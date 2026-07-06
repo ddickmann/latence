@@ -28,13 +28,26 @@ edges connect people to organisations) — the browsable KG the viewer renders.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from latence_core.storage import Storage
+
+
+def _document_id(data: bytes) -> str:
+    """The content-addressed source ``document_id`` the Source stamps on every record.
+
+    Mirrors ``latence_core.stages.source._document_id`` (and the same convention the
+    DeltaRunner reproduces): ``sha256:`` + hex sha256 of the raw file bytes. Kept as a
+    tiny local mirror so the demo binds Screening findings back to file names by
+    ``document_id`` (a stable, per-file key) rather than by a coincidental
+    ``verdict:category`` pair — without pulling a private Source helper into the demo.
+    """
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 # A cross-document, entity-rich business corpus so the KG has real nodes + edges.
 _MEMO_MD = """# Acquisition memo
@@ -78,11 +91,16 @@ class CorpusManifest:
     ``documents`` is every file written (name → byte size); ``dangerous`` names the
     fixtures deliberately planted to exercise Screening and the disposition each is
     expected to receive, so the demo (and its tests) can assert Screening actually
-    caught them rather than trusting the run silently.
+    caught them rather than trusting the run silently. ``document_ids`` maps each
+    file name to the content-addressed ``document_id`` the Source stamps (``sha256:``
+    + sha256 of the bytes), so a Screening finding — which carries ``document_id`` but
+    not the file name — is bound back to the *specific* planted file, not to a
+    coincidental ``verdict:category`` pair.
     """
 
     documents: dict[str, int]
     dangerous: dict[str, str]
+    document_ids: dict[str, str] = field(default_factory=dict)
 
 
 def _make_text_pdf(pages: list[str]) -> bytes:
@@ -191,6 +209,7 @@ def build_corpus_bytes() -> tuple[dict[str, bytes], CorpusManifest]:
             "dump.txt": "quarantine:oversized",
             "support-ticket.md": "flag:prompt_injection",
         },
+        document_ids={name: _document_id(data) for name, data in documents.items()},
     )
     return documents, manifest
 
