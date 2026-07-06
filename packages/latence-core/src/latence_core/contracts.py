@@ -35,7 +35,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # EntityMentions within one document, carrying head/tail mention refs, its label,
 # confidence, and a Provenance span covering the head..tail extent) — an inter-Stage
 # Record like EntityMention, carrying Provenance and Classification and exportable.
-SCHEMA_VERSION = 5
+# v6 (S6 Redaction): RedactionRecord (a per-document Redaction result carrying the
+# masked/replaced text variant and the structured list of detected PIISpans — each
+# with its type, its document-offset char span, the action taken, and a stable
+# placeholder — so the action is auditable) plus PIISpan and the RedactionAction
+# enum. A RedactionRecord is an inter-Stage Record like every other, carrying
+# Provenance and Classification, so the redacted text threads through the DAG and
+# exports to the RAG corpus as the PII-handled variant (ADR-0017/0024).
+SCHEMA_VERSION = 6
 
 
 class Provenance(BaseModel):
@@ -544,3 +551,140 @@ class RelationMention(Record):
             msg = "A RelationMention's Provenance must carry a page_start and page_end."
             raise ValueError(msg)
         return self
+
+
+# -- S6: Redaction (PII) -----------------------------------------------------
+
+
+class RedactionAction(StrEnum):
+    """What a Redaction Provider did to a detected PII span (CONTEXT ``Redaction``).
+
+    ``MASK`` replaces the span with a fixed mask token (e.g. ``[EMAIL]``) — the
+    default, lossy, irreversible. ``REPLACE`` substitutes a deterministic surrogate
+    of the same type (a pseudonym) so the text stays readable while the real value
+    is gone. ``HASH`` substitutes a stable salted hash so equal PII values remain
+    joinable across the corpus without exposing the value. ``TAG`` leaves the surface
+    text intact but records the span (detect-only) — used when policy for a
+    Classification sensitivity is to flag PII for review rather than remove it.
+    """
+
+    MASK = "mask"
+    REPLACE = "replace"
+    HASH = "hash"
+    TAG = "tag"
+
+
+class PIISpan(BaseModel):
+    """One detected PII span in a document, with the action taken (CONTEXT ``Redaction``).
+
+    The structured, auditable record of a single redaction: *what* type of PII was
+    found (``pii_type``, from the Provider's configured type set — the Capability
+    names none), *where* it sat in the parent document's assembled markdown
+    (``char_start``/``char_end``, the same document-offset coordinate system every
+    other Stage uses, so the span resolves back through the parent's page map to its
+    source page), *what was done* (``action``), and the ``placeholder`` that replaced
+    it in the masked variant (empty for a ``TAG`` action, which leaves the text
+    intact). ``detector`` names the recogniser that fired (``regex:email``,
+    ``gliner-pii``) so a hybrid Provider's rule vs model provenance is auditable.
+
+    The **raw PII value is deliberately NOT stored** — a PIISpan carries the offset,
+    the type, and the placeholder, never the sensitive surface string, so the audit
+    trail itself never becomes a PII leak (S6 AC: no raw PII in logs/records).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    pii_type: str = Field(..., min_length=1, description="PII type, e.g. 'email' (per-Provider).")
+    detector: str = Field(..., min_length=1, description="Recogniser that fired, e.g. regex:email.")
+    char_start: int = Field(..., ge=0, description="Span start in the parent document markdown.")
+    char_end: int = Field(..., ge=0, description="Span end (half-open) in the parent document.")
+    action: RedactionAction = Field(..., description="What was done to the span.")
+    placeholder: str = Field(
+        default="",
+        description="Replacement text in the masked variant ('' for a TAG/detect-only span).",
+    )
+    page_start: int | None = Field(default=None, ge=0, description="Source page the span starts.")
+    page_end: int | None = Field(default=None, ge=0, description="Source page the span ends.")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Detector confidence 0..1.")
+
+    @model_validator(mode="after")
+    def _span_ordered(self) -> PIISpan:
+        if self.char_end < self.char_start:
+            msg = (
+                f"PIISpan is inverted: char_end {self.char_end} "
+                f"< char_start {self.char_start}"
+            )
+            raise ValueError(msg)
+        if self.action is not RedactionAction.TAG and not self.placeholder:
+            msg = (
+                f"A {self.action.value} PIISpan must carry the placeholder it wrote into "
+                "the masked variant (only a TAG/detect-only span may have an empty placeholder)."
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def length(self) -> int:
+        return self.char_end - self.char_start
+
+
+class RedactionRecord(Record):
+    """A per-document Redaction result: the masked text variant + the PII spans (S6).
+
+    Redaction detects PII and produces masked/replaced variants of the text (CONTEXT
+    ``Redaction``). Like every inter-Stage carrier it is a :class:`Record`, so it
+    carries Provenance and Classification and threads through the DAG / exports to the
+    corpus — the ``masked_content`` is the **PII-handled RAG-corpus text** an Export
+    materializes (ADR-0017). A RedactionRecord records:
+
+    * ``masked_content`` — the document's assembled markdown with every non-``TAG``
+      PII span replaced by its placeholder (a ``TAG``-only run leaves the text
+      identical to the source but still records the spans).
+    * ``pii_spans`` — the structured, auditable list of every detected span (type,
+      document offset, action, placeholder, page) — the S6 "structured record of
+      detected PII spans" requirement. The raw PII value is never stored on a span.
+    * ``policy`` — the redaction policy name that was applied (keyed off the
+      document's ``Classification.sensitivity``, S6 AC), recorded so the run is
+      auditable end to end.
+    * Provenance ``char_start``/``char_end`` — the covered document extent ``[0,
+      len)``; the parent document's Classification, inherited unchanged.
+
+    ``document_record_id`` links the record back to the document it redacted;
+    ``media_type`` mirrors the source (``text/markdown``). A document with no detected
+    PII yields a RedactionRecord whose ``masked_content`` equals the source and whose
+    ``pii_spans`` is empty (never an error) — so the corpus always has one PII-handled
+    variant per document.
+    """
+
+    document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
+    masked_content: str = Field(default="", description="Text with PII spans masked/replaced.")
+    media_type: str = Field(default="text/markdown")
+    policy: str = Field(default="default", description="Redaction policy applied (sensitivity).")
+    pii_spans: list[PIISpan] = Field(
+        default_factory=list, description="Every detected PII span (type/offset/action/placeholder)"
+    )
+
+    @model_validator(mode="after")
+    def _spans_ordered_and_in_bounds(self) -> RedactionRecord:
+        prov = self.provenance
+        if prov.char_start is None or prov.char_end is None:
+            msg = "A RedactionRecord's Provenance must carry a char_start and char_end span."
+            raise ValueError(msg)
+        # Spans must be ordered and non-overlapping so the masked variant is
+        # reconstructable and the audit is unambiguous.
+        last_end = -1
+        for span in self.pii_spans:
+            if span.char_start < last_end:
+                msg = (
+                    "RedactionRecord pii_spans must be ordered and non-overlapping; "
+                    f"span at {span.char_start} overlaps a prior span ending at {last_end}."
+                )
+                raise ValueError(msg)
+            last_end = span.char_end
+        return self
+
+    @property
+    def pii_count(self) -> int:
+        """Number of detected PII spans (0 for a clean document)."""
+        return len(self.pii_spans)

@@ -18,7 +18,10 @@ from latence_core.contracts import ScreeningFinding
 # and the confidence distribution).
 # v5 (S5): the report gains ``relations`` (Relation-Extraction per-type relation
 # counts and the confidence distribution).
-QUALITY_SCHEMA_VERSION = 5
+# v6 (S6): the report gains ``redaction`` (Redaction per-PII-type detection counts,
+# per-action counts, and documents-with-PII) — the S6 acceptance criterion, and NEVER
+# any raw PII value (counts only).
+QUALITY_SCHEMA_VERSION = 6
 
 
 class StageMetrics(BaseModel):
@@ -217,6 +220,30 @@ class RelationQuality(BaseModel):
         return self.relations_offset_resolving == self.relations_total
 
 
+class RedactionQuality(BaseModel):
+    """Redaction-Stage quality: per-PII-type + per-action detection counts (S6).
+
+    Emitted when a run had a Redaction Stage. ``pii_total`` is the number of detected
+    :class:`~latence_core.contracts.PIISpan`s across the corpus; ``per_type`` breaks
+    that down by PII type (e.g. ``email``, ``ssn``) and ``per_action`` by the
+    :class:`~latence_core.contracts.RedactionAction` taken (mask/replace/hash/tag).
+    ``documents_redacted`` is the number of RedactionRecords (one per document);
+    ``documents_with_pii`` counts those that had at least one detected span. The
+    per-type + per-action counts are the S6 acceptance criterion ("PII detection
+    counts by type land in the Quality Report"). **No raw PII value ever appears
+    here** — the report carries counts and types only, never a detected surface
+    string (S6 AC: no raw PII written to logs/records).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents_redacted: int = 0
+    documents_with_pii: int = 0
+    pii_total: int = 0
+    per_type: dict[str, int] = Field(default_factory=dict)
+    per_action: dict[str, int] = Field(default_factory=dict)
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -239,6 +266,8 @@ class QualityReport(BaseModel):
     entities: EntityQuality | None = None
     # Present when the run had a Relation-Extraction (or fused) Stage.
     relations: RelationQuality | None = None
+    # Present when the run had a Redaction Stage.
+    redaction: RedactionQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

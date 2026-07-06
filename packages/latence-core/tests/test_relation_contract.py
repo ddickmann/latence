@@ -51,9 +51,9 @@ def _relation(**overrides: object) -> RelationMention:
     return RelationMention(**base)  # type: ignore[arg-type]
 
 
-def test_schema_version_is_five() -> None:
-    assert SCHEMA_VERSION == 5
-    assert _relation().schema_version == 5
+def test_schema_version_is_six() -> None:
+    assert SCHEMA_VERSION == 6
+    assert _relation().schema_version == 6
 
 
 def test_valid_relation_round_trips() -> None:

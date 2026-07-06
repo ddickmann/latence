@@ -29,7 +29,8 @@ class CapabilityKind(StrEnum):
     entity mentions found in chunked text). S5 adds Relation Extraction (typed
     relations between mentions) and a *fused* Entity+Relation Extraction — one
     Provider fulfilling both adjacent Stages in one pass (ADR-0013), so the Pipeline
-    is not forced to one Provider per Stage.
+    is not forced to one Provider per Stage. S6 adds Redaction (PII detection +
+    masked/replaced text variant per document), typically wired off the Chunk Stage.
     """
 
     SOURCE = "source"
@@ -40,6 +41,7 @@ class CapabilityKind(StrEnum):
     ENTITY_EXTRACTION = "entity_extraction"
     RELATION_EXTRACTION = "relation_extraction"
     FUSED_ENTITY_RELATION = "fused_entity_relation"
+    REDACTION = "redaction"
     EXPORT = "export"
 
 

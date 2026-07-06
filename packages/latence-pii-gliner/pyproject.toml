@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-pii-gliner"
+version = "0.1.0"
+description = "Learned zero-shot PII Redaction Provider (GLiNER-PII, CPU via transformers/ONNX) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER model stack
+# (gliner -> torch/transformers) ships with THIS Provider package, not the thin
+# core. Both the gliner library and the default urchade/gliner_multi_pii-v1
+# checkpoint are Apache-2.0 (weights AND code verified permissive, ADR-0012,
+# 2026-07-06; base model urchade/gliner_multi-v2.1 is Apache-2.0). Nothing downloads
+# unless a Pipeline configures this Provider.
+dependencies = [
+    "latence-core",
+    "gliner>=0.2.5",
+]
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'redaction.gliner_pii' available to any Pipeline with no core change
+# (ADR-0004), alongside the in-core deterministic 'redaction.hybrid_rule' — it is the
+# learned "model half" of the hybrid the S6 issue calls for.
+[project.entry-points."latence.providers"]
+"redaction.gliner_pii" = "latence_pii_gliner.provider:GlinerPIIRedactor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_pii_gliner"]

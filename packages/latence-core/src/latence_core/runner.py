@@ -27,6 +27,7 @@ from latence_core.capability import (
     FusedEntityRelationExtractor,
     IntakeScreener,
     Parser,
+    PIIDetector,
     ProviderRegistry,
     RelationExtractor,
     ScreeningOutcome,
@@ -40,6 +41,7 @@ from latence_core.contracts import (
     ParserInput,
     QuarantineRecord,
     Record,
+    RedactionRecord,
     RelationMention,
     ScreeningCheckpoint,
     ScreeningFinding,
@@ -52,6 +54,7 @@ from latence_core.quality import (
     EntityQuality,
     ParseQuality,
     QualityReport,
+    RedactionQuality,
     RelationQuality,
     ScreeningQuality,
     StageMetrics,
@@ -68,10 +71,17 @@ if TYPE_CHECKING:
 # RelationMention in one output list (mixed carrier), routed to both downstream
 # consumers without a separate Entity-Extraction Stage. The Runner keeps outputs in
 # one per-Stage dict and lets each Stage's capability decide how to (de)serialize its
-# checkpoint. Screening ALSO produces QuarantineRecords, but those never flow
-# downstream — they are persisted to a sidecar and reported, not threaded through
-# the DAG.
-StageOutput = ParserInput | DocumentRecord | ChunkRecord | EntityMention | RelationMention
+# checkpoint. Redaction→RedactionRecord (one PII-handled variant per document).
+# Screening ALSO produces QuarantineRecords, but those never flow downstream — they
+# are persisted to a sidecar and reported, not threaded through the DAG.
+StageOutput = (
+    ParserInput
+    | DocumentRecord
+    | ChunkRecord
+    | EntityMention
+    | RelationMention
+    | RedactionRecord
+)
 _T = TypeVar("_T", bound=StageOutput)
 
 # WAL event kinds. The log is append-only and never read for control flow in S1
@@ -164,6 +174,8 @@ class LocalRunner:
             return EntityMention
         if stage.capability is CapabilityKind.RELATION_EXTRACTION:
             return RelationMention
+        if stage.capability is CapabilityKind.REDACTION:
+            return RedactionRecord
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
@@ -177,14 +189,15 @@ class LocalRunner:
         """Resolve an Export's pass-through carrier from its nearest producing ancestor.
 
         Walks up ``depends_on`` to the closest Stage that actually *produces* the
-        record kind Export re-emits: a Relation-Extraction ancestor ⇒ RelationMention,
-        an Entity-Extraction ancestor ⇒ EntityMention, a Chunk / Content-Screening
-        ancestor ⇒ ChunkRecord, otherwise a Parse (or Intake-Screening/Source that
-        must feed a Parse) ancestor ⇒ DocumentRecord. A *fused* Entity+Relation
-        ancestor produces a MIXED carrier (both mentions and relations), so its
-        checkpoint is read polymorphically (:meth:`_read_mixed_checkpoint`), signalled
-        here by returning :class:`Record`. The frontier is walked breadth-first in
-        ``depends_on`` order, so the nearest producing ancestor wins.
+        record kind Export re-emits: a Redaction ancestor ⇒ RedactionRecord, a
+        Relation-Extraction ancestor ⇒ RelationMention, an Entity-Extraction ancestor
+        ⇒ EntityMention, a Chunk / Content-Screening ancestor ⇒ ChunkRecord, otherwise
+        a Parse (or Intake-Screening/Source that must feed a Parse) ancestor ⇒
+        DocumentRecord. A *fused* Entity+Relation ancestor produces a MIXED carrier
+        (both mentions and relations), so its checkpoint is read polymorphically
+        (:meth:`_read_mixed_checkpoint`), signalled here by returning :class:`Record`.
+        The frontier is walked breadth-first in ``depends_on`` order, so the nearest
+        producing ancestor wins.
         """
         by_name = {s.name: s for s in pipeline.stages}
         seen: set[str] = set()
@@ -199,6 +212,8 @@ class LocalRunner:
                 continue
             if parent.capability is CapabilityKind.FUSED_ENTITY_RELATION:
                 return Record
+            if parent.capability is CapabilityKind.REDACTION:
+                return RedactionRecord
             if parent.capability is CapabilityKind.RELATION_EXTRACTION:
                 return RelationMention
             if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
@@ -439,6 +454,23 @@ class LocalRunner:
             out: list[StageOutput] = [*fused.mentions, *fused.relations]
             return out
 
+        if stage.capability is CapabilityKind.REDACTION:
+            if not isinstance(provider, PIIDetector):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the PIIDetector capability."
+                )
+                raise TypeError(msg)
+            # Redaction consumes the run's parsed DocumentRecords (the whole
+            # document's assembled markdown + page map, at original-document offsets)
+            # and emits one PII-handled RedactionRecord per document, keyed off
+            # Classification sensitivity — threaded downstream to Export as the
+            # corpus's PII variant. It depends on Parse (not Chunk): the chunk stream
+            # is markup-stripped with remapped offsets, so scanning it would fabricate
+            # a broken coordinate system for the spans and page resolution.
+            redaction_docs = self._as_type(stage, incoming, DocumentRecord)
+            return list(provider.redact(redaction_docs))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -579,26 +611,34 @@ class LocalRunner:
     @staticmethod
     def _as_records(
         stage: Stage, records: list[StageOutput]
-    ) -> list[DocumentRecord | ChunkRecord | EntityMention | RelationMention]:
+    ) -> list[DocumentRecord | ChunkRecord | EntityMention | RelationMention | RedactionRecord]:
         """Narrow gathered inputs to the inter-Stage Records Export materializes.
 
         Export materializes DocumentRecords (S1/S2 spine), ChunkRecords (S3, when a
         Chunk Stage is upstream), EntityMentions (S4, an Entity-Extraction Stage
-        upstream), or RelationMentions (S5, a Relation-Extraction / fused Stage
-        upstream). A fused Stage feeds a MIX of mentions and relations — both are
+        upstream), RelationMentions (S5, a Relation-Extraction / fused Stage upstream),
+        or RedactionRecords (S6, a Redaction Stage upstream — the PII-handled corpus
+        variant). A fused Stage feeds a MIX of mentions and relations — both are
         Records and both export. A raw ParserInput (not a Record) means a Source was
         wired straight into Export with no Parse between. Surface it as a clear
         typed error.
         """
-        exportable = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
+        exportable = (
+            DocumentRecord,
+            ChunkRecord,
+            EntityMention,
+            RelationMention,
+            RedactionRecord,
+        )
         wrong = [r for r in records if not isinstance(r, exportable)]
         if wrong:
             got = sorted({type(r).__name__ for r in wrong})
             msg = (
                 f"Stage {stage.name!r} (export) requires Record inputs "
-                f"(DocumentRecord/ChunkRecord/EntityMention/RelationMention) but "
-                f"received: {', '.join(got)}. An Export needs a Parse (and optionally "
-                f"a Chunk / Entity-Extraction / Relation-Extraction) upstream."
+                f"(DocumentRecord/ChunkRecord/EntityMention/RelationMention/"
+                f"RedactionRecord) but received: {', '.join(got)}. An Export needs a "
+                f"Parse (and optionally a Chunk / Entity-Extraction / "
+                f"Relation-Extraction / Redaction) upstream."
             )
             raise TypeError(msg)
         return [r for r in records if isinstance(r, exportable)]
@@ -671,6 +711,7 @@ class LocalRunner:
             outputs,
             (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
         )
+        redactions = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.REDACTION)
         return QualityReport(
             pipeline_name=pipeline.name,
             run_id=run_id,
@@ -684,6 +725,7 @@ class LocalRunner:
             screening=self._screening_quality(pipeline, run_id, storage, ordered),
             entities=self._entity_quality(pipeline, mentions),
             relations=self._relation_quality(pipeline, relations),
+            redaction=self._redaction_quality(pipeline, redactions),
         )
 
     @staticmethod
@@ -878,6 +920,38 @@ class LocalRunner:
                 quality.relations_offset_resolving += 1
         quality.documents_with_relations = len(docs_with_relations)
         quality.per_type = dict(sorted(quality.per_type.items()))
+        return quality
+
+    @staticmethod
+    def _redaction_quality(
+        pipeline: Pipeline, records: list[StageOutput]
+    ) -> RedactionQuality | None:
+        """Aggregate Redaction quality: per-PII-type + per-action detection counts (S6).
+
+        Only computed when the Pipeline has a Redaction Stage. ``records`` is the set
+        of one :class:`~latence_core.contracts.RedactionRecord` per document, from
+        which the per-type and per-action span counts, the documents-redacted, and the
+        documents-with-PII are measured — the S6 acceptance criterion ("PII detection
+        counts by type land in the Quality Report"). Only counts and type/action names
+        cross into the report; **no raw PII value** ever does (a PIISpan never stores
+        the surface string, so this rollup cannot leak one).
+        """
+        if not any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages):
+            return None
+        quality = RedactionQuality()
+        for record in records:
+            if not isinstance(record, RedactionRecord):
+                continue
+            quality.documents_redacted += 1
+            if record.pii_spans:
+                quality.documents_with_pii += 1
+            for span in record.pii_spans:
+                quality.pii_total += 1
+                quality.per_type[span.pii_type] = quality.per_type.get(span.pii_type, 0) + 1
+                action = span.action.value
+                quality.per_action[action] = quality.per_action.get(action, 0) + 1
+        quality.per_type = dict(sorted(quality.per_type.items()))
+        quality.per_action = dict(sorted(quality.per_action.items()))
         return quality
 
     @staticmethod

@@ -39,6 +39,10 @@ latence = "latence_core.cli:app"
 # Python, no extra deps). The LLM + fused gliner-relex Providers live in
 # latence-relation-llm / latence-relation-gliner (ADR-0013, empirical choice).
 "relation.pattern" = "latence_core.stages.relation:PatternRelationExtractor"
+# S6 built-in: deterministic hybrid-rule PII redactor (regex library + gazetteer +
+# custom patterns; policy keyed off Classification.sensitivity). Pure Python, no
+# extra deps. The learned GLiNER-PII Provider lives in latence-pii-gliner (ADR-0024).
+"redaction.hybrid_rule" = "latence_core.stages.redaction:HybridPIIRedactor"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]

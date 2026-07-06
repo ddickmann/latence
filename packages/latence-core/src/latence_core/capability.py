@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         ParserInput,
         QuarantineRecord,
         Record,
+        RedactionRecord,
         RelationMention,
         ScreeningFinding,
     )
@@ -197,6 +198,45 @@ class FusedEntityRelationExtractor(Protocol):
 
     def extract_fused(self, chunks: Iterable[ChunkRecord]) -> FusedExtraction:
         """Consume :class:`ChunkRecord`s and return mentions + relations together."""
+        ...
+
+
+@runtime_checkable
+class PIIDetector(Protocol):
+    """Detects PII and produces masked/replaced text variants (CONTEXT ``Redaction``).
+
+    The S6 Redaction Capability. Given the run's parsed
+    :class:`~latence_core.contracts.DocumentRecord`s — each carrying the whole
+    document's assembled markdown at its exact document offsets plus the page map — a
+    Provider detects PII per document and returns one
+    :class:`~latence_core.contracts.RedactionRecord` per document: the masked/replaced
+    text variant and the structured list of detected
+    :class:`~latence_core.contracts.PIISpan`s (type, document offset, action,
+    placeholder), so the redaction is auditable and the corpus gets a PII-handled
+    variant. Redaction is metadata-aware: the Provider keys its policy off the
+    document's ``Classification.sensitivity`` (S6 AC). The PII type set is
+    Provider/config-supplied — the Capability names no PII types. A document with no
+    detected PII yields a RedactionRecord whose masked text equals the source and whose
+    span list is empty (never an error).
+
+    Redaction scans the **parsed document text** (not the markup-stripped chunk text),
+    because the masked variant, every PIISpan offset, and the page resolution all live
+    in the document's original-markdown coordinate system — the one the parent page map
+    and the S6 round-trip use. Chunk text is markup-stripped with offsets remapped to
+    the original, so its content length no longer equals its span width: scanning it
+    would fabricate a broken coordinate system (offsets and pages would point at the
+    wrong location). Redaction therefore depends on the Parse Stage.
+    """
+
+    def redact(self, documents: Iterable[DocumentRecord]) -> Iterator[RedactionRecord]:
+        """Consume the run's parsed :class:`DocumentRecord`s; yield one RedactionRecord each.
+
+        Each :class:`DocumentRecord` carries the whole document's assembled markdown
+        (at original-document offsets) and its page map — exactly the text and
+        coordinate system a text-based Provider scans. Records are emitted in first-seen
+        document order for determinism. A ``PARSE_ERROR`` document (no usable content) is
+        skipped, mirroring the Chunk Stage.
+        """
         ...
 
 

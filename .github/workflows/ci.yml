@@ -47,6 +47,7 @@ jobs:
           uv pip install --no-deps -e packages/latence-ner-gliner
           uv pip install --no-deps -e packages/latence-relation-gliner
           uv pip install --no-deps -e packages/latence-relation-llm
+          uv pip install --no-deps -e packages/latence-pii-gliner
 
       - name: Ruff (lint)
         run: uv run ruff check packages
@@ -60,6 +61,7 @@ jobs:
           packages/latence-ner-gliner/src
           packages/latence-relation-gliner/src
           packages/latence-relation-llm/src
+          packages/latence-pii-gliner/src
 
       - name: Pytest
         run: uv run pytest
@@ -72,6 +74,7 @@ jobs:
           uv build --package latence-ner-gliner
           uv build --package latence-relation-gliner
           uv build --package latence-relation-llm
+          uv build --package latence-pii-gliner
 
   storage-s3:
     name: Storage on MinIO (s3://)

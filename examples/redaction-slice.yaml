@@ -1,0 +1,90 @@
+# S6 Redaction (PII) Pipeline:
+#   Source -> Parse -+-> Chunk (retrieval-sized pieces for the corpus)
+#                    \-> Redaction (whole-document PII-handled variant) -> Export
+#
+# Redaction reads the PARSED document (original markdown), not the chunk stream, so its
+# PII spans and page resolution live in the original-document coordinate system.
+#
+# Redaction (CONTEXT `Redaction`) detects PII and produces masked/replaced variants
+# of the text. Each run emits ONE RedactionRecord per document: the masked text
+# variant (the PII-handled RAG-corpus text) plus a structured, auditable list of PII
+# spans (type, document offset, action, placeholder) that resolve back through the
+# parent's page map to their ORIGINAL source page (the S6 round-trip). The raw PII
+# value is NEVER stored on a span and NEVER written to the Quality Report or logs.
+#
+# METADATA-AWARE: Redaction keys its policy off `Classification.sensitivity`. The
+# `policies` map below says, per sensitivity value, which action to take (mask /
+# replace / hash / tag) and, optionally, which PII types to act on — so a `public`
+# document is masked hard while an `internal` one is only tagged for review, from the
+# same Pipeline with no code change.
+#
+# ZERO-SHOT / config-driven: the PII type set + recognisers come from `config`,
+# nothing hardcoded in core. The reference Provider `redaction.hybrid_rule` ships IN
+# latence-core: a deterministic, dependency-free hybrid of a well-known-PII regex
+# library + a config gazetteer + custom patterns (hash-stable, CPU, no model
+# download). For learned PII NER, install `latence-pii-gliner` and swap to
+# `redaction.gliner_pii` (a GLiNER-PII checkpoint via transformers/ONNX, Apache-2.0
+# weights+code) — a one-line provider/config change, no pipeline change
+# (ADR-0004/0007/0016/0024).
+#
+# Run with:
+#   latence run examples/redaction-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/:
+#   export/records.jsonl (RedactionRecords: masked text + PII spans) + parquet,
+#   quality-report.json  (redaction: per-type + per-action PII counts; no raw PII).
+name: redaction-slice
+storage_uri: file:///tmp/latence-redaction-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # edit to your folder of text / markdown files
+      sensitivity: internal            # drives the redaction policy below
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext         # swap to parser.document for real PDFs (S2)
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config:
+      max_tokens: 512
+      overlap_tokens: 64
+      min_tokens: 16
+
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule    # swap to redaction.gliner_pii for learned PII NER
+    depends_on: [parse]                # scans the parsed document's ORIGINAL markdown —
+                                       # the coordinate system PII spans + pages use —
+                                       # NOT the markup-stripped chunk stream
+    config:
+      # The built-in rule library to enable (default: all). The rule half of the
+      # hybrid: email / ssn / credit_card / phone / ip / iban.
+      detectors: [email, phone, ssn, credit_card]
+      # Extra config-supplied recognisers (the rest of the rule half):
+      gazetteer:
+        name: [Alice, Bob, Carol]      # literal terms to redact, keyed by PII type
+      patterns:
+        employee_id: ['EMP-\d{5}']     # custom regexes, keyed by PII type
+      default_action: mask             # mask | replace | hash | tag
+      salt: change-me                  # salts replace/hash surrogates (deterministic)
+      # Metadata-aware policy: per Classification.sensitivity value.
+      policies:
+        public:
+          action: mask                 # public docs: mask PII hard
+        internal:
+          action: tag                  # internal docs: detect-only (flag for review)
+        confidential:
+          skip: true                   # confidential docs: redaction disabled here
+      # case_sensitive: false          # match gazetteer terms case-insensitively
+      # min_chars: 1                    # near-empty documents are emitted clean
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]

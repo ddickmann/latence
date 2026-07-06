@@ -49,11 +49,11 @@ def _mention(**overrides: object) -> EntityMention:
     return EntityMention(**base)  # type: ignore[arg-type]
 
 
-def test_schema_version_is_five() -> None:
-    # SCHEMA_VERSION is corpus-wide; S5 bumped it to 5. An EntityMention serialized
-    # now stamps the current version (5), still a valid EntityMention.
-    assert SCHEMA_VERSION == 5
-    assert _mention().schema_version == 5
+def test_schema_version_is_six() -> None:
+    # SCHEMA_VERSION is corpus-wide; S6 bumped it to 6. An EntityMention serialized
+    # now stamps the current version (6), still a valid EntityMention.
+    assert SCHEMA_VERSION == 6
+    assert _mention().schema_version == 6
 
 
 def test_valid_mention_round_trips() -> None:
