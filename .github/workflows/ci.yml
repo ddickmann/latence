@@ -37,17 +37,22 @@ jobs:
 
       # latence-ner-gliner / latence-relation-gliner / latence-relation-llm are
       # workspace members but NOT in the dev env's deps: the two gliner packages pull
-      # the heavy GLiNER stack (torch/transformers) and the llm one pulls the openai
-      # client, which would break the CPU-first, offline, deterministic test env
-      # (ADR-0007/0016). Install ONLY their source (no deps) so their src is
-      # type-checked and their provider tests (which monkeypatch the heavy/endpoint
-      # dep with a fake) collect and run offline.
+      # the heavy GLiNER stack (torch/transformers), the llm + the three -endpoint
+      # packages pull the openai client, and the airflow adapter pulls apache-airflow,
+      # which would break the CPU-first, offline, deterministic test env (ADR-0007/0016).
+      # Install ONLY their source (no deps) so their src is type-checked and their tests
+      # (which monkeypatch the heavy/endpoint dep with a fake, or, for the Airflow
+      # adapter, use its Airflow-free in-process path) collect and run offline.
       - name: Install heavy/endpoint Provider sources (no heavy deps)
         run: |
           uv pip install --no-deps -e packages/latence-ner-gliner
           uv pip install --no-deps -e packages/latence-relation-gliner
           uv pip install --no-deps -e packages/latence-relation-llm
           uv pip install --no-deps -e packages/latence-pii-gliner
+          uv pip install --no-deps -e packages/latence-parser-endpoint
+          uv pip install --no-deps -e packages/latence-ner-endpoint
+          uv pip install --no-deps -e packages/latence-embedder-endpoint
+          uv pip install --no-deps -e packages/latence-runner-airflow
 
       - name: Ruff (lint)
         run: uv run ruff check packages
@@ -62,6 +67,10 @@ jobs:
           packages/latence-relation-gliner/src
           packages/latence-relation-llm/src
           packages/latence-pii-gliner/src
+          packages/latence-parser-endpoint/src
+          packages/latence-ner-endpoint/src
+          packages/latence-embedder-endpoint/src
+          packages/latence-runner-airflow/src
 
       - name: Pytest
         run: uv run pytest
@@ -75,6 +84,10 @@ jobs:
           uv build --package latence-relation-gliner
           uv build --package latence-relation-llm
           uv build --package latence-pii-gliner
+          uv build --package latence-parser-endpoint
+          uv build --package latence-ner-endpoint
+          uv build --package latence-embedder-endpoint
+          uv build --package latence-runner-airflow
 
   storage-s3:
     name: Storage on MinIO (s3://)

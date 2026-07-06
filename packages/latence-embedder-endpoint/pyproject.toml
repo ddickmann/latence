@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-embedder-endpoint"
+version = "0.1.0"
+description = "Endpoint-backed Embedder Provider (multilingual-e5-large / any OpenAI-compatible embeddings endpoint) — the Embedder performance path for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# The endpoint client is optional/heavy relative to the thin core (ADR-0016): it ships with THIS
+# Provider, not latence-core. The 'openai' client is Apache-2.0 (code); this Provider bundles NO
+# weights — it calls a user-supplied OpenAI-compatible embeddings endpoint (ADR-0007/0017: the
+# Embedder is opt-in, and the endpoint is its performance path).
+dependencies = [
+    "latence-core",
+    "openai>=1.0",
+]
+
+# Registers the Embedder performance Provider under the discovery group. Installing this package
+# makes 'embedding.endpoint' available with no core change (ADR-0004), swappable with the in-core
+# deterministic 'embedding.hashing' by one config line (ADR-0007).
+[project.entry-points."latence.providers"]
+"embedding.endpoint" = "latence_embedder_endpoint.provider:EndpointEmbedder"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_embedder_endpoint"]

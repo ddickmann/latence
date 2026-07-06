@@ -1,0 +1,69 @@
+# S12 Performance path: the SAME Pipeline, heavy models on an endpoint.
+#   Source -> Parse -> Chunk -> Entity Extraction -> Export
+#
+# This is byte-for-byte the entity-slice Pipeline, with the two heavy Stages (Parse,
+# Entity Extraction) pointed at an OpenAI-compatible / vLLM / Triton ENDPOINT instead
+# of the in-process CPU Providers. Nothing else changes — same Stages, same contracts,
+# same downstream (ADR-0007: "switching is a config/URL swap, never a pipeline change").
+#
+# To go back to the laptop CPU path, change exactly two lines:
+#   parse:    provider: parse.endpoint   -> parser.document   (drop base_url/model)
+#   entities: provider: entity.endpoint  -> entity.gliner     (drop base_url)
+#
+# The endpoint Providers live in their own packages (heavy `openai` client isolated
+# from the thin core, ADR-0016):
+#   pip install latence-parser-endpoint latence-ner-endpoint latence-embedder-endpoint
+#
+# Endpoint failures are retried with backoff+jitter (a 429/5xx/transport blip) and a
+# terminal 4xx fails fast; the number of retries a run absorbed lands on the Quality
+# Report's per-Stage `endpoint_retries` (S12).
+#
+# Run under the built-in local Runner:
+#   latence run examples/performance-path-slice.yaml
+# Or under a second Runner (Airflow), using Airflow's own state/scheduling (ADR-0010):
+#   pip install "latence-runner-airflow[airflow]"
+#   # AirflowRunner(...).build_dag(pipeline) -> drop into your Airflow dags/ folder.
+name: performance-path-slice
+storage_uri: file:///tmp/latence-performance-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs      # edit to your folder of text / markdown / PDF files
+      sensitivity: internal
+      extensions: [txt, md, pdf]          # widen so a PDF-capable endpoint Parser sees PDFs
+
+  - name: parse
+    capability: parse
+    provider: parse.endpoint              # PERFORMANCE PATH (was: parser.document)
+    depends_on: [source]
+    config:
+      base_url: "http://vllm-host:8000/v1"   # the only change vs the CPU path
+      model: "paddleocr-vl"
+      api_key: "not-needed"               # or $OPENAI_API_KEY; a local server takes any placeholder
+      retry_attempts: 4                    # ported backoff+jitter retry
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown              # pure-Python, no endpoint — stays in-process
+    depends_on: [parse]
+    config:
+      max_tokens: 512
+      overlap_tokens: 64
+      min_tokens: 16
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.endpoint             # PERFORMANCE PATH (was: entity.gliner / entity.gazetteer)
+    depends_on: [chunk]
+    config:
+      labels: [person, organization, location]   # zero-shot, per-Pipeline (nothing hardcoded)
+      base_url: "http://vllm-host:8000/v1"
+      model: "gliner-large"
+      threshold: 0.5
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [entities]

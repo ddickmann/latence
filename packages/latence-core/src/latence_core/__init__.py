@@ -75,6 +75,14 @@ from latence_core.contracts import (
 )
 from latence_core.delta_runner import DeltaRunner
 from latence_core.embedding import HashingEmbedder
+from latence_core.endpoint import (
+    EndpointError,
+    EndpointLease,
+    EndpointPool,
+    RetryPolicy,
+    call_with_retry,
+    is_retryable_status,
+)
 from latence_core.goldset import (
     ConfusionCounts,
     GoldDocument,
@@ -168,6 +176,9 @@ __all__ = [
     "DocumentRecord",
     "DriftDiagnostics",
     "Embedder",
+    "EndpointError",
+    "EndpointLease",
+    "EndpointPool",
     "EntityCoOccurrence",
     "EntityExtractor",
     "EntityMention",
@@ -226,6 +237,7 @@ __all__ = [
     "RelationExtractor",
     "RelationMention",
     "RelationQuality",
+    "RetryPolicy",
     "RiskMarker",
     "SchemeNotAllowedError",
     "ScreeningCheckpoint",
@@ -249,6 +261,8 @@ __all__ = [
     "score_entities",
     "score_relations",
     "strip_markup",
+    "call_with_retry",
+    "is_retryable_status",
     "topological_order",
 ]
 

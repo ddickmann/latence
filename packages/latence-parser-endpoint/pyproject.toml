@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-endpoint"
+version = "0.1.0"
+description = "Endpoint-backed Parse Provider (PaddleOCR-VL / any OpenAI-compatible vision endpoint) — the Parse performance path for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# The endpoint client is optional/heavy relative to the thin core (ADR-0016): it ships with THIS
+# Provider, not latence-core. The 'openai' client is Apache-2.0 (code); this Provider bundles NO
+# weights — it calls a user-supplied OpenAI-compatible / vLLM / Triton endpoint. Nothing is called
+# unless a Pipeline configures this Provider (ADR-0007: the endpoint path is the performance path,
+# never forced into first-run).
+dependencies = [
+    "latence-core",
+    "openai>=1.0",
+]
+
+# Registers the Parse performance Provider under the discovery group. Installing this package makes
+# 'parse.endpoint' available to any Pipeline with no core change (ADR-0004), swappable with the
+# in-core CPU 'parser.document' by one config line (ADR-0007).
+[project.entry-points."latence.providers"]
+"parse.endpoint" = "latence_parser_endpoint.provider:EndpointDocumentParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_endpoint"]

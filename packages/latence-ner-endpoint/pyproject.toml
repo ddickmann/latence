@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-ner-endpoint"
+version = "0.1.0"
+description = "Endpoint-backed Entity Extraction Provider (GLiNER-large / any OpenAI-compatible endpoint) — the NER performance path for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# The endpoint client is optional/heavy relative to the thin core (ADR-0016): it ships with THIS
+# Provider, not latence-core. The 'openai' client is Apache-2.0 (code); this Provider bundles NO
+# weights — it calls a user-supplied OpenAI-compatible / vLLM / Triton endpoint (ADR-0007: the
+# endpoint path is the performance path).
+dependencies = [
+    "latence-core",
+    "openai>=1.0",
+]
+
+# Registers the NER performance Provider under the discovery group. Installing this package makes
+# 'entity.endpoint' available to any Pipeline with no core change (ADR-0004), swappable with the
+# in-core 'entity.gazetteer' / in-process 'entity.gliner' by one config line (ADR-0007).
+[project.entry-points."latence.providers"]
+"entity.endpoint" = "latence_ner_endpoint.provider:EndpointEntityExtractor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_ner_endpoint"]

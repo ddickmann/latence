@@ -143,6 +143,29 @@ class LocalRunner:
 
     def __init__(self, registry: ProviderRegistry | None = None) -> None:
         self._registry = registry or ProviderRegistry()
+        # Per-Stage endpoint-retry tally, drained into that Stage's StageMetrics (S12). An
+        # endpoint-backed performance Provider exposes an ``endpoint_retries`` int attribute (how
+        # many transient failures it retried through); the Runner reads it after the Stage runs and
+        # resets for the next. A CPU/in-process Provider has no such attribute → 0.
+        self._last_stage_retries = 0
+
+    def _drain_retry_count(self) -> int:
+        """Read and reset the endpoint-retry tally the just-executed Stage's Provider reported."""
+        count = self._last_stage_retries
+        self._last_stage_retries = 0
+        return count
+
+    @staticmethod
+    def _provider_retry_count(provider: object) -> int:
+        """The endpoint-retry count a Provider exposes, or 0 if it exposes none.
+
+        An endpoint-backed performance Provider (``latence-*-endpoint``) tallies how many transient
+        endpoint failures it retried through in an ``endpoint_retries`` int attribute; an
+        in-process/CPU Provider has no such attribute. Read defensively so any Provider shape is
+        accepted (the seam names no base class — ADR-0004).
+        """
+        value = getattr(provider, "endpoint_retries", 0)
+        return value if isinstance(value, int) else 0
 
     # -- state layout ------------------------------------------------------
 
@@ -274,7 +297,17 @@ class LocalRunner:
     def _read_checkpoint(
         self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
     ) -> list[StageOutput]:
-        text = storage.read_text(uri)
+        return self._read_checkpoint_text(storage.read_text(uri), record_type)
+
+    def _read_checkpoint_text(
+        self, text: str, record_type: type[StageOutput] | type[Record]
+    ) -> list[StageOutput]:
+        """Validate newline-delimited record JSON into typed records (the checkpoint decode).
+
+        Split out from :meth:`_read_checkpoint` so a Runner adapter that transports Stage outputs
+        over a non-file substrate (e.g. Airflow XCom, S12) reuses the *exact* same typed decode —
+        the contract survives the boundary, no bespoke (de)serialization per Runner.
+        """
         if record_type is Record:
             # A fused Stage's mixed carrier (or an Export re-emitting one): each line
             # is an EntityMention or a RelationMention — discriminate per line.
@@ -312,7 +345,9 @@ class LocalRunner:
 
     # -- execution ---------------------------------------------------------
 
-    def run(self, pipeline: Pipeline, run_id: str = "run-0001") -> QualityReport:
+    def run(
+        self, pipeline: Pipeline, run_id: str = "run-0001", *, runner_name: str = "local"
+    ) -> QualityReport:
         storage = Storage.for_uri(pipeline.storage_uri)
         run_dir = self._run_dir(pipeline, run_id)
         storage.makedirs(run_dir)
@@ -360,6 +395,7 @@ class LocalRunner:
                         records_out=len(own_output),
                         duration_seconds=0.0,
                         from_checkpoint=True,
+                        runner=runner_name,
                     )
                 )
                 continue
@@ -381,6 +417,8 @@ class LocalRunner:
                     records_in=len(incoming),
                     records_out=len(own_output),
                     duration_seconds=round(duration, 6),
+                    runner=runner_name,
+                    endpoint_retries=self._drain_retry_count(),
                 )
             )
 
@@ -399,9 +437,29 @@ class LocalRunner:
         run_id: str,
         incoming: list[StageOutput],
     ) -> list[StageOutput]:
+        """Run one Stage and record any endpoint retries its Provider reported (S12).
+
+        Delegates the capability dispatch to :meth:`_dispatch_stage`, then reads the endpoint-retry
+        tally off the (endpoint-backed) Provider so ``run()`` can fold it into that Stage's metrics.
+        Kept as the single seam a second Runner adapter reuses — identical Stage semantics + the
+        same retry accounting under any substrate (ADR-0003), no fork.
+        """
         provider_cls = self._registry.load(stage.provider)
         provider = provider_cls(stage.config)
+        try:
+            return self._dispatch_stage(stage, provider, storage, pipeline, run_id, incoming)
+        finally:
+            self._last_stage_retries = self._provider_retry_count(provider)
 
+    def _dispatch_stage(
+        self,
+        stage: Stage,
+        provider: object,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+        incoming: list[StageOutput],
+    ) -> list[StageOutput]:
         if stage.capability is CapabilityKind.SOURCE:
             if not isinstance(provider, Source):
                 msg = f"Provider {stage.provider!r} does not satisfy the Source capability."

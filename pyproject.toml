@@ -9,6 +9,10 @@ latence-ner-gliner = { workspace = true }
 latence-relation-llm = { workspace = true }
 latence-relation-gliner = { workspace = true }
 latence-pii-gliner = { workspace = true }
+latence-parser-endpoint = { workspace = true }
+latence-ner-endpoint = { workspace = true }
+latence-embedder-endpoint = { workspace = true }
+latence-runner-airflow = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
 [project]
@@ -17,12 +21,15 @@ version = "0.0.0"
 description = "Dev meta-project pinning the latence workspace for tooling (not published)."
 requires-python = ">=3.11"
 # latence-ner-gliner / latence-relation-gliner / latence-relation-llm /
-# latence-pii-gliner are intentionally NOT pinned here: the three gliner packages pull
-# the heavy GLiNER stack (torch/transformers) and the llm one pulls the openai client
-# — installing them would break the CPU-first, offline, deterministic dev/test
-# environment (ADR-0007/0016). They are still workspace members (built + type-checked
-# from source), just not installed into the default dev env. Each Provider is
-# exercised with its heavy/endpoint dep monkeypatched with a fake in tests.
+# latence-pii-gliner / latence-parser-endpoint / latence-ner-endpoint /
+# latence-embedder-endpoint / latence-runner-airflow are intentionally NOT pinned here:
+# the gliner packages pull the heavy GLiNER stack (torch/transformers), the llm + the
+# three -endpoint packages pull the openai client, and the airflow adapter pulls
+# apache-airflow — installing any would break the CPU-first, offline, deterministic
+# dev/test environment (ADR-0007/0016). They are still workspace members (built +
+# type-checked from source), just not installed into the default dev env. Each Provider
+# / adapter is exercised with its heavy/endpoint dep monkeypatched with a fake (or, for
+# the Airflow adapter, via its Airflow-free in-process path) in tests.
 dependencies = [
     "latence-core",
     "latence-parser-plaintext",
@@ -69,7 +76,7 @@ no_implicit_reexport = true
 # the dev env by design, ADR-0016) and are treated as dynamically typed — the
 # Providers monkeypatch them with fakes in tests.
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "fsspec.*", "yaml", "gliner", "openai"]
+module = ["pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "airflow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

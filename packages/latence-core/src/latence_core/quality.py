@@ -46,7 +46,12 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # retracted/purged, drift, and whether a full Reconciliation was triggered) — the S11 acceptance
 # criterion ("delta churn lands in the Quality Report"). Present only on a delta run (a fresh
 # full run reports ``delta=None``). Counts only (no raw text), safe to persist.
-QUALITY_SCHEMA_VERSION = 11
+# v12 (S12): each :class:`StageMetrics` gains ``runner`` (which Runner executed the Stage —
+# ``"local"`` or a second-Runner adapter name, proving pluggable execution, ADR-0003) and
+# ``endpoint_retries`` (how many transient endpoint failures a Stage retried through — endpoint
+# fault-tolerance surfaced in the report, S12 AC). Additive with defaults, so a v11 report still
+# validates.
+QUALITY_SCHEMA_VERSION = 12
 
 
 class StageMetrics(BaseModel):
@@ -63,6 +68,15 @@ class StageMetrics(BaseModel):
     from_checkpoint: bool = Field(
         default=False, description="True if this Stage was skipped and resumed from a checkpoint."
     )
+    # S12: which Runner executed the Stage (``"local"`` for the built-in LocalRunner, an adapter
+    # name like ``"airflow"`` for a second Runner). Proves execution is pluggable (ADR-0003): the
+    # same Stage semantics under a different substrate, visible in the Quality Report.
+    runner: str = Field(default="local")
+    # S12: endpoint-retry observability for an endpoint-backed performance Provider — how many
+    # transient failures this Stage retried through before succeeding (0 for a CPU/in-process
+    # Provider or a first-try endpoint call). Surfaced so an operator sees a flaky endpoint in the
+    # Quality Report rather than only in logs (S12 AC: failures retried/surfaced).
+    endpoint_retries: int = Field(default=0)
 
 
 class CompletenessCheck(BaseModel):
