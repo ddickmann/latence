@@ -18,7 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 if TYPE_CHECKING:
     from latence_core.storage import Storage
 
-PIPELINE_SCHEMA_VERSION = 1
+# v2 (S10): the Pipeline gains an optional ``gold_set_uri`` — the annotation file an adopter
+# drops in for the gold-set harness (per-Stage precision/recall/F1 in the Quality Report,
+# ADR-0008). Additive and backward-compatible (defaults to None), so a v1 declaration still
+# validates.
+PIPELINE_SCHEMA_VERSION = 2
 
 
 class CapabilityKind(StrEnum):
@@ -77,6 +81,12 @@ class Pipeline(BaseModel):
     name: str = Field(..., min_length=1)
     storage_uri: str = Field(..., min_length=1, description="Base URI for state and exports.")
     stages: list[Stage] = Field(..., min_length=1)
+    # S10: an optional gold set (JSON/YAML on Storage) an adopter drops in to get per-Stage
+    # precision/recall/F1 on their own corpus in the Quality Report. Opt-in — a run with no
+    # gold set simply reports no gold-set section (ADR-0008).
+    gold_set_uri: str | None = Field(
+        default=None, description="Optional gold-set annotation file (JSON/YAML) on Storage."
+    )
 
     @model_validator(mode="after")
     def _validate_dag(self) -> Pipeline:

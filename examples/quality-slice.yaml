@@ -1,0 +1,80 @@
+# S10 Quality Report + gold-set harness demo Pipeline:
+#   Source -> Parse -> Chunk -> Entity Extraction --\
+#                        |                           +-> Relation Extraction -> Export (RAG corpus)
+#
+# The Quality Report (CONTEXT `Quality Report`) is a FIRST-CLASS ARTIFACT emitted every run
+# alongside the data (ADR-0008): per-Stage metrics, corpus-level statistics, and
+# contract-completeness — that Provenance/Classification are present AND offsets are aligned.
+# S10 promotes it to the full artifact and adds the GOLD-SET HARNESS: an adopter drops in
+# 20-50 annotated documents (`gold_set_uri` below) and gets per-Stage precision/recall/F1 on
+# THEIR OWN corpus — the "high-quality, AI-ready data" claim made auditable, not asserted.
+#
+# The gold set (examples/quality-docs/gold.json) is a JSON (or YAML) file the adopter authors:
+# for each source document (keyed by `file_name`) it lists the entities and relations that
+# SHOULD be extracted, by label + character span in the parsed markdown. The harness matches the
+# run's extracted mentions/relations against those annotations (label + span-overlap, one-to-one)
+# and writes precision/recall/F1 per Stage — overall and per label — into the Quality Report.
+# `match_min_overlap` (0.0 = any overlap counts; 1.0 = exact span) is the single tuning knob.
+#
+# The report is BOTH machine-readable (quality-report.json) and human-readable
+# (quality-report.md, the rendered summary) — both persisted under the run directory.
+#
+# Run with:
+#   latence run examples/quality-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/:
+#   export/records.jsonl + export/records.parquet   (the RAG-ready corpus)
+#   quality-report.json   (machine-readable: stages, completeness, drift, goldset P/R/F1)
+#   quality-report.md     (human-readable rendered summary)
+name: quality-slice
+storage_uri: file:///tmp/latence-quality-demo
+
+# The gold set for the harness (optional). Remove this line and the report simply omits the
+# gold-set section; every other part of the Quality Report is unchanged.
+gold_set_uri: file://EXAMPLES_DIR/quality-docs/gold.json
+
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/quality-docs   # edit to your folder of annotated documents
+      sensitivity: internal
+      extensions: [txt, md]
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext         # swap to parser.document for real PDFs (S2)
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer         # zero-shot; scored against the gold set's entities
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [Acme]
+        PERSON:
+          terms: [Alice, Bob]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern         # scored against the gold set's relations
+    depends_on: [chunk, entities]
+    config:
+      window_chars: 200
+      relations:
+        works_for:
+          head: PERSON
+          tail: ORG
+          triggers: [works at, joined]
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet     # the RAG-ready corpus as JSONL + Parquet
+    depends_on: [relations]

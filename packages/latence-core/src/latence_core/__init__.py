@@ -66,6 +66,15 @@ from latence_core.contracts import (
     ScreeningVerdict,
 )
 from latence_core.embedding import HashingEmbedder
+from latence_core.goldset import (
+    ConfusionCounts,
+    GoldDocument,
+    GoldEntity,
+    GoldRelation,
+    GoldSet,
+    score_entities,
+    score_relations,
+)
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
@@ -75,8 +84,11 @@ from latence_core.quality import (
     CompletenessCheck,
     ConfidenceHistogram,
     DisambiguationQuality,
+    DriftDiagnostics,
     EntityQuality,
+    GoldSetEvaluation,
     GraphQuality,
+    LabelScore,
     ParseQuality,
     ProfilingQuality,
     QualityReport,
@@ -84,6 +96,7 @@ from latence_core.quality import (
     RelationQuality,
     ScreeningQuality,
     StageMetrics,
+    StageScore,
 )
 from latence_core.runner import LocalRunner, topological_order
 from latence_core.storage import SchemeNotAllowedError, Storage
@@ -104,6 +117,7 @@ __all__ = [
     "Classification",
     "CompletenessCheck",
     "ConfidenceHistogram",
+    "ConfusionCounts",
     "ContentScreener",
     "CorpusFeatures",
     "DisambiguationQuality",
@@ -113,6 +127,7 @@ __all__ = [
     "Disposition",
     "DocumentFeatures",
     "DocumentRecord",
+    "DriftDiagnostics",
     "Embedder",
     "EntityCoOccurrence",
     "EntityExtractor",
@@ -124,6 +139,11 @@ __all__ = [
     "FeatureScope",
     "FusedEntityRelationExtractor",
     "FusedExtraction",
+    "GoldDocument",
+    "GoldEntity",
+    "GoldRelation",
+    "GoldSet",
+    "GoldSetEvaluation",
     "GraphAssembler",
     "GraphBuilder",
     "GraphEdge",
@@ -133,6 +153,7 @@ __all__ = [
     "GraphScope",
     "HashingEmbedder",
     "IntakeScreener",
+    "LabelScore",
     "LocalRunner",
     "MergeDecision",
     "MergeStrategy",
@@ -171,11 +192,14 @@ __all__ = [
     "Source",
     "Stage",
     "StageMetrics",
+    "StageScore",
     "Storage",
     "chunk_document",
     "detect_language",
     "estimate_tokens",
     "make_graph_id",
+    "score_entities",
+    "score_relations",
     "strip_markup",
     "topological_order",
 ]

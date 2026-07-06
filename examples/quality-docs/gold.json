@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "match_min_overlap": 0.0,
+  "documents": [
+    {
+      "file_name": "memo.txt",
+      "entities": [
+        { "label": "PERSON", "char_start": 0, "char_end": 5, "text": "Alice" },
+        { "label": "ORG", "char_start": 15, "char_end": 19, "text": "Acme" }
+      ],
+      "relations": [
+        {
+          "label": "works_for",
+          "head": { "label": "PERSON", "char_start": 0, "char_end": 5, "text": "Alice" },
+          "tail": { "label": "ORG", "char_start": 15, "char_end": 19, "text": "Acme" }
+        }
+      ]
+    },
+    {
+      "file_name": "note.txt",
+      "entities": [
+        { "label": "PERSON", "char_start": 0, "char_end": 3, "text": "Bob" },
+        { "label": "ORG", "char_start": 11, "char_end": 15, "text": "Acme" }
+      ],
+      "relations": [
+        {
+          "label": "works_for",
+          "head": { "label": "PERSON", "char_start": 0, "char_end": 3, "text": "Bob" },
+          "tail": { "label": "ORG", "char_start": 11, "char_end": 15, "text": "Acme" }
+        }
+      ]
+    }
+  ]
+}

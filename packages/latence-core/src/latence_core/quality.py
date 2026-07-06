@@ -33,7 +33,15 @@ from latence_core.contracts import ScreeningFinding
 # by type, edges by label, KB-linked node count, and evidence coverage: the fraction of edges
 # that carry Evidence) — the S9 acceptance criterion ("KG statistics land in the Quality
 # Report"). Counts only (no raw text), safe to persist.
-QUALITY_SCHEMA_VERSION = 9
+# v10 (S10): the Quality Report is promoted to the full first-class artifact (ADR-0008). The
+# ``completeness`` check gains offset-alignment (records whose Provenance char/page spans
+# resolve) so contract-completeness covers "offsets aligned", not just Provenance/Classification
+# present. The report gains ``drift`` (the corpus-level roll-up of the PageOffsetIndex drift
+# diagnostics across every parsed document — the S10 drift-diagnostics AC) and ``goldset`` (the
+# gold-set harness result: per-Stage precision/recall/F1 against the adopter's own annotations,
+# present only when a gold set was supplied). A ``render()`` produces the human-readable summary
+# (the machine-readable JSON + human-readable rendering AC). Counts only, safe to persist.
+QUALITY_SCHEMA_VERSION = 10
 
 
 class StageMetrics(BaseModel):
@@ -53,19 +61,42 @@ class StageMetrics(BaseModel):
 
 
 class CompletenessCheck(BaseModel):
-    """Contract-completeness: every exported record carries Provenance + Classification."""
+    """Contract-completeness: Provenance + Classification present AND offsets aligned (S10).
+
+    Every exported record must carry Provenance and Classification (enforced by the
+    contract, audited here) — but the S10 promotion also audits that a record's offsets
+    are *aligned*: a record that carries a char span must carry a **well-ordered** one
+    (``char_end >= char_start``), and if it also carries page coordinates those must be
+    well-ordered too (``page_end >= page_start``). ``records_with_aligned_offsets`` counts
+    records that pass this offset audit; ``offset_bearing_records`` is how many records
+    carried any char span to audit (a record with no char span at all is vacuously aligned
+    and not counted). So ``offsets_aligned`` is True only when every offset-bearing
+    record's span is internally consistent — the "offsets aligned" half of the
+    completeness AC. (Page *presence* is separately guaranteed at construction for the
+    sub-document carriers whose contracts require it — EntityMention/RelationMention — so
+    this audit does not re-require it for whole-document carriers that legitimately have a
+    ``[0, len)`` char span and no page span.)
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     records_checked: int = 0
     records_with_provenance: int = 0
     records_with_classification: int = 0
+    offset_bearing_records: int = 0
+    records_with_aligned_offsets: int = 0
+
+    @property
+    def offsets_aligned(self) -> bool:
+        """True if every offset-bearing record carried a well-ordered, page-resolved span."""
+        return self.records_with_aligned_offsets == self.offset_bearing_records
 
     @property
     def passed(self) -> bool:
         return (
             self.records_with_provenance == self.records_checked
             and self.records_with_classification == self.records_checked
+            and self.offsets_aligned
         )
 
 
@@ -359,6 +390,96 @@ class GraphQuality(BaseModel):
     avg_edge_confidence: float = 0.0
 
 
+class DriftDiagnostics(BaseModel):
+    """Corpus-level Provenance-integrity drift roll-up (S10 drift-diagnostics AC).
+
+    A finer-grained, cross-Stage view of the offset→page drift the ported
+    :class:`~latence_core.pagemap.PageOffsetIndex` recovers than the Parse-only
+    :class:`ParseQuality.page_drift_*` fields: it audits EVERY record that carries a char
+    span — chunks, mentions, relations, redaction spans — resolving each span's endpoints
+    through its parent page map and counting the fuzzy recoveries. ``resolutions`` is how
+    many offset→page lookups the audit performed, ``recovered`` how many needed the fuzzy
+    fallback (an offset outside any exact page span — a drift), and ``max_drift_chars`` the
+    worst such gap. ``clean`` (recovered == 0) is the headline the report renders: a
+    Provenance chain with zero drift means every derived offset resolves exactly to its
+    source page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolutions: int = 0
+    recovered: int = 0
+    max_drift_chars: int = 0
+    records_audited: int = 0
+
+    @property
+    def clean(self) -> bool:
+        """True if every audited offset resolved exactly (no fuzzy recovery)."""
+        return self.recovered == 0
+
+
+class LabelScore(BaseModel):
+    """Precision/recall/F1 for a single label within a Stage's gold-set score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    true_positives: int = 0
+    false_positives: int = 0
+    false_negatives: int = 0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+
+
+class StageScore(BaseModel):
+    """Precision/recall/F1 for one Stage against the gold set (overall + per label).
+
+    The per-Stage gold-set result: the corpus-total true/false-positive/negative counts
+    and their standard derivations, plus the same broken down per label. ``gold_total`` /
+    ``predicted_total`` are the annotation and prediction counts, so an adopter reading the
+    report sees both the score and the support it rests on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str
+    true_positives: int = 0
+    false_positives: int = 0
+    false_negatives: int = 0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+    per_label: dict[str, LabelScore] = Field(default_factory=dict)
+
+    @property
+    def gold_total(self) -> int:
+        return self.true_positives + self.false_negatives
+
+    @property
+    def predicted_total(self) -> int:
+        return self.true_positives + self.false_positives
+
+
+class GoldSetEvaluation(BaseModel):
+    """The gold-set harness result: per-Stage precision/recall/F1 on the adopter's corpus (S10).
+
+    Present in the Quality Report only when a gold set was supplied (an adopter dropped in
+    20–50 annotated documents). ``documents_annotated`` is the number of gold documents;
+    ``documents_matched`` how many of those the run actually produced records for (an
+    annotated document the Source never read is un-scored and flagged by the gap). ``stages``
+    holds one :class:`StageScore` per evaluated Stage (``entities``, ``relations``). This is
+    the S10 headline: the "high-quality, AI-ready data" claim made auditable on the adopter's
+    OWN corpus, not a public benchmark.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents_annotated: int = 0
+    documents_matched: int = 0
+    match_min_overlap: float = 0.0
+    stages: list[StageScore] = Field(default_factory=list)
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -389,6 +510,86 @@ class QualityReport(BaseModel):
     disambiguation: DisambiguationQuality | None = None
     # Present when the run had a Graph Assembly Stage.
     graph: GraphQuality | None = None
+    # S10: corpus-level Provenance-integrity drift roll-up (present when the run parsed
+    # documents with page maps), and the gold-set harness result (present only when a
+    # gold set was supplied — an adopter dropped in annotated documents).
+    drift: DriftDiagnostics | None = None
+    goldset: GoldSetEvaluation | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
+
+    def render(self) -> str:
+        """A compact human-readable Markdown summary of the report (S10 AC).
+
+        The machine-readable half is :meth:`to_json`; this is the human-readable half —
+        the same numbers, laid out so an operator or an adopter reads the run's health at a
+        glance without parsing JSON. Deterministic (every section is rendered in a fixed
+        order and every map is already sorted), so a seeded run renders byte-identically.
+        """
+        lines: list[str] = []
+        lines.append(f"# Quality Report — {self.pipeline_name} ({self.run_id})")
+        lines.append("")
+        lines.append(f"- documents: {self.document_count}")
+        lines.append(f"- duration: {self.total_duration_seconds:.3f}s")
+        # Render off the completeness detail so the headline can never disagree with the
+        # breakdown printed under it (the stored ``contracts_complete`` flag mirrors it).
+        status = "PASS" if self.completeness.passed else "FAIL"
+        lines.append(f"- contracts complete: {status}")
+        c = self.completeness
+        lines.append(
+            f"  - provenance {c.records_with_provenance}/{c.records_checked}, "
+            f"classification {c.records_with_classification}/{c.records_checked}, "
+            f"offsets aligned {c.records_with_aligned_offsets}/{c.offset_bearing_records}"
+        )
+        if self.drift is not None:
+            d = self.drift
+            drift_status = "clean" if d.clean else f"{d.recovered} recovered"
+            lines.append(
+                f"- provenance drift: {drift_status} "
+                f"({d.resolutions} lookups, max {d.max_drift_chars} chars)"
+            )
+        lines.append("")
+        lines.append("## Stages")
+        for m in self.stages:
+            resumed = " (from checkpoint)" if m.from_checkpoint else ""
+            lines.append(
+                f"- {m.name} [{m.capability}/{m.provider}]: "
+                f"{m.records_in} in -> {m.records_out} out, "
+                f"{m.duration_seconds:.3f}s{resumed}"
+            )
+        section_map = (
+            ("Parse", self.parse),
+            ("Chunk", self.chunk),
+            ("Screening", self.screening),
+            ("Entities", self.entities),
+            ("Relations", self.relations),
+            ("Redaction", self.redaction),
+            ("Profiling", self.profiling),
+            ("Disambiguation", self.disambiguation),
+            ("Graph", self.graph),
+        )
+        present = [name for name, section in section_map if section is not None]
+        if present:
+            lines.append("")
+            lines.append(f"## Stage metrics present: {', '.join(present)}")
+        if self.goldset is not None:
+            g = self.goldset
+            lines.append("")
+            lines.append("## Gold-set evaluation")
+            lines.append(
+                f"- documents: {g.documents_matched}/{g.documents_annotated} matched "
+                f"(min overlap {g.match_min_overlap})"
+            )
+            for score in g.stages:
+                lines.append(
+                    f"- {score.stage}: P={score.precision:.3f} R={score.recall:.3f} "
+                    f"F1={score.f1:.3f} "
+                    f"(tp={score.true_positives}, fp={score.false_positives}, "
+                    f"fn={score.false_negatives})"
+                )
+                for label, ls in score.per_label.items():
+                    lines.append(
+                        f"  - {label}: P={ls.precision:.3f} R={ls.recall:.3f} F1={ls.f1:.3f}"
+                    )
+        return "\n".join(lines) + "\n"

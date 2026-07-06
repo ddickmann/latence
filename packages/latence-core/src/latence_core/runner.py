@@ -55,14 +55,23 @@ from latence_core.contracts import (
     ScreeningCheckpoint,
     ScreeningFinding,
 )
+from latence_core.goldset import (
+    ConfusionCounts,
+    GoldSet,
+    score_entities,
+    score_relations,
+)
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import (
     ChunkQuality,
     CompletenessCheck,
     DisambiguationQuality,
+    DriftDiagnostics,
     EntityQuality,
+    GoldSetEvaluation,
     GraphQuality,
+    LabelScore,
     ParseQuality,
     ProfilingQuality,
     QualityReport,
@@ -70,6 +79,7 @@ from latence_core.quality import (
     RelationQuality,
     ScreeningQuality,
     StageMetrics,
+    StageScore,
 )
 from latence_core.storage import Storage
 
@@ -844,12 +854,7 @@ class LocalRunner:
         final_records: Iterable[Record | StageOutput],
     ) -> QualityReport:
         records = list(final_records)
-        completeness = CompletenessCheck(
-            records_checked=len(records),
-            # Contracts guarantee these are present; the check makes it auditable.
-            records_with_provenance=sum(1 for r in records if r.provenance is not None),
-            records_with_classification=sum(1 for r in records if r.classification is not None),
-        )
+        completeness = self._completeness_check(records)
         # Document count = distinct source documents seen across the run. Chunks
         # fan out from a document (many chunks share one document_id), so counting
         # distinct Provenance document ids is correct whether the sinks are
@@ -925,6 +930,186 @@ class LocalRunner:
                 pipeline, disambiguations, disambig_mentions_in
             ),
             graph=self._graph_quality(pipeline, graph_records),
+            drift=self._drift_diagnostics(chunked, parsed),
+            goldset=self._goldset_evaluation(pipeline, storage, mentions, relations),
+        )
+
+    @staticmethod
+    def _completeness_check(records: list[Record | StageOutput]) -> CompletenessCheck:
+        """Contract-completeness over the exported records (Provenance/Classification + offsets).
+
+        Every record must carry Provenance and Classification (contract-guaranteed, audited
+        here). The S10 promotion also audits offset *alignment*: a record that carries a char
+        span must carry a **well-ordered** one, and if it also carries page coordinates those
+        must be well-ordered too — the "offsets aligned" half of the completeness AC. A record
+        with no char span at all is vacuously aligned and not counted. Page *presence* is not
+        re-required here: the sub-document carriers whose contracts require a page span
+        (EntityMention/RelationMention) already guarantee it at construction, while a
+        whole-document carrier (DocumentRecord/RedactionRecord/FeatureRecord) legitimately
+        holds a ``[0, len)`` char span with no page span.
+        """
+        check = CompletenessCheck(
+            records_checked=len(records),
+            records_with_provenance=sum(1 for r in records if r.provenance is not None),
+            records_with_classification=sum(1 for r in records if r.classification is not None),
+        )
+        for record in records:
+            prov = record.provenance
+            if prov.char_start is None and prov.char_end is None:
+                # No char span to audit — vacuously aligned.
+                continue
+            check.offset_bearing_records += 1
+            span_ok = (
+                prov.char_start is not None
+                and prov.char_end is not None
+                and prov.char_end >= prov.char_start
+            )
+            pages_ok = (
+                prov.page_start is None
+                or prov.page_end is None
+                or prov.page_end >= prov.page_start
+            )
+            if span_ok and pages_ok:
+                check.records_with_aligned_offsets += 1
+        return check
+
+    @staticmethod
+    def _drift_diagnostics(
+        chunked: list[StageOutput], parsed: list[StageOutput]
+    ) -> DriftDiagnostics | None:
+        """Corpus-level Provenance-integrity drift roll-up across derived offsets (S10).
+
+        Audits every :class:`ChunkRecord` that carries its parent document's page map by
+        resolving the chunk's ``[char_start, char_end)`` endpoints through a
+        :class:`PageOffsetIndex` and accumulating the fuzzy recoveries — a finer,
+        cross-Stage drift signal than the Parse-only page-boundary audit. Returns ``None``
+        when there were no page-map-bearing chunk records to audit (a Parse-only or
+        chunk-free run), so a pipeline with nothing to audit reports no drift section rather
+        than a misleading all-zero one.
+        """
+        audited = 0
+        resolutions = 0
+        recovered = 0
+        max_drift = 0
+        for record in chunked:
+            if not isinstance(record, ChunkRecord) or record.page_map is None:
+                continue
+            prov = record.provenance
+            if prov.char_start is None or prov.char_end is None:
+                continue
+            index = PageOffsetIndex(record.page_map)
+            index.page_for_offset(prov.char_start)
+            index.page_for_offset(max(prov.char_end - 1, prov.char_start))
+            diag = index.diagnostics
+            audited += 1
+            resolutions += diag.resolutions
+            recovered += diag.recovered
+            max_drift = max(max_drift, diag.max_drift_chars)
+        if audited == 0:
+            return None
+        return DriftDiagnostics(
+            resolutions=resolutions,
+            recovered=recovered,
+            max_drift_chars=max_drift,
+            records_audited=audited,
+        )
+
+    def _goldset_evaluation(
+        self,
+        pipeline: Pipeline,
+        storage: Storage,
+        mentions: list[StageOutput],
+        relations: list[StageOutput],
+    ) -> GoldSetEvaluation | None:
+        """Score the run against the adopter's gold set, when one is supplied (S10 harness).
+
+        Returns ``None`` unless the Pipeline declares a ``gold_set_uri`` — the harness is
+        opt-in (an adopter drops in 20–50 annotated documents). When present, the gold set is
+        loaded from Storage (JSON or YAML), the extracted mentions/relations are mapped to
+        their source file names, and per-Stage precision/recall/F1 are computed
+        deterministically against the annotations. The mention side is required for both
+        Stages (a relation's endpoints resolve through the mention spans), so a relations-only
+        gold set with no Entity-Extraction Stage simply yields no relation matches — never an
+        error.
+        """
+        if not pipeline.gold_set_uri:
+            return None
+        gold = self._load_gold_set(pipeline.gold_set_uri, storage)
+        typed_mentions = [m for m in mentions if isinstance(m, EntityMention)]
+        typed_relations = [r for r in relations if isinstance(r, RelationMention)]
+        # Map each mention/relation's parent document to its source file name so the gold
+        # annotations (keyed by file name) bind to the run's records.
+        file_name_of: dict[str, str] = {}
+        for m in typed_mentions:
+            file_name_of.setdefault(m.document_record_id, m.provenance.file_name)
+        for r in typed_relations:
+            file_name_of.setdefault(r.document_record_id, r.provenance.file_name)
+
+        gold_files = set(gold.by_file_name())
+        matched_files = {
+            file_name_of[doc_id]
+            for doc_id in file_name_of
+            if file_name_of[doc_id] in gold_files
+        }
+        evaluation = GoldSetEvaluation(
+            documents_annotated=len(gold.documents),
+            documents_matched=len(matched_files),
+            match_min_overlap=gold.match_min_overlap,
+        )
+        entity_overall, entity_labels = score_entities(typed_mentions, gold, file_name_of)
+        evaluation.stages.append(
+            self._stage_score("entities", entity_overall, entity_labels)
+        )
+        if gold.total_relations > 0:
+            relation_overall, relation_labels = score_relations(
+                typed_relations, typed_mentions, gold, file_name_of
+            )
+            evaluation.stages.append(
+                self._stage_score("relations", relation_overall, relation_labels)
+            )
+        return evaluation
+
+    @staticmethod
+    def _load_gold_set(uri: str, storage: Storage) -> GoldSet:
+        """Load + validate a gold set from Storage (JSON or YAML), by file extension."""
+        text = storage.read_text(uri)
+        if uri.endswith((".yaml", ".yml")):
+            import yaml
+
+            data = yaml.safe_load(text)
+        else:
+            data = json.loads(text)
+        if not isinstance(data, dict):
+            msg = f"Gold set at {uri!r} must be a JSON/YAML mapping at the top level."
+            raise ValueError(msg)
+        return GoldSet.from_mapping(data)
+
+    @staticmethod
+    def _stage_score(
+        stage: str,
+        overall: ConfusionCounts,
+        per_label: dict[str, ConfusionCounts],
+    ) -> StageScore:
+        """Assemble a :class:`StageScore` from the confusion counts (overall + per label)."""
+        return StageScore(
+            stage=stage,
+            true_positives=overall.true_positives,
+            false_positives=overall.false_positives,
+            false_negatives=overall.false_negatives,
+            precision=overall.precision,
+            recall=overall.recall,
+            f1=overall.f1,
+            per_label={
+                label: LabelScore(
+                    true_positives=c.true_positives,
+                    false_positives=c.false_positives,
+                    false_negatives=c.false_negatives,
+                    precision=c.precision,
+                    recall=c.recall,
+                    f1=c.f1,
+                )
+                for label, c in per_label.items()
+            },
         )
 
     @staticmethod

@@ -57,7 +57,13 @@ def run(
         report.contracts_complete,
     )
     storage = Storage.for_uri(pipeline.storage_uri)
-    report_uri = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}/quality-report.json"
+    run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
+    report_uri = f"{run_dir}/quality-report.json"
+    # Persist the human-readable rendering alongside the machine-readable JSON (S10: the
+    # Quality Report is both machine- and human-readable). stdout stays JSON (pipeable);
+    # the rendered summary goes to Storage and to the log.
+    storage.write_atomic(f"{run_dir}/quality-report.md", report.render().encode("utf-8"))
+    logger.info("quality report:\n%s", report.render())
     typer.echo(report.to_json())
     if not storage.exists(report_uri):  # pragma: no cover - defensive
         typer.echo("warning: quality report was not persisted", err=True)

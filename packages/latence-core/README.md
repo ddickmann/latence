@@ -269,3 +269,53 @@ The KG statistics — node/edge counts, nodes by type, edges by label, KB-linked
 count, and **evidence coverage** (the fraction of edges carrying Evidence) — land in the
 Quality Report's `graph` section (ADR-0027). This slice completes the first end-to-end
 messy-docs → KG demo.
+
+## S10 — Quality Report + gold-set harness
+
+The **Quality Report** (CONTEXT) is promoted to the full first-class artifact (ADR-0008):
+every run writes both a machine-readable `quality-report.json` and a human-readable
+`quality-report.md` (the rendered summary) under `<storage_uri>/_latence/runs/<run_id>/`.
+It carries per-Stage metrics, the per-Stage quality sections S2–S9 added, **contract
+completeness** (Provenance/Classification present **and offsets aligned**), and a
+corpus-level **drift** roll-up (`PageOffsetIndex` recoveries across every derived offset;
+`clean` = every offset resolves exactly to its source page).
+
+The **gold-set harness** makes the "AI-ready" claim auditable on the adopter's *own* corpus.
+Drop in an annotation file — for each source document, the entities and relations that
+*should* be extracted, by label + char span — and point the Pipeline at it:
+
+```yaml
+name: quality-slice
+storage_uri: file:///tmp/latence-quality-demo
+gold_set_uri: file:///path/to/gold.json     # optional; omit and the section is skipped
+stages:
+  - { name: source, capability: source, provider: source.local_folder, config: {path: 'file:///docs'} }
+  - { name: parse, capability: parse, provider: parser.plaintext, depends_on: [source] }
+  - { name: chunk, capability: chunk, provider: chunk.markdown, depends_on: [parse] }
+  - { name: entities, capability: entity_extraction, provider: entity.gazetteer, depends_on: [chunk], config: {labels: {ORG: {terms: [Acme]}, PERSON: {terms: [Alice, Bob]}}} }
+  - { name: relations, capability: relation_extraction, provider: relation.pattern, depends_on: [chunk, entities], config: {relations: {works_for: {head: PERSON, tail: ORG, triggers: [works at, joined]}}} }
+  - { name: export, capability: export, provider: export.jsonl_parquet, depends_on: [relations] }
+```
+
+```json
+{
+  "documents": [
+    {"file_name": "memo.txt",
+     "entities": [{"label": "PERSON", "char_start": 0, "char_end": 5},
+                  {"label": "ORG", "char_start": 15, "char_end": 19}],
+     "relations": [{"label": "works_for",
+                    "head": {"label": "PERSON", "char_start": 0, "char_end": 5},
+                    "tail": {"label": "ORG", "char_start": 15, "char_end": 19}}]}
+  ],
+  "match_min_overlap": 0.0
+}
+```
+
+The harness matches each run's extracted mentions/relations against the annotations
+(label + span-overlap, greedy **one-to-one**, a relation credited only when *both*
+endpoints align) and writes **precision / recall / F1 per Stage — overall and per label —**
+into the report's `goldset` section, with `documents_matched / documents_annotated` support.
+`match_min_overlap` (0.0 = any overlap, 1.0 = exact span) is the single tuning knob. It is a
+Runner-side evaluation, not a DAG Stage (ADR-0028) — deterministic and seeded, so a run is
+byte-identical; a pipeline with no `gold_set_uri` pays nothing. See
+`examples/quality-slice.yaml`.
