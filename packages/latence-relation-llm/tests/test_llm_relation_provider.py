@@ -24,6 +24,7 @@ from latence_core.contracts import (
     Provenance,
     RelationMention,
 )
+from latence_core.endpoint import EndpointError
 from latence_relation_llm import LLMRelationExtractor
 
 
@@ -81,10 +82,22 @@ def _mention(idx: int, label: str, text: str, start: int, end: int) -> EntityMen
     )
 
 
+class _StatusError(Exception):
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class _FakeCompletions:
     reply: str = "{}"
+    error: Exception | None = None
+    _fail_times: int = 0
+    calls: int = 0
 
     def create(self, **kwargs: Any) -> Any:
+        type(self).calls += 1
+        if type(self).error is not None and type(self).calls <= type(self)._fail_times:
+            raise type(self).error
         msg = types.SimpleNamespace(content=type(self).reply)
         choice = types.SimpleNamespace(message=msg)
         return types.SimpleNamespace(choices=[choice])
@@ -109,6 +122,9 @@ def fake_openai(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOpenAI]:
     module.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", module)
     _FakeCompletions.reply = "{}"
+    _FakeCompletions.error = None
+    _FakeCompletions._fail_times = 0
+    _FakeCompletions.calls = 0
     return _FakeOpenAI
 
 
@@ -198,3 +214,53 @@ def test_missing_openai_dependency_raises_clear_error(monkeypatch: pytest.Monkey
     mentions = [_mention(0, "PERSON", "Alice", 0, 5), _mention(1, "ORG", "Acme Corp", 16, 25)]
     with pytest.raises(ImportError, match="pip install latence-relation-llm"):
         list(provider.relate([chunk], mentions))
+
+
+def test_transient_failure_is_retried_and_counted(fake_openai: type[_FakeOpenAI]) -> None:
+    """Regression (issue #44.3): a 5xx blip is retried through the ported retry AND surfaces.
+
+    Before the fix the RE Provider called the endpoint directly (no retry, no ``endpoint_retries``),
+    so a transient 503 crashed the Stage and RE retries never appeared in the Quality Report like
+    Parse/NER/Embedder. Now two 503s are absorbed, the third try succeeds, and the retry count is
+    tallied on ``endpoint_retries`` — the attribute the Runner folds into the report.
+    """
+    _FakeCompletions.error = _StatusError("overloaded", status_code=503)
+    _FakeCompletions._fail_times = 2
+    _FakeCompletions.reply = json.dumps(
+        {"relations": [{"head": 0, "tail": 1, "label": "works_for", "confidence": 0.8}]}
+    )
+    chunk = _chunk("Alice works for Acme Corp.")
+    mentions = [_mention(0, "PERSON", "Alice", 0, 5), _mention(1, "ORG", "Acme Corp", 16, 25)]
+    provider = LLMRelationExtractor({"labels": ["works_for"]})
+    out = list(provider.relate([chunk], mentions))
+    assert len(out) == 1  # succeeded after the retries
+    assert _FakeCompletions.calls == 3  # two failures + one success
+    assert provider.endpoint_retries == 2  # surfaced for the Quality Report
+
+
+def test_terminal_failure_propagates_without_retry(fake_openai: type[_FakeOpenAI]) -> None:
+    """A terminal 4xx fails fast: one call, EndpointError raised, no retry (issue #44.3)."""
+    _FakeCompletions.error = _StatusError("bad request", status_code=400)
+    _FakeCompletions._fail_times = 99
+    chunk = _chunk("Alice works for Acme Corp.")
+    mentions = [_mention(0, "PERSON", "Alice", 0, 5), _mention(1, "ORG", "Acme Corp", 16, 25)]
+    provider = LLMRelationExtractor({"labels": ["works_for"]})
+    with pytest.raises(EndpointError, match="bad request"):
+        list(provider.relate([chunk], mentions))
+    assert _FakeCompletions.calls == 1
+    assert provider.endpoint_retries == 0
+
+
+def test_retries_exhausted_surface_the_error(fake_openai: type[_FakeOpenAI]) -> None:
+    """When every attempt is a retryable failure, the final EndpointError surfaces (issue #44.3)."""
+    _FakeCompletions.error = _StatusError("still down", status_code=503)
+    _FakeCompletions._fail_times = 99
+    chunk = _chunk("Alice works for Acme Corp.")
+    mentions = [_mention(0, "PERSON", "Alice", 0, 5), _mention(1, "ORG", "Acme Corp", 16, 25)]
+    provider = LLMRelationExtractor(
+        {"labels": ["works_for"], "retry_attempts": 3}
+    )
+    with pytest.raises(EndpointError, match="still down"):
+        list(provider.relate([chunk], mentions))
+    assert _FakeCompletions.calls == 3  # attempts exhausted
+    assert provider.endpoint_retries == 2  # two retries taken before the final raise

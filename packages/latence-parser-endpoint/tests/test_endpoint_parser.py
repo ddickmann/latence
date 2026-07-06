@@ -164,3 +164,59 @@ def test_missing_openai_dependency_raises_clear_error(monkeypatch: pytest.Monkey
     provider = EndpointDocumentParser({"base_url": "http://vllm/v1"})
     with pytest.raises(ImportError, match="pip install latence-parser-endpoint"):
         list(provider.parse([_parser_input()]))
+
+
+def test_oversized_binary_input_is_rejected_before_encoding(
+    fake_openai: type[_FakeOpenAI],
+) -> None:
+    """Adversarial (issue #44.1): an over-cap binary input must NOT be base64-encoded or sent.
+
+    Simulates a zip-bomb-expanded / oversized input reaching the parser (e.g. Screening bypassed):
+    a payload just over a small configured cap must degrade to PARSE_ERROR with the size reason and
+    make ZERO endpoint calls — proving the guard fires before the base64/data-URL inflation path,
+    not after paying its memory/request cost.
+    """
+    _FakeCompletions.calls = 0
+    _FakeCompletions.reply = "should never be produced"
+    payload = b"\x00" * 2048  # 2 KiB, over the 1 KiB cap below
+    provider = EndpointDocumentParser({"base_url": "http://vllm/v1", "max_input_bytes": 1024})
+    out = list(provider.parse([_parser_input(content=payload)]))
+    assert len(out) == 1
+    assert out[0].disposition is Disposition.PARSE_ERROR
+    assert "over the 1024-byte parser cap" in (out[0].error or "")
+    assert out[0].content == ""
+    # The endpoint was never called — the input was rejected before encoding, not transcribed.
+    assert _FakeCompletions.calls == 0
+    # Provenance survives the rejection (auditable).
+    assert out[0].provenance.file_name == "a.txt"
+
+
+def test_oversized_text_input_is_rejected_before_encoding(
+    fake_openai: type[_FakeOpenAI],
+) -> None:
+    """A huge text input inflates the prompt the same way; the cap covers it (UTF-8 byte length)."""
+    _FakeCompletions.calls = 0
+    provider = EndpointDocumentParser({"base_url": "http://vllm/v1", "max_input_bytes": 1024})
+    out = list(provider.parse([_parser_input(content="A" * 2048)]))
+    assert out[0].disposition is Disposition.PARSE_ERROR
+    assert _FakeCompletions.calls == 0
+
+
+def test_at_cap_input_still_parses(fake_openai: type[_FakeOpenAI]) -> None:
+    """An input exactly at the cap is NOT rejected — the guard is strictly ``>`` cap."""
+    _FakeCompletions.calls = 0
+    _FakeCompletions.reply = "ok"
+    provider = EndpointDocumentParser({"base_url": "http://vllm/v1", "max_input_bytes": 16})
+    out = list(provider.parse([_parser_input(content=b"\x00" * 16)]))
+    assert out[0].disposition is Disposition.PARSED
+    assert _FakeCompletions.calls == 1
+
+
+def test_cap_disabled_allows_large_input(fake_openai: type[_FakeOpenAI]) -> None:
+    """``max_input_bytes <= 0`` disables the guard for an adopter who caps upstream."""
+    _FakeCompletions.calls = 0
+    _FakeCompletions.reply = "ok"
+    provider = EndpointDocumentParser({"base_url": "http://vllm/v1", "max_input_bytes": 0})
+    out = list(provider.parse([_parser_input(content=b"\x00" * 4096)]))
+    assert out[0].disposition is Disposition.PARSED
+    assert _FakeCompletions.calls == 1

@@ -19,10 +19,15 @@ and :meth:`~latence_core.runner.LocalRunner._build_report` seams verbatim (no fo
 
 Endpoint fault-tolerance rides two layers without corrupting the corpus: the Provider's own ported
 retry (:mod:`latence_core.endpoint`) absorbs transient endpoint blips inside a Stage, and Airflow's
-**task-level retries** re-run a whole Stage task on an unhandled failure. Because a Corpus Version
-is only committed *after* the DAG run finishes successfully (the commit is downstream of every Stage
-task), a mid-DAG endpoint failure — retried or ultimately failed — leaves the last committed Corpus
-Version intact (S12 AC): a failed Airflow task fails the DAG run before any commit, never torn.
+**task-level retries** re-run a whole Stage task on an unhandled failure. The run's data artifacts
+are committed by an explicit **report/commit task** that :meth:`build_dag` wires downstream of every
+sink Stage (and that the in-process :meth:`run` performs as its final step): it builds and persists
+the Quality Report only once every Stage has succeeded. Because that commit task is downstream of
+every Stage, a mid-DAG endpoint failure — retried or ultimately failed — fails the DAG run *before*
+the commit task runs, so the last committed state is left intact (S12 AC): a failed Airflow task
+fails the DAG run before any commit, never torn. (The adapter commits the run's Quality Report as
+its data artifact; a full transactional Corpus Version bump is the Delta Runner's concern, not this
+seam's.)
 
 ``airflow`` is a heavy optional dependency isolated in THIS adapter package (ADR-0016), imported
 lazily only in :meth:`AirflowRunner.build_dag`; the in-process execution path
@@ -181,12 +186,25 @@ class AirflowRunner:
         default_args: dict[str, Any] | None = None,
         **dag_kwargs: Any,
     ) -> Any:
-        """Build a real Airflow ``DAG`` of one ``PythonOperator`` per Stage (adopter path).
+        """Build a real Airflow ``DAG`` of one ``PythonOperator`` per Stage plus a report/commit
+        task (adopter path).
 
-        Wires the operators by the Pipeline's ``depends_on`` edges so Airflow schedules the Stages
-        in the right order and owns their state/retries (ADR-0010). Each operator's callable is
-        :meth:`_airflow_stage_callable`, which runs the Stage through the same shared engine and
-        pushes/pulls via Airflow's real XCom — so the Stage semantics match the local Runner.
+        Wires one operator per Stage by the Pipeline's ``depends_on`` edges so Airflow schedules the
+        Stages in the right order and owns their state/retries (ADR-0010). Each Stage operator's
+        callable is :meth:`_airflow_stage_callable`, which runs the Stage through the same shared
+        engine and pushes/pulls via Airflow's real XCom — so the Stage semantics match the local
+        Runner.
+
+        A final ``<dag_id>.report`` task (:meth:`_airflow_report_callable`) is wired **downstream of
+        every sink Stage** (issue #44.4): it gathers each Stage's records + metrics from XCom,
+        builds the Quality Report through the same shared ``_build_report`` seam the ``run()`` path
+        uses, and persists it — the explicit commit of the run's data artifacts. Because it is
+        downstream of every Stage, Airflow only schedules it once all Stages have succeeded, so a
+        mid-DAG Stage failure fails the DAG run *before* the report/commit task runs and leaves the
+        last committed Corpus Version intact (never torn). Before this task the real DAG emitted no
+        Quality Report and had no commit step; the ADR/`run()`-path claim of a "commit downstream of
+        every Stage" now actually holds on the adopter path too.
+
         ``airflow`` is imported here (lazily) so the rest of the adapter — and the in-process
         proof — needs no Airflow install (ADR-0016).
         """
@@ -217,6 +235,20 @@ class AirflowRunner:
         for stage in pipeline.stages:
             for parent in stage.depends_on:
                 operators[parent] >> operators[stage.name]
+
+        # The report/commit task (issue #44.4): downstream of every sink Stage, so Airflow runs it
+        # only after all Stages succeed. It builds + persists the Quality Report (the commit of the
+        # run's data artifacts). A mid-DAG failure fails the run before it, so no torn commit.
+        ordered = topological_order(list(pipeline.stages))
+        depended_on = {p for s in ordered for p in s.depends_on}
+        sinks = [s.name for s in ordered if s.name not in depended_on]
+        report_op = PythonOperator(
+            task_id="report",
+            python_callable=self._airflow_report_callable(pipeline, run_id),
+            dag=dag,
+        )
+        for sink in sinks:
+            operators[sink] >> report_op
         return dag
 
     def _airflow_stage_callable(
@@ -227,7 +259,11 @@ class AirflowRunner:
         Uses Airflow's real XCom (via the task-instance ``ti`` Airflow injects) as the inter-task
         carrier — so Airflow owns the run state, not local checkpoint files (ADR-0010). Records are
         serialized to their contract JSON for XCom transport and re-validated on pull, so the
-        typed contract survives the Airflow boundary intact.
+        typed contract survives the Airflow boundary intact. The Stage also pushes its
+        :class:`~latence_core.quality.StageMetrics` (records in/out, duration, runner name, and the
+        endpoint-retry tally its Provider reported) under a ``"metrics"`` key so the downstream
+        report/commit task can assemble the Quality Report from XCom — the same metrics the
+        in-process :meth:`run` records (issue #44.4).
         """
         engine = self._engine
 
@@ -239,10 +275,61 @@ class AirflowRunner:
                 raw = ti.xcom_pull(task_ids=parent) or []
                 parent_stage = _stage_by_name(pipeline, parent)
                 incoming.extend(_deserialize(engine, parent_stage, pipeline, raw))
+            started = time.perf_counter()
             own_output = engine._execute_stage(  # noqa: SLF001
                 stage, storage, pipeline, run_id, incoming
             )
+            duration = time.perf_counter() - started
+            metrics = StageMetrics(
+                name=stage.name,
+                capability=stage.capability.value,
+                provider=stage.provider,
+                records_in=len(incoming),
+                records_out=len(own_output),
+                duration_seconds=round(duration, 6),
+                runner=RUNNER_NAME,
+                endpoint_retries=engine._drain_retry_count(),  # noqa: SLF001
+            )
             ti.xcom_push(key="return_value", value=[r.model_dump_json() for r in own_output])
+            ti.xcom_push(key="metrics", value=metrics.model_dump_json())
+
+        return _task
+
+    def _airflow_report_callable(
+        self, pipeline: Pipeline, run_id: str
+    ) -> Callable[..., None]:
+        """The report/commit task's Airflow function: build + persist the Quality Report (#44.4).
+
+        Runs after every Stage (wired downstream of every sink), so all Stages have succeeded when
+        it fires — a mid-DAG failure fails the run before this task, so the report/commit only ever
+        reflects a complete run (no torn commit). Gathers each Stage's records and metrics from
+        XCom, rebuilds the same ``outputs`` / ``stage_metrics`` the in-process :meth:`run` builds,
+        and calls the shared ``_build_report`` seam — so the Quality Report is byte-identical in
+        shape to the local Runner's, then persists it to the engine's own report location (the
+        commit of the run's data artifacts).
+        """
+        engine = self._engine
+
+        def _task(**context: Any) -> None:
+            ti = context["ti"]
+            storage = Storage.for_uri(pipeline.storage_uri)
+            ordered = topological_order(list(pipeline.stages))
+            outputs: dict[str, list[StageOutput]] = {}
+            stage_metrics: list[StageMetrics] = []
+            for stage in ordered:
+                raw = ti.xcom_pull(task_ids=stage.name) or []
+                outputs[stage.name] = _deserialize(engine, stage, pipeline, raw)
+                raw_metrics = ti.xcom_pull(task_ids=stage.name, key="metrics")
+                if raw_metrics is not None:
+                    stage_metrics.append(StageMetrics.model_validate_json(raw_metrics))
+            final_records = engine._final_records(ordered, outputs)  # noqa: SLF001
+            report = engine._build_report(  # noqa: SLF001
+                pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
+            )
+            storage.write_atomic(
+                engine._report_uri(pipeline, run_id),  # noqa: SLF001
+                report.to_json().encode("utf-8"),
+            )
 
         return _task
 

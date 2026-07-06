@@ -69,7 +69,9 @@ class EndpointError(RuntimeError):
 class RetryPolicy:
     """Exponential backoff with full jitter (ported ``retry_utils`` algorithm).
 
-    ``attempts`` total tries (so ``attempts - 1`` retries). The nth retry sleeps a random duration
+    ``attempts`` total tries (so ``attempts - 1`` retries); it is clamped to at least 1 in
+    ``__post_init__`` so a configured ``retry_attempts: 0`` means "one try, no retries" rather
+    than skipping the call. The nth retry sleeps a random duration
     in ``[0, min(base * 2**n, max_delay)]`` — "full jitter", the private original's shape — which
     de-correlates a thundering herd of Stages retrying one overloaded endpoint at once. A terminal
     (non-retryable) error is re-raised immediately; the retry only ever fires on a retryable one.
@@ -78,6 +80,17 @@ class RetryPolicy:
     attempts: int = 4
     base_delay: float = 0.5
     max_delay: float = 30.0
+
+    def __post_init__(self) -> None:
+        # Clamp ``attempts`` to at least 1 so an operator-supplied ``retry_attempts: 0`` (or a
+        # negative) still runs the call exactly once with no retries, rather than skipping the loop
+        # entirely and falling through to the ``assert last_error is not None`` guard in
+        # :func:`call_with_retry` — which would raise a bare ``AssertionError`` (and, under ``-O``,
+        # ``raise None``). Mirrors the ``max(1, ...)`` batch-size guards elsewhere: zero means "one
+        # try, no retries", the natural read of "no retry attempts". Frozen dataclass → set via
+        # ``object.__setattr__``.
+        if self.attempts < 1:
+            object.__setattr__(self, "attempts", 1)
 
     def backoff(self, retry_index: int, rand: float) -> float:
         """The (jittered) sleep before the ``retry_index``-th retry (0-based).
@@ -230,6 +243,7 @@ def call_with_retry(
             if on_retry is not None:
                 on_retry()
             sleep(policy.backoff(attempt, rng()))
-    # Unreachable: the loop either returns or raises. Guards the type-checker.
+    # Unreachable: ``policy.attempts`` is clamped to >= 1 (RetryPolicy.__post_init__), so the loop
+    # always runs at least once and either returns or raises. Guards the type-checker.
     assert last_error is not None  # noqa: S101
     raise last_error

@@ -160,3 +160,44 @@ def test_backoff_is_capped_by_max_delay() -> None:
     policy = RetryPolicy(base_delay=10.0, max_delay=15.0)
     # 10 * 2^2 = 40, capped to 15; rand=1.0 -> full ceiling.
     assert policy.backoff(2, 1.0) == 15.0
+
+
+def test_zero_attempts_is_clamped_to_one_try() -> None:
+    """Regression (issue #44.2): ``retry_attempts: 0`` must run one try, not fall through.
+
+    Before the clamp, ``RetryPolicy(attempts=0)`` skipped the loop body entirely so
+    :func:`call_with_retry` reached ``assert last_error is not None`` — an ``AssertionError``
+    (``raise None`` under ``-O``) instead of either the result or the endpoint's own error. The
+    clamp turns 0 (and any negative) into exactly one try with no retries.
+    """
+    # Clamp is on the policy itself.
+    assert RetryPolicy(attempts=0).attempts == 1
+    assert RetryPolicy(attempts=-5).attempts == 1
+
+    # A zero-attempts policy over a *succeeding* call returns the result with a single try — never
+    # an AssertionError from the fall-through guard.
+    calls = {"n": 0}
+
+    def once() -> str:
+        calls["n"] += 1
+        return "ok"
+
+    result = call_with_retry(
+        once, RetryPolicy(attempts=0), rng=lambda: 0.0, sleep=lambda _d: None
+    )
+    assert result == "ok"
+    assert calls["n"] == 1
+
+    # A zero-attempts policy over a *retryable-failing* call surfaces the endpoint's own
+    # EndpointError after its single try — not a bare AssertionError, and with no retry.
+    fail_calls = {"n": 0}
+
+    def always_503() -> str:
+        fail_calls["n"] += 1
+        raise EndpointError("overloaded", status=503)
+
+    with pytest.raises(EndpointError, match="overloaded"):
+        call_with_retry(
+            always_503, RetryPolicy(attempts=0), rng=lambda: 0.0, sleep=lambda _d: None
+        )
+    assert fail_calls["n"] == 1

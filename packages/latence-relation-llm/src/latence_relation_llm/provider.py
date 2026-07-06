@@ -20,6 +20,15 @@ round-trip). A relation naming an out-of-range index, a self-relation, or an
 unknown label is dropped, so a hallucinated reference never yields an
 un-resolvable record.
 
+Fault tolerance is the ported endpoint machinery (:mod:`latence_core.endpoint`),
+the same as the other endpoint Providers (Parse/NER/Embedder): the chat call goes
+through :func:`~latence_core.endpoint.call_with_retry` with
+exponential-backoff-with-jitter, so a 429/5xx/transport blip is retried and a
+terminal 4xx fails fast. The count of transient failures a run absorbed is exposed
+on ``endpoint_retries`` and folded into the Quality Report by the Runner (issue
+#44.3: RE retries surface for observability consistency with the other endpoint
+Stages, not silently).
+
 Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied
 endpoint; it bundles no model weights. The ``openai`` client is Apache-2.0 (code).
 No key or endpoint is embedded — both come from config/environment.
@@ -33,9 +42,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
+from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
@@ -71,6 +82,9 @@ class LLMRelationExtractor:
         max_mentions: int  — cap on mentions sent per document to bound the prompt
             (default 100).
         default_confidence: float  — used when the model omits a confidence (default 0.8).
+        retry_attempts / retry_base_delay / retry_max_delay  — the ported retry policy
+            knobs (issue #44.3), identical to the other endpoint Providers; retries
+            absorbed surface on ``endpoint_retries`` for the Quality Report.
 
     The client is constructed lazily on first ``relate`` so building the Provider
     (which the Runner does for every Stage) never needs the endpoint reachable.
@@ -93,7 +107,20 @@ class LLMRelationExtractor:
         self._temperature = float(config.get("temperature", 0.0))
         self._max_mentions = int(config.get("max_mentions", 100))
         self._default_confidence = float(config.get("default_confidence", 0.8))
+        # Ported retry (issue #44.3): the RE endpoint call now rides the same
+        # backoff-with-jitter as Parse/NER/Embedder. Seeded RNG off the endpoint identity so a
+        # test run is byte-stable while a real run still de-correlates a burst of retries.
+        self._policy = RetryPolicy(
+            attempts=int(config.get("retry_attempts", 4)),
+            base_delay=float(config.get("retry_base_delay", 0.5)),
+            max_delay=float(config.get("retry_max_delay", 30.0)),
+        )
+        self._rng = random.Random(f"{self._base_url}|{self._model}")
         self._client: Any = None
+        # Observability: transient endpoint failures this Provider retried through. The Runner
+        # reads this after the Stage runs (via the generic ``endpoint_retries`` attribute seam)
+        # and folds it into the Quality Report — same as the other endpoint Stages.
+        self.endpoint_retries = 0
 
     # -- lazy client --------------------------------------------------------
 
@@ -186,16 +213,12 @@ class LLMRelationExtractor:
             f"Entity mentions:\n{numbered}\n\n"
             "Return the JSON object of relations now."
         )
-        response = client.chat.completions.create(
-            model=self._model,
-            temperature=self._temperature,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user},
-            ],
-        )
-        content = response.choices[0].message.content or "{}"
+        # Route the endpoint call through the ported retry (issue #44.3): a 429/5xx/transport blip
+        # is retried with backoff+jitter and tallied on ``endpoint_retries``; a terminal 4xx fails
+        # fast. Only the network call is wrapped — a well-formed HTTP 200 whose *body* is non-JSON
+        # is a model-quality issue, not a transient fault, and still drops to no relations (below),
+        # so retrying does not burn budget on a reply that will never parse.
+        content = self._call_endpoint(client, user)
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
@@ -203,6 +226,43 @@ class LLMRelationExtractor:
             return []
         relations = parsed.get("relations", []) if isinstance(parsed, dict) else []
         return [r for r in relations if isinstance(r, dict)]
+
+    def _call_endpoint(self, client: Any, user: str) -> str:
+        """One chat-completions call through the ported retry, returning the raw reply string.
+
+        Classes any client exception into a :class:`EndpointError` (429/5xx retryable, other 4xx
+        terminal, transport retryable) so :func:`call_with_retry` decides retry-vs-fail; the retry
+        count is tallied on ``endpoint_retries`` via ``on_retry``. An exhausted / terminal failure
+        re-raises the :class:`EndpointError` — the Runner surfaces the Stage failure, identical to
+        the NER/Parse endpoint Providers.
+        """
+
+        def do_call() -> str:
+            try:
+                response = client.chat.completions.create(
+                    model=self._model,
+                    temperature=self._temperature,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": user},
+                    ],
+                )
+            except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError
+                raise _classify_exception(exc) from exc
+            return response.choices[0].message.content or "{}"
+
+        result = call_with_retry(
+            do_call,
+            self._policy,
+            rng=self._rng.random,
+            sleep=lambda _d: None,
+            on_retry=self._count_retry,
+        )
+        return str(result)
+
+    def _count_retry(self) -> None:
+        self.endpoint_retries += 1
 
     def _valid_relations(
         self, raw: list[dict[str, Any]], mentions: list[EntityMention]
@@ -239,6 +299,19 @@ class LLMRelationExtractor:
                 confidence = self._default_confidence
             confidence = min(max(confidence, 0.0), 1.0)
             yield head, tail, label, confidence
+
+
+def _classify_exception(exc: Exception) -> EndpointError:
+    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry.
+
+    An exception exposing an HTTP ``status_code`` (the OpenAI client's ``APIStatusError`` shape) is
+    classed by that status (429/5xx retryable, other 4xx terminal); anything else is a transport
+    error → retryable. Mirrors the NER/Parse endpoint Providers exactly.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return EndpointError(str(exc), status=status)
+    return EndpointError(str(exc))
 
 
 # -- shared text/page-map/provenance helpers (mirror the core provider) ------

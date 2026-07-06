@@ -48,6 +48,17 @@ _SYSTEM_PROMPT = (
 # text) simply has none.
 _PAGE_SEPARATOR = "\n\n---PAGE---\n\n"
 
+# Defensive input size cap (issue #44.1). Intake Screening's ``SignatureSizeIntakeScreener`` caps
+# raw input at 25 MiB before Parse, but this Provider must not TRUST that Screening ran ahead of it
+# (it can be invoked directly, or a zip that expanded downstream of Screening's central-directory
+# check could still reach it): base64-encoding an unbounded input into a data URL inflates it ~1.33x
+# in memory and again on the wire, a DoS/OOM vector on an oversized or zip-bomb-expanded input. So
+# the Provider guards its OWN input, defense-in-depth, degrading an over-cap input to a PARSE_ERROR
+# record (the same graceful-degradation contract as a corrupt file / a terminal endpoint failure)
+# rather than encoding it. Default matches Screening's ``max_bytes`` so a Screening-passed input is
+# never rejected here; override with ``max_input_bytes``.
+_DEFAULT_MAX_INPUT_BYTES = 25 * 1024 * 1024
+
 
 class EndpointDocumentParser:
     """Parser Provider that transcribes documents via an OpenAI-compatible endpoint.
@@ -62,6 +73,9 @@ class EndpointDocumentParser:
             any placeholder.
         temperature: float  — sampling temperature (default 0.0 for determinism).
         retry_attempts / retry_base_delay / retry_max_delay  — the ported retry policy knobs.
+        max_input_bytes: int  — defensive cap on the raw input this Provider will encode/send
+            (default 25 MiB, matching Intake Screening's ``max_bytes``); an over-cap input degrades
+            to a PARSE_ERROR without an endpoint call. ``<= 0`` disables the guard.
         category / sensitivity  — Classification attached at Parse (category from config else the
             input's; sensitivity inherited else config else ``"unknown"``), matching the CPU
             reference so the swap is output-identical modulo the model.
@@ -78,6 +92,9 @@ class EndpointDocumentParser:
         self._temperature = float(config.get("temperature", 0.0))
         self._category = config.get("category")
         self._sensitivity = config.get("sensitivity")
+        # Defensive cap on the raw input this Provider will encode/send (issue #44.1). <= 0 disables
+        # the guard (an adopter who has proven Screening runs ahead and wants no second cap).
+        self._max_input_bytes = int(config.get("max_input_bytes", _DEFAULT_MAX_INPUT_BYTES))
         self._policy = RetryPolicy(
             attempts=int(config.get("retry_attempts", 4)),
             base_delay=float(config.get("retry_base_delay", 0.5)),
@@ -118,20 +135,20 @@ class EndpointDocumentParser:
             yield self._parse_one(client, raw)
 
     def _parse_one(self, client: Any, raw: ParserInput) -> DocumentRecord:
+        # Defensive size guard (issue #44.1): reject an over-cap input BEFORE base64-encoding it
+        # into a data URL, so an oversized / zip-bomb-expanded input can't inflate memory/request.
+        # Degrades to PARSE_ERROR (same graceful path as a corrupt file / terminal endpoint failure)
+        # — never encoded, never sent. No endpoint call is made for an over-cap input.
+        oversize = self._oversize_reason(raw)
+        if oversize is not None:
+            return self._parse_error(raw, oversize)
         try:
             markdown = self._transcribe(client, raw)
         except EndpointError as exc:
             # Unrecoverable endpoint failure (terminal 4xx, or retries exhausted): emit a
             # PARSE_ERROR record carrying Provenance + reason, exactly like the CPU reference's
             # corrupt-file path — the run continues and the failure is auditable, never a crash.
-            return DocumentRecord(
-                record_id=raw.provenance.document_id,
-                provenance=raw.provenance,
-                classification=raw.classification,
-                content="",
-                disposition=Disposition.PARSE_ERROR,
-                error=f"endpoint parse failed: {exc}",
-            )
+            return self._parse_error(raw, f"endpoint parse failed: {exc}")
         # Split the transcription back into per-page spans on the page separator, so any downstream
         # offset resolves to its original source page (Provenance integrity, S2) — the same page-map
         # contract as the CPU reference.
@@ -153,6 +170,39 @@ class EndpointDocumentParser:
             content=assembly.text,
             media_type="text/markdown",
             page_map=assembly.page_map,
+        )
+
+    def _oversize_reason(self, raw: ParserInput) -> str | None:
+        """Reason string if the raw input is over the size cap, else ``None`` (issue #44.1).
+
+        Measures the true byte length of the undecoded input — the number of bytes that would be
+        base64-encoded into the data URL (a ``str`` input is measured by its UTF-8 encoding, since
+        that is what inflates the prompt). ``max_input_bytes <= 0`` disables the guard.
+        """
+        if self._max_input_bytes <= 0:
+            return None
+        content = raw.content
+        n_bytes = len(content) if isinstance(content, bytes) else len(content.encode("utf-8"))
+        if n_bytes > self._max_input_bytes:
+            return (
+                f"input is {n_bytes} bytes, over the {self._max_input_bytes}-byte parser cap "
+                "(rejected before base64 encoding to avoid request/memory inflation)"
+            )
+        return None
+
+    def _parse_error(self, raw: ParserInput, reason: str) -> DocumentRecord:
+        """A PARSE_ERROR record carrying Provenance + reason (the graceful-degradation contract).
+
+        Identical shape whether the cause is an oversized input, a terminal endpoint error, or
+        exhausted retries — the run continues and the failure is auditable, never a crash.
+        """
+        return DocumentRecord(
+            record_id=raw.provenance.document_id,
+            provenance=raw.provenance,
+            classification=raw.classification,
+            content="",
+            disposition=Disposition.PARSE_ERROR,
+            error=reason,
         )
 
     def _classification(self, raw: ParserInput, text: str) -> Any:
