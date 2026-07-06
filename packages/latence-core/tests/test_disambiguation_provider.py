@@ -227,3 +227,50 @@ def test_entities_before_relations_and_deterministic() -> None:
 
 def test_empty_mentions_yield_no_records() -> None:
     assert list(CascadeDisambiguator().disambiguate([], [])) == []
+
+
+# -- precision guards wired through the Provider (issue #35) -------------------
+
+
+def test_type_incompatible_acronym_is_not_merged_by_default() -> None:
+    # The Provider defaults the type-compatibility guard on: "IT" (SKILL) and "Information
+    # Technology" (FIELD) do NOT merge, and the block is surfaced as a below-policy decision
+    # on an emitted entity (audited, not silent). Would FAIL (one merged entity) if reverted.
+    mentions = [
+        _mention("m1", "d1", "Information Technology", "FIELD", 0),
+        _mention("m2", "d1", "IT", "SKILL", 40),
+    ]
+    records = list(CascadeDisambiguator().disambiguate(mentions, []))
+    entities = [r for r in records if r.entity is not None]
+    assert len(entities) == 2  # not over-merged
+    blocked = [
+        d
+        for r in entities
+        for d in (r.entity.merge_decisions if r.entity else [])
+        if not d.applied and d.strategy.value == "acronym"
+    ]
+    assert blocked, "the blocked acronym decision must survive onto an emitted entity"
+    assert "type-incompatible" in blocked[0].reason
+
+
+def test_same_type_acronym_still_merges_through_provider() -> None:
+    # The guard does not block a legitimate same-typed cross-document acronym merge.
+    mentions = [
+        _mention("m1", "d1", "International Business Machines", "ORG", 0),
+        _mention("m2", "d2", "IBM", "ORG", 0),
+    ]
+    records = list(CascadeDisambiguator().disambiguate(mentions, []))
+    entities = [r for r in records if r.entity is not None]
+    assert len(entities) == 1
+
+
+def test_guards_tunable_off_through_provider_config() -> None:
+    # An adopter can restore the permissive cascade via config (the over-merge returns).
+    mentions = [
+        _mention("m1", "d1", "Information Technology", "FIELD", 0),
+        _mention("m2", "d2", "IT", "SKILL", 0),
+    ]
+    config = {"require_type_compatibility": False}
+    records = list(CascadeDisambiguator(config).disambiguate(mentions, []))
+    entities = [r for r in records if r.entity is not None]
+    assert len(entities) == 1

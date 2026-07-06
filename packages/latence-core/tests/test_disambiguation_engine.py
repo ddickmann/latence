@@ -65,6 +65,120 @@ def test_acronym_strategy_merges_and_is_applied() -> None:
     assert any(a.strategy is Strategy.ACRONYM for a in applied)
 
 
+# -- precision guards on acronym + substring (issue #35) ----------------------
+
+
+def test_acronym_type_incompatible_is_blocked_not_merged() -> None:
+    # "IT" (SKILL) vs "Information Technology" (FIELD): the acronym fires, but the surfaces
+    # carry disjoint types, so the type-compatibility guard blocks the merge. Recorded as a
+    # below-guard decision (applied=False), never silently over-merged. Would FAIL (they'd
+    # merge into one cluster) if the guard were reverted.
+    resolver = EntityResolver()
+    resolver.add_all(
+        [
+            _m("m1", "d1", "Information Technology", "FIELD"),
+            _m("m2", "d1", "IT", "SKILL"),
+        ]
+    )
+    clusters, audits = resolver.resolve()
+    assert len(clusters) == 2  # NOT merged despite the acronym match
+    acr = [a for a in audits if a.strategy is Strategy.ACRONYM]
+    assert acr and acr[0].applied is False
+    assert "type-incompatible" in acr[0].reason
+
+
+def test_substring_type_incompatible_is_blocked_not_merged() -> None:
+    # "Atlantic Trust" (2 tokens, CONCEPT) is a whole-token substring of "Central Atlantic
+    # Trust" (3 tokens, ORG): ratio 2/3 ≥ 0.5 so the SUBSTRING rung fires, but the surfaces
+    # carry disjoint types, so the type guard blocks the merge. With a permissive policy the
+    # merge WOULD apply were the guard reverted — the adversarial regression.
+    resolver = EntityResolver(min_confidence=0.0)
+    resolver.add_all(
+        [
+            _m("m1", "d1", "Central Atlantic Trust", "ORG"),
+            _m("m2", "d1", "Atlantic Trust", "CONCEPT"),
+        ]
+    )
+    clusters, audits = resolver.resolve()
+    assert len(clusters) == 2  # blocked by the type guard, not merged
+    sub = [a for a in audits if a.strategy is Strategy.SUBSTRING]
+    assert sub and sub[0].applied is False and "type-incompatible" in sub[0].reason
+
+
+def test_acronym_same_type_still_merges_cross_document() -> None:
+    # The precision guard must NOT block a legitimate same-typed cross-document acronym
+    # merge: IBM (ORG) in d2 and International Business Machines (ORG) in d1 still fold to
+    # one cluster (type-compatible; shared-document guard is opt-in / off by default).
+    resolver = EntityResolver()
+    resolver.add_all(
+        [
+            _m("m1", "d1", "International Business Machines", "ORG"),
+            _m("m2", "d2", "IBM", "ORG"),
+        ]
+    )
+    clusters, audits = resolver.resolve()
+    assert len(clusters) == 1
+    assert any(a.strategy is Strategy.ACRONYM and a.applied for a in audits)
+
+
+def test_untyped_surface_is_treated_as_type_compatible() -> None:
+    # A surface with an empty label is not blocked wholesale — the type guard only fires when
+    # BOTH sides carry disjoint non-empty types. Here both are "" so the acronym merges.
+    resolver = EntityResolver()
+    resolver.add_all(
+        [_m("m1", "d1", "International Business Machines", ""), _m("m2", "d2", "IBM", "")]
+    )
+    clusters, _ = resolver.resolve()
+    assert len(clusters) == 1
+
+
+def test_shared_document_guard_blocks_cross_document_when_enabled() -> None:
+    # With the opt-in shared-document guard enabled, a same-typed acronym whose surfaces never
+    # co-occur in one document is blocked (audited, applied=False). Would FAIL (merged) if the
+    # guard were not wired.
+    resolver = EntityResolver(require_shared_document=True)
+    resolver.add_all(
+        [
+            _m("m1", "d1", "International Business Machines", "ORG"),
+            _m("m2", "d2", "IBM", "ORG"),
+        ]
+    )
+    clusters, audits = resolver.resolve()
+    assert len(clusters) == 2
+    acr = [a for a in audits if a.strategy is Strategy.ACRONYM]
+    assert acr and acr[0].applied is False and "no-shared-document" in acr[0].reason
+
+
+def test_shared_document_guard_allows_same_document_merge() -> None:
+    # The same guard permits the merge when the surfaces DO share a document.
+    resolver = EntityResolver(require_shared_document=True)
+    resolver.add_all(
+        [
+            _m("m1", "d1", "International Business Machines", "ORG"),
+            _m("m2", "d1", "IBM", "ORG"),
+        ]
+    )
+    clusters, _ = resolver.resolve()
+    assert len(clusters) == 1
+
+
+def test_guards_tunable_off_restores_permissive_cascade() -> None:
+    # Turning both guards off reproduces the pre-#35 permissive behaviour: a type-incompatible
+    # acronym merges at applied confidence (the over-merge the guards exist to prevent).
+    resolver = EntityResolver(
+        require_type_compatibility=False, require_shared_document=False
+    )
+    resolver.add_all(
+        [
+            _m("m1", "d1", "Information Technology", "FIELD"),
+            _m("m2", "d2", "IT", "SKILL"),
+        ]
+    )
+    clusters, audits = resolver.resolve()
+    assert len(clusters) == 1  # over-merged, as the un-guarded cascade would
+    assert any(a.strategy is Strategy.ACRONYM and a.applied for a in audits)
+
+
 # -- alias --------------------------------------------------------------------
 
 

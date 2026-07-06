@@ -208,3 +208,103 @@ def test_empty_mentions_is_noop() -> None:
     result = agg.finalize()
     assert result.entity_frequency == {}
     assert result.co_occurrences == []
+
+
+# -- bounded aggregate state (algorithmic-complexity DoS guards, issue #33) ----
+
+
+def test_per_document_pair_fanout_is_capped() -> None:
+    """A pathological document with many distinct entities cannot build O(n²) pairs.
+
+    Adversarial regression: without the per-document cap, one ``add_mentions`` call over
+    N distinct entities builds N*(N-1)/2 transient pairs (a memory-DoS lever with a large
+    NER Provider). With ``max_entities_per_document=k`` only k*(k-1)/2 pairs are tracked.
+    Would FAIL (pair table would hold 499_500 entries) if the cap were reverted.
+    """
+    cap = 10
+    agg = CorpusAggregator(max_entities_per_document=cap)
+    # 1000 distinct entity surfaces in a single document.
+    agg.add_mentions(
+        [MentionView(document_id="d1", text=f"e{i:04d}", label="X") for i in range(1000)]
+    )
+    # Only k*(k-1)/2 pairs can exist across the whole (single-document) corpus.
+    assert len(agg._pair_docs) == cap * (cap - 1) // 2  # noqa: SLF001
+    # Every mention still counted in frequency (only the O(n²) pairing is capped).
+    result = agg.finalize()
+    assert len(result.entity_frequency) == 1000
+
+
+def test_per_document_cap_keeps_most_frequent_entities() -> None:
+    """The per-document cap deterministically keeps the most-frequent-in-document entities."""
+    agg = CorpusAggregator(max_entities_per_document=2)
+    # "hot" x3, "warm" x2, "cold" x1 — the cap keeps {cold? no} the top two by frequency.
+    mentions = (
+        [MentionView(document_id="d1", text="hot", label="X")] * 3
+        + [MentionView(document_id="d1", text="warm", label="X")] * 2
+        + [MentionView(document_id="d1", text="cold", label="X")] * 1
+    )
+    agg.add_mentions(mentions)
+    pairs = {(left, right) for left, right, _ in agg.finalize().co_occurrences}
+    # Only the (hot, warm) pair survives; the least-frequent "cold" is dropped from pairing.
+    assert pairs == {("hot", "warm")}
+
+
+def test_accumulated_pair_table_is_capped() -> None:
+    """The corpus-wide pair table cannot grow past ``max_tracked_pairs``.
+
+    Adversarial regression: a stream of documents each introducing fresh entity pairs would
+    grow ``_pair_docs`` without bound. With the cap, new pairs are dropped once full while
+    already-tracked pairs still accumulate their document sets. Would FAIL if reverted.
+    """
+    agg = CorpusAggregator(max_tracked_pairs=3, max_entities_per_document=2)
+    for i in range(50):
+        agg.add_mentions(
+            [
+                MentionView(document_id=f"d{i}", text=f"a{i}", label="X"),
+                MentionView(document_id=f"d{i}", text=f"b{i}", label="X"),
+            ]
+        )
+    assert len(agg._pair_docs) == 3  # noqa: SLF001
+
+
+def test_pair_cap_still_accumulates_tracked_pairs_across_docs() -> None:
+    """Once full, an already-tracked pair keeps counting new documents (not frozen out)."""
+    agg = CorpusAggregator(max_tracked_pairs=1, max_entities_per_document=2)
+    # First doc registers the (acme, alice) pair (fills the 1-slot table).
+    agg.add_mentions(
+        [
+            MentionView(document_id="d1", text="acme", label="ORG"),
+            MentionView(document_id="d1", text="alice", label="PERSON"),
+        ]
+    )
+    # Second doc's NEW pair (bob, carol) is dropped (table full)...
+    agg.add_mentions(
+        [
+            MentionView(document_id="d2", text="bob", label="PERSON"),
+            MentionView(document_id="d2", text="carol", label="PERSON"),
+        ]
+    )
+    # ...but a repeat of the tracked pair still adds its document.
+    agg.add_mentions(
+        [
+            MentionView(document_id="d3", text="acme", label="ORG"),
+            MentionView(document_id="d3", text="alice", label="PERSON"),
+        ]
+    )
+    pairs = {(left, right): count for left, right, count in agg.finalize().co_occurrences}
+    assert pairs == {("acme", "alice"): 2}
+
+
+def test_caps_do_not_change_result_below_threshold() -> None:
+    """Below the caps, behaviour is byte-identical to an uncapped aggregator (no regression)."""
+    capped = CorpusAggregator(max_entities_per_document=1000, max_tracked_pairs=1000)
+    default = CorpusAggregator()
+    for agg in (capped, default):
+        agg.add_mentions(
+            [
+                MentionView(document_id="d1", text="Alice", label="PERSON"),
+                MentionView(document_id="d1", text="Acme", label="ORG"),
+                MentionView(document_id="d1", text="Bob", label="PERSON"),
+            ]
+        )
+    assert capped.finalize() == default.finalize()

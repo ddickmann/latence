@@ -211,6 +211,26 @@ class EntityResolver:
     decision is logged with ``applied=False`` and NOT merged — the "no silent over-merge"
     guarantee. Every fired decision is recorded in the audit log.
 
+    **Precision guards on the two low-precision rungs (issue #35).** The acronym and
+    substring strategies were the two rungs the original ``dataset-intelligence`` resolver
+    gated and the first port dropped, letting them merge different-typed, unrelated surfaces
+    at applied confidence ("IT" ↔ "Information Technology", "cat" ↔ "Central Atlantic
+    Trust"). Restored here:
+
+    * ``require_type_compatibility`` (**default on**) — the two surfaces must share at least
+      one entity type (an untyped surface is treated as compatible). This is the guard that
+      kills the issue's over-merge examples; it is safe to default on because it never blocks
+      a legitimately same-typed cross-document merge (e.g. IBM ↔ International Business
+      Machines, both ``ORG``).
+    * ``require_shared_document`` (**default off**) — the stricter evidence requirement that
+      the two surfaces co-occur in a common document. Left opt-in because it also blocks the
+      *legitimate* cross-document merges the Stage exists to make (the same-type acronym of a
+      name that only appears in a different document), so it is a per-adopter precision knob,
+      not a default.
+
+    A fired rung that fails an enabled guard is recorded as a below-guard decision
+    (``applied=False``) — audited, not silently merged and not silently dropped.
+
     Determinism: surfaces are processed in sorted order and Union-Find picks the
     lexicographic-min canonical, so identical input yields byte-identical clusters.
     """
@@ -225,6 +245,8 @@ class EntityResolver:
         embedding_threshold: float = 0.75,
         min_substring_ratio: float = 0.5,
         enable_embedding: bool = True,
+        require_type_compatibility: bool = True,
+        require_shared_document: bool = False,
     ) -> None:
         # Aliases are normalised on both sides so lookup is case/whitespace-insensitive.
         self._aliases = {
@@ -236,6 +258,15 @@ class EntityResolver:
         self._embedding_threshold = embedding_threshold
         self._min_substring_ratio = min_substring_ratio
         self._enable_embedding = enable_embedding
+        # Precision guards for the low-precision acronym + substring rungs (S8 port
+        # fidelity, issue #35). The original dataset-intelligence EntityResolver gated
+        # these two rungs on a same-entity-type compatibility check AND a shared-document
+        # evidence requirement; the first port dropped both, letting acronym/substring
+        # merge different-typed, semantically-unrelated surfaces ("IT" ↔ "Information
+        # Technology", "cat" ↔ "Central Atlantic Trust"). Re-introduced here, on by
+        # default, tunable off for the permissive original-cascade behaviour.
+        self._require_type_compatibility = require_type_compatibility
+        self._require_shared_document = require_shared_document
         self._mentions: list[MentionInput] = []
 
     def add(self, mention: MentionInput) -> None:
@@ -264,6 +295,16 @@ class EntityResolver:
             by_norm.setdefault(norm, []).append(mention)
             display.setdefault(norm, mention.text)
 
+        # Per-surface evidence for the precision guards (issue #35): the distinct entity
+        # types the surface was tagged with, and the distinct documents it appears in.
+        labels_by_norm = {
+            norm: frozenset(m.label for m in mentions) for norm, mentions in by_norm.items()
+        }
+        docs_by_norm = {
+            norm: frozenset(m.document_id for m in mentions)
+            for norm, mentions in by_norm.items()
+        }
+
         surfaces = sorted(by_norm)
         uf = _UnionFind()
         for norm in surfaces:
@@ -273,7 +314,9 @@ class EntityResolver:
         # Compare every ordered pair once (i < j), source=j folded into target=i.
         for i, target in enumerate(surfaces):
             for source in surfaces[i + 1 :]:
-                decision = self._propose(source, target, display)
+                decision = self._propose(
+                    source, target, display, labels_by_norm, docs_by_norm
+                )
                 if decision is None:
                     continue
                 audits.append(decision)
@@ -285,7 +328,12 @@ class EntityResolver:
         return clusters, audits
 
     def _propose(
-        self, source: str, target: str, display: dict[str, str]
+        self,
+        source: str,
+        target: str,
+        display: dict[str, str],
+        labels_by_norm: dict[str, frozenset[str]],
+        docs_by_norm: dict[str, frozenset[str]],
     ) -> MergeAudit | None:
         """Try the cascade on one ordered pair; return the first fired decision, else None."""
         src_disp, tgt_disp = display[source], display[target]
@@ -301,19 +349,25 @@ class EntityResolver:
                 f"alias: {src_disp!r} ~ {tgt_disp!r}",
             )
 
-        # 3. acronym
+        # 3. acronym — gated by the precision guards (issue #35): a same-type compatibility
+        #    check and a shared-document-evidence requirement, both restored from the
+        #    original asset. A fired acronym whose surfaces are type-incompatible or share
+        #    no document is recorded as a below-guard decision (applied=False), never
+        #    silently merged (no silent over-merge) and never silently dropped.
         if acronym_of(target) == source or acronym_of(source) == target:
-            return self._decision(
-                src_disp, tgt_disp, Strategy.ACRONYM, self._acronym_confidence,
-                f"acronym: {src_disp!r} ~ {tgt_disp!r}",
+            return self._guarded_decision(
+                source, target, src_disp, tgt_disp, Strategy.ACRONYM,
+                self._acronym_confidence, f"acronym: {src_disp!r} ~ {tgt_disp!r}",
+                labels_by_norm, docs_by_norm,
             )
 
-        # 4. substring (whole-token containment, length-ratio gated)
+        # 4. substring (whole-token containment, length-ratio gated) — same precision guards.
         sub = self._substring_score(source, target)
         if sub is not None:
-            return self._decision(
-                src_disp, tgt_disp, Strategy.SUBSTRING, sub,
+            return self._guarded_decision(
+                source, target, src_disp, tgt_disp, Strategy.SUBSTRING, sub,
                 f"substring: {src_disp!r} within {tgt_disp!r}",
+                labels_by_norm, docs_by_norm,
             )
 
         # 5. embedding (lexical stand-in; inert when disabled — the no-embedder CPU path)
@@ -324,6 +378,65 @@ class EntityResolver:
                     src_disp, tgt_disp, Strategy.EMBEDDING, round(sim, 6),
                     f"embedding: sim={round(sim, 6)}",
                 )
+        return None
+
+    def _guarded_decision(
+        self,
+        source: str,
+        target: str,
+        src_disp: str,
+        tgt_disp: str,
+        strategy: Strategy,
+        confidence: float,
+        reason: str,
+        labels_by_norm: dict[str, frozenset[str]],
+        docs_by_norm: dict[str, frozenset[str]],
+    ) -> MergeAudit:
+        """Build a decision for a low-precision rung, applying the type + shared-doc guards.
+
+        The acronym and substring rungs are the two low-precision strategies the original
+        resolver gated (issue #35). A guard failure forces ``applied=False`` with an audit
+        reason naming the failed guard — the merge is recorded (no silent over-merge) but
+        NOT folded, restoring the original's precision without becoming a silent drop.
+        """
+        failed = self._guard_failure(source, target, labels_by_norm, docs_by_norm)
+        if failed is None:
+            return self._decision(src_disp, tgt_disp, strategy, confidence, reason)
+        # A guard blocks the merge: record it as an audited, below-guard non-merge.
+        return MergeAudit(
+            source_text=src_disp,
+            target_text=tgt_disp,
+            strategy=strategy,
+            confidence=confidence,
+            applied=False,
+            reason=f"{reason} [blocked: {failed}]",
+        )
+
+    def _guard_failure(
+        self,
+        source: str,
+        target: str,
+        labels_by_norm: dict[str, frozenset[str]],
+        docs_by_norm: dict[str, frozenset[str]],
+    ) -> str | None:
+        """The name of the first precision guard the pair fails, or None if both pass.
+
+        * **type compatibility** — the two surfaces must share at least one entity type
+          (a surface with no recorded label is treated as compatible, so an untyped mention
+          stream is not blocked wholesale).
+        * **shared-document evidence** — the two surfaces must both appear in at least one
+          common document, the original asset's evidence requirement for these rungs.
+        """
+        if self._require_type_compatibility:
+            src_labels = labels_by_norm.get(source, frozenset())
+            tgt_labels = labels_by_norm.get(target, frozenset())
+            if src_labels and tgt_labels and src_labels.isdisjoint(tgt_labels):
+                return "type-incompatible"
+        if self._require_shared_document:
+            src_docs = docs_by_norm.get(source, frozenset())
+            tgt_docs = docs_by_norm.get(target, frozenset())
+            if src_docs.isdisjoint(tgt_docs):
+                return "no-shared-document"
         return None
 
     def _substring_score(self, source: str, target: str) -> float | None:

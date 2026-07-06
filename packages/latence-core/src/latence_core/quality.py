@@ -315,12 +315,21 @@ class ProfilingQuality(BaseModel):
     corpus-scope half surfaces the cross-document aggregates the single
     :class:`~latence_core.contracts.CorpusFeatures` record already computed. This is the
     S7 acceptance criterion — the feature summary lands in the Quality Report — kept to
-    counts and averages (no raw document text), so it is safe to persist.
+    counts and averages (no raw document text).
 
     ``documents_profiled`` is the number of DOCUMENT-scope FeatureRecords; the
     ``avg_*`` fields are their means (0.0 for an empty run). The corpus fields mirror
     the CORPUS-scope record; ``top_co_occurrences`` is the capped, ranked co-occurrence
-    list rendered as ``"left|right"`` → document-count for a flat, JSON-stable summary.
+    list rendered as ``pair-fingerprint`` → document-count. The key is a deterministic,
+    **salted** sha256 fingerprint (``"pair:<hex>"``) of the entity pair — the same
+    salted-digest construction S6 uses for PII surrogates — *not* the raw ``"left|right"``
+    surfaces: a pair from a ``confidential`` source must not have its (possibly PII)
+    surface printed into this ``internal``-stamped report. The salt (from the Redaction
+    Stage config) defeats rainbow-table recovery, but the digest is a fingerprint, not
+    encryption — low-entropy surfaces stay dictionary-recoverable by a reader who knows
+    the salt, so this report is not safe to publish to an untrusted audience. The raw
+    surfaces live only in the exported, sensitivity-stamped ``CorpusFeatures`` data
+    artifact. Equal pairs share a key, so the recurrence signal is preserved.
     """
 
     model_config = ConfigDict(extra="forbid")

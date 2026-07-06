@@ -201,3 +201,24 @@ def test_co_occurrence_cap_config() -> None:
     corpus = next(r for r in records if r.scope is FeatureScope.CORPUS)
     assert corpus.corpus is not None
     assert len(corpus.corpus.co_occurrences) == 2
+
+
+def test_pair_state_caps_are_wired_from_config() -> None:
+    """The DoS caps (issue #33) are threaded from Provider config into the aggregator.
+
+    Adversarial regression: a single document with many distinct entities must not build an
+    O(n²) pair explosion. With ``max_entities_per_document`` wired through, only k*(k-1)/2
+    pairs are ever formed. Would FAIL if the Provider dropped the cap on the wire.
+    """
+    docs = [_doc("filler text for the doc.", "d1")]
+    mentions = [_mention("d1", f"E{i:03d}", "X", i) for i in range(300)]
+    profiler = StatisticalProfiler(
+        {"max_entities_per_document": 5, "max_co_occurrences": 1000}
+    )
+    records = list(profiler.profile(docs, mentions))
+    corpus = next(r for r in records if r.scope is FeatureScope.CORPUS)
+    assert corpus.corpus is not None
+    # Capped fan-out: at most 5*4/2 = 10 pairs, not 300*299/2 = 44_850.
+    assert len(corpus.corpus.co_occurrences) == 10
+    # Every mention still counted in entity frequency (only pairing is capped).
+    assert len(corpus.corpus.entity_frequency) == 300

@@ -124,7 +124,17 @@ def test_profiling_slice_end_to_end(tmp_path: Path) -> None:
     assert pq.corpus_total_words > 0
     assert pq.distinct_entities >= 2
     assert pq.sensitivity_coverage == {"internal": 2}
-    assert "Acme|Alice" in pq.top_co_occurrences
+    # The Quality Report keys co-occurrences by a salted pair fingerprint, never the raw
+    # entity surfaces (issue #33). The pipeline has no Redaction Stage, so the fingerprint
+    # salt is the S6 default ("latence"). The raw pair stays only in the exported
+    # CorpusFeatures data artifact (asserted above via ``pairs``).
+    from latence_core.runner import _DEFAULT_FINGERPRINT_SALT, _co_occurrence_fingerprint
+
+    salt = _DEFAULT_FINGERPRINT_SALT
+    assert "Acme|Alice" not in pq.top_co_occurrences
+    assert not any("Acme" in key or "Alice" in key for key in pq.top_co_occurrences)
+    assert _co_occurrence_fingerprint("Acme", "Alice", salt) in pq.top_co_occurrences
+    assert pq.top_co_occurrences[_co_occurrence_fingerprint("Acme", "Alice", salt)] == 2
     assert report.profiling is not None
     assert report.profiling.documents_profiled == persisted.profiling.documents_profiled
 
@@ -133,6 +143,62 @@ def test_profiling_slice_end_to_end(tmp_path: Path) -> None:
 
     # 6. Contract completeness holds over the FeatureRecords (Provenance+Classification).
     assert persisted.contracts_complete
+
+
+def test_co_occurrence_fingerprint_is_salted() -> None:
+    """The pair fingerprint mixes the salt into the digest (issue #33, security fix).
+
+    Locks in that the salt is load-bearing: two different salts must produce different
+    keys for the same pair (so reverting the salt threading is caught), and the digest
+    must equal the S6 salted-digest construction ``sha256(f"{salt}:{left}|{right}")`` —
+    not the unsalted ``sha256(f"{left}|{right}")`` the earlier version shipped.
+    """
+    import hashlib
+
+    from latence_core.runner import _co_occurrence_fingerprint
+
+    latence = _co_occurrence_fingerprint("Acme", "Alice", "latence")
+    other = _co_occurrence_fingerprint("Acme", "Alice", "other-salt")
+    assert latence != other, "salt must change the fingerprint"
+
+    expected = "pair:" + hashlib.sha256(b"latence:Acme|Alice").hexdigest()[:16]
+    assert latence == expected
+    # The unsalted form the security review flagged must NOT be what we emit.
+    unsalted = "pair:" + hashlib.sha256(b"Acme|Alice").hexdigest()[:16]
+    assert latence != unsalted
+
+
+def test_fingerprint_salt_resolves_from_redaction_stage() -> None:
+    """The fingerprint salt is read from the Redaction Stage config, matching S6.
+
+    A pipeline whose Redaction Stage sets a custom ``salt`` must apply that same salt to
+    co-occurrence fingerprints; a pipeline with no Redaction Stage falls back to the S6
+    default ("latence").
+    """
+    from latence_core.pipeline import CapabilityKind, Pipeline, Stage
+    from latence_core.runner import _DEFAULT_FINGERPRINT_SALT, _fingerprint_salt
+
+    no_redaction = Pipeline(
+        name="p",
+        storage_uri="file:///s",
+        stages=[Stage(name="prof", provider="profiling.statistical", capability=CapabilityKind.PROFILING)],
+    )
+    assert _fingerprint_salt(no_redaction) == _DEFAULT_FINGERPRINT_SALT
+
+    with_redaction = Pipeline(
+        name="p",
+        storage_uri="file:///s",
+        stages=[
+            Stage(
+                name="redact",
+                provider="redaction.reference",
+                capability=CapabilityKind.REDACTION,
+                config={"salt": "deployment-secret"},
+            ),
+            Stage(name="prof", provider="profiling.statistical", capability=CapabilityKind.PROFILING),
+        ],
+    )
+    assert _fingerprint_salt(with_redaction) == "deployment-secret"
 
 
 def test_profiling_slice_is_deterministic(tmp_path: Path) -> None:

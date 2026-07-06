@@ -76,6 +76,14 @@ class CascadeDisambiguator:
         min_substring_ratio: float  — length-ratio gate for the SUBSTRING strategy. Default 0.5.
         enable_embedding: bool  — turn the lexical EMBEDDING strategy off for the strict
             no-embedder path (a real embedder Provider is the pluggable upgrade). Default True.
+        require_type_compatibility: bool  — gate the acronym + substring rungs on a
+            same-entity-type compatibility check, so those low-precision strategies do not
+            merge different-typed surfaces ("IT" ↔ "Information Technology", issue #35).
+            Default True (safe: never blocks a same-typed cross-document merge).
+        require_shared_document: bool  — gate the acronym + substring rungs on shared-document
+            evidence (both surfaces appear in a common document), the original asset's stricter
+            evidence requirement. Default False (opt-in: it also blocks the legitimate
+            cross-document merges the Stage exists to make).
         kb: list[dict]  — the external knowledge base for linking: each entry is
             ``{"kb_id", "name", "entity_type"?, "aliases"?}``. Empty/omitted ⇒ every entity is
             unlinked (the graceful fallback, S8 AC).
@@ -100,6 +108,10 @@ class CascadeDisambiguator:
             "embedding_threshold": float(config.get("embedding_threshold", 0.75)),
             "min_substring_ratio": float(config.get("min_substring_ratio", 0.5)),
             "enable_embedding": bool(config.get("enable_embedding", True)),
+            "require_type_compatibility": bool(
+                config.get("require_type_compatibility", True)
+            ),
+            "require_shared_document": bool(config.get("require_shared_document", False)),
         }
         self._kb = self._build_kb(config)
         self._normalizer = RelationNormalizer(

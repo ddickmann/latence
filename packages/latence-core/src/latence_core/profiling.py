@@ -15,12 +15,22 @@ verbatim is the algorithmic value:
    a redundancy proxy. Deterministic and CPU-only (no tokenizer, no model download),
    so a seeded run is byte-identical (Baseline bar).
 
-2. **Cross-document aggregation** (:class:`CorpusAggregator`) — a **streaming,
-   spill-to-disk-friendly** accumulator: documents are folded in one at a time and
-   only bounded state is held in RAM, so the feature pass never assumes the whole
-   corpus fits in memory (S7 AC). The corpus Zipf α, per-language/category/sensitivity
-   source coverage, cross-document entity frequency, entity-type consensus, and the
-   top entity co-occurrence pairs are computed incrementally and finalised once.
+2. **Cross-document aggregation** (:class:`CorpusAggregator`) — a **streaming**
+   accumulator: documents are folded in one at a time and the corpus text is never
+   held whole in RAM, so the feature pass never buffers the whole corpus (S7 AC). The
+   corpus Zipf α, per-language/category/sensitivity source coverage, cross-document
+   entity frequency, entity-type consensus, and the top entity co-occurrence pairs are
+   computed incrementally and finalised once.
+
+   The aggregate state that *is* retained is explicitly bounded so it cannot be driven
+   to unbounded growth by a hostile or pathological mention stream (a memory-DoS lever
+   with a large NER Provider): the per-document co-occurrence fan-out is capped at
+   ``max_entities_per_document`` distinct entities (so one ``add_mentions`` call is
+   ``O(cap²)``, not ``O(distinct-entities²)``) and the accumulated pair table is capped
+   at ``max_tracked_pairs`` entries. The frequency/consensus counters and the corpus
+   vocabulary grow with the corpus *vocabulary* (distinct words / distinct entity
+   surfaces), which is inherent to the feature set — this is a per-vocabulary bound, not
+   a spill-to-disk one; nothing here spills to disk.
 
 This is a pure engine (no contracts, no IO); the reference Profiler Provider
 (:mod:`latence_core.stages.profiling`) wraps it and stamps the framework contracts.
@@ -48,6 +58,21 @@ _VOWEL_GROUP_RE = re.compile(r"[aeiouy]+")
 # The co-occurrence report is capped so the corpus feature record stays bounded
 # regardless of corpus size (the report is a summary, not the full O(n²) matrix).
 _MAX_CO_OCCURRENCES = 50
+
+# Per-document co-occurrence fan-out cap: at most this many distinct entities from one
+# document enter the pairing, so a single ``add_mentions`` call is O(cap²) rather than
+# O(distinct-entities²). Without it a document with a large NER Provider (thousands of
+# distinct surfaces) builds millions of transient pairs in one call — an algorithmic
+# memory-DoS lever. The retained entities are the most frequent within the document
+# (ties broken lexicographically), so the cap keeps the strongest co-occurrence signal.
+_MAX_ENTITIES_PER_DOCUMENT = 200
+
+# Accumulated pair-table cap: the total number of distinct co-occurring pairs held
+# across the whole corpus is bounded, so a large corpus cannot grow ``_pair_docs``
+# without limit. Once the table is full, a pair not already tracked is dropped (the
+# report is a capped summary anyway — see ``_MAX_CO_OCCURRENCES``). Sized generously
+# above the report cap so the finalised top-K is unaffected on any realistic corpus.
+_MAX_TRACKED_PAIRS = 100_000
 
 
 @dataclass(frozen=True)
@@ -267,18 +292,38 @@ class CorpusAggregator:
     """Streaming, memory-bounded accumulator for the cross-document feature set.
 
     Documents are folded in one at a time via :meth:`add_document` and their mentions
-    via :meth:`add_mentions`; only bounded aggregate state is held (frequency counters,
-    coverage tallies, a running corpus vocabulary), never the corpus text — the S7
-    "streaming/spill-to-disk friendly, no whole-corpus-in-RAM assumption" acceptance
-    criterion. :meth:`finalize` fits the corpus Zipf α and derives the type-consensus
-    and the capped co-occurrence report once.
+    via :meth:`add_mentions`; the corpus text is never held whole in RAM — the S7
+    "streaming, no whole-corpus-in-RAM assumption" acceptance criterion. :meth:`finalize`
+    fits the corpus Zipf α and derives the type-consensus and the capped co-occurrence
+    report once.
+
+    **Bounded aggregate state (no unbounded-growth DoS lever).** The retained state is
+    explicitly capped so a hostile or pathological mention stream cannot drive it to
+    unbounded growth:
+
+    * the per-document co-occurrence fan-out is capped at ``max_entities_per_document``
+      distinct entities, so a single :meth:`add_mentions` call is ``O(cap²)`` rather than
+      ``O(distinct-entities²)`` — the most frequent entities in the document are kept;
+    * the accumulated pair table is capped at ``max_tracked_pairs`` entries — once full,
+      a pair not already tracked is dropped (the report is a capped top-K summary anyway).
+
+    The frequency/consensus counters and the corpus vocabulary still grow with the corpus
+    *vocabulary* (distinct words / distinct entity surfaces) — inherent to the feature
+    set, a per-vocabulary bound, not a spill-to-disk one; nothing spills to disk.
 
     Determinism: every finalised map is sorted, and the co-occurrence report is ranked
     by ``(-document_count, left, right)``, so a seeded run is byte-identical regardless
-    of document arrival order (the aggregation is commutative).
+    of document arrival order (the aggregation is commutative). The per-document cap keeps
+    the most-frequent entities with lexicographic tie-breaks, so it too is order-stable.
     """
 
-    def __init__(self, max_co_occurrences: int = _MAX_CO_OCCURRENCES) -> None:
+    def __init__(
+        self,
+        max_co_occurrences: int = _MAX_CO_OCCURRENCES,
+        *,
+        max_entities_per_document: int = _MAX_ENTITIES_PER_DOCUMENT,
+        max_tracked_pairs: int = _MAX_TRACKED_PAIRS,
+    ) -> None:
         self._document_count = 0
         self._total_words = 0
         self._corpus_word_freq: Counter[str] = Counter()
@@ -290,11 +335,12 @@ class CorpusAggregator:
         # Per entity text, the distribution of labels it was tagged with (for consensus).
         self._entity_labels: dict[str, Counter[str]] = {}
         # Per unordered entity pair, the set of documents both appeared in (so the
-        # co-occurrence count is cross-document, deduplicated within a document).
+        # co-occurrence count is cross-document, deduplicated within a document). Capped
+        # at ``_max_tracked_pairs`` so it cannot grow without bound on a large corpus.
         self._pair_docs: dict[tuple[str, str], set[str]] = {}
-        # Per document, the distinct entity texts seen — folded into pairs at add time
-        # and discarded, so only one document's mention set is held transiently.
         self._max_co_occurrences = max_co_occurrences
+        self._max_entities_per_document = max_entities_per_document
+        self._max_tracked_pairs = max_tracked_pairs
 
     def add_document(
         self,
@@ -326,24 +372,44 @@ class CorpusAggregator:
         pairs of *this* document against the set of documents each pair has co-occurred
         in (so a pair repeated within one document counts that document once). The
         per-document mention set is consumed here and not retained.
+
+        The co-occurrence fan-out is bounded: at most ``max_entities_per_document``
+        distinct entities from this document enter the pairing (the most frequent within
+        the document, lexicographic tie-break), so one call is ``O(cap²)`` rather than
+        ``O(distinct-entities²)`` — a large NER Provider cannot make a single document
+        build an unbounded pair explosion. Frequency/consensus still count every mention.
         """
         if not mentions:
             return
         # add_mentions is called per document, so every mention shares one document_id.
         document_id = mentions[0].document_id
-        distinct_texts: set[str] = set()
+        # Frequency, type frequency, and consensus count EVERY mention (unbounded fan-out
+        # applies only to the O(n²) pairing, not to these O(n) tallies).
+        doc_entity_freq: Counter[str] = Counter()
         for mention in mentions:
             self._entity_freq[mention.text] += 1
             self._entity_type_freq[mention.label] += 1
             self._entity_labels.setdefault(mention.text, Counter())[mention.label] += 1
-            distinct_texts.add(mention.text)
-        ordered = sorted(distinct_texts)
+            doc_entity_freq[mention.text] += 1
+        # Cap the distinct entities that enter the pairing to the most-frequent-in-document
+        # (ties broken lexicographically), so the pairing is O(cap²) and deterministic.
+        if len(doc_entity_freq) > self._max_entities_per_document:
+            kept = sorted(doc_entity_freq.items(), key=lambda kv: (-kv[1], kv[0]))
+            ordered = sorted(text for text, _ in kept[: self._max_entities_per_document])
+        else:
+            ordered = sorted(doc_entity_freq)
         for i, left in enumerate(ordered):
             for right in ordered[i + 1 :]:
                 pair = (left, right)
                 # Record this pair as co-occurring in this document (deduplicated by
-                # document_id, so a pair repeated within one document counts once).
-                self._pair_docs.setdefault(pair, set()).add(document_id)
+                # document_id, so a pair repeated within one document counts once). Once
+                # the accumulated pair table is full, only already-tracked pairs are
+                # updated — a new pair is dropped to keep the corpus-wide state bounded.
+                existing = self._pair_docs.get(pair)
+                if existing is not None:
+                    existing.add(document_id)
+                elif len(self._pair_docs) < self._max_tracked_pairs:
+                    self._pair_docs[pair] = {document_id}
 
     def finalize(self) -> CorpusFeatureValues:
         """Fit corpus Zipf α, derive type consensus, and build the capped co-occurrence report."""

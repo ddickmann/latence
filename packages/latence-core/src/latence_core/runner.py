@@ -15,6 +15,7 @@ spine (Source→Parse→Export) the order is linear, but the DAG machinery is re
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import TYPE_CHECKING, TypeVar
@@ -154,6 +155,50 @@ def scrub_sensitive(value: object) -> object:
     if isinstance(value, list):
         return [scrub_sensitive(item) for item in value]
     return value
+
+
+_CO_OCCURRENCE_FINGERPRINT_LEN = 16
+_DEFAULT_FINGERPRINT_SALT = "latence"
+
+
+def _co_occurrence_fingerprint(left: str, right: str, salt: str) -> str:
+    """A deterministic, salted fingerprint of a co-occurrence pair.
+
+    The Quality Report is a shareable artifact; a co-occurring entity pair drawn from a
+    ``confidential`` source could carry PII in its raw surface. Rather than emit
+    ``"{left}|{right}"`` (the raw surfaces) into the report, we key the co-occurrence
+    entry by ``"pair:" + <sha256 hex prefix>`` over ``"{salt}:{left}|{right}"`` — the
+    same salted-digest construction S6 uses in
+    :func:`~latence_core.redaction_policy.placeholder_for` (``salt`` resolved from the
+    pipeline's Redaction Stage config, default ``"latence"``).
+
+    This is a **fingerprint, not encryption**: entity surfaces are low-entropy, so a
+    reader who can enumerate candidate names could recover a pair by dictionary attack.
+    The salt makes that attack per-deployment (the attacker must know the deployment's
+    salt) and defeats precomputed rainbow tables, matching S6's threat posture — it does
+    **not** make the digest irreversible. It removes the raw surface from the shareable
+    report; it does not make the report safe to publish to an untrusted audience. The
+    raw pair remains only in the exported, sensitivity-stamped ``CorpusFeatures`` data
+    artifact. Deterministic (byte-stable across processes, not the seed-salted builtin
+    ``hash``) so a seeded run renders identically, and stable per pair so the recurrence
+    signal survives.
+    """
+    digest = hashlib.sha256(f"{salt}:{left}|{right}".encode()).hexdigest()
+    return f"pair:{digest[:_CO_OCCURRENCE_FINGERPRINT_LEN]}"
+
+
+def _fingerprint_salt(pipeline: Pipeline) -> str:
+    """Resolve the co-occurrence fingerprint salt from the Redaction Stage config.
+
+    Uses the identical key + default as S6's Redaction Stage
+    (``config["salt"]``, default ``"latence"``) so a deployment that sets a custom salt
+    gets the same salt applied to both PII surrogates and co-occurrence fingerprints. If
+    the pipeline has no Redaction Stage, the default applies.
+    """
+    for stage in pipeline.stages:
+        if stage.capability is CapabilityKind.REDACTION:
+            return str(stage.config.get("salt", _DEFAULT_FINGERPRINT_SALT))
+    return _DEFAULT_FINGERPRINT_SALT
 
 
 def topological_order(stages: list[Stage]) -> list[Stage]:
@@ -1453,9 +1498,17 @@ class LocalRunner:
         corpus-scope record's aggregates (word/vocabulary counts, corpus Zipf α, source
         coverage, entity-type frequency, top co-occurrences) are surfaced verbatim —
         the S7 acceptance criterion ("feature summary lands in the Quality Report").
-        Counts and averages only (no raw document text), so the report is safe to
-        persist. All maps are already engine-sorted; the co-occurrence list is rendered
-        as ``"left|right"`` → document-count for a flat, JSON-stable summary.
+        Counts and averages only (no raw document text). All maps are already
+        engine-sorted; the co-occurrence list is rendered as ``pair-fingerprint`` →
+        document-count — the raw entity surfaces (possible PII from a ``confidential``
+        source that would otherwise land in an ``internal``-stamped report) are replaced
+        by a deterministic, **salted** sha256 fingerprint of the ``left|right`` pair (the
+        same salted-digest construction S6 uses; salt from the Redaction Stage config).
+        The fingerprint keeps the raw surface out of the report and defeats rainbow-table
+        recovery, but it is not irreversible — a reader who can enumerate candidate
+        entity names and knows the salt could still recover a pair by dictionary attack,
+        so the report is *not* safe to publish to an untrusted audience. The raw surfaces
+        remain only in the exported, sensitivity-stamped ``CorpusFeatures`` data artifact.
         """
         if not any(s.capability is CapabilityKind.PROFILING for s in pipeline.stages):
             return None
@@ -1505,8 +1558,20 @@ class LocalRunner:
             quality.sensitivity_coverage = dict(cf.sensitivity_coverage)
             quality.distinct_entities = len(cf.entity_frequency)
             quality.entity_type_frequency = dict(cf.entity_type_frequency)
+            # Fingerprint each pair rather than emit the raw entity surfaces: a co-occurring
+            # pair drawn from a ``confidential`` source must not have its (possibly PII)
+            # surface rendered into the ``internal``-stamped Quality Report. The salted
+            # sha256 fingerprint (same construction as S6's placeholder_for; salt resolved
+            # from the Redaction Stage config) is deterministic, so equal pairs map to equal
+            # keys (the recurrence signal is preserved) without printing the surface. It is a
+            # fingerprint, not encryption — low-entropy surfaces remain dictionary-recoverable
+            # by a reader who knows the salt, so this removes the surface from the report but
+            # does not make the report publishable to an untrusted audience. The raw pair
+            # remains only in the exported, sensitivity-stamped CorpusFeatures data artifact.
+            salt = _fingerprint_salt(pipeline)
             quality.top_co_occurrences = {
-                f"{co.left}|{co.right}": co.document_count for co in cf.co_occurrences
+                _co_occurrence_fingerprint(co.left, co.right, salt): co.document_count
+                for co in cf.co_occurrences
             }
         return quality
 

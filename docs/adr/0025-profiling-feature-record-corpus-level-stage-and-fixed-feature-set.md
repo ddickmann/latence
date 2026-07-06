@@ -61,18 +61,38 @@ nothing for a fixed v1 feature set. A future feature is a schema addition (a ver
 not a registry entry — a deliberate trade of extensibility for a stable, verifiable
 contract, the same "framework owns the seam" stance as the rest of the spine.
 
-## The feature pass is streaming / spill-to-disk friendly, never whole-corpus-in-RAM
+## The feature pass is streaming with bounded aggregate state, never whole-corpus-in-RAM
 
 The S7 acceptance criterion requires the feature pass to make no whole-corpus-in-RAM
 assumption (PORTING-MAP.md keeps the private stack's "feature disk-spilling under memory
-pressure" specifically for this Stage). So the engine's cross-document aggregation is a
-streaming `CorpusAggregator`: documents are folded in one at a time and only bounded
-aggregate state is held (frequency counters, coverage tallies, a running corpus
-vocabulary, per-pair document sets) — never the corpus text. The reference Provider drives
-it from a generator over the document stream, so corpus text is processed and released
-document by document. The aggregation is commutative and every finalised map is sorted, so
-the result is order-independent and byte-identical for a seeded run regardless of document
-arrival order.
+pressure" motivation for this Stage). So the engine's cross-document aggregation is a
+streaming `CorpusAggregator`: documents are folded in one at a time and the corpus *text*
+is never held whole — the reference Provider drives it from a generator over the document
+stream, so text is processed and released document by document.
+
+The aggregate state that is retained is **explicitly bounded** so it cannot be driven to
+unbounded growth by a hostile or pathological mention stream (an algorithmic-complexity
+memory-DoS lever that activates with a large NER Provider — the in-core gazetteer only
+latently bounds it today):
+
+* the per-document co-occurrence fan-out is capped at `max_entities_per_document` distinct
+  entities, so one `add_mentions` call is `O(cap²)` rather than `O(distinct-entities²)` —
+  the most-frequent entities in the document are kept (lexicographic tie-break);
+* the accumulated pair table is capped at `max_tracked_pairs` entries — once full, a pair
+  not already tracked is dropped (the finalised report is a capped top-K summary anyway).
+
+To be precise about what is *not* bounded and why: the frequency/consensus counters and the
+corpus vocabulary grow with the corpus **vocabulary** (distinct words / distinct entity
+surfaces), which is inherent to the feature set — a per-vocabulary bound. **Nothing spills
+to disk** in the v1 reference engine; the earlier "spill-to-disk friendly" framing overclaimed
+a capability the code does not have. Disk-spilling of the per-vocabulary counters remains a
+post-v1 Provider option behind the same seam; the v1 guarantee is streaming corpus text plus
+the two hard caps above, not disk-spill.
+
+The aggregation is commutative and every finalised map is sorted, so the result is
+order-independent and byte-identical for a seeded run regardless of document arrival order
+(the per-document cap keeps the most-frequent entities with lexicographic tie-breaks, so it
+too is order-stable).
 
 ## Providers shipped (CPU-first reference, ADR-0007; no new model, no new license)
 
@@ -90,4 +110,15 @@ The feature summary lands in the Quality Report as `ProfilingQuality`: per-docum
 averages (readability / density / diversity / Zipf / compression) plus the corpus
 aggregates (word / vocabulary counts, corpus Zipf α, source coverage, entity-type
 frequency, top co-occurrences) — counts and averages only, no raw document text — satisfying
-the S7 "feature summary lands in the Quality Report" criterion.
+the S7 "feature summary lands in the Quality Report" criterion. The top-co-occurrence entries
+are keyed by a deterministic, **salted** sha256 **pair fingerprint** (`"pair:<hex>"`) —
+the same salted-digest construction S6 uses in `placeholder_for`, with the salt resolved from
+the Redaction Stage config (default `"latence"`) — not the raw `left|right` entity surfaces:
+a co-occurring pair drawn from a `confidential` source must not have its (possibly PII) surface
+printed into the `internal`-stamped report. The salt makes recovery per-deployment and defeats
+precomputed rainbow tables, but this is a **fingerprint, not encryption** — entity surfaces are
+low-entropy, so a reader who can enumerate candidate names and knows the salt can still recover
+a pair by dictionary attack. It removes the raw surface from the report; it does **not** make
+the report safe to publish to an untrusted audience (do not overstate this as "non-reversible").
+The raw surfaces remain only in the exported, sensitivity-stamped `CorpusFeatures` data
+artifact — the AI-ready data, not the shareable report.

@@ -64,7 +64,17 @@ while dropping vendor coupling:
   **confidence-weighted, audited merge log**. The cascade is tried in descending precision so
   the strongest signal wins and the reason is auditable; Union-Find points every cluster at
   its lexicographic-min canonical, so the canonical text is deterministic regardless of merge
-  order.
+  order. The two low-precision rungs (acronym, substring) additionally carry the original
+  asset's **precision guards** (issue #35): a same-entity-type compatibility check (default
+  on) and a shared-document-evidence requirement (default off, opt-in). The first port
+  dropped both, letting acronym/substring merge different-typed, unrelated surfaces at applied
+  confidence ("IT" ↔ "Information Technology", "cat" ↔ "Central Atlantic Trust"). The
+  type-compatibility guard is safe to default on — it never blocks a legitimately same-typed
+  cross-document merge (IBM ↔ International Business Machines, both `ORG`) — while the stricter
+  shared-document guard is a per-adopter knob because it would also block the legitimate
+  cross-document merges the Stage exists to make. A rung that fires but fails an enabled guard
+  is recorded as a below-guard `MergeDecision` (`applied=False`), audited not silently merged,
+  and not silently dropped — the same "no silent over-merge" discipline extended to precision.
 - **GLinker linking pipeline** (`linking/backends.py`, 4.5/5): the L2 candidate-gen → L3
   biencoder → L4 rerank → L0 threshold cascade with a **KB-text fallback**. The CPU reference
   keeps the cascade *shape* verbatim (candidate generation by normalised-token overlap over

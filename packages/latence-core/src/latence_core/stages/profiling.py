@@ -14,10 +14,13 @@ turns the run's corpus into typed :class:`~latence_core.contracts.FeatureRecord`
   :class:`~latence_core.contracts.CorpusFeatures` (entity frequency, co-occurrence, type
   consensus, source coverage), stamped with a synthetic corpus-scope Provenance.
 
-The pass is **streaming / spill-to-disk friendly** (S7 AC): documents are folded into
-a :class:`~latence_core.profiling.CorpusAggregator` one at a time via a generator, so
-the corpus text is never held whole in RAM — only the bounded aggregate state is. The
-entity mentions are grouped by document once up front (the mention stream is small
+The pass is **streaming** (S7 AC): documents are folded into a
+:class:`~latence_core.profiling.CorpusAggregator` one at a time via a generator, so the
+corpus text is never held whole in RAM — only the bounded aggregate state is, and that
+state is explicitly capped (per-document co-occurrence fan-out + accumulated pair table)
+so a large NER Provider cannot drive it to unbounded growth. Nothing spills to disk; the
+frequency counters grow with the corpus vocabulary, which is inherent to the feature set.
+The entity mentions are grouped by document once up front (the mention stream is small
 relative to the corpus text and must be indexed by document to fold per-document).
 
 Determinism: document-scope records are emitted in first-seen document order and the
@@ -41,6 +44,8 @@ from latence_core.contracts import (
     Provenance,
 )
 from latence_core.profiling import (
+    _MAX_ENTITIES_PER_DOCUMENT,
+    _MAX_TRACKED_PAIRS,
     CorpusAggregator,
     DocFeatureValues,
     MentionView,
@@ -69,6 +74,12 @@ class StatisticalProfiler:
         max_co_occurrences: int  — cap on the number of top entity co-occurrence pairs
             in the corpus feature record, so the report stays bounded on a large corpus
             (default 50).
+        max_entities_per_document: int  — cap on the distinct entities from one document
+            that enter the co-occurrence pairing, so a large NER Provider cannot make one
+            document build an O(distinct-entities²) pair explosion (default 200).
+        max_tracked_pairs: int  — cap on the accumulated distinct co-occurring pairs held
+            across the corpus, so the pair state cannot grow without bound (default
+            100_000).
         corpus_sensitivity: str  — the ``Classification.sensitivity`` stamped on the
             CORPUS-scope record (the aggregate is not tied to one document's
             sensitivity). Default ``"internal"`` (a corpus profile is derived metadata,
@@ -80,6 +91,10 @@ class StatisticalProfiler:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self._max_co_occurrences = int(config.get("max_co_occurrences", 50))
+        self._max_entities_per_document = int(
+            config.get("max_entities_per_document", _MAX_ENTITIES_PER_DOCUMENT)
+        )
+        self._max_tracked_pairs = int(config.get("max_tracked_pairs", _MAX_TRACKED_PAIRS))
         self._corpus_sensitivity = str(config.get("corpus_sensitivity", "internal"))
         category = config.get("corpus_category", "corpus_profile")
         self._corpus_category = None if category is None else str(category)
@@ -101,7 +116,11 @@ class StatisticalProfiler:
                 )
             )
 
-        aggregator = CorpusAggregator(max_co_occurrences=self._max_co_occurrences)
+        aggregator = CorpusAggregator(
+            max_co_occurrences=self._max_co_occurrences,
+            max_entities_per_document=self._max_entities_per_document,
+            max_tracked_pairs=self._max_tracked_pairs,
+        )
         seen_language = _UNKNOWN_LANGUAGE
         for document in documents:
             # A document that failed to parse has no usable content — skip it (mirrors
