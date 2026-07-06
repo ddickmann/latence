@@ -177,9 +177,9 @@ def _chunk_provenance() -> Provenance:
     )
 
 
-def test_schema_version_is_seven() -> None:
-    # Bumped to 7 by S7 (Profiling contracts added; 6 was S6's RedactionRecord).
-    assert SCHEMA_VERSION == 7
+def test_schema_version_is_current() -> None:
+    # Bumped to 8 by S8 (Disambiguation contracts added; 7 was S7's Profiling FeatureRecord).
+    assert SCHEMA_VERSION == 8
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

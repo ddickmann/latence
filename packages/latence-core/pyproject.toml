@@ -47,6 +47,11 @@ latence = "latence_core.cli:app"
 # readability / Zipf / compression + cross-document entity frequency / co-occurrence /
 # type consensus / source coverage). Pure Python, no extra deps (ADR-0025).
 "profiling.statistical" = "latence_core.stages.profiling:StatisticalProfiler"
+# S8 built-in: deterministic CPU-viable cascade disambiguator (5-strategy entity
+# resolver + Union-Find + audited merge log; GLinker-style KB linking with graceful
+# fallback; relation normalizer with inverse detection). Pure Python, no extra deps —
+# the FAISS/GPU blocking Provider is a pluggable upgrade behind this same seam (ADR-0026).
+"disambiguation.cascade" = "latence_core.stages.disambiguation:CascadeDisambiguator"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]

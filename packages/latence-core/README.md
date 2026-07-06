@@ -159,3 +159,58 @@ whole-corpus-in-RAM assumption.
 
 The feature summary — per-document averages plus the corpus aggregates — lands in the
 Quality Report's `profiling` section (ADR-0025).
+
+## Disambiguation (S8)
+
+**Disambiguation** is the corpus-level Stage — the algorithmic crown — that links
+entity mentions to canonical entities and merges duplicates across documents, with
+auditable, confidence-weighted merge decisions (no silent over-merge) and Evidence
+back to source mentions. It is inserted after Entity Extraction (required) and
+optionally after Relation Extraction as a `disambiguation` Stage (see
+`examples/disambiguation-slice.yaml`). It emits first-class `DisambiguationRecord`s at
+two scopes:
+
+- one **ENTITY**-scope record per resolved `CanonicalEntity` — the cross-document
+  merged cluster, its `member_mention_ids`, an audited `merge_decisions` log (each with
+  its resolver strategy, confidence, `applied` flag, and `Evidence`), an optional
+  external-KB `kb_id` (with a graceful fallback for the unlinked), and **page-accurate
+  Provenance** inherited from the representative mention;
+- one **RELATION**-scope record per `NormalizedRelation` — a relation whose endpoints
+  are remapped to canonical entities and whose label is normalised (fuzzy/alias,
+  type-filtered, inverse-detected + direction-swapped).
+
+The ported algorithmic assets (all PORT-AS-IS, ASSET-INVENTORY.md) are re-homed in the
+pure `latence_core.disambiguation` engine:
+
+- the **EntityResolver** 5-strategy cascade — exact → alias → acronym → substring →
+  embedding — with a **Union-Find** merge map (lexicographic-min canonical) and a
+  **confidence-weighted, audited merge log**: a proposed merge below the confidence
+  policy is recorded with `applied=False` but **never folded** (the "no silent
+  over-merge" guarantee);
+- the **GLinker** linking cascade — L2 candidate-gen → L3 biencoder → L4 rerank → L0
+  threshold — with a **KB-text fallback** (an unmatched mention stays an unlinked
+  canonical entity, not a forced wrong link);
+- the **RelationNormalizer** — alias/fuzzy label resolution, type filtering, and
+  **inverse detection + direction swap**.
+
+The CPU reference path is required and works with **no embedder and no KB** (the lexical
+token-similarity stand-in and the empty-KB fallback); a FAISS/GPU blocking Provider is a
+pluggable option behind the same `Disambiguator` seam, **not** required (ADR-0026).
+
+- **`disambiguation.cascade`** ships in core (pure-Python, deterministic, no model
+  download). Config: `aliases`, `min_confidence` (0.82), `alias_confidence` (0.95),
+  `acronym_confidence` (0.9), `embedding_threshold` (0.75), `min_substring_ratio` (0.5),
+  `enable_embedding` (true); `kb` + `kb_threshold` (0.5) for linking; `label_aliases`,
+  `inverses`, `allowed_labels`, `label_threshold` (0.6) for relation normalisation.
+
+  ```yaml
+    - name: disambiguate
+      capability: disambiguation
+      provider: disambiguation.cascade
+      depends_on: [entities, relations]   # relations is optional (entity-only otherwise)
+  ```
+
+The merge/link statistics — mentions in vs canonical entities out, the
+created/merged/singleton breakdown, applied vs below-policy merges by strategy,
+KB-linked vs unlinked, relations normalised — land in the Quality Report's
+`disambiguation` section (ADR-0026).

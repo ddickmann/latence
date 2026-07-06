@@ -50,7 +50,25 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # it threads through the DAG and exports; the CORPUS record's Provenance is the synthetic
 # corpus-scope lineage (ADR-0025). Metric names are a fixed, closed set — no dynamic
 # registry (S7 RECAST) — so a seeded run is byte-identical and the schema is auditable.
-SCHEMA_VERSION = 7
+# v8 (S8 Disambiguation): the corpus-level Stage that links entity mentions to canonical
+# entities and merges duplicates across documents, with auditable, confidence-weighted
+# merge decisions (no silent over-merge) and Evidence back to source mentions (ADR-0026).
+# Adds Evidence (the record linking a merge decision — or, later, a KG edge — back to the
+# specific source mentions/offsets that justify it, with a confidence value: CONTEXT
+# ``Evidence``); MergeStrategy (the 5-strategy resolver cascade EXACT→ALIAS→ACRONYM→
+# SUBSTRING→EMBEDDING plus KB_LINK, the ported EntityResolver technique); MergeDecision (one
+# audited, confidence-weighted merge or link decision — its strategy, confidence, the
+# Evidence, and whether the confidence policy APPLIED it, so a below-threshold decision is
+# recorded not silently applied); CanonicalEntity (a merged cluster: canonical text + type,
+# its member mention record_ids, its Evidence, an optional KB link, and — via
+# PageOffsetIndex — page-accurate Provenance); NormalizedRelation (a RelationMention whose
+# head/tail are remapped to canonical entity ids, its label L2-normalized, inverse detected
+# + direction swapped); DisambiguationScope (ENTITY / RELATION) + DisambiguationRecord (the
+# scoped inter-Stage carrier, one CanonicalEntity or one NormalizedRelation per record, like
+# FeatureRecord's scope split). Every one is a versioned Pydantic contract carrying
+# Provenance + Classification at the boundary; a seeded run is byte-identical (merge/link
+# order is deterministic and every collection is sorted).
+SCHEMA_VERSION = 8
 
 
 class Provenance(BaseModel):
@@ -872,5 +890,258 @@ class FeatureRecord(Record):
                 raise ValueError(msg)
             if self.document_record_id is not None:
                 msg = "A CORPUS-scope FeatureRecord must not name a single document_record_id."
+                raise ValueError(msg)
+        return self
+
+
+# -- S8: Disambiguation ------------------------------------------------------
+
+
+class Evidence(BaseModel):
+    """The justification linking an inference back to its source mentions (CONTEXT ``Evidence``).
+
+    Evidence is the record linking a knowledge-graph edge — or, in S8, a Disambiguation
+    merge/link decision — back to the specific source mentions and offsets that justify
+    it, with a confidence value. It is deliberately distinct from :class:`Provenance`:
+    Provenance is *source lineage* (which file, which page, which char span a record came
+    from); Evidence is *justification for an inference* (which mentions made us believe two
+    surface strings name the same entity, and how strongly). A merge that folds two
+    mentions into one canonical entity carries the Evidence for *why* — so no merge is a
+    silent, unexplained act.
+
+    ``mention_ids`` are the ``record_id``s of the source :class:`EntityMention`s (or, for a
+    relation, the endpoints) the inference rests on; ``document_ids`` the distinct source
+    documents they came from (the cross-document reach of the evidence); ``snippet`` an
+    optional short human-readable justification (never raw sensitive content — a surface
+    string or the strategy name), and ``confidence`` the 0..1 strength of the justification.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    mention_ids: list[str] = Field(
+        default_factory=list, description="record_ids of the source mentions that justify this."
+    )
+    document_ids: list[str] = Field(
+        default_factory=list, description="Distinct source document ids the evidence spans."
+    )
+    snippet: str = Field(default="", description="Short human-readable justification.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Strength of the justification.")
+
+
+class MergeStrategy(StrEnum):
+    """Which resolver strategy justified a merge/link decision (ported EntityResolver cascade).
+
+    The ported ``resolution/entity_resolver.py`` asset (ASSET-INVENTORY.md, 5/5,
+    PORT-AS-IS) resolves entity mentions with a **5-strategy cascade**, tried in order of
+    descending precision so the strongest available signal wins and the reason is
+    auditable:
+
+    * ``EXACT`` — identical normalised surface strings (case/whitespace-folded).
+    * ``ALIAS`` — a configured alias/synonym maps one surface to another's canonical.
+    * ``ACRONYM`` — an acronym matches the initials of a multi-word name
+      (``IBM`` ↔ ``International Business Machines``).
+    * ``SUBSTRING`` — one name is a whole-word substring of the other
+      (``Acme`` ↔ ``Acme Corporation``), gated by a length ratio so ``a`` ⊄ ``about``.
+    * ``EMBEDDING`` — a vector-similarity match above a threshold (the CPU reference
+      Provider has no embedder, so this strategy is inert there and is the pluggable
+      FAISS/GPU upgrade path, S8 AC).
+
+    ``KB_LINK`` is the linking (not merge) disposition: the GLinker pipeline matched a
+    mention to a canonical entity in an external KB (L2→L3→L4→L0). Recorded as the
+    justification on a :class:`CanonicalEntity` that carries a ``kb_id``.
+    """
+
+    EXACT = "exact"
+    ALIAS = "alias"
+    ACRONYM = "acronym"
+    SUBSTRING = "substring"
+    EMBEDDING = "embedding"
+    KB_LINK = "kb_link"
+
+
+class MergeDecision(BaseModel):
+    """One audited, confidence-weighted merge/link decision (no silent over-merge, S8 AC).
+
+    The ported EntityResolver keeps an **audited merge log**: every candidate merge —
+    applied or not — is recorded with the strategy that proposed it, its confidence, and
+    the Evidence, so a run never silently over-merges. A decision below the confidence
+    policy is recorded with ``applied == False`` and is NOT folded into a canonical
+    entity — the S8 acceptance criterion "merges below the confidence policy are not
+    applied and are logged".
+
+    ``source_text``/``target_text`` are the two surface strings the decision related
+    (``source`` folded into ``target``); ``strategy`` the cascade rung that proposed it;
+    ``confidence`` its 0..1 score; ``applied`` whether the confidence policy accepted it;
+    ``evidence`` the justification (the mentions/offsets). ``reason`` is a short
+    human-readable note (e.g. ``"acronym: IBM ~ International Business Machines"``).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    source_text: str = Field(..., min_length=1, description="Surface folded into the target.")
+    target_text: str = Field(..., min_length=1, description="Surface kept as the canonical.")
+    strategy: MergeStrategy
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    applied: bool = Field(..., description="False = below policy, logged but not merged.")
+    reason: str = Field(..., min_length=1, description="Human-readable justification.")
+    evidence: Evidence
+
+
+class CanonicalEntity(Record):
+    """A canonical entity: a merged cross-document cluster of mentions (CONTEXT ``Disambiguation``).
+
+    Disambiguation links entity mentions to canonical entities and merges duplicates across
+    documents. A CanonicalEntity is the *entity-scope* output: one per resolved cluster,
+    carrying the chosen canonical surface (``canonical_text``) and ``entity_type``, the
+    ``member_mention_ids`` (the ``record_id``s of every :class:`EntityMention` folded into
+    it), the ``source_document_ids`` it spans (its cross-document reach — the affected-set
+    key S11 keys incremental recompute off), the ``merge_decisions`` that built it (the
+    audit trail), and its :class:`Evidence`. When the cluster linked to an external KB, the
+    matched id is recorded in ``kb_id`` (``None`` for an unlinked entity — the graceful
+    fallback, S8 AC).
+
+    Like every inter-Stage carrier it is a :class:`Record`, so it carries Provenance and
+    Classification and threads through the DAG / exports. Its Provenance is the *canonical*
+    mention's lineage — page-accurate via :class:`~latence_core.pagemap.PageOffsetIndex`, so
+    a downstream KG edge can cite "page 7 of the contract", the S8 page-map-integration
+    sub-task — and its Classification is inherited from that mention. ``mention_count`` is
+    the size of the cluster; a singleton entity (no duplicate found) is valid — it is a
+    canonical entity of one mention, not an error.
+    """
+
+    canonical_text: str = Field(..., min_length=1, description="The chosen canonical surface.")
+    entity_type: str = Field(..., min_length=1, description="The entity label (majority vote).")
+    member_mention_ids: list[str] = Field(
+        ..., min_length=1, description="record_ids of every mention folded into this entity."
+    )
+    source_document_ids: list[str] = Field(
+        default_factory=list, description="Distinct source documents this entity appears in."
+    )
+    kb_id: str | None = Field(
+        default=None, description="External KB id when linked; None when unlinked (fallback)."
+    )
+    merge_decisions: list[MergeDecision] = Field(
+        default_factory=list, description="The audited merges that built this cluster."
+    )
+    evidence: Evidence
+
+    @property
+    def mention_count(self) -> int:
+        """The number of source mentions folded into this canonical entity."""
+        return len(self.member_mention_ids)
+
+    @property
+    def linked(self) -> bool:
+        """True if this entity linked to an external KB (carries a kb_id)."""
+        return self.kb_id is not None
+
+    @model_validator(mode="after")
+    def _canonical_is_a_member(self) -> CanonicalEntity:
+        # The member list must be non-empty (enforced above) and de-duplicated so the
+        # cluster size is unambiguous and a mention is not double-counted.
+        if len(set(self.member_mention_ids)) != len(self.member_mention_ids):
+            msg = "A CanonicalEntity's member_mention_ids must be unique (no double-counting)."
+            raise ValueError(msg)
+        return self
+
+
+class NormalizedRelation(Record):
+    """A relation remapped onto canonical entities, label normalised (ported RelationNormalizer).
+
+    The ported ``relations/normalizer.py`` asset (ASSET-INVENTORY.md, 4.5/5, PORT-AS-IS):
+    GLinker-style relation L2 resolution — fuzzy + alias label normalisation, type
+    filtering, and **inverse detection + direction swap** (an ``employed_by`` relation
+    whose configured inverse is ``employs`` is rewritten to the canonical direction). A
+    NormalizedRelation is the *relation-scope* Disambiguation output: it takes a source
+    :class:`RelationMention` and rewrites its endpoints from mention ids to the
+    ``head_entity_id``/``tail_entity_id`` of the :class:`CanonicalEntity`s they resolved to,
+    and its ``label`` to the normalised canonical relation label. ``inverted`` records
+    whether the head/tail were swapped to reach the canonical direction (so the rewrite is
+    auditable). ``source_relation_id`` links back to the original RelationMention.
+
+    Like every carrier it is a :class:`Record` (Provenance + Classification, inherited from
+    the source relation), so it threads through the DAG and exports. A relation whose head
+    or tail did not resolve to a canonical entity is dropped by the Provider (not emitted as
+    a broken relation) and counted in the Quality Report — never silently mis-linked.
+    """
+
+    source_relation_id: str = Field(..., min_length=1, description="Parent RelationMention id.")
+    label: str = Field(..., min_length=1, description="The normalised canonical relation label.")
+    head_entity_id: str = Field(..., min_length=1, description="Canonical head entity record_id.")
+    tail_entity_id: str = Field(..., min_length=1, description="Canonical tail entity record_id.")
+    head_text: str = Field(..., min_length=1, description="Canonical head surface string.")
+    tail_text: str = Field(..., min_length=1, description="Canonical tail surface string.")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    inverted: bool = Field(
+        default=False, description="True if head/tail were swapped to the canonical direction."
+    )
+    evidence: Evidence
+
+    @model_validator(mode="after")
+    def _endpoints_distinct(self) -> NormalizedRelation:
+        if self.head_entity_id == self.tail_entity_id:
+            msg = (
+                "A NormalizedRelation's head and tail must be distinct canonical entities "
+                f"(both are {self.head_entity_id!r})."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class DisambiguationScope(StrEnum):
+    """The scope a :class:`DisambiguationRecord` describes (CONTEXT ``Disambiguation``).
+
+    Disambiguation is a *corpus-level* Stage, so — like Profiling (ADR-0025) — it emits a
+    single scoped carrier rather than two contracts. ``ENTITY`` records carry one
+    :class:`CanonicalEntity` each (the entity-linking + merge half); ``RELATION`` records
+    carry one :class:`NormalizedRelation` each (the relation-normalisation half). A consumer
+    reads one exported stream and filters by ``scope``; the DAG, the checkpoint, and Export
+    all treat one carrier.
+    """
+
+    ENTITY = "entity"
+    RELATION = "relation"
+
+
+class DisambiguationRecord(Record):
+    """A corpus-level Disambiguation result: one canonical entity OR one normalized relation.
+
+    The scoped inter-Stage carrier for the Disambiguation Stage, mirroring
+    :class:`FeatureRecord`'s scope split (ADR-0025/0026). Exactly one of
+    ``entity``/``relation`` is populated, selected by ``scope``:
+
+    * ``scope == ENTITY``: ``entity`` holds the :class:`CanonicalEntity`; ``relation`` is
+      ``None``. Its Provenance is the canonical mention's page-accurate lineage and its
+      Classification is inherited from that mention.
+    * ``scope == RELATION``: ``relation`` holds the :class:`NormalizedRelation`;
+      ``entity`` is ``None``. Its Provenance/Classification are the source relation's.
+
+    The scope/payload consistency is contract-enforced, so a Provider cannot emit an
+    entity-scope record with a relation payload (or leave both empty). Records are emitted
+    deterministically (all ENTITY records in canonical-text order, then all RELATION records)
+    so a seeded run is byte-identical (Baseline bar).
+    """
+
+    scope: DisambiguationScope
+    entity: CanonicalEntity | None = Field(default=None)
+    relation: NormalizedRelation | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _scope_payload_consistent(self) -> DisambiguationRecord:
+        if self.scope is DisambiguationScope.ENTITY:
+            if self.entity is None:
+                msg = "An ENTITY-scope DisambiguationRecord must carry an 'entity'."
+                raise ValueError(msg)
+            if self.relation is not None:
+                msg = "An ENTITY-scope DisambiguationRecord must not carry a 'relation'."
+                raise ValueError(msg)
+        else:  # RELATION
+            if self.relation is None:
+                msg = "A RELATION-scope DisambiguationRecord must carry a 'relation'."
+                raise ValueError(msg)
+            if self.entity is not None:
+                msg = "A RELATION-scope DisambiguationRecord must not carry an 'entity'."
                 raise ValueError(msg)
         return self

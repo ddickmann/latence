@@ -33,7 +33,10 @@ class CapabilityKind(StrEnum):
     masked/replaced text variant per document), typically wired off the Chunk Stage.
     S7 adds Profiling (corpus-level statistical + quality features), wired off Parse
     (per-document features) and, optionally, Entity Extraction (cross-document entity
-    features).
+    features). S8 adds Disambiguation (corpus-level entity linking + duplicate merge with
+    audited, confidence-weighted decisions and Evidence), wired off Entity Extraction
+    (required — the mentions it resolves) and, optionally, Relation Extraction (the
+    relations it normalises onto the canonical entities).
     """
 
     SOURCE = "source"
@@ -46,6 +49,7 @@ class CapabilityKind(StrEnum):
     FUSED_ENTITY_RELATION = "fused_entity_relation"
     REDACTION = "redaction"
     PROFILING = "profiling"
+    DISAMBIGUATION = "disambiguation"
     EXPORT = "export"
 
 

@@ -1,0 +1,100 @@
+# S8 Disambiguation (canonical entities + normalized relations) Pipeline:
+#   Source -> Parse -> Chunk -> Entity Extraction --\
+#                        |                            +-> Relation Extraction --\
+#                        \-----------------------------------------------------> Disambiguation -> Export
+#
+# Disambiguation (CONTEXT `Disambiguation`) is the CORPUS-LEVEL Stage — the algorithmic
+# crown — that links entity mentions to canonical entities and merges duplicates across
+# documents, with auditable, confidence-weighted merge decisions (NO silent over-merge)
+# and Evidence back to source mentions. It emits typed DisambiguationRecords at two scopes:
+#   * one ENTITY-scope record per resolved canonical entity — its member mentions, an
+#     audited merge log (strategy + confidence + applied flag + Evidence), an optional
+#     external-KB link (with a graceful fallback for unlinked mentions), and page-accurate
+#     Provenance inherited from the representative mention;
+#   * one RELATION-scope record per normalized relation — endpoints remapped onto canonical
+#     entities, label normalised (fuzzy/alias), type-filtered, inverse-detected + swapped.
+#
+# It depends on Entity Extraction (REQUIRED — the mentions it resolves) and OPTIONALLY on
+# Relation Extraction (the relations it normalises). Drop the `relations` edge for an
+# entity-only disambiguation.
+#
+# PORTED ALGORITHMIC ASSETS (all PORT-AS-IS, ASSET-INVENTORY.md), re-homed in the pure
+# `latence_core.disambiguation` engine: the EntityResolver 5-strategy cascade (exact ->
+# alias -> acronym -> substring -> embedding) + Union-Find + audited merge log; the GLinker
+# L2->L3->L4->L0 linking cascade with KB-text fallback; the RelationNormalizer (alias/fuzzy
+# labels, type filtering, inverse detection + direction swap).
+#
+# The reference Provider `disambiguation.cascade` ships IN latence-core: pure-Python,
+# deterministic, CPU-viable with NO embedder and NO KB required (a lexical token-similarity
+# stand-in + empty-KB fallback). A FAISS/GPU blocking Provider is a pluggable upgrade behind
+# the same seam, not required (ADR-0026).
+#
+# Run with:
+#   latence run examples/disambiguation-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/:
+#   export/records.jsonl (DisambiguationRecords: canonical entities + normalized relations)
+#     + parquet,
+#   quality-report.json  (disambiguation: merge/link statistics — created/merged/linked).
+name: disambiguation-slice
+storage_uri: file:///tmp/latence-disambiguation-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # edit to your folder of text / markdown files
+      sensitivity: internal
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext         # swap to parser.document for real PDFs (S2)
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer         # zero-shot; the mentions Disambiguation resolves
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, International Business Machines, IBM, Globex]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [chunk, entities]
+    config:
+      relations:
+        works_for:
+          head: PERSON
+          tail: ORG
+          triggers: [works at, employed by, joined]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade   # in-core, deterministic, CPU-viable resolver+linker
+    depends_on: [entities, relations]  # entities REQUIRED; drop `relations` for entity-only
+    config:
+      min_confidence: 0.82             # the merge policy; a proposed merge below it is
+                                       # LOGGED (applied=false) but not folded (no silent
+                                       # over-merge)
+      # aliases: { Big Blue: IBM }     # surface -> surface synonym map (ALIAS strategy)
+      kb:                              # the configurable KB for entity linking (L2->L4->L0)
+        - { kb_id: Q1, name: Acme, entity_type: ORG }
+        - { kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM] }
+      kb_threshold: 0.5                # L0 acceptance threshold; below it -> graceful fallback
+      inverses: { employs: works_for } # inverse detection: rewrite + swap head/tail
+      # allowed_labels: [works_for]    # type filter: drop relations outside this set
+      # enable_embedding: true         # the lexical EMBEDDING strategy (off = strict no-embedder)
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [disambiguate]

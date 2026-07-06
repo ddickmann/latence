@@ -25,7 +25,11 @@ from latence_core.contracts import ScreeningFinding
 # the corpus-level aggregates — document/word/vocabulary counts, corpus Zipf α,
 # source coverage, top entity co-occurrences) — the S7 acceptance criterion ("feature
 # summary lands in the Quality Report").
-QUALITY_SCHEMA_VERSION = 7
+# v8 (S8): the report gains ``disambiguation`` (Disambiguation merge/link statistics —
+# mentions in, canonical entities out, entities created/merged/singleton, merges applied
+# vs below-policy per strategy, KB-linked vs unlinked, and relations normalized/dropped) —
+# the S8 acceptance criterion ("merge/link statistics land in the Quality Report").
+QUALITY_SCHEMA_VERSION = 8
 
 
 class StageMetrics(BaseModel):
@@ -284,6 +288,44 @@ class ProfilingQuality(BaseModel):
     top_co_occurrences: dict[str, int] = Field(default_factory=dict)
 
 
+class DisambiguationQuality(BaseModel):
+    """Disambiguation-Stage quality: merge + link + normalisation statistics (S8).
+
+    Emitted when a run had a Disambiguation Stage. The S8 acceptance criterion — "merge/link
+    statistics (created/merged/singleton, confidence) land in the Quality Report" — kept to
+    counts (no raw document text), so it is safe to persist.
+
+    ``mentions_in`` is the number of :class:`~latence_core.contracts.EntityMention`s the
+    Stage resolved; ``entities_out`` the number of :class:`~latence_core.contracts.CanonicalEntity`s
+    produced. ``entities_merged`` counts canonical entities that folded in more than one
+    mention (a real merge), ``entities_singleton`` those of exactly one mention (no
+    duplicate found) — together the created/merged/singleton breakdown (the algorithm only
+    merges, never splits). ``merges_applied`` / ``merges_below_policy`` count audited merge
+    decisions that were folded vs recorded but NOT applied (the no-silent-over-merge audit);
+    ``merges_by_strategy`` breaks the applied merges down by the resolver cascade rung.
+    ``entities_linked`` / ``entities_unlinked`` count canonical entities matched to the
+    external KB vs the graceful fallback. ``relations_normalized`` counts relations remapped
+    onto canonical entities, ``relations_inverted`` those whose direction was canonicalised
+    by inverse detection. ``avg_entity_confidence`` is the mean cluster confidence, an
+    at-a-glance quality signal.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mentions_in: int = 0
+    entities_out: int = 0
+    entities_merged: int = 0
+    entities_singleton: int = 0
+    merges_applied: int = 0
+    merges_below_policy: int = 0
+    merges_by_strategy: dict[str, int] = Field(default_factory=dict)
+    entities_linked: int = 0
+    entities_unlinked: int = 0
+    relations_normalized: int = 0
+    relations_inverted: int = 0
+    avg_entity_confidence: float = 0.0
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -310,6 +352,8 @@ class QualityReport(BaseModel):
     redaction: RedactionQuality | None = None
     # Present when the run had a Profiling Stage.
     profiling: ProfilingQuality | None = None
+    # Present when the run had a Disambiguation Stage.
+    disambiguation: DisambiguationQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

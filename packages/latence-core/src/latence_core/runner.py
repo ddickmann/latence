@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, TypeVar
 from latence_core.capability import (
     Chunker,
     ContentScreener,
+    Disambiguator,
     EntityExtractor,
     Export,
     FusedEntityRelationExtractor,
@@ -36,6 +37,8 @@ from latence_core.capability import (
 )
 from latence_core.contracts import (
     ChunkRecord,
+    DisambiguationRecord,
+    DisambiguationScope,
     Disposition,
     DocumentRecord,
     EntityMention,
@@ -54,6 +57,7 @@ from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import (
     ChunkQuality,
     CompletenessCheck,
+    DisambiguationQuality,
     EntityQuality,
     ParseQuality,
     ProfilingQuality,
@@ -87,6 +91,7 @@ StageOutput = (
     | RelationMention
     | RedactionRecord
     | FeatureRecord
+    | DisambiguationRecord
 )
 _T = TypeVar("_T", bound=StageOutput)
 
@@ -184,6 +189,8 @@ class LocalRunner:
             return RedactionRecord
         if stage.capability is CapabilityKind.PROFILING:
             return FeatureRecord
+        if stage.capability is CapabilityKind.DISAMBIGUATION:
+            return DisambiguationRecord
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
@@ -224,6 +231,8 @@ class LocalRunner:
                 return RedactionRecord
             if parent.capability is CapabilityKind.PROFILING:
                 return FeatureRecord
+            if parent.capability is CapabilityKind.DISAMBIGUATION:
+                return DisambiguationRecord
             if parent.capability is CapabilityKind.RELATION_EXTRACTION:
                 return RelationMention
             if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
@@ -500,6 +509,25 @@ class LocalRunner:
             self._require_profiling_inputs(stage, incoming, profile_docs)
             return list(provider.profile(profile_docs, profile_mentions))
 
+        if stage.capability is CapabilityKind.DISAMBIGUATION:
+            if not isinstance(provider, Disambiguator):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the Disambiguator capability."
+                )
+                raise TypeError(msg)
+            # Disambiguation is corpus-level and multi-input: it wires an Entity-Extraction
+            # (or fused) parent for the EntityMentions it resolves + links (REQUIRED — the
+            # mentions are what it disambiguates) and OPTIONALLY a Relation-Extraction (or
+            # fused) parent for the RelationMentions it normalises onto the canonical
+            # entities. Partition the gathered inputs by carrier; a fused parent supplies
+            # both from one mixed list. The mention side is required (unlike Profiling), so
+            # a non-empty input with no EntityMention is a wiring error.
+            disambig_mentions = [r for r in incoming if isinstance(r, EntityMention)]
+            disambig_relations = [r for r in incoming if isinstance(r, RelationMention)]
+            self._require_disambiguation_inputs(stage, incoming, disambig_mentions)
+            return list(provider.disambiguate(disambig_mentions, disambig_relations))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -663,6 +691,32 @@ class LocalRunner:
             raise TypeError(msg)
 
     @staticmethod
+    def _require_disambiguation_inputs(
+        stage: Stage, incoming: list[StageOutput], mentions: list[EntityMention]
+    ) -> None:
+        """A Disambiguation Stage must be wired to an Entity-Extraction parent (the mentions).
+
+        Disambiguation depends on an Entity-Extraction (or fused) parent for the
+        EntityMentions it resolves and links — the mentions are REQUIRED (unlike Profiling's
+        optional mentions: with no mentions there is nothing to disambiguate). The
+        RelationMention side is optional (an entity-only Disambiguation pipeline is valid), so
+        it is not checked here. A non-empty input that carries no EntityMention means the
+        Pipeline wired Disambiguation to the wrong parent — surface it as a clear typed error.
+        An empty run (no documents ⇒ no mentions) is legitimately empty.
+        """
+        if not incoming:
+            return
+        if not mentions:
+            got = sorted({type(r).__name__ for r in incoming})
+            msg = (
+                f"Stage {stage.name!r} (disambiguation) received no EntityMentions "
+                f"(got: {', '.join(got)}). A Disambiguation Stage must depend on an "
+                f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
+                f"the Pipeline's depends_on wiring."
+            )
+            raise TypeError(msg)
+
+    @staticmethod
     def _as_records(
         stage: Stage, records: list[StageOutput]
     ) -> list[
@@ -672,6 +726,7 @@ class LocalRunner:
         | RelationMention
         | RedactionRecord
         | FeatureRecord
+        | DisambiguationRecord
     ]:
         """Narrow gathered inputs to the inter-Stage Records Export materializes.
 
@@ -679,11 +734,12 @@ class LocalRunner:
         Chunk Stage is upstream), EntityMentions (S4, an Entity-Extraction Stage
         upstream), RelationMentions (S5, a Relation-Extraction / fused Stage upstream),
         RedactionRecords (S6, a Redaction Stage upstream — the PII-handled corpus
-        variant), or FeatureRecords (S7, a Profiling Stage upstream — the corpus
-        statistical/quality feature set). A fused Stage feeds a MIX of mentions and
-        relations — both are Records and both export. A raw ParserInput (not a Record)
-        means a Source was wired straight into Export with no Parse between. Surface it
-        as a clear typed error.
+        variant), FeatureRecords (S7, a Profiling Stage upstream — the corpus
+        statistical/quality feature set), or DisambiguationRecords (S8, a Disambiguation
+        Stage upstream — the canonical entities + normalized relations). A fused Stage feeds
+        a MIX of mentions and relations — both are Records and both export. A raw ParserInput
+        (not a Record) means a Source was wired straight into Export with no Parse between.
+        Surface it as a clear typed error.
         """
         exportable = (
             DocumentRecord,
@@ -692,6 +748,7 @@ class LocalRunner:
             RelationMention,
             RedactionRecord,
             FeatureRecord,
+            DisambiguationRecord,
         )
         wrong = [r for r in records if not isinstance(r, exportable)]
         if wrong:
@@ -699,9 +756,10 @@ class LocalRunner:
             msg = (
                 f"Stage {stage.name!r} (export) requires Record inputs "
                 f"(DocumentRecord/ChunkRecord/EntityMention/RelationMention/"
-                f"RedactionRecord/FeatureRecord) but received: {', '.join(got)}. An "
-                f"Export needs a Parse (and optionally a Chunk / Entity-Extraction / "
-                f"Relation-Extraction / Redaction / Profiling) upstream."
+                f"RedactionRecord/FeatureRecord/DisambiguationRecord) but received: "
+                f"{', '.join(got)}. An Export needs a Parse (and optionally a Chunk / "
+                f"Entity-Extraction / Relation-Extraction / Redaction / Profiling / "
+                f"Disambiguation) upstream."
             )
             raise TypeError(msg)
         return [r for r in records if isinstance(r, exportable)]
@@ -782,6 +840,17 @@ class LocalRunner:
         )
         redactions = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.REDACTION)
         features = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.PROFILING)
+        disambiguations = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.DISAMBIGUATION
+        )
+        # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
+        # the Stage consumed — the count it resolved from.
+        disambig_mentions_in = self._records_of_kinds(
+            pipeline,
+            ordered,
+            outputs,
+            (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
+        )
         return QualityReport(
             pipeline_name=pipeline.name,
             run_id=run_id,
@@ -797,6 +866,9 @@ class LocalRunner:
             relations=self._relation_quality(pipeline, relations),
             redaction=self._redaction_quality(pipeline, redactions),
             profiling=self._profiling_quality(pipeline, features),
+            disambiguation=self._disambiguation_quality(
+                pipeline, disambiguations, disambig_mentions_in
+            ),
         )
 
     @staticmethod
@@ -1093,6 +1165,72 @@ class LocalRunner:
             quality.top_co_occurrences = {
                 f"{co.left}|{co.right}": co.document_count for co in cf.co_occurrences
             }
+        return quality
+
+    @staticmethod
+    def _disambiguation_quality(
+        pipeline: Pipeline,
+        records: list[StageOutput],
+        mentions_in: list[StageOutput],
+    ) -> DisambiguationQuality | None:
+        """Aggregate Disambiguation merge/link/normalisation statistics for the report (S8).
+
+        Only computed when the Pipeline has a Disambiguation Stage. ``records`` is the mix of
+        ENTITY-scope (canonical entities) and RELATION-scope (normalized relations)
+        :class:`~latence_core.contracts.DisambiguationRecord`s; ``mentions_in`` the
+        Entity-Extraction output the Stage consumed. Rolls up: mentions in vs canonical
+        entities out; the created/merged/singleton breakdown; applied vs below-policy merges
+        (the no-silent-over-merge audit) broken down by strategy; KB-linked vs unlinked
+        entities; and relations normalized (with the inverted count). Counts only (no raw
+        text) — the S8 acceptance criterion, safe to persist.
+        """
+        if not any(s.capability is CapabilityKind.DISAMBIGUATION for s in pipeline.stages):
+            return None
+        quality = DisambiguationQuality()
+        quality.mentions_in = sum(1 for r in mentions_in if isinstance(r, EntityMention))
+        entities = [
+            r
+            for r in records
+            if isinstance(r, DisambiguationRecord)
+            and r.scope is DisambiguationScope.ENTITY
+            and r.entity is not None
+        ]
+        quality.entities_out = len(entities)
+        confidence_sum = 0.0
+        for record in entities:
+            entity = record.entity
+            if entity is None:  # pragma: no cover - filtered above
+                continue
+            if entity.mention_count > 1:
+                quality.entities_merged += 1
+            else:
+                quality.entities_singleton += 1
+            if entity.linked:
+                quality.entities_linked += 1
+            else:
+                quality.entities_unlinked += 1
+            confidence_sum += entity.evidence.confidence
+            for decision in entity.merge_decisions:
+                if decision.applied:
+                    quality.merges_applied += 1
+                    key = decision.strategy.value
+                    quality.merges_by_strategy[key] = quality.merges_by_strategy.get(key, 0) + 1
+                else:
+                    quality.merges_below_policy += 1
+        if entities:
+            quality.avg_entity_confidence = round(confidence_sum / len(entities), 6)
+        quality.merges_by_strategy = dict(sorted(quality.merges_by_strategy.items()))
+        relations = [
+            r
+            for r in records
+            if isinstance(r, DisambiguationRecord)
+            and r.scope is DisambiguationScope.RELATION
+            and r.relation is not None
+        ]
+        quality.relations_normalized = len(relations)
+        quality.relations_inverted = sum(
+            1 for r in relations if r.relation is not None and r.relation.inverted
+        )
         return quality
 
     @staticmethod

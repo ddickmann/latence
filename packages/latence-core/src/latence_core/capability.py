@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from latence_core.contracts import (
         ChunkRecord,
+        DisambiguationRecord,
         DocumentRecord,
         EntityMention,
         FeatureRecord,
@@ -269,6 +270,43 @@ class Profiler(Protocol):
         self, documents: Iterable[DocumentRecord], mentions: Iterable[EntityMention]
     ) -> Iterator[FeatureRecord]:
         """Consume the run's documents + mentions; yield per-document + corpus FeatureRecords."""
+        ...
+
+
+@runtime_checkable
+class Disambiguator(Protocol):
+    """Links mentions to canonical entities + merges duplicates (CONTEXT ``Disambiguation``).
+
+    The S8 Disambiguation Capability — the algorithmic crown. Disambiguation is a
+    **corpus-level** Stage: it consumes the whole run's
+    :class:`~latence_core.contracts.EntityMention`s (required — the mentions it resolves and
+    links) and, OPTIONALLY, the run's :class:`~latence_core.contracts.RelationMention`s (to
+    normalise onto the canonical entities), and emits
+    :class:`~latence_core.contracts.DisambiguationRecord`s at two scopes:
+
+    * one ``ENTITY``-scope record per resolved
+      :class:`~latence_core.contracts.CanonicalEntity` — a cross-document merged cluster with
+      its member mentions, an audited, confidence-weighted merge log (**no silent
+      over-merge** — a below-policy merge is logged not applied), an optional external-KB
+      link (with a **graceful fallback** for unlinked mentions), and page-accurate
+      Provenance + :class:`~latence_core.contracts.Evidence` back to the source mentions;
+    * one ``RELATION``-scope record per :class:`~latence_core.contracts.NormalizedRelation` —
+      a relation whose endpoints are remapped to canonical entities and whose label is L2
+      normalised (fuzzy/alias, type-filtered, inverse-detected + direction-swapped).
+
+    Both carriers are supplied so relations can be normalised onto the entities resolved in
+    the same pass; a Provider that only disambiguates entities ignores the relations. The
+    mention side is REQUIRED (unlike Profiling's optional mentions) — Disambiguation with no
+    mentions has nothing to resolve. Records are emitted deterministically (all ENTITY
+    records in canonical-text order, then RELATION records), so a seeded run is
+    byte-identical (Baseline bar). The CPU reference path must work with no embedder/KB; a
+    FAISS/GPU blocking Provider is a pluggable option, not required (S8 AC).
+    """
+
+    def disambiguate(
+        self, mentions: Iterable[EntityMention], relations: Iterable[RelationMention]
+    ) -> Iterator[DisambiguationRecord]:
+        """Consume the run's mentions (+ optional relations); yield entities + relations."""
         ...
 
 
