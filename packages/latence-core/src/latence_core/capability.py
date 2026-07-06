@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from latence_core.contracts import (
         ChunkRecord,
+        Delta,
         DisambiguationRecord,
         DocumentRecord,
         EntityMention,
@@ -339,6 +340,68 @@ class GraphAssembler(Protocol):
 
     def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
         """Consume the run's DisambiguationRecords; yield GraphRecords (nodes then edges)."""
+        ...
+
+
+@dataclass(frozen=True)
+class DeltaOutcome:
+    """The result of applying a :class:`Delta` to the parent corpus (S11 affected-set recompute).
+
+    A :class:`DeltaProcessor` takes the last committed Corpus Version's corpus-level derived
+    records, the current run's freshly-extracted corpus-level records, and the classified
+    :class:`~latence_core.contracts.Delta`, and returns:
+
+    * ``records`` — the new **live** derived set for Version N+1: the parent records the delta did
+      not touch, spliced with the affected-set recompute's freshly-resolved records (the
+      merge-on-add / split-on-delete result). This is what the Corpus Version commits.
+    * ``retracted`` — the derived records tombstoned by this delta (soft-retained on a
+      Retraction, discarded on a Purge), so the audit knows exactly what left the live set.
+    * ``entities_created`` / ``entities_merged`` / ``entities_split`` — the affected-set
+      recompute's effect on canonical entities vs the parent (a bridging doc that MERGED two
+      clusters, a deleted doc that SPLIT one) — the S11 churn the Quality Report reports.
+    * ``edges_added`` / ``edges_retracted`` — the graph patch counts.
+    """
+
+    records: list[Record] = field(default_factory=list)
+    retracted: list[Record] = field(default_factory=list)
+    entities_created: int = 0
+    entities_merged: int = 0
+    entities_split: int = 0
+    edges_added: int = 0
+    edges_retracted: int = 0
+
+
+@runtime_checkable
+class DeltaProcessor(Protocol):
+    """Applies a Delta to the parent corpus with affected-set recompute (CONTEXT ``Delta``).
+
+    The S11 Delta Capability (ADR-0018). A DeltaProcessor is model-agnostic and pure over
+    records: given the parent Corpus Version's corpus-level derived records
+    (:class:`~latence_core.contracts.DisambiguationRecord`s +
+    :class:`~latence_core.contracts.GraphRecord`s), the current run's freshly-extracted
+    corpus-level records, and the classified :class:`~latence_core.contracts.Delta`, it returns
+    a :class:`DeltaOutcome`: the new live derived set for Version N+1 (parent records the delta
+    did not touch, spliced with the affected-set recompute), the retracted set, and the
+    entity/edge churn counts.
+
+    Doc-level Stages (Parse … Redaction) are purely incremental and re-run by the Runner on the
+    changed documents; the DeltaProcessor owns only the **corpus-level** recompute — the
+    blocking-neighborhood affected set for Disambiguation and the graph patch by
+    ``source_document_ids`` (ports ``graph/patcher``). When the Delta signals a full
+    Reconciliation (drift crossed the threshold), the processor re-resolves ALL blocks rather
+    than only the affected set; the seam is identical, only the affected set differs. The
+    reference Provider is pure-Python, deterministic and CPU-viable (the affected-set
+    IncrementalDisambiguator + GraphPatcher); a distributed blocking Provider is a pluggable
+    upgrade behind this same seam.
+    """
+
+    def apply_delta(
+        self,
+        parent_records: Iterable[Record],
+        current_records: Iterable[Record],
+        delta: Delta,
+    ) -> DeltaOutcome:
+        """Apply ``delta`` to the parent corpus; return the patched live set + churn."""
         ...
 
 

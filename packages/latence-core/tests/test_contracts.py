@@ -178,8 +178,8 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 8 by S8 (Disambiguation contracts added; 7 was S7's Profiling FeatureRecord).
-    assert SCHEMA_VERSION == 9
+    # Bumped to 10 by S11 (incremental-delta contracts added; 9 was S9's Graph Assembly).
+    assert SCHEMA_VERSION == 10
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

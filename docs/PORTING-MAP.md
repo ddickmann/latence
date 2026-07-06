@@ -36,10 +36,10 @@ Legend: **KEEP** = port the idea/code into the framework · **RECAST** = good id
 | PageOffsetIndex / page_mapper (offset→page, fuzzy drift recovery) | KEEP | Core to Provenance integrity; a Rust hot-path candidate |
 | 5-strategy entity resolution + GLinker linking pipeline | KEEP | The Disambiguation Stage's reference Provider |
 | Graph builder with EvidenceRecord provenance | PORTED (S9) | The Graph Assembly Stage — `latence_core.graph.GraphBuilder` (content-addressed ids, endpoint validation, Evidence links) behind the `graph.canonical` Provider; KG Export as Parquet+TTL+GraphML (ADR-0027) |
-| Write-ahead log + atomic state updates | KEEP | Backs the local Runner's files-on-Storage state (ADR-0010) AND transactional Corpus Versions (ADR-0018) |
-| delta_detector (content-hash new/updated/unchanged) | KEEP | Delta computation (ADR-0018) |
-| graph/patcher (retract edges by source_document_ids) | KEEP | Evidence-based Retraction/Purge (ADR-0018) |
-| incremental_linker (link delta vs existing KB) | RECAST | Good for attach-to-known; extend to affected-set merge/split (ADR-0018) |
+| Write-ahead log + atomic state updates | PORTED (S11) | `latence_core.state.write_ahead_log.WriteAheadLog` (temp→manifest→atomic rename + crash recovery) over the Storage seam; backs transactional Corpus Versions via `CorpusStore` (ADR-0018/0029) |
+| delta_detector (content-hash new/updated/unchanged) | PORTED (S11) | `latence_core.state.delta_detector` (sha256 over doc_id+markdown+entity texts+relation labels → added/updated/deleted/unchanged) driving the `Delta` contract (ADR-0018) |
+| graph/patcher (retract edges by source_document_ids) | PORTED (S11) | `latence_core.state.graph_patcher.GraphPatcher` (retract/add derived records by Evidence-provenance reach) behind Retraction/Purge (ADR-0018) |
+| incremental_linker (link delta vs existing KB) | RECAST (S11) | `latence_core.state.incremental.IncrementalDisambiguator` — affected-set (blocking-neighborhood) merge-on-add / split-on-delete via the ported EntityResolver, with a drift-triggered Reconciliation backstop (ADR-0018/0029) |
 | ontology/incremental, link_prediction/incremental_trainer (RotatE warm-start) | DROP (from v1) | Ride with the post-v1 link-prediction/ontology plugins (ADR-0005) |
 | Feature disk-spilling under memory pressure | KEEP | Profiling Stage |
 | Tier-based config routing (Tier 1/2/3) | RECAST | Becomes Pipeline declarations, not bespoke handler logic |

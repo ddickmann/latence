@@ -74,6 +74,21 @@ class LocalFolderSource:
                 msg = "LocalFolderSource 'extensions' must be a list of strings."
                 raise ValueError(msg)
             self._extensions = frozenset(e.lstrip(".").lower() for e in raw_exts)
+        # S11: documents to logically exclude from this run by content-addressed id. A
+        # Retraction/Purge (ADR-0018) re-runs the pipeline with the deleted documents excluded
+        # HERE, at Source, so doc-level Stages simply never see them and the corpus-level Stages
+        # re-resolve the survivors — a genuine split-on-delete through the real pipeline, not a
+        # bolted-on record edit. Empty (the default) means read everything.
+        raw_exclude = config.get("exclude_document_ids")
+        if raw_exclude is None:
+            self._excluded: frozenset[str] = frozenset()
+        else:
+            if not isinstance(raw_exclude, list) or not all(
+                isinstance(e, str) for e in raw_exclude
+            ):
+                msg = "LocalFolderSource 'exclude_document_ids' must be a list of strings."
+                raise ValueError(msg)
+            self._excluded = frozenset(raw_exclude)
 
     def produce(self, storage: Storage) -> Iterator[ParserInput]:
         for uri in storage.walk_files(self._path, follow_symlinks=self._follow_symlinks):
@@ -83,6 +98,9 @@ class LocalFolderSource:
                 continue
             data = storage.read_bytes(uri)
             document_id = _document_id(data)
+            # Logically-deleted (retracted/purged) documents are skipped at Source.
+            if document_id in self._excluded:
+                continue
             provenance = Provenance(
                 source_uri=uri,
                 file_name=file_name,

@@ -319,3 +319,50 @@ into the report's `goldset` section, with `documents_matched / documents_annotat
 Runner-side evaluation, not a DAG Stage (ADR-0028) — deterministic and seeded, so a run is
 byte-identical; a pipeline with no `gold_set_uri` pays nothing. See
 `examples/quality-slice.yaml`.
+
+## Incremental deltas (S11)
+
+The corpus is not rebuilt on every change. A **Delta** is a content-hash diff of the Source
+manifest against the last committed **Corpus Version**; a delta run transactionally produces an
+immutable **Version N+1** (CONTEXT `Corpus Version` / `Delta` / `Affected set` / `Reconciliation` /
+`Retraction` / `Purge`; ADR-0018 / ADR-0029). You do not change the Pipeline — you change how you
+run it: drive the same pipeline with the **`DeltaRunner`** (which wraps the `LocalRunner`) instead
+of `LocalRunner().run(...)`.
+
+```python
+from latence_core import DeltaRunner, Pipeline, Storage
+
+pipeline = Pipeline.load("examples/delta-slice.yaml", Storage.for_uri(store))
+dr = DeltaRunner()                                  # drift_threshold=0.5 by default
+dr.apply_delta(pipeline, run_id="v0")               # first run -> Corpus Version 0
+# ...add / change / remove files under the source folder...
+dr.apply_delta(pipeline, run_id="v1")               # only the affected set recomputes
+dr.retract(pipeline, "v2", document_ids=[doc_id])   # soft delete: tombstone + re-resolve (audit-retained)
+dr.purge(pipeline,   "v3", document_ids=[doc_id])   # hard GDPR erase: source + derived + Evidence gone
+```
+
+On each `apply_delta` the DeltaRunner:
+
+- **detects the delta** — a content-hash diff of the Source manifest classifies every document
+  added / updated / deleted / unchanged (ported `delta_detector`);
+- **recomputes only the affected set** — doc-level Stages re-run on changed docs; corpus-level
+  Stages (Disambiguation, Graph Assembly) recompute only the blocking neighborhoods the delta
+  touched, catching **merge-on-add** (a bridging doc unites two clusters) and **split-on-delete**
+  (its removal splits them). Untouched records are carried forward verbatim;
+- **triggers a full Reconciliation** when a cheap drift metric (fraction of the corpus changed)
+  crosses `drift_threshold` — the bounded-error backstop;
+- **commits an immutable Corpus Version** via a write-ahead log + atomic manifest swap (ported
+  `write_ahead_log`): re-running the same delta is **idempotent**, a failed run leaves Version N
+  intact, and any prior Version is inspectable for audit and rollback (`CorpusStore.read_version` /
+  `read_records`);
+- emits the **delta churn** (docs +/~/-, entities created/merged/split, edges +/-, records
+  retracted/purged, drift, reconciliation) into the run's Quality Report `delta` section.
+
+Deletion is **dual-mode**: **Retraction** (the default) soft-tombstones the deleted documents'
+derived records — excluded from every Export / KG / RAG corpus but retained for audit and
+rollback — and re-resolves affected clusters; **Purge** physically erases the source, all derived
+records, and their Evidence (GDPR / right-to-be-forgotten), then reconciles. Both are surgical via
+Evidence provenance (ported `graph/patcher`). Corpus Versions live under
+`<storage_uri>/_latence/corpus/`. The in-core reference `DeltaProcessor` is `delta.affected_set`
+(pure-Python, deterministic, CPU-viable); a distributed blocking Provider is a pluggable upgrade
+behind the same seam. See `examples/delta-slice.yaml`.

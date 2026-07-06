@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from latence_core.contracts import ScreeningFinding
+from latence_core.contracts import DeltaChurn, ScreeningFinding
 
 # v3 (S3): the report gains ``chunk`` (Chunk-Stage counts + offset-integrity) and
 # ``screening`` (both checkpoints' quarantine/flag findings).
@@ -41,7 +41,12 @@ from latence_core.contracts import ScreeningFinding
 # gold-set harness result: per-Stage precision/recall/F1 against the adopter's own annotations,
 # present only when a gold set was supplied). A ``render()`` produces the human-readable summary
 # (the machine-readable JSON + human-readable rendering AC). Counts only, safe to persist.
-QUALITY_SCHEMA_VERSION = 10
+# v11 (S11): the report gains ``delta`` — the :class:`~latence_core.contracts.DeltaChurn` of an
+# incremental delta run (documents ±, entities created/merged/split, edges ±, records
+# retracted/purged, drift, and whether a full Reconciliation was triggered) — the S11 acceptance
+# criterion ("delta churn lands in the Quality Report"). Present only on a delta run (a fresh
+# full run reports ``delta=None``). Counts only (no raw text), safe to persist.
+QUALITY_SCHEMA_VERSION = 11
 
 
 class StageMetrics(BaseModel):
@@ -515,6 +520,10 @@ class QualityReport(BaseModel):
     # gold set was supplied — an adopter dropped in annotated documents).
     drift: DriftDiagnostics | None = None
     goldset: GoldSetEvaluation | None = None
+    # S11: the delta-churn roll-up, present only on an incremental delta run (a fresh full run
+    # reports ``delta=None``) — documents ±, entities created/merged/split, edges ±, records
+    # retracted/purged, drift, and whether a full Reconciliation was triggered.
+    delta: DeltaChurn | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
@@ -592,4 +601,24 @@ class QualityReport(BaseModel):
                     lines.append(
                         f"  - {label}: P={ls.precision:.3f} R={ls.recall:.3f} F1={ls.f1:.3f}"
                     )
+        if self.delta is not None:
+            dc = self.delta
+            recon = "reconciled" if dc.reconciliation_triggered else "incremental"
+            frm = "none" if dc.from_version is None else str(dc.from_version)
+            lines.append("")
+            lines.append(f"## Delta churn (v{frm} -> v{dc.to_version}, {recon})")
+            lines.append(
+                f"- documents: +{dc.documents_added} ~{dc.documents_updated} "
+                f"-{dc.documents_deleted} (={dc.documents_unchanged} unchanged)"
+            )
+            lines.append(
+                f"- entities: +{dc.entities_created} merged {dc.entities_merged} "
+                f"split {dc.entities_split}"
+            )
+            lines.append(f"- edges: +{dc.edges_added} -{dc.edges_retracted}")
+            lines.append(
+                f"- records: {dc.records_retracted} retracted, {dc.records_purged} purged "
+                f"({dc.deletion_mode.value})"
+            )
+            lines.append(f"- drift: {dc.drift:.3f}")
         return "\n".join(lines) + "\n"

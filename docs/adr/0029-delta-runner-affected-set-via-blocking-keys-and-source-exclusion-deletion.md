@@ -1,0 +1,34 @@
+# Delta orchestration: DeltaRunner wraps the LocalRunner; affected-set via blocking keys; deletion re-runs with Source-level exclusion
+
+ADR-0018 fixed the *what* of incremental corpus deltas (content-hash Delta, affected-set recompute, drift-triggered Reconciliation, dual-mode deletion, WAL-backed Corpus Versions). This ADR records three implementation trade-offs S11 made that were not obvious from ADR-0018, and why.
+
+## 1. The delta machinery is an orchestration layer AROUND the Runner, not a Stage in the DAG
+
+A Delta is not a pipeline Stage — it spans the *whole* run (it compares this run's manifest to the last committed Corpus Version and patches the corpus-level derived set). So `DeltaRunner` **wraps** `LocalRunner` rather than adding a `CapabilityKind`: `apply_delta` runs the pipeline via the unchanged `LocalRunner`, reads the run's Stage checkpoints back, computes the `Delta`, drives the `DeltaProcessor` Capability, and commits a `CorpusVersion`. The Runner, the Pipeline contract, and every existing Stage are untouched (ADR-0018 "reuse the existing seams"). The one Capability S11 adds — `DeltaProcessor` — is a cross-cutting record-to-record operation the DeltaRunner invokes, not a node the topological sort schedules. A distributed/GPU blocking Provider is a drop-in behind that seam.
+
+Rejected: making Delta a terminal Stage. It would have to reach *backwards* to the previous committed corpus (not a `depends_on` parent), which the DAG model has no vocabulary for, and it would run once per pipeline execution regardless — exactly an orchestration concern.
+
+## 2. The affected set is a blocking-key neighborhood closure, and the churn baseline is content, not just ids
+
+The reference `DeltaProcessor` recomputes only the **affected set** — the blocking neighborhoods (normalised-token blocks) the delta's changed/deleted documents touch, plus their key-neighbors (the recast IncrementalLinker). Two subtleties bit hard enough to record:
+
+- **Reach must unwrap the scoped carrier.** A `DisambiguationRecord`/`GraphRecord` holds its Evidence and `source_document_ids` on the *inner payload* (`entity`/`relation`/`node`/`edge`), not on the carrier. The retract-by-provenance patcher (`graph/patcher` port) therefore unwraps the payload before reading reach — otherwise a canonical entity's cross-document reach is invisible and a merged cluster is wrongly kept on deletion.
+- **The Corpus Version fingerprint hashes record *content*, sorted-key, not just `record_id`.** A merge that folds `International Business Machines` into `IBM` keeps the lexicographic-min canonical id `entity:ibm` while changing the cluster's membership. An id-only fingerprint would treat that as a no-op and the idempotency check would wrongly skip the commit. The fingerprint is a sha256 over each record's canonical (sorted-key) JSON, so a membership change flips it but an insertion-order difference in an open `properties` bag does not — the exact "same corpus content" signal (G1 determinism).
+
+## 3. Deletion (Retraction/Purge) re-runs the pipeline with the deleted documents EXCLUDED AT SOURCE
+
+The surprising one. A split-on-delete (a merged cluster whose only bridging document is deleted must split) requires re-resolving the survivors *without* the deleted document's mentions. Rather than surgically edit derived records (fragile, and it cannot re-run the resolver), the DeltaRunner re-runs the real pipeline with the deleted document ids injected into every Source Stage's new `exclude_document_ids` config (ADR-0014's thin Source seam already supported a config widening). Doc-level Stages simply never see the deleted documents; the corpus-level Stages re-resolve the survivors through the genuine resolver — a real split-on-delete, not a bolted-on record edit. Retraction retains the tombstoned records in the prior Version (inspectable for audit/rollback); Purge physically erases them (see §5).
+
+Rejected: a bespoke in-place record editor for deletions. It would duplicate the resolver's merge/split logic outside the resolver, drift from it, and forfeit the "the corpus is always the output of the real pipeline" invariant that makes a delta run and a from-scratch run converge (the drift-Reconciliation backstop relies on this).
+
+## 4. Only an *intentional* deletion is a durable Source exclusion — an edit's incidental DELETED is not
+
+Cumulative deletion (a document retracted at Version N stays excluded on every later run) must not be driven by *every* `DELETED` delta entry, because document ids are content-addressed (sha256 of the file bytes). An ordinary in-place edit therefore retires the old content-id and mints a new one, and the content-hash detector classifies that retired id `DELETED` even though the user retracted nothing. If the carried-forward exclusion unioned *all* `DELETED` ids, editing a file then reverting it to earlier content would find the reverted content-id blacklisted at Source and silently drop it forever (an edit-then-revert data-loss bug).
+
+The fix: `Delta.intentional_deletion` marks a delta whose `DELETED` entries are a *user-requested* `retract()`/`purge()` (set only on the deletion path; `apply_delta` leaves it `False`). `_prior_deletions` carries forward only the `DELETED` ids of `intentional_deletion` Versions — so a retracted/purged document stays gone across re-runs (durable tombstone), while an edit's incidental content-id churn does not permanently blacklist that content. The corpus reflects the current source folder for adds/edits/reverts; only explicit retract/purge is sticky.
+
+## 5. Purge is a physical erasure across the whole store, not just a forward logical exclusion
+
+Purge is the GDPR / right-to-be-forgotten operation, and the S11 AC requires that *nothing derived survives*. A forward-only logical exclusion is insufficient: the purged document's PII-bearing derived records and raw text would linger in prior committed Versions' record logs, in the run checkpoints/export artifacts, and in the on-disk source file. So `purge` additionally: (a) physically deletes the source file(s) whose content-addressed id is purged (`Storage.remove`); (b) expunges every derived record whose Evidence-provenance reach touches a purged document from **all** committed Versions' record logs (`CorpusStore.expunge_records`, using the same `graph/patcher` reach); (c) wipes the re-derivable run artifact trees under `_latence/runs` (`Storage.remove_tree`), which hold raw chunk/mention text and the Export sink's records. The committed head Version (which already omits the purged document) remains the authoritative live set; the erasure loses no durable audit state, because a Purge is by definition the disposition that *does not* retain.
+
+This intentionally trumps the normal Corpus Version immutability — a Purge is the one operation that rewrites audit history, by design. A Retraction is unaffected: it still retains its tombstones for audit and rollback.

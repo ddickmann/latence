@@ -1,0 +1,94 @@
+# S11 Incremental deltas Pipeline:
+#   Source -> Parse -> Chunk -> Entity -> Relation -> Disambiguation -> Graph Assembly -> Export
+#
+# This is an ordinary full pipeline — the SAME one S9 runs. Incremental deltas do not change the
+# Pipeline: they change HOW you run it. Instead of `LocalRunner().run(pipeline)`, drive it with the
+# `DeltaRunner`, which wraps the local Runner and adds the lean-yet-enterprise delta machinery
+# (ADR-0018 / ADR-0029):
+#
+#   from latence_core import DeltaRunner, Pipeline
+#   pipeline = Pipeline.load("examples/delta-slice.yaml", storage)
+#   dr = DeltaRunner()                       # drift_threshold=0.5 by default
+#   dr.apply_delta(pipeline, run_id="v0")    # first run -> Corpus Version 0 (a full reconciliation)
+#   # ... add / change / remove files under the source folder ...
+#   dr.apply_delta(pipeline, run_id="v1")    # content-hash diff -> only the affected set recomputes
+#   dr.retract(pipeline, "v2", document_ids=[doc_id])  # soft delete: tombstone + re-resolve (audit-retained)
+#   dr.purge(pipeline,   "v3", document_ids=[doc_id])  # hard GDPR erase: source + derived + Evidence gone
+#
+# What the DeltaRunner does on each apply_delta (ADR-0018):
+#   * DELTA DETECTION — a content-hash diff of the Source manifest against the last committed Corpus
+#     Version classifies every document added / updated / deleted / unchanged (ported delta_detector).
+#   * AFFECTED-SET RECOMPUTE — doc-level Stages re-run only on changed docs; corpus-level Stages
+#     (Disambiguation, Graph Assembly) recompute only the blocking neighborhoods the delta touched,
+#     catching MERGE-ON-ADD (a bridging doc unites two clusters) and SPLIT-ON-DELETE (its removal
+#     splits them). Untouched records are carried forward verbatim.
+#   * DRIFT-TRIGGERED RECONCILIATION — a cheap drift metric (fraction of the corpus changed) crossing
+#     the threshold triggers a full recompute (the bounded-error backstop).
+#   * CORPUS VERSION TRANSACTION — the whole delta commits an immutable Version N+1 via a write-ahead
+#     log + atomic manifest swap: re-running the same delta is idempotent, a failed run leaves N
+#     intact, and any prior Version is inspectable for audit and rollback.
+#   * QUALITY REPORT — the delta churn (docs +/~/-, entities created/merged/split, edges +/-, records
+#     retracted/purged, drift, reconciliation) lands in the run's Quality Report.
+#
+# Corpus Versions live under <storage_uri>/_latence/corpus/. The per-run Quality Report + export
+# still land under <storage_uri>/_latence/runs/<run_id>/ as usual.
+#
+# The in-core reference DeltaProcessor `delta.affected_set` is pure-Python, deterministic and
+# CPU-viable (retract-by-Evidence-provenance graph patcher + blocking-neighborhood affected-set
+# recompute). A distributed blocking Provider is a pluggable upgrade behind the same seam.
+name: delta-slice
+storage_uri: file:///tmp/latence-delta-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/graph-docs   # edit to your folder; add/remove files between runs
+      sensitivity: internal
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, International Business Machines, IBM, Globex]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [chunk, entities]
+    config:
+      relations:
+        works_for:
+          head: PERSON
+          tail: ORG
+          triggers: [works at, employed by, joined]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [entities, relations]
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [graph]

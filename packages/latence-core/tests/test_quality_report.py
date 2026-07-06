@@ -19,9 +19,9 @@ from latence_core.quality import (
 )
 
 
-def test_schema_version_is_v10() -> None:
-    assert QUALITY_SCHEMA_VERSION == 10
-    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 10
+def test_schema_version_is_v11() -> None:
+    assert QUALITY_SCHEMA_VERSION == 11
+    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 11
 
 
 def test_completeness_passes_only_when_provenance_classification_and_offsets_align() -> None:

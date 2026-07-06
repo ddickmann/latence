@@ -129,6 +129,31 @@ class Storage:
         # object stores implement move as an atomic server-side copy+delete.
         self._fs.mv(self._check(tmp), self._check(uri))
 
+    def remove(self, uri: str) -> None:
+        """Physically delete a single file (the Purge / GDPR-erasure primitive, ADR-0018).
+
+        Idempotent: removing a non-existent path is a no-op, so a purge that has already erased a
+        file (or a file the caller only *believes* exists) does not raise. Unlike
+        :meth:`write_atomic` this is a destructive, non-recoverable delete — used only on the
+        Purge path where the S11 acceptance criterion requires that *nothing derived survives*
+        (the source file, and the derived records expunged from prior Versions and checkpoints).
+        """
+        checked = self._check(uri)
+        if self._fs.exists(checked):
+            self._fs.rm_file(checked) if hasattr(self._fs, "rm_file") else self._fs.rm(checked)
+
+    def remove_tree(self, uri: str) -> None:
+        """Recursively delete a directory and everything under it (the Purge erasure primitive).
+
+        Idempotent: a missing path is a no-op. Destructive and non-recoverable — used on the Purge
+        path to wipe re-derivable run artifact trees (checkpoints, export outputs, run manifests)
+        that would otherwise retain a purged document's raw text (the S11 "nothing derived
+        survives" acceptance criterion).
+        """
+        checked = self._check(uri)
+        if self._fs.exists(checked):
+            self._fs.rm(checked, recursive=True)
+
     def open(self, uri: str, mode: str = "rb") -> IO[Any]:
         opened: IO[Any] = self._fs.open(self._check(uri), mode)
         return opened

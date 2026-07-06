@@ -81,7 +81,24 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # scope split). Every one is a versioned Pydantic contract carrying Provenance + Classification
 # at the boundary; node/edge ids are content-addressed (sha256 over a stable key) so a seeded
 # run is byte-identical and two runs over the same corpus produce the same graph.
-SCHEMA_VERSION = 9
+# v10 (S11 Incremental deltas): the lean-yet-enterprise delta machinery (ADR-0018). A Delta is
+# a content-hash diff of the Source manifest against the last committed Corpus Version, and a
+# delta run transactionally produces an immutable Version N+1 (CONTEXT ``Corpus Version`` /
+# ``Delta`` / ``Affected set`` / ``Reconciliation`` / ``Retraction`` / ``Purge``). Adds
+# DeltaKind (ADDED / UPDATED / DELETED / UNCHANGED — the four content-hash classes a document
+# falls into); DeletionMode (RETRACTION — the default soft tombstone, retained for audit;
+# PURGE — the physical GDPR erasure of source + derived + Evidence); DeltaEntry (one document's
+# classification: its DeltaKind, document id, file name, and content hash); Delta (the whole
+# classified change set against a parent Corpus Version, plus the drift metric that decided
+# whether a full Reconciliation was triggered); CorpusVersion (an immutable, numbered committed
+# state of the corpus — its version number, parent, the delta that produced it, the record
+# count, a content fingerprint, and whether it was a full reconciliation); DeltaChurn (the S11
+# Quality-Report roll-up: documents ±, entities created/merged/split, edges ±, records
+# retracted/purged, and the drift that triggered — or did not trigger — a reconciliation).
+# Every one is a versioned Pydantic contract; a delta run is deterministic (a seeded corpus
+# state yields the same manifest, the same Delta, and the same Version fingerprint — the
+# Baseline bar and the G1 determinism criterion).
+SCHEMA_VERSION = 10
 
 
 class Provenance(BaseModel):
@@ -1302,3 +1319,228 @@ class GraphRecord(Record):
                 msg = "An EDGE-scope GraphRecord must not carry a 'node'."
                 raise ValueError(msg)
         return self
+
+
+# -- S11: Incremental deltas -------------------------------------------------
+
+
+class DeltaKind(StrEnum):
+    """How a document changed since the last committed Corpus Version (CONTEXT ``Delta``).
+
+    A :class:`Delta` is a content-hash diff of the Source manifest against the last committed
+    Corpus Version (ports ``delta_detector``). Each document falls into exactly one class:
+
+    * ``ADDED`` — a document id not present in the parent Version (new source).
+    * ``UPDATED`` — the same document id, a new content hash (the text or its derived
+      extraction changed): doc-level Stages re-run on it, its old derived records are retracted.
+    * ``DELETED`` — a document id in the parent Version absent from the new manifest: its
+      records are retracted (or purged), affected clusters re-resolved.
+    * ``UNCHANGED`` — same id, same hash: nothing re-runs; its committed records are carried
+      forward verbatim.
+    """
+
+    ADDED = "added"
+    UPDATED = "updated"
+    DELETED = "deleted"
+    UNCHANGED = "unchanged"
+
+
+class DeletionMode(StrEnum):
+    """The disposition for a deleted document (CONTEXT ``Retraction`` / ``Purge``).
+
+    Deletion is dual-mode (ADR-0018). ``RETRACTION`` is the default soft tombstone: the
+    document and its derived records are excluded from every Export, the knowledge graph, and
+    the RAG corpus, but **retained** for audit and rollback, with affected clusters
+    re-resolved. ``PURGE`` is the hard GDPR / right-to-be-forgotten erasure: physical removal
+    of the source, all derived records, and their Evidence, followed by reconciliation of the
+    affected set — nothing derived survives.
+    """
+
+    RETRACTION = "retraction"
+    PURGE = "purge"
+
+
+class DeltaEntry(BaseModel):
+    """One document's classification within a :class:`Delta` (CONTEXT ``Delta``).
+
+    The content-hash diff assigns each document a :class:`DeltaKind`. ``content_hash`` is the
+    deterministic SHA-256 the ported detector computed over the document's markdown plus its
+    derived entity texts and relation labels (``None`` for a ``DELETED`` document, which no
+    longer has a current hash). ``file_name`` is carried for the audit; identity is the
+    ``document_id`` alone (never the file name).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    kind: DeltaKind
+    document_id: str = Field(..., min_length=1)
+    file_name: str = Field(default="")
+    content_hash: str | None = Field(
+        default=None, description="Deterministic content hash; None for a DELETED document."
+    )
+
+    @model_validator(mode="after")
+    def _hash_consistent(self) -> DeltaEntry:
+        if self.kind is DeltaKind.DELETED:
+            if self.content_hash is not None:
+                msg = "A DELETED DeltaEntry has no current content_hash."
+                raise ValueError(msg)
+        elif self.content_hash is None:
+            msg = f"A {self.kind.value} DeltaEntry must carry a content_hash."
+            raise ValueError(msg)
+        return self
+
+
+class Delta(BaseModel):
+    """The classified change set since the last committed Corpus Version (CONTEXT ``Delta``).
+
+    Computed as a content-hash diff of the Source manifest against the parent Version's
+    manifest (ports ``delta_detector``): every document is an ADDED / UPDATED / DELETED /
+    UNCHANGED :class:`DeltaEntry`. ``parent_version`` is the Corpus Version this delta was
+    computed against (``None`` for the very first, bootstrap delta against an empty corpus).
+    ``deletion_mode`` records how deleted documents are being handled (Retraction by default,
+    Purge on request). ``intentional_deletion`` records whether this delta's DELETED entries are
+    *user-requested* tombstones (an explicit :meth:`retract`/:meth:`purge`) rather than the
+    incidental delete-half of an ordinary in-place content edit: because document ids are
+    content-addressed, editing a file mints a new id and retires the old one, so the detector
+    classifies the old content-id DELETED even though the user retracted nothing. Only an
+    ``intentional_deletion`` DELETED id is a durable tombstone that stays excluded at Source on
+    every future run; an edit's incidental DELETED id must NOT be permanently blacklisted, or an
+    edit-then-revert to earlier content would be silently dropped. ``drift`` is the cheap drift
+    metric (fraction of the corpus changed), and ``triggered_reconciliation`` records whether it
+    crossed the threshold and forced a full Reconciliation — so the trigger and its outcome are
+    auditable (the S11 AC).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    parent_version: int | None = Field(
+        default=None, ge=0, description="The Corpus Version diffed against; None on bootstrap."
+    )
+    deletion_mode: DeletionMode = Field(default=DeletionMode.RETRACTION)
+    intentional_deletion: bool = Field(
+        default=False,
+        description=(
+            "True only when the DELETED entries are a user-requested retract/purge (a durable "
+            "tombstone), not the incidental delete-half of a content-addressed in-place edit."
+        ),
+    )
+    entries: list[DeltaEntry] = Field(default_factory=list)
+    drift: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Fraction of the corpus changed by this delta."
+    )
+    triggered_reconciliation: bool = Field(
+        default=False,
+        description="True if drift crossed the threshold and forced a full recompute.",
+    )
+
+    def _ids(self, kind: DeltaKind) -> list[str]:
+        return sorted(e.document_id for e in self.entries if e.kind is kind)
+
+    @property
+    def added(self) -> list[str]:
+        return self._ids(DeltaKind.ADDED)
+
+    @property
+    def updated(self) -> list[str]:
+        return self._ids(DeltaKind.UPDATED)
+
+    @property
+    def deleted(self) -> list[str]:
+        return self._ids(DeltaKind.DELETED)
+
+    @property
+    def unchanged(self) -> list[str]:
+        return self._ids(DeltaKind.UNCHANGED)
+
+    @property
+    def changed(self) -> list[str]:
+        """The documents a delta must re-process (added + updated), sorted."""
+        return sorted(self.added + self.updated)
+
+    @property
+    def is_empty(self) -> bool:
+        """True if nothing changed (no add/update/delete) — an idempotent no-op re-run."""
+        return not (self.added or self.updated or self.deleted)
+
+
+class CorpusVersion(BaseModel):
+    """An immutable, numbered committed state of the corpus (CONTEXT ``Corpus Version``).
+
+    A Delta run reads Version N and transactionally produces Version N+1 (via the ported WAL +
+    atomic manifest swap); any prior Version is inspectable for audit and rollback. A
+    CorpusVersion is the manifest of that committed state: its ``version`` number, the
+    ``parent_version`` it succeeded (``None`` for the initial Version 0), the :class:`Delta`
+    that produced it, the live ``record_count`` after the delta, a deterministic
+    ``fingerprint`` (a content hash over the committed record ids — identical input + config ⇒
+    identical fingerprint, the G1 determinism criterion), and ``reconciled`` (True when this
+    Version was produced by a full Reconciliation rather than an incremental affected-set
+    recompute). ``created_ts`` is excluded from the fingerprint so re-running a delta is
+    byte-identical apart from the timestamp.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    version: int = Field(..., ge=0, description="This Corpus Version's number.")
+    parent_version: int | None = Field(default=None, ge=0)
+    delta: Delta
+    record_count: int = Field(..., ge=0, description="Live derived-record count after the delta.")
+    document_count: int = Field(..., ge=0, description="Live source-document count post-delta.")
+    fingerprint: str = Field(..., min_length=1, description="Deterministic content fingerprint.")
+    reconciled: bool = Field(
+        default=False,
+        description="True if produced by a full Reconciliation, not incremental.",
+    )
+    created_ts: float = Field(
+        default=0.0, description="Commit wall-clock (excluded from fingerprint)."
+    )
+
+    @model_validator(mode="after")
+    def _parent_ordered(self) -> CorpusVersion:
+        if self.parent_version is not None and self.parent_version >= self.version:
+            msg = (
+                f"CorpusVersion {self.version} must succeed a lower parent "
+                f"(got parent {self.parent_version})."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class DeltaChurn(BaseModel):
+    """The delta run's churn roll-up for the Quality Report (S11 AC).
+
+    "Delta churn (docs ±, entities created/merged/split, edges ±, drift) lands in the Quality
+    Report" — the S11 acceptance criterion, kept to counts (no raw text), so it is safe to
+    persist. ``documents_added`` / ``documents_updated`` / ``documents_deleted`` classify the
+    delta; ``documents_unchanged`` are carried forward untouched. ``entities_created`` /
+    ``entities_merged`` / ``entities_split`` are the affected-set recompute's effect on
+    canonical entities (a bridging doc that MERGES two clusters, a deleted doc that SPLITS
+    one); ``edges_added`` / ``edges_retracted`` the graph patch. ``records_retracted`` /
+    ``records_purged`` count the soft-tombstoned vs physically-erased derived records.
+    ``drift`` is the metric and ``reconciliation_triggered`` whether it forced a full recompute,
+    with ``deletion_mode`` recording how deletes were handled. ``from_version`` / ``to_version``
+    bracket the transaction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    from_version: int | None = Field(default=None, ge=0)
+    to_version: int = Field(..., ge=0)
+    documents_added: int = 0
+    documents_updated: int = 0
+    documents_deleted: int = 0
+    documents_unchanged: int = 0
+    entities_created: int = 0
+    entities_merged: int = 0
+    entities_split: int = 0
+    edges_added: int = 0
+    edges_retracted: int = 0
+    records_retracted: int = 0
+    records_purged: int = 0
+    drift: float = Field(default=0.0, ge=0.0, le=1.0)
+    reconciliation_triggered: bool = False
+    deletion_mode: DeletionMode = Field(default=DeletionMode.RETRACTION)
