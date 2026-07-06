@@ -26,7 +26,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # RiskMarkers); RiskMarker/ScreeningVerdict/ScreeningFinding contracts; a
 # QuarantineRecord for records Screening removes from the pipeline (retained and
 # inspectable with the reason recorded).
-SCHEMA_VERSION = 3
+# v4 (S4 Entity Extraction): EntityMention (a typed entity mention found in a
+# chunk, carrying its label, confidence, the char span it occupies in the parent
+# document's assembled markdown, and the source page(s) that span resolves to via
+# PageOffsetIndex) — an inter-Stage Record like ChunkRecord, so it carries
+# Provenance and Classification and is exportable.
+SCHEMA_VERSION = 4
 
 
 class Provenance(BaseModel):
@@ -378,6 +383,15 @@ class ChunkRecord(Record):
 
     ``document_record_id`` links the chunk back to its parent document; ``index``
     is the chunk's ordinal within that document (0-based, contiguous).
+
+    ``page_map`` carries the parent document's page-boundary map forward so a
+    *downstream* Stage that finds a sub-chunk offset (an entity mention) can
+    resolve **that offset's own** source page through
+    :class:`~latence_core.pagemap.PageOffsetIndex` — not merely inherit the
+    chunk's whole ``[page_start, page_end]`` range. Without it, a mention on a
+    later page of a multi-page chunk would cite the chunk's first page. Optional
+    (a chunk produced before S4, or from a document with no page map, has ``None``
+    and downstream falls back to the inherited chunk page range).
     """
 
     document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
@@ -385,6 +399,10 @@ class ChunkRecord(Record):
     content: str = Field(default="")
     media_type: str = Field(default="text/markdown")
     token_count: int = Field(..., ge=0, description="Budgeted token count for the chunk text.")
+    page_map: PageMap | None = Field(
+        default=None,
+        description="Parent document's page map, so a sub-chunk offset resolves to its own page.",
+    )
     risk_markers: list[RiskMarker] = Field(
         default_factory=list, description="Content-Screening flags that propagate into the corpus."
     )
@@ -393,3 +411,59 @@ class ChunkRecord(Record):
     def flagged(self) -> bool:
         """True if Content Screening attached any risk marker to this chunk."""
         return bool(self.risk_markers)
+
+
+# -- S4: Entity Extraction ---------------------------------------------------
+
+
+class EntityMention(Record):
+    """One typed entity mention found in a chunk's text (CONTEXT ``Entity Extraction``).
+
+    Entity Extraction finds typed entity mentions in chunked text (zero-shot NER):
+    every mention is an inter-Stage :class:`Record` — it carries Provenance and
+    Classification like any other — so it can be threaded through the DAG and
+    exported. A mention records:
+
+    * ``label`` — the entity type it was tagged as. The label set is supplied per
+      Pipeline (zero-shot); no label set is hardcoded in core.
+    * ``text`` — the exact surface string of the mention as it appears in the
+      parent document's assembled markdown.
+    * ``confidence`` — the extractor's 0..1 score for the mention.
+    * ``char_start``/``char_end`` on its **Provenance** — the half-open span the
+      mention occupies **in the parent document's assembled markdown** (not in the
+      chunk-local text), so a mention resolves back to its exact source offsets and,
+      through the parent's page map, to its original source page(s) (the S4
+      round-trip: mention → offset → original page, via
+      :class:`~latence_core.pagemap.PageOffsetIndex`).
+    * ``page_start``/``page_end`` on its **Provenance** — the source page(s) the
+      mention span falls on, resolved from the parent's page map.
+    * the parent chunk's **Classification**, inherited unchanged.
+
+    ``chunk_record_id``/``document_record_id`` link the mention back to the chunk it
+    was found in and to the document that chunk came from; ``index`` is the
+    mention's ordinal within its chunk (0-based).
+    """
+
+    document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
+    chunk_record_id: str = Field(..., min_length=1, description="Parent ChunkRecord id.")
+    index: int = Field(..., ge=0, description="0-based mention ordinal within the chunk.")
+    label: str = Field(..., min_length=1, description="Zero-shot entity type (per-Pipeline label).")
+    text: str = Field(..., min_length=1, description="The mention's exact surface string.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+
+    @model_validator(mode="after")
+    def _span_present(self) -> EntityMention:
+        prov = self.provenance
+        if prov.char_start is None or prov.char_end is None:
+            msg = "An EntityMention's Provenance must carry a char_start and char_end span."
+            raise ValueError(msg)
+        if prov.char_end < prov.char_start:
+            msg = (
+                f"EntityMention span is inverted: char_end {prov.char_end} "
+                f"< char_start {prov.char_start}"
+            )
+            raise ValueError(msg)
+        if prov.page_start is None or prov.page_end is None:
+            msg = "An EntityMention's Provenance must carry a page_start and page_end."
+            raise ValueError(msg)
+        return self

@@ -25,7 +25,8 @@ class CapabilityKind(StrEnum):
     """The Capability a Stage fulfils.
 
     S1 spine: source/parse/export. S3 adds Chunk and Screening's two checkpoints
-    (intake before Parse, content after Chunk).
+    (intake before Parse, content after Chunk). S4 adds Entity Extraction (typed
+    entity mentions found in chunked text).
     """
 
     SOURCE = "source"
@@ -33,6 +34,7 @@ class CapabilityKind(StrEnum):
     PARSE = "parse"
     CHUNK = "chunk"
     CONTENT_SCREENING = "content_screening"
+    ENTITY_EXTRACTION = "entity_extraction"
     EXPORT = "export"
 
 

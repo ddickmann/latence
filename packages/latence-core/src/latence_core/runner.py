@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, TypeVar
 from latence_core.capability import (
     Chunker,
     ContentScreener,
+    EntityExtractor,
     Export,
     IntakeScreener,
     Parser,
@@ -33,6 +34,7 @@ from latence_core.contracts import (
     ChunkRecord,
     Disposition,
     DocumentRecord,
+    EntityMention,
     ParserInput,
     QuarantineRecord,
     Record,
@@ -44,6 +46,7 @@ from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import (
     ChunkQuality,
     CompletenessCheck,
+    EntityQuality,
     ParseQuality,
     QualityReport,
     ScreeningQuality,
@@ -56,11 +59,12 @@ if TYPE_CHECKING:
 
 # A Stage's output is one of the inter-Stage carriers the DAG threads between
 # Stages: Source→ParserInput; Parse→DocumentRecord; Chunk/Content-Screening→
-# ChunkRecord. The Runner keeps them in one per-Stage dict and lets each Stage's
-# capability decide how to (de)serialize its checkpoint. Screening ALSO produces
-# QuarantineRecords, but those never flow downstream — they are persisted to a
-# sidecar and reported, not threaded through the DAG.
-StageOutput = ParserInput | DocumentRecord | ChunkRecord
+# ChunkRecord; Entity-Extraction→EntityMention. The Runner keeps them in one
+# per-Stage dict and lets each Stage's capability decide how to (de)serialize its
+# checkpoint. Screening ALSO produces QuarantineRecords, but those never flow
+# downstream — they are persisted to a sidecar and reported, not threaded through
+# the DAG.
+StageOutput = ParserInput | DocumentRecord | ChunkRecord | EntityMention
 _T = TypeVar("_T", bound=StageOutput)
 
 # WAL event kinds. The log is append-only and never read for control flow in S1
@@ -149,6 +153,8 @@ class LocalRunner:
             return ParserInput
         if stage.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
             return ChunkRecord
+        if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
+            return EntityMention
         if stage.capability is CapabilityKind.EXPORT:
             return cls._export_carrier(stage, pipeline)
         return DocumentRecord
@@ -158,9 +164,12 @@ class LocalRunner:
         """Resolve an Export's pass-through carrier from its nearest producing ancestor.
 
         Walks up ``depends_on`` to the closest Stage that actually *produces* the
-        record kind Export re-emits: a Chunk / Content-Screening ancestor ⇒
-        ChunkRecord, otherwise a Parse (or Intake-Screening/Source that must feed a
-        Parse) ancestor ⇒ DocumentRecord.
+        record kind Export re-emits: an Entity-Extraction ancestor ⇒ EntityMention,
+        a Chunk / Content-Screening ancestor ⇒ ChunkRecord, otherwise a Parse (or
+        Intake-Screening/Source that must feed a Parse) ancestor ⇒ DocumentRecord.
+        The frontier is walked breadth-first in ``depends_on`` order, so the nearest
+        producing ancestor wins (an Export fed directly by Entity Extraction exports
+        mentions).
         """
         by_name = {s.name: s for s in pipeline.stages}
         seen: set[str] = set()
@@ -173,6 +182,8 @@ class LocalRunner:
             parent = by_name.get(name)
             if parent is None:  # pragma: no cover - validated DAG
                 continue
+            if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
+                return EntityMention
             if parent.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
                 return ChunkRecord
             if parent.capability is CapabilityKind.PARSE:
@@ -339,6 +350,16 @@ class LocalRunner:
             # Export; quarantined chunks are removed and persisted for audit.
             return list(content_outcome.passed)
 
+        if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
+            if not isinstance(provider, EntityExtractor):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the EntityExtractor capability."
+                )
+                raise TypeError(msg)
+            chunk_records = self._as_type(stage, incoming, ChunkRecord)
+            return list(provider.extract(chunk_records))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -445,24 +466,29 @@ class LocalRunner:
         return [r for r in records if isinstance(r, expected)]
 
     @staticmethod
-    def _as_records(stage: Stage, records: list[StageOutput]) -> list[DocumentRecord | ChunkRecord]:
+    def _as_records(
+        stage: Stage, records: list[StageOutput]
+    ) -> list[DocumentRecord | ChunkRecord | EntityMention]:
         """Narrow gathered inputs to the inter-Stage Records Export materializes.
 
-        Export materializes DocumentRecords (S1/S2 spine) or ChunkRecords (S3, when
-        a Chunk Stage is upstream); a raw ParserInput (not a Record) means a Source
-        was wired straight into Export with no Parse between. Surface it as a clear
+        Export materializes DocumentRecords (S1/S2 spine), ChunkRecords (S3, when a
+        Chunk Stage is upstream), or EntityMentions (S4, when an Entity-Extraction
+        Stage is upstream); a raw ParserInput (not a Record) means a Source was
+        wired straight into Export with no Parse between. Surface it as a clear
         typed error.
         """
-        wrong = [r for r in records if not isinstance(r, (DocumentRecord, ChunkRecord))]
+        exportable = (DocumentRecord, ChunkRecord, EntityMention)
+        wrong = [r for r in records if not isinstance(r, exportable)]
         if wrong:
             got = sorted({type(r).__name__ for r in wrong})
             msg = (
                 f"Stage {stage.name!r} (export) requires Record inputs "
-                f"(DocumentRecord/ChunkRecord) but received: {', '.join(got)}. "
-                f"An Export needs a Parse (and optionally a Chunk) upstream."
+                f"(DocumentRecord/ChunkRecord/EntityMention) but received: "
+                f"{', '.join(got)}. An Export needs a Parse (and optionally a "
+                f"Chunk / Entity-Extraction) upstream."
             )
             raise TypeError(msg)
-        return [r for r in records if isinstance(r, (DocumentRecord, ChunkRecord))]
+        return [r for r in records if isinstance(r, exportable)]
 
     @staticmethod
     def _final_records(
@@ -516,6 +542,9 @@ class LocalRunner:
             pipeline, ordered, outputs, CapabilityKind.CONTENT_SCREENING
         )
         flagged_source = post_content if post_content else chunked
+        mentions = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.ENTITY_EXTRACTION
+        )
         return QualityReport(
             pipeline_name=pipeline.name,
             run_id=run_id,
@@ -527,6 +556,7 @@ class LocalRunner:
             parse=self._parse_quality(pipeline, parsed),
             chunk=self._chunk_quality(pipeline, chunked, flagged_source),
             screening=self._screening_quality(pipeline, run_id, storage, ordered),
+            entities=self._entity_quality(pipeline, mentions),
         )
 
     @staticmethod
@@ -613,6 +643,46 @@ class LocalRunner:
         quality.chunks_flagged = sum(
             1 for r in flagged_source if isinstance(r, ChunkRecord) and r.flagged
         )
+        return quality
+
+    @staticmethod
+    def _entity_quality(
+        pipeline: Pipeline, records: list[StageOutput]
+    ) -> EntityQuality | None:
+        """Aggregate Entity-Extraction quality: per-type counts + confidence dist.
+
+        Only computed when the Pipeline has an Entity-Extraction Stage. ``records``
+        is that Stage's output (the mention set) from which per-label counts, the
+        confidence histogram, and the offset-resolution invariant are measured:
+        every :class:`~latence_core.contracts.EntityMention`'s Provenance must carry
+        a valid char span AND a page span — the S4 round-trip (mention → offset →
+        original page) — so ``offset_resolving`` is True only when every mention
+        carried a resolvable span. The confidence distribution + per-type counts are
+        the S4 acceptance criterion (they "land in the Quality Report").
+        """
+        if not any(s.capability is CapabilityKind.ENTITY_EXTRACTION for s in pipeline.stages):
+            return None
+        quality = EntityQuality()
+        chunk_ids_with_mentions: set[str] = set()
+        for record in records:
+            if not isinstance(record, EntityMention):
+                continue
+            quality.mentions_total += 1
+            quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
+            quality.confidence.add(record.confidence)
+            chunk_ids_with_mentions.add(record.chunk_record_id)
+            prov = record.provenance
+            has_span = (
+                prov.char_start is not None
+                and prov.char_end is not None
+                and prov.char_end >= prov.char_start
+            )
+            has_pages = prov.page_start is not None and prov.page_end is not None
+            if has_span and has_pages:
+                quality.mentions_offset_resolving += 1
+        quality.chunks_with_mentions = len(chunk_ids_with_mentions)
+        # Sort per_type for a stable, deterministic report.
+        quality.per_type = dict(sorted(quality.per_type.items()))
         return quality
 
     @staticmethod

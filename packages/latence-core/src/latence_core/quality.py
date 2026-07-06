@@ -14,7 +14,9 @@ from latence_core.contracts import ScreeningFinding
 
 # v3 (S3): the report gains ``chunk`` (Chunk-Stage counts + offset-integrity) and
 # ``screening`` (both checkpoints' quarantine/flag findings).
-QUALITY_SCHEMA_VERSION = 3
+# v4 (S4): the report gains ``entities`` (Entity-Extraction per-type mention counts
+# and the confidence distribution).
+QUALITY_SCHEMA_VERSION = 4
 
 
 class StageMetrics(BaseModel):
@@ -126,6 +128,65 @@ class ScreeningQuality(BaseModel):
         return self.intake_screened + self.content_screened
 
 
+class ConfidenceHistogram(BaseModel):
+    """A fixed-bin histogram of mention confidences (the confidence distribution, S4).
+
+    Ten equal-width bins over ``[0.0, 1.0]``: ``bins[i]`` counts mentions whose
+    confidence falls in ``[i/10, (i+1)/10)`` — except a confidence of exactly 1.0,
+    which lands in the top bin. Deterministic and dependency-free, so a seeded run
+    yields the identical distribution.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bins: list[int] = Field(default_factory=lambda: [0] * 10)
+
+    def add(self, confidence: float) -> None:
+        """Increment the bin ``confidence`` falls in (1.0 lands in the top bin)."""
+        clamped = min(max(confidence, 0.0), 1.0)
+        idx = min(int(clamped * 10), 9)
+        self.bins[idx] += 1
+
+    @property
+    def count(self) -> int:
+        return sum(self.bins)
+
+    @property
+    def mean(self) -> float:
+        """Mean confidence, estimated at each bin's midpoint (0.0 if empty)."""
+        total = self.count
+        if total == 0:
+            return 0.0
+        weighted = sum(count * ((i + 0.5) / 10) for i, count in enumerate(self.bins))
+        return round(weighted / total, 6)
+
+
+class EntityQuality(BaseModel):
+    """Entity-Extraction quality: per-type mention counts + confidence distribution (S4).
+
+    Emitted when a run had an Entity-Extraction Stage. ``mentions_total`` is the
+    number of typed :class:`~latence_core.contracts.EntityMention`s produced;
+    ``per_type`` breaks that down by entity label (the zero-shot label set the
+    Pipeline configured); ``confidence`` is the fixed-bin distribution of mention
+    confidences. ``mentions_offset_resolving`` counts mentions whose Provenance
+    carried a valid source char span AND page span — the S4 round-trip invariant
+    (mention → offset → original page).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mentions_total: int = 0
+    mentions_offset_resolving: int = 0
+    chunks_with_mentions: int = 0
+    per_type: dict[str, int] = Field(default_factory=dict)
+    confidence: ConfidenceHistogram = Field(default_factory=ConfidenceHistogram)
+
+    @property
+    def offset_resolving(self) -> bool:
+        """True if every emitted mention carried a resolvable source offset+page span."""
+        return self.mentions_offset_resolving == self.mentions_total
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -144,6 +205,8 @@ class QualityReport(BaseModel):
     # Present when the run had a Chunk Stage / a Screening Stage respectively.
     chunk: ChunkQuality | None = None
     screening: ScreeningQuality | None = None
+    # Present when the run had an Entity-Extraction Stage.
+    entities: EntityQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

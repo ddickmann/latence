@@ -86,3 +86,39 @@ under `<run>/quarantine/<stage>.jsonl`; per-record decisions land under
 `<run>/screening/<stage>.jsonl`; and quarantine dispositions/reasons plus chunk
 and screening metrics roll up into the Quality Report's `chunk` and `screening`
 sections (ADR-0021).
+
+## Entity Extraction (S4)
+
+**Entity Extraction** finds typed entity mentions in chunked text (zero-shot NER),
+inserted after Chunk as an `entity_extraction` Stage (see
+`examples/entity-slice.yaml`). Each mention is a first-class `EntityMention` record
+carrying its label, a confidence, and the char span it occupies **in the parent
+document's assembled markdown** — so a mention resolves back through the parent's
+page map to its original source page (the round-trip: mention → offset → page). The
+label set is **zero-shot**: supplied per Pipeline in `config`, nothing hardcoded in
+core.
+
+- **`entity.gazetteer`** ships in core (pure-Python, deterministic, no model
+  download): a zero-shot gazetteer/regex extractor. Config: `labels` (a mapping of
+  entity type → `{terms: [...], patterns: [...], confidence: float}`),
+  `default_confidence` (0.9), `case_sensitive` (false), `min_chars` (1).
+
+  ```yaml
+    - name: entities
+      capability: entity_extraction
+      provider: entity.gazetteer
+      depends_on: [chunk]
+      config:
+        labels:
+          PERSON: { terms: [Alice, Bob] }
+          ORG:    { terms: [Acme Corp], confidence: 0.95 }
+          EMAIL:  { patterns: ['[\w.+-]+@[\w.-]+\.\w+'] }
+  ```
+
+- **`entity.gliner`** (in the separate `latence-ner-gliner` package) is a learned
+  zero-shot Provider over a GLiNER checkpoint via `transformers`/ONNX (CPU,
+  Apache-2.0 weights+code). It is a one-line swap — `provider: entity.gliner`,
+  `config.labels: [person, organization, ...]` — no pipeline change (ADR-0016).
+
+Per-type mention counts and the confidence distribution land in the Quality
+Report's `entities` section (ADR-0022).

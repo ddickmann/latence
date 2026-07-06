@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-ner-gliner"
+version = "0.1.0"
+description = "Learned zero-shot Entity Extraction Provider (GLiNER, CPU via transformers/ONNX) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER model stack
+# (gliner -> torch/transformers) ships with THIS Provider package, not the thin
+# core. Both the gliner library and the default urchade/gliner_multi-v2.1
+# checkpoint are Apache-2.0 (weights AND code verified permissive, ADR-0012,
+# 2026-07-06); nothing downloads unless a Pipeline configures this Provider.
+dependencies = [
+    "latence-core",
+    "gliner>=0.2.5",
+]
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'entity.gliner' available to any Pipeline with no core change
+# (ADR-0004), alongside the in-core deterministic 'entity.gazetteer'.
+[project.entry-points."latence.providers"]
+"entity.gliner" = "latence_ner_gliner.provider:GlinerEntityExtractor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_ner_gliner"]

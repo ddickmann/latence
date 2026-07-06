@@ -1,0 +1,73 @@
+# S4 Entity Extraction Pipeline:
+#   Source -> Parse -> Chunk -> Entity Extraction -> Export
+#
+# Entity Extraction (CONTEXT `Entity Extraction`) finds typed entity mentions in
+# chunked text (zero-shot NER). Every mention carries its label, a confidence, and
+# the char span it occupies in the parent document's assembled markdown — so a
+# mention resolves back through the parent's page map to its ORIGINAL source page
+# (the S4 round-trip: mention -> offset -> page, via the core PageOffsetIndex).
+#
+# ZERO-SHOT: the entity label set is supplied here in `config`, not hardcoded in
+# core. The same Provider extracts person/organization for one corpus and gene/drug
+# for another — swap the labels, no code change.
+#
+# The reference Provider `entity.gazetteer` ships IN latence-core: a deterministic,
+# dependency-free gazetteer/regex extractor (hash-stable, CPU, no model download).
+# For learned NER, install `latence-ner-gliner` and swap to `entity.gliner` (a
+# GLiNER checkpoint via transformers/ONNX, Apache-2.0 weights+code) — a one-line
+# provider/config change, no pipeline change (ADR-0004/0007/0016).
+#
+# Run with:
+#   latence run examples/entity-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/:
+#   export/records.jsonl (typed EntityMentions) + parquet,
+#   quality-report.json  (entities: per-type counts + confidence distribution).
+name: entity-slice
+storage_uri: file:///tmp/latence-entity-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # edit to your folder of text / markdown files
+      sensitivity: internal
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext         # swap to parser.document for real PDFs (S2)
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config:
+      max_tokens: 512
+      overlap_tokens: 64
+      min_tokens: 16
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer         # swap to entity.gliner for learned NER
+    depends_on: [chunk]
+    config:
+      # The zero-shot label set (per-Pipeline; nothing hardcoded in core). Each
+      # label declares literal `terms` (a gazetteer) and/or regex `patterns`.
+      labels:
+        ORG:
+          terms: [Acme Corp, Globex, Initech]
+          confidence: 0.95
+        PERSON:
+          terms: [Alice, Bob, Carol]
+          confidence: 0.85
+        EMAIL:
+          patterns: ['[\w.+-]+@[\w.-]+\.\w+']
+          confidence: 0.99
+      # default_confidence: 0.9        # confidence when a label sets none
+      # case_sensitive: false          # match `terms` case-insensitively (default)
+      # min_chars: 1                    # near-empty chunks below this are skipped
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [entities]

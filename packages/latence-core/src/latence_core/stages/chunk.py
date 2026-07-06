@@ -94,4 +94,8 @@ class MarkdownChunker:
                 content=ch.text,
                 media_type="text/markdown",
                 token_count=ch.token_count,
+                # Carry the parent's page map forward so a downstream Stage that
+                # finds a sub-chunk offset (an entity mention) can resolve *that*
+                # offset's own source page, not just inherit the chunk's range.
+                page_map=doc.page_map,
             )

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from latence_core.contracts import (
         ChunkRecord,
         DocumentRecord,
+        EntityMention,
         ParserInput,
         QuarantineRecord,
         Record,
@@ -115,6 +116,23 @@ class ContentScreener(Protocol):
 
     def screen_content(self, chunks: Iterable[ChunkRecord]) -> ScreeningOutcome[ChunkRecord]:
         """Return chunks (some marked) plus any quarantined chunks and findings."""
+        ...
+
+
+@runtime_checkable
+class EntityExtractor(Protocol):
+    """Finds typed entity mentions in chunked text (CONTEXT ``Entity Extraction``).
+
+    Zero-shot NER: the label set is configured per Pipeline (Stage ``config``), not
+    hardcoded — the Capability names no types. Each emitted
+    :class:`~latence_core.contracts.EntityMention` carries its label, confidence,
+    and the char span it occupies **in the parent document's assembled markdown**,
+    so a mention resolves back through the parent's page map to its source page(s).
+    An empty or near-empty chunk yields no mentions (never an error).
+    """
+
+    def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
+        """Consume :class:`ChunkRecord`s and yield typed :class:`EntityMention`s."""
         ...
 
 

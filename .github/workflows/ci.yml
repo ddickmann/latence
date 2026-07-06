@@ -35,6 +35,14 @@ jobs:
       - name: Sync workspace
         run: uv sync --python ${{ matrix.python-version }}
 
+      # latence-ner-gliner is a workspace member but NOT in the dev env's deps: it
+      # pulls the heavy GLiNER stack (torch/transformers), which would break the
+      # CPU-first, offline, deterministic test env (ADR-0007/0016). Install ONLY its
+      # source (no deps) so its src is type-checked and its provider tests (which
+      # monkeypatch the gliner dep) collect and run offline.
+      - name: Install latence-ner-gliner source (no heavy deps)
+        run: uv pip install --no-deps -e packages/latence-ner-gliner
+
       - name: Ruff (lint)
         run: uv run ruff check packages
 
@@ -44,6 +52,7 @@ jobs:
           packages/latence-core/src
           packages/latence-parser-plaintext/src
           packages/latence-parser-document/src
+          packages/latence-ner-gliner/src
 
       - name: Pytest
         run: uv run pytest
@@ -53,6 +62,7 @@ jobs:
           uv build --package latence-core
           uv build --package latence-parser-plaintext
           uv build --package latence-parser-document
+          uv build --package latence-ner-gliner
 
   storage-s3:
     name: Storage on MinIO (s3://)

@@ -32,6 +32,9 @@ latence = "latence_core.cli:app"
 "chunk.markdown" = "latence_core.stages.chunk:MarkdownChunker"
 "screening.intake_signature" = "latence_core.stages.screening:SignatureSizeIntakeScreener"
 "screening.content_keyword" = "latence_core.stages.screening:KeywordContentScreener"
+# S4 built-in: deterministic zero-shot gazetteer/regex entity extractor (pure
+# Python, no extra deps). The learned GLiNER Provider lives in latence-ner-gliner.
+"entity.gazetteer" = "latence_core.stages.entity:GazetteerEntityExtractor"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]
