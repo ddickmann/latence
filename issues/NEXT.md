@@ -13,15 +13,19 @@ Phase 1 is a strict build-through. Pull the top unblocked issue, meet the **Base
 - [x] **S8 — disambiguation** (ported 5-strategy resolver cascade + Union-Find + audited merge log + GLinker linking + RelationNormalizer; ADR-0026)
 - [x] **S9 — graph-assembly+export** (canonical KG with content-addressed nodes/edges + per-edge Evidence; KG Export as Parquet/TTL/GraphML; ADR-0027)
 - [x] **S10 — quality-report** (Quality Report promoted to the full first-class artifact — offset-aligned completeness + corpus drift roll-up + machine- & human-readable render — plus the gold-set harness: per-Stage precision/recall/F1 on the adopter's own annotated corpus; ADR-0028)
+- [x] **S11 — incremental-deltas** (WAL-backed Corpus Version transactions; content-hash Delta; affected-set splice with merge-on-add/split-on-delete; drift reconcile; Retraction + real GDPR Purge — physical source removal + cross-version expunge + checkpoint wipe; ADR-0029)
+- [x] **S12 — performance-path+runner** (endpoint Providers for the heavy Capabilities — one-config swap, byte-identical contracts, retries surfaced in the report — + an Airflow Runner adapter on platform state; ADR-0030)
+- [x] **S13 — demo-package** (`latence-demo`: one-command offline messy-corpus → PII-handled RAG corpus + browsable Evidence-bearing KG + Quality Report in a self-contained viewer; live one-line Provider swap; --strict smoke test; ADR-0011/0019)
+
+## Phase 1 COMPLETE — at the HARD STOP
+
+All 13 slices merged to `main` (12 packages). Do **not** start Phase 2 until every G1 box is green.
 
 ## Now
-- [ ] **S11 — incremental-deltas** ← start here
+- [ ] **G1 — profound-testing-gate (#14)** ← the hard stop. First burn down the before-G1 debt below, then run G1's exit criteria.
 
-## Phase-1 queue (in order)
-S11 incremental-deltas · S12 performance-path+runner · S13 demo-package
-
-## Then — HARD STOP
-- [ ] **G1 — profound-testing-gate** (do not start Phase 2 until every G1 box is green)
+## Before-G1 debt (must be resolved at/by G1)
+#24 mypy-strict on tests · #26 chunking O(n²) DoS · #28 gazetteer ReDoS · #30 manifest secret scrub · #33 profiling pair-state memory + report PII · #35 disambiguation type-gate · #37 RAG PII-handled default + Embedder seam · #39 gold-set basename + docstrings · #42 true affected-set recompute + purge collateral guard · #44 endpoint size cap + Airflow real-path · #46 demo polish
 
 ## Phase-2 queue (after G1)
 H-core · H2 · H3 · H4 · H5 · H6 · H7 · H8 · H9 · H10 · H11 · H12 · H13
