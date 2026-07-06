@@ -41,6 +41,37 @@ latence-framework/
 │   ├── latence-parser-*/      # Parser Providers
 │   ├── latence-ner-*/         # EntityExtractor Providers
 │   ├── ...                    # one package per Provider family
-│   └── latence-framework/     # meta-package: the CPU demo set
+│   └── latence-demo/          # the CPU demo set: bundled corpus + viewer + `latence-demo`
 └── demo/                      # docker compose: messy corpus → KG + Quality Report
 ```
+
+## Try the demo (one command)
+
+`docker compose up` (or `uv run latence-demo`) ingests a bundled **messy** corpus — mixed
+text/markdown + a real PDF, plus deliberately dangerous files — and produces parsed markdown, a
+browsable **knowledge graph**, and the **Quality Report**, rendered in a **self-contained web
+viewer** (no external CDN/network). CPU-only, no cloud, no GPU, no credentials.
+
+```bash
+# From a clean clone, with uv:
+uv sync
+uv run latence-demo
+open /tmp/latence-demo/_latence/runs/demo/export/index.html
+
+# Or with Docker (no local Python):
+cd demo && docker compose up
+open out/_latence/runs/demo/export/index.html
+```
+
+You will see the type-spoofed file, the zip bomb, and the oversized file **Quarantined**; the
+prompt-injection document **flagged**; and `IBM` / `International Business Machines` collapsed
+to one node with `works_for` / `partner_of` edges, each carrying **Evidence**.
+
+**The model- and cloud-agnostic proof** — change ONE line and rerun the *identical* Pipeline:
+
+```bash
+uv run latence-demo --entity-provider entity.gliner    # a local model instead of the gazetteer
+```
+
+`diff examples/demo-pipeline.yaml examples/demo-pipeline.swap.yaml` shows the single-Provider
+change. See [`packages/latence-demo/README.md`](./packages/latence-demo/README.md) for details.

@@ -13,6 +13,7 @@ latence-parser-endpoint = { workspace = true }
 latence-ner-endpoint = { workspace = true }
 latence-embedder-endpoint = { workspace = true }
 latence-runner-airflow = { workspace = true }
+latence-demo = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
 [project]
@@ -34,6 +35,11 @@ dependencies = [
     "latence-core",
     "latence-parser-plaintext",
     "latence-parser-document",
+    # The S13 showable demo — CPU-only, offline, only depends on latence-core +
+    # latence-parser-document (both already pinned), so it installs into the default
+    # dev env and its tests run offline/deterministically (unlike the heavy/endpoint
+    # Provider packages above).
+    "latence-demo",
 ]
 
 [dependency-groups]

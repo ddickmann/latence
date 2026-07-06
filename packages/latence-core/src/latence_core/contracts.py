@@ -313,9 +313,24 @@ class ParserInput(BaseModel):
 
     ``config`` carries per-input Parser hints (e.g. a forced encoding or an OCR
     language) so a Source or the Runner can steer a Parser without a new contract.
+
+    ``content`` bytes are serialized to JSON as **base64** (``ser_json_bytes`` /
+    ``val_json_bytes``), not as a UTF-8 string. This is a serialization-durability
+    invariant, not a field change: a raw source document can be *arbitrary binary*
+    (a PDF, an office file, a ZIP archive with a deflate stream), and Pydantic's
+    default bytes-as-UTF-8 JSON encoding raises on any byte sequence that is not
+    valid UTF-8 — which would tear the Runner's checkpoint the moment a genuinely
+    binary file (e.g. a Screened ZIP) is threaded through the Source/Intake seam.
+    base64 round-trips *any* bytes losslessly (``model_validate_json`` yields the
+    identical bytes), so checkpoint/resume survives the messy, dangerous corpus the
+    demo is built to ingest. The model fields are unchanged, so the inter-Stage
+    contract (and its ``schema_version``) is unchanged — only the on-disk JSON
+    encoding of already-binary content is made lossless.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid", ser_json_bytes="base64", val_json_bytes="base64"
+    )
 
     schema_version: int = Field(default=SCHEMA_VERSION)
     provenance: Provenance

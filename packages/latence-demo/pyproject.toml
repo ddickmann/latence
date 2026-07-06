@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-demo"
+version = "0.1.0"
+description = "Latence framework showable demo (ADR-0011): one command ingests a bundled messy corpus and produces parsed markdown, a browsable knowledge graph, and the Quality Report — CPU-only, no cloud, self-contained web viewer."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# The CPU demo set (ADR-0016): the thin core plus the pure-Python reference
+# Providers the demo pipeline uses (parser.document for real PDFs). Every one is
+# CPU-only, offline, permissively licensed (ADR-0007/0012) — `pip install
+# latence-demo` gives an adopter the whole one-command onboarding with no torch,
+# no cloud client, no GPU. The optional GLiNER / endpoint / Airflow Provider
+# packages are NOT pulled in; the documented one-line Provider swap installs the
+# one it names.
+dependencies = [
+    "latence-core",
+    "latence-parser-document",
+]
+
+[project.scripts]
+# `latence-demo` runs the whole showable artifact from a clean clone (the
+# `docker compose up` entrypoint calls the same code, ADR-0011).
+latence-demo = "latence_demo.cli:main"
+
+# The self-contained web-viewer Export Provider ships here, registered under the
+# framework discovery group (ADR-0004): it renders the knowledge graph (nodes /
+# edges / Evidence) as ONE portable HTML file on Storage — no CDN, no network —
+# exactly like the KG Export writes portable graph files (ADR-0017). Installing
+# this package makes `export.demo_site` available to any Pipeline.
+[project.entry-points."latence.providers"]
+"export.demo_site" = "latence_demo.viewer:DemoSiteExport"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_demo"]

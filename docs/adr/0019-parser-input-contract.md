@@ -12,3 +12,18 @@ The S1 walking skeleton over-fit the Parse seam to its own passthrough Provider.
 This strengthens ADR-0004 (Capability protocols): the Capability seam is now typed against the data the Stage *actually* consumes and the data it *produces* as two contracts, so the model-agnosticity promise holds for a real bytes-consuming Provider, not only the demo passthrough. It respects ADR-0006 (one schema, dual serialization): `ParserInput` is another versioned Pydantic contract, and Provenance/Classification remain required at the seam.
 
 Rejected: keeping `DocumentRecord` as the Parse input (the over-fit above — forces Sources to decode, which they cannot do for binary formats, and gives PDF Parsers a nonsensical pre-decoded `str`); a single union-typed record with a "is-it-parsed-yet" flag (a mode bit on one contract invites Providers to read the wrong half and defers the type error to runtime); and pushing raw content through an out-of-band Storage handle instead of the contract (breaks the "every Stage boundary is a validated versioned record" invariant and loses the checkpoint round-trip that resume depends on).
+
+---
+
+**S13 build note — binary-safe `ParserInput` checkpoint serialization.** The claim above that
+`model_dump_json` "round-trips raw bytes losslessly" held only for byte sequences that happen
+to be valid UTF-8. Pydantic's default `bytes`→JSON encoding is a UTF-8 decode, which *raises*
+on any non-UTF-8 sequence — so the first genuinely binary source document threaded through the
+Source/Intake checkpoint (a PDF is mostly ASCII and survived; a ZIP archive's deflate stream
+does not) tore the Runner's checkpoint mid-run. The S13 demo, whose whole point is ingesting a
+messy corpus *including a Screened ZIP bomb*, surfaced this. Fix: `ParserInput` now sets
+`ser_json_bytes="base64"` / `val_json_bytes="base64"`, so `content` round-trips **any** bytes
+losslessly (`model_validate_json` yields the identical bytes). This is a serialization-encoding
+change only — the model fields, the inter-Stage contract, and its `schema_version` are
+unchanged, and every existing round-trip test still passes — so the checkpoint/resume invariant
+now holds for arbitrary binary source content, as this ADR always intended.

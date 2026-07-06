@@ -1,0 +1,111 @@
+# S13 Demo Pipeline — the full spine over the bundled messy corpus (ADR-0011).
+#
+#   Source -> Intake Screening -> Parse -> Chunk -> Content Screening
+#          -> Entity Extraction -> Relation Extraction -> Redaction
+#          -> Disambiguation -> Graph Assembly
+#          -> Export (knowledge_graph) + Export (demo_site) + Export (RAG corpus)
+#
+# CPU-only, offline, no cloud credentials. Every Provider ships in latence-core or
+# latence-demo (pure-Python, permissively licensed — ADR-0007/0012).
+#
+# The one-command demo (`latence-demo` / `docker compose up`) stages the bundled corpus and
+# runs this pipeline; this YAML is the same pipeline as code, committed so a platform team can
+# diff it. `demo-pipeline.swap.yaml` is the ONE-LINE Provider swap: entity.gazetteer ->
+# entity.gliner (a local model) — same Stages, same contracts, same viewer (ADR-0011).
+#
+# `EXAMPLES_DIR` / `STORAGE_URI` are placeholders the demo replaces with absolute URIs; edit
+# the Source `path` to your own folder to run this pipeline directly with `latence run`.
+name: latence-demo
+storage_uri: file:///tmp/latence-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/demo-corpus   # the bundled messy corpus is staged here
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152        # 2 MiB — the planted 3 MiB oversized fixture is Quarantined
+      max_zip_ratio: 50.0       # the planted zip bomb exceeds this ratio (metadata-only check)
+
+  - name: parse
+    capability: parse
+    provider: parser.document   # real PDFs + text -> markdown + page map (S2)
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword   # flags the prompt-injection fixture chunk
+    depends_on: [chunk]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer   # <-- THE ONE-LINE SWAP POINT (see demo-pipeline.swap.yaml)
+    depends_on: [content_screen]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, Acme Corporation, International Business Machines, IBM, Globex]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [content_screen, entities]
+    config:
+      window_chars: 200
+      relations:
+        works_for: {head: PERSON, tail: ORG, triggers: [works at, employed by, joined]}
+        partner_of: {head: ORG, tail: ORG, triggers: [partner of, partnered with]}
+
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule   # PII-handled corpus variant
+    depends_on: [parse]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [entities, relations]
+    config:
+      kb:
+        - {kb_id: Q1, name: Acme, entity_type: ORG}
+        - {kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM]}
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-demo}
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph   # KG as Parquet + TTL + GraphML (ADR-0017)
+    depends_on: [graph]
+    config: {basename: graph}
+
+  - name: export_site
+    capability: export
+    provider: export.demo_site         # the self-contained web viewer (no CDN/network)
+    depends_on: [graph]
+    config: {basename: index, pipeline_name: latence-demo}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet     # the RAG-ready corpus (PII-handled)
+    depends_on: [redact]
+    config: {basename: corpus}

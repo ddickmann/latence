@@ -9,3 +9,4 @@ build/
 # Data
 .DS_Store
 demo/data/
+demo/out/

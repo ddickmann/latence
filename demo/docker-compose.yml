@@ -1,0 +1,24 @@
+# The one-command showable demo (ADR-0011, S13):
+#
+#   cd demo && docker compose up
+#
+# Ingests the bundled messy corpus (mixed text/markdown + a real PDF + deliberately
+# dangerous files) and produces parsed markdown, a browsable knowledge graph, and the
+# Quality Report — CPU-only, no cloud, no GPU, no external credentials. Every artifact
+# (the self-contained web viewer index.html, the KG as Parquet/TTL/GraphML, the RAG
+# corpus, and the Quality Report) lands under ./out on the host; open:
+#
+#   demo/out/_latence/runs/demo/export/index.html
+#
+# The container exits non-zero if a planted dangerous file was not caught or if
+# contract-completeness failed — the one command is also a smoke test.
+services:
+  demo:
+    build:
+      # Build from the repo root so the whole uv workspace is in context.
+      context: ..
+      dockerfile: demo/Dockerfile
+    # No network needed at runtime — the whole pipeline is offline/CPU-only.
+    network_mode: "none"
+    volumes:
+      - ./out:/data

@@ -71,6 +71,7 @@ jobs:
           packages/latence-ner-endpoint/src
           packages/latence-embedder-endpoint/src
           packages/latence-runner-airflow/src
+          packages/latence-demo/src
 
       - name: Pytest
         run: uv run pytest
@@ -88,6 +89,7 @@ jobs:
           uv build --package latence-ner-endpoint
           uv build --package latence-embedder-endpoint
           uv build --package latence-runner-airflow
+          uv build --package latence-demo
 
   storage-s3:
     name: Storage on MinIO (s3://)
