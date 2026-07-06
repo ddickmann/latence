@@ -186,3 +186,68 @@ def test_converging_dag_resume_sees_both_parents_current_outputs(tmp_path: Path)
     rows = [json.loads(line) for line in s.read_text(jsonl).splitlines() if line.strip()]
     file_names = {r["provenance"]["file_name"] for r in rows}
     assert file_names == {"a1.txt", "b1.txt", "b2.txt"}
+
+
+# -- issue #30: secret scrubbing on manifest write --------------------------
+
+
+def test_scrub_sensitive_redacts_nested_secret_keys() -> None:
+    """The scrubber redacts secret-looking keys anywhere in a nested manifest tree."""
+    from latence_core.runner import scrub_sensitive
+
+    payload = {
+        "name": "p",
+        "stages": [
+            {
+                "provider": "relation.llm",
+                "config": {
+                    "model": "gpt-4o",
+                    "api_key": "sk-INLINE-SECRET",
+                    "nested": {"auth_token": "tok-123", "client_secret": "cs-9"},
+                    "params": [{"password": "hunter2"}, {"note": "safe"}],
+                },
+            }
+        ],
+    }
+    scrubbed = scrub_sensitive(payload)
+    import json
+
+    dumped = json.dumps(scrubbed)
+    # No secret VALUE survives anywhere in the serialized manifest.
+    for leaked in ("sk-INLINE-SECRET", "tok-123", "cs-9", "hunter2"):
+        assert leaked not in dumped, f"secret {leaked!r} leaked into manifest"
+    # Non-secret data is untouched; secret KEYS remain (documenting a secret was set).
+    assert scrubbed["stages"][0]["config"]["model"] == "gpt-4o"  # type: ignore[index]
+    assert scrubbed["stages"][0]["config"]["api_key"] == "***REDACTED***"  # type: ignore[index]
+    assert scrubbed["stages"][0]["config"]["params"][1]["note"] == "safe"  # type: ignore[index]
+
+
+def test_manifest_never_persists_inlined_api_key(docs_dir: Path, tmp_path: Path) -> None:
+    """End-to-end: an operator who inlines api_key into a Stage config must not have it
+    written cleartext to manifest.json (issue #30). Reverting the scrub fails here."""
+    store = f"file://{tmp_path}/store"
+    secret = "sk-DO-NOT-LEAK-1234567890"
+    p = Pipeline.from_yaml_text(
+        f"""
+name: t
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config: {{path: 'file://{docs_dir}', api_key: '{secret}', auth_token: '{secret}'}}
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [parse]
+"""
+    )
+    LocalRunner().run(p, run_id="r1")
+    s = Storage.for_uri(store)
+    manifest = s.read_text(f"{store}/_latence/runs/r1/manifest.json")
+    assert secret not in manifest, "inlined secret leaked into manifest.json"
+    assert "***REDACTED***" in manifest

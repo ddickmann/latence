@@ -115,6 +115,46 @@ _T = TypeVar("_T", bound=StageOutput)
 _WAL_STAGE_BEGIN = "stage_begin"
 _WAL_STAGE_COMMIT = "stage_commit"
 
+# Secret-handling (issue #30): the run manifest persists the whole Pipeline
+# (including every Stage's operator ``config``) verbatim. A Provider such as the S5
+# relation.llm reads its ``api_key`` from ``$OPENAI_API_KEY`` (env fallback, no key
+# in code/logs — the Baseline), but an operator who *inlines* ``api_key`` into the
+# Pipeline YAML would otherwise write it cleartext into ``manifest.json``. Any config
+# key whose (lowercased) name contains one of these tokens is redacted before the
+# manifest is written. Matching is substring-based so ``api_key``, ``openai_api_key``,
+# ``auth_token``, ``client_secret``, ``db_password`` are all caught.
+_SENSITIVE_KEY_TOKENS = ("api_key", "apikey", "token", "secret", "password", "passwd", "credential")
+_REDACTED = "***REDACTED***"
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in _SENSITIVE_KEY_TOKENS)
+
+
+def scrub_sensitive(value: object) -> object:
+    """Recursively redact sensitive config keys in a JSON-able manifest structure.
+
+    Walks the ``pipeline.model_dump(mode="json")`` tree and replaces the *value* of
+    any mapping key that looks like a secret (see ``_SENSITIVE_KEY_TOKENS``) with a
+    fixed placeholder, keeping the key so the manifest still documents that a secret
+    was configured — just not its value (issue #30). Lists and nested mappings are
+    scrubbed in place-of-copy; scalars pass through. Env-var *references* the operator
+    might legitimately keep (e.g. ``"$OPENAI_API_KEY"``) are redacted too — the
+    manifest never needs the secret's value, referenced or inlined.
+    """
+    if isinstance(value, dict):
+        scrubbed: dict[str, object] = {}
+        for key, val in value.items():
+            if isinstance(key, str) and _is_sensitive_key(key):
+                scrubbed[key] = _REDACTED
+            else:
+                scrubbed[key] = scrub_sensitive(val)
+        return scrubbed
+    if isinstance(value, list):
+        return [scrub_sensitive(item) for item in value]
+    return value
+
 
 def topological_order(stages: list[Stage]) -> list[Stage]:
     """Kahn's algorithm over ``depends_on`` edges. Raises on a cycle."""
@@ -354,10 +394,14 @@ class LocalRunner:
 
         manifest_uri = self._manifest_uri(pipeline, run_id)
         if not storage.exists(manifest_uri):
+            # Scrub inlined secrets (api_key/token/secret/password/…) from every Stage
+            # config before persisting — an operator who inlines a key into the YAML
+            # must not have it written cleartext to manifest.json (issue #30).
+            manifest_pipeline = scrub_sensitive(pipeline.model_dump(mode="json"))
             storage.write_atomic(
                 manifest_uri,
                 json.dumps(
-                    {"pipeline": pipeline.model_dump(mode="json"), "run_id": run_id},
+                    {"pipeline": manifest_pipeline, "run_id": run_id},
                     sort_keys=True,
                 ).encode("utf-8"),
             )

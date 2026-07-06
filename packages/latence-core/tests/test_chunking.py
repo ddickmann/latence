@@ -7,9 +7,14 @@ retrieval-sized pieces, and the offset map back into the ORIGINAL text.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from latence_core.chunking import (
+    _WORD_RE,
     ChunkBudget,
+    _overlap_start,
+    _token_index,
     chunk_document,
     estimate_tokens,
     strip_markup,
@@ -219,3 +224,83 @@ def test_budget_rejects_overlap_ge_max() -> None:
 def test_budget_rejects_negative_min() -> None:
     with pytest.raises(ValueError, match="min_tokens"):
         ChunkBudget(max_tokens=100, overlap_tokens=10, min_tokens=-1)
+
+
+# -- issue #26: O(n^2) chunking-DoS regression -------------------------------
+
+
+def _overlap_start_rescan(text: str, boundary: int, overlap_tokens: int) -> int:
+    """The pre-fix O(n) rescan-from-0 overlap look-back, kept as a correctness oracle.
+
+    If :func:`_overlap_start` ever diverges from this reference, the bisect-based
+    rewrite has changed chunk boundaries — the test below asserts they never do.
+    """
+    if overlap_tokens <= 0:
+        return boundary
+    matches = list(_WORD_RE.finditer(text, 0, boundary))
+    if not matches:
+        return boundary
+    budget = 0
+    start = boundary
+    for match in reversed(matches):
+        tok = match.group(0)
+        budget += 1 + ((len(tok) - 1) // 6 if tok.isalnum() and len(tok) > 6 else 0)
+        start = match.start()
+        if budget >= overlap_tokens:
+            break
+    return start
+
+
+def test_overlap_start_is_byte_identical_to_the_old_rescan() -> None:
+    """The bisect rewrite yields the SAME boundary as the O(n) rescan for every cut.
+
+    Chunk boundaries always land at token boundaries (``_best_break`` breaks after a
+    delimiter; ``_window_end`` returns ``match.end()``), so the equivalence is tested
+    at exactly those positions — plus the document ends and 0 — which is the full set
+    the real pipeline ever passes in.
+    """
+    text = ("The quarterly revenue report; growth, margins! And more. " * 60).strip()
+    tokens = _token_index(text)
+    boundaries = {0, len(text), *tokens.ends, *tokens.starts}
+    for overlap in (0, 1, 5, 10, 64):
+        for boundary in sorted(boundaries):
+            assert _overlap_start(tokens, boundary, overlap) == _overlap_start_rescan(
+                text, boundary, overlap
+            ), f"diverged at boundary={boundary}, overlap={overlap}"
+
+
+def test_chunking_pathological_input_stays_near_linear() -> None:
+    """A crafted large plain-text doc must NOT drive chunking into O(n^2) CPU (issue #26).
+
+    Reverting to the rescan-from-0 ``_overlap_start`` makes doubling the input ~4x the
+    time; the bounded backward walk keeps it ~2x. Assert the growth ratio stays well
+    under quadratic so a reverted fix fails here rather than in production.
+    """
+    # Short single-token "words" separated by whitespace maximise the token count per
+    # char — the worst case for a per-chunk rescan. Small max_tokens ⇒ many chunks.
+    unit = "aa "
+    budget = ChunkBudget(max_tokens=20, overlap_tokens=8, min_tokens=2)
+
+    def _time(n_chars: int) -> float:
+        text = (unit * (n_chars // len(unit))).strip()
+        t0 = time.perf_counter()
+        chunk_document(text, budget)
+        return time.perf_counter() - t0
+
+    small = _time(40_000)
+    large = _time(80_000)
+    # Quadratic would give ~4x for a 2x input; linear ~2x. Allow generous slack for a
+    # noisy CI host but stay decisively sub-quadratic (< 3x). ``small`` is floored so a
+    # near-zero fast run cannot make the ratio explode on measurement jitter.
+    ratio = large / max(small, 1e-3)
+    assert ratio < 3.0, f"chunking scaled {ratio:.1f}x for 2x input — O(n^2) regression"
+
+
+def test_chunking_large_document_completes_promptly() -> None:
+    """A 400k-char in-cap document chunks in well under a second (was ~53s pre-fix)."""
+    text = ("word " * 80_000).strip()
+    t0 = time.perf_counter()
+    chunks = chunk_document(text, ChunkBudget(max_tokens=64, overlap_tokens=16, min_tokens=4))
+    elapsed = time.perf_counter() - t0
+    assert chunks
+    assert elapsed < 5.0, f"400k-char chunking took {elapsed:.1f}s — O(n^2) DoS not fixed"

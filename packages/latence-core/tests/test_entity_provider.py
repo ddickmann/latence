@@ -8,8 +8,14 @@ overlap resolution, and config validation.
 
 from __future__ import annotations
 
+import time
+
+import pytest
 from latence_core.contracts import ChunkRecord, Classification, PageMap, Provenance
-from latence_core.stages.entity import GazetteerEntityExtractor
+from latence_core.stages.entity import (
+    _MAX_PATTERN_LENGTH,
+    GazetteerEntityExtractor,
+)
 
 
 def _chunk(
@@ -235,3 +241,142 @@ def test_multiple_chunks_each_offset_independently() -> None:
     assert alice.provenance.char_start == 0
     assert bob.provenance.char_start == 500  # Bob is at chunk-local 0 of chunk-1.
     assert bob.chunk_record_id == "doc1#chunk-1"
+
+
+# -- issue #28: ReDoS guard on operator-supplied config patterns -------------
+
+# Patterns whose backtracking is exponential in Python's engine — each takes
+# many seconds to minutes on a short crafted string (verified: ``(a+)+$`` needs
+# ~68s on 31 chars). Compiling any of these from operator config must be REFUSED.
+#
+# The list deliberately covers ALL three catastrophic shapes, incl. the two that a
+# naive guard misses (both were live bypasses caught in review):
+#   * nested unbounded quantifier under an unbounded group: ``(a+)+`` / ``(a*)*`` …
+#   * an UNBOUNDED OUTER ``{N,}`` quantifier on a quantified group — ``(a+){2,}`` —
+#     which a 3-char trailing-slice guard truncates and lets through;
+#   * a GROUP-FREE run of adjacent unbounded quantifiers over overlapping atoms —
+#     ``a*a*…b`` / ``\w*\w*…x`` — which a ``(...)``-only scan never inspects.
+_PATHOLOGICAL_PATTERNS = [
+    r"(a+)+$",
+    r"(a*)*$",
+    r"(\w+)+$",
+    r"([a-zA-Z]+)*$",
+    r"(a|a)+$",
+    r"(a|ab)+$",
+    r"(.*)*$",
+    r"((ab)*)*$",
+    # Outer {N,} on a quantified group — must not be truncated by the trailing slice.
+    r"(a+){2,}$",
+    r"(\w+){2,}$",
+    r"([a-z]+){3,}$",
+    # Group-free adjacent unbounded quantifiers over overlapping atoms.
+    r"a*a*a*a*a*a*a*b",
+    r"\w*\w*\w*x",
+    r".*.*b",
+]
+
+# Legitimate operator patterns whose adjacent/sequential quantifiers are over DISJOINT
+# atoms (nothing to redistribute) — these are linear and MUST still compile. They lock
+# the adjacency guard against over-rejecting common real-world config regex.
+_SAFE_ADJACENT_QUANTIFIER_PATTERNS = [
+    r"a+b+c",  # disjoint literals
+    r"\w+\s+\w+",  # \w and \s are disjoint metaclasses
+    r"[a-z]+[0-9]+",  # disjoint char classes
+    r"\S+\s+\S+",
+    r"\d+-\d+",
+    r"x*y*z",
+    r"[A-Z]+[a-z]+",
+]
+
+
+@pytest.mark.parametrize("pattern", _PATHOLOGICAL_PATTERNS)
+def test_pathological_config_pattern_is_refused_at_compile_time(pattern: str) -> None:
+    """A catastrophic-backtracking config pattern raises before it is ever run (issue #28).
+
+    Without the guard, construction would succeed and a later crafted chunk would
+    hang the extractor for minutes — a DoS. The guard turns that into an immediate
+    ``ValueError`` at Provider construction, so a reverted fix fails this test.
+    """
+    config = {"labels": {"X": {"patterns": [pattern]}}}
+    with pytest.raises(ValueError, match="backtracking|ReDoS|too long"):
+        GazetteerEntityExtractor(config)
+
+
+def test_overlong_config_pattern_is_refused() -> None:
+    config = {"labels": {"X": {"patterns": ["a" * (_MAX_PATTERN_LENGTH + 1)]}}}
+    with pytest.raises(ValueError, match="too long"):
+        GazetteerEntityExtractor(config)
+
+
+def test_adversarial_input_against_refused_pattern_never_runs() -> None:
+    """The guard fires at construct time, so the exponential match is never reached.
+
+    Belt-and-braces: build the extractor inside the timed block with a pathological
+    pattern and the adversarial input that would trigger the blow-up. Because
+    construction raises immediately, the whole block completes in well under a second
+    — proving no matching against the crafted string ever happens. If the guard were
+    removed, constructing would succeed and running ``extract`` on the crafted chunk
+    would hang far past this bound.
+    """
+    evil_pattern = r"(a+)+$"
+    crafted = _chunk("a" * 40 + "!")  # 40 a's then a non-match — worst case for (a+)+
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError):
+        extractor = GazetteerEntityExtractor({"labels": {"X": {"patterns": [evil_pattern]}}})
+        list(extractor.extract([crafted]))
+    assert time.perf_counter() - t0 < 1.0
+
+
+def test_safe_config_patterns_still_compile_and_match() -> None:
+    """The guard must not reject legitimate operator patterns (no false-positive DoS)."""
+    config = {
+        "labels": {
+            "EMAIL": {"patterns": [r"[\w.]+@[\w.]+"]},
+            "ID": {"patterns": [r"[A-Z]{2,4}-\d{3,6}"]},
+            "PHONE": {"patterns": [r"\+?\d[\d -]{6,14}\d"]},
+            "WORD": {"patterns": [r"cat|dog|bird"]},
+        }
+    }
+    chunk = _chunk("Mail a@b.com id AB-12345 phone +1 555 123 4567 about a dog.")
+    mentions = list(GazetteerEntityExtractor(config).extract([chunk]))
+    labels = {m.label for m in mentions}
+    assert {"EMAIL", "ID", "PHONE", "WORD"} <= labels
+
+
+@pytest.mark.parametrize("pattern", _SAFE_ADJACENT_QUANTIFIER_PATTERNS)
+def test_disjoint_adjacent_quantifiers_are_not_rejected(pattern: str) -> None:
+    """Adjacent unbounded quantifiers over DISJOINT atoms are linear — must compile.
+
+    The group-free adjacency guard flags ``a*a*…b`` only because the atoms OVERLAP.
+    ``a+b+c`` / ``\\w+\\s+\\w+`` / ``[a-z]+[0-9]+`` cannot redistribute input, so they are
+    safe and must not be refused — else the ReDoS guard breaks ordinary config regex.
+    """
+    GazetteerEntityExtractor({"labels": {"X": {"patterns": [pattern]}}})
+
+
+def test_group_free_adjacent_redos_is_refused_before_it_can_run() -> None:
+    """A group-free ``a*a*…b`` DoS pattern is refused at construct time (issue #28).
+
+    This shape has no ``(...)`` group, so a group-only guard never inspects it, yet it
+    is genuinely exponential. Constructing must raise immediately — proving the crafted
+    adversarial chunk is never matched against it.
+    """
+    evil = r"a*a*a*a*a*a*a*a*b"
+    crafted = _chunk("a" * 40)  # 40 a's, no trailing 'b' — worst case for the a*-run
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError, match="backtracking|ReDoS"):
+        extractor = GazetteerEntityExtractor({"labels": {"X": {"patterns": [evil]}}})
+        list(extractor.extract([crafted]))
+    assert time.perf_counter() - t0 < 1.0
+
+
+def test_outer_brace_quantifier_redos_is_refused() -> None:
+    """An outer ``{N,}`` on a quantified group is unbounded and must be refused.
+
+    Regression for the trailing-slice truncation bug: ``(a+){2,}$`` is exponential but a
+    guard that reads only 3 chars after ``)`` truncates the ``}`` of ``{2,}`` and lets it
+    through. The full-quantifier parse must classify ``{2,}`` as unbounded and refuse.
+    """
+    for evil in (r"(a+){2,}$", r"(\w+){5,}$"):
+        with pytest.raises(ValueError, match="backtracking|ReDoS"):
+            GazetteerEntityExtractor({"labels": {"X": {"patterns": [evil]}}})

@@ -229,6 +229,46 @@ def test_relation_requires_head_and_tail_labels() -> None:
         PatternRelationExtractor({"relations": {"bad": {"triggers": ["x"]}}})
 
 
+# -- issue #30 (hardening): _document_texts memory amplification fuzz --------
+
+
+def test_document_texts_reconstructs_and_stays_bounded_under_fuzz() -> None:
+    """Seeded fuzz over adversarial chunk layouts: correct placement, bounded buffer.
+
+    ``_document_texts`` allocates ``buf = [" "] * end`` where ``end`` is the max
+    ``char_start + len(content)`` — bounded by Intake Screening's size cap upstream,
+    but exercised here with sparse/large offsets, overlaps, and empty chunks to prove
+    it never mis-places content nor allocates beyond the true document span (issue #30).
+    Deterministic: a fixed seed keeps the run hash-stable (Baseline bar).
+    """
+    import random
+
+    rng = random.Random(1730)
+    for _ in range(200):
+        n_chunks = rng.randint(1, 8)
+        chunks: list[ChunkRecord] = []
+        for i in range(n_chunks):
+            start = rng.randint(0, 5_000)
+            length = rng.randint(0, 40)
+            content = "".join(rng.choice("abcXYZ ") for _ in range(length))
+            chunks.append(
+                _doc_chunk(content, char_start=start, record_id=f"d1#chunk-{i}")
+            )
+        texts = PatternRelationExtractor._document_texts(chunks)
+        assert set(texts) == {"d1"}
+        reconstructed = texts["d1"]
+        expected_end = max((c.provenance.char_start or 0) + len(c.content) for c in chunks)
+        # The buffer is exactly the document span — no amplification past the last char.
+        assert len(reconstructed) == expected_end
+        # Every chunk's content sits at its own offset (last writer wins on overlap,
+        # matching the in-place slice assignment).
+        placed = [" "] * expected_end
+        for c in chunks:
+            s = c.provenance.char_start or 0
+            placed[s : s + len(c.content)] = c.content
+        assert reconstructed == "".join(placed)
+
+
 def test_relations_scoped_per_document() -> None:
     # Two documents' mentions in one pass; a relation never crosses documents.
     c0 = _doc_chunk("Alice works for Acme Corp.", record_id="d1#chunk-0", document_record_id="d1")

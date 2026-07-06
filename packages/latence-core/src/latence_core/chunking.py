@@ -36,6 +36,7 @@ concern every downstream Stage may need, not a single Provider's private detail.
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass, field
 
@@ -274,6 +275,35 @@ def chunk_document(text: str, budget: ChunkBudget | None = None) -> list[Chunk]:
     return chunks
 
 
+@dataclass(frozen=True)
+class _TokenIndex:
+    """Precomputed token spans + costs over the stripped text, scanned ONCE.
+
+    ``starts[k]`` / ``ends[k]`` are the half-open span of token ``k`` (in the same
+    word/punct stream :func:`estimate_tokens` counts) and ``costs[k]`` its budgeted
+    cost. Building this once per document turns overlap look-back from an O(n) rescan
+    from offset 0 per chunk (the O(n^2) DoS lever, issue #26) into an O(log n) locate
+    plus a bounded backward walk — while yielding byte-identical boundaries.
+    """
+
+    starts: list[int]
+    ends: list[int]
+    costs: list[int]
+
+
+def _token_index(text: str) -> _TokenIndex:
+    """Scan the token stream once, recording each token's span and budgeted cost."""
+    starts: list[int] = []
+    ends: list[int] = []
+    costs: list[int] = []
+    for match in _WORD_RE.finditer(text):
+        tok = match.group(0)
+        starts.append(match.start())
+        ends.append(match.end())
+        costs.append(1 + ((len(tok) - 1) // 6 if tok.isalnum() and len(tok) > 6 else 0))
+    return _TokenIndex(starts=starts, ends=ends, costs=costs)
+
+
 def _budget_pieces(text: str, budget: ChunkBudget) -> list[tuple[int, int]]:
     """Return half-open ``[start, end)`` slices of ``text`` under the token budget.
 
@@ -282,6 +312,7 @@ def _budget_pieces(text: str, budget: ChunkBudget) -> list[tuple[int, int]]:
     the previous window. A trailing piece below ``min_tokens`` is merged into the
     previous piece rather than emitted as a fragment.
     """
+    tokens = _token_index(text)
     pieces: list[tuple[int, int]] = []
     cursor = 0
     length = len(text)
@@ -297,7 +328,7 @@ def _budget_pieces(text: str, budget: ChunkBudget) -> list[tuple[int, int]]:
         pieces.append((cursor, boundary))
         # Next window starts ``overlap_tokens`` before the boundary, but strictly
         # after the current cursor so the loop always advances.
-        next_cursor = _overlap_start(text, boundary, budget.overlap_tokens)
+        next_cursor = _overlap_start(tokens, boundary, budget.overlap_tokens)
         cursor = next_cursor if next_cursor > cursor else boundary
     _merge_short_tail(text, pieces, budget)
     return pieces
@@ -345,20 +376,31 @@ def _best_break(text: str, start: int, hard_end: int) -> int:
     return hard_end
 
 
-def _overlap_start(text: str, boundary: int, overlap_tokens: int) -> int:
-    """The offset ``overlap_tokens`` worth of tokens before ``boundary``."""
+def _overlap_start(tokens: _TokenIndex, boundary: int, overlap_tokens: int) -> int:
+    """The offset ``overlap_tokens`` worth of tokens before ``boundary``.
+
+    Walks the *precomputed* token index backward from ``boundary`` (issue #26): the
+    old implementation re-scanned the whole document from offset 0 on every chunk,
+    making :func:`chunk_document` O(n^2) in document length — a malicious-input DoS
+    lever (a large in-cap .txt drove chunking into minutes/hours on one core). The
+    token spans are now scanned once per document; here we binary-search the last
+    token ending at or before ``boundary`` and walk back only as far as the overlap
+    needs. Byte-identical to the old rescan: the token set considered is exactly the
+    tokens fully within ``[0, boundary)`` (``finditer(text, 0, boundary)`` endpos
+    semantics), walked in reverse, accumulating budgeted cost until it reaches
+    ``overlap_tokens`` and returning that token's start.
+    """
     if overlap_tokens <= 0:
         return boundary
-    matches = list(_WORD_RE.finditer(text, 0, boundary))
-    if not matches:
+    # Last token whose half-open span lies fully within [0, boundary): ends[k] <= boundary.
+    hi = bisect.bisect_right(tokens.ends, boundary)
+    if hi == 0:
         return boundary
     budget = 0
     start = boundary
-    for match in reversed(matches):
-        tok = match.group(0)
-        cost = 1 + ((len(tok) - 1) // 6 if tok.isalnum() and len(tok) > 6 else 0)
-        budget += cost
-        start = match.start()
+    for k in range(hi - 1, -1, -1):
+        budget += tokens.costs[k]
+        start = tokens.starts[k]
         if budget >= overlap_tokens:
             break
     return start

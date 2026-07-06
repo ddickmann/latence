@@ -54,6 +54,321 @@ if TYPE_CHECKING:
 # span, and the confidence assigned.
 _Match = tuple[str, str, int, int, float]
 
+# -- ReDoS guard for operator-supplied config patterns (issue #28) -----------
+#
+# S4 is the first Stage that compiles arbitrary operator-supplied config regex
+# (``labels[...]["patterns"]``) and runs it over untrusted chunk.content. A
+# pathological pattern (nested unbounded quantifiers like ``(\w+)+``, an outer
+# ``{m,}`` on a quantified group like ``(a+){2,}``, an overlapping alternation under
+# a quantifier like ``(a|a)+`` / ``(a|ab)+``, or a run of adjacent unbounded
+# quantifiers with no group at all like ``a*a*a*…b``) plus a crafted document can
+# drive Python's backtracking engine into exponential CPU — a DoS lever even though
+# the dangerous pattern is operator-authored. We keep heavy deps out of core
+# (ADR-0016), so instead of a re2 backend we statically reject the
+# catastrophic-backtracking signature at compile time, before any untrusted content
+# is matched. Literal ``terms`` are escaped and never reach this guard; only raw
+# ``patterns`` do.
+
+# The compiled config-pattern alternation is refused above this character length: a
+# runaway pattern string is itself a red flag and the bound keeps compilation cheap.
+_MAX_PATTERN_LENGTH = 1000
+
+# A quantifier that can match unboundedly (``*``, ``+``, ``{m,}``) — the amplifier in
+# every catastrophic-backtracking pattern. ``?`` and bounded ``{m,n}`` cannot blow up.
+# Used to scan a group *body* for an inner unbounded quantifier (``(X+)+``); the outer
+# quantifier is parsed exactly by ``_quantifier_at`` so ``{N,}`` is never truncated.
+_UNBOUNDED_QUANTIFIER = re.compile(r"[*+]|\{\d*,\}")
+
+
+def _top_level_alternatives(body: str) -> list[str]:
+    """Split a group body on top-level ``|`` (ignoring ``|`` inside nested groups/classes)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_class = False
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            buf.append(body[i : i + 2])
+            i += 2
+            continue
+        if in_class:
+            buf.append(ch)
+            if ch == "]":
+                in_class = False
+        elif ch == "[":
+            in_class = True
+            buf.append(ch)
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "|" and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+# Metaclass first-tokens that match many chars. Two *different* metaclasses can be
+# disjoint (``\w`` vs ``\s``), so this set is only used by the (liberal) alternation
+# heuristic, never by the (strict) adjacency check.
+_METACLASS_FIRSTS = {rf"\{c}" for c in "wWdDsS"}
+
+
+def _first_token(atom: str) -> str | None:
+    """The leading token of a sub-expression, for first-char overlap comparison.
+
+    A literal char, an escaped class like ``\\w`` (returned as ``\\w``), a full ``[...]``
+    class (returned verbatim, e.g. ``[a-z]``), or ``.``. ``None`` for an empty string.
+    Returning the class text verbatim lets the adjacency check tell ``[a-z]`` from
+    ``[0-9]`` (disjoint) instead of collapsing every class to one wildcard.
+    """
+    atom = atom.strip()
+    if not atom:
+        return None
+    if atom[0] == "\\" and len(atom) >= 2:
+        return atom[:2]
+    if atom[0] == "[":
+        end = atom.find("]", 1)
+        return atom if end == -1 else atom[: end + 1]
+    return atom[0]
+
+
+def _tokens_definitely_overlap(a: str | None, b: str | None) -> bool:
+    """True only when two first-tokens *provably* share an input character.
+
+    Stricter than the alternation heuristic: it drives the group-free adjacency check,
+    where over-approximating would falsely reject ubiquitous, safe operator patterns
+    like ``\\w+\\s+\\w+`` (``\\w`` and ``\\s`` are DISJOINT) or ``[a-z]+[0-9]+`` (disjoint
+    classes). So metaclasses and char classes overlap only their identical selves; only
+    ``.`` (true wildcard) overlaps everything. Identical tokens overlap outright.
+    """
+    if a is None or b is None:
+        return False
+    if a == "." or b == ".":
+        return True
+    return a == b
+
+
+def _alternation_branches_overlap(alternatives: list[str]) -> bool:
+    """True if two branches can begin with the same input character.
+
+    The classic ``(a|a)+`` / ``(a|ab)+`` exponential-backtracking shape: a quantified
+    alternation whose branches share a first character, so the engine has multiple
+    equally-valid ways to consume the same input. Compared by first *token* (a literal
+    char, an escaped class like ``\\w``, or a ``[...]`` class treated as a wildcard for
+    overlap purposes) — a conservative over-approximation, which is the safe direction
+    for a DoS guard.
+    """
+    firsts = [t for alt in alternatives if (t := _first_token(alt)) is not None]
+    seen: set[str] = set()
+    for f in firsts:
+        # A metaclass, a char class, or ``.`` overlaps liberally in an alternation:
+        # here over-rejecting an overlapping quantified alternation is the safe DoS
+        # direction (these shapes are rare and suspicious in operator config).
+        if f in _METACLASS_FIRSTS or f == "." or f.startswith("["):
+            return True
+        if f in seen:
+            return True
+        seen.add(f)
+    return False
+
+
+def _quantifier_at(pattern: str, k: int) -> tuple[str, bool] | None:
+    """Parse a full quantifier starting at ``pattern[k]``, if one is present.
+
+    Returns ``(quantifier_text, is_unbounded)`` or ``None`` if no quantifier starts
+    at ``k``. A quantifier is ``*``/``+``/``?`` (optionally followed by a lazy/possessive
+    ``?``/``+``) or a complete ``{m}`` / ``{m,}`` / ``{m,n}`` run — parsed in full so an
+    outer ``{N,}`` is never truncated (the bug that let ``(a+){2,}`` slip past). It is
+    *unbounded* when the engine can repeat without a fixed cap: ``*``, ``+``, or a
+    ``{m,}`` with no upper bound. ``?`` and every ``{m}`` / ``{m,n}`` is bounded.
+    """
+    if k >= len(pattern):
+        return None
+    ch = pattern[k]
+    if ch in "*+?":
+        end = k + 1
+        # Absorb a trailing lazy (``?``) or possessive (``+``) modifier.
+        if end < len(pattern) and pattern[end] in "?+":
+            end += 1
+        return pattern[k:end], ch in "*+"
+    if ch == "{":
+        close = pattern.find("}", k)
+        if close == -1:
+            return None  # a stray ``{`` is a literal, not a quantifier
+        inner = pattern[k + 1 : close]
+        # Must look like {m}, {m,} or {m,n} to be a quantifier; else treat as literal.
+        if not re.fullmatch(r"\d*(?:,\d*)?", inner) or inner in ("", ","):
+            return None
+        end = close + 1
+        if end < len(pattern) and pattern[end] in "?+":
+            end += 1
+        # Unbounded ⇔ a comma with no digits after it ({m,}); {m} and {m,n} are bounded.
+        is_unbounded = "," in inner and inner.split(",")[1] == ""
+        return pattern[k:end], is_unbounded
+    return None
+
+
+def _has_adjacent_unbounded_quantifiers(pattern: str) -> bool:
+    """True if two consecutive unbounded-quantified atoms can match the same input.
+
+    The group-free exponential shape ``a*a*…b`` / ``\\w*\\w*…x``: unbounded quantifiers
+    on *overlapping* atoms in sequence, with no enclosing group, so the
+    ``(...)``-scanning check never sees it. When the engine hits a non-matching tail it
+    redistributes the same input across those repeats combinatorially → exponential.
+
+    The overlap condition is essential: ``a+b+c`` is linear (disjoint atoms, nothing to
+    redistribute) and must NOT be flagged, whereas ``a*a*…b`` / ``\\w*\\w*…`` is
+    exponential. We compare the first token of each unbounded-quantified atom (via
+    :func:`_tokens_overlap`) and flag only when two adjacent ones can consume the same
+    character — conservative (a safe operator pattern is rewritten without the
+    redundant overlapping repeats).
+
+    Atoms counted: a single char / escape / ``.`` / char-class / group immediately
+    followed by an *unbounded* quantifier. Bounded quantifiers (``?``, ``{m}``,
+    ``{m,n}``) break the run.
+    """
+    i = 0
+    n = len(pattern)
+    prev_unbounded_first: str | None = None  # first-token of the last unbounded atom
+    while i < n:
+        ch = pattern[i]
+        # Determine the atom spanning [i, atom_end).
+        if ch == "\\":
+            atom_end = min(i + 2, n)
+        elif ch == "[":
+            # Consume a char class as one atom.
+            j = i + 1
+            if j < n and pattern[j] == "]":  # a literal ']' right after '[' is a member
+                j += 1
+            while j < n and pattern[j] != "]":
+                if pattern[j] == "\\":
+                    j += 2
+                    continue
+                j += 1
+            atom_end = min(j + 1, n)  # include the closing ']'
+        elif ch == "(":
+            # Consume the whole group as one atom.
+            depth = 1
+            j = i + 1
+            while j < n and depth:
+                if pattern[j] == "\\":
+                    j += 2
+                    continue
+                if pattern[j] == "(":
+                    depth += 1
+                elif pattern[j] == ")":
+                    depth -= 1
+                j += 1
+            atom_end = j
+        elif ch in "*+?{|":
+            # A stray quantifier / alternation bar breaks the adjacency run.
+            i += 1
+            prev_unbounded_first = None
+            continue
+        else:
+            atom_end = i + 1
+        atom = pattern[i:atom_end]
+        quant = _quantifier_at(pattern, atom_end)
+        if quant is not None and quant[1]:  # this atom carries an unbounded quantifier
+            this_first = _first_token(atom)
+            if prev_unbounded_first is not None and _tokens_definitely_overlap(
+                prev_unbounded_first, this_first
+            ):
+                return True
+            prev_unbounded_first = this_first
+        else:
+            prev_unbounded_first = None
+        # Advance past the atom and any quantifier it carries.
+        i = atom_end + (len(quant[0]) if quant is not None else 0)
+    return False
+
+
+def _has_catastrophic_backtracking(pattern: str) -> bool:
+    """True if ``pattern`` has a shape that can drive exponential backtracking.
+
+    Flags the dominant catastrophic-backtracking shapes:
+      * an unbounded-quantified group whose body itself contains an unbounded
+        quantifier — ``(X+)+`` / ``(X*)*`` / ``(a+){2,}`` (any unbounded outer form);
+      * an unbounded-quantified group that is a top-level alternation with overlapping
+        branches — ``(a|a)+`` / ``(a|ab)+``;
+      * a run of adjacent unbounded quantifiers with no enclosing group — ``a*a*…b``.
+
+    Scans each ``(`` … matching ``)`` group, then the group-free adjacency case.
+    Conservative: it may over-reject an exotic-but-safe pattern, which is the right
+    trade for an operator-config guard — the operator rewrites it without the
+    nesting/overlap/redundant repeats.
+    """
+    i = 0
+    n = len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\":  # escaped char — skip the pair
+            i += 2
+            continue
+        if ch == "(":
+            depth = 1
+            j = i + 1
+            while j < n and depth:
+                if pattern[j] == "\\":
+                    j += 2
+                    continue
+                if pattern[j] == "(":
+                    depth += 1
+                elif pattern[j] == ")":
+                    depth -= 1
+                j += 1
+            body = pattern[i + 1 : j - 1] if depth == 0 else pattern[i + 1 :]
+            # Parse the FULL outer quantifier at the group's close (``{N,}`` is 4+ chars
+            # and must not be truncated — the bug that let ``(a+){2,}`` slip past).
+            quant = _quantifier_at(pattern, j)
+            group_is_unbounded = quant is not None and quant[1]
+            if group_is_unbounded:
+                if _UNBOUNDED_QUANTIFIER.search(body):
+                    return True
+                alts = _top_level_alternatives(body)
+                if len(alts) > 1 and _alternation_branches_overlap(alts):
+                    return True
+            i = j + (len(quant[0]) if quant is not None else 0)
+            continue
+        i += 1
+    return _has_adjacent_unbounded_quantifiers(pattern)
+
+
+def _guard_config_pattern(pattern: str) -> None:
+    """Reject an operator config pattern that can cause catastrophic backtracking.
+
+    Raises :class:`ValueError` for an over-long pattern or a catastrophic-backtracking
+    ReDoS signature (issue #28): a nested/outer-unbounded-quantified group
+    (``(\\w+)+``, ``(a+){2,}``), an overlapping quantified alternation (``(a|a)+``), or a
+    run of adjacent unbounded quantifiers (``a*a*…b``). Only raw ``patterns`` are
+    guarded; escaped literal ``terms`` are always safe.
+    """
+    if len(pattern) > _MAX_PATTERN_LENGTH:
+        msg = (
+            f"Config pattern is too long ({len(pattern)} > {_MAX_PATTERN_LENGTH} chars); "
+            "refuse to compile a potential ReDoS pattern."
+        )
+        raise ValueError(msg)
+    if _has_catastrophic_backtracking(pattern):
+        msg = (
+            f"Config pattern {pattern!r} has a catastrophic-backtracking signature "
+            r"(e.g. nested/outer unbounded quantifiers '(\w+)+' / '(a+){2,}', an "
+            r"overlapping alternation '(a|a)+', or adjacent unbounded quantifiers "
+            "'a*a*...b') that can cause exponential backtracking (ReDoS); rewrite it "
+            "without the nesting/redundant repeats."
+        )
+        raise ValueError(msg)
+
 
 class GazetteerEntityExtractor:
     """Zero-shot gazetteer/regex EntityExtractor Provider.
@@ -68,7 +383,12 @@ class GazetteerEntityExtractor:
               * ``terms``: list[str]  — literal surface strings (case-insensitive,
                 whole-word) to tag as this type. A gazetteer.
               * ``patterns``: list[str]  — regexes whose whole match is tagged as
-                this type (e.g. an email or an id format).
+                this type (e.g. an email or an id format). Rejected at compile time
+                (``ValueError``) if a pattern has a catastrophic-backtracking ReDoS
+                signature (nested/outer unbounded quantifiers, an overlapping quantified
+                alternation, or adjacent unbounded quantifiers) or is absurdly long —
+                the framework compiles operator config regex over untrusted content, so
+                the guard keeps a bad pattern from becoming a DoS lever (issue #28).
               * ``confidence``: float  — the score to stamp on mentions of this
                 type (default ``default_confidence``).
             ``labels`` may also be given as ``list[str]`` for pattern-free label
@@ -117,7 +437,12 @@ class GazetteerEntityExtractor:
                 # Whole-word, literal: escape the term and bound it so "Amazon" does
                 # not match inside "Amazonian".
                 alternatives.append(rf"\b{re.escape(str(term))}\b")
-            alternatives.extend(str(pat) for pat in spec.get("patterns", []))
+            for pat in spec.get("patterns", []):
+                pat_str = str(pat)
+                # ReDoS guard (issue #28): refuse a catastrophic-backtracking pattern
+                # before it is ever compiled or run over untrusted content.
+                _guard_config_pattern(pat_str)
+                alternatives.append(pat_str)
             if not alternatives:
                 continue
             pattern = re.compile("|".join(f"(?:{alt})" for alt in alternatives), flags)
