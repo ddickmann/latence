@@ -9,6 +9,8 @@ from latence_core.contracts import (
     Classification,
     Disposition,
     DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     ParserInput,
     Provenance,
@@ -178,8 +180,9 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 10 by S11 (incremental-delta contracts added; 9 was S9's Graph Assembly).
-    assert SCHEMA_VERSION == 10
+    # Bumped to 11 by the S4 offset-map coordinate fix (ChunkRecord.offset_map +
+    # OffsetMap/OffsetSegment); 10 was S11 incremental-delta contracts.
+    assert SCHEMA_VERSION == 11
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:
@@ -204,6 +207,76 @@ def test_chunk_record_roundtrips_and_carries_offsets() -> None:
     assert not rec.flagged
     restored = ChunkRecord.model_validate_json(rec.model_dump_json())
     assert restored == rec
+
+
+def test_offset_map_validates_ordering_and_bounds() -> None:
+    # Valid: first segment at local 0, strictly increasing, within length.
+    ok = OffsetMap(
+        segments=[
+            OffsetSegment(local_start=0, doc_start=2),
+            OffsetSegment(local_start=2, doc_start=6),
+        ],
+        length=9,
+    )
+    assert ok.segments[1].doc_start == 6
+    # First segment must start at local 0.
+    with pytest.raises(ValidationError, match="must start at local_start 0"):
+        OffsetMap(segments=[OffsetSegment(local_start=1, doc_start=2)], length=5)
+    # Strictly increasing local_start.
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        OffsetMap(
+            segments=[
+                OffsetSegment(local_start=0, doc_start=0),
+                OffsetSegment(local_start=0, doc_start=3),
+            ],
+            length=5,
+        )
+    # A segment past the content length is rejected.
+    with pytest.raises(ValidationError, match="outside content length"):
+        OffsetMap(
+            segments=[
+                OffsetSegment(local_start=0, doc_start=0),
+                OffsetSegment(local_start=9, doc_start=9),
+            ],
+            length=5,
+        )
+
+
+def test_chunk_record_carries_offset_map_and_roundtrips() -> None:
+    offset_map = OffsetMap(
+        segments=[
+            OffsetSegment(local_start=0, doc_start=2),
+            OffsetSegment(local_start=2, doc_start=6),
+        ],
+        length=9,
+    )
+    rec = ChunkRecord(
+        record_id="d1#chunk-0",
+        document_record_id="d1",
+        index=0,
+        provenance=_chunk_provenance(),
+        classification=_classification(),
+        content="Hi Alice.",
+        token_count=3,
+        offset_map=offset_map,
+    )
+    assert rec.offset_map is not None
+    assert rec.offset_map.segments[1].local_start == 2
+    restored = ChunkRecord.model_validate_json(rec.model_dump_json())
+    assert restored == rec
+    # Optional and additive: a chunk built without it (pre-v11) is still valid.
+    assert (
+        ChunkRecord(
+            record_id="d1#chunk-1",
+            document_record_id="d1",
+            index=1,
+            provenance=_chunk_provenance(),
+            classification=_classification(),
+            content="x",
+            token_count=1,
+        ).offset_map
+        is None
+    )
 
 
 def test_chunk_record_flagged_when_it_has_markers() -> None:

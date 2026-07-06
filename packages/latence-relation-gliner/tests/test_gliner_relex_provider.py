@@ -20,6 +20,8 @@ from latence_core.contracts import (
     ChunkRecord,
     Classification,
     EntityMention,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     Provenance,
     RelationMention,
@@ -31,7 +33,9 @@ def _chunk(
     content: str,
     *,
     char_start: int = 100,
+    char_end: int | None = None,
     page_map: PageMap | None = None,
+    offset_map: OffsetMap | None = None,
 ) -> ChunkRecord:
     prov = Provenance(
         source_uri="file:///c/a.txt",
@@ -40,7 +44,7 @@ def _chunk(
         file_size=1000,
         document_id="sha256:doc1",
         char_start=char_start,
-        char_end=char_start + len(content),
+        char_end=char_start + len(content) if char_end is None else char_end,
         page_start=2,
         page_end=2,
     )
@@ -53,6 +57,7 @@ def _chunk(
         content=content,
         token_count=len(content.split()),
         page_map=page_map,
+        offset_map=offset_map,
     )
 
 
@@ -173,6 +178,48 @@ def test_relation_endpoint_offsets_shift_to_document(fake_gliner: type[_FakeGLiN
     # Covering span straddles the page boundary: records both pages.
     assert rel.provenance.page_start == 1
     assert rel.provenance.page_end == 2
+
+
+def test_offsets_resolve_through_offset_map_past_stripped_markup(
+    fake_gliner: type[_FakeGLiNER],
+) -> None:
+    # Original "**Note:** Alice joined Globex." strips to "Note: Alice joined Globex.":
+    # the stripped ``**`` before the prose shifts every later mention right in the
+    # original, so char_start+local is a lower bound. The carried offset_map corrects it.
+    original = "**Note:** Alice joined Globex."
+    content = "Note: Alice joined Globex."
+    offset_map = OffsetMap(
+        segments=[
+            OffsetSegment(local_start=0, doc_start=2),
+            OffsetSegment(local_start=5, doc_start=9),
+        ],
+        length=len(content),
+    )
+    fake_gliner.entities = [
+        {"start": 6, "end": 11, "label": "person", "score": 0.9},
+        {"start": 19, "end": 25, "label": "organization", "score": 0.9},
+    ]
+    fake_gliner.relations = [
+        {
+            "head": {"start": 6, "end": 11},
+            "tail": {"start": 19, "end": 25},
+            "relation": "works_for",
+            "score": 0.8,
+        }
+    ]
+    chunk = _chunk(content, char_start=2, char_end=len(original), offset_map=offset_map)
+    result = GlinerRelexExtractor(_config()).extract_fused([chunk])
+    by_text = {m.text: m for m in result.mentions}
+    assert set(by_text) == {"Alice", "Globex"}
+    for m in result.mentions:
+        # TRUE original span (not the char_start+local lower bound).
+        assert original[m.provenance.char_start : m.provenance.char_end] == m.text
+    assert by_text["Alice"].provenance.char_start == 10  # not 2 + 6 = 8
+    assert by_text["Globex"].provenance.char_start == 23  # not 2 + 19 = 21
+    # The relation's covering span is the min/max of the corrected endpoints.
+    rel = result.relations[0]
+    assert (rel.provenance.char_start, rel.provenance.char_end) == (10, 29)
+    assert original[rel.provenance.char_start : rel.provenance.char_end] == "Alice joined Globex"
 
 
 def test_empty_chunk_skipped_without_model_call(fake_gliner: type[_FakeGLiNER]) -> None:

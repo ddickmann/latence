@@ -11,7 +11,17 @@ from __future__ import annotations
 import time
 
 import pytest
-from latence_core.contracts import ChunkRecord, Classification, PageMap, Provenance
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    Disposition,
+    DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
+    PageMap,
+    Provenance,
+)
+from latence_core.stages.chunk import MarkdownChunker
 from latence_core.stages.entity import (
     _MAX_PATTERN_LENGTH,
     GazetteerEntityExtractor,
@@ -26,14 +36,17 @@ def _chunk(
     page_start: int = 2,
     page_end: int = 2,
     page_map: PageMap | None = None,
+    offset_map: OffsetMap | None = None,
     record_id: str = "doc1#chunk-0",
 ) -> ChunkRecord:
     """A ChunkRecord whose Provenance carries a document-level span + page range.
 
     ``char_start`` is where the chunk sits in the parent document's assembled
     markdown (S3), so a mention at chunk-local offset ``k`` lands at document offset
-    ``char_start + k`` — the offset shift the extractor must apply. ``page_map`` (the
-    parent's page map, carried on the chunk since S4) lets the extractor re-resolve a
+    ``char_start + k`` when no markup was stripped before it. ``offset_map`` (the
+    stripped-content→original map carried since v11) resolves that offset EXACTLY even
+    when markup was stripped before the mention; absent it, the extractor degrades to
+    the ``char_start + k`` shift. ``page_map`` lets the extractor re-resolve a
     mention's *own* page; absent it, a mention inherits the chunk's page range.
     """
     if char_end is None:
@@ -58,6 +71,7 @@ def _chunk(
         content=content,
         token_count=len(content.split()),
         page_map=page_map,
+        offset_map=offset_map,
     )
 
 
@@ -230,6 +244,68 @@ def test_no_labels_configured_extracts_nothing() -> None:
     chunk = _chunk("Alice met Bob.")
     assert list(GazetteerEntityExtractor({}).extract([chunk])) == []
     assert list(GazetteerEntityExtractor({"labels": ["PERSON", "ORG"]}).extract([chunk])) == []
+
+
+def test_mention_offset_resolves_through_offset_map_past_stripped_markup() -> None:
+    # Original markdown "**Hi** Alice." strips to "Hi Alice."; the ** around "Hi" are
+    # gaps, so "Alice" sits further right in the original than char_start + local. The
+    # carried offset_map recovers the TRUE offset — the case markup-free fixtures miss.
+    original = "**Hi** Alice."
+    # local→orig: H2 i3 (space)6 A7 l8 i9 c10 e11 .12  ⇒ run breakpoints (0,2) then (2,6).
+    offset_map = OffsetMap(
+        segments=[
+            OffsetSegment(local_start=0, doc_start=2),
+            OffsetSegment(local_start=2, doc_start=6),
+        ],
+        length=len("Hi Alice."),
+    )
+    chunk = _chunk("Hi Alice.", char_start=2, char_end=13, offset_map=offset_map)
+    alice = next(
+        m
+        for m in GazetteerEntityExtractor(_ORG_PERSON_CONFIG).extract([chunk])
+        if m.text == "Alice"
+    )
+    # TRUE original offset (7), NOT the char_start + local lower bound (2 + 3 = 5).
+    assert alice.provenance.char_start == 7
+    assert alice.provenance.char_end == 12
+    assert original[alice.provenance.char_start : alice.provenance.char_end] == "Alice"
+
+
+def test_mention_offsets_index_original_markdown_end_to_end() -> None:
+    # A real chunk built from markdown through the Chunker, then extracted: every
+    # mention's recorded span must index the ORIGINAL markdown exactly, even though the
+    # mentions all sit AFTER stripped markup (the heading and the bold run). Under the
+    # char_start+local lower bound this slice is left-shifted and the assertion fails.
+    md = "# Memo\n\n**Reminder:** Alice from Acme Corp will meet Bob about Globex.\n"
+    assembly = PageMap.from_page_texts([md])
+    doc = DocumentRecord(
+        record_id="sha256:doc1",
+        provenance=Provenance(
+            source_uri="file:///c/memo.md",
+            file_name="memo.md",
+            file_type="md",
+            file_size=len(md),
+            document_id="sha256:doc1",
+            char_start=0,
+            char_end=assembly.page_map.total_chars,
+            page_start=1,
+            page_end=1,
+        ),
+        classification=Classification(language="en", sensitivity="internal"),
+        content=assembly.text,
+        page_map=assembly.page_map,
+        disposition=Disposition.PARSED,
+    )
+    chunks = list(MarkdownChunker({"max_tokens": 512}).chunk([doc]))
+    mentions = list(GazetteerEntityExtractor(_ORG_PERSON_CONFIG).extract(chunks))
+    by_text = {m.text: m for m in mentions}
+    assert {"Alice", "Bob", "Acme Corp", "Globex"} <= set(by_text)
+    for m in mentions:
+        assert m.provenance.char_start is not None and m.provenance.char_end is not None
+        # The exact regression: original slice at the recorded span equals the surface.
+        assert doc.content[m.provenance.char_start : m.provenance.char_end] == m.text
+    # "Alice" really begins at its recorded offset in the original markdown.
+    assert doc.content[by_text["Alice"].provenance.char_start :].startswith("Alice")
 
 
 def test_multiple_chunks_each_offset_independently() -> None:

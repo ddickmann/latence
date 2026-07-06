@@ -57,6 +57,8 @@ from latence_core.contracts import (
     MergeDecision,
     MergeStrategy,
     NormalizedRelation,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     PageMapAssembly,
     PageSpan,
@@ -94,6 +96,7 @@ from latence_core.goldset import (
 )
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
+from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import (
@@ -212,6 +215,9 @@ __all__ = [
     "MergeDecision",
     "MergeStrategy",
     "NormalizedRelation",
+    "OffsetIndex",
+    "OffsetMap",
+    "OffsetSegment",
     "PageDriftDiagnostics",
     "PageMap",
     "PageMapAssembly",

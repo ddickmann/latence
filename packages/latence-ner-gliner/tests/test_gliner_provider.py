@@ -19,6 +19,8 @@ from latence_core.contracts import (
     ChunkRecord,
     Classification,
     EntityMention,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     Provenance,
 )
@@ -29,7 +31,9 @@ def _chunk(
     content: str,
     *,
     char_start: int = 100,
+    char_end: int | None = None,
     page_map: PageMap | None = None,
+    offset_map: OffsetMap | None = None,
     record_id: str = "doc1#chunk-0",
 ) -> ChunkRecord:
     prov = Provenance(
@@ -39,7 +43,7 @@ def _chunk(
         file_size=1000,
         document_id="sha256:doc1",
         char_start=char_start,
-        char_end=char_start + len(content),
+        char_end=char_start + len(content) if char_end is None else char_end,
         page_start=2,
         page_end=2,
     )
@@ -52,6 +56,7 @@ def _chunk(
         content=content,
         token_count=len(content.split()),
         page_map=page_map,
+        offset_map=offset_map,
     )
 
 
@@ -137,6 +142,43 @@ def test_mention_page_resolves_to_its_own_page_in_multipage_chunk(
     by_text = {m.text: m for m in mentions}
     assert (by_text["Alice"].provenance.page_start, by_text["Alice"].provenance.page_end) == (1, 1)
     assert (by_text["Bob"].provenance.page_start, by_text["Bob"].provenance.page_end) == (2, 2)
+
+
+def test_mention_offset_resolves_through_offset_map_past_stripped_markup(
+    fake_gliner: type[_FakeGLiNER],
+) -> None:
+    # Original "**Note:** Alice joined Globex." strips to "Note: Alice joined Globex.":
+    # the stripped ``**`` before the prose shifts every later mention right in the
+    # original, so char_start+local is a lower bound. The carried offset_map corrects it
+    # — the exact learned-NER blind spot issue #48 names (the gazetteer fix must reach
+    # here too, not just the in-core Provider).
+    original = "**Note:** Alice joined Globex."
+    content = "Note: Alice joined Globex."
+    offset_map = OffsetMap(
+        segments=[
+            OffsetSegment(local_start=0, doc_start=2),
+            OffsetSegment(local_start=5, doc_start=9),
+        ],
+        length=len(content),
+    )
+    fake_gliner.returns = [
+        {"start": 6, "end": 11, "label": "person", "score": 0.9},
+        {"start": 19, "end": 25, "label": "organization", "score": 0.9},
+    ]
+    chunk = _chunk(
+        content, char_start=2, char_end=len(original), offset_map=offset_map
+    )
+    mentions = list(
+        GlinerEntityExtractor({"labels": ["person", "organization"]}).extract([chunk])
+    )
+    by_text = {m.text: m for m in mentions}
+    assert set(by_text) == {"Alice", "Globex"}
+    for m in mentions:
+        # TRUE original span (not the char_start+local lower bound) — would fail on the
+        # bare shift: original[8:13] == 'Alice' is false ("ce jo" or ":** A" etc.).
+        assert original[m.provenance.char_start : m.provenance.char_end] == m.text
+    assert by_text["Alice"].provenance.char_start == 10  # not 2 + 6 = 8
+    assert by_text["Globex"].provenance.char_start == 23  # not 2 + 19 = 21
 
 
 def test_threshold_filters_low_scores(fake_gliner: type[_FakeGLiNER]) -> None:

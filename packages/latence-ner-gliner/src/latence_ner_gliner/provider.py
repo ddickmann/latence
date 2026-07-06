@@ -20,15 +20,19 @@ and ``GENE``/``DRUG`` for another with no retraining, and core hardcodes no labe
 
 Each emitted :class:`~latence_core.contracts.EntityMention` carries its label,
 GLiNER's confidence, and the mention's char span **in the parent document's
-assembled markdown** — the model returns chunk-local offsets, which are shifted by
-the chunk's own ``provenance.char_start`` (the chunk records its span in the parent
-document, S3) so a mention resolves back to the exact source offsets and, through
-the parent's page map (carried on the chunk) via
-:class:`~latence_core.pagemap.PageOffsetIndex`, to its original source page(s) (the
-S4 round-trip). The page span is re-resolved from the mention's *own* document
-offset — a mention on a later page of a multi-page chunk cites that page, not the
-chunk's first page — degrading to the chunk's inherited range only when no page map
-is present. An empty/near-empty chunk yields no mentions (S4 AC).
+assembled markdown** — the model returns chunk-local offsets, which are resolved to
+their TRUE original offsets through the chunk's stripped-``content``→original
+``offset_map`` (carried since v11) via :class:`~latence_core.offsetmap.OffsetIndex`,
+so a mention resolves back to its EXACT source offset even when markdown markup was
+stripped before it within the chunk. (Chunk ``content`` is markup-stripped, so the
+naive ``char_start + local`` shift is only a lower bound — ADR-0022 corrected,
+ADR-0031.) A pre-v11 chunk with no offset map degrades to that shift. From the
+resolved offset the page span is re-resolved through the parent's page map (carried
+on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` to its original
+source page(s) (the S4 round-trip) — a mention on a later page of a multi-page chunk
+cites that page, not the chunk's first page, degrading to the chunk's inherited
+range only when no page map is present. An empty/near-empty chunk yields no mentions
+(S4 AC).
 
 The ``gliner`` import is deferred to first use so importing this module (for
 Provider discovery) never requires torch to be installed, and so a missing optional
@@ -40,6 +44,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import EntityMention
+from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
@@ -126,6 +131,10 @@ class GlinerEntityExtractor:
         )
         # Deterministic ordering: by chunk-local start, then label.
         raw.sort(key=lambda e: (int(e["start"]), str(e["label"])))
+        # Resolve chunk-local model offsets to TRUE original offsets through the chunk's
+        # stripped→original offset map (markup stripping makes char_start+local only a
+        # lower bound — ADR-0031); a pre-v11 chunk with no map degrades to that shift.
+        offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
         # Re-resolve each mention's OWN page from the parent's page map (carried on
         # the chunk), not just inherit the chunk's page range. Built once per chunk.
@@ -133,10 +142,15 @@ class GlinerEntityExtractor:
         for i, ent in enumerate(raw):
             local_start = int(ent["start"])
             local_end = int(ent["end"])
+            if offset_index is not None:
+                doc_char_start, doc_char_end = offset_index.resolve_span(local_start, local_end)
+            else:
+                doc_char_start = chunk_char_start + local_start
+                doc_char_end = chunk_char_start + local_end
             provenance = self._mention_provenance(
                 chunk.provenance,
-                doc_char_start=chunk_char_start + local_start,
-                doc_char_end=chunk_char_start + local_end,
+                doc_char_start=doc_char_start,
+                doc_char_end=doc_char_end,
                 page_index=page_index,
             )
             yield EntityMention(

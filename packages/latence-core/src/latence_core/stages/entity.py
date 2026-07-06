@@ -20,10 +20,13 @@ Each emitted :class:`~latence_core.contracts.EntityMention` carries:
 
 * its ``label`` (from the configured zero-shot label set) and a ``confidence``;
 * Provenance ``char_start``/``char_end`` — the mention's half-open span **in the
-  parent document's assembled markdown**, computed by offsetting the chunk-local
-  match position by the chunk's own ``provenance.char_start`` (the chunk records
-  its span in the parent document, S3), so the mention resolves back to the exact
-  source offsets;
+  parent document's assembled markdown**, resolved from the chunk-local match
+  position through the chunk's ``offset_map`` (the stripped-``content``→original
+  offset map carried since v11) via :class:`~latence_core.offsetmap.OffsetIndex`, so
+  the mention resolves back to its EXACT source offset even when markdown markup was
+  stripped before it within the chunk. (Chunk ``content`` is markup-stripped, so the
+  naive ``char_start + local`` shift is only a lower bound — ADR-0022 corrected,
+  ADR-0031.) A chunk without an offset map (pre-v11) degrades to that shift;
 * Provenance ``page_start``/``page_end`` — the source page(s) that span falls on,
   resolved from the mention's *own* document offset through the parent's page map
   (carried on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` — the
@@ -42,6 +45,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import EntityMention
+from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
@@ -461,10 +465,13 @@ class GazetteerEntityExtractor:
         if len(text.strip()) < self._min_chars:
             return
         matches = self._find_matches(text)
-        # The chunk records its own span in the parent document (S3); a mention's
-        # document-level offset is the chunk-local match offset shifted by the
-        # chunk's start. The chunk always carries a char span (S3 invariant); fall
-        # back to 0 only defensively so a mention always has an offset.
+        # A mention's document-level offset is its chunk-local match offset resolved
+        # through the chunk's stripped→original offset map: chunk ``content`` is
+        # markup-stripped, so ``char_start + local`` is only a lower bound once markup
+        # was stripped before the match. Absent an offset map (pre-v11 chunk) fall back
+        # to that shift; the chunk always carries its own start (S3 invariant), 0 only
+        # defensively so a mention always has an offset.
+        offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
         # Resolve each mention's OWN page from the parent's page map (carried on the
         # chunk), not the chunk's whole page range: a mention on a later page of a
@@ -472,10 +479,15 @@ class GazetteerEntityExtractor:
         # per chunk. Absent (pre-S4 chunk / no page map) → inherit the chunk range.
         page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
         for i, (label, surface, local_start, local_end, confidence) in enumerate(matches):
+            if offset_index is not None:
+                doc_char_start, doc_char_end = offset_index.resolve_span(local_start, local_end)
+            else:
+                doc_char_start = chunk_char_start + local_start
+                doc_char_end = chunk_char_start + local_end
             provenance = self._mention_provenance(
                 chunk.provenance,
-                doc_char_start=chunk_char_start + local_start,
-                doc_char_end=chunk_char_start + local_end,
+                doc_char_start=doc_char_start,
+                doc_char_end=doc_char_end,
                 page_index=page_index,
             )
             yield EntityMention(

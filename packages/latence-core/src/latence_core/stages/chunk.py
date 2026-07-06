@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.chunking import ChunkBudget, chunk_document
-from latence_core.contracts import ChunkRecord, Disposition
+from latence_core.contracts import ChunkRecord, Disposition, OffsetMap, OffsetSegment
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
@@ -98,4 +98,13 @@ class MarkdownChunker:
                 # finds a sub-chunk offset (an entity mention) can resolve *that*
                 # offset's own source page, not just inherit the chunk's range.
                 page_map=doc.page_map,
+                # Carry the stripped→original offset map so that same sub-chunk offset
+                # resolves to its TRUE original offset (content is markup-stripped, so
+                # char_start + local is only a lower bound once markup precedes it).
+                offset_map=OffsetMap(
+                    segments=[
+                        OffsetSegment(local_start=ls, doc_start=ds) for ls, ds in ch.offset_map
+                    ],
+                    length=len(ch.text),
+                ),
             )

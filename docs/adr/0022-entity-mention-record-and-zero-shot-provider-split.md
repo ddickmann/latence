@@ -25,14 +25,28 @@ special-casing. Rejected: mentions-inside-chunks (couples every consumer to the
 chunk shape, hides the mention's own Provenance, and forces each downstream Stage
 to re-resolve offsets).
 
-## A mention's offsets index the ORIGINAL document, resolved by shifting the chunk span
+## A mention's offsets index the ORIGINAL document, resolved through the chunk's offset map
+
+> **Correction (2026-07-07, superseded by ADR-0031).** As first shipped, this section
+> claimed the shift `doc_offset = chunk.provenance.char_start + local_offset` yields the
+> mention's original-document offset. **That is false for a chunk that contains markup.**
+> Chunk `content` is markup-**stripped** (`chunking.strip_markup` deletes 18 constructs),
+> so `local_offset` is measured over shorter text; because stripping only ever *deletes*
+> characters, the shift is a **lower bound** on the true offset, exact **only** when no
+> markup was stripped before the mention within its chunk. The S4 fixtures passed because
+> they were all markup-free plain text. ADR-0031 corrects the root cause: Chunk now carries
+> a stripped-`content`→original **offset map** (`OffsetMap`) on each `ChunkRecord`, and the
+> extractor resolves a mention's local span through it (`OffsetIndex`) to the EXACT original
+> offset. The description below is retained for history; read `char_start + local_offset` as
+> "the lower-bound shift the offset map replaced". The page-resolution reasoning is unchanged
+> — it simply now runs on the corrected offset.
 
 An extractor sees a *chunk's* text and returns *chunk-local* offsets. But a mention
 must resolve back to its source **page** via `PageOffsetIndex`, which indexes the
-**parent document's** assembled markdown (ADR-0020/0021). So the Provider shifts
-each chunk-local match by the chunk's own `provenance.char_start` (the span the
-chunk occupies in the parent document, preserved losslessly by Chunk, ADR-0021):
-`doc_offset = chunk.provenance.char_start + local_offset`. The mention's **page** is
+**parent document's** assembled markdown (ADR-0020/0021). The Provider maps each
+chunk-local match back to the parent document through the chunk's offset map
+(ADR-0031; originally, and incorrectly for markup, a bare shift by the chunk's own
+`provenance.char_start`): `doc_offset = resolve(local_offset)`. The mention's **page** is
 then re-resolved from *that* document offset through `PageOffsetIndex` — the same
 resolver the chunk Provider uses (ADR-0021) — **not** inherited wholesale from the
 chunk's `page_start`/`page_end`. A default chunk budget (512 tokens) routinely spans

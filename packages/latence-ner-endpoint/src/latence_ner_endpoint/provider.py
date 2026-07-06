@@ -10,10 +10,13 @@ Zero-shot: the label set is supplied per Pipeline (Stage ``config``); core hardc
 same endpoint tags ``PERSON``/``ORG`` for one Pipeline and ``GENE``/``DRUG`` for another. Each
 emitted :class:`~latence_core.contracts.EntityMention` carries its label, the model's confidence,
 and the mention's char span **in the parent document's assembled markdown** — the endpoint returns
-chunk-local offsets, shifted by the chunk's own ``provenance.char_start`` and re-resolved to the
-source page(s) through the parent's page map via :class:`~latence_core.pagemap.PageOffsetIndex` (the
-S4 round-trip) — byte-for-byte the same contract the CPU learned Provider produces, so the output is
-identical modulo the model.
+chunk-local offsets, resolved to their TRUE original offsets through the chunk's
+stripped-``content``→original ``offset_map`` (carried since v11) via
+:class:`~latence_core.offsetmap.OffsetIndex` (so a mention resolves to its exact source offset even
+when markdown markup was stripped before it — ADR-0022 corrected, ADR-0031; a pre-v11 chunk degrades
+to the ``char_start + local`` shift), then re-resolved to the source page(s) through the parent's
+page map via :class:`~latence_core.pagemap.PageOffsetIndex` (the S4 round-trip) — byte-for-byte the
+same contract the CPU learned Provider produces, so the output is identical modulo the model.
 
 Fault tolerance is the ported endpoint machinery (:mod:`latence_core.endpoint`): a shared
 reference-counted :class:`~latence_core.endpoint.EndpointLease` means N Stages against one served
@@ -36,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import EntityMention
 from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
+from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
@@ -142,6 +146,10 @@ class EndpointEntityExtractor:
         raw = self._call_model(client, chunk.content)
         # Deterministic ordering: by chunk-local start, then label.
         raw.sort(key=lambda e: (int(e.get("start", 0)), str(e.get("label", ""))))
+        # Resolve chunk-local model offsets to TRUE original offsets through the chunk's
+        # stripped→original offset map (markup stripping makes char_start+local only a
+        # lower bound — ADR-0031); a pre-v11 chunk with no map degrades to that shift.
+        offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
         page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
         emitted = 0
@@ -150,10 +158,15 @@ class EndpointEntityExtractor:
             if resolved is None:
                 continue
             local_start, local_end, label, confidence = resolved
+            if offset_index is not None:
+                doc_char_start, doc_char_end = offset_index.resolve_span(local_start, local_end)
+            else:
+                doc_char_start = chunk_char_start + local_start
+                doc_char_end = chunk_char_start + local_end
             provenance = self._mention_provenance(
                 chunk.provenance,
-                doc_char_start=chunk_char_start + local_start,
-                doc_char_end=chunk_char_start + local_end,
+                doc_char_start=doc_char_start,
+                doc_char_end=doc_char_end,
                 page_index=page_index,
             )
             yield EntityMention(

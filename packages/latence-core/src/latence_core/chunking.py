@@ -49,12 +49,22 @@ class Chunk:
     the half-open offsets the chunk maps back to in the *original* document text
     (the markup-stripping offset map has already been applied), so a downstream
     Stage resolves them to a source page. ``token_count`` is the budgeted estimate.
+
+    ``offset_map`` is the run-length map from this chunk's stripped ``text`` offsets
+    back to original-markdown offsets: a tuple of ``(local_start, doc_start)``
+    breakpoints, one per contiguous surviving run (a new run begins at each stripped
+    gap). It lets a downstream Stage recover a *sub-chunk* offset's TRUE original
+    position — ``char_start + local`` is only a lower bound once markup was stripped
+    before that offset. A markup-free chunk has a single ``(0, char_start)`` segment.
+    This is plain data (the engine stays contract-free); the reference Chunker
+    Provider wraps it in the :class:`~latence_core.contracts.OffsetMap` contract.
     """
 
     text: str
     char_start: int
     char_end: int
     token_count: int
+    offset_map: tuple[tuple[int, int], ...] = ()
 
 
 # -- 18-pattern markup stripping ---------------------------------------------
@@ -270,9 +280,30 @@ def chunk_document(text: str, budget: ChunkBudget | None = None) -> list[Chunk]:
                 char_start=orig_start,
                 char_end=orig_end,
                 token_count=estimate_tokens(piece),
+                # The run-length local→original map for THIS piece, so a sub-chunk
+                # offset (an entity mention) resolves to its true original position.
+                offset_map=_offset_segments(strip.mapping, start, end),
             )
         )
     return chunks
+
+
+def _offset_segments(mapping: list[int], start: int, end: int) -> tuple[tuple[int, int], ...]:
+    """Run-length ``(local_start, doc_start)`` breakpoints for a piece's offset map.
+
+    ``mapping[i]`` is the original offset of stripped char ``i``. For the piece
+    ``[start, end)`` the chunk-local offset ``k`` maps to ``mapping[start + k]``. Since
+    stripping only deletes characters, the piece's kept characters form contiguous
+    original runs (``mapping`` increases by one within a run and jumps at each stripped
+    gap); we record one breakpoint per run. The first is always ``(0, mapping[start])``,
+    so a markup-free piece collapses to a single identity segment.
+    """
+    segments: list[tuple[int, int]] = [(0, mapping[start])]
+    for k in range(1, end - start):
+        orig = mapping[start + k]
+        if orig != mapping[start + k - 1] + 1:
+            segments.append((k, orig))
+    return tuple(segments)
 
 
 @dataclass(frozen=True)

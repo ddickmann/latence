@@ -139,6 +139,58 @@ def test_entity_slice_end_to_end(tmp_path: Path) -> None:
     assert report.entities.mentions_total == persisted.entities.mentions_total
 
 
+def test_entity_slice_resolves_offsets_through_markdown_markup(tmp_path: Path) -> None:
+    # A markdown document whose entity mentions all sit AFTER stripped markup (a heading
+    # and a bold run). End to end, every exported mention's span must index the ORIGINAL
+    # markdown exactly — the S4 coordinate fix (char_start + local would be left-shifted).
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "note.md").write_text(
+        "# Memo\n\n**Reminder:** Alice from Acme Corp will meet Bob about Globex.\n",
+        encoding="utf-8",
+    )
+    store = f"file://{tmp_path}/store"
+    LocalRunner().run(_pipeline(store, docs), run_id="s4md")
+    s = Storage.for_uri(store)
+    base = f"{store}/_latence/runs/s4md"
+
+    rows = [
+        json.loads(line)
+        for line in s.read_text(f"{base}/export/records.jsonl").splitlines()
+        if line.strip()
+    ]
+    mentions = [EntityMention.model_validate(r) for r in rows]
+    by_text = {m.text: m for m in mentions}
+    assert {"Alice", "Acme Corp", "Bob", "Globex"} <= set(by_text)
+
+    from latence_core.contracts import DocumentRecord
+
+    docs_by_id = {
+        d.record_id: d
+        for d in (
+            DocumentRecord.model_validate_json(line)
+            for line in s.read_text(f"{base}/checkpoints/parse.jsonl").splitlines()
+            if line.strip()
+        )
+    }
+    for m in mentions:
+        parent = docs_by_id[m.document_record_id]
+        assert m.provenance.char_start is not None and m.provenance.char_end is not None
+        # The exact original slice at the recorded span equals the surface string.
+        assert parent.content[m.provenance.char_start : m.provenance.char_end] == m.text
+        # And the mention's own page resolves from its TRUE offset.
+        assert parent.page_map is not None
+        idx = PageOffsetIndex(parent.page_map)
+        assert idx.page_for_offset(m.provenance.char_start) == m.provenance.page_start
+    # "Alice" is not left-shifted onto the stripped "**Reminder:**" prefix.
+    alice = by_text["Alice"]
+    assert (
+        docs_by_id[alice.document_record_id]
+        .content[alice.provenance.char_start :]
+        .startswith("Alice")
+    )
+
+
 def test_entity_slice_is_deterministic(tmp_path: Path) -> None:
     # Two runs over the SAME input + config (identical source_uri) into two run ids
     # produce byte-identical exported mentions (hash-stable, seeded Baseline bar).

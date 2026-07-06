@@ -208,6 +208,59 @@ def test_chunk_covers_all_content_no_overlap() -> None:
             assert covered[i], f"char {i} ({c!r}) uncovered"
 
 
+# -- stripped→original offset map (the S4 coordinate-fix carrier) -------------
+
+
+def _resolve(offset_map: tuple[tuple[int, int], ...], local: int) -> int:
+    """Resolve a chunk-local offset to its original offset through the run-length map."""
+    doc = offset_map[0][1]
+    for local_start, doc_start in offset_map:
+        if local_start <= local:
+            doc = doc_start + (local - local_start)
+        else:
+            break
+    return doc
+
+
+def test_offset_map_is_single_identity_segment_without_markup() -> None:
+    """A markup-free chunk's map is one identity segment: resolve == char_start + local."""
+    text = "Plain prose with no markdown markup at all here today."
+    (chunk,) = chunk_document(text, ChunkBudget(max_tokens=512))
+    assert chunk.offset_map == ((0, chunk.char_start),)
+    for k in range(len(chunk.text)):
+        assert _resolve(chunk.offset_map, k) == chunk.char_start + k
+
+
+def test_offset_map_resolves_local_offsets_to_original_after_strip() -> None:
+    """Every chunk-local character resolves through offset_map to its ORIGINAL char.
+
+    This is the invariant the whole S4 coordinate fix rests on: once markup is
+    stripped *before* a position within a chunk, ``char_start + local`` is a lower
+    bound, but the carried offset map still recovers the exact original offset.
+    """
+    md = "# Report\n\nThe **bold** revenue and a [link](http://x) grew, see `code`."
+    chunks = chunk_document(md, ChunkBudget(max_tokens=20, overlap_tokens=4, min_tokens=2))
+    assert chunks
+    for ch in chunks:
+        # The map begins at the chunk's own start and stays within its content.
+        assert ch.offset_map[0] == (0, ch.char_start)
+        for k, expected_char in enumerate(ch.text):
+            assert md[_resolve(ch.offset_map, k)] == expected_char
+
+
+def test_offset_map_records_break_at_each_stripped_gap() -> None:
+    """A stripped gap before a position introduces a new segment (not identity)."""
+    md = "**Hi** Alice met Bob."
+    (chunk,) = chunk_document(md, ChunkBudget(max_tokens=512))
+    # The stripped ``**`` before "Hi" and after it force the map off the identity line.
+    assert chunk.text == "Hi Alice met Bob."
+    assert len(chunk.offset_map) > 1
+    # "Alice" sits after a stripped gap: its resolved offset exceeds char_start+local.
+    local_alice = chunk.text.index("Alice")
+    assert _resolve(chunk.offset_map, local_alice) > chunk.char_start + local_alice
+    assert md[_resolve(chunk.offset_map, local_alice) :].startswith("Alice")
+
+
 # -- budget validation -------------------------------------------------------
 
 

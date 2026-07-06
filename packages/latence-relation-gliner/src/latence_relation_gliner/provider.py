@@ -23,10 +23,15 @@ in core.
 
 Both the emitted :class:`~latence_core.contracts.EntityMention`s and
 :class:`~latence_core.contracts.RelationMention`s carry Provenance whose char span is
-shifted from the model's chunk-local offsets into the parent document's assembled
-markdown (by the chunk's own ``provenance.char_start``, S3) and whose page span is
-re-resolved through the parent's page map (carried on the chunk) via
-:class:`~latence_core.pagemap.PageOffsetIndex` — the S4/S5 round-trip. Because a fused
+resolved from the model's chunk-local offsets into the parent document's assembled
+markdown through the chunk's ``offset_map`` (the stripped-``content``→original offset
+map carried since v11) via :class:`~latence_core.offsetmap.OffsetIndex` — so a mention's
+offset is EXACT even when markdown markup was stripped before it (``char_start + local``
+is only a lower bound; ADR-0022 corrected, ADR-0031; a pre-v11 chunk degrades to that
+shift). A relation's covering span is the min/max of its resolved endpoints, so it
+inherits the correction. Each page span is re-resolved through the parent's page map
+(carried on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` — the S4/S5
+round-trip. Because a fused
 Stage emits both carriers together, the Runner threads mentions AND relations
 downstream from one Stage without running a separate Entity-Extraction Stage (no
 double-extraction).
@@ -42,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
+from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
@@ -153,6 +159,10 @@ class GlinerRelexExtractor:
         raw_relations: list[dict[str, Any]] = list(result.get("relations", []))
         raw_entities.sort(key=lambda e: (int(e["start"]), str(e["label"])))
 
+        # Resolve chunk-local model offsets to TRUE original offsets through the
+        # chunk's stripped→original offset map (markup stripping makes char_start+local
+        # only a lower bound); a pre-v11 chunk with no map degrades to that shift.
+        offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
         page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
 
@@ -163,10 +173,14 @@ class GlinerRelexExtractor:
         for i, ent in enumerate(raw_entities):
             local_start = int(ent["start"])
             local_end = int(ent["end"])
+            if offset_index is not None:
+                doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
+            else:
+                doc_start, doc_end = chunk_char_start + local_start, chunk_char_start + local_end
             provenance = _mention_provenance(
                 chunk.provenance,
-                chunk_char_start + local_start,
-                chunk_char_start + local_end,
+                doc_start,
+                doc_end,
                 page_index,
             )
             mention = EntityMention(

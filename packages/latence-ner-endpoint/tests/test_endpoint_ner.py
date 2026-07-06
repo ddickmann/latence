@@ -14,12 +14,27 @@ import types
 from typing import Any
 
 import pytest
-from latence_core.contracts import ChunkRecord, Classification, EntityMention, PageMap, Provenance
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    EntityMention,
+    OffsetMap,
+    OffsetSegment,
+    PageMap,
+    Provenance,
+)
 from latence_ner_endpoint import EndpointEntityExtractor
 from latence_ner_endpoint.provider import _POOL
 
 
-def _chunk(text: str, *, char_start: int = 0, page_map: PageMap | None = None) -> ChunkRecord:
+def _chunk(
+    text: str,
+    *,
+    char_start: int = 0,
+    char_end: int | None = None,
+    page_map: PageMap | None = None,
+    offset_map: OffsetMap | None = None,
+) -> ChunkRecord:
     prov = Provenance(
         source_uri="file:///c/a.txt",
         file_name="a.txt",
@@ -27,7 +42,7 @@ def _chunk(text: str, *, char_start: int = 0, page_map: PageMap | None = None) -
         file_size=1000,
         document_id="sha256:d1",
         char_start=char_start,
-        char_end=char_start + len(text),
+        char_end=char_start + len(text) if char_end is None else char_end,
         page_start=1,
         page_end=1,
     )
@@ -40,6 +55,7 @@ def _chunk(text: str, *, char_start: int = 0, page_map: PageMap | None = None) -
         content=text,
         token_count=len(text.split()),
         page_map=page_map,
+        offset_map=offset_map,
     )
 
 
@@ -109,6 +125,44 @@ def test_extracts_and_resolves_offsets(fake_openai: None) -> None:
     assert m.provenance.char_end == 15
     assert m.provenance.page_start == 1
     assert m.classification.sensitivity == "internal"
+
+
+def test_mention_offset_resolves_through_offset_map_past_stripped_markup(
+    fake_openai: None,
+) -> None:
+    # Original "**Note:** Alice joined Globex." strips to "Note: Alice joined Globex.":
+    # the stripped ``**`` before the prose shifts every later mention right in the
+    # original, so char_start+local is a lower bound. The carried offset_map corrects it
+    # — the learned/cloud-NER blind spot issue #48 names (this path is a one-config swap
+    # for the in-core gazetteer, so it must resolve identically).
+    original = "**Note:** Alice joined Globex."
+    content = "Note: Alice joined Globex."
+    offset_map = OffsetMap(
+        segments=[
+            OffsetSegment(local_start=0, doc_start=2),
+            OffsetSegment(local_start=5, doc_start=9),
+        ],
+        length=len(content),
+    )
+    _FakeCompletions.reply = json.dumps(
+        {
+            "entities": [
+                {"start": 6, "end": 11, "label": "person", "confidence": 0.9},
+                {"start": 19, "end": 25, "label": "organization", "confidence": 0.9},
+            ]
+        }
+    )
+    chunk = _chunk(content, char_start=2, char_end=len(original), offset_map=offset_map)
+    out = list(
+        EndpointEntityExtractor({"labels": ["person", "organization"]}).extract([chunk])
+    )
+    by_text = {m.text: m for m in out}
+    assert set(by_text) == {"Alice", "Globex"}
+    for m in out:
+        # TRUE original span (not the char_start+local lower bound) — fails on the shift.
+        assert original[m.provenance.char_start : m.provenance.char_end] == m.text
+    assert by_text["Alice"].provenance.char_start == 10  # not 2 + 6 = 8
+    assert by_text["Globex"].provenance.char_start == 23  # not 2 + 19 = 21
 
 
 def test_hallucinated_spans_dropped(fake_openai: None) -> None:

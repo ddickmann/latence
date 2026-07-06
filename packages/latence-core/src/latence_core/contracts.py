@@ -98,7 +98,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Every one is a versioned Pydantic contract; a delta run is deterministic (a seeded corpus
 # state yields the same manifest, the same Delta, and the same Version fingerprint — the
 # Baseline bar and the G1 determinism criterion).
-SCHEMA_VERSION = 10
+#
+# v11 (S4 offset-map coordinate fix): ChunkRecord gains an optional ``offset_map`` — the
+# run-length map from a chunk's markup-stripped ``content`` offsets back to the ORIGINAL
+# parsed-markdown offsets (OffsetSegment/OffsetMap contracts). Chunk content is
+# de-marked-up (chunking.strip_markup deletes 18 markup constructs) while the chunk's
+# outer ``[char_start, char_end)`` stays in original coordinates, so a *sub-chunk* offset
+# (an entity mention) cannot be recovered by ``char_start + local_offset`` once markup was
+# stripped before it — that shift is a lower bound, not the true offset (ADR-0022 corrected,
+# ADR-0031). Carrying the map lets Entity Extraction (and the fused NER+RE Provider) emit a
+# mention's TRUE original offset and page at source, so every downstream consumer inherits
+# correct offsets with no per-Stage relocation. Optional and additive: a chunk without it
+# (pre-v11, or a document with no map) degrades to the ``char_start + local`` shift.
+SCHEMA_VERSION = 11
 
 
 class Provenance(BaseModel):
@@ -446,6 +458,75 @@ class QuarantineRecord(Record):
 # -- S3: Chunk ---------------------------------------------------------------
 
 
+class OffsetSegment(BaseModel):
+    """One contiguous run mapping stripped-``content`` offsets to original offsets.
+
+    Chunk ``content`` is the markup-stripped text; markup stripping only ever
+    **deletes** characters (``chunking.strip_markup``), so a chunk's surviving
+    characters form contiguous runs of the ORIGINAL parsed markdown. Within a run
+    the map is a constant shift: original offset ``= doc_start + (local -
+    local_start)``. A new segment begins at each stripped gap, so the whole
+    stripped→original map is this short list of run breakpoints (typically a handful
+    per chunk), not a per-character table.
+
+    ``local_start`` is the offset into the chunk's ``content``; ``doc_start`` is the
+    original-markdown offset of that same character. The first segment always starts
+    at ``local_start == 0``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    local_start: int = Field(..., ge=0, description="Offset into the chunk's stripped content.")
+    doc_start: int = Field(..., ge=0, description="Original-markdown offset of that character.")
+
+
+class OffsetMap(BaseModel):
+    """Run-length map from a chunk's stripped ``content`` to original offsets.
+
+    Carried on a :class:`ChunkRecord` so a downstream Stage that finds a *sub-chunk*
+    offset (an entity mention's chunk-local match) can recover that offset's TRUE
+    position in the parent document's assembled markdown — not merely the lower bound
+    ``char_start + local_offset`` gives once markup was stripped before the mention
+    within its chunk (ADR-0022 corrected, ADR-0031). The live resolver over this map
+    is :class:`latence_core.offsetmap.OffsetIndex`.
+
+    ``segments`` are ordered by ``local_start`` (strictly increasing, first at 0);
+    ``length`` is ``len(content)`` — the exclusive upper bound of the local domain, so
+    a half-open local span's original end is resolvable. A markup-free chunk has
+    exactly one segment ``(0, char_start)``: the map is then the identity shift and a
+    mention resolves to ``char_start + local`` exactly as before.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    segments: list[OffsetSegment] = Field(..., min_length=1)
+    length: int = Field(..., ge=0, description="Length of the chunk content this map covers.")
+
+    @model_validator(mode="after")
+    def _ordered_within_bounds(self) -> OffsetMap:
+        first = self.segments[0].local_start
+        if first != 0:
+            msg = f"First OffsetSegment must start at local_start 0, got {first}"
+            raise ValueError(msg)
+        prev = -1
+        for seg in self.segments:
+            if seg.local_start <= prev:
+                msg = (
+                    "OffsetSegments must have strictly increasing local_start; "
+                    f"got {seg.local_start} after {prev}"
+                )
+                raise ValueError(msg)
+            if self.length and seg.local_start >= self.length:
+                msg = (
+                    f"OffsetSegment local_start {seg.local_start} is outside "
+                    f"content length {self.length}"
+                )
+                raise ValueError(msg)
+            prev = seg.local_start
+        return self
+
+
 class ChunkRecord(Record):
     """One retrieval-sized piece of a parsed document (CONTEXT ``Chunk``).
 
@@ -474,6 +555,13 @@ class ChunkRecord(Record):
     later page of a multi-page chunk would cite the chunk's first page. Optional
     (a chunk produced before S4, or from a document with no page map, has ``None``
     and downstream falls back to the inherited chunk page range).
+
+    ``offset_map`` carries the stripped-``content``→original-markdown offset map
+    (:class:`OffsetMap`) so a downstream Stage can recover a sub-chunk offset's TRUE
+    original position. ``content`` is markup-stripped, so ``char_start + local`` is
+    only a lower bound on a mention's real offset once markup was stripped before it;
+    the map corrects that (ADR-0031). Optional and additive — absent (pre-v11 chunk,
+    or no map), downstream degrades to the ``char_start + local`` shift.
     """
 
     document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
@@ -484,6 +572,13 @@ class ChunkRecord(Record):
     page_map: PageMap | None = Field(
         default=None,
         description="Parent document's page map, so a sub-chunk offset resolves to its own page.",
+    )
+    offset_map: OffsetMap | None = Field(
+        default=None,
+        description=(
+            "Stripped-content→original-markdown offset map, so a sub-chunk offset (an entity "
+            "mention) resolves to its TRUE original offset, not the lower bound char_start+local."
+        ),
     )
     risk_markers: list[RiskMarker] = Field(
         default_factory=list, description="Content-Screening flags that propagate into the corpus."

@@ -14,6 +14,7 @@ from latence_core.contracts import (
     PageMap,
     Provenance,
 )
+from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.stages.chunk import MarkdownChunker
 
@@ -83,6 +84,30 @@ def test_chunker_char_span_indexes_original_markdown() -> None:
     for ch in chunker.chunk([doc]):
         # No markup in this doc, so the original slice equals the chunk text.
         assert doc.content[ch.provenance.char_start : ch.provenance.char_end] == ch.content
+
+
+def test_chunker_stamps_offset_map_resolving_subchunk_offsets_to_original() -> None:
+    """Each chunk carries an offset_map that resolves a sub-chunk offset to the ORIGINAL.
+
+    The chunk's own char span is already correct; the offset_map lets a *sub-chunk*
+    offset (an entity mention) resolve exactly even when markdown markup was stripped
+    before it — the whole point of the S4 coordinate fix.
+    """
+    doc = _doc(["The **bold** revenue and the [link](http://x) both grew sharply here."])
+    chunker = MarkdownChunker({"max_tokens": 512})
+    (chunk,) = list(chunker.chunk([doc]))
+    assert chunk.offset_map is not None
+    # Markup was stripped, so the map is NOT a single identity segment.
+    assert len(chunk.offset_map.segments) > 1
+    index = OffsetIndex(chunk.offset_map)
+    # Every chunk-local character resolves through the map to the identical original char.
+    for k, ch in enumerate(chunk.content):
+        assert doc.content[index.resolve(k)] == ch
+    # "revenue" follows the stripped ``**bold**``: its resolved span indexes the original.
+    local = chunk.content.index("revenue")
+    start, end = index.resolve_span(local, local + len("revenue"))
+    assert doc.content[start:end] == "revenue"
+    assert start > chunk.provenance.char_start + local  # strictly past the lower bound
 
 
 def test_chunker_indices_are_contiguous_from_zero() -> None:
