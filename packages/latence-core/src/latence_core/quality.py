@@ -16,7 +16,9 @@ from latence_core.contracts import ScreeningFinding
 # ``screening`` (both checkpoints' quarantine/flag findings).
 # v4 (S4): the report gains ``entities`` (Entity-Extraction per-type mention counts
 # and the confidence distribution).
-QUALITY_SCHEMA_VERSION = 4
+# v5 (S5): the report gains ``relations`` (Relation-Extraction per-type relation
+# counts and the confidence distribution).
+QUALITY_SCHEMA_VERSION = 5
 
 
 class StageMetrics(BaseModel):
@@ -187,6 +189,34 @@ class EntityQuality(BaseModel):
         return self.mentions_offset_resolving == self.mentions_total
 
 
+class RelationQuality(BaseModel):
+    """Relation-Extraction quality: per-type relation counts + confidence dist (S5).
+
+    Emitted when a run had a Relation-Extraction (or fused) Stage. ``relations_total``
+    is the number of typed :class:`~latence_core.contracts.RelationMention`s produced;
+    ``per_type`` breaks that down by relation label (the per-Pipeline relation label
+    set); ``confidence`` is the fixed-bin distribution of relation confidences.
+    ``relations_offset_resolving`` counts relations whose Provenance carried a valid
+    source char span AND page span — the S5 round-trip (relation → offset → page).
+    ``documents_with_relations`` counts distinct parent documents that yielded at
+    least one relation. The counts + distribution are the S5 acceptance criterion
+    ("relation counts + confidence land in the Quality Report").
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    relations_total: int = 0
+    relations_offset_resolving: int = 0
+    documents_with_relations: int = 0
+    per_type: dict[str, int] = Field(default_factory=dict)
+    confidence: ConfidenceHistogram = Field(default_factory=ConfidenceHistogram)
+
+    @property
+    def offset_resolving(self) -> bool:
+        """True if every emitted relation carried a resolvable source offset+page span."""
+        return self.relations_offset_resolving == self.relations_total
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -207,6 +237,8 @@ class QualityReport(BaseModel):
     screening: ScreeningQuality | None = None
     # Present when the run had an Entity-Extraction Stage.
     entities: EntityQuality | None = None
+    # Present when the run had a Relation-Extraction (or fused) Stage.
+    relations: RelationQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

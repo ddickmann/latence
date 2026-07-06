@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         ParserInput,
         QuarantineRecord,
         Record,
+        RelationMention,
         ScreeningFinding,
     )
     from latence_core.storage import Storage
@@ -133,6 +134,69 @@ class EntityExtractor(Protocol):
 
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
         """Consume :class:`ChunkRecord`s and yield typed :class:`EntityMention`s."""
+        ...
+
+
+@runtime_checkable
+class RelationExtractor(Protocol):
+    """Finds typed relations between entity mentions (CONTEXT ``Relation Extraction``).
+
+    Relation Extraction relates *mentions within a document* (ADR-0022): given the
+    document's :class:`~latence_core.contracts.EntityMention`s plus the chunk text
+    that supplies the surrounding context, it yields directed, typed
+    :class:`~latence_core.contracts.RelationMention`s (head → tail). The relation
+    label set is configured per Pipeline (Stage ``config``), not hardcoded — the
+    Capability names no relation types (zero-shot / prompt-driven), mirroring
+    Entity Extraction. Each emitted relation carries the head/tail mention refs, its
+    label, confidence, and a Provenance span covering both endpoints, so it resolves
+    back through the parent's page map to its source page(s). A document with fewer
+    than two mentions, or no relatable pair, yields no relations (never an error).
+    """
+
+    def relate(
+        self, chunks: Iterable[ChunkRecord], mentions: Iterable[EntityMention]
+    ) -> Iterator[RelationMention]:
+        """Consume a run's chunks + mentions and yield typed :class:`RelationMention`s.
+
+        Both carriers are supplied: ``mentions`` are what a relation connects, and
+        ``chunks`` carry the text (and the parent page map) a text-based Provider
+        needs for context and offset→page resolution. The Provider groups both by
+        ``document_record_id`` internally — a relation only ever links two mentions
+        of the *same* document.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class FusedExtraction:
+    """The joint output of a :class:`FusedEntityRelationExtractor` — one pass, both Stages.
+
+    A Fused Provider (ADR-0013: gliner-relex, the custom span-predictor) fulfils
+    Entity Extraction AND Relation Extraction in a single pass over the chunks, so
+    it returns both carriers together: the ``mentions`` it found and the
+    ``relations`` between them. The Runner threads both downstream from the one
+    fused Stage — S4's mentions and S5's relations — without invoking a separate
+    Entity-Extraction Stage (no double-extraction).
+    """
+
+    mentions: list[EntityMention] = field(default_factory=list)
+    relations: list[RelationMention] = field(default_factory=list)
+
+
+@runtime_checkable
+class FusedEntityRelationExtractor(Protocol):
+    """One Provider that fulfils BOTH Entity + Relation Extraction in one pass (ADR-0013).
+
+    The Pipeline does not force one Provider per Stage: a fused model (gliner-relex,
+    the custom span-predictor) does joint NER + RE, so a single fused Stage produces
+    both the :class:`~latence_core.contracts.EntityMention`s and the
+    :class:`~latence_core.contracts.RelationMention`s. The Runner routes a fused
+    Stage's :class:`FusedExtraction` to both downstream consumers without running a
+    separate Entity-Extraction Stage — the S5 seam requirement.
+    """
+
+    def extract_fused(self, chunks: Iterable[ChunkRecord]) -> FusedExtraction:
+        """Consume :class:`ChunkRecord`s and return mentions + relations together."""
         ...
 
 

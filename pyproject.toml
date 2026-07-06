@@ -6,6 +6,8 @@ latence-core = { workspace = true }
 latence-parser-plaintext = { workspace = true }
 latence-parser-document = { workspace = true }
 latence-ner-gliner = { workspace = true }
+latence-relation-llm = { workspace = true }
+latence-relation-gliner = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
 [project]
@@ -13,11 +15,13 @@ name = "latence-framework-dev"
 version = "0.0.0"
 description = "Dev meta-project pinning the latence workspace for tooling (not published)."
 requires-python = ">=3.11"
-# latence-ner-gliner is intentionally NOT pinned here: it pulls the heavy GLiNER
-# stack (torch/transformers), which would break the CPU-first, offline,
-# deterministic dev/test environment (ADR-0007/0016). It is still a workspace
-# member (built + type-checked from source), just not installed into the default
-# dev env. Its provider is exercised with the gliner dep monkeypatched in tests.
+# latence-ner-gliner / latence-relation-gliner / latence-relation-llm are
+# intentionally NOT pinned here: the two gliner packages pull the heavy GLiNER stack
+# (torch/transformers) and the llm one pulls the openai client — installing them
+# would break the CPU-first, offline, deterministic dev/test environment
+# (ADR-0007/0016). They are still workspace members (built + type-checked from
+# source), just not installed into the default dev env. Each Provider is exercised
+# with its heavy/endpoint dep monkeypatched with a fake in tests.
 dependencies = [
     "latence-core",
     "latence-parser-plaintext",
@@ -59,11 +63,12 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 disallow_any_generics = true
 no_implicit_reexport = true
-# pyarrow / fsspec / yaml ship without complete type stubs. gliner is an optional
-# heavy dep isolated in latence-ner-gliner (not installed in the dev env by design,
-# ADR-0016) and ships no stubs — the Provider treats its return as dynamically typed.
+# pyarrow / fsspec / yaml ship without complete type stubs. gliner and openai are
+# optional heavy/endpoint deps isolated in their Provider packages (not installed in
+# the dev env by design, ADR-0016) and are treated as dynamically typed — the
+# Providers monkeypatch them with fakes in tests.
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "fsspec.*", "yaml", "gliner"]
+module = ["pyarrow.*", "fsspec.*", "yaml", "gliner", "openai"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

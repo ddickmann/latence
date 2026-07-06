@@ -35,13 +35,18 @@ jobs:
       - name: Sync workspace
         run: uv sync --python ${{ matrix.python-version }}
 
-      # latence-ner-gliner is a workspace member but NOT in the dev env's deps: it
-      # pulls the heavy GLiNER stack (torch/transformers), which would break the
-      # CPU-first, offline, deterministic test env (ADR-0007/0016). Install ONLY its
-      # source (no deps) so its src is type-checked and its provider tests (which
-      # monkeypatch the gliner dep) collect and run offline.
-      - name: Install latence-ner-gliner source (no heavy deps)
-        run: uv pip install --no-deps -e packages/latence-ner-gliner
+      # latence-ner-gliner / latence-relation-gliner / latence-relation-llm are
+      # workspace members but NOT in the dev env's deps: the two gliner packages pull
+      # the heavy GLiNER stack (torch/transformers) and the llm one pulls the openai
+      # client, which would break the CPU-first, offline, deterministic test env
+      # (ADR-0007/0016). Install ONLY their source (no deps) so their src is
+      # type-checked and their provider tests (which monkeypatch the heavy/endpoint
+      # dep with a fake) collect and run offline.
+      - name: Install heavy/endpoint Provider sources (no heavy deps)
+        run: |
+          uv pip install --no-deps -e packages/latence-ner-gliner
+          uv pip install --no-deps -e packages/latence-relation-gliner
+          uv pip install --no-deps -e packages/latence-relation-llm
 
       - name: Ruff (lint)
         run: uv run ruff check packages
@@ -53,6 +58,8 @@ jobs:
           packages/latence-parser-plaintext/src
           packages/latence-parser-document/src
           packages/latence-ner-gliner/src
+          packages/latence-relation-gliner/src
+          packages/latence-relation-llm/src
 
       - name: Pytest
         run: uv run pytest
@@ -63,6 +70,8 @@ jobs:
           uv build --package latence-parser-plaintext
           uv build --package latence-parser-document
           uv build --package latence-ner-gliner
+          uv build --package latence-relation-gliner
+          uv build --package latence-relation-llm
 
   storage-s3:
     name: Storage on MinIO (s3://)

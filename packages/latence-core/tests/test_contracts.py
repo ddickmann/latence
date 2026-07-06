@@ -177,9 +177,9 @@ def _chunk_provenance() -> Provenance:
     )
 
 
-def test_schema_version_is_four() -> None:
-    # Bumped to 4 by S4 (EntityMention contract added).
-    assert SCHEMA_VERSION == 4
+def test_schema_version_is_five() -> None:
+    # Bumped to 5 by S5 (RelationMention contract added; 4 was S4's EntityMention).
+    assert SCHEMA_VERSION == 5
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

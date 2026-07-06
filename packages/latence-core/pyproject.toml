@@ -35,6 +35,10 @@ latence = "latence_core.cli:app"
 # S4 built-in: deterministic zero-shot gazetteer/regex entity extractor (pure
 # Python, no extra deps). The learned GLiNER Provider lives in latence-ner-gliner.
 "entity.gazetteer" = "latence_core.stages.entity:GazetteerEntityExtractor"
+# S5 built-in: deterministic zero-shot trigger-phrase relation extractor (pure
+# Python, no extra deps). The LLM + fused gliner-relex Providers live in
+# latence-relation-llm / latence-relation-gliner (ADR-0013, empirical choice).
+"relation.pattern" = "latence_core.stages.relation:PatternRelationExtractor"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]

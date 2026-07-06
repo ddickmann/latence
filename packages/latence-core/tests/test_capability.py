@@ -13,6 +13,16 @@ def test_builtin_providers_discovered() -> None:
     names = reg.names()
     assert "source.local_folder" in names
     assert "export.jsonl_parquet" in names
+    # S4/S5 in-core reference extractors are discoverable too.
+    assert "entity.gazetteer" in names
+    assert "relation.pattern" in names
+
+
+def test_relation_pattern_provider_loads() -> None:
+    from latence_core.stages.relation import PatternRelationExtractor
+
+    reg = ProviderRegistry()
+    assert reg.load("relation.pattern") is PatternRelationExtractor
 
 
 def test_load_returns_expected_class() -> None:

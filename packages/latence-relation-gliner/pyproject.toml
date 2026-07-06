@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-relation-gliner"
+version = "0.1.0"
+description = "Fused zero-shot Entity+Relation Extraction Provider (gliner-relex, CPU via transformers/ONNX) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER model stack
+# (gliner -> torch/transformers) ships with THIS Provider package, not the thin
+# core. Both the gliner library and the default knowledgator/gliner-relex-multi-v1.0
+# checkpoint are Apache-2.0 (weights AND code verified permissive, ADR-0012,
+# 2026-07-06); nothing downloads unless a Pipeline configures this Provider.
+dependencies = [
+    "latence-core",
+    "gliner>=0.2.5",
+]
+
+# Registers the FUSED Provider under the discovery group. Installing this package
+# makes 'relation.gliner_relex' available to any Pipeline with no core change
+# (ADR-0004). It fulfils Entity+Relation Extraction in one pass (ADR-0013).
+[project.entry-points."latence.providers"]
+"relation.gliner_relex" = "latence_relation_gliner.provider:GlinerRelexExtractor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_relation_gliner"]

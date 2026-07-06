@@ -24,9 +24,11 @@ from latence_core.capability import (
     ContentScreener,
     EntityExtractor,
     Export,
+    FusedEntityRelationExtractor,
     IntakeScreener,
     Parser,
     ProviderRegistry,
+    RelationExtractor,
     ScreeningOutcome,
     Source,
 )
@@ -38,6 +40,7 @@ from latence_core.contracts import (
     ParserInput,
     QuarantineRecord,
     Record,
+    RelationMention,
     ScreeningCheckpoint,
     ScreeningFinding,
 )
@@ -49,6 +52,7 @@ from latence_core.quality import (
     EntityQuality,
     ParseQuality,
     QualityReport,
+    RelationQuality,
     ScreeningQuality,
     StageMetrics,
 )
@@ -59,12 +63,15 @@ if TYPE_CHECKING:
 
 # A Stage's output is one of the inter-Stage carriers the DAG threads between
 # Stages: Source→ParserInput; Parse→DocumentRecord; Chunk/Content-Screening→
-# ChunkRecord; Entity-Extraction→EntityMention. The Runner keeps them in one
-# per-Stage dict and lets each Stage's capability decide how to (de)serialize its
+# ChunkRecord; Entity-Extraction→EntityMention; Relation-Extraction→RelationMention.
+# A *fused* Entity+Relation Stage (ADR-0013) emits BOTH EntityMention and
+# RelationMention in one output list (mixed carrier), routed to both downstream
+# consumers without a separate Entity-Extraction Stage. The Runner keeps outputs in
+# one per-Stage dict and lets each Stage's capability decide how to (de)serialize its
 # checkpoint. Screening ALSO produces QuarantineRecords, but those never flow
 # downstream — they are persisted to a sidecar and reported, not threaded through
 # the DAG.
-StageOutput = ParserInput | DocumentRecord | ChunkRecord | EntityMention
+StageOutput = ParserInput | DocumentRecord | ChunkRecord | EntityMention | RelationMention
 _T = TypeVar("_T", bound=StageOutput)
 
 # WAL event kinds. The log is append-only and never read for control flow in S1
@@ -139,7 +146,7 @@ class LocalRunner:
     # -- checkpoint IO -----------------------------------------------------
 
     @classmethod
-    def _output_type(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput]:
+    def _output_type(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput] | type[Record]:
         """The carrier a Stage checkpoints (the records it feeds downstream).
 
         Source and Intake Screening thread raw ParserInputs; Parse threads parsed
@@ -155,21 +162,29 @@ class LocalRunner:
             return ChunkRecord
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             return EntityMention
+        if stage.capability is CapabilityKind.RELATION_EXTRACTION:
+            return RelationMention
+        if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+            # A fused Stage checkpoints a MIXED carrier (EntityMention +
+            # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
+            return Record
         if stage.capability is CapabilityKind.EXPORT:
             return cls._export_carrier(stage, pipeline)
         return DocumentRecord
 
     @classmethod
-    def _export_carrier(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput]:
+    def _export_carrier(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput] | type[Record]:
         """Resolve an Export's pass-through carrier from its nearest producing ancestor.
 
         Walks up ``depends_on`` to the closest Stage that actually *produces* the
-        record kind Export re-emits: an Entity-Extraction ancestor ⇒ EntityMention,
-        a Chunk / Content-Screening ancestor ⇒ ChunkRecord, otherwise a Parse (or
-        Intake-Screening/Source that must feed a Parse) ancestor ⇒ DocumentRecord.
-        The frontier is walked breadth-first in ``depends_on`` order, so the nearest
-        producing ancestor wins (an Export fed directly by Entity Extraction exports
-        mentions).
+        record kind Export re-emits: a Relation-Extraction ancestor ⇒ RelationMention,
+        an Entity-Extraction ancestor ⇒ EntityMention, a Chunk / Content-Screening
+        ancestor ⇒ ChunkRecord, otherwise a Parse (or Intake-Screening/Source that
+        must feed a Parse) ancestor ⇒ DocumentRecord. A *fused* Entity+Relation
+        ancestor produces a MIXED carrier (both mentions and relations), so its
+        checkpoint is read polymorphically (:meth:`_read_mixed_checkpoint`), signalled
+        here by returning :class:`Record`. The frontier is walked breadth-first in
+        ``depends_on`` order, so the nearest producing ancestor wins.
         """
         by_name = {s.name: s for s in pipeline.stages}
         seen: set[str] = set()
@@ -182,6 +197,10 @@ class LocalRunner:
             parent = by_name.get(name)
             if parent is None:  # pragma: no cover - validated DAG
                 continue
+            if parent.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+                return Record
+            if parent.capability is CapabilityKind.RELATION_EXTRACTION:
+                return RelationMention
             if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
                 return EntityMention
             if parent.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
@@ -200,13 +219,42 @@ class LocalRunner:
         storage.write_atomic(uri, (payload + ("\n" if records else "")).encode("utf-8"))
 
     def _read_checkpoint(
-        self, storage: Storage, uri: str, record_type: type[StageOutput]
+        self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
     ) -> list[StageOutput]:
         text = storage.read_text(uri)
+        if record_type is Record:
+            # A fused Stage's mixed carrier (or an Export re-emitting one): each line
+            # is an EntityMention or a RelationMention — discriminate per line.
+            return self._read_mixed_lines(text)
         records: list[StageOutput] = []
         for raw in text.splitlines():
             if raw.strip():
-                records.append(record_type.model_validate_json(raw))
+                records.append(record_type.model_validate_json(raw))  # type: ignore[arg-type]
+        return records
+
+    @staticmethod
+    def _read_mixed_lines(text: str) -> list[StageOutput]:
+        """Read a mixed EntityMention/RelationMention checkpoint (a fused Stage output).
+
+        Each line is discriminated by the presence of the ``head_mention_id`` *key*
+        in the parsed JSON object — a structural signal unique to the relation
+        contract — never a substring match against the raw line. A substring test
+        would misclassify an EntityMention whose ``text``/``label`` value is literally
+        ``head_mention_id`` (it serialises to a line containing ``"head_mention_id"``),
+        and the subsequent RelationMention validation would crash the resumed run.
+        Both records are inter-Stage Records; keeping them in one checkpoint is what
+        lets a single fused Stage feed both downstream consumers (S5: one pass, no
+        double-extract).
+        """
+        records: list[StageOutput] = []
+        for raw in text.splitlines():
+            if not raw.strip():
+                continue
+            obj = json.loads(raw)
+            if isinstance(obj, dict) and "head_mention_id" in obj:
+                records.append(RelationMention.model_validate(obj))
+            else:
+                records.append(EntityMention.model_validate(obj))
         return records
 
     # -- execution ---------------------------------------------------------
@@ -360,6 +408,37 @@ class LocalRunner:
             chunk_records = self._as_type(stage, incoming, ChunkRecord)
             return list(provider.extract(chunk_records))
 
+        if stage.capability is CapabilityKind.RELATION_EXTRACTION:
+            if not isinstance(provider, RelationExtractor):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the RelationExtractor capability."
+                )
+                raise TypeError(msg)
+            # Relation Extraction is multi-input: it wires BOTH a Chunk (or
+            # Content-Screening) parent for text/page-map context AND an
+            # Entity-Extraction parent for the mentions it relates. Partition the
+            # gathered inputs by carrier; a missing side is a wiring error.
+            rel_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
+            rel_mentions = [r for r in incoming if isinstance(r, EntityMention)]
+            self._require_relation_inputs(stage, incoming, rel_chunks, rel_mentions)
+            return list(provider.relate(rel_chunks, rel_mentions))
+
+        if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+            if not isinstance(provider, FusedEntityRelationExtractor):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the FusedEntityRelationExtractor capability."
+                )
+                raise TypeError(msg)
+            # One pass over the chunks yields BOTH mentions and relations; the fused
+            # Stage threads them together downstream (no separate Entity-Extraction
+            # Stage — the S5 no-double-extract routing).
+            fused_chunks = self._as_type(stage, incoming, ChunkRecord)
+            fused = provider.extract_fused(fused_chunks)
+            out: list[StageOutput] = [*fused.mentions, *fused.relations]
+            return out
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -466,26 +545,60 @@ class LocalRunner:
         return [r for r in records if isinstance(r, expected)]
 
     @staticmethod
+    def _require_relation_inputs(
+        stage: Stage,
+        incoming: list[StageOutput],
+        chunks: list[ChunkRecord],
+        mentions: list[EntityMention],
+    ) -> None:
+        """A Relation-Extraction Stage must be wired to BOTH chunks and mentions.
+
+        It depends on an Entity-Extraction parent (the mentions it relates) and a
+        Chunk / Content-Screening parent (the text + page map it needs for triggers
+        and offset→page resolution). A missing side means the Pipeline forgot a
+        ``depends_on`` edge — surface it as a clear typed error, not an empty result.
+        An empty run (no documents ⇒ no chunks and no mentions) is legitimately empty.
+        """
+        if not incoming:
+            return
+        if not mentions:
+            msg = (
+                f"Stage {stage.name!r} (relation_extraction) received no EntityMentions. "
+                f"A Relation-Extraction Stage must depend on an Entity-Extraction Stage "
+                f"(the mentions it relates). Check the Pipeline's depends_on wiring."
+            )
+            raise TypeError(msg)
+        if not chunks:
+            msg = (
+                f"Stage {stage.name!r} (relation_extraction) received no ChunkRecords. "
+                f"A Relation-Extraction Stage must also depend on the Chunk (or "
+                f"Content-Screening) Stage for the text + page map. Check depends_on."
+            )
+            raise TypeError(msg)
+
+    @staticmethod
     def _as_records(
         stage: Stage, records: list[StageOutput]
-    ) -> list[DocumentRecord | ChunkRecord | EntityMention]:
+    ) -> list[DocumentRecord | ChunkRecord | EntityMention | RelationMention]:
         """Narrow gathered inputs to the inter-Stage Records Export materializes.
 
         Export materializes DocumentRecords (S1/S2 spine), ChunkRecords (S3, when a
-        Chunk Stage is upstream), or EntityMentions (S4, when an Entity-Extraction
-        Stage is upstream); a raw ParserInput (not a Record) means a Source was
+        Chunk Stage is upstream), EntityMentions (S4, an Entity-Extraction Stage
+        upstream), or RelationMentions (S5, a Relation-Extraction / fused Stage
+        upstream). A fused Stage feeds a MIX of mentions and relations — both are
+        Records and both export. A raw ParserInput (not a Record) means a Source was
         wired straight into Export with no Parse between. Surface it as a clear
         typed error.
         """
-        exportable = (DocumentRecord, ChunkRecord, EntityMention)
+        exportable = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
         wrong = [r for r in records if not isinstance(r, exportable)]
         if wrong:
             got = sorted({type(r).__name__ for r in wrong})
             msg = (
                 f"Stage {stage.name!r} (export) requires Record inputs "
-                f"(DocumentRecord/ChunkRecord/EntityMention) but received: "
-                f"{', '.join(got)}. An Export needs a Parse (and optionally a "
-                f"Chunk / Entity-Extraction) upstream."
+                f"(DocumentRecord/ChunkRecord/EntityMention/RelationMention) but "
+                f"received: {', '.join(got)}. An Export needs a Parse (and optionally "
+                f"a Chunk / Entity-Extraction / Relation-Extraction) upstream."
             )
             raise TypeError(msg)
         return [r for r in records if isinstance(r, exportable)]
@@ -542,8 +655,21 @@ class LocalRunner:
             pipeline, ordered, outputs, CapabilityKind.CONTENT_SCREENING
         )
         flagged_source = post_content if post_content else chunked
-        mentions = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.ENTITY_EXTRACTION
+        # Mentions come from an Entity-Extraction Stage OR a fused Stage (which emits
+        # mentions + relations together); relations from a Relation-Extraction Stage
+        # OR that same fused Stage. The quality builders isinstance-filter each list to
+        # its own carrier, so a fused Stage's mixed output is passed to both.
+        mentions = self._records_of_kinds(
+            pipeline,
+            ordered,
+            outputs,
+            (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
+        )
+        relations = self._records_of_kinds(
+            pipeline,
+            ordered,
+            outputs,
+            (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
         )
         return QualityReport(
             pipeline_name=pipeline.name,
@@ -557,6 +683,7 @@ class LocalRunner:
             chunk=self._chunk_quality(pipeline, chunked, flagged_source),
             screening=self._screening_quality(pipeline, run_id, storage, ordered),
             entities=self._entity_quality(pipeline, mentions),
+            relations=self._relation_quality(pipeline, relations),
         )
 
     @staticmethod
@@ -570,6 +697,26 @@ class LocalRunner:
         result: list[StageOutput] = []
         for stage in ordered:
             if stage.capability is kind:
+                result.extend(outputs.get(stage.name, []))
+        return result
+
+    @staticmethod
+    def _records_of_kinds(
+        pipeline: Pipeline,
+        ordered: list[Stage],
+        outputs: dict[str, list[StageOutput]],
+        kinds: tuple[CapabilityKind, ...],
+    ) -> list[StageOutput]:
+        """Flatten the outputs of every Stage fulfilling any of ``kinds`` (order-stable).
+
+        Used where a record kind can be produced by more than one capability — a
+        mention comes from an Entity-Extraction OR a fused Stage; a relation from a
+        Relation-Extraction OR that same fused Stage — and the caller then filters the
+        gathered output by carrier type.
+        """
+        result: list[StageOutput] = []
+        for stage in ordered:
+            if stage.capability in kinds:
                 result.extend(outputs.get(stage.name, []))
         return result
 
@@ -660,7 +807,11 @@ class LocalRunner:
         carried a resolvable span. The confidence distribution + per-type counts are
         the S4 acceptance criterion (they "land in the Quality Report").
         """
-        if not any(s.capability is CapabilityKind.ENTITY_EXTRACTION for s in pipeline.stages):
+        entity_kinds = (
+            CapabilityKind.ENTITY_EXTRACTION,
+            CapabilityKind.FUSED_ENTITY_RELATION,
+        )
+        if not any(s.capability in entity_kinds for s in pipeline.stages):
             return None
         quality = EntityQuality()
         chunk_ids_with_mentions: set[str] = set()
@@ -682,6 +833,50 @@ class LocalRunner:
                 quality.mentions_offset_resolving += 1
         quality.chunks_with_mentions = len(chunk_ids_with_mentions)
         # Sort per_type for a stable, deterministic report.
+        quality.per_type = dict(sorted(quality.per_type.items()))
+        return quality
+
+    @staticmethod
+    def _relation_quality(
+        pipeline: Pipeline, records: list[StageOutput]
+    ) -> RelationQuality | None:
+        """Aggregate Relation-Extraction quality: per-type counts + confidence dist (S5).
+
+        Only computed when the Pipeline has a Relation-Extraction (or fused) Stage.
+        ``records`` is the relation set from which per-label counts, the confidence
+        histogram, and the offset-resolution invariant are measured: every
+        :class:`~latence_core.contracts.RelationMention`'s Provenance must carry a
+        valid char span AND a page span — the S5 round-trip (relation → offset →
+        original page) — so ``offset_resolving`` is True only when every relation
+        carried a resolvable span. The per-type counts + confidence distribution are
+        the S5 acceptance criterion ("relation counts + confidence land in the
+        Quality Report").
+        """
+        relation_kinds = (
+            CapabilityKind.RELATION_EXTRACTION,
+            CapabilityKind.FUSED_ENTITY_RELATION,
+        )
+        if not any(s.capability in relation_kinds for s in pipeline.stages):
+            return None
+        quality = RelationQuality()
+        docs_with_relations: set[str] = set()
+        for record in records:
+            if not isinstance(record, RelationMention):
+                continue
+            quality.relations_total += 1
+            quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
+            quality.confidence.add(record.confidence)
+            docs_with_relations.add(record.document_record_id)
+            prov = record.provenance
+            has_span = (
+                prov.char_start is not None
+                and prov.char_end is not None
+                and prov.char_end >= prov.char_start
+            )
+            has_pages = prov.page_start is not None and prov.page_end is not None
+            if has_span and has_pages:
+                quality.relations_offset_resolving += 1
+        quality.documents_with_relations = len(docs_with_relations)
         quality.per_type = dict(sorted(quality.per_type.items()))
         return quality
 

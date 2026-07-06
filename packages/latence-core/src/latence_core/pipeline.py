@@ -26,7 +26,10 @@ class CapabilityKind(StrEnum):
 
     S1 spine: source/parse/export. S3 adds Chunk and Screening's two checkpoints
     (intake before Parse, content after Chunk). S4 adds Entity Extraction (typed
-    entity mentions found in chunked text).
+    entity mentions found in chunked text). S5 adds Relation Extraction (typed
+    relations between mentions) and a *fused* Entity+Relation Extraction — one
+    Provider fulfilling both adjacent Stages in one pass (ADR-0013), so the Pipeline
+    is not forced to one Provider per Stage.
     """
 
     SOURCE = "source"
@@ -35,6 +38,8 @@ class CapabilityKind(StrEnum):
     CHUNK = "chunk"
     CONTENT_SCREENING = "content_screening"
     ENTITY_EXTRACTION = "entity_extraction"
+    RELATION_EXTRACTION = "relation_extraction"
+    FUSED_ENTITY_RELATION = "fused_entity_relation"
     EXPORT = "export"
 
 

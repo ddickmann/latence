@@ -31,7 +31,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # document's assembled markdown, and the source page(s) that span resolves to via
 # PageOffsetIndex) — an inter-Stage Record like ChunkRecord, so it carries
 # Provenance and Classification and is exportable.
-SCHEMA_VERSION = 4
+# v5 (S5 Relation Extraction): RelationMention (a typed relation between two
+# EntityMentions within one document, carrying head/tail mention refs, its label,
+# confidence, and a Provenance span covering the head..tail extent) — an inter-Stage
+# Record like EntityMention, carrying Provenance and Classification and exportable.
+SCHEMA_VERSION = 5
 
 
 class Provenance(BaseModel):
@@ -465,5 +469,78 @@ class EntityMention(Record):
             raise ValueError(msg)
         if prov.page_start is None or prov.page_end is None:
             msg = "An EntityMention's Provenance must carry a page_start and page_end."
+            raise ValueError(msg)
+        return self
+
+
+# -- S5: Relation Extraction -------------------------------------------------
+
+
+class RelationMention(Record):
+    """One typed relation between two entity mentions (CONTEXT ``Relation Extraction``).
+
+    Relation Extraction finds typed relations between entity mentions *within a
+    document*. A relation is an inter-Stage :class:`Record` — it carries Provenance
+    and Classification like :class:`EntityMention` — so it threads through the DAG,
+    is checkpointed/resumed uniformly, and is exported to the corpus directly. A
+    relation records:
+
+    * ``label`` — the relation type (e.g. ``works_for``, ``located_in``). The
+      relation label set is supplied per Pipeline (zero-shot / prompt-driven); no
+      label set is hardcoded in core, mirroring Entity Extraction.
+    * ``head_mention_id``/``tail_mention_id`` — the ``record_id`` of the head (subject)
+      and tail (object) :class:`EntityMention` the relation connects. The relation is
+      directed head → tail.
+    * ``head_text``/``tail_text`` — the head/tail surface strings, carried denormalised
+      so a consumer (and Graph Assembly's Evidence) reads the relation without
+      re-joining to the mention set.
+    * ``confidence`` — the extractor's 0..1 score for the relation.
+    * ``char_start``/``char_end`` on its **Provenance** — the half-open span in the
+      parent document's assembled markdown that *covers both* endpoints (from the
+      earlier mention's start to the later mention's end), so the relation resolves
+      back to source offsets and, through the parent's page map, to its source
+      page(s). The page span is resolved the same way (mention → offset → page).
+    * the parent document's **Classification**, inherited unchanged.
+
+    ``document_record_id`` links the relation back to the document its two mentions
+    belong to; ``index`` is the relation's ordinal within that document (0-based).
+
+    The head and tail must be distinct mentions (no self-relation), and the char
+    span must be present and well-ordered — a relation with no span or an inverted
+    span fails validation, so a Provider that forgets to resolve the endpoint offsets
+    cannot silently emit an un-resolvable relation.
+    """
+
+    document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
+    index: int = Field(..., ge=0, description="0-based relation ordinal within the document.")
+    label: str = Field(
+        ..., min_length=1, description="Zero-shot relation type (per-Pipeline label)."
+    )
+    head_mention_id: str = Field(..., min_length=1, description="record_id of the head mention.")
+    tail_mention_id: str = Field(..., min_length=1, description="record_id of the tail mention.")
+    head_text: str = Field(..., min_length=1, description="Head mention surface string.")
+    tail_text: str = Field(..., min_length=1, description="Tail mention surface string.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+
+    @model_validator(mode="after")
+    def _relation_valid(self) -> RelationMention:
+        if self.head_mention_id == self.tail_mention_id:
+            msg = (
+                "A RelationMention's head and tail must be distinct mentions "
+                f"(both are {self.head_mention_id!r})."
+            )
+            raise ValueError(msg)
+        prov = self.provenance
+        if prov.char_start is None or prov.char_end is None:
+            msg = "A RelationMention's Provenance must carry a char_start and char_end span."
+            raise ValueError(msg)
+        if prov.char_end < prov.char_start:
+            msg = (
+                f"RelationMention span is inverted: char_end {prov.char_end} "
+                f"< char_start {prov.char_start}"
+            )
+            raise ValueError(msg)
+        if prov.page_start is None or prov.page_end is None:
+            msg = "A RelationMention's Provenance must carry a page_start and page_end."
             raise ValueError(msg)
         return self
