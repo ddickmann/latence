@@ -118,3 +118,11 @@ _Avoid_: Adapter, integration, connector
 **Fused Provider**:
 A single Provider that fulfils more than one adjacent Stage's Capability in one pass (e.g., joint NER + Relation Extraction). The Pipeline permits this; Capabilities are not forced one-per-Stage.
 _Avoid_: Multi-task model (implementation detail, not the seam concept)
+
+**ParserInput**:
+The raw-document contract the Parser consumes: Provenance and Classification plus the *undecoded* source `content` (bytes, or str if already textual) and a per-input `config` of Parser hints. Produced by Source, it is the input side of the Parse seam — decoding bytes into markdown belongs to the Parser, which turns a ParserInput into a DocumentRecord (ADR-0019), so the seam fits real bytes-consuming parsers, not just the passthrough.
+_Avoid_: Seed record, raw record (unqualified), pre-parsed document
+
+**Raw document**:
+A source document as first read by Source — its bytes plus stamped Provenance and Classification, before any Parse decoding — carried as a ParserInput. Contrast the DocumentRecord, which is the *parsed* (markdown) form the Parser produces.
+_Avoid_: Blob, payload, input record (unqualified)

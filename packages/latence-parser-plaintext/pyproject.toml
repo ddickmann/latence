@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-plaintext"
+version = "0.1.0"
+description = "Passthrough plain-text/markdown Parser Provider for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+dependencies = ["latence-core"]
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'parser.plaintext' available to any Pipeline with no core change —
+# the proof of dynamic, cross-package Provider discovery (ADR-0004).
+[project.entry-points."latence.providers"]
+"parser.plaintext" = "latence_parser_plaintext.provider:PlaintextParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_plaintext"]

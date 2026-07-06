@@ -1,0 +1,20 @@
+# Walking-skeleton Pipeline: Source (local folder) -> Parse (passthrough) -> Export (JSONL + Parquet).
+# Run with:  latence run examples/pipeline.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/ (export/ + quality-report.json).
+name: walking-skeleton
+storage_uri: file:///tmp/latence-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # replaced with an absolute path by the demo/test; edit to your folder
+      sensitivity: internal
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [parse]

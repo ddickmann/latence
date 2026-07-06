@@ -1,0 +1,3 @@
+Latence turns messy enterprise data into AI-ready data. This is the walking
+skeleton: a source folder is read, parsed as passthrough markdown, and exported
+to JSONL and Parquet with full provenance for every record.

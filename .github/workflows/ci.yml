@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Hash-stable runs for deterministic tests.
+  PYTHONHASHSEED: "0"
+
+jobs:
+  quality:
+    name: lint · type · test · build (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync workspace
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Ruff (lint)
+        run: uv run ruff check packages
+
+      - name: Mypy (strict)
+        run: uv run mypy --strict packages/latence-core/src packages/latence-parser-plaintext/src
+
+      - name: Pytest
+        run: uv run pytest
+
+      - name: Build wheels
+        run: |
+          uv build --package latence-core
+          uv build --package latence-parser-plaintext
+
+  storage-s3:
+    name: Storage on MinIO (s3://)
+    runs-on: ubuntu-latest
+    env:
+      LATENCE_S3_ENDPOINT: http://localhost:9000
+      LATENCE_S3_BUCKET: latence-test
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start MinIO
+        run: |
+          # Run MinIO directly (services: can't pass the required `server` command).
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+          # Wait for the health endpoint (host curl, not container curl).
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live; then
+              echo "minio ready"; break
+            fi
+            echo "waiting for minio ($i)"; sleep 2
+          done
+          # Create the test bucket via the mc client.
+          docker run --rm --network host \
+            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            minio/mc:latest mb --ignore-existing local/latence-test
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync workspace (+ s3fs)
+        run: |
+          uv sync
+          uv pip install s3fs
+
+      - name: Storage round-trip on s3://
+        run: uv run pytest packages/latence-core/tests/test_storage_s3.py -v

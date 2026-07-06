@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-core"
+version = "0.1.0"
+description = "Latence framework core: data contracts, Capability protocols, Pipeline, local Runner, Storage seam."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# Near-zero deps (ADR-0016): only the contract/serialization/IO/CLI spine.
+dependencies = [
+    "pydantic>=2.5",
+    "fsspec>=2024.2",
+    "pyarrow>=15.0",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+]
+
+[project.scripts]
+latence = "latence_core.cli:app"
+
+# Built-in reference Providers ship inside core so the demo runs end to end
+# (ADR-0004). Additional Providers live in their own packages.
+[project.entry-points."latence.providers"]
+"source.local_folder" = "latence_core.stages.source:LocalFolderSource"
+"export.jsonl_parquet" = "latence_core.stages.export:JsonlParquetExport"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_core"]

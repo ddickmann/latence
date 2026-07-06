@@ -1,0 +1,61 @@
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+latence-core = { workspace = true }
+latence-parser-plaintext = { workspace = true }
+
+# Dev-only aggregate environment for the whole workspace.
+[project]
+name = "latence-framework-dev"
+version = "0.0.0"
+description = "Dev meta-project pinning the latence workspace for tooling (not published)."
+requires-python = ">=3.11"
+dependencies = [
+    "latence-core",
+    "latence-parser-plaintext",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["packages"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may keep imports at runtime for readability and use assert freely.
+"**/tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_reexport = true
+# pyarrow / fsspec / yaml ship without complete type stubs.
+[[tool.mypy.overrides]]
+module = ["pyarrow.*", "fsspec.*", "yaml"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["packages"]
