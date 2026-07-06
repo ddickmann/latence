@@ -19,14 +19,34 @@ import json
 import time
 from typing import TYPE_CHECKING, TypeVar
 
-from latence_core.capability import Export, Parser, ProviderRegistry, Source
-from latence_core.contracts import Disposition, DocumentRecord, ParserInput, Record
+from latence_core.capability import (
+    Chunker,
+    ContentScreener,
+    Export,
+    IntakeScreener,
+    Parser,
+    ProviderRegistry,
+    ScreeningOutcome,
+    Source,
+)
+from latence_core.contracts import (
+    ChunkRecord,
+    Disposition,
+    DocumentRecord,
+    ParserInput,
+    QuarantineRecord,
+    Record,
+    ScreeningCheckpoint,
+    ScreeningFinding,
+)
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import (
+    ChunkQuality,
     CompletenessCheck,
     ParseQuality,
     QualityReport,
+    ScreeningQuality,
     StageMetrics,
 )
 from latence_core.storage import Storage
@@ -34,11 +54,13 @@ from latence_core.storage import Storage
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-# A Stage's output is one of the two inter-Stage carriers on the S1 spine: a
-# Source yields raw ParserInputs, a Parser/Export yields parsed DocumentRecords.
-# The Runner keeps them in one per-Stage dict and lets each Stage's capability
-# decide how to (de)serialize its checkpoint.
-StageOutput = ParserInput | DocumentRecord
+# A Stage's output is one of the inter-Stage carriers the DAG threads between
+# Stages: Source→ParserInput; Parse→DocumentRecord; Chunk/Content-Screening→
+# ChunkRecord. The Runner keeps them in one per-Stage dict and lets each Stage's
+# capability decide how to (de)serialize its checkpoint. Screening ALSO produces
+# QuarantineRecords, but those never flow downstream — they are persisted to a
+# sidecar and reported, not threaded through the DAG.
+StageOutput = ParserInput | DocumentRecord | ChunkRecord
 _T = TypeVar("_T", bound=StageOutput)
 
 # WAL event kinds. The log is append-only and never read for control flow in S1
@@ -95,6 +117,14 @@ class LocalRunner:
     def _export_dir(self, pipeline: Pipeline, run_id: str) -> str:
         return f"{self._run_dir(pipeline, run_id)}/export"
 
+    def _quarantine_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
+        # Quarantined records are retained and inspectable (CONTEXT ``Quarantine``):
+        # excluded from the DAG and Export, persisted here per Screening Stage.
+        return f"{self._run_dir(pipeline, run_id)}/quarantine/{stage_name}.jsonl"
+
+    def _findings_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
+        return f"{self._run_dir(pipeline, run_id)}/screening/{stage_name}.jsonl"
+
     # -- WAL ---------------------------------------------------------------
 
     def _wal_append(self, storage: Storage, uri: str, event: str, stage: str) -> None:
@@ -104,10 +134,51 @@ class LocalRunner:
 
     # -- checkpoint IO -----------------------------------------------------
 
-    @staticmethod
-    def _output_type(stage: Stage) -> type[StageOutput]:
-        """The carrier a Stage checkpoints: Source→ParserInput, else DocumentRecord."""
-        return ParserInput if stage.capability is CapabilityKind.SOURCE else DocumentRecord
+    @classmethod
+    def _output_type(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput]:
+        """The carrier a Stage checkpoints (the records it feeds downstream).
+
+        Source and Intake Screening thread raw ParserInputs; Parse threads parsed
+        DocumentRecords; Chunk and Content Screening thread ChunkRecords. (Screening
+        never threads its QuarantineRecords — those go to a sidecar, not the DAG.)
+        Export is a pass-through sink: its carrier is whatever its upstream feeds —
+        DocumentRecords on the S1/S2 spine, ChunkRecords once a Chunk Stage sits
+        upstream — so its checkpoint re-reads with the right type on resume.
+        """
+        if stage.capability in (CapabilityKind.SOURCE, CapabilityKind.INTAKE_SCREENING):
+            return ParserInput
+        if stage.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
+            return ChunkRecord
+        if stage.capability is CapabilityKind.EXPORT:
+            return cls._export_carrier(stage, pipeline)
+        return DocumentRecord
+
+    @classmethod
+    def _export_carrier(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput]:
+        """Resolve an Export's pass-through carrier from its nearest producing ancestor.
+
+        Walks up ``depends_on`` to the closest Stage that actually *produces* the
+        record kind Export re-emits: a Chunk / Content-Screening ancestor ⇒
+        ChunkRecord, otherwise a Parse (or Intake-Screening/Source that must feed a
+        Parse) ancestor ⇒ DocumentRecord.
+        """
+        by_name = {s.name: s for s in pipeline.stages}
+        seen: set[str] = set()
+        frontier = list(stage.depends_on)
+        while frontier:
+            name = frontier.pop(0)
+            if name in seen:
+                continue
+            seen.add(name)
+            parent = by_name.get(name)
+            if parent is None:  # pragma: no cover - validated DAG
+                continue
+            if parent.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
+                return ChunkRecord
+            if parent.capability is CapabilityKind.PARSE:
+                return DocumentRecord
+            frontier.extend(parent.depends_on)
+        return DocumentRecord
 
     def _write_checkpoint(
         self, storage: Storage, uri: str, records: list[StageOutput]
@@ -164,7 +235,9 @@ class LocalRunner:
                 # Resume: this Stage already completed. Reload ITS OWN output into
                 # the dict and skip re-running. A downstream Stage still reads this
                 # value as one of its parents' outputs.
-                own_output = self._read_checkpoint(storage, ckpt_uri, self._output_type(stage))
+                own_output = self._read_checkpoint(
+                    storage, ckpt_uri, self._output_type(stage, pipeline)
+                )
                 outputs[stage.name] = own_output
                 stage_metrics.append(
                     StageMetrics(
@@ -200,7 +273,9 @@ class LocalRunner:
             )
 
         final_records = self._final_records(ordered, outputs)
-        report = self._build_report(pipeline, run_id, stage_metrics, final_records)
+        report = self._build_report(
+            pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
+        )
         storage.write_atomic(self._report_uri(pipeline, run_id), report.to_json().encode("utf-8"))
         return report
 
@@ -222,6 +297,20 @@ class LocalRunner:
             # A Source is a root: it reads Storage, not upstream records.
             return list(provider.produce(storage))
 
+        if stage.capability is CapabilityKind.INTAKE_SCREENING:
+            if not isinstance(provider, IntakeScreener):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the IntakeScreener capability."
+                )
+                raise TypeError(msg)
+            raw_inputs = self._as_type(stage, incoming, ParserInput)
+            intake_outcome = provider.screen_intake(raw_inputs)
+            self._persist_screening_sidecar(storage, pipeline, run_id, stage, intake_outcome)
+            # Only the passed raw inputs proceed to Parse; the quarantined ones are
+            # removed from the DAG (persisted for audit above), never reaching Parse.
+            return list(intake_outcome.passed)
+
         if stage.capability is CapabilityKind.PARSE:
             if not isinstance(provider, Parser):
                 msg = f"Provider {stage.provider!r} does not satisfy the Parser capability."
@@ -229,18 +318,95 @@ class LocalRunner:
             parser_inputs = self._as_type(stage, incoming, ParserInput)
             return list(provider.parse(parser_inputs))
 
+        if stage.capability is CapabilityKind.CHUNK:
+            if not isinstance(provider, Chunker):
+                msg = f"Provider {stage.provider!r} does not satisfy the Chunker capability."
+                raise TypeError(msg)
+            doc_records = self._as_type(stage, incoming, DocumentRecord)
+            return list(provider.chunk(doc_records))
+
+        if stage.capability is CapabilityKind.CONTENT_SCREENING:
+            if not isinstance(provider, ContentScreener):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the ContentScreener capability."
+                )
+                raise TypeError(msg)
+            chunk_records = self._as_type(stage, incoming, ChunkRecord)
+            content_outcome = provider.screen_content(chunk_records)
+            self._persist_screening_sidecar(storage, pipeline, run_id, stage, content_outcome)
+            # Passed chunks (some now carrying propagated RiskMarkers) proceed to
+            # Export; quarantined chunks are removed and persisted for audit.
+            return list(content_outcome.passed)
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
                 raise TypeError(msg)
-            doc_records = self._as_type(stage, incoming, DocumentRecord)
+            # Export materializes any inter-Stage Record: DocumentRecords (S1/S2
+            # spine) or ChunkRecords (S3, when a Chunk Stage sits upstream). Only a
+            # raw ParserInput (not a Record) is an invalid Export input.
+            exportable = self._as_records(stage, incoming)
             out_dir = self._export_dir(pipeline, run_id)
-            provider.export(doc_records, storage, out_dir)
+            provider.export(exportable, storage, out_dir)
             # Export is a sink: it passes its input records through unchanged.
-            return list(doc_records)
+            return list(exportable)
 
         msg = f"Unknown capability {stage.capability!r} for stage {stage.name!r}."
         raise ValueError(msg)
+
+    # -- Screening sidecars (quarantine + findings, off the DAG) ------------
+
+    def _persist_screening_sidecar(
+        self,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+        stage: Stage,
+        outcome: ScreeningOutcome[ParserInput] | ScreeningOutcome[ChunkRecord],
+    ) -> None:
+        """Persist a Screening Stage's quarantine records + findings for audit.
+
+        Written atomically alongside the checkpoint so a resumed run re-reads them
+        from Storage without re-running Screening (the Quality Report is rebuilt
+        from these files uniformly on fresh and resumed runs). Quarantined records
+        are retained and inspectable here (CONTEXT ``Quarantine``); they never enter
+        the DAG or an Export.
+        """
+        q_uri = self._quarantine_uri(pipeline, run_id, stage.name)
+        q_payload = "\n".join(r.model_dump_json() for r in outcome.quarantined)
+        storage.write_atomic(
+            q_uri, (q_payload + ("\n" if outcome.quarantined else "")).encode("utf-8")
+        )
+        f_uri = self._findings_uri(pipeline, run_id, stage.name)
+        f_payload = "\n".join(f.model_dump_json() for f in outcome.findings)
+        storage.write_atomic(
+            f_uri, (f_payload + ("\n" if outcome.findings else "")).encode("utf-8")
+        )
+
+    def _read_quarantine(
+        self, storage: Storage, pipeline: Pipeline, run_id: str, stage_name: str
+    ) -> list[QuarantineRecord]:
+        uri = self._quarantine_uri(pipeline, run_id, stage_name)
+        if not storage.exists(uri):
+            return []
+        return [
+            QuarantineRecord.model_validate_json(line)
+            for line in storage.read_text(uri).splitlines()
+            if line.strip()
+        ]
+
+    def _read_findings(
+        self, storage: Storage, pipeline: Pipeline, run_id: str, stage_name: str
+    ) -> list[ScreeningFinding]:
+        uri = self._findings_uri(pipeline, run_id, stage_name)
+        if not storage.exists(uri):
+            return []
+        return [
+            ScreeningFinding.model_validate_json(line)
+            for line in storage.read_text(uri).splitlines()
+            if line.strip()
+        ]
 
     @staticmethod
     def _gather_inputs(stage: Stage, outputs: dict[str, list[StageOutput]]) -> list[StageOutput]:
@@ -279,6 +445,26 @@ class LocalRunner:
         return [r for r in records if isinstance(r, expected)]
 
     @staticmethod
+    def _as_records(stage: Stage, records: list[StageOutput]) -> list[DocumentRecord | ChunkRecord]:
+        """Narrow gathered inputs to the inter-Stage Records Export materializes.
+
+        Export materializes DocumentRecords (S1/S2 spine) or ChunkRecords (S3, when
+        a Chunk Stage is upstream); a raw ParserInput (not a Record) means a Source
+        was wired straight into Export with no Parse between. Surface it as a clear
+        typed error.
+        """
+        wrong = [r for r in records if not isinstance(r, (DocumentRecord, ChunkRecord))]
+        if wrong:
+            got = sorted({type(r).__name__ for r in wrong})
+            msg = (
+                f"Stage {stage.name!r} (export) requires Record inputs "
+                f"(DocumentRecord/ChunkRecord) but received: {', '.join(got)}. "
+                f"An Export needs a Parse (and optionally a Chunk) upstream."
+            )
+            raise TypeError(msg)
+        return [r for r in records if isinstance(r, (DocumentRecord, ChunkRecord))]
+
+    @staticmethod
     def _final_records(
         ordered: list[Stage], outputs: dict[str, list[StageOutput]]
     ) -> list[StageOutput]:
@@ -299,7 +485,10 @@ class LocalRunner:
         self,
         pipeline: Pipeline,
         run_id: str,
+        storage: Storage,
+        ordered: list[Stage],
         stage_metrics: list[StageMetrics],
+        outputs: dict[str, list[StageOutput]],
         final_records: Iterable[Record | StageOutput],
     ) -> QualityReport:
         records = list(final_records)
@@ -309,8 +498,24 @@ class LocalRunner:
             records_with_provenance=sum(1 for r in records if r.provenance is not None),
             records_with_classification=sum(1 for r in records if r.classification is not None),
         )
-        # Document count = distinct source documents seen at the Source stage.
+        # Document count = distinct source documents seen across the run. Chunks
+        # fan out from a document (many chunks share one document_id), so counting
+        # distinct Provenance document ids is correct whether the sinks are
+        # DocumentRecords or ChunkRecords.
         doc_ids = {r.provenance.document_id for r in records}
+        # Parse/Chunk quality scan the Stage that produced those records (not just
+        # the sinks), so a Source→Parse→Chunk→Export pipeline (whose sinks are
+        # ChunkRecords) still reports Parse metrics from the Parse Stage's output.
+        parsed = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.PARSE)
+        chunked = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.CHUNK)
+        # Content Screening attaches the risk markers, so the flagged count is read
+        # from the FINAL corpus records (post-screening), not the raw Chunk output
+        # (which has no markers yet). Falls back to the chunk output when there is
+        # no Content-Screening Stage.
+        post_content = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.CONTENT_SCREENING
+        )
+        flagged_source = post_content if post_content else chunked
         return QualityReport(
             pipeline_name=pipeline.name,
             run_id=run_id,
@@ -319,12 +524,100 @@ class LocalRunner:
             stages=stage_metrics,
             completeness=completeness,
             contracts_complete=completeness.passed,
-            parse=self._parse_quality(pipeline, records),
+            parse=self._parse_quality(pipeline, parsed),
+            chunk=self._chunk_quality(pipeline, chunked, flagged_source),
+            screening=self._screening_quality(pipeline, run_id, storage, ordered),
         )
 
     @staticmethod
+    def _records_of_kind(
+        pipeline: Pipeline,
+        ordered: list[Stage],
+        outputs: dict[str, list[StageOutput]],
+        kind: CapabilityKind,
+    ) -> list[StageOutput]:
+        """Flatten the outputs of every Stage fulfilling ``kind`` (order-stable)."""
+        result: list[StageOutput] = []
+        for stage in ordered:
+            if stage.capability is kind:
+                result.extend(outputs.get(stage.name, []))
+        return result
+
+    def _screening_quality(
+        self, pipeline: Pipeline, run_id: str, storage: Storage, ordered: list[Stage]
+    ) -> ScreeningQuality | None:
+        """Aggregate Screening findings across both checkpoints for the report.
+
+        Reads each Screening Stage's persisted findings + quarantine sidecars (so
+        the numbers are identical on fresh and resumed runs) and rolls them into
+        the Quality Report: every Quarantine disposition and reason, and every
+        propagated flag, are auditable there (S3 AC). Returns ``None`` when the
+        Pipeline has no Screening Stage.
+        """
+        screen_kinds = (CapabilityKind.INTAKE_SCREENING, CapabilityKind.CONTENT_SCREENING)
+        if not any(s.capability in screen_kinds for s in pipeline.stages):
+            return None
+        quality = ScreeningQuality()
+        for stage in ordered:
+            if stage.capability not in screen_kinds:
+                continue
+            findings = self._read_findings(storage, pipeline, run_id, stage.name)
+            quality.findings.extend(findings)
+            for finding in findings:
+                if finding.checkpoint is ScreeningCheckpoint.INTAKE:
+                    quality.intake_screened += 1
+                else:
+                    quality.content_screened += 1
+                if finding.verdict.value == "quarantine":
+                    quality.quarantined += 1
+                elif finding.verdict.value == "flag":
+                    quality.flagged += 1
+                else:
+                    quality.passed += 1
+        return quality
+
+    @staticmethod
+    def _chunk_quality(
+        pipeline: Pipeline,
+        records: list[StageOutput],
+        flagged_source: list[StageOutput],
+    ) -> ChunkQuality | None:
+        """Aggregate Chunk-Stage quality: chunk counts, tokens, offset integrity.
+
+        Only computed when the Pipeline has a Chunk Stage. ``records`` is the Chunk
+        Stage's output (the canonical chunk set) from which counts, tokens, and the
+        offset-preservation invariant are measured: every :class:`ChunkRecord`'s
+        Provenance ``char_start``/``char_end`` must be a valid span and its
+        ``page_start``/``page_end`` populated — the S3 round-trip invariant, so
+        ``offset_preserving`` is True only if every chunk carried a resolvable span.
+        ``flagged_source`` is the POST-Content-Screening corpus (markers are
+        attached there, not at Chunk), so ``chunks_flagged`` reflects the corpus.
+        """
+        if not any(s.capability is CapabilityKind.CHUNK for s in pipeline.stages):
+            return None
+        quality = ChunkQuality()
+        for record in records:
+            if not isinstance(record, ChunkRecord):
+                continue
+            quality.chunks_total += 1
+            quality.tokens_total += record.token_count
+            prov = record.provenance
+            has_span = (
+                prov.char_start is not None
+                and prov.char_end is not None
+                and prov.char_end >= prov.char_start
+            )
+            has_pages = prov.page_start is not None and prov.page_end is not None
+            if has_span and has_pages:
+                quality.chunks_offset_preserving += 1
+        quality.chunks_flagged = sum(
+            1 for r in flagged_source if isinstance(r, ChunkRecord) and r.flagged
+        )
+        return quality
+
+    @staticmethod
     def _parse_quality(
-        pipeline: Pipeline, records: list[Record | StageOutput]
+        pipeline: Pipeline, records: list[StageOutput]
     ) -> ParseQuality | None:
         """Aggregate Parse-Stage quality: page-map drift + parse-error counts.
 

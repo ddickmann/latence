@@ -22,10 +22,17 @@ PIPELINE_SCHEMA_VERSION = 1
 
 
 class CapabilityKind(StrEnum):
-    """The Capability a Stage fulfils. S1 spine only."""
+    """The Capability a Stage fulfils.
+
+    S1 spine: source/parse/export. S3 adds Chunk and Screening's two checkpoints
+    (intake before Parse, content after Chunk).
+    """
 
     SOURCE = "source"
+    INTAKE_SCREENING = "intake_screening"
     PARSE = "parse"
+    CHUNK = "chunk"
+    CONTENT_SCREENING = "content_screening"
     EXPORT = "export"
 
 

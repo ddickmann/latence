@@ -27,6 +27,11 @@ latence = "latence_core.cli:app"
 [project.entry-points."latence.providers"]
 "source.local_folder" = "latence_core.stages.source:LocalFolderSource"
 "export.jsonl_parquet" = "latence_core.stages.export:JsonlParquetExport"
+# S3 built-ins: offset-preserving Chunker + the two Screening checkpoints. Pure
+# Python (no extra deps), so they ship in core for the end-to-end demo (ADR-0004).
+"chunk.markdown" = "latence_core.stages.chunk:MarkdownChunker"
+"screening.intake_signature" = "latence_core.stages.screening:SignatureSizeIntakeScreener"
+"screening.content_keyword" = "latence_core.stages.screening:KeywordContentScreener"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]

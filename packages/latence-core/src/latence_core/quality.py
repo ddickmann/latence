@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-QUALITY_SCHEMA_VERSION = 2
+from latence_core.contracts import ScreeningFinding
+
+# v3 (S3): the report gains ``chunk`` (Chunk-Stage counts + offset-integrity) and
+# ``screening`` (both checkpoints' quarantine/flag findings).
+QUALITY_SCHEMA_VERSION = 3
 
 
 class StageMetrics(BaseModel):
@@ -75,6 +79,53 @@ class ParseQuality(BaseModel):
         return self.page_drift_recovered == 0
 
 
+class ChunkQuality(BaseModel):
+    """Chunk-Stage quality: chunk/token counts + offset-preservation integrity (S3).
+
+    Emitted when a run chunked documents. ``chunks_offset_preserving`` counts
+    chunks whose Provenance carried a valid source char span AND page span — the
+    S3 round-trip invariant (chunk → offset → original page). ``offset_preserving``
+    is True only when every chunk preserved its offsets. ``chunks_flagged`` counts
+    chunks Content Screening marked with a risk marker.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunks_total: int = 0
+    chunks_offset_preserving: int = 0
+    chunks_flagged: int = 0
+    tokens_total: int = 0
+
+    @property
+    def offset_preserving(self) -> bool:
+        """True if every emitted chunk carried a resolvable source offset+page span."""
+        return self.chunks_offset_preserving == self.chunks_total
+
+
+class ScreeningQuality(BaseModel):
+    """Screening quality: quarantine + flag dispositions across both checkpoints (S3).
+
+    Emitted when a run had a Screening Stage. Counts are rolled up from the
+    per-record :class:`~latence_core.contracts.ScreeningFinding`s, which are also
+    carried verbatim in ``findings`` so every Quarantine disposition and reason is
+    inspectable in the Quality Report (S3 AC: "Quarantine dispositions and reasons
+    appear in the Quality Report").
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    intake_screened: int = 0
+    content_screened: int = 0
+    quarantined: int = 0
+    flagged: int = 0
+    passed: int = 0
+    findings: list[ScreeningFinding] = Field(default_factory=list)
+
+    @property
+    def total_screened(self) -> int:
+        return self.intake_screened + self.content_screened
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -90,6 +141,9 @@ class QualityReport(BaseModel):
     contracts_complete: bool = True
     # Present when the run had a Parse Stage; ``None`` for a Parse-free pipeline.
     parse: ParseQuality | None = None
+    # Present when the run had a Chunk Stage / a Screening Stage respectively.
+    chunk: ChunkQuality | None = None
+    screening: ScreeningQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

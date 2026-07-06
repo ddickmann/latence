@@ -1,0 +1,69 @@
+# S3 Chunk + Screening Pipeline:
+#   Source -> Intake Screening -> Parse -> Chunk -> Content Screening -> Export
+#
+# Screening runs at TWO checkpoints (CONTEXT `Screening`):
+#   * Intake Screening (before Parse): oversized files, file-type spoofing, and
+#     zip bombs are Quarantined — removed from the pipeline, never reaching Parse,
+#     but retained + inspectable under <run>/quarantine/ with the reason recorded.
+#   * Content Screening (after Chunk): prompt-injection / harmful content is FLAGGED
+#     with a RiskMarker that survives into the exported corpus, so a RAG consumer
+#     can filter it out (a lowered quarantine_threshold escalates a hit to Quarantine).
+#
+# Chunk (ported orchestrator asset: 18-pattern markup stripping + token budgeting)
+# splits each parsed document into retrieval-sized pieces while preserving offsets,
+# page alignment, Provenance and Classification losslessly — every chunk resolves
+# back to its source page via the core PageOffsetIndex.
+#
+# All three S3 Providers ship IN latence-core (pure-Python, no extra deps). Run with:
+#   latence run examples/chunk-screening-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/:
+#   export/records.jsonl (chunks, with any risk_markers) + parquet,
+#   quarantine/intake.jsonl (withheld raw docs), screening/*.jsonl (findings),
+#   quality-report.json (chunk + screening metrics, quarantine reasons).
+name: chunk-screening-slice
+storage_uri: file:///tmp/latence-chunk-screening-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # edit to your folder of text / markdown / PDFs
+      sensitivity: confidential
+      # extensions: [txt, md, pdf]     # widen to feed a PDF-capable Parser (see S2)
+
+  - name: intake
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 26214400             # 25 MiB oversized cap
+      max_zip_ratio: 100.0            # zip-bomb compression-ratio cap
+      # max_zip_uncompressed: 536870912  # 512 MiB absolute uncompressed cap
+      check_spoof: true               # reject a .pdf/.docx whose magic bytes don't match
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext        # swap to parser.document for real PDFs (S2)
+    depends_on: [intake]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config:
+      max_tokens: 512                 # per-chunk token ceiling
+      overlap_tokens: 64              # tokens repeated across a boundary (retrieval recall)
+      min_tokens: 16                  # a trailing remnant below this merges upward
+
+  - name: content
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+    config:
+      # quarantine_threshold: 0.5     # < 1.0 escalates any injection/harmful hit to Quarantine
+      quarantine_threshold: 1.01      # default: flag (marker propagates), don't drop
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [content]

@@ -21,7 +21,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # offset→page Provenance integrity) and ``disposition`` (an error disposition so
 # a corrupt/unparseable file records a failure instead of crashing the run);
 # PageSpan/PageMap contracts added.
-SCHEMA_VERSION = 2
+# v3 (S3 Chunk + Screening): ChunkRecord (retrieval-sized piece with preserved
+# offsets, page alignment, Provenance and Classification, plus propagating
+# RiskMarkers); RiskMarker/ScreeningVerdict/ScreeningFinding contracts; a
+# QuarantineRecord for records Screening removes from the pipeline (retained and
+# inspectable with the reason recorded).
+SCHEMA_VERSION = 3
 
 
 class Provenance(BaseModel):
@@ -249,3 +254,142 @@ class ParserInput(BaseModel):
     config: dict[str, Any] = Field(
         default_factory=dict, description="Per-input Parser hints (encoding, OCR lang, …)."
     )
+
+
+# -- S3: Screening -----------------------------------------------------------
+
+
+class ScreeningCheckpoint(StrEnum):
+    """Which of Screening's two checkpoints produced a finding (CONTEXT glossary).
+
+    ``INTAKE`` runs before Parse over the raw document (malware, zip bombs,
+    file-type spoofing, oversized/corrupt files). ``CONTENT`` runs after Chunk
+    over the retrieval-sized text (prompt injection, harmful content, sensitivity
+    escalation).
+    """
+
+    INTAKE = "intake"
+    CONTENT = "content"
+
+
+class ScreeningVerdict(StrEnum):
+    """What Screening decided about a record.
+
+    ``PASS`` — nothing found; the record proceeds untouched. ``FLAG`` — a risk was
+    found but the record still proceeds, carrying a :class:`RiskMarker` so a RAG
+    consumer can exclude it. ``QUARANTINE`` — the record is dangerous and is
+    removed from every downstream Stage and Export (retained and inspectable with
+    the reason, CONTEXT ``Quarantine``).
+    """
+
+    PASS = "pass"
+    FLAG = "flag"
+    QUARANTINE = "quarantine"
+
+
+class RiskMarker(BaseModel):
+    """A risk flag Content Screening attaches to a record so it propagates.
+
+    The marker survives into the corpus (it is a field on the record contract, not
+    an out-of-band note) so a downstream RAG consumer can filter on it — the S3
+    acceptance criterion "a risk marker that survives into the corpus so RAG
+    consumers can exclude it".
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    category: str = Field(..., min_length=1, description="e.g. 'prompt_injection', 'harmful'.")
+    detector: str = Field(..., min_length=1, description="Provider that raised the marker.")
+    score: float = Field(..., ge=0.0, le=1.0, description="Detector confidence 0..1.")
+    reason: str = Field(..., min_length=1, description="Human-readable justification.")
+
+
+class ScreeningFinding(BaseModel):
+    """One Screening decision about one record, recorded for the Quality Report.
+
+    Emitted at either checkpoint. A ``QUARANTINE`` verdict names the removed
+    document; a ``FLAG`` carries the :class:`RiskMarker` that was propagated. The
+    finding is the audit trail: every Quarantine disposition and reason surfaces
+    in the Quality Report (S3 AC), and a flag records what was marked and why.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    checkpoint: ScreeningCheckpoint
+    verdict: ScreeningVerdict
+    document_id: str = Field(..., min_length=1)
+    detector: str = Field(..., min_length=1, description="Screener Provider name.")
+    category: str = Field(..., min_length=1, description="Risk category checked.")
+    reason: str = Field(..., min_length=1)
+    marker: RiskMarker | None = Field(
+        default=None, description="Present when verdict == FLAG: the propagated marker."
+    )
+
+    @model_validator(mode="after")
+    def _verdict_consistent(self) -> ScreeningFinding:
+        if self.verdict is ScreeningVerdict.FLAG and self.marker is None:
+            msg = "A FLAG ScreeningFinding must carry the RiskMarker it propagated."
+            raise ValueError(msg)
+        if self.verdict is not ScreeningVerdict.FLAG and self.marker is not None:
+            msg = "Only a FLAG ScreeningFinding may carry a RiskMarker."
+            raise ValueError(msg)
+        return self
+
+
+class QuarantineRecord(Record):
+    """A record Screening removed from the pipeline (CONTEXT ``Quarantine``).
+
+    Excluded from every downstream Stage and Export, but **retained and
+    inspectable**: Provenance is intact, the offending checkpoint/detector/reason
+    are recorded, and the raw byte size is kept so the audit knows what was held
+    back. It never reaches Parse (intake) or the corpus (content). A
+    ``QuarantineRecord`` carries no usable ``content`` — the point of Quarantine
+    is that the data does not flow, only its audit trail.
+    """
+
+    checkpoint: ScreeningCheckpoint
+    detector: str = Field(..., min_length=1)
+    category: str = Field(..., min_length=1)
+    reason: str = Field(..., min_length=1)
+    quarantined_bytes: int = Field(..., ge=0, description="Byte size of the withheld source.")
+
+
+# -- S3: Chunk ---------------------------------------------------------------
+
+
+class ChunkRecord(Record):
+    """One retrieval-sized piece of a parsed document (CONTEXT ``Chunk``).
+
+    Chunk splits a :class:`DocumentRecord`'s markdown into retrieval-sized pieces
+    while preserving offsets, page alignment, Provenance and Classification
+    losslessly. Every chunk carries:
+
+    * ``char_start``/``char_end`` on its **Provenance** — the half-open span the
+      chunk occupies in the parent document's assembled markdown, so any chunk
+      resolves back to its exact source offsets (round-trip: chunk → offset →
+      original page via :class:`~latence_core.pagemap.PageOffsetIndex`);
+    * ``page_start``/``page_end`` on its **Provenance** — the source page(s) the
+      chunk spans, resolved from the parent's page map;
+    * the parent's **Classification**, inherited unchanged;
+    * ``risk_markers`` — any :class:`RiskMarker` Content Screening attached, which
+      survive into the corpus so RAG consumers can exclude the chunk.
+
+    ``document_record_id`` links the chunk back to its parent document; ``index``
+    is the chunk's ordinal within that document (0-based, contiguous).
+    """
+
+    document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
+    index: int = Field(..., ge=0, description="0-based chunk ordinal within the document.")
+    content: str = Field(default="")
+    media_type: str = Field(default="text/markdown")
+    token_count: int = Field(..., ge=0, description="Budgeted token count for the chunk text.")
+    risk_markers: list[RiskMarker] = Field(
+        default_factory=list, description="Content-Screening flags that propagate into the corpus."
+    )
+
+    @property
+    def flagged(self) -> bool:
+        """True if Content Screening attached any risk marker to this chunk."""
+        return bool(self.risk_markers)

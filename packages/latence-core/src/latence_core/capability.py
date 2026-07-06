@@ -12,16 +12,45 @@ base class or import of core required for a third-party Provider.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from importlib import metadata
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import DocumentRecord, ParserInput, Record
+    from latence_core.contracts import (
+        ChunkRecord,
+        DocumentRecord,
+        ParserInput,
+        QuarantineRecord,
+        Record,
+        ScreeningFinding,
+    )
     from latence_core.storage import Storage
 
 ENTRY_POINT_GROUP = "latence.providers"
+
+# The carrier type a Screening checkpoint operates on: ParserInput at intake,
+# ChunkRecord at content. ``ScreeningOutcome`` is generic over it.
+_Screened = TypeVar("_Screened")
+
+
+@dataclass(frozen=True)
+class ScreeningOutcome(Generic[_Screened]):
+    """The result of a Screening checkpoint: what passed, what was Quarantined.
+
+    ``passed`` are the records that proceed downstream — for Content Screening
+    these may carry newly-attached risk markers. ``quarantined`` are the
+    :class:`~latence_core.contracts.QuarantineRecord`s removed from the pipeline
+    (retained for audit, never exported to the corpus). ``findings`` is the full
+    per-record decision log Screening emits into the Quality Report — every
+    Quarantine reason and every flag, so the disposition is auditable (S3 AC).
+    """
+
+    passed: list[_Screened] = field(default_factory=list)
+    quarantined: list[QuarantineRecord] = field(default_factory=list)
+    findings: list[ScreeningFinding] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -44,6 +73,48 @@ class Parser(Protocol):
 
     def parse(self, inputs: Iterable[ParserInput]) -> Iterator[DocumentRecord]:
         """Consume raw :class:`ParserInput`s and yield parsed markdown records."""
+        ...
+
+
+@runtime_checkable
+class Chunker(Protocol):
+    """Splits parsed documents into retrieval-sized ChunkRecords (CONTEXT ``Chunk``).
+
+    Preserves offsets, page alignment, Provenance and Classification on every
+    emitted chunk. A ``PARSE_ERROR`` DocumentRecord (no usable content) yields no
+    chunks.
+    """
+
+    def chunk(self, documents: Iterable[DocumentRecord]) -> Iterator[ChunkRecord]:
+        """Consume parsed :class:`DocumentRecord`s and yield :class:`ChunkRecord`s."""
+        ...
+
+
+@runtime_checkable
+class IntakeScreener(Protocol):
+    """Screens raw documents BEFORE Parse (CONTEXT ``Screening`` — intake checkpoint).
+
+    Catches malware, zip bombs, file-type spoofing, oversized/corrupt files. A
+    dangerous document is Quarantined (removed from every downstream Stage); a
+    clean one passes through untouched.
+    """
+
+    def screen_intake(self, inputs: Iterable[ParserInput]) -> ScreeningOutcome[ParserInput]:
+        """Partition raw inputs into passed vs quarantined, with findings."""
+        ...
+
+
+@runtime_checkable
+class ContentScreener(Protocol):
+    """Screens chunked content AFTER Chunk (CONTEXT ``Screening`` — content checkpoint).
+
+    Catches prompt injection, harmful content, sensitivity escalation. A flagged
+    chunk keeps flowing but carries a :class:`~latence_core.contracts.RiskMarker`
+    that survives into the corpus; a chunk deemed dangerous is Quarantined.
+    """
+
+    def screen_content(self, chunks: Iterable[ChunkRecord]) -> ScreeningOutcome[ChunkRecord]:
+        """Return chunks (some marked) plus any quarantined chunks and findings."""
         ...
 
 

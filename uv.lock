@@ -164,7 +164,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "latence-core", editable = "packages/latence-core" },
-    { name = "pypdf", specifier = ">=4.0" },
+    { name = "pypdf", specifier = ">=6.0" },
 ]
 
 [[package]]
