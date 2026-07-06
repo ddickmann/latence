@@ -9,13 +9,19 @@ export const meta = {
 }
 
 // ---- parameters (pass via Workflow args) ----
-const slice = args.slice                                   // e.g. "S2"
-const title = args.title || slice                          // e.g. "S2 — Parse"
-const issueFile = args.issueFile                            // repo-relative, e.g. "issues/phase-1-machinery/S2-parse.md"
-const branch = args.branch || `${String(slice).toLowerCase()}-slice`
-const repo = args.repo || '/Users/dennisdickmann/Developer/latence-framework'
-const worktree = args.worktree || `/Users/dennisdickmann/Developer/latence-framework-${String(slice).toLowerCase()}`
-const ghIssue = args.ghIssue || null                       // GitHub issue number to "Closes #", optional
+// Normalize: args may arrive as a parsed object OR a JSON string. Coerce so a
+// stringified args can't turn `args.slice` into String.prototype.slice (a function).
+let a = args
+if (typeof a === 'string') { try { a = JSON.parse(a) } catch { a = {} } }
+if (!a || typeof a !== 'object') a = {}
+
+const slice = String(a.slice || 'slice')                   // e.g. "S2"
+const title = String(a.title || slice)                     // e.g. "S2 — Parse"
+const issueFile = String(a.issueFile || '')                // repo-relative, e.g. "issues/phase-1-machinery/S2-parse.md"
+const branch = String(a.branch || `${slice.toLowerCase()}-slice`)
+const repo = String(a.repo || '/Users/dennisdickmann/Developer/latence-framework')
+const worktree = String(a.worktree || `/Users/dennisdickmann/Developer/latence-framework-${slice.toLowerCase()}`)
+const ghIssue = a.ghIssue != null ? a.ghIssue : null       // GitHub issue number to "Closes #", optional
 
 const DESIGN = [
   'CONTEXT.md (glossary — use these exact terms)',
