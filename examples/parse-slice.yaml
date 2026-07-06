@@ -1,0 +1,32 @@
+# S2 Parse-slice Pipeline: Source (local folder, PDF + text) -> Parse (document) -> Export.
+#
+# The document Parser turns each PDF into per-page markdown with a real page map
+# (any downstream offset resolves back to its source page), attaches Classification
+# at Parse (language auto-detected from the decoded text), and degrades a corrupt
+# or type-spoofed file to a PARSE_ERROR record instead of crashing the run.
+#
+# Requires the 'latence-parser-document' package installed (registers 'parser.document').
+# Run with:  latence run examples/parse-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/ (export/ + quality-report.json).
+# The Quality Report's "parse" section carries page-drift diagnostics + parse-error counts.
+name: parse-slice
+storage_uri: file:///tmp/latence-parse-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # edit to your folder of PDFs / text
+      sensitivity: confidential
+      extensions: [txt, md, pdf]       # widen the S1 text-only default to read PDFs
+  - name: parse
+    capability: parse
+    provider: parser.document
+    depends_on: [source]
+    config:
+      # category: contract             # optional: stamp a content category
+      page_separator: "\n\n"          # markdown joined between PDF pages
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [parse]

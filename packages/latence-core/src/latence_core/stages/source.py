@@ -14,38 +14,23 @@ import hashlib
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Classification, ParserInput, Provenance
+from latence_core.language import UNKNOWN_LANGUAGE, detect_language
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from latence_core.storage import Storage
 
-# Text file types S1 knows how to read. Anything else under the folder is skipped.
-_TEXT_EXTENSIONS = {"txt", "md", "markdown"}
+# Text file types whose bytes can be decoded for the naive language hint. For any
+# other accepted type (a PDF, an office file) Source hands the raw bytes on with
+# language left ``und`` — authoritative Classification is attached at Parse, from
+# the *decoded* text, which Source cannot produce for a binary format (ADR-0019).
+_TEXT_EXTENSIONS = frozenset({"txt", "md", "markdown", "text"})
 
-# Tiny stop-word signatures for a deliberately naive language auto-detect. The
-# glossary permits Source's language detection to be naive in S1; this is honest
-# about being a heuristic rather than pretending to be a model.
-_LANGUAGE_HINTS: dict[str, frozenset[str]] = {
-    "en": frozenset({"the", "and", "of", "to", "is", "in", "that", "it"}),
-    "de": frozenset({"der", "die", "und", "das", "ist", "nicht", "mit", "ein"}),
-    "fr": frozenset({"le", "la", "et", "les", "des", "un", "une", "est"}),
-    "es": frozenset({"el", "la", "y", "los", "las", "un", "una", "es"}),
-}
-
-
-def _detect_language(text: str) -> str:
-    tokens = [t for t in text.lower().split() if t.isalpha()]
-    if not tokens:
-        return "und"
-    token_set = set(tokens)
-    best_lang = "und"
-    best_score = 0
-    for lang, hints in _LANGUAGE_HINTS.items():
-        score = len(token_set & hints)
-        if score > best_score:
-            best_score, best_lang = score, lang
-    return best_lang
+# Default set of file extensions the Source reads. S1's spine is text-only; S2's
+# Parse can consume PDFs, so the accepted set is config-widenable (see below)
+# without forking a second Source Provider. Anything not in the set is skipped.
+_DEFAULT_EXTENSIONS = frozenset({"txt", "md", "markdown"})
 
 
 def _document_id(data: bytes) -> str:
@@ -64,6 +49,11 @@ class LocalFolderSource:
             folder. Default ``False``: a symlink whose target escapes the source
             root is NOT read, so the Source cannot be tricked into exfiltrating
             files outside the folder it was pointed at (ADR-0014, secure default).
+        extensions: list[str] | None  — file extensions (no dot, lowercased) the
+            Source reads. Defaults to text/markdown (the S1 spine). Widen it to
+            e.g. ``["txt", "md", "pdf"]`` to feed a PDF-capable Parser (S2) with no
+            second Source Provider. Binary types are handed on as raw bytes with
+            language ``und``; Parse attaches the authoritative Classification.
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -76,12 +66,20 @@ class LocalFolderSource:
         self._sensitivity = str(config.get("sensitivity", "unknown"))
         self._category = config.get("category")
         self._follow_symlinks = bool(config.get("follow_symlinks", False))
+        raw_exts = config.get("extensions")
+        if raw_exts is None:
+            self._extensions = _DEFAULT_EXTENSIONS
+        else:
+            if not isinstance(raw_exts, list) or not all(isinstance(e, str) for e in raw_exts):
+                msg = "LocalFolderSource 'extensions' must be a list of strings."
+                raise ValueError(msg)
+            self._extensions = frozenset(e.lstrip(".").lower() for e in raw_exts)
 
     def produce(self, storage: Storage) -> Iterator[ParserInput]:
         for uri in storage.walk_files(self._path, follow_symlinks=self._follow_symlinks):
             file_name = uri.rsplit("/", 1)[-1]
             ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-            if ext not in _TEXT_EXTENSIONS:
+            if ext not in self._extensions:
                 continue
             data = storage.read_bytes(uri)
             document_id = _document_id(data)
@@ -92,11 +90,17 @@ class LocalFolderSource:
                 file_size=len(data),
                 document_id=document_id,
             )
-            # Naive language detect is Source's own concern; it decodes a *view*
-            # of the bytes for the heuristic but hands the RAW bytes downstream —
-            # authoritative decoding-to-markdown is the Parser's job (ADR-0019).
+            # Naive language detect is Source's own concern, and only meaningful
+            # for a text type: it decodes a *view* of the bytes for the heuristic
+            # but hands the RAW bytes downstream. For a binary type (PDF/office) it
+            # cannot decode text, so it leaves language ``und`` — authoritative
+            # decoding-to-markdown and Classification are the Parser's job (ADR-0019).
+            if ext in _TEXT_EXTENSIONS:
+                language = detect_language(data.decode("utf-8", errors="replace"))
+            else:
+                language = UNKNOWN_LANGUAGE
             classification = Classification(
-                language=_detect_language(data.decode("utf-8", errors="replace")),
+                language=language,
                 category=self._category,
                 sensitivity=self._sensitivity,
             )

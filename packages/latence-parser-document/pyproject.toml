@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-document"
+version = "0.1.0"
+description = "CPU reference document Parser Provider (PDF + text -> markdown + page map) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the PDF reader ships
+# with this Provider package, not the thin core. pypdf is pure-Python, CPU-only,
+# and BSD-3-Clause (permissive per ADR-0012, weights/code verified 2026-07-06).
+dependencies = [
+    "latence-core",
+    "pypdf>=6.0",
+]
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'parser.document' available to any Pipeline with no core change
+# (ADR-0004), alongside the S1 'parser.plaintext'.
+[project.entry-points."latence.providers"]
+"parser.document" = "latence_parser_document.provider:DocumentParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_document"]

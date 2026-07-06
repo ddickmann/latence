@@ -6,7 +6,9 @@ import pytest
 from latence_core.contracts import (
     SCHEMA_VERSION,
     Classification,
+    Disposition,
     DocumentRecord,
+    PageMap,
     ParserInput,
     Provenance,
     Record,
@@ -105,3 +107,56 @@ def test_parser_input_accepts_str_content_and_config() -> None:
     )
     assert raw.content == "already text"
     assert raw.config["encoding"] == "latin-1"
+
+
+# -- S2: page map + disposition on DocumentRecord --------------------------
+
+
+def test_document_record_carries_page_map_and_roundtrips() -> None:
+    assembly = PageMap.from_page_texts(["p1", "p2"])
+    rec = DocumentRecord(
+        record_id="r1",
+        provenance=_provenance(),
+        classification=_classification(),
+        content=assembly.text,
+        page_map=assembly.page_map,
+    )
+    assert rec.disposition is Disposition.PARSED
+    assert rec.page_map is not None
+    assert len(rec.page_map.pages) == 2
+    restored = DocumentRecord.model_validate_json(rec.model_dump_json())
+    assert restored == rec
+
+
+def test_parse_error_record_requires_error_reason() -> None:
+    with pytest.raises(ValidationError, match="must carry an 'error'"):
+        DocumentRecord(
+            record_id="r1",
+            provenance=_provenance(),
+            classification=_classification(),
+            disposition=Disposition.PARSE_ERROR,
+        )
+
+
+def test_parsed_record_must_not_carry_error() -> None:
+    with pytest.raises(ValidationError, match="must not carry an 'error'"):
+        DocumentRecord(
+            record_id="r1",
+            provenance=_provenance(),
+            classification=_classification(),
+            disposition=Disposition.PARSED,
+            error="should not be here",
+        )
+
+
+def test_parse_error_record_is_valid_with_reason() -> None:
+    rec = DocumentRecord(
+        record_id="r1",
+        provenance=_provenance(),
+        classification=_classification(),
+        disposition=Disposition.PARSE_ERROR,
+        error="corrupt file",
+    )
+    assert rec.disposition is Disposition.PARSE_ERROR
+    assert rec.error == "corrupt file"
+    assert rec.page_map is None

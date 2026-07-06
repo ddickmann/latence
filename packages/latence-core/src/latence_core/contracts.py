@@ -9,13 +9,19 @@ record can never silently lose its source or attributes at a Stage boundary.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Bump on any breaking change to a contract below. Serialized with every record
 # so downstream consumers can detect and reject an incompatible schema.
-SCHEMA_VERSION = 1
+#
+# v2 (S2 Parse): DocumentRecord gains ``page_map`` (source page boundaries for
+# offset→page Provenance integrity) and ``disposition`` (an error disposition so
+# a corrupt/unparseable file records a failure instead of crashing the run);
+# PageSpan/PageMap contracts added.
+SCHEMA_VERSION = 2
 
 
 class Provenance(BaseModel):
@@ -69,14 +75,153 @@ class Record(BaseModel):
     classification: Classification
 
 
-class DocumentRecord(Record):
-    """A whole-document record: the parsed Parse output for S1.
+class PageSpan(BaseModel):
+    """One page's half-open ``[char_start, char_end)`` span in the assembled text."""
 
-    ``content`` is markdown text; ``media_type`` records how to interpret it.
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    page_number: int = Field(..., ge=1, description="1-based source page number.")
+    char_start: int = Field(..., ge=0)
+    char_end: int = Field(..., ge=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> PageSpan:
+        if self.char_end < self.char_start:
+            msg = (
+                f"Page {self.page_number} span is inverted: "
+                f"char_end {self.char_end} < char_start {self.char_start}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def length(self) -> int:
+        return self.char_end - self.char_start
+
+
+class PageMap(BaseModel):
+    """The page-boundary map carried on a parsed :class:`DocumentRecord`.
+
+    ``pages`` are contiguous, non-overlapping, ordered spans covering the whole
+    assembled text; ``total_chars`` is the assembled length (the end of the last
+    page). A single-page document (plain text) has exactly one span — the map is
+    always present after a successful Parse, never optional, so downstream
+    offset→page resolution has one code path. The live resolver over this map is
+    :class:`latence_core.pagemap.PageOffsetIndex`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    pages: list[PageSpan] = Field(..., min_length=1)
+    total_chars: int = Field(..., ge=0)
+
+    @model_validator(mode="after")
+    def _contiguous(self) -> PageMap:
+        prev_end = 0
+        for i, span in enumerate(self.pages):
+            expected_page = i + 1
+            if span.page_number != expected_page:
+                msg = f"Page numbers must be 1..n in order; got {span.page_number} at index {i}"
+                raise ValueError(msg)
+            if span.char_start != prev_end:
+                msg = (
+                    f"Page {span.page_number} starts at {span.char_start}, "
+                    f"expected {prev_end} (spans must be contiguous)"
+                )
+                raise ValueError(msg)
+            prev_end = span.char_end
+        if self.total_chars != prev_end:
+            msg = f"total_chars {self.total_chars} != last page end {prev_end}"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def from_page_texts(cls, page_texts: list[str], separator: str = "\n\n") -> PageMapAssembly:
+        """Assemble per-page text into one markdown string plus its page map.
+
+        The Parser-side constructor: hand it the per-page decoded text in page
+        order and it returns both the concatenated markdown and the
+        :class:`PageMap` recording where each page landed — the two are built
+        together so the boundaries are exact by construction, not reverse-engineered.
+
+        A single-page (or zero-page, coerced to one empty page) document is the
+        plain-text case: one span covering everything.
+        """
+        if not page_texts:
+            page_texts = [""]
+        spans: list[PageSpan] = []
+        parts: list[str] = []
+        cursor = 0
+        sep_len = len(separator)
+        last = len(page_texts) - 1
+        for i, text in enumerate(page_texts):
+            start = cursor
+            parts.append(text)
+            cursor += len(text)
+            # The inter-page separator counts toward the *preceding* page's span so
+            # the assembled offsets stay contiguous with no un-attributed gap.
+            if i != last:
+                parts.append(separator)
+                cursor += sep_len
+            spans.append(PageSpan(page_number=i + 1, char_start=start, char_end=cursor))
+        assembled = "".join(parts)
+        page_map = cls(pages=spans, total_chars=len(assembled))
+        return PageMapAssembly(text=assembled, page_map=page_map)
+
+
+class PageMapAssembly(BaseModel):
+    """The assembled markdown plus its :class:`PageMap`, built together by Parse."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str
+    page_map: PageMap
+
+
+class Disposition(StrEnum):
+    """A parsed record's outcome disposition.
+
+    ``PARSED`` is the healthy path. ``PARSE_ERROR`` marks a document the Parser
+    could not decode (a corrupt PDF, an unsupported/spoofed format): the record is
+    still emitted — carrying its Provenance and the failure reason — so the run
+    does not crash and the failure is auditable in the Quality Report, but it
+    carries no usable ``content`` and downstream Stages skip it.
+    """
+
+    PARSED = "parsed"
+    PARSE_ERROR = "parse_error"
+
+
+class DocumentRecord(Record):
+    """A whole-document record: the parsed Parse output.
+
+    ``content`` is the assembled markdown text; ``media_type`` records how to
+    interpret it. ``page_map`` (present when ``disposition == PARSED``) records
+    the source page boundaries so any downstream offset resolves back to its
+    original page. ``disposition``/``error`` capture a graceful parse failure — a
+    corrupt file yields a ``PARSE_ERROR`` record, never an exception that aborts
+    the run.
     """
 
     content: str = Field(default="")
     media_type: str = Field(default="text/markdown")
+    page_map: PageMap | None = Field(default=None)
+    disposition: Disposition = Field(default=Disposition.PARSED)
+    error: str | None = Field(
+        default=None, description="Human-readable failure reason when disposition is PARSE_ERROR."
+    )
+
+    @model_validator(mode="after")
+    def _disposition_consistent(self) -> DocumentRecord:
+        if self.disposition is Disposition.PARSE_ERROR:
+            if self.error is None:
+                msg = "A PARSE_ERROR DocumentRecord must carry an 'error' reason."
+                raise ValueError(msg)
+        elif self.error is not None:
+            msg = "A PARSED DocumentRecord must not carry an 'error' reason."
+            raise ValueError(msg)
+        return self
 
 
 class ParserInput(BaseModel):

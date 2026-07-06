@@ -2,11 +2,15 @@
 
 Phase 1 is a strict build-through. Pull the top unblocked issue, meet the **Baseline bar**, mark done, move the pointer.
 
+## Done
+- [x] **S1 — walking-skeleton**
+- [x] **S2 — parse** (document Parser: PDF/text → markdown + page map; ported PageOffsetIndex; Classification at Parse; graceful PARSE_ERROR; drift diagnostics in the Quality Report)
+
 ## Now
-- [ ] **S1 — walking-skeleton** ← start here
+- [ ] **S3 — chunk+screening** ← start here
 
 ## Phase-1 queue (in order)
-S2 parse · S3 chunk+screening · S4 entity-extraction · S5 relation-extraction · S6 redaction · S7 profiling · S8 disambiguation · S9 graph-assembly+export · S10 quality-report · S11 incremental-deltas · S12 performance-path+runner · S13 demo-package
+S3 chunk+screening · S4 entity-extraction · S5 relation-extraction · S6 redaction · S7 profiling · S8 disambiguation · S9 graph-assembly+export · S10 quality-report · S11 incremental-deltas · S12 performance-path+runner · S13 demo-package
 
 ## Then — HARD STOP
 - [ ] **G1 — profound-testing-gate** (do not start Phase 2 until every G1 box is green)

@@ -4,6 +4,7 @@ members = ["packages/*"]
 [tool.uv.sources]
 latence-core = { workspace = true }
 latence-parser-plaintext = { workspace = true }
+latence-parser-document = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
 [project]
@@ -14,6 +15,7 @@ requires-python = ">=3.11"
 dependencies = [
     "latence-core",
     "latence-parser-plaintext",
+    "latence-parser-document",
 ]
 
 [dependency-groups]

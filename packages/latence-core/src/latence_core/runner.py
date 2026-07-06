@@ -20,10 +20,12 @@ import time
 from typing import TYPE_CHECKING, TypeVar
 
 from latence_core.capability import Export, Parser, ProviderRegistry, Source
-from latence_core.contracts import DocumentRecord, ParserInput, Record
+from latence_core.contracts import Disposition, DocumentRecord, ParserInput, Record
+from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import (
     CompletenessCheck,
+    ParseQuality,
     QualityReport,
     StageMetrics,
 )
@@ -317,4 +319,55 @@ class LocalRunner:
             stages=stage_metrics,
             completeness=completeness,
             contracts_complete=completeness.passed,
+            parse=self._parse_quality(pipeline, records),
         )
+
+    @staticmethod
+    def _parse_quality(
+        pipeline: Pipeline, records: list[Record | StageOutput]
+    ) -> ParseQuality | None:
+        """Aggregate Parse-Stage quality: page-map drift + parse-error counts.
+
+        Only computed when the Pipeline actually has a Parse Stage, so a
+        Source→Export pipeline reports ``parse=None`` rather than a misleading
+        all-zero section. For each parsed :class:`DocumentRecord` that carries a
+        page map, the Runner builds a :class:`PageOffsetIndex` and audits it —
+        resolving each page's boundary offsets — so the drift diagnostics the
+        ported asset produces surface in the Quality Report (S2: "drift
+        diagnostics in the Quality Report"). A clean parse resolves every offset
+        exactly (``page_maps_clean``). Each parsed record's assembled-markdown
+        byte size is summed into ``bytes_after_parse`` — the observable rollup of
+        the Provenance 'size-after-parse'.
+        """
+        if not any(s.capability is CapabilityKind.PARSE for s in pipeline.stages):
+            return None
+
+        quality = ParseQuality()
+        for record in records:
+            if not isinstance(record, DocumentRecord):
+                continue
+            if record.disposition is Disposition.PARSE_ERROR:
+                quality.parse_errors += 1
+                continue
+            quality.documents_parsed += 1
+            # Provenance 'size-after-parse', aggregated: the assembled-markdown
+            # byte size of each parsed record (mirrors the parser's per-record
+            # ``size_after_parse`` helper, summed here into the observable report).
+            quality.bytes_after_parse += len(record.content.encode("utf-8"))
+            page_map = record.page_map
+            if page_map is None:
+                continue
+            quality.page_map_present += 1
+            quality.pages_total += len(page_map.pages)
+            index = PageOffsetIndex(page_map)
+            # Audit: resolve each page's start and last-char offset. With exact
+            # boundaries every lookup is exact; any drift the map carries is
+            # detected here and accumulated into the diagnostics.
+            for span in page_map.pages:
+                index.page_for_offset(span.char_start)
+                index.page_for_offset(max(span.char_end - 1, span.char_start))
+            diag = index.diagnostics
+            quality.page_drift_resolutions += diag.resolutions
+            quality.page_drift_recovered += diag.recovered
+            quality.page_drift_max_chars = max(quality.page_drift_max_chars, diag.max_drift_chars)
+        return quality

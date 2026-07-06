@@ -39,7 +39,11 @@ jobs:
         run: uv run ruff check packages
 
       - name: Mypy (strict)
-        run: uv run mypy --strict packages/latence-core/src packages/latence-parser-plaintext/src
+        run: >
+          uv run mypy --strict
+          packages/latence-core/src
+          packages/latence-parser-plaintext/src
+          packages/latence-parser-document/src
 
       - name: Pytest
         run: uv run pytest
@@ -48,6 +52,7 @@ jobs:
         run: |
           uv build --package latence-core
           uv build --package latence-parser-plaintext
+          uv build --package latence-parser-document
 
   storage-s3:
     name: Storage on MinIO (s3://)
