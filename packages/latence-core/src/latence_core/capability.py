@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         ChunkRecord,
         DocumentRecord,
         EntityMention,
+        FeatureRecord,
         ParserInput,
         QuarantineRecord,
         Record,
@@ -237,6 +238,37 @@ class PIIDetector(Protocol):
         document order for determinism. A ``PARSE_ERROR`` document (no usable content) is
         skipped, mirroring the Chunk Stage.
         """
+        ...
+
+
+@runtime_checkable
+class Profiler(Protocol):
+    """Computes corpus-level statistical + quality features (CONTEXT ``Profiling``).
+
+    The S7 Profiling Capability. Profiling is a **corpus-level** Stage: it consumes the
+    whole run's parsed :class:`~latence_core.contracts.DocumentRecord`s (and, when an
+    Entity-Extraction Stage is upstream, the run's
+    :class:`~latence_core.contracts.EntityMention`s) and emits
+    :class:`~latence_core.contracts.FeatureRecord`s — one ``DOCUMENT``-scope record per
+    parsed document carrying its per-document features (density, readability, Zipf α,
+    compression ratio, structure) and exactly one ``CORPUS``-scope record carrying the
+    cross-document aggregate features (entity frequency, co-occurrence, type consensus,
+    source coverage).
+
+    Both carriers are supplied so a fused corpus profile can relate document text to the
+    entities extracted from it; a Provider that only wants document text ignores the
+    mentions. The feature pass must be **streaming / spill-to-disk friendly** — it must
+    not assume the whole corpus fits in RAM (S7 AC) — so a Provider folds documents in
+    one at a time rather than materialising the corpus. A ``PARSE_ERROR`` document (no
+    usable content) is skipped, mirroring the Chunk Stage. Records are emitted
+    deterministically (document-scope in first-seen order, then the single corpus-scope
+    record last), so a seeded run is byte-identical.
+    """
+
+    def profile(
+        self, documents: Iterable[DocumentRecord], mentions: Iterable[EntityMention]
+    ) -> Iterator[FeatureRecord]:
+        """Consume the run's documents + mentions; yield per-document + corpus FeatureRecords."""
         ...
 
 

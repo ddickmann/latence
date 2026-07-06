@@ -1,0 +1,72 @@
+# S7 Profiling (corpus features) Pipeline:
+#   Source -> Parse -+-> Chunk -> Entity Extraction --\
+#                    |                                  +-> Profiling -> Export
+#                    \----------------------------------/
+#
+# Profiling (CONTEXT `Profiling`) is the CORPUS-LEVEL Stage that computes statistical
+# and quality features over the corpus. It emits typed FeatureRecords at two scopes:
+#   * one DOCUMENT-scope record per parsed document — density, readability, Zipf alpha,
+#     compression ratio, structure (per-document features);
+#   * exactly one CORPUS-scope record — entity frequency, cross-document co-occurrence,
+#     entity-type consensus, and source coverage by language/category/sensitivity.
+#
+# It reads the PARSED document (original markdown), not the chunk stream, so its
+# per-document offsets live in the original-document coordinate system. It depends on
+# Parse (required, the documents it profiles) and OPTIONALLY on Entity Extraction (the
+# mentions its cross-document entity features aggregate). Drop the `entities` edge and
+# you get a valid Parse-only profile with empty entity aggregates.
+#
+# FIXED FEATURE SET (no dynamic registry): the private stack's 9 enrichers are
+# consolidated into one closed, versioned feature schema (ADR-0025). The reference
+# Provider `profiling.statistical` ships IN latence-core: pure-Python, deterministic,
+# dependency-free (no model download — the Zipf fit + readability are closed-form),
+# and STREAMING (folds documents one at a time, no whole-corpus-in-RAM assumption).
+#
+# Run with:
+#   latence run examples/profiling-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/:
+#   export/records.jsonl (FeatureRecords: per-document + one corpus record) + parquet,
+#   quality-report.json  (profiling: per-document feature averages + corpus aggregates).
+name: profiling-slice
+storage_uri: file:///tmp/latence-profiling-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/docs   # edit to your folder of text / markdown files
+      sensitivity: internal
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext         # swap to parser.document for real PDFs (S2)
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer         # zero-shot; the corpus entity features aggregate these
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:    { terms: [Acme, Globex] }
+        PERSON: { terms: [Alice, Bob, Carol] }
+
+  - name: profile
+    capability: profiling
+    provider: profiling.statistical    # in-core, deterministic, streaming corpus profiler
+    depends_on: [parse, entities]      # Parse = the documents; entities = the mentions
+                                       # (drop `entities` for a Parse-only text profile)
+    config:
+      max_co_occurrences: 50           # cap on the top co-occurrence pairs in the report
+      corpus_sensitivity: internal     # sensitivity stamped on the CORPUS-scope record
+      corpus_category: corpus_profile  # category stamped on the CORPUS-scope record
+
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [profile]

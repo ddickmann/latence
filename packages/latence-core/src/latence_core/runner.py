@@ -28,6 +28,7 @@ from latence_core.capability import (
     IntakeScreener,
     Parser,
     PIIDetector,
+    Profiler,
     ProviderRegistry,
     RelationExtractor,
     ScreeningOutcome,
@@ -38,6 +39,8 @@ from latence_core.contracts import (
     Disposition,
     DocumentRecord,
     EntityMention,
+    FeatureRecord,
+    FeatureScope,
     ParserInput,
     QuarantineRecord,
     Record,
@@ -53,6 +56,7 @@ from latence_core.quality import (
     CompletenessCheck,
     EntityQuality,
     ParseQuality,
+    ProfilingQuality,
     QualityReport,
     RedactionQuality,
     RelationQuality,
@@ -72,8 +76,9 @@ if TYPE_CHECKING:
 # consumers without a separate Entity-Extraction Stage. The Runner keeps outputs in
 # one per-Stage dict and lets each Stage's capability decide how to (de)serialize its
 # checkpoint. Redaction→RedactionRecord (one PII-handled variant per document).
-# Screening ALSO produces QuarantineRecords, but those never flow downstream — they
-# are persisted to a sidecar and reported, not threaded through the DAG.
+# Profiling→FeatureRecord (per-document + one corpus-scope record). Screening ALSO
+# produces QuarantineRecords, but those never flow downstream — they are persisted to a
+# sidecar and reported, not threaded through the DAG.
 StageOutput = (
     ParserInput
     | DocumentRecord
@@ -81,6 +86,7 @@ StageOutput = (
     | EntityMention
     | RelationMention
     | RedactionRecord
+    | FeatureRecord
 )
 _T = TypeVar("_T", bound=StageOutput)
 
@@ -176,6 +182,8 @@ class LocalRunner:
             return RelationMention
         if stage.capability is CapabilityKind.REDACTION:
             return RedactionRecord
+        if stage.capability is CapabilityKind.PROFILING:
+            return FeatureRecord
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
@@ -214,6 +222,8 @@ class LocalRunner:
                 return Record
             if parent.capability is CapabilityKind.REDACTION:
                 return RedactionRecord
+            if parent.capability is CapabilityKind.PROFILING:
+                return FeatureRecord
             if parent.capability is CapabilityKind.RELATION_EXTRACTION:
                 return RelationMention
             if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
@@ -471,6 +481,25 @@ class LocalRunner:
             redaction_docs = self._as_type(stage, incoming, DocumentRecord)
             return list(provider.redact(redaction_docs))
 
+        if stage.capability is CapabilityKind.PROFILING:
+            if not isinstance(provider, Profiler):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the Profiler capability."
+                )
+                raise TypeError(msg)
+            # Profiling is corpus-level and multi-input: it wires a Parse parent for
+            # the DocumentRecords (per-document features) and OPTIONALLY an
+            # Entity-Extraction parent for the EntityMentions (cross-document entity
+            # features). Partition the gathered inputs by carrier; the mentions side is
+            # optional (a Parse-only Profiling pipeline yields corpus text features with
+            # empty entity aggregates), so — unlike Relation Extraction — a missing
+            # mention side is NOT an error. Any other carrier (a raw ParserInput) is.
+            profile_docs = [r for r in incoming if isinstance(r, DocumentRecord)]
+            profile_mentions = [r for r in incoming if isinstance(r, EntityMention)]
+            self._require_profiling_inputs(stage, incoming, profile_docs)
+            return list(provider.profile(profile_docs, profile_mentions))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -609,19 +638,52 @@ class LocalRunner:
             raise TypeError(msg)
 
     @staticmethod
+    def _require_profiling_inputs(
+        stage: Stage, incoming: list[StageOutput], documents: list[DocumentRecord]
+    ) -> None:
+        """A Profiling Stage must be wired to a Parse parent (the documents it profiles).
+
+        Profiling depends on a Parse parent for the DocumentRecords (per-document
+        features + the corpus text aggregates). The EntityMention side is optional (a
+        Parse-only Profiling pipeline is valid — it yields text features with empty
+        entity aggregates), so it is not checked here. A non-empty input that carries no
+        DocumentRecord means the Pipeline wired Profiling to the wrong parent (e.g. an
+        Entity-Extraction Stage with no Parse) — surface it as a clear typed error. An
+        empty run (no documents) is legitimately empty.
+        """
+        if not incoming:
+            return
+        if not documents:
+            got = sorted({type(r).__name__ for r in incoming})
+            msg = (
+                f"Stage {stage.name!r} (profiling) received no DocumentRecords "
+                f"(got: {', '.join(got)}). A Profiling Stage must depend on the Parse "
+                f"Stage (the documents it profiles). Check the Pipeline's depends_on wiring."
+            )
+            raise TypeError(msg)
+
+    @staticmethod
     def _as_records(
         stage: Stage, records: list[StageOutput]
-    ) -> list[DocumentRecord | ChunkRecord | EntityMention | RelationMention | RedactionRecord]:
+    ) -> list[
+        DocumentRecord
+        | ChunkRecord
+        | EntityMention
+        | RelationMention
+        | RedactionRecord
+        | FeatureRecord
+    ]:
         """Narrow gathered inputs to the inter-Stage Records Export materializes.
 
         Export materializes DocumentRecords (S1/S2 spine), ChunkRecords (S3, when a
         Chunk Stage is upstream), EntityMentions (S4, an Entity-Extraction Stage
         upstream), RelationMentions (S5, a Relation-Extraction / fused Stage upstream),
-        or RedactionRecords (S6, a Redaction Stage upstream — the PII-handled corpus
-        variant). A fused Stage feeds a MIX of mentions and relations — both are
-        Records and both export. A raw ParserInput (not a Record) means a Source was
-        wired straight into Export with no Parse between. Surface it as a clear
-        typed error.
+        RedactionRecords (S6, a Redaction Stage upstream — the PII-handled corpus
+        variant), or FeatureRecords (S7, a Profiling Stage upstream — the corpus
+        statistical/quality feature set). A fused Stage feeds a MIX of mentions and
+        relations — both are Records and both export. A raw ParserInput (not a Record)
+        means a Source was wired straight into Export with no Parse between. Surface it
+        as a clear typed error.
         """
         exportable = (
             DocumentRecord,
@@ -629,6 +691,7 @@ class LocalRunner:
             EntityMention,
             RelationMention,
             RedactionRecord,
+            FeatureRecord,
         )
         wrong = [r for r in records if not isinstance(r, exportable)]
         if wrong:
@@ -636,9 +699,9 @@ class LocalRunner:
             msg = (
                 f"Stage {stage.name!r} (export) requires Record inputs "
                 f"(DocumentRecord/ChunkRecord/EntityMention/RelationMention/"
-                f"RedactionRecord) but received: {', '.join(got)}. An Export needs a "
-                f"Parse (and optionally a Chunk / Entity-Extraction / "
-                f"Relation-Extraction / Redaction) upstream."
+                f"RedactionRecord/FeatureRecord) but received: {', '.join(got)}. An "
+                f"Export needs a Parse (and optionally a Chunk / Entity-Extraction / "
+                f"Relation-Extraction / Redaction / Profiling) upstream."
             )
             raise TypeError(msg)
         return [r for r in records if isinstance(r, exportable)]
@@ -680,8 +743,14 @@ class LocalRunner:
         # Document count = distinct source documents seen across the run. Chunks
         # fan out from a document (many chunks share one document_id), so counting
         # distinct Provenance document ids is correct whether the sinks are
-        # DocumentRecords or ChunkRecords.
-        doc_ids = {r.provenance.document_id for r in records}
+        # DocumentRecords or ChunkRecords. A Profiling Stage's CORPUS-scope
+        # FeatureRecord carries a synthetic corpus-scope document_id (it is not a source
+        # document), so it is excluded from the source-document count.
+        doc_ids = {
+            r.provenance.document_id
+            for r in records
+            if not (isinstance(r, FeatureRecord) and r.scope is FeatureScope.CORPUS)
+        }
         # Parse/Chunk quality scan the Stage that produced those records (not just
         # the sinks), so a Source→Parse→Chunk→Export pipeline (whose sinks are
         # ChunkRecords) still reports Parse metrics from the Parse Stage's output.
@@ -712,6 +781,7 @@ class LocalRunner:
             (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
         )
         redactions = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.REDACTION)
+        features = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.PROFILING)
         return QualityReport(
             pipeline_name=pipeline.name,
             run_id=run_id,
@@ -726,6 +796,7 @@ class LocalRunner:
             entities=self._entity_quality(pipeline, mentions),
             relations=self._relation_quality(pipeline, relations),
             redaction=self._redaction_quality(pipeline, redactions),
+            profiling=self._profiling_quality(pipeline, features),
         )
 
     @staticmethod
@@ -952,6 +1023,76 @@ class LocalRunner:
                 quality.per_action[action] = quality.per_action.get(action, 0) + 1
         quality.per_type = dict(sorted(quality.per_type.items()))
         quality.per_action = dict(sorted(quality.per_action.items()))
+        return quality
+
+    @staticmethod
+    def _profiling_quality(
+        pipeline: Pipeline, records: list[StageOutput]
+    ) -> ProfilingQuality | None:
+        """Aggregate Profiling quality: per-document feature averages + corpus aggregates (S7).
+
+        Only computed when the Pipeline has a Profiling Stage. ``records`` is the mix of
+        DOCUMENT-scope and the single CORPUS-scope
+        :class:`~latence_core.contracts.FeatureRecord`s. The document-scope records are
+        averaged into a compact readability/density/diversity summary, and the
+        corpus-scope record's aggregates (word/vocabulary counts, corpus Zipf α, source
+        coverage, entity-type frequency, top co-occurrences) are surfaced verbatim —
+        the S7 acceptance criterion ("feature summary lands in the Quality Report").
+        Counts and averages only (no raw document text), so the report is safe to
+        persist. All maps are already engine-sorted; the co-occurrence list is rendered
+        as ``"left|right"`` → document-count for a flat, JSON-stable summary.
+        """
+        if not any(s.capability is CapabilityKind.PROFILING for s in pipeline.stages):
+            return None
+        quality = ProfilingQuality()
+        doc_features = [
+            r
+            for r in records
+            if isinstance(r, FeatureRecord)
+            and r.scope is FeatureScope.DOCUMENT
+            and r.document is not None
+        ]
+        n = len(doc_features)
+        quality.documents_profiled = n
+        if n:
+            quality.avg_readability = round(
+                sum(r.document.readability for r in doc_features if r.document) / n, 6
+            )
+            quality.avg_density = round(
+                sum(r.document.density for r in doc_features if r.document) / n, 6
+            )
+            quality.avg_type_token_ratio = round(
+                sum(r.document.type_token_ratio for r in doc_features if r.document) / n, 6
+            )
+            quality.avg_zipf_alpha = round(
+                sum(r.document.zipf_alpha for r in doc_features if r.document) / n, 6
+            )
+            quality.avg_compression_ratio = round(
+                sum(r.document.compression_ratio for r in doc_features if r.document) / n, 6
+            )
+        corpus = next(
+            (
+                r
+                for r in records
+                if isinstance(r, FeatureRecord)
+                and r.scope is FeatureScope.CORPUS
+                and r.corpus is not None
+            ),
+            None,
+        )
+        if corpus is not None and corpus.corpus is not None:
+            cf = corpus.corpus
+            quality.corpus_total_words = cf.total_words
+            quality.corpus_unique_words = cf.total_unique_words
+            quality.corpus_zipf_alpha = cf.corpus_zipf_alpha
+            quality.language_coverage = dict(cf.language_coverage)
+            quality.category_coverage = dict(cf.category_coverage)
+            quality.sensitivity_coverage = dict(cf.sensitivity_coverage)
+            quality.distinct_entities = len(cf.entity_frequency)
+            quality.entity_type_frequency = dict(cf.entity_type_frequency)
+            quality.top_co_occurrences = {
+                f"{co.left}|{co.right}": co.document_count for co in cf.co_occurrences
+            }
         return quality
 
     @staticmethod

@@ -9,11 +9,11 @@ A corpus-level **Profiling** Capability that computes statistical and quality fe
 - The 9 enrichers (`dataset-intelligence` enrichment modules) → consolidate into one `document_features` + `corpus_features` module. RECAST (simplify registry).
 
 ## Acceptance criteria
-- [ ] Profiling Capability emits per-document and cross-document `FeatureRecord`s tied to Provenance.
-- [ ] Features are computed streaming/spill-to-disk friendly (no whole-corpus-in-RAM assumption for the feature pass).
-- [ ] Feature summary lands in the Quality Report.
-- [ ] Runs CPU-only within the demo budget on the sample corpus.
-- [ ] Baseline bar met.
+- [x] Profiling Capability emits per-document and cross-document `FeatureRecord`s tied to Provenance.
+- [x] Features are computed streaming/spill-to-disk friendly (no whole-corpus-in-RAM assumption for the feature pass).
+- [x] Feature summary lands in the Quality Report.
+- [x] Runs CPU-only within the demo budget on the sample corpus.
+- [x] Baseline bar met.
 
 ## Blocked by
 S3.

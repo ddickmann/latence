@@ -122,3 +122,40 @@ core.
 
 Per-type mention counts and the confidence distribution land in the Quality
 Report's `entities` section (ADR-0022).
+
+## Profiling (S7)
+
+**Profiling** is the corpus-level Stage that computes statistical and quality
+features over the corpus, inserted after Parse (and optionally after Entity
+Extraction) as a `profiling` Stage (see `examples/profiling-slice.yaml`). It emits
+first-class `FeatureRecord`s at two scopes:
+
+- one **DOCUMENT**-scope record per parsed document — `char_count`, `word_count`,
+  `sentence_count`, `type_token_ratio`, `density`, a normalised `readability`, the
+  fitted `zipf_alpha`, a zlib `compression_ratio` (a redundancy proxy), and the
+  average word/sentence lengths;
+- exactly one **CORPUS**-scope record — corpus word/vocabulary counts and Zipf α,
+  **source coverage** by language / category / sensitivity, cross-document
+  **entity frequency** and **entity-type frequency**, per-entity **type consensus**
+  (the fraction of an entity's mentions that agree on its label), and the top
+  cross-document **entity co-occurrence** pairs.
+
+The feature set is **fixed and closed** (the private stack's 9 enrichers consolidated,
+the dynamic registry recast away, ADR-0025), so a seeded run is byte-identical. The
+pass is **streaming** — documents are folded in one at a time, with no
+whole-corpus-in-RAM assumption.
+
+- **`profiling.statistical`** ships in core (pure-Python, deterministic, no model
+  download — the Zipf fit and readability are closed-form). Config:
+  `max_co_occurrences` (50), `corpus_sensitivity` (`internal`), `corpus_category`
+  (`corpus_profile`).
+
+  ```yaml
+    - name: profile
+      capability: profiling
+      provider: profiling.statistical
+      depends_on: [parse, entities]   # entities is optional (Parse-only = text-only profile)
+  ```
+
+The feature summary — per-document averages plus the corpus aggregates — lands in the
+Quality Report's `profiling` section (ADR-0025).

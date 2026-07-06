@@ -43,6 +43,10 @@ latence = "latence_core.cli:app"
 # custom patterns; policy keyed off Classification.sensitivity). Pure Python, no
 # extra deps. The learned GLiNER-PII Provider lives in latence-pii-gliner (ADR-0024).
 "redaction.hybrid_rule" = "latence_core.stages.redaction:HybridPIIRedactor"
+# S7 built-in: deterministic streaming corpus profiler (per-document density /
+# readability / Zipf / compression + cross-document entity frequency / co-occurrence /
+# type consensus / source coverage). Pure Python, no extra deps (ADR-0025).
+"profiling.statistical" = "latence_core.stages.profiling:StatisticalProfiler"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]

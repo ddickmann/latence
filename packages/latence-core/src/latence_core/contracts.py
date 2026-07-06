@@ -42,7 +42,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # enum. A RedactionRecord is an inter-Stage Record like every other, carrying
 # Provenance and Classification, so the redacted text threads through the DAG and
 # exports to the RAG corpus as the PII-handled variant (ADR-0017/0024).
-SCHEMA_VERSION = 6
+# v7 (S7 Profiling): FeatureRecord (a corpus-level Profiling result carrying a typed,
+# fixed FeatureSet of statistical + quality features) at two scopes (FeatureScope:
+# DOCUMENT — one per parsed document, carrying that document's per-document features;
+# CORPUS — exactly one, carrying the cross-document aggregate features). A FeatureRecord
+# is an inter-Stage Record like every other, carrying Provenance and Classification, so
+# it threads through the DAG and exports; the CORPUS record's Provenance is the synthetic
+# corpus-scope lineage (ADR-0025). Metric names are a fixed, closed set — no dynamic
+# registry (S7 RECAST) — so a seeded run is byte-identical and the schema is auditable.
+SCHEMA_VERSION = 7
 
 
 class Provenance(BaseModel):
@@ -688,3 +696,181 @@ class RedactionRecord(Record):
     def pii_count(self) -> int:
         """Number of detected PII spans (0 for a clean document)."""
         return len(self.pii_spans)
+
+
+# -- S7: Profiling -----------------------------------------------------------
+
+
+class FeatureScope(StrEnum):
+    """The scope a :class:`FeatureRecord` describes (CONTEXT ``Profiling``).
+
+    Profiling is a *corpus-level* Stage, so it emits at two scopes. ``DOCUMENT`` is
+    one record per parsed document, carrying that document's per-document features
+    (density, readability, Zipf α, compression ratio, structure). ``CORPUS`` is
+    exactly one record per run, carrying the cross-document aggregate features
+    (entity frequency, co-occurrence, type consensus, source coverage). Both are
+    inter-Stage :class:`Record`s — the split is a scope tag, not two contracts, so a
+    consumer reads one exported stream and filters by ``scope``.
+    """
+
+    DOCUMENT = "document"
+    CORPUS = "corpus"
+
+
+class DocumentFeatures(BaseModel):
+    """The fixed per-document statistical + quality feature set (S7).
+
+    Computed over one parsed :class:`DocumentRecord`'s assembled markdown. This is the
+    consolidated, **fixed** feature set the S7 issue calls for (the private stack's 9
+    enrichers RECAST into a lean closed set — no dynamic registry), so the schema is
+    stable and a seeded run is byte-identical:
+
+    * ``char_count`` / ``word_count`` / ``sentence_count`` — raw size measures.
+    * ``unique_word_count`` — distinct lowercased word types (the vocabulary size).
+    * ``type_token_ratio`` — ``unique_word_count / word_count`` (lexical diversity;
+      0.0 for an empty document).
+    * ``density`` — non-whitespace characters as a fraction of all characters (0..1):
+      how information-dense the text is versus padding/layout whitespace.
+    * ``readability`` — a normalised 0..1 readability score (higher = easier), derived
+      from average sentence length and average word length (a Flesch-style reading-ease
+      mapped into ``[0, 1]``), dependency-free and deterministic.
+    * ``zipf_alpha`` — the fitted Zipfian exponent α of the word-frequency
+      distribution (a well-formed natural-language corpus sits near 1.0); 0.0 when
+      there are too few distinct words to fit.
+    * ``compression_ratio`` — ``compressed_size / raw_size`` under zlib (0..1-ish): a
+      proxy for redundancy/repetitiveness (boilerplate compresses hard, so a low ratio
+      flags a repetitive/templated document); 0.0 for empty text.
+    * ``avg_word_length`` / ``avg_sentence_length`` — the shape measures the
+      readability score is built from, surfaced for downstream tuning.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    char_count: int = Field(..., ge=0)
+    word_count: int = Field(..., ge=0)
+    sentence_count: int = Field(..., ge=0)
+    unique_word_count: int = Field(..., ge=0)
+    type_token_ratio: float = Field(..., ge=0.0, le=1.0)
+    density: float = Field(..., ge=0.0, le=1.0)
+    readability: float = Field(..., ge=0.0, le=1.0)
+    zipf_alpha: float = Field(..., ge=0.0)
+    compression_ratio: float = Field(..., ge=0.0)
+    avg_word_length: float = Field(..., ge=0.0)
+    avg_sentence_length: float = Field(..., ge=0.0)
+
+
+class EntityCoOccurrence(BaseModel):
+    """One cross-document co-occurrence: an ordered entity-text pair + its count (S7).
+
+    The pair is stored in a canonical order (``left <= right`` lexicographically) so
+    the same unordered pair is counted once regardless of the order the two mentions
+    appeared in a document. ``document_count`` is the number of *distinct documents*
+    in which both entities co-occur — the cross-document co-occurrence signal, not a
+    raw within-document tally.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    left: str = Field(..., min_length=1)
+    right: str = Field(..., min_length=1)
+    document_count: int = Field(..., ge=1)
+
+
+class CorpusFeatures(BaseModel):
+    """The fixed cross-document statistical + quality feature set (S7).
+
+    Computed over the whole run — every parsed document and (when an Entity-Extraction
+    Stage is upstream) every :class:`EntityMention`. The consolidated cross-document
+    half of the RECAST enricher set:
+
+    * ``document_count`` — parsed documents profiled.
+    * ``total_words`` / ``total_unique_words`` — corpus size + vocabulary.
+    * ``corpus_zipf_alpha`` — the Zipfian exponent fitted over the *whole-corpus*
+      word-frequency distribution (the corpus-level Zipf α the issue names).
+    * ``language_coverage`` — per-``Classification.language`` document counts (source
+      coverage by language).
+    * ``category_coverage`` / ``sensitivity_coverage`` — the same source-coverage
+      breakdown by content category and sensitivity.
+    * ``entity_frequency`` — cross-document entity mention counts, keyed by the
+      mention surface text (how often each entity appears corpus-wide).
+    * ``entity_type_frequency`` — mention counts keyed by entity *label*.
+    * ``entity_type_consensus`` — per entity text, the fraction of its mentions that
+      carry its single most-common label (1.0 = every mention agrees on the type; a
+      lower value flags an entity the extractor typed inconsistently across the
+      corpus). Only entities seen at least twice are scored.
+    * ``co_occurrences`` — the top cross-document entity co-occurrence pairs
+      (:class:`EntityCoOccurrence`), most-frequent first, capped for a bounded report.
+
+    Every map is emitted in a deterministic order (sorted), so a seeded run is
+    byte-identical.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    document_count: int = Field(..., ge=0)
+    total_words: int = Field(..., ge=0)
+    total_unique_words: int = Field(..., ge=0)
+    corpus_zipf_alpha: float = Field(..., ge=0.0)
+    language_coverage: dict[str, int] = Field(default_factory=dict)
+    category_coverage: dict[str, int] = Field(default_factory=dict)
+    sensitivity_coverage: dict[str, int] = Field(default_factory=dict)
+    entity_frequency: dict[str, int] = Field(default_factory=dict)
+    entity_type_frequency: dict[str, int] = Field(default_factory=dict)
+    entity_type_consensus: dict[str, float] = Field(default_factory=dict)
+    co_occurrences: list[EntityCoOccurrence] = Field(default_factory=list)
+
+
+class FeatureRecord(Record):
+    """A corpus-level Profiling result: a typed FeatureSet at one scope (CONTEXT ``Profiling``).
+
+    Profiling computes statistical and quality features over the corpus. A FeatureRecord
+    is an inter-Stage :class:`Record` — it carries Provenance and Classification like
+    every other carrier — so it threads through the DAG, is checkpointed/resumed
+    uniformly, and exports directly. Exactly one of ``document``/``corpus`` is populated,
+    selected by ``scope``:
+
+    * ``scope == DOCUMENT``: ``document`` holds the per-document :class:`DocumentFeatures`
+      and ``document_record_id`` links back to the profiled DocumentRecord; its Provenance
+      is that document's lineage, its Classification inherited unchanged. ``corpus`` is
+      ``None``.
+    * ``scope == CORPUS``: ``corpus`` holds the cross-document :class:`CorpusFeatures`;
+      ``document_record_id`` is ``None`` and its Provenance is the synthetic corpus-scope
+      lineage (the whole run is its source). ``document`` is ``None``.
+
+    The scope/payload consistency is contract-enforced, so a Provider cannot emit a
+    document-scope record with corpus features (or vice-versa) or leave both empty.
+    """
+
+    scope: FeatureScope
+    document_record_id: str | None = Field(
+        default=None, description="Parent DocumentRecord id (DOCUMENT scope only)."
+    )
+    document: DocumentFeatures | None = Field(default=None)
+    corpus: CorpusFeatures | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _scope_payload_consistent(self) -> FeatureRecord:
+        if self.scope is FeatureScope.DOCUMENT:
+            if self.document is None:
+                msg = "A DOCUMENT-scope FeatureRecord must carry a 'document' feature set."
+                raise ValueError(msg)
+            if self.corpus is not None:
+                msg = "A DOCUMENT-scope FeatureRecord must not carry 'corpus' features."
+                raise ValueError(msg)
+            if self.document_record_id is None:
+                msg = "A DOCUMENT-scope FeatureRecord must carry the profiled document_record_id."
+                raise ValueError(msg)
+        else:  # CORPUS
+            if self.corpus is None:
+                msg = "A CORPUS-scope FeatureRecord must carry a 'corpus' feature set."
+                raise ValueError(msg)
+            if self.document is not None:
+                msg = "A CORPUS-scope FeatureRecord must not carry 'document' features."
+                raise ValueError(msg)
+            if self.document_record_id is not None:
+                msg = "A CORPUS-scope FeatureRecord must not name a single document_record_id."
+                raise ValueError(msg)
+        return self

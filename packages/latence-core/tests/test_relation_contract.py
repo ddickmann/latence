@@ -51,9 +51,11 @@ def _relation(**overrides: object) -> RelationMention:
     return RelationMention(**base)  # type: ignore[arg-type]
 
 
-def test_schema_version_is_six() -> None:
-    assert SCHEMA_VERSION == 6
-    assert _relation().schema_version == 6
+def test_schema_version_is_current() -> None:
+    # SCHEMA_VERSION is corpus-wide (7 after S7 Profiling); a RelationMention
+    # serialized now stamps the current version, still a valid RelationMention.
+    assert SCHEMA_VERSION == 7
+    assert _relation().schema_version == 7
 
 
 def test_valid_relation_round_trips() -> None:

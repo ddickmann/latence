@@ -21,7 +21,11 @@ from latence_core.contracts import ScreeningFinding
 # v6 (S6): the report gains ``redaction`` (Redaction per-PII-type detection counts,
 # per-action counts, and documents-with-PII) — the S6 acceptance criterion, and NEVER
 # any raw PII value (counts only).
-QUALITY_SCHEMA_VERSION = 6
+# v7 (S7): the report gains ``profiling`` (Profiling per-document feature averages +
+# the corpus-level aggregates — document/word/vocabulary counts, corpus Zipf α,
+# source coverage, top entity co-occurrences) — the S7 acceptance criterion ("feature
+# summary lands in the Quality Report").
+QUALITY_SCHEMA_VERSION = 7
 
 
 class StageMetrics(BaseModel):
@@ -244,6 +248,42 @@ class RedactionQuality(BaseModel):
     per_action: dict[str, int] = Field(default_factory=dict)
 
 
+class ProfilingQuality(BaseModel):
+    """Profiling-Stage quality: per-document feature averages + corpus aggregates (S7).
+
+    Emitted when a run had a Profiling Stage. The document-scope half rolls the
+    per-document :class:`~latence_core.contracts.DocumentFeatures` into simple averages
+    (a compact summary of the corpus's readability / density / diversity), and the
+    corpus-scope half surfaces the cross-document aggregates the single
+    :class:`~latence_core.contracts.CorpusFeatures` record already computed. This is the
+    S7 acceptance criterion — the feature summary lands in the Quality Report — kept to
+    counts and averages (no raw document text), so it is safe to persist.
+
+    ``documents_profiled`` is the number of DOCUMENT-scope FeatureRecords; the
+    ``avg_*`` fields are their means (0.0 for an empty run). The corpus fields mirror
+    the CORPUS-scope record; ``top_co_occurrences`` is the capped, ranked co-occurrence
+    list rendered as ``"left|right"`` → document-count for a flat, JSON-stable summary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents_profiled: int = 0
+    avg_readability: float = 0.0
+    avg_density: float = 0.0
+    avg_type_token_ratio: float = 0.0
+    avg_zipf_alpha: float = 0.0
+    avg_compression_ratio: float = 0.0
+    corpus_total_words: int = 0
+    corpus_unique_words: int = 0
+    corpus_zipf_alpha: float = 0.0
+    language_coverage: dict[str, int] = Field(default_factory=dict)
+    category_coverage: dict[str, int] = Field(default_factory=dict)
+    sensitivity_coverage: dict[str, int] = Field(default_factory=dict)
+    distinct_entities: int = 0
+    entity_type_frequency: dict[str, int] = Field(default_factory=dict)
+    top_co_occurrences: dict[str, int] = Field(default_factory=dict)
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -268,6 +308,8 @@ class QualityReport(BaseModel):
     relations: RelationQuality | None = None
     # Present when the run had a Redaction Stage.
     redaction: RedactionQuality | None = None
+    # Present when the run had a Profiling Stage.
+    profiling: ProfilingQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
