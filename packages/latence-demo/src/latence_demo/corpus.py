@@ -28,13 +28,26 @@ edges connect people to organisations) — the browsable KG the viewer renders.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from latence_core.storage import Storage
+
+
+def _document_id(data: bytes) -> str:
+    """The content-addressed source ``document_id`` the Source stamps on every record.
+
+    Mirrors ``latence_core.stages.source._document_id`` (and the same convention the
+    DeltaRunner reproduces): ``sha256:`` + hex sha256 of the raw file bytes. Kept as a
+    tiny local mirror so the demo binds Screening findings back to file names by
+    ``document_id`` (a stable, per-file key) rather than by a coincidental
+    ``verdict:category`` pair — without pulling a private Source helper into the demo.
+    """
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 # A cross-document, entity-rich business corpus so the KG has real nodes + edges.
 _MEMO_MD = """# Acquisition memo
@@ -78,11 +91,16 @@ class CorpusManifest:
     ``documents`` is every file written (name → byte size); ``dangerous`` names the
     fixtures deliberately planted to exercise Screening and the disposition each is
     expected to receive, so the demo (and its tests) can assert Screening actually
-    caught them rather than trusting the run silently.
+    caught them rather than trusting the run silently. ``document_ids`` maps each
+    file name to the content-addressed ``document_id`` the Source stamps (``sha256:``
+    + sha256 of the bytes), so a Screening finding — which carries ``document_id`` but
+    not the file name — is bound back to the *specific* planted file, not to a
+    coincidental ``verdict:category`` pair.
     """
 
     documents: dict[str, int]
     dangerous: dict[str, str]
+    document_ids: dict[str, str] = field(default_factory=dict)
 
 
 def _make_text_pdf(pages: list[str]) -> bytes:
@@ -147,11 +165,26 @@ def _make_zip_bomb() -> bytes:
     real ZIP of a highly-compressible payload; the declared uncompressed size vastly
     exceeds the on-disk size, so the ratio check quarantines it. Nothing here can
     detonate — the bytes are a run of zeros that the Screener never expands.
+
+    Byte-determinism (Baseline bar + the resume contract): ``ZipFile.writestr`` with a
+    bare *filename* stamps ``time.localtime()`` into each entry's DOS ``date_time``, so
+    the archive bytes — and thus its content-addressed ``document_id`` — would change
+    every second. The demo re-stages the corpus on every run (including a resumed one),
+    so a wall-clock timestamp makes the re-staged ``archive.zip`` hash to a *different*
+    ``document_id`` than the one the first run screened and checkpointed — silently
+    breaking the per-file dangerous-fixture binding on resume. We therefore pin the
+    entry via an explicit :class:`zipfile.ZipInfo` with a FIXED ``date_time`` (and
+    external attrs), making the archive byte-identical across runs and processes.
     """
     payload = b"\x00" * (2 * 1024 * 1024)  # 2 MiB of zeros -> compresses to ~KB.
+    # Fixed epoch (ZIP's minimum representable DOS date is 1980-01-01) — never the
+    # current time — so the bytes are reproducible run-to-run and process-to-process.
+    info = zipfile.ZipInfo(filename="payload.bin", date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o600 << 16  # stable perms; default is host/umask-dependent.
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("payload.bin", payload)
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(info, payload)
     return buf.getvalue()
 
 
@@ -191,6 +224,7 @@ def build_corpus_bytes() -> tuple[dict[str, bytes], CorpusManifest]:
             "dump.txt": "quarantine:oversized",
             "support-ticket.md": "flag:prompt_injection",
         },
+        document_ids={name: _document_id(data) for name, data in documents.items()},
     )
     return documents, manifest
 

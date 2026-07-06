@@ -94,6 +94,70 @@ def test_demo_resumes_from_checkpoints(tmp_path: Path) -> None:
     assert result2.summary.dangerous_all_caught
 
 
+def test_demo_resume_binds_dangerous_by_document_id_across_a_time_boundary(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Regression (S13 debt #46, re-do): resume-path per-file dangerous binding is robust.
+
+    The demo re-stages the corpus on a resumed run and binds each Screening finding to its
+    file **by content-addressed ``document_id``**. If any fixture's bytes were not
+    byte-deterministic — the ``archive.zip`` zip-bomb stamped ``time.localtime()`` into its
+    ZIP entry — the re-staged file would hash to a *different* ``document_id`` than the one the
+    first run screened and checkpointed, so its checkpointed finding would be missed on resume
+    and ``dangerous_all_caught`` would silently flip to False.
+
+    Rather than racing wall-clock ``time.sleep`` (which only re-hashes a time-stamped fixture
+    when the two runs happen to straddle a DOS 2-second bucket — the ~4/6 flake the re-do note
+    called out), we **deterministically** advance the clock ``zipfile`` reads across a 2-second
+    DOS boundary between the two runs. A revert to the bare-filename ``writestr`` form would
+    stamp these two distinct instants into the archive, re-hash ``archive.zip`` on resume, and
+    fail this test *every* run; the pinned :class:`~zipfile.ZipInfo` ignores the clock entirely,
+    so with the fix the corpus is byte-identical and every dangerous fixture binds to its own
+    checkpointed finding. (Deterministically backstopped by ``test_zip_bomb_bytes_are_time_
+    independent`` in ``test_corpus.py``.)
+    """
+    import time
+
+    # Two instants > 2s apart -> distinct DOS date_time buckets for a bare-filename writestr.
+    calls = {"n": 0}
+
+    def _fake_time() -> float:
+        # First run sees instant[0]; the resume (calls["n"]==1) sees instant[1], 3s later.
+        return 1_700_000_000.0 if calls["n"] == 0 else 1_700_000_003.0
+
+    real_localtime = time.localtime
+
+    def _fake_localtime(secs: float | None = None) -> time.struct_time:
+        return real_localtime(_fake_time() if secs is None else secs)
+
+    monkeypatch.setattr(time, "time", _fake_time)
+    monkeypatch.setattr(time, "localtime", _fake_localtime)
+
+    store = f"file://{tmp_path}/store"
+    result1 = DemoBuilder(storage_uri=store, run_id="resume-tb").run()
+    # Advance the clock zipfile reads across a DOS 2-second boundary for the resume run.
+    calls["n"] = 1
+    result2 = DemoBuilder(storage_uri=store, run_id="resume-tb").run()
+
+    # It genuinely resumed (no Stage re-ran) — the path the bug lives on.
+    assert all(m.from_checkpoint for m in result2.report.stages)
+
+    # Every planted dangerous fixture — quarantine AND flag — is still caught after resume,
+    # and each observed disposition binds to the correct file per document_id.
+    assert result2.summary.dangerous_all_caught
+    by_name = {d.file_name: d for d in result2.summary.dangerous}
+    assert by_name["invoice.pdf"].observed == "quarantine:type_spoof"
+    assert by_name["archive.zip"].observed == "quarantine:zip_bomb"
+    assert by_name["dump.txt"].observed == "quarantine:oversized"
+    assert by_name["support-ticket.md"].observed == "flag:prompt_injection"
+
+    # The manifest's per-file document_id is stable across the re-stage (byte-determinism):
+    # the resume manifest ids equal the first run's, so findings bind to the SAME files.
+    for name in result1.manifest.dangerous:
+        assert result1.manifest.document_ids[name] == result2.manifest.document_ids[name]
+
+
 # -- The one-line Provider swap (the model- and cloud-agnostic proof, ADR-0011) ------
 
 

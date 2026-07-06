@@ -107,3 +107,52 @@ def test_cli_no_strict_tolerates_slip_through(monkeypatch) -> None:  # type: ign
     result = runner.invoke(app, ["--no-strict"])
     assert result.exit_code == 0, result.output
     assert "MISMATCH" in result.output
+
+
+# --- The one-line Provider swap must NOT crash with a raw KeyError (S13 debt #46.1). ---
+#
+# From a clean clone the CPU demo set has no learned-NER Provider installed, so `latence-demo
+# --entity-provider entity.gliner` used to reach the runner and crash with a raw KeyError
+# traceback — a poor first impression for the README's headline swap command. The CLI now
+# runs a preflight: if the chosen Provider is not in the registry it exits non-zero BEFORE the
+# pipeline runs, with a clean message naming the package to install.
+
+
+def test_cli_swap_to_uninstalled_provider_exits_clean_not_keyerror(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    # Simulate a clean clone where latence-ner-gliner is NOT installed (in the test env its
+    # source IS installed, so we force entity.gliner out of the registry). A revert of the
+    # preflight would let this reach the runner and raise a bare KeyError instead.
+    monkeypatch.setattr(
+        cli_module.ProviderRegistry,
+        "names",
+        lambda self: ["entity.gazetteer", "source.local_folder"],
+    )
+    store = f"file://{tmp_path}/store"
+    result = runner.invoke(
+        app, ["--storage-uri", store, "--entity-provider", "entity.gliner"]
+    )
+    # Clean, CLI-handled non-zero exit — not an uncaught KeyError bubbling out of the runner.
+    assert result.exit_code == 1, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert not isinstance(result.exception, KeyError)
+    assert "entity.gliner" in result.output
+    assert "not installed" in result.output
+    assert "latence-ner-gliner" in result.output  # names the package to install
+    # It failed the preflight — never staged the corpus or reached the runner.
+    assert not (tmp_path / "store").exists()
+
+
+def test_cli_swap_to_unknown_provider_gives_generic_hint(tmp_path: Path) -> None:
+    # An unrecognised Provider (no known package) still fails the preflight cleanly, with a
+    # generic 'install the package that registers it' hint rather than a raw KeyError.
+    store = f"file://{tmp_path}/store"
+    result = runner.invoke(
+        app, ["--storage-uri", store, "--entity-provider", "entity.does_not_exist"]
+    )
+    assert result.exit_code == 1, result.output
+    assert not isinstance(result.exception, KeyError)
+    assert "entity.does_not_exist" in result.output
+    assert "latence.providers" in result.output  # generic install hint
+    assert not (tmp_path / "store").exists()

@@ -7,6 +7,7 @@ high-ratio ZIP, an oversized file), and that a real multi-page PDF is present.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import zipfile
 from pathlib import Path
@@ -43,6 +44,36 @@ def test_dangerous_fixtures_are_actually_dangerous() -> None:
     assert ratio > 50.0  # exceeds the demo's intake ratio cap
     # oversized: over the demo's 2 MiB intake cap.
     assert len(docs["dump.txt"]) > 2 * 1024 * 1024
+
+
+def test_zip_bomb_bytes_are_time_independent() -> None:
+    # Regression (S13 debt #46, re-do root cause): the zip-bomb fixture must NOT embed the
+    # current wall-clock time in its ZIP entry. `ZipFile.writestr` with a bare filename stamps
+    # `time.localtime()` into each entry's DOS date_time, so the archive bytes — and thus its
+    # content-addressed document_id — would change every second, breaking the resume-path
+    # per-file dangerous binding (the demo re-stages the corpus, re-hashing the fixture to a new
+    # id its checkpointed finding no longer matches). The builder pins a fixed epoch instead.
+    docs, _ = build_corpus_bytes()
+    with zipfile.ZipFile(io.BytesIO(docs["archive.zip"])) as zf:
+        infos = zf.infolist()
+    assert infos, "archive.zip must contain at least one entry"
+    for info in infos:
+        # The pinned epoch is 1980-01-01 (ZIP's minimum). Any 'current year' here means the
+        # entry carries a live timestamp — the exact non-determinism this fixes.
+        assert info.date_time == (1980, 1, 1, 0, 0, 0), info.date_time
+
+
+def test_manifest_document_ids_match_source_content_addressing() -> None:
+    # The manifest's document_ids must equal the exact id the Source stamps on each file:
+    # "sha256:" + sha256(bytes). This is the key _score_dangerous binds findings to files by;
+    # a drift here (or a reverted manifest field) would silently break per-file scoring.
+    docs, manifest = build_corpus_bytes()
+    assert set(manifest.document_ids) == set(docs)
+    for name, data in docs.items():
+        assert manifest.document_ids[name] == "sha256:" + hashlib.sha256(data).hexdigest()
+    # The dangerous fixtures each have a resolvable, distinct document_id.
+    dangerous_ids = {manifest.document_ids[n] for n in manifest.dangerous}
+    assert len(dangerous_ids) == len(manifest.dangerous)
 
 
 def test_stage_corpus_writes_every_file(tmp_path: Path) -> None:

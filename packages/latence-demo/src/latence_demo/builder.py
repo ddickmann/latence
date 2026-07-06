@@ -41,6 +41,10 @@ from latence_demo.viewer import (
 )
 
 # Default demo storage root — a local folder (the CPU-only, no-cloud default, ADR-0007).
+# NOTE (hardening): this path is under a shared, world-writable ``/tmp`` and is predictable,
+# which is fine for a throwaway local demo but NOT for a real deployment — a co-located user
+# could pre-create or symlink the path. Adopters should pass a private, per-run ``--storage-uri``
+# (or an ``s3://``/``gs://`` root) rather than rely on this default.
 DEFAULT_STORAGE_URI = "file:///tmp/latence-demo"
 
 
@@ -170,28 +174,38 @@ class DemoBuilder:
     ) -> list[DangerousFixtureOutcome]:
         """Prove each planted dangerous fixture got its expected Screening disposition.
 
-        Maps every quarantine/flag finding in the Quality Report back to its source file name,
-        then compares the observed disposition against the corpus manifest's planted intent. A
-        mismatch (a dangerous file that slipped through) surfaces as ``matched=False`` — the demo
-        failing loudly rather than asserting a false "it's safe" (S13 AC).
+        Binds every quarantine/flag finding in the Quality Report to its source file **by
+        ``document_id``** — the content-addressed id the Source stamps and the finding carries —
+        via the manifest's ``file_name -> document_id`` map, then compares the observed
+        disposition against that file's planted intent. Because the match is per-file, a
+        'right reason, wrong file' mislabel (e.g. the injection flag landing on the wrong
+        document) is caught, not passed. A mismatch — a dangerous file that slipped through, or
+        the expected disposition landing on a different file — surfaces as ``matched=False``, so
+        the demo fails loudly rather than asserting a false "it's safe" (S13 AC).
+
+        Order-independent and resume-safe: the observed dispositions are keyed by
+        ``document_id`` (not by iteration position), and the manifest's ``document_id`` for a
+        file must equal the id the Source actually stamped and the checkpointed finding carries.
+        That equality holds ONLY because the staged corpus is byte-deterministic across runs
+        (see :func:`latence_demo.corpus._make_zip_bomb`, which pins the ZIP timestamp): the
+        demo re-stages the corpus on a resumed run, so a nondeterministic fixture would re-hash
+        to a new ``document_id`` and miss its own checkpointed finding.
         """
-        # file_name -> "verdict:category" observed from the Screening findings. The intake
-        # findings key on document_id, so map document_id -> file_name via the manifest is not
-        # available here; instead the reason/category + checkpoint identify the disposition.
+        # document_id -> "verdict:category" observed from the Screening findings. Each finding
+        # carries the document_id of the exact record it screened, so we can attribute the
+        # disposition to the specific planted file rather than to a coincidental pair.
         observed: dict[str, str] = {}
         screening = report.screening
         if screening is not None:
-            # A finding carries document_id + category + verdict but not the file name; the
-            # demo's dangerous fixtures each map to a unique (verdict, category) pair, so key
-            # the observed disposition by that pair and match it to the planted intent below.
             for f in screening.findings:
                 if f.verdict.value == "pass":
                     continue
-                observed[f"{f.verdict.value}:{f.category}"] = f"{f.verdict.value}:{f.category}"
+                observed[f.document_id] = f"{f.verdict.value}:{f.category}"
 
         outcomes: list[DangerousFixtureOutcome] = []
         for file_name, expected in sorted(manifest.dangerous.items()):
-            got = observed.get(expected, "not-detected")
+            doc_id = manifest.document_ids.get(file_name)
+            got = observed.get(doc_id, "not-detected") if doc_id is not None else "not-detected"
             outcomes.append(
                 DangerousFixtureOutcome(
                     file_name=file_name,
