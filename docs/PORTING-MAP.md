@@ -36,7 +36,11 @@ Legend: **KEEP** = port the idea/code into the framework · **RECAST** = good id
 | PageOffsetIndex / page_mapper (offset→page, fuzzy drift recovery) | KEEP | Core to Provenance integrity; a Rust hot-path candidate |
 | 5-strategy entity resolution + GLinker linking pipeline | KEEP | The Disambiguation Stage's reference Provider |
 | Graph builder with EvidenceRecord provenance | KEEP | The Graph Assembly Stage |
-| Write-ahead log + atomic state updates | KEEP | Backs the local Runner's files-on-Storage state (ADR-0010) |
+| Write-ahead log + atomic state updates | KEEP | Backs the local Runner's files-on-Storage state (ADR-0010) AND transactional Corpus Versions (ADR-0018) |
+| delta_detector (content-hash new/updated/unchanged) | KEEP | Delta computation (ADR-0018) |
+| graph/patcher (retract edges by source_document_ids) | KEEP | Evidence-based Retraction/Purge (ADR-0018) |
+| incremental_linker (link delta vs existing KB) | RECAST | Good for attach-to-known; extend to affected-set merge/split (ADR-0018) |
+| ontology/incremental, link_prediction/incremental_trainer (RotatE warm-start) | DROP (from v1) | Ride with the post-v1 link-prediction/ontology plugins (ADR-0005) |
 | Feature disk-spilling under memory pressure | KEEP | Profiling Stage |
 | Tier-based config routing (Tier 1/2/3) | RECAST | Becomes Pipeline declarations, not bespoke handler logic |
 | 9 enrichers as a registry | RECAST | Consolidate; the registry is heavier than a fixed set needs |

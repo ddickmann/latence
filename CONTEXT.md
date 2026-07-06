@@ -78,8 +78,34 @@ The record linking a knowledge-graph edge (or a Disambiguation merge decision) b
 _Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference)
 
 **Quality Report**:
-A first-class artifact emitted per run: per-Stage metrics, corpus-level KG statistics, contract-completeness checks, and optional gold-set precision/recall. The substantiation of the "AI-ready" claim.
+A first-class artifact emitted per run: per-Stage metrics, corpus-level KG statistics, contract-completeness checks, and optional gold-set precision/recall. For a delta run it also reports what changed — documents added/retracted, entities created/merged/split, edges added/retracted, and drift since the last reconciliation. The substantiation of the "AI-ready" claim.
 _Avoid_: Metrics dump, stats, log
+
+## Corpus deltas
+
+**Corpus Version**:
+An immutable, numbered committed state of the corpus on Storage. A Delta run reads Version N and transactionally produces Version N+1; any prior Version is inspectable for audit and rollback.
+_Avoid_: Snapshot (reserved for the RotatE GraphSnapshot), commit
+
+**Delta**:
+The set of changes since the last committed Corpus Version, computed as a content-hash diff of the Source manifest: added, updated (same identity, new hash), deleted, or unchanged documents.
+_Avoid_: Diff, changeset, increment
+
+**Affected set**:
+The blocking neighborhoods (and their immediate neighbors) touched by a Delta's changed mentions — the only region corpus-level Stages recompute, rather than the whole corpus.
+_Avoid_: Dirty set, impacted region
+
+**Reconciliation**:
+A full recompute of all blocks, triggered when a drift metric crosses a threshold, that corrects the order-dependent error accumulated by incremental Affected-set recomputation.
+_Avoid_: Full rebuild, refresh
+
+**Retraction**:
+The default deletion disposition — a soft tombstone: the document and its derived records are excluded from every Export, the knowledge graph, and the RAG corpus, but retained for audit and rollback, with affected clusters re-resolved.
+_Avoid_: Soft delete, archive
+
+**Purge**:
+The hard deletion operation for legal erasure (GDPR / right-to-be-forgotten): physical removal of the source, all derived records, and their Evidence, followed by reconciliation of the Affected set.
+_Avoid_: Hard delete, wipe
 
 **Capability**:
 A narrow, model-agnostic interface a Stage depends on to do its work (e.g., Parser, EntityExtractor, PIIDetector), typed against the framework's data contracts.
