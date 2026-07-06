@@ -1,0 +1,7 @@
+# Reference Providers ship permissive weights only; restricted-license models are opt-in
+
+Every model shipped as a framework DEFAULT must have permissively-licensed weights (Apache-2.0 / MIT / BSD): commercial use, redistribution, and modification allowed with no field-of-use or acceptable-use restriction. Verified 2026-07-06 (weights and code checked separately): PaddleOCR-VL-1.5, LightOnOCR-2-1B, knowledgator/gliner-linker-large + rerank, intfloat/multilingual-e5-small (MIT), sentence-transformers/all-MiniLM-L6-v2, ModernBERT, google/mt5, microsoft/llmlingua-2, and all Qwen3 sizes (dense + MoE) are clean.
+
+The one exception found is **unsloth/embeddinggemma-300m / google/embeddinggemma-300m**: the `gemma` license is NOT OSI open-source — commercial use is allowed but it carries Google's Prohibited Use Policy and flow-down obligations (every downstream recipient must be bound to the Gemma use restrictions, with a Notice). Therefore EmbeddingGemma is NOT a default; the default Embedder is multilingual-e5-small (MIT). Models like EmbeddingGemma are available as opt-in Providers that surface their license and flow-down obligations at install time.
+
+Standing rule (per the project's research-diligence directive): a GLiNER/HF checkpoint's license is per-weight and cannot be inferred from the library (GLiNER code is Apache-2.0, but some checkpoints are cc-by-nc-4.0). Every new default Provider requires per-model weights-and-code license verification recorded before it ships.

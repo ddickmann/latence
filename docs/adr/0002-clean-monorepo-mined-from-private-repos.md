@@ -1,0 +1,3 @@
+# Clean-history monorepo; private repos are quarries, not ancestors
+
+The framework lives in this fresh monorepo (`latence-framework`) with a clean git history; the four private latence.ai repos (latence-python, superpod, latenceai-dataset-intelligence, pipeline-worker) are treated as quarries — good parts are ported deliberately, file by file, never merged with history. Reasons: the private histories were never audited for secrets or customer data and cannot be published; a monorepo keeps core contracts, orchestration, and provider plugins versioned together while the project has one author; splitting into multi-repo later is cheap, the reverse is not. Alternative rejected: open-sourcing latence-python in place (inherits its hosted-API surface, history risk, and name).

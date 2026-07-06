@@ -1,0 +1,94 @@
+# Latence Framework
+
+A model-agnostic, cloud-agnostic framework that turns messy, siloed enterprise data into high-quality, AI-ready data — from document parsing through NER, relation extraction, PII handling, enrichment, and disambiguation to corpus-level knowledge graphs. The framework defines the stack and orchestration contracts; the concrete models and infrastructure are the adopter's choice.
+
+## Language
+
+**Stage**:
+A unit of pipeline work with a typed input and output contract (e.g., parsing, entity extraction). Stages declare what they consume and produce; they do not know how they are scheduled or which model fulfils them.
+_Avoid_: Service, step, task
+
+**Runner**:
+An execution adapter that schedules Stages on a particular substrate — the built-in local runner, a Databricks job, an Airflow DAG. Runners own scheduling, retries, and checkpointing; they never define pipeline semantics.
+_Avoid_: Orchestrator, worker, control plane
+
+**Pipeline**:
+A DAG of Stages over a set of input documents, declared once in the framework and executable by any Runner.
+_Avoid_: Workflow, job chain
+
+## Stages
+
+**Source**:
+The Capability that lists and fetches documents from where they live (a folder, an object store, or — via connectors — a source system like SharePoint), stamping initial Provenance. The entry point that makes siloed data addressable.
+_Avoid_: Connector (a Connector is one Provider of the Source Capability), ingester, loader
+
+**Parse**:
+The Stage that turns a source document (PDF, image, office file) into markdown plus a page map preserving original page boundaries.
+_Avoid_: Document intelligence, doc intel, OCR (OCR is one Provider technique, not the Stage)
+
+**Chunk**:
+The Stage that splits parsed documents into retrieval-sized pieces while preserving offsets, page alignment, Provenance, and Classification.
+_Avoid_: Enrichment (banned project-wide — it meant chunking in superpod and feature computation in dataset-intelligence)
+
+**Entity Extraction**:
+The Stage that finds typed entity mentions in text (zero-shot NER and friends).
+_Avoid_: Extraction (unqualified)
+
+**Relation Extraction**:
+The Stage that finds typed relations between entity mentions within a document.
+_Avoid_: Ontology (reserved exclusively for formal ontology induction, a post-v1 plugin)
+
+**Redaction**:
+The Stage that detects PII and produces masked/replaced variants of the text.
+
+**Screening**:
+The Stage that catches dangerous data early, at two checkpoints: Intake Screening before Parse (malware, zip bombs, file-type spoofing, oversized/corrupt files) and Content Screening after Chunk (prompt injection, harmful content, sensitivity escalation). Screening either Quarantines a record or flags it with risk markers that propagate downstream.
+_Avoid_: Guardrails (connotes runtime LLM I/O filtering), moderation
+
+**Profiling**:
+The corpus-level Stage that computes statistical and quality features (density, readability, Zipf, cross-document entity frequency, co-occurrence).
+_Avoid_: Enrichment
+
+**Disambiguation**:
+The corpus-level Stage that links entity mentions to canonical entities and merges duplicates across documents.
+_Avoid_: Entity linking / entity resolution as stage names (they name the two internal steps, not the Stage)
+
+**Graph Assembly**:
+The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations.
+
+**Export**:
+The Stage that materializes AI-ready outputs (Parquet, JSONL, TTL, GraphML).
+
+## Cross-cutting
+
+**Provenance**:
+The immutable chain from any record back to its source: file name, file type, file size, source system, document id, page and character offsets. Every record at every Stage carries it; Chunk must preserve it losslessly.
+_Avoid_: Lineage, metadata (unqualified)
+
+**Classification**:
+Descriptive attributes of a document's content — language, content category, sensitivity — attached after Parse and inherited by every downstream record.
+_Avoid_: Tagging, labeling
+
+**Quarantine**:
+The disposition for records Screening removes from the pipeline: excluded from all downstream Stages and exports, but retained and inspectable with the reason recorded.
+_Avoid_: Delete, drop, filter (unqualified)
+
+**Evidence**:
+The record linking a knowledge-graph edge (or a Disambiguation merge decision) back to the specific source mentions and offsets that justify it, with a confidence value.
+_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference)
+
+**Quality Report**:
+A first-class artifact emitted per run: per-Stage metrics, corpus-level KG statistics, contract-completeness checks, and optional gold-set precision/recall. The substantiation of the "AI-ready" claim.
+_Avoid_: Metrics dump, stats, log
+
+**Capability**:
+A narrow, model-agnostic interface a Stage depends on to do its work (e.g., Parser, EntityExtractor, PIIDetector), typed against the framework's data contracts.
+_Avoid_: Model, service, backend
+
+**Provider**:
+A concrete implementation of a Capability — an in-process model, a remote inference endpoint, or a cloud AI service — registered as a plugin. The framework never names a model; it names Capabilities and lets Providers fulfil them.
+_Avoid_: Adapter, integration, connector
+
+**Fused Provider**:
+A single Provider that fulfils more than one adjacent Stage's Capability in one pass (e.g., joint NER + Relation Extraction). The Pipeline permits this; Capabilities are not forced one-per-Stage.
+_Avoid_: Multi-task model (implementation detail, not the seam concept)
