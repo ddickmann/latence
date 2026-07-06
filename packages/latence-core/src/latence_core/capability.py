@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         DocumentRecord,
         EntityMention,
         FeatureRecord,
+        GraphRecord,
         ParserInput,
         QuarantineRecord,
         Record,
@@ -307,6 +308,64 @@ class Disambiguator(Protocol):
         self, mentions: Iterable[EntityMention], relations: Iterable[RelationMention]
     ) -> Iterator[DisambiguationRecord]:
         """Consume the run's mentions (+ optional relations); yield entities + relations."""
+        ...
+
+
+@runtime_checkable
+class GraphAssembler(Protocol):
+    """Builds the canonical knowledge graph from disambiguated records (CONTEXT ``Graph Assembly``).
+
+    The S9 Graph Assembly Capability. Graph Assembly is a **corpus-level** Stage: it consumes
+    the whole run's :class:`~latence_core.contracts.DisambiguationRecord`s (the canonical
+    entities and normalized relations the S8 Disambiguation Stage produced) and emits
+    :class:`~latence_core.contracts.GraphRecord`s at two scopes:
+
+    * one ``NODE``-scope record per :class:`~latence_core.contracts.CanonicalEntity` — a graph
+      node with a **deterministic** content-addressed id, its member mentions, source-document
+      reach, an optional external-KB link, and :class:`~latence_core.contracts.Evidence` back
+      to the source mentions;
+    * one ``EDGE``-scope record per :class:`~latence_core.contracts.NormalizedRelation` — a
+      graph edge with a deterministic id, its head/tail node ids, the normalized label, and
+      **per-edge Evidence** back to the source relation's mentions/documents (every edge
+      carries Evidence, the S9 acceptance criterion).
+
+    An edge is emitted only when *both* its endpoints resolved to a node (endpoint validation
+    — no dangling edges). Records are emitted deterministically (all NODE records in node-id
+    order, then EDGE records in edge-id order), so a seeded run is byte-identical (Baseline
+    bar) and two runs over the same corpus produce the same graph. The reference Provider is
+    pure-Python, no embedder/KB required; a graph-DB-writer or embedding-augmented Provider is
+    a pluggable option behind this same seam (ADR-0017: Export writes files, never a live DB).
+    """
+
+    def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
+        """Consume the run's DisambiguationRecords; yield GraphRecords (nodes then edges)."""
+        ...
+
+
+@runtime_checkable
+class Embedder(Protocol):
+    """Optionally embeds RAG-corpus text into vectors (CONTEXT — an opt-in Export augmentation).
+
+    The S9 **opt-in** Embedder Capability (ADR-0017: "embeddings are optional (an opt-in
+    Embedder Provider) so any vector DB can ingest it"). It is **not required for Export** —
+    the RAG-ready corpus exports its cleaned/chunked/PII-handled text with full
+    Provenance/Classification whether or not an embedder is wired. When a Pipeline opts in, an
+    Embedder maps each text to a fixed-width vector so the exported corpus carries embeddings a
+    vector DB can ingest directly.
+
+    The reference embedder in core is a deterministic, dependency-free hashing embedder (no
+    model, no weights, no license to verify — ADR-0012/0016), so the seam is exercised end to
+    end offline; the default learned Embedder (``multilingual-e5-small``, MIT) is a pluggable
+    Provider package, not a core dependency. The Capability names no model — only the seam.
+    """
+
+    @property
+    def dimension(self) -> int:
+        """The fixed embedding width every returned vector has."""
+        ...
+
+    def embed(self, texts: Iterable[str]) -> Iterator[list[float]]:
+        """Map each input text to a ``dimension``-wide vector, in input order."""
         ...
 
 

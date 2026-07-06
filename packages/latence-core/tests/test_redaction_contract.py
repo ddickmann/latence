@@ -67,8 +67,8 @@ def _record(**overrides: object) -> RedactionRecord:
 def test_schema_version_is_current() -> None:
     # SCHEMA_VERSION is corpus-wide (7 after S7 Profiling); a RedactionRecord
     # serialized now stamps the current version, still a valid RedactionRecord.
-    assert SCHEMA_VERSION == 8
-    assert _record().schema_version == 8
+    assert SCHEMA_VERSION == 9
+    assert _record().schema_version == SCHEMA_VERSION
 
 
 # -- PIISpan ------------------------------------------------------------------

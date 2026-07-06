@@ -52,6 +52,14 @@ latence = "latence_core.cli:app"
 # fallback; relation normalizer with inverse detection). Pure Python, no extra deps —
 # the FAISS/GPU blocking Provider is a pluggable upgrade behind this same seam (ADR-0026).
 "disambiguation.cascade" = "latence_core.stages.disambiguation:CascadeDisambiguator"
+# S9 built-ins: the canonical Graph Assembler (deterministic content-addressed nodes/edges +
+# per-edge Evidence, ported graph builder) and the KG Export (Parquet + TTL + GraphML as
+# portable files, never a live DB — ADR-0017). Plus a deterministic reference Embedder (opt-in
+# RAG-corpus embeddings; the learned multilingual-e5-small is a pluggable package). Pure Python,
+# no extra deps (ADR-0007/0016).
+"graph.canonical" = "latence_core.stages.graph_assembly:CanonicalGraphAssembler"
+"export.knowledge_graph" = "latence_core.stages.graph_export:KnowledgeGraphExport"
+"embedding.hashing" = "latence_core.embedding:HashingEmbedder"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_core"]

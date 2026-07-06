@@ -68,7 +68,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # FeatureRecord's scope split). Every one is a versioned Pydantic contract carrying
 # Provenance + Classification at the boundary; a seeded run is byte-identical (merge/link
 # order is deterministic and every collection is sorted).
-SCHEMA_VERSION = 8
+# v9 (S9 Graph Assembly + Export): the corpus-level Stage that builds the canonical knowledge
+# graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations
+# (CONTEXT ``Graph Assembly``), plus the Export that materializes the two AI-ready
+# deliverables on Storage (ADR-0017). Adds GraphNode (one per CanonicalEntity: a deterministic
+# sha256 node id, canonical text/type, its member mentions, source-document reach, optional KB
+# link, and Evidence back to its source mentions); GraphEdge (one per NormalizedRelation: a
+# deterministic edge id, head/tail node ids, the normalized label, confidence, and per-edge
+# Evidence back to the source relation's mentions/documents — the CONTEXT ``Evidence`` term
+# reused verbatim for edge justification); GraphScope (NODE / EDGE) + GraphRecord (the scoped
+# inter-Stage carrier, one GraphNode or one GraphEdge per record, like DisambiguationRecord's
+# scope split). Every one is a versioned Pydantic contract carrying Provenance + Classification
+# at the boundary; node/edge ids are content-addressed (sha256 over a stable key) so a seeded
+# run is byte-identical and two runs over the same corpus produce the same graph.
+SCHEMA_VERSION = 9
 
 
 class Provenance(BaseModel):
@@ -1143,5 +1156,149 @@ class DisambiguationRecord(Record):
                 raise ValueError(msg)
             if self.entity is not None:
                 msg = "A RELATION-scope DisambiguationRecord must not carry an 'entity'."
+                raise ValueError(msg)
+        return self
+
+
+# -- S9: Graph Assembly ------------------------------------------------------
+
+
+class GraphNode(Record):
+    """One node in the canonical knowledge graph (CONTEXT ``Graph Assembly``).
+
+    Graph Assembly builds the canonical knowledge graph — nodes, edges, and per-edge
+    Evidence — from disambiguated entities and relations. A GraphNode is the graph's
+    entity half: exactly one node per :class:`CanonicalEntity`, carrying a
+    **deterministic** ``node_id`` (content-addressed: a sha256 over the corpus id and the
+    canonical entity id, so the same entity always yields the same node id and two runs over
+    the same corpus produce the same graph — the S9 "deterministic IDs" acceptance
+    criterion), the ``canonical_name`` and ``label`` (entity type), the ``entity_id`` of the
+    source :class:`CanonicalEntity`, the ``member_mention_ids`` folded into it, its
+    ``source_document_ids`` (cross-document reach), an optional external ``kb_id`` link, and
+    the :class:`Evidence` back to the source mentions that justify it.
+
+    Like every inter-Stage carrier it is a :class:`Record`, so it carries Provenance
+    (inherited from the canonical entity — page-accurate via PageOffsetIndex) and
+    Classification. ``properties`` is an open bag of node attributes materialised into the KG
+    export (confidence, mention_count, document_count), kept JSON-serialisable so it round-
+    trips through Parquet/TTL/GraphML.
+    """
+
+    node_id: str = Field(..., min_length=1, description="Deterministic content-addressed id.")
+    entity_id: str = Field(..., min_length=1, description="Source CanonicalEntity record_id.")
+    label: str = Field(..., min_length=1, description="The entity type (node label).")
+    canonical_name: str = Field(..., min_length=1, description="The canonical surface string.")
+    member_mention_ids: list[str] = Field(
+        default_factory=list, description="record_ids of every mention behind this node."
+    )
+    source_document_ids: list[str] = Field(
+        default_factory=list, description="Distinct source documents this node appears in."
+    )
+    kb_id: str | None = Field(default=None, description="External KB id when linked; else None.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Node confidence (cluster).")
+    properties: dict[str, Any] = Field(
+        default_factory=dict, description="Open node attribute bag (JSON-serialisable)."
+    )
+    evidence: Evidence
+
+    @property
+    def linked(self) -> bool:
+        """True if this node links to an external KB (carries a kb_id)."""
+        return self.kb_id is not None
+
+
+class GraphEdge(Record):
+    """One edge in the canonical knowledge graph, with per-edge Evidence (S9 Graph Assembly).
+
+    A GraphEdge is the graph's relation half: exactly one edge per
+    :class:`NormalizedRelation`, carrying a **deterministic** ``edge_id`` (content-addressed:
+    a sha256 over the corpus id and the source relation id), the ``source_node_id`` /
+    ``target_node_id`` it connects (the deterministic ids of the head/tail
+    :class:`GraphNode`s), the normalized relation ``label``, its ``confidence``, and its
+    :class:`Evidence` — the record linking the edge back to the specific source mentions and
+    offsets that justify it, with a confidence value (CONTEXT ``Evidence``, reused verbatim
+    from S8 for per-edge justification: **every edge carries Evidence**, the S9 acceptance
+    criterion). ``relation_id`` back-references the source :class:`NormalizedRelation`.
+
+    Like every inter-Stage carrier it is a :class:`Record` (Provenance + Classification,
+    inherited from the source relation). The head and tail node must be distinct (no
+    self-loop). ``properties`` is an open bag of edge attributes materialised into the KG
+    export (inverted, source_document_ids), kept JSON-serialisable.
+    """
+
+    edge_id: str = Field(..., min_length=1, description="Deterministic content-addressed id.")
+    relation_id: str = Field(..., min_length=1, description="Source NormalizedRelation record_id.")
+    source_node_id: str = Field(..., min_length=1, description="Head GraphNode node_id.")
+    target_node_id: str = Field(..., min_length=1, description="Tail GraphNode node_id.")
+    label: str = Field(..., min_length=1, description="The normalized relation label (edge label).")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Edge confidence.")
+    properties: dict[str, Any] = Field(
+        default_factory=dict, description="Open edge attribute bag (JSON-serialisable)."
+    )
+    evidence: Evidence
+
+    @model_validator(mode="after")
+    def _endpoints_distinct(self) -> GraphEdge:
+        if self.source_node_id == self.target_node_id:
+            msg = (
+                "A GraphEdge's source and target node must be distinct "
+                f"(both are {self.source_node_id!r})."
+            )
+            raise ValueError(msg)
+        return self
+
+
+class GraphScope(StrEnum):
+    """The scope a :class:`GraphRecord` describes (CONTEXT ``Graph Assembly``).
+
+    Graph Assembly is a *corpus-level* Stage, so — like Disambiguation (ADR-0026) and
+    Profiling (ADR-0025) — it emits a single scoped carrier rather than two contracts.
+    ``NODE`` records carry one :class:`GraphNode` each (the graph's entity half); ``EDGE``
+    records carry one :class:`GraphEdge` each (the graph's relation half). A consumer reads
+    one exported stream and filters by ``scope``; the DAG, the checkpoint, and the KG Export
+    all treat one carrier.
+    """
+
+    NODE = "node"
+    EDGE = "edge"
+
+
+class GraphRecord(Record):
+    """A corpus-level Graph-Assembly result: one graph node OR one graph edge.
+
+    The scoped inter-Stage carrier for the Graph Assembly Stage, mirroring
+    :class:`DisambiguationRecord`'s scope split (ADR-0026). Exactly one of ``node``/``edge``
+    is populated, selected by ``scope``:
+
+    * ``scope == NODE``: ``node`` holds the :class:`GraphNode`; ``edge`` is ``None``. Its
+      Provenance/Classification are the source canonical entity's (page-accurate).
+    * ``scope == EDGE``: ``edge`` holds the :class:`GraphEdge`; ``node`` is ``None``. Its
+      Provenance/Classification are the source normalized relation's.
+
+    The scope/payload consistency is contract-enforced, so a Provider cannot emit a node-scope
+    record with an edge payload (or leave both empty). Records are emitted deterministically
+    (all NODE records in node-id order, then all EDGE records in edge-id order), so a seeded
+    run is byte-identical (Baseline bar).
+    """
+
+    scope: GraphScope
+    node: GraphNode | None = Field(default=None)
+    edge: GraphEdge | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _scope_payload_consistent(self) -> GraphRecord:
+        if self.scope is GraphScope.NODE:
+            if self.node is None:
+                msg = "A NODE-scope GraphRecord must carry a 'node'."
+                raise ValueError(msg)
+            if self.edge is not None:
+                msg = "A NODE-scope GraphRecord must not carry an 'edge'."
+                raise ValueError(msg)
+        else:  # EDGE
+            if self.edge is None:
+                msg = "An EDGE-scope GraphRecord must carry an 'edge'."
+                raise ValueError(msg)
+            if self.node is not None:
+                msg = "An EDGE-scope GraphRecord must not carry a 'node'."
                 raise ValueError(msg)
         return self

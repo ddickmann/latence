@@ -35,7 +35,7 @@ Legend: **KEEP** = port the idea/code into the framework · **RECAST** = good id
 |---|---|---|
 | PageOffsetIndex / page_mapper (offset→page, fuzzy drift recovery) | KEEP | Core to Provenance integrity; a Rust hot-path candidate |
 | 5-strategy entity resolution + GLinker linking pipeline | KEEP | The Disambiguation Stage's reference Provider |
-| Graph builder with EvidenceRecord provenance | KEEP | The Graph Assembly Stage |
+| Graph builder with EvidenceRecord provenance | PORTED (S9) | The Graph Assembly Stage — `latence_core.graph.GraphBuilder` (content-addressed ids, endpoint validation, Evidence links) behind the `graph.canonical` Provider; KG Export as Parquet+TTL+GraphML (ADR-0027) |
 | Write-ahead log + atomic state updates | KEEP | Backs the local Runner's files-on-Storage state (ADR-0010) AND transactional Corpus Versions (ADR-0018) |
 | delta_detector (content-hash new/updated/unchanged) | KEEP | Delta computation (ADR-0018) |
 | graph/patcher (retract edges by source_document_ids) | KEEP | Evidence-based Retraction/Purge (ADR-0018) |

@@ -214,3 +214,58 @@ The merge/link statistics — mentions in vs canonical entities out, the
 created/merged/singleton breakdown, applied vs below-policy merges by strategy,
 KB-linked vs unlinked, relations normalised — land in the Quality Report's
 `disambiguation` section (ADR-0026).
+
+## Graph Assembly + Export (S9)
+
+**Graph Assembly** is the corpus-level Stage that builds the canonical knowledge
+graph — nodes, edges, and per-edge **Evidence** — from the disambiguated canonical
+entities and normalized relations. It is wired after Disambiguation as a
+`graph_assembly` Stage (see `examples/graph-slice.yaml`) and emits first-class
+`GraphRecord`s at two scopes: one `NODE`-scope record per canonical entity (a graph
+node with a **deterministic, content-addressed** id, its member mentions + source
+documents, an optional external-KB link, page-accurate Provenance, and Evidence back
+to the source mentions) and one `EDGE`-scope record per normalized relation (a graph
+edge with a deterministic id, its head/tail node ids, the normalized label, and
+**per-edge Evidence** — every edge carries Evidence). An edge is emitted only when both
+endpoints resolved to a node (no dangling edges).
+
+The ported **Graph builder** (`dataset-intelligence/graph/builder.py`, PORT-AS-IS) is
+re-homed in the pure `latence_core.graph` engine: content-addressed sha256 ids
+(`make_graph_id`), endpoint validation, and Evidence links, with the `max_evidence_per_node`
+bound for hub entities.
+
+**Export** materializes the two AI-ready deliverables as **portable files on Storage,
+never a live database** (ADR-0017):
+
+- **`export.knowledge_graph`** ships in core: the KG as **Parquet + TTL + GraphML**
+  (nodes + edges + per-edge Evidence), loadable into Neo4j, a triple store, or a
+  graph-RAG engine. Hand-emitted with no `rdflib`/`networkx` dependency; byte-stable.
+  Config: `basename` (`graph`).
+- **`export.jsonl_parquet`** (the S1 exporter) writes the **RAG-ready corpus** — the
+  cleaned/chunked/Screened/PII-handled text with full Provenance/Classification — as
+  JSONL + Parquet.
+
+Embeddings are **optional** (ADR-0017): the corpus exports its text whether or not an
+Embedder is wired. **`embedding.hashing`** ships in core as a deterministic, dependency-free
+reference `Embedder`; the learned `multilingual-e5-small` (MIT) is a pluggable Provider
+package, not a core dependency.
+
+```yaml
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [chunk]
+```
+
+The KG statistics — node/edge counts, nodes by type, edges by label, KB-linked node
+count, and **evidence coverage** (the fraction of edges carrying Evidence) — land in the
+Quality Report's `graph` section (ADR-0027). This slice completes the first end-to-end
+messy-docs → KG demo.

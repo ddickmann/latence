@@ -29,7 +29,11 @@ from latence_core.contracts import ScreeningFinding
 # mentions in, canonical entities out, entities created/merged/singleton, merges applied
 # vs below-policy per strategy, KB-linked vs unlinked, and relations normalized/dropped) —
 # the S8 acceptance criterion ("merge/link statistics land in the Quality Report").
-QUALITY_SCHEMA_VERSION = 8
+# v9 (S9): the report gains ``graph`` (Graph-Assembly KG statistics — node/edge counts, nodes
+# by type, edges by label, KB-linked node count, and evidence coverage: the fraction of edges
+# that carry Evidence) — the S9 acceptance criterion ("KG statistics land in the Quality
+# Report"). Counts only (no raw text), safe to persist.
+QUALITY_SCHEMA_VERSION = 9
 
 
 class StageMetrics(BaseModel):
@@ -326,6 +330,35 @@ class DisambiguationQuality(BaseModel):
     avg_entity_confidence: float = 0.0
 
 
+class GraphQuality(BaseModel):
+    """Graph-Assembly quality: canonical knowledge-graph statistics (S9).
+
+    Emitted when a run had a Graph Assembly Stage. The S9 acceptance criterion — "KG
+    statistics (node/edge counts, evidence coverage) land in the Quality Report" — kept to
+    counts (no raw document text), so it is safe to persist.
+
+    ``nodes_total`` / ``edges_total`` are the graph's size; ``nodes_by_type`` breaks nodes down
+    by entity label and ``edges_by_label`` breaks edges down by relation label.
+    ``nodes_linked`` counts nodes that carry an external-KB id. ``edges_with_evidence`` counts
+    edges whose Evidence names at least one source mention, and ``evidence_coverage`` is that
+    fraction over all edges (1.0 = every edge is justified — the S9 "every edge carries
+    Evidence" invariant, surfaced as a coverage number). ``avg_node_confidence`` /
+    ``avg_edge_confidence`` are at-a-glance quality signals.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    nodes_total: int = 0
+    edges_total: int = 0
+    nodes_linked: int = 0
+    nodes_by_type: dict[str, int] = Field(default_factory=dict)
+    edges_by_label: dict[str, int] = Field(default_factory=dict)
+    edges_with_evidence: int = 0
+    evidence_coverage: float = 0.0
+    avg_node_confidence: float = 0.0
+    avg_edge_confidence: float = 0.0
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -354,6 +387,8 @@ class QualityReport(BaseModel):
     profiling: ProfilingQuality | None = None
     # Present when the run had a Disambiguation Stage.
     disambiguation: DisambiguationQuality | None = None
+    # Present when the run had a Graph Assembly Stage.
+    graph: GraphQuality | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)

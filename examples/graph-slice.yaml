@@ -1,0 +1,122 @@
+# S9 Graph Assembly + Export (the first end-to-end messy-docs -> KG demo) Pipeline:
+#   Source -> Parse -> Chunk -> Entity Extraction --\
+#                        |                           +-> Relation Extraction --\
+#                        |                                                       +-> Disambiguation
+#                        |                                                              |
+#                        |                                                              v
+#                        |                                                       Graph Assembly
+#                        |                                                        |          |
+#                        |                                                        v          |
+#                        \--------------------> Export (RAG corpus)      Export (knowledge graph)
+#
+# Graph Assembly (CONTEXT `Graph Assembly`) is the CORPUS-LEVEL Stage that builds the canonical
+# knowledge graph — nodes, edges, and per-edge Evidence — from the disambiguated canonical
+# entities + normalized relations. It emits typed GraphRecords at two scopes:
+#   * one NODE-scope record per canonical entity — a graph node with a DETERMINISTIC,
+#     content-addressed id, its member mentions + source-document reach, an optional external-KB
+#     link, page-accurate Provenance, and Evidence back to the source mentions;
+#   * one EDGE-scope record per normalized relation — a graph edge with a deterministic id, its
+#     head/tail node ids, the normalized label, its confidence, and PER-EDGE Evidence (every
+#     edge carries Evidence). An edge is emitted only when both endpoints resolved to a node.
+#
+# Export materializes the TWO AI-ready deliverables as PORTABLE FILES ON STORAGE, never a live
+# database (ADR-0017):
+#   1. the RAG-ready corpus — cleaned/chunked/Screened/PII-handled text with full Provenance/
+#      Classification — as JSONL + Parquet (via export.jsonl_parquet, off Chunk);
+#   2. the knowledge graph — nodes, edges, per-edge Evidence — as Parquet + TTL + GraphML (via
+#      export.knowledge_graph, off Graph Assembly), loadable into Neo4j, a triple store, or a
+#      graph-RAG engine.
+#
+# PORTED ALGORITHMIC ASSET (PORT-AS-IS, ASSET-INVENTORY.md): the Graph builder + EvidenceRecord
+# provenance (dataset-intelligence/graph/builder.py), re-homed in the pure latence_core.graph
+# engine — content-addressed sha256 ids, endpoint validation (no dangling edges), and Evidence
+# links.
+#
+# Embeddings are OPTIONAL (ADR-0017): the RAG corpus exports its text with full Provenance/
+# Classification whether or not an Embedder is wired. The in-core embedding.hashing is a
+# deterministic, dependency-free reference; the learned multilingual-e5-small (MIT) is a
+# pluggable Provider package, not a core dependency.
+#
+# The reference Providers `graph.canonical` and `export.knowledge_graph` ship IN latence-core:
+# pure-Python, deterministic, CPU-viable, no extra deps (ADR-0007/0016).
+#
+# Run with:
+#   latence run examples/graph-slice.yaml
+# Outputs land under <storage_uri>/_latence/runs/<run_id>/export/:
+#   graph-nodes.parquet + graph-edges.parquet + graph.ttl + graph.graphml  (the knowledge graph)
+#   corpus.jsonl + corpus.parquet                                          (the RAG-ready corpus)
+#   ../quality-report.json  (graph: node/edge counts, nodes-by-type, edges-by-label, evidence
+#                            coverage).
+name: graph-slice
+storage_uri: file:///tmp/latence-graph-demo
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: file://EXAMPLES_DIR/graph-docs   # edit to your folder of text / markdown files
+      sensitivity: internal
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext         # swap to parser.document for real PDFs (S2)
+    depends_on: [source]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer         # zero-shot; the mentions Disambiguation resolves
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, Acme Corporation, International Business Machines, IBM, Globex]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [chunk, entities]
+    config:
+      relations:
+        works_for:
+          head: PERSON
+          tail: ORG
+          triggers: [works at, employed by, joined]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade   # in-core resolver+linker: canonical entities + relations
+    depends_on: [entities, relations]
+    config:
+      kb:
+        - { kb_id: Q1, name: Acme, entity_type: ORG }
+        - { kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM] }
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical          # in-core ported builder: content-addressed nodes/edges
+    depends_on: [disambiguate]         # REQUIRED: the canonical entities + normalized relations
+    config:
+      corpus_id: graph-slice           # mixed into every deterministic node/edge id
+      # max_evidence_per_node: 0       # cap on mention ids in a node's Evidence (0 = unlimited)
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph   # the KG as Parquet + TTL + GraphML (ADR-0017)
+    depends_on: [graph]
+    config:
+      basename: graph
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet     # the RAG-ready corpus as JSONL + Parquet
+    depends_on: [chunk]                # swap to a Redaction Stage upstream for the PII-handled
+    config:                            # variant (S6); embeddings are an opt-in Embedder Provider
+      basename: corpus

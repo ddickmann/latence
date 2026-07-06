@@ -36,7 +36,9 @@ class CapabilityKind(StrEnum):
     features). S8 adds Disambiguation (corpus-level entity linking + duplicate merge with
     audited, confidence-weighted decisions and Evidence), wired off Entity Extraction
     (required — the mentions it resolves) and, optionally, Relation Extraction (the
-    relations it normalises onto the canonical entities).
+    relations it normalises onto the canonical entities). S9 adds Graph Assembly (corpus-level
+    knowledge-graph construction — nodes, edges, and per-edge Evidence — from the disambiguated
+    canonical entities + normalized relations), wired off Disambiguation.
     """
 
     SOURCE = "source"
@@ -50,6 +52,7 @@ class CapabilityKind(StrEnum):
     REDACTION = "redaction"
     PROFILING = "profiling"
     DISAMBIGUATION = "disambiguation"
+    GRAPH_ASSEMBLY = "graph_assembly"
     EXPORT = "export"
 
 

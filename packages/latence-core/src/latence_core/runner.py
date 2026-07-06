@@ -26,6 +26,7 @@ from latence_core.capability import (
     EntityExtractor,
     Export,
     FusedEntityRelationExtractor,
+    GraphAssembler,
     IntakeScreener,
     Parser,
     PIIDetector,
@@ -44,6 +45,8 @@ from latence_core.contracts import (
     EntityMention,
     FeatureRecord,
     FeatureScope,
+    GraphRecord,
+    GraphScope,
     ParserInput,
     QuarantineRecord,
     Record,
@@ -59,6 +62,7 @@ from latence_core.quality import (
     CompletenessCheck,
     DisambiguationQuality,
     EntityQuality,
+    GraphQuality,
     ParseQuality,
     ProfilingQuality,
     QualityReport,
@@ -92,6 +96,7 @@ StageOutput = (
     | RedactionRecord
     | FeatureRecord
     | DisambiguationRecord
+    | GraphRecord
 )
 _T = TypeVar("_T", bound=StageOutput)
 
@@ -191,6 +196,8 @@ class LocalRunner:
             return FeatureRecord
         if stage.capability is CapabilityKind.DISAMBIGUATION:
             return DisambiguationRecord
+        if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
+            return GraphRecord
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
@@ -233,6 +240,8 @@ class LocalRunner:
                 return FeatureRecord
             if parent.capability is CapabilityKind.DISAMBIGUATION:
                 return DisambiguationRecord
+            if parent.capability is CapabilityKind.GRAPH_ASSEMBLY:
+                return GraphRecord
             if parent.capability is CapabilityKind.RELATION_EXTRACTION:
                 return RelationMention
             if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
@@ -528,6 +537,21 @@ class LocalRunner:
             self._require_disambiguation_inputs(stage, incoming, disambig_mentions)
             return list(provider.disambiguate(disambig_mentions, disambig_relations))
 
+        if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
+            if not isinstance(provider, GraphAssembler):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the GraphAssembler capability."
+                )
+                raise TypeError(msg)
+            # Graph Assembly is corpus-level: it consumes the whole run's DisambiguationRecords
+            # (the canonical entities + normalized relations) and builds the knowledge graph —
+            # nodes, edges, and per-edge Evidence. It depends on a Disambiguation parent; a
+            # non-empty input carrying no DisambiguationRecord is a wiring error.
+            graph_records = self._as_type(stage, incoming, DisambiguationRecord)
+            self._require_graph_inputs(stage, incoming, graph_records)
+            return list(provider.assemble(graph_records))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -717,6 +741,31 @@ class LocalRunner:
             raise TypeError(msg)
 
     @staticmethod
+    def _require_graph_inputs(
+        stage: Stage, incoming: list[StageOutput], records: list[DisambiguationRecord]
+    ) -> None:
+        """A Graph Assembly Stage must be wired to a Disambiguation parent (the entities/relations).
+
+        Graph Assembly depends on a Disambiguation parent for the DisambiguationRecords (the
+        canonical entities + normalized relations it turns into nodes + edges). A non-empty
+        input that carries no DisambiguationRecord means the Pipeline wired Graph Assembly to
+        the wrong parent — surface it as a clear typed error. An empty run (no documents ⇒ no
+        entities) is legitimately empty. (``_as_type`` already rejects a mixed/wrong carrier;
+        this guards the all-wrong case with a Stage-specific message.)
+        """
+        if not incoming:
+            return
+        if not records:  # pragma: no cover - _as_type raises first on a wrong carrier
+            got = sorted({type(r).__name__ for r in incoming})
+            msg = (
+                f"Stage {stage.name!r} (graph_assembly) received no DisambiguationRecords "
+                f"(got: {', '.join(got)}). A Graph Assembly Stage must depend on the "
+                f"Disambiguation Stage (the canonical entities + relations it assembles). "
+                f"Check the Pipeline's depends_on wiring."
+            )
+            raise TypeError(msg)
+
+    @staticmethod
     def _as_records(
         stage: Stage, records: list[StageOutput]
     ) -> list[
@@ -727,6 +776,7 @@ class LocalRunner:
         | RedactionRecord
         | FeatureRecord
         | DisambiguationRecord
+        | GraphRecord
     ]:
         """Narrow gathered inputs to the inter-Stage Records Export materializes.
 
@@ -735,11 +785,12 @@ class LocalRunner:
         upstream), RelationMentions (S5, a Relation-Extraction / fused Stage upstream),
         RedactionRecords (S6, a Redaction Stage upstream — the PII-handled corpus
         variant), FeatureRecords (S7, a Profiling Stage upstream — the corpus
-        statistical/quality feature set), or DisambiguationRecords (S8, a Disambiguation
-        Stage upstream — the canonical entities + normalized relations). A fused Stage feeds
-        a MIX of mentions and relations — both are Records and both export. A raw ParserInput
-        (not a Record) means a Source was wired straight into Export with no Parse between.
-        Surface it as a clear typed error.
+        statistical/quality feature set), DisambiguationRecords (S8, a Disambiguation
+        Stage upstream — the canonical entities + normalized relations), or GraphRecords (S9,
+        a Graph Assembly Stage upstream — the knowledge-graph nodes + edges). A fused Stage
+        feeds a MIX of mentions and relations — both are Records and both export. A raw
+        ParserInput (not a Record) means a Source was wired straight into Export with no Parse
+        between. Surface it as a clear typed error.
         """
         exportable = (
             DocumentRecord,
@@ -749,6 +800,7 @@ class LocalRunner:
             RedactionRecord,
             FeatureRecord,
             DisambiguationRecord,
+            GraphRecord,
         )
         wrong = [r for r in records if not isinstance(r, exportable)]
         if wrong:
@@ -756,10 +808,10 @@ class LocalRunner:
             msg = (
                 f"Stage {stage.name!r} (export) requires Record inputs "
                 f"(DocumentRecord/ChunkRecord/EntityMention/RelationMention/"
-                f"RedactionRecord/FeatureRecord/DisambiguationRecord) but received: "
+                f"RedactionRecord/FeatureRecord/DisambiguationRecord/GraphRecord) but received: "
                 f"{', '.join(got)}. An Export needs a Parse (and optionally a Chunk / "
                 f"Entity-Extraction / Relation-Extraction / Redaction / Profiling / "
-                f"Disambiguation) upstream."
+                f"Disambiguation / Graph-Assembly) upstream."
             )
             raise TypeError(msg)
         return [r for r in records if isinstance(r, exportable)]
@@ -843,6 +895,9 @@ class LocalRunner:
         disambiguations = self._records_of_kind(
             pipeline, ordered, outputs, CapabilityKind.DISAMBIGUATION
         )
+        graph_records = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.GRAPH_ASSEMBLY
+        )
         # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
         # the Stage consumed — the count it resolved from.
         disambig_mentions_in = self._records_of_kinds(
@@ -869,6 +924,7 @@ class LocalRunner:
             disambiguation=self._disambiguation_quality(
                 pipeline, disambiguations, disambig_mentions_in
             ),
+            graph=self._graph_quality(pipeline, graph_records),
         )
 
     @staticmethod
@@ -1231,6 +1287,56 @@ class LocalRunner:
         quality.relations_inverted = sum(
             1 for r in relations if r.relation is not None and r.relation.inverted
         )
+        return quality
+
+    @staticmethod
+    def _graph_quality(
+        pipeline: Pipeline, records: list[StageOutput]
+    ) -> GraphQuality | None:
+        """Aggregate Graph-Assembly KG statistics for the report (S9).
+
+        Only computed when the Pipeline has a Graph Assembly Stage. ``records`` is the mix of
+        NODE-scope (graph nodes) and EDGE-scope (graph edges)
+        :class:`~latence_core.contracts.GraphRecord`s. Rolls up: node/edge counts; nodes by
+        entity type and edges by relation label; KB-linked node count; and — the S9 acceptance
+        criterion — evidence coverage, the fraction of edges whose Evidence names at least one
+        source mention (1.0 = every edge is justified). Counts only (no raw text), safe to
+        persist. All maps are sorted for a deterministic report.
+        """
+        if not any(s.capability is CapabilityKind.GRAPH_ASSEMBLY for s in pipeline.stages):
+            return None
+        quality = GraphQuality()
+        nodes = [
+            r.node
+            for r in records
+            if isinstance(r, GraphRecord) and r.scope is GraphScope.NODE and r.node is not None
+        ]
+        edges = [
+            r.edge
+            for r in records
+            if isinstance(r, GraphRecord) and r.scope is GraphScope.EDGE and r.edge is not None
+        ]
+        quality.nodes_total = len(nodes)
+        quality.edges_total = len(edges)
+        node_conf = 0.0
+        for node in nodes:
+            quality.nodes_by_type[node.label] = quality.nodes_by_type.get(node.label, 0) + 1
+            if node.linked:
+                quality.nodes_linked += 1
+            node_conf += node.confidence
+        edge_conf = 0.0
+        for edge in edges:
+            quality.edges_by_label[edge.label] = quality.edges_by_label.get(edge.label, 0) + 1
+            if edge.evidence.mention_ids:
+                quality.edges_with_evidence += 1
+            edge_conf += edge.confidence
+        if nodes:
+            quality.avg_node_confidence = round(node_conf / len(nodes), 6)
+        if edges:
+            quality.avg_edge_confidence = round(edge_conf / len(edges), 6)
+            quality.evidence_coverage = round(quality.edges_with_evidence / len(edges), 6)
+        quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
+        quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
         return quality
 
     @staticmethod
