@@ -4,10 +4,8 @@
 # network use is `uv sync` at build time (pinned by uv.lock).
 FROM python:3.12-slim
 
-# uv for a fast, lockfile-pinned, reproducible install. Pin the uv image to an exact
-# version (never `latest`) so a rebuild is reproducible and cannot silently pull a
-# changed uv — the same reproducibility contract `uv.lock` gives the dependency set.
-COPY --from=ghcr.io/astral-sh/uv:0.8.11 /uv /uvx /bin/
+# uv for a fast, lockfile-pinned, reproducible install.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
@@ -27,10 +25,6 @@ ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONHASHSEED=0
 
 # Artifacts land under this Storage root; the compose file mounts it to ./out on the host.
-# In the container this is a dedicated, non-world-writable mount (not a shared /tmp), so the
-# predictable-path/world-writable concern of the host `file:///tmp/latence-demo` default does
-# not apply here. Hardening note (real deployments): point this at a private, per-run,
-# non-predictable Storage root to avoid a shared-/tmp symlink/clobber race.
 ENV LATENCE_DEMO_STORAGE="file:///data"
 
 # Run the whole showable demo. Exits non-zero if a planted dangerous file was not caught

@@ -70,16 +70,8 @@ to one node with `works_for` / `partner_of` edges, each carrying **Evidence**.
 **The model- and cloud-agnostic proof** — change ONE line and rerun the *identical* Pipeline:
 
 ```bash
-# The learned-NER Provider ships heavy deps (torch), so it is NOT in the CPU demo set —
-# install it once, then swap in a single Provider:
-uv pip install -e packages/latence-ner-gliner          # brings the GLiNER model Provider
 uv run latence-demo --entity-provider entity.gliner    # a local model instead of the gazetteer
 ```
-
-Without that install the swap exits cleanly (non-zero) with a clear
-"FAIL: entity Provider 'entity.gliner' is not installed. Install it first: pip install latence-ner-gliner"
-message naming what to install — the default `uv run latence-demo` above stays CPU-only and needs
-no extra packages.
 
 `diff examples/demo-pipeline.yaml examples/demo-pipeline.swap.yaml` shows the single-Provider
 change. See [`packages/latence-demo/README.md`](./packages/latence-demo/README.md) for details.

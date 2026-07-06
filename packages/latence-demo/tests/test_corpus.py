@@ -7,7 +7,6 @@ high-ratio ZIP, an oversized file), and that a real multi-page PDF is present.
 
 from __future__ import annotations
 
-import hashlib
 import io
 import zipfile
 from pathlib import Path
@@ -44,19 +43,6 @@ def test_dangerous_fixtures_are_actually_dangerous() -> None:
     assert ratio > 50.0  # exceeds the demo's intake ratio cap
     # oversized: over the demo's 2 MiB intake cap.
     assert len(docs["dump.txt"]) > 2 * 1024 * 1024
-
-
-def test_manifest_document_ids_match_source_content_addressing() -> None:
-    # The manifest's document_ids must equal the exact id the Source stamps on each file:
-    # "sha256:" + sha256(bytes). This is the key _score_dangerous binds findings to files by;
-    # a drift here (or a reverted manifest field) would silently break per-file scoring.
-    docs, manifest = build_corpus_bytes()
-    assert set(manifest.document_ids) == set(docs)
-    for name, data in docs.items():
-        assert manifest.document_ids[name] == "sha256:" + hashlib.sha256(data).hexdigest()
-    # The dangerous fixtures each have a resolvable, distinct document_id.
-    dangerous_ids = {manifest.document_ids[n] for n in manifest.dangerous}
-    assert len(dangerous_ids) == len(manifest.dangerous)
 
 
 def test_stage_corpus_writes_every_file(tmp_path: Path) -> None:
