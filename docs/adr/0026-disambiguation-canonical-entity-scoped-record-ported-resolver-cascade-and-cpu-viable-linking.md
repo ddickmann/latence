@@ -116,3 +116,19 @@ vs canonical entities out, the created/merged/singleton breakdown, applied vs be
 merges by strategy, KB-linked vs unlinked, and relations normalised — counts only (no raw
 document text) — satisfying the S8 "merge/link statistics land in the Quality Report"
 criterion.
+
+## Hardening addendum (issue #75) — unicode-confusable surface normalisation
+
+The exact-strategy key (`normalize_text`) applies **Unicode NFKC** compatibility
+normalisation and `str.casefold` before whitespace folding, so *compatibility-confusable*
+surfaces — fullwidth Latin (`ＡＣＭＥ`), typographic ligatures (`ﬁle`), superscript letters,
+Roman-numeral glyphs (`Ⅳ`) — canonicalise to the same key as their plain-ASCII spelling and
+resolve into one canonical entity. This closes the "hide a duplicate behind a look-alike
+glyph" split vector. NFKC deliberately does **not** fold *cross-script homoglyphs* (a
+Cyrillic `А` U+0410 stays distinct from a Latin `A` U+0041), which is the safe posture: a
+mixed-script look-alike is never *silently over-merged* into an unrelated entity, preserving
+the no-silent-over-merge guarantee. A confusable-skeleton (homoglyph) Provider can tighten
+this behind the same seam without changing the default. The disambiguation PRECISION metric
+(pairwise merge precision/recall over a labeled gold set) is recorded as the Hardening-bar
+number this Stage must beat, with the confusable-fold and the type-compatibility guard both
+pinned by regression tests.

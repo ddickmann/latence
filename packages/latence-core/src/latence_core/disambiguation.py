@@ -37,6 +37,7 @@ sorted. Identical input + config ⇒ byte-identical clusters (the Baseline bar).
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
@@ -44,17 +45,45 @@ from enum import StrEnum
 # Normalisation for the EXACT strategy and for token overlap: fold case, collapse
 # internal whitespace, drop surrounding punctuation. Deterministic and dependency-free.
 _WS_RE = re.compile(r"\s+")
-_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 def normalize_text(text: str) -> str:
-    """Canonical-form a surface string for exact matching (case + whitespace folded)."""
-    return _WS_RE.sub(" ", text.strip().lower())
+    """Canonical-form a surface string for exact matching (Unicode + case + whitespace folded).
+
+    Applies **Unicode NFKC** compatibility normalisation before case/whitespace folding so
+    that *compatibility-confusable* surfaces — fullwidth Latin (``ＡＣＭＥ``), typographic
+    ligatures (``ﬁle``), superscript/subscript letters, Roman-numeral glyphs (``Ⅳ`` → ``iv``)
+    — canonicalise to the **same** key as their plain-ASCII spelling and therefore resolve
+    into one canonical entity, closing the "an adversary hides a duplicate behind a
+    look-alike glyph" split vector (issue #75). ``str.casefold`` (not ``str.lower``) is used
+    so case folding is Unicode-correct (e.g. ``ß`` folds to ``ss``).
+
+    NFKC deliberately does **not** fold *cross-script homoglyphs* — a Cyrillic ``А`` (U+0410)
+    stays distinct from a Latin ``A`` (U+0041) because they are genuinely different
+    characters. That asymmetry is the safe posture for this Stage: legitimate compatibility
+    variants merge, but a mixed-script look-alike is never *silently over-merged* into an
+    unrelated entity (S8 "no silent over-merge"). A future confusable-skeleton Provider can
+    tighten homoglyph detection behind the same seam without changing this default.
+
+    Determinism: NFKC and casefold are pure, table-driven Unicode operations — identical
+    input ⇒ identical output, independent of platform (the Baseline bar).
+    """
+    return _WS_RE.sub(" ", unicodedata.normalize("NFKC", text).strip().casefold())
 
 
 def _tokens(text: str) -> list[str]:
-    """Lowercased alphanumeric word tokens (the token-overlap unit for candidate gen)."""
-    return [t.lower() for t in _WORD_RE.findall(text)]
+    """NFKC-folded, casefolded word tokens (the token-overlap unit for candidate gen).
+
+    Folds through the same NFKC + casefold pipeline as :func:`normalize_text` so token-level
+    strategies (acronym, substring, embedding similarity, KB candidate generation) see
+    compatibility-confusable surfaces identically to the exact strategy — otherwise a
+    fullwidth-spelled name would tokenise differently from its ASCII twin and evade both the
+    acronym and the overlap rungs. ``_WORD_RE`` matches Unicode word runs (letters/digits,
+    underscore excluded), so non-Latin scripts tokenise too. Deterministic.
+    """
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return _WORD_RE.findall(folded)
 
 
 def acronym_of(text: str) -> str:
