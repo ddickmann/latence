@@ -120,7 +120,9 @@ stages:
     provider: redaction.hybrid_rule    # in-core hybrid PII redactor (S6): the PII-handling Stage
     depends_on: [parse]                # scans the parsed document's ORIGINAL markdown coordinate
     config:                            # system (where PII spans + pages live), NOT the chunk stream
-      detectors: [email, phone, ssn, credit_card]
+      # No `detectors` key ⇒ ALL built-in recognisers (email, phone, ssn, credit_card,
+      # ip, iban, aws_key, api_key, secret): comprehensive PII+secret coverage by
+      # default, so the shipped RAG corpus is genuinely PII-handled (#61).
       gazetteer:
         name: [Alice, Bob, Carol]      # the PERSON names in this corpus, masked out of the RAG text
       default_action: mask

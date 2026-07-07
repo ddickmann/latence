@@ -54,11 +54,16 @@ _PDF_EXTENSIONS = frozenset({"pdf"})
 # File types decoded as a single-page plain-text/markdown document.
 _TEXT_EXTENSIONS = frozenset({"txt", "md", "markdown", "text"})
 
-# PDF magic bytes: a real PDF starts with "%PDF-" (allowing a small leading BOM or
-# junk window, as the spec tolerates). Used to catch a type-spoofed file (a
-# ``.pdf`` that is not a PDF) before handing it to the PDF reader.
+# PDF magic bytes: a real PDF starts with "%PDF-" at byte 0. pypdf itself reads the
+# header at offset 0, so we require it there — allowing only a tiny, bounded leading
+# BOM/whitespace window — rather than accepting a ``%PDF-`` substring anywhere in the
+# first 1 KB (which a spoofed file could smuggle to slip past this guard; see the
+# intake Screener's matching hardening, issue #62). Used to catch a type-spoofed file
+# (a ``.pdf`` that is not a PDF) before handing it to the PDF reader.
 _PDF_MAGIC = b"%PDF-"
-_PDF_MAGIC_WINDOW = 1024
+# Bounded leading window of BOM / ASCII whitespace tolerated before the header.
+_PDF_LEADING_SLACK = 8
+_PDF_LEADING_SKIP = b"\x00\r\n\t \xef\xbb\xbf\xff\xfe"
 
 
 class DocumentParser:
@@ -159,9 +164,15 @@ class DocumentParser:
         reader error (encrypted, truncated, malformed) degrades to a parse failure.
         """
         data = raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
-        head = data[:_PDF_MAGIC_WINDOW]
-        if _PDF_MAGIC not in head:
-            msg = "File declared as PDF but missing the %PDF- signature (type spoof?)."
+        offset = 0
+        limit = min(len(data), _PDF_LEADING_SLACK)
+        while offset < limit and data[offset] in _PDF_LEADING_SKIP:
+            offset += 1
+        if data[offset : offset + len(_PDF_MAGIC)] != _PDF_MAGIC:
+            msg = (
+                "File declared as PDF but the %PDF- signature is not at the start of the "
+                "file (type spoof?)."
+            )
             raise _ParseFailure(msg)
 
         # Import inside the method so a malformed dependency never breaks discovery,

@@ -4,8 +4,9 @@ The S6 Redaction reference Provider (ADR-0004; ships in core like the S3
 Chunker/Screeners, the S4 gazetteer and the S5 trigger extractor so the demo runs
 end to end, ADR-0007 CPU-first, ADR-0016 no extra deps). It is the **rule half** of
 the "hybrid rule+model" reference the issue calls for: a library of well-known-PII
-regex recognisers (email, phone, national id, credit card, IP, IBAN) plus a
-config-supplied gazetteer and custom-pattern set. The **model half** is the drop-in,
+and secret recognisers (email, phone, SSN, credit card, IP, IBAN, AWS access key,
+labelled API token, labelled password/secret) enabled comprehensively by default,
+plus a config-supplied gazetteer and custom-pattern set. The **model half** is the drop-in,
 separately-packaged ``latence-pii-gliner`` (a permissively-licensed GLiNER-PII
 checkpoint via plain ``transformers``, ADR-0012/0016) behind this same
 :class:`~latence_core.capability.PIIDetector` seam — shipping the deterministic
@@ -60,37 +61,88 @@ if TYPE_CHECKING:
 
     from latence_core.contracts import DocumentRecord
 
-# The built-in rule library: well-known PII types with conservative, whole-value
-# recognisers. Selectable by name via config ``detectors`` (default: all). These are
-# literal, offline, dependency-free — the deterministic rule half of the hybrid.
+# The built-in rule library: well-known PII/secret types with conservative,
+# whole-value recognisers. Selectable by name via config ``detectors`` (default:
+# all — comprehensive coverage). These are literal, offline, dependency-free — the
+# deterministic rule half of the hybrid. Every pattern is linear-time (no nested
+# quantifier over an overlapping class), so a pathological input cannot induce
+# catastrophic backtracking (ReDoS).
 _BUILTIN_PATTERNS: dict[str, str] = {
     # RFC-5322-ish email (deliberately conservative, not exhaustive).
     "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
     # US SSN NNN-NN-NNNN.
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    # 13–16 digit card number, optional space/dash grouping.
-    "credit_card": r"\b(?:\d[ -]?){13,16}\b",
+    # 13–16 digit card number, optional single space/dash between digits.
+    "credit_card": r"\b\d(?:[ -]?\d){12,15}\b",
     # International-ish phone: optional +, 7–15 digits with separators.
     "phone": r"(?<!\w)\+?\d[\d\s().-]{6,}\d(?!\w)",
     # IPv4.
     "ip": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
     # IBAN: 2 letters, 2 check digits, up to 30 alnum.
     "iban": r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b",
+    # AWS access key id: literal AKIA/ASIA/AGPA/… prefix + 16 uppercase alnum.
+    "aws_key": r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|A3T[A-Z0-9])[A-Z0-9]{16}\b",
+    # Generic long high-entropy API token: a ``key``/``token``/``secret`` label
+    # followed by a 20+ char base64/hex-ish credential (bounded, linear-time).
+    "api_key": (
+        r"(?i:\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|bearer|secret[_-]?key)\b)"
+        r"['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+_.=-]{20,})"
+    ),
+    # A ``password``/``passwd``/``pwd`` assignment: mask the credential value.
+    "secret": (
+        r"(?i:\b(?:password|passwd|pwd|secret)\b)"
+        r"['\"]?\s*[:=]\s*['\"]?(\S{3,})"
+    ),
 }
+# Recognisers whose credential value is captured in group(1) (a labelled
+# assignment): the span must cover only the secret, not the label. All other
+# recognisers match the whole PII value as group(0).
+_CAPTURE_GROUP_DETECTORS: frozenset[str] = frozenset({"api_key", "secret"})
+
+# Specificity rank used only to break ties when two recognisers claim the SAME
+# span (same start, same length): the more specific, structured recogniser wins its
+# label so a per-type recall/precision benchmark is not polluted by the loose phone
+# recogniser mislabelling an SSN. Lower rank = higher priority. Config-supplied
+# gazetteer/pattern recognisers and unlisted types fall back to the default rank, so
+# they never lose their own exact spans to a built-in (they only ever tie on an
+# identical span, and a stable, type-alphabetical order then decides — unchanged).
+_SPECIFICITY_RANK: dict[str, int] = {
+    "ssn": 0,
+    "credit_card": 0,
+    "iban": 0,
+    "aws_key": 0,
+    "email": 1,
+    "api_key": 1,
+    "secret": 1,
+    "ip": 1,
+    "phone": 5,  # loosest built-in: loses a tie to any structured recogniser above
+}
+_DEFAULT_RANK = 3
 
 
 class _Detector:
-    """One compiled PII recogniser: a type label + a pattern + which engine fired."""
+    """One compiled PII recogniser: a type label + a pattern + which engine fired.
 
-    __slots__ = ("pii_type", "pattern", "detector", "confidence")
+    ``group`` is the capture group whose span is masked: 0 for a whole-value
+    recogniser, 1 for a labelled-assignment recogniser (``password: <value>``)
+    where only the credential — not the label — must be redacted.
+    """
+
+    __slots__ = ("pii_type", "pattern", "detector", "confidence", "group")
 
     def __init__(
-        self, pii_type: str, pattern: re.Pattern[str], detector: str, confidence: float
+        self,
+        pii_type: str,
+        pattern: re.Pattern[str],
+        detector: str,
+        confidence: float,
+        group: int = 0,
     ) -> None:
         self.pii_type = pii_type
         self.pattern = pattern
         self.detector = detector
         self.confidence = confidence
+        self.group = group
 
 
 # A raw match before it becomes a PIISpan: type, document-offset span, the surface
@@ -108,7 +160,10 @@ class HybridPIIRedactor:
 
     Config:
         detectors: list[str]  — which built-in recognisers to enable (subset of
-            ``email``/``ssn``/``credit_card``/``phone``/``ip``/``iban``). Default: all.
+            ``email``/``ssn``/``credit_card``/``phone``/``ip``/``iban``/``aws_key``/
+            ``api_key``/``secret``). Default: **all** — comprehensive PII+secret
+            coverage, so a corpus is PII-handled by default (do not silently narrow
+            this to a partial set in production configs).
         gazetteer: dict[str, list[str]]  — extra literal terms to redact, keyed by PII
             type (e.g. ``{"name": ["Alice", "Bob"]}``) — whole-word, case-insensitive
             by default. The config-supplied half of the rule set.
@@ -158,8 +213,9 @@ class HybridPIIRedactor:
                 msg = f"Unknown built-in PII detector {name!r}. Available: {available}."
                 raise ValueError(msg)
             # Built-in patterns are ASCII-cased already; IGNORECASE is harmless.
+            group = 1 if name in _CAPTURE_GROUP_DETECTORS else 0
             detectors.append(
-                _Detector(str(name), re.compile(builtin, flags), f"regex:{name}", 0.9)
+                _Detector(str(name), re.compile(builtin, flags), f"regex:{name}", 0.9, group)
             )
         gazetteer = config.get("gazetteer", {})
         if not isinstance(gazetteer, dict):
@@ -259,20 +315,35 @@ class HybridPIIRedactor:
 
         Each detector scans independently; a type not in ``allowed`` (when a policy
         restricts types) is skipped entirely. Overlaps between detectors are resolved
-        by (earlier start, longer span, type) so a stable non-overlapping set results.
+        by (earlier start, longer span, more specific type, type name) so a stable
+        non-overlapping set results — the specificity rank ensures a structured
+        recogniser (SSN, credit card, …) claims a span the loose phone recogniser also
+        matched, so the per-type label is correct.
         """
         raw: list[_Match] = []
         for detector in self._detectors:
             if allowed is not None and detector.pii_type not in allowed:
                 continue
             for m in detector.pattern.finditer(text):
-                start, end = m.start(), m.end()
-                if end > start:
-                    raw.append(
-                        (detector.pii_type, start, end, m.group(0), detector.detector,
-                         detector.confidence)
-                    )
-        raw.sort(key=lambda t: (t[1], -(t[2] - t[1]), t[0]))
+                # For a labelled-assignment recogniser, redact only the captured
+                # credential (group 1) — never the ``password:`` label; otherwise
+                # the whole matched value (group 0).
+                group = detector.group
+                start, end = m.start(group), m.end(group)
+                if start < 0 or end <= start:
+                    continue
+                raw.append(
+                    (detector.pii_type, start, end, m.group(group), detector.detector,
+                     detector.confidence)
+                )
+        raw.sort(
+            key=lambda t: (
+                t[1],
+                -(t[2] - t[1]),
+                _SPECIFICITY_RANK.get(t[0], _DEFAULT_RANK),
+                t[0],
+            )
+        )
         accepted: list[_Match] = []
         last_end = -1
         for match in raw:

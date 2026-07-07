@@ -94,7 +94,10 @@ def test_intake_quarantines_type_spoof() -> None:
 
 def test_intake_passes_genuine_pdf_header() -> None:
     screener = SignatureSizeIntakeScreener()
-    out = screener.screen_intake([_raw("real.pdf", "pdf", b"%PDF-1.4\n... body ...")])
+    # A genuine PDF: %PDF- at offset 0, a version digit, and real structure
+    # (an object + xref + trailer + %%EOF).
+    body = b"%PDF-1.4\n1 0 obj<<>>endobj\nxref\n0 1\ntrailer<<>>\nstartxref\n0\n%%EOF"
+    out = screener.screen_intake([_raw("real.pdf", "pdf", body)])
     assert len(out.passed) == 1
     assert out.quarantined == []
 
