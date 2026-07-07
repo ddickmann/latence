@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from typing import Any
 
 import pytest
 
@@ -18,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _storage_options() -> dict[str, object]:
+def _storage_options() -> dict[str, Any]:
     endpoint = os.environ["LATENCE_S3_ENDPOINT"]
     return {
         "key": os.environ.get("AWS_ACCESS_KEY_ID"),

@@ -123,5 +123,7 @@ def test_prior_versions_inspectable_after_advance(tmp_path: Path) -> None:
     assert v0.version == 0
     v0_records = store.read_records(0)
     assert len(v0_records) == 1
-    assert v0_records[0].entity is not None
-    assert v0_records[0].entity.mention_count == 1  # the pre-merge state
+    v0_rec = v0_records[0]
+    assert isinstance(v0_rec, DisambiguationRecord)
+    assert v0_rec.entity is not None
+    assert v0_rec.entity.mention_count == 1  # the pre-merge state

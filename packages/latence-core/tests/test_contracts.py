@@ -56,7 +56,7 @@ def test_record_missing_classification_raises() -> None:
 
 def test_provenance_requires_core_fields() -> None:
     with pytest.raises(ValidationError):
-        Provenance(  # type: ignore[call-arg]
+        Provenance(
             source_uri="",  # empty -> min_length violation
             file_name="a.txt",
             file_type="txt",
@@ -68,7 +68,7 @@ def test_provenance_requires_core_fields() -> None:
 def test_provenance_is_frozen() -> None:
     prov = _provenance()
     with pytest.raises(ValidationError):
-        prov.file_size = 20  # type: ignore[misc]
+        prov.file_size = 20
 
 
 def test_document_record_roundtrips_json() -> None:

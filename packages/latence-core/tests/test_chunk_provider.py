@@ -61,7 +61,9 @@ def test_chunker_offsets_round_trip_to_source_page() -> None:
     page_a = "Alpha content on the first page about revenue. " * 6
     page_b = "Beta content on the second page about costs. " * 6
     doc = _doc([page_a.strip(), page_b.strip()])
-    index = PageOffsetIndex(doc.page_map)
+    assert doc.page_map is not None
+    page_map = doc.page_map
+    index = PageOffsetIndex(page_map)
 
     chunker = MarkdownChunker({"max_tokens": 30, "overlap_tokens": 0, "min_tokens": 4})
     chunks = list(chunker.chunk([doc]))
@@ -69,7 +71,7 @@ def test_chunker_offsets_round_trip_to_source_page() -> None:
     for ch in chunks:
         prov = ch.provenance
         assert prov.char_start is not None and prov.char_end is not None
-        assert 0 <= prov.char_start <= prov.char_end <= doc.page_map.total_chars
+        assert 0 <= prov.char_start <= prov.char_end <= page_map.total_chars
         # The page recorded on the chunk equals the page the offset resolves to.
         expected_start_page = index.page_for_offset(prov.char_start)
         assert prov.page_start == expected_start_page
@@ -107,6 +109,7 @@ def test_chunker_stamps_offset_map_resolving_subchunk_offsets_to_original() -> N
     local = chunk.content.index("revenue")
     start, end = index.resolve_span(local, local + len("revenue"))
     assert doc.content[start:end] == "revenue"
+    assert chunk.provenance.char_start is not None
     assert start > chunk.provenance.char_start + local  # strictly past the lower bound
 
 

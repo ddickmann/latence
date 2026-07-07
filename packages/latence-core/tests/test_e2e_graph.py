@@ -128,7 +128,7 @@ def test_graph_slice_end_to_end(tmp_path: Path) -> None:
 
     # 2. Nodes load as Arrow; cross-document IBM/International Business Machines is ONE node.
     with s.open(f"{kg}-nodes.parquet", "rb") as fh:
-        nodes_tbl = pq.read_table(fh)
+        nodes_tbl = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     node_rows = nodes_tbl.to_pylist()
     node_names = [r["canonical_name"] for r in node_rows]
     node_ids = [r["node_id"] for r in node_rows]
@@ -158,7 +158,7 @@ def test_graph_slice_end_to_end(tmp_path: Path) -> None:
 
     # 3. Edges load; the works_for edge carries Evidence.
     with s.open(f"{kg}-edges.parquet", "rb") as fh:
-        edges_tbl = pq.read_table(fh)
+        edges_tbl = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert edges_tbl.num_rows >= 1
     assert "works_for" in edges_tbl.column("label").to_pylist()
     first_edge_evidence = json.loads(edges_tbl.column("evidence").to_pylist()[0])

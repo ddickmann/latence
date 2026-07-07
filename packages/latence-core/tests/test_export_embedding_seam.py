@@ -110,7 +110,7 @@ def test_corpus_export_attaches_embedding_per_row(tmp_path: Path) -> None:
     # Parquet carries a native list<double> embedding column of the same width.
     parquet_uri = next(u for u in uris if u.endswith(".parquet"))
     with storage.open(parquet_uri, "rb") as fh:
-        table = pq.read_table(fh)
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert "embedding" in table.column_names
     first = table.column("embedding")[0].as_py()
     assert len(first) == _DIMENSION
@@ -131,7 +131,7 @@ def test_embeddings_are_optional_no_embedder_no_vectors(tmp_path: Path) -> None:
 
     parquet_uri = next(u for u in uris if u.endswith(".parquet"))
     with storage.open(parquet_uri, "rb") as fh:
-        table = pq.read_table(fh)
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert "embedding" not in table.column_names
 
 

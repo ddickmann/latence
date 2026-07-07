@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from latence_core.contracts import DeletionMode
+from latence_core.contracts import DeletionMode, DisambiguationRecord, Record
 from latence_core.delta_runner import DeltaRunner
 from latence_core.pipeline import Pipeline
 from latence_core.state.corpus_store import CorpusStore
@@ -86,11 +86,11 @@ def _record_reach_ids(record: object) -> set[str]:
     return set(_record_reach(record))  # type: ignore[arg-type]
 
 
-def _entity_sizes(records: list) -> dict[str, int]:
+def _entity_sizes(records: list[Record]) -> dict[str, int]:
     return {
         r.entity.canonical_text: r.entity.mention_count
         for r in records
-        if getattr(r, "entity", None) is not None
+        if isinstance(r, DisambiguationRecord) and r.entity is not None
     }
 
 

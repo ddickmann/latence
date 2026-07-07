@@ -238,7 +238,7 @@ def test_demo_runs_the_swapped_provider_and_reflects_it(tmp_path: Path) -> None:
     # against it. The rerun still assembles a graph + catches the dangerous fixtures — the swap
     # changed the Provider, nothing else (ADR-0011).
     registry = ProviderRegistry()
-    registry._loaded["entity.custom_model"] = _FakeModelNer  # type: ignore[attr-defined]
+    registry._loaded["entity.custom_model"] = _FakeModelNer
 
     store = f"file://{tmp_path}/store"
     result = DemoBuilder(

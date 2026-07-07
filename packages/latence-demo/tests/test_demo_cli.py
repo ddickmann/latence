@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import latence_demo.cli as cli_module
+import pytest
+from latence_core.capability import ProviderRegistry
 from latence_demo.builder import DemoResult
 from latence_demo.cli import app
 from latence_demo.contracts import (
@@ -119,13 +121,14 @@ def test_cli_no_strict_tolerates_slip_through(monkeypatch) -> None:  # type: ign
 
 
 def test_cli_swap_to_uninstalled_provider_exits_clean_not_keyerror(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Simulate a clean clone where latence-ner-gliner is NOT installed (in the test env its
     # source IS installed, so we force entity.gliner out of the registry). A revert of the
     # preflight would let this reach the runner and raise a bare KeyError instead.
+    # cli imports ProviderRegistry from latence_core.capability; patch that same class object.
     monkeypatch.setattr(
-        cli_module.ProviderRegistry,
+        ProviderRegistry,
         "names",
         lambda self: ["entity.gazetteer", "source.local_folder"],
     )

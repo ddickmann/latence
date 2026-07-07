@@ -206,7 +206,7 @@ def test_s3_partial_kill_reruns_downstream_of_chunk(tmp_path: Path) -> None:
 
     LocalRunner().run(pipeline, run_id="r")
     for stage in ("chunk", "content", "export"):
-        s._fs.rm(f"{base}/checkpoints/{stage}.jsonl")  # type: ignore[attr-defined]
+        s._fs.rm(f"{base}/checkpoints/{stage}.jsonl")
 
     report = LocalRunner().run(pipeline, run_id="r")
     by_name = {m.name: m for m in report.stages}

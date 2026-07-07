@@ -57,21 +57,14 @@ jobs:
       - name: Ruff (lint)
         run: uv run ruff check packages
 
-      - name: Mypy (strict)
-        run: >
-          uv run mypy --strict
-          packages/latence-core/src
-          packages/latence-parser-plaintext/src
-          packages/latence-parser-document/src
-          packages/latence-ner-gliner/src
-          packages/latence-relation-gliner/src
-          packages/latence-relation-llm/src
-          packages/latence-pii-gliner/src
-          packages/latence-parser-endpoint/src
-          packages/latence-ner-endpoint/src
-          packages/latence-embedder-endpoint/src
-          packages/latence-runner-airflow/src
-          packages/latence-demo/src
+      # Strict type check over BOTH src AND tests for every workspace package (issue #24).
+      # The per-package loop (not a single `mypy --strict packages`) is deliberate: the
+      # package dirs are hyphenated, so mypy maps every tests/conftest.py to the same bare
+      # `conftest` module and a whole-tree invocation aborts with a duplicate-module error
+      # before checking anything. scripts/typecheck.sh runs mypy once per package so each
+      # conftest is unique in its process; one non-zero exit fails the whole step.
+      - name: Mypy (strict, src + tests)
+        run: MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
 
       - name: Pytest
         run: uv run pytest

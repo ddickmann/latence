@@ -62,7 +62,7 @@ stages:
     parquet_uri = f"{base}/export/records.parquet"
     assert s.exists(parquet_uri)
     with s.open(parquet_uri, "rb") as fh:
-        table = pq.read_table(fh)
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert table.num_rows == 2
     assert set(table.column_names) >= {"record_id", "provenance", "classification", "content"}
 

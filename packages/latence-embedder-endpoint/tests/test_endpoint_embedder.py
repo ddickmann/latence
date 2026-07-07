@@ -26,8 +26,9 @@ class _FakeEmbeddings:
 
     def create(self, *, model: str, input: list[str]) -> Any:  # noqa: A002 - openai API name
         type(self).calls += 1
-        if type(self).error is not None and type(self).calls <= type(self).fail_times:
-            raise type(self).error
+        err = type(self).error
+        if err is not None and type(self).calls <= type(self).fail_times:
+            raise err
         data = []
         for i, text in enumerate(input):
             # A deterministic vector keyed by text length so order is observable.

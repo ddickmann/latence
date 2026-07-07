@@ -70,7 +70,11 @@ def test_delta_provider_add_merges_affected_region() -> None:
     outcome = processor.apply_delta(parent, current, delta)
     assert isinstance(outcome, DeltaOutcome)
     # The merged entity (2 members) replaces the parent's stale 1-member entity.
-    live = {r.entity.canonical_text: r.entity.mention_count for r in outcome.records if r.entity}
+    live = {
+        r.entity.canonical_text: r.entity.mention_count
+        for r in outcome.records
+        if isinstance(r, DisambiguationRecord) and r.entity
+    }
     assert live["IBM"] == 2
     assert outcome.entities_merged >= 1
 
@@ -112,8 +116,10 @@ def test_delta_provider_add_keeps_untouched_record_verbatim() -> None:
     # The untouched Globex record is the very same object carried forward (identity), never touched.
     assert by_id["globex#r"] is untouched
     # The affected IBM record is the fresh current derivation (2 members), not the stale parent.
-    assert by_id["ibm#r"].entity is not None
-    assert by_id["ibm#r"].entity.mention_count == 2
+    ibm = by_id["ibm#r"]
+    assert isinstance(ibm, DisambiguationRecord)
+    assert ibm.entity is not None
+    assert ibm.entity.mention_count == 2
     assert affected_parent not in outcome.records  # the stale parent was superseded
 
 
@@ -197,6 +203,10 @@ def test_delta_provider_delete_splits() -> None:
         triggered_reconciliation=False,
     )
     outcome = processor.apply_delta(parent, current, delta)
-    live = {r.entity.canonical_text: r.entity.mention_count for r in outcome.records if r.entity}
+    live = {
+        r.entity.canonical_text: r.entity.mention_count
+        for r in outcome.records
+        if isinstance(r, DisambiguationRecord) and r.entity
+    }
     assert live["IBM"] == 1  # split back down
     assert outcome.entities_split >= 1

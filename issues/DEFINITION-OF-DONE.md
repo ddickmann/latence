@@ -6,7 +6,7 @@ The anti-"brittle toy repo" gate. Every issue declares which bar it must meet.
 
 Prove the machinery at enterprise level, without yet being perfect.
 
-- [ ] **Typed**: strict type-checking passes (mypy/pyright strict) on the touched packages.
+- [ ] **Typed**: strict type-checking passes (mypy `--strict`) on the touched packages, over **both `src` and `tests`** — enforced project-wide by `scripts/typecheck.sh` (one strict pass per package; a per-package loop, not a single whole-tree invocation, because the hyphenated package dirs make every `tests/conftest.py` collide as the bare `conftest` module under a single `mypy --strict packages` run — see issue #24).
 - [ ] **Contracts**: inter-Stage data is a versioned Pydantic model; `Provenance` and `Classification` present and validated at every boundary the slice touches; schema-version bumped on any contract change.
 - [ ] **Tested**: unit tests for happy path **and** the key failure modes; ≥1 end-to-end test through the local Runner; deterministic (seeded, hash-stable).
 - [ ] **CI green**: lint + type + test + build pass in CI for the slice's packages.

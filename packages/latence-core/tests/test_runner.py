@@ -65,7 +65,7 @@ def test_partial_kill_then_resume(docs_dir: Path, tmp_path: Path) -> None:
     # once, then deleting the parse+export checkpoints (and their exports).
     LocalRunner().run(p, run_id="r1")
     for stage in ("parse", "export"):
-        s._fs.rm(f"{base}/checkpoints/{stage}.jsonl")  # type: ignore[attr-defined]
+        s._fs.rm(f"{base}/checkpoints/{stage}.jsonl")
 
     report = LocalRunner().run(p, run_id="r1")
     # Source resumed from checkpoint; parse+export re-ran.
@@ -166,7 +166,7 @@ def test_converging_dag_resume_sees_both_parents_current_outputs(tmp_path: Path)
     # Simulate a crash that lost sa's checkpoint and everything downstream of it,
     # while sb's checkpoint survived.
     for stage in ("sa", "c", "export"):
-        s._fs.rm(f"{base}/checkpoints/{stage}.jsonl")  # type: ignore[attr-defined]
+        s._fs.rm(f"{base}/checkpoints/{stage}.jsonl")
 
     report = LocalRunner().run(p, run_id="cv")
     by_name = {m.name: m for m in report.stages}

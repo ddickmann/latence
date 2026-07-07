@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from latence_core.capability import ProviderRegistry
 from latence_core.contracts import ChunkRecord, EntityMention
-from latence_core.pipeline import Pipeline
-from latence_core.runner import LocalRunner
+from latence_core.pipeline import Pipeline, Stage
+from latence_core.runner import LocalRunner, StageOutput
 from latence_core.storage import Storage
 from latence_runner_airflow import RUNNER_NAME, AirflowRunner, XComBackend
 
@@ -240,11 +240,16 @@ stages:
 
 def test_xcom_backend_gathers_parents_in_order() -> None:
     xcom = XComBackend()
-    xcom.push("a", ["a1", "a2"])  # type: ignore[list-item]
-    xcom.push("b", ["b1"])  # type: ignore[list-item]
+    # String sentinels stand in for opaque StageOutput records: this test only asserts the
+    # concatenation ORDER (parents in declared order), not record structure, so we cast them
+    # through the typed seam rather than construct full record instances.
+    a_outputs = cast(list[StageOutput], ["a1", "a2"])
+    b_outputs = cast(list[StageOutput], ["b1"])
+    xcom.push("a", a_outputs)
+    xcom.push("b", b_outputs)
 
     class _Stage:
         depends_on = ["a", "b"]
 
-    gathered = xcom.gather(_Stage())  # type: ignore[arg-type]
-    assert gathered == ["a1", "a2", "b1"]
+    gathered = xcom.gather(cast(Stage, _Stage()))
+    assert gathered == cast(list[StageOutput], ["a1", "a2", "b1"])

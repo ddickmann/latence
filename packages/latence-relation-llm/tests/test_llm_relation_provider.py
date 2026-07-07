@@ -96,8 +96,9 @@ class _FakeCompletions:
 
     def create(self, **kwargs: Any) -> Any:
         type(self).calls += 1
-        if type(self).error is not None and type(self).calls <= type(self)._fail_times:
-            raise type(self).error
+        err = type(self).error
+        if err is not None and type(self).calls <= type(self)._fail_times:
+            raise err
         msg = types.SimpleNamespace(content=type(self).reply)
         choice = types.SimpleNamespace(message=msg)
         return types.SimpleNamespace(choices=[choice])

@@ -117,7 +117,7 @@ def test_nodes_parquet_loads_as_arrow(tmp_path: Path) -> None:
     s = Storage.for_uri(store)
     KnowledgeGraphExport().export(_records(), s, f"{store}/kg")
     with s.open(f"{store}/kg/graph-nodes.parquet", "rb") as fh:
-        table = pq.read_table(fh)
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert table.num_rows == 2
     names = set(table.column("canonical_name").to_pylist())
     assert names == {"Alice", "Acme"}
@@ -128,7 +128,7 @@ def test_edges_parquet_loads_as_arrow(tmp_path: Path) -> None:
     s = Storage.for_uri(store)
     KnowledgeGraphExport().export(_records(), s, f"{store}/kg")
     with s.open(f"{store}/kg/graph-edges.parquet", "rb") as fh:
-        table = pq.read_table(fh)
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert table.num_rows == 1
     assert table.column("label").to_pylist() == ["works_for"]
 
@@ -184,7 +184,7 @@ def test_empty_graph_writes_valid_files(tmp_path: Path) -> None:
     KnowledgeGraphExport().export([], s, f"{store}/kg")
     # Parquet with zero rows still loads.
     with s.open(f"{store}/kg/graph-nodes.parquet", "rb") as fh:
-        assert pq.read_table(fh).num_rows == 0
+        assert pq.read_table(fh).num_rows == 0  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     # GraphML still parses.
     root = ET.fromstring(s.read_text(f"{store}/kg/graph.graphml"))
     assert root.tag.endswith("graphml")
@@ -228,6 +228,7 @@ def test_control_chars_dont_break_any_representation(tmp_path: Path) -> None:
     node_a = _node("na", poisoned_name)
     node_b = _node("nb", "Beta")
     edge = _edge("e1", "na", "nb")
+    assert edge.edge is not None
     edge.edge.label = "works\x0cfor"  # the predicate/label is attacker-controlled too
     store = f"file://{tmp_path}"
     s = Storage.for_uri(store)
