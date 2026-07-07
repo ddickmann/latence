@@ -36,6 +36,7 @@ from html import escape
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import GraphEdge, GraphNode, GraphRecord, GraphScope
+from latence_core.providers.profile import ProviderProfile
 
 from latence_demo.contracts import DemoSiteManifest, GraphSummary
 
@@ -382,6 +383,26 @@ class DemoSiteExport:
     is composed post-run by the demo CLI via :func:`render_site`; this Provider guarantees a
     valid standalone KG viewer for any Pipeline that installs the package.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The demo-site Export renders a standalone HTML KG viewer with a deterministic circular
+        layout (dependency-free, no CDN/network). It ships no model weights (``model_id=None``),
+        is Apache-2.0 framework code (verified per ADR-0012 — weights-and-code trivially the
+        same), deterministic, CPU-only, does not batch, and has no per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=32,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

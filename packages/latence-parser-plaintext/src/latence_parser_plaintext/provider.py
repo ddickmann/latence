@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, DocumentRecord, PageMap
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -32,6 +33,26 @@ class PlaintextParser:
             unknown codec name in that (untrusted) hint yields a ``PARSE_ERROR``
             record, never an exception that aborts the run (ADR-0020).
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        A byte-decoding plain-text Parser ships no model weights (``model_id=None``) and is
+        framework code (Apache-2.0, verified — weights-and-code trivially the same code). The
+        decode is deterministic, CPU-only, does not batch (a per-document transform), and has
+        no per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import RelationMention
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -89,6 +90,32 @@ class LLMRelationExtractor:
     The client is constructed lazily on first ``relate`` so building the Provider
     (which the Runner does for every Stage) never needs the endpoint reachable.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): an OpenAI-compatible LLM endpoint adapter.
+
+        ``compute="either"``: a thin HTTP client that runs on the local CPU (no local CUDA
+        required); the served LLM lives behind the endpoint (a hosted API or a self-hosted
+        vLLM), so the device seam does not skip it on a CPU-only host. Real quality/throughput
+        needs a live rig (#64); conformance verifies it against a stub. ``model_id=None``:
+        ships no weights — the served model id is config-supplied (default ``gpt-4o-mini`` is a
+        served-model id, not a bundled checkpoint). License is framework code (Apache-2.0,
+        verified; the ``openai`` client is Apache-2.0). ``deterministic=False`` (a served LLM is
+        not byte-identical). ``cost_per_1k=None``: an LLM's per-call cost is vendor- and
+        model-specific and changes over time, so a number is left undeclared rather than
+        fabricated — the bake-off reads the honest gap, not a stale price.
+        """
+        return ProviderProfile(
+            compute="either",
+            memory_mb=64,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=False,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

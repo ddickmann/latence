@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import Disposition, DocumentRecord, PageMap
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
 from latence_core.language import detect_language
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -83,6 +84,34 @@ class EndpointDocumentParser:
     The client is constructed lazily on first ``parse`` so building the Provider (which the Runner
     does for every Stage) never needs the endpoint reachable.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): an OpenAI-compatible endpoint adapter.
+
+        ``compute="either"``: the adapter itself is a thin HTTP client that runs on the local
+        CPU (no local CUDA required) — the served model lives behind the endpoint (a vLLM /
+        Triton / hosted URL), so the device seam does not skip it on a CPU-only host. Its real
+        quality/throughput needs a live rig (#64); conformance verifies it against a stub.
+
+        ``model_id=None``: this package ships **no** model weights — the served model id is
+        config-supplied (``config['model']``, default ``paddleocr-vl`` is a served-model id, not
+        a bundled checkpoint). License is framework code (Apache-2.0, verified per ADR-0012;
+        the ``openai`` client is Apache-2.0). ``deterministic=False``: a served LLM/VLM is not
+        guaranteed byte-identical (temperature/model/version), so it does not overclaim.
+        ``cost_per_1k=None``: the per-call cost is deployment/vendor-specific (a self-hosted
+        vLLM has no vendor cost), so a number is left undeclared rather than fabricated.
+        """
+        return ProviderProfile(
+            compute="either",
+            memory_mb=64,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=False,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

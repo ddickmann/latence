@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
     apply_masking,
@@ -77,6 +78,35 @@ class GlinerPIIRedactor:
     The model is loaded lazily and cached on first use, so constructing the Provider
     never downloads weights.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2) for the default GLiNER-PII checkpoint.
+
+        ``compute="either"``: the GLiNER-PII model runs in-process on a laptop CPU (ADR-0007 —
+        first contact is ``pip install`` → learned PII NER, no CUDA) and accelerates on a GPU
+        when present, so the device seam routes it rather than skipping it on a CPU-only host.
+
+        License **verified** per ADR-0012 (recorded 2026-07-06): the ``gliner`` library is
+        Apache-2.0 (code) and the default checkpoint ``urchade/gliner_multi_pii-v1`` is
+        Apache-2.0 (weights, base ``urchade/gliner_multi-v2.1`` also Apache-2.0) — both
+        permissive, so ``license_verified=True``.
+
+        ``deterministic=False``: learned float inference is not guaranteed byte-identical
+        across hardware/library versions, so the profile does not overclaim reproducibility
+        (unlike the pure-code hybrid-rule Redactor). ``memory_mb`` is the approximate resident
+        footprint of the checkpoint + transformers stack (declared, not measured).
+        """
+        return ProviderProfile(
+            compute="either",
+            memory_mb=2048,
+            model_id=_DEFAULT_MODEL,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=False,
+            batch=True,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

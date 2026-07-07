@@ -299,6 +299,27 @@ class KeywordContentScreener:
             default; set below 1.0 to escalate any hit to Quarantine).
     """
 
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The keyword Content Screener catches prompt-injection/harmful markers by scan.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         # Default > 1.0 so the reference Provider flags rather than drops (a single
@@ -599,6 +620,27 @@ class FuzzyInjectionContentScreener:
         quarantine_threshold: float  — a chunk whose score reaches this is Quarantined instead
             of flagged (default 1.01 — flag-only; set below 1.0 to escalate any hit).
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The fuzzy-injection Content Screener is a bounded obfuscation-tolerant scorer.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

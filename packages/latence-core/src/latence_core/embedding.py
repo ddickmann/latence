@@ -17,6 +17,8 @@ import math
 import re
 from typing import TYPE_CHECKING, Any
 
+from latence_core.providers.profile import ProviderProfile
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
@@ -41,6 +43,27 @@ class HashingEmbedder:
     vector is byte-stable across processes (the token hash is sha256-based, not the salted
     builtin ``hash``), so a seeded run is reproducible.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The reference Embedder is a deterministic dependency-free hashing embedder.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

@@ -100,6 +100,19 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+      # Provider Conformance suite (P3-F3, ADR-0036 §5): the enterprise-readiness gate,
+      # parametrized over EVERY registered Provider (CPU providers run for real; endpoint/GPU
+      # providers run the contract/graceful-failure/license/determinism-declaration subset
+      # against a deterministic stub — real numbers need a rig, #64). Run explicitly with
+      # LATENCE_CUDA=0 so the device seam is a reproducible CPU-only host and a GPU-declared
+      # provider is skipped-with-flag (never a fabricated number). It also runs inside the
+      # `Pytest` step above; this dedicated step makes the gate a visible, first-class check on
+      # both py3.11 + py3.12. GPU providers run the full suite where a GPU exists (not in CI).
+      - name: Provider conformance (LATENCE_CUDA=0, every registered provider)
+        env:
+          LATENCE_CUDA: "0"
+        run: uv run pytest packages/latence-core/tests/test_conformance.py packages/latence-core/tests/test_e2e_conformance.py -q
+
       - name: Build wheels
         run: |
           uv build --package latence-core

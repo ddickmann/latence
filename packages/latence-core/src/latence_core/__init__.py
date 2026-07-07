@@ -35,6 +35,12 @@ from latence_core.chunking import (
     estimate_tokens,
     strip_markup,
 )
+from latence_core.conformance.report import (
+    CheckOutcome,
+    CheckStatus,
+    ConformanceReport,
+    ProviderConformance,
+)
 from latence_core.contracts import (
     SCHEMA_VERSION,
     CanonicalEntity,
@@ -184,6 +190,8 @@ __all__ = [
     "CapabilityKind",
     "Chunk",
     "ChunkBudget",
+    "CheckOutcome",
+    "CheckStatus",
     "ChunkQuality",
     "ChunkRecord",
     "Chunker",
@@ -192,6 +200,7 @@ __all__ = [
     "CompletenessCheck",
     "ConfidenceHistogram",
     "ConfigError",
+    "ConformanceReport",
     "ConfusionCounts",
     "ContentScreener",
     "ContractError",
@@ -276,6 +285,7 @@ __all__ = [
     "Pipeline",
     "Profiler",
     "ProfilingQuality",
+    "ProviderConformance",
     "Provenance",
     "ProviderError",
     "ProviderProfile",

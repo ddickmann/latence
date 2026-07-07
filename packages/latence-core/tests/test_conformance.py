@@ -1,0 +1,527 @@
+"""Provider Conformance suite — the parametrized-over-every-Provider gate (P3-F3, ADR-0036 §5).
+
+This is the enterprise-readiness gate: it parametrizes over **every** Provider the
+:class:`~latence_core.capability.ProviderRegistry` discovers and asserts the C1–C6 contract
+(:mod:`latence_core.conformance`). "Passes conformance" *is* the definition of enterprise-ready.
+
+Deterministic + seeded (``PYTHONHASHSEED`` pinned by the repo-root conftest; ``LATENCE_CUDA=0``
+pinned below so the device seam is reproducible). The CPU reference Providers run for real; the
+endpoint/GPU Providers run the contract/graceful-failure/license/determinism-declaration subset
+against a deterministic stub (their real numbers need a rig, #64 — flagged, never fabricated).
+
+The suite also proves the checks **bite** (not merely assert): a deliberately-broken throwaway
+Provider FAILs C2 (untyped crash) and C4 (declared-deterministic-but-not), and a synthetic
+GPU-only Provider is skipped-with-flag by C5 — so a bad Provider would actually be caught.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import pytest
+from latence_core.capability import ProviderRegistry
+from latence_core.conformance import (
+    build_conformance_report,
+    capability_of,
+    case_for_provider,
+    run_conformance,
+)
+from latence_core.conformance.cases import AdversarialOutcome, Capability
+from latence_core.conformance.harness import (
+    _check_c2_graceful,
+    _check_c3_license,
+    _check_c4_determinism,
+    _check_c5_device,
+    _run_conformance_checks_for,
+)
+from latence_core.conformance.report import CheckStatus
+from latence_core.providers.profile import ProviderProfile
+
+# The exact roster the registry must discover — asserting real coverage, not a moving target.
+# 29 Providers across 14 Capabilities (P3 landscape). If a Provider is added/removed, this list
+# is updated deliberately, so the count check catches an accidental un-covered Provider.
+_EXPECTED_PROVIDERS = frozenset(
+    {
+        "source.local_folder",
+        "parser.plaintext",
+        "parser.document",
+        "parse.endpoint",
+        "chunk.markdown",
+        "chunk.sentence_window",
+        "screening.intake_signature",
+        "screening.content_keyword",
+        "screening.content_fuzzy",
+        "entity.gazetteer",
+        "entity.gliner",
+        "entity.endpoint",
+        "relation.pattern",
+        "relation.llm",
+        "relation.gliner_relex",
+        "redaction.hybrid_rule",
+        "redaction.gliner_pii",
+        "profiling.statistical",
+        "profiling.lightweight",
+        "disambiguation.cascade",
+        "disambiguation.exact_surface",
+        "graph.canonical",
+        "graph.weighted",
+        "export.jsonl_parquet",
+        "export.knowledge_graph",
+        "export.demo_site",
+        "embedding.hashing",
+        "embedding.endpoint",
+        "delta.affected_set",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _pin_cpu_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the device seam to a CPU-only host so the suite is reproducible (LATENCE_CUDA=0)."""
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+
+
+def _registry() -> ProviderRegistry:
+    return ProviderRegistry()
+
+
+def _all_provider_names() -> list[str]:
+    return _registry().names()
+
+
+# ---------------------------------------------------------------------------
+# Coverage: every registered Provider is parametrized, and every Capability has a case.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_discovers_the_expected_provider_roster() -> None:
+    """The registry discovers exactly the expected 29 Providers — real coverage, not a subset."""
+    names = set(_all_provider_names())
+    assert names == set(_EXPECTED_PROVIDERS), (
+        f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
+    )
+    assert len(names) == 29
+
+
+def test_every_provider_maps_to_a_capability_with_a_case() -> None:
+    """No silent coverage gap: every Provider's Capability has a ConformanceCase (else FAIL)."""
+    for name in _all_provider_names():
+        capability = capability_of(name)  # raises if the prefix names no Capability
+        case = case_for_provider(name)  # raises if the Capability has no case
+        assert case.capability is capability or case.stub_scoped
+
+
+def test_a_capability_with_no_case_fails_loudly() -> None:
+    """A Provider whose Capability has no case FAILs loudly (forces the case), never skips."""
+    # ``capability_of`` rejects an unknown prefix — the anti-silent-skip guard.
+    with pytest.raises(KeyError, match="unknown Capability prefix"):
+        capability_of("mystery.provider")
+
+
+# ---------------------------------------------------------------------------
+# C1–C6 for every registered Provider (the gate itself).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider_name", sorted(_EXPECTED_PROVIDERS))
+def test_provider_passes_conformance(provider_name: str) -> None:
+    """Every registered Provider passes C1–C6 (no check FAILs) — the enterprise-readiness gate."""
+    result = run_conformance(_registry(), provider_name)
+    failed = [c for c in result.checks if c.status is CheckStatus.FAIL]
+    assert not failed, f"{provider_name} failed: {[(c.check, c.detail) for c in failed]}"
+    # Every Provider is checked for all six concerns (some SKIPPED, none missing).
+    checks = {c.check for c in result.checks}
+    assert {"C1_valid_records", "C2_graceful_failure", "C3_license", "C4_determinism",
+            "C5_device", "C6_no_pii_leak"} <= checks
+
+
+def test_full_report_all_pass_and_flags_stub_scoped() -> None:
+    """The rolled-up report: all 29 pass, and the endpoint/GPU Providers are stub-flagged."""
+    report = build_conformance_report(_registry())
+    assert report.providers_total == 29
+    assert report.providers_failed == 0
+    assert report.all_passed
+    # The seven endpoint/GPU Providers are flagged stub-scoped ("needs a rig"), never fabricated.
+    stub_scoped = {r.provider for r in report.results if r.stub_scoped}
+    assert stub_scoped == {
+        "parse.endpoint",
+        "entity.endpoint",
+        "entity.gliner",
+        "relation.llm",
+        "relation.gliner_relex",
+        "redaction.gliner_pii",
+        "embedding.endpoint",
+    }
+
+
+def test_cpu_providers_run_for_real_not_stub() -> None:
+    """The in-core CPU reference Providers are NOT stub-scoped — they run for real."""
+    report = build_conformance_report(_registry())
+    for res in report.results:
+        if res.provider in {"chunk.markdown", "entity.gazetteer", "graph.canonical"}:
+            assert not res.stub_scoped
+
+
+# ---------------------------------------------------------------------------
+# C3 license gate is genuine.
+# ---------------------------------------------------------------------------
+
+
+def test_c3_unverified_plus_verified_is_impossible() -> None:
+    """The UNVERIFIED-never-verified invariant is enforced at the provider level (C3)."""
+    # A ProviderProfile forbids constructing UNVERIFIED+verified, so C3 re-asserts on a would-be
+    # bad profile via a stub object carrying the two fields (the invariant re-check).
+    class _BadProfileHolder:
+        license = "UNVERIFIED"
+        license_verified = True
+
+    outcome = _check_c3_license(_BadProfileHolder())  # type: ignore[arg-type]
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_c3_missing_profile_fails() -> None:
+    """A Provider that declares no profile FAILs C3 (every provider must declare one)."""
+    outcome = _check_c3_license(None)
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_c3_restricted_unverified_license_fails() -> None:
+    """A restricted (non-permissive) license that is not verified fails C3 (must be opt-in)."""
+    restricted = ProviderProfile(
+        compute="cpu",
+        memory_mb=1,
+        model_id="m",
+        license="LicenseRef-Gemma",
+        license_verified=False,
+        deterministic=True,
+        batch=False,
+    )
+    outcome = _check_c3_license(restricted)
+    assert outcome.status is CheckStatus.FAIL
+
+
+def test_c3_restricted_verified_license_is_opt_in_pass() -> None:
+    """A restricted license that IS verified passes C3 as a flagged opt-in (ADR-0012)."""
+    opt_in = ProviderProfile(
+        compute="gpu",
+        memory_mb=1,
+        model_id="google/embeddinggemma-300m",
+        license="LicenseRef-Gemma",
+        license_verified=True,
+        deterministic=False,
+        batch=True,
+    )
+    outcome = _check_c3_license(opt_in)
+    assert outcome.status is CheckStatus.PASS
+    assert "opt-in" in outcome.detail
+
+
+# ---------------------------------------------------------------------------
+# C5 device: a synthetic GPU-only Provider is skipped-with-flag on this CPU host.
+# ---------------------------------------------------------------------------
+
+
+def test_c5_gpu_provider_is_skipped_with_flag_on_cpu_host() -> None:
+    """A compute="gpu" Provider on a CPU-only host is skipped-with-flag (never run, never faked)."""
+    gpu_profile = ProviderProfile(
+        compute="gpu",
+        memory_mb=4096,
+        model_id="some/gpu-only-model",
+        license="Apache-2.0",
+        license_verified=True,
+        deterministic=False,
+        batch=True,
+    )
+    outcome, skipped, reason = _check_c5_device(gpu_profile)
+    assert skipped is True
+    assert outcome.status is CheckStatus.SKIPPED
+    assert reason is not None and "GPU" in reason.upper() or "cuda" in (reason or "").lower()
+
+
+def test_c5_gpu_provider_end_to_end_skip_records_but_does_not_run() -> None:
+    """A GPU-only Provider skipped by C5 records C1/C2/C4/C6 as SKIPPED (not run, not faked)."""
+    # Register a synthetic GPU-only Provider inline and run the full harness path on it.
+    class _GpuOnlyChunker:
+        @classmethod
+        def profile(cls) -> ProviderProfile:
+            return ProviderProfile(
+                compute="gpu",
+                memory_mb=4096,
+                model_id="gpu/chunker",
+                license="Apache-2.0",
+                license_verified=True,
+                deterministic=False,
+                batch=True,
+            )
+
+        def __init__(self, config: dict[str, Any] | None = None) -> None:
+            self._config = config or {}
+
+        def chunk(self, documents: Any) -> Any:  # pragma: no cover - must NOT be called
+            raise AssertionError("a skipped GPU provider must never be run")
+
+    result = _run_conformance_checks_for(
+        provider_name="chunk.gpu_only",
+        capability=Capability.CHUNK,
+        provider_cls=_GpuOnlyChunker,
+    )
+    assert result.device_skipped is True
+    statuses = {c.check: c.status for c in result.checks}
+    assert statuses["C5_device"] is CheckStatus.SKIPPED
+    for name in ("C1_valid_records", "C2_graceful_failure", "C4_determinism", "C6_no_pii_leak"):
+        assert statuses[name] is CheckStatus.SKIPPED
+
+
+# ---------------------------------------------------------------------------
+# The checks BITE: a deliberately-broken throwaway Provider FAILs C2 and C4.
+# ---------------------------------------------------------------------------
+
+
+class _BrokenChunker:
+    """A throwaway broken Provider: crashes untyped on bad input (C2) + non-deterministic (C4).
+
+    It declares ``deterministic=True`` but returns a different result each call (C4 must catch
+    that), and on an adversarial input it raises a **bare** ``RuntimeError`` (not a typed
+    ``LatenceError``), which C2 must catch as an untyped crash.
+    """
+
+    _counter = 0
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=1,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,  # a LIE — C4 must catch it
+            batch=False,
+        )
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self._config = config or {}
+
+    def chunk(self, documents: Any) -> Any:
+        docs = list(documents)
+        # A PARSE_ERROR document (the adversarial input) triggers the untyped crash C2 forbids.
+        from latence_core.contracts import Disposition, DocumentRecord
+
+        if any(
+            isinstance(d, DocumentRecord) and d.disposition is Disposition.PARSE_ERROR
+            for d in docs
+        ):
+            msg = "boom (untyped)"
+            raise RuntimeError(msg)
+        # Non-deterministic: a different (invalid) output each call, so two runs differ.
+        type(self)._counter += 1
+        base = list(_valid_chunks())
+        # Mutate one field so the two runs are not byte-identical.
+        if base:
+            base[0] = base[0].model_copy(update={"token_count": type(self)._counter})
+        return base
+
+
+def _valid_chunks() -> Any:
+    from latence_core.conformance import fixtures
+
+    return list(fixtures.canonical_corpus().chunks)
+
+
+def test_c2_bites_an_untyped_crash() -> None:
+    """C2 FAILs a Provider that raises a bare (untyped) exception on the adversarial input."""
+    outcome = _check_c2_graceful(case_for_provider("chunk.markdown"), _BrokenChunker)
+    assert outcome.status is CheckStatus.FAIL
+    assert "untyped" in outcome.detail
+
+
+def test_c4_bites_a_declared_deterministic_that_is_not() -> None:
+    """C4 FAILs a Provider that declares deterministic=True but yields different output twice."""
+    outcome = _check_c4_determinism(
+        case_for_provider("chunk.markdown"), _BrokenChunker, _BrokenChunker.profile()
+    )
+    assert outcome.status is CheckStatus.FAIL
+    assert "differ" in outcome.detail
+
+
+# ---------------------------------------------------------------------------
+# C2 no-PII: a typed error / graceful path must never leak the adversarial PII.
+# ---------------------------------------------------------------------------
+
+
+class _PIILeakingScreener:
+    """A Provider whose graceful path LEAKS the adversarial PII in its reason (C2 must catch it)."""
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=1,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+        )
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self._config = config or {}
+
+    def screen_content(self, chunks: Any) -> Any:
+        from latence_core.capability import ScreeningOutcome
+        from latence_core.conformance import fixtures
+        from latence_core.contracts import (
+            ScreeningCheckpoint,
+            ScreeningFinding,
+            ScreeningVerdict,
+        )
+
+        list(chunks)
+        # A quarantine whose reason echoes the raw PII payload — the leak C2 forbids.
+        finding = ScreeningFinding(
+            checkpoint=ScreeningCheckpoint.CONTENT,
+            verdict=ScreeningVerdict.QUARANTINE,
+            document_id="adv-doc",
+            detector="pii-leaker",
+            category="prompt_injection",
+            reason=f"blocked secret {fixtures.PII_ADVERSARIAL_SECRET}",
+        )
+        return ScreeningOutcome(passed=[], quarantined=[], findings=[finding])
+
+
+def test_c2_bites_a_pii_leak_in_the_graceful_reason() -> None:
+    """C2 FAILs a Provider that leaks the adversarial PII in its quarantine reason (no-PII gate)."""
+    outcome = _check_c2_graceful(case_for_provider("screening.content_keyword"), _PIILeakingScreener)
+    assert outcome.status is CheckStatus.FAIL
+    assert "PII" in outcome.detail
+
+
+def test_c2_passes_a_clean_typed_failure() -> None:
+    """C2 PASSes the real keyword Content Screener (graceful, no PII in its surfaced reason)."""
+    outcome = _check_c2_graceful(
+        case_for_provider("screening.content_keyword"),
+        _registry().load("screening.content_keyword"),
+    )
+    assert outcome.status is CheckStatus.PASS
+
+
+# ---------------------------------------------------------------------------
+# Determinism of the harness itself (a seeded run is byte-identical).
+# ---------------------------------------------------------------------------
+
+
+class _NonDeterministicEmbedder:
+    """An Embedder that declares deterministic=True but returns different vectors each call.
+
+    The archetypal C4 regression: a lying embedder. C4 must byte-compare the *actual vectors* the
+    invoke returns (not a discarded empty list) and catch that the two runs differ — the signal
+    the bake-off (P3-F5) trusts.
+    """
+
+    _counter = 0
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=1,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,  # a LIE — C4 must catch it via the returned vectors
+            batch=False,
+        )
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self._config = config or {}
+        self._dimension = int((config or {}).get("dimension", 64))
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def embed(self, texts: Any) -> Any:
+        for _ in texts:
+            type(self)._counter += 1
+            # A correctly-shaped but non-deterministic vector: right width, different values.
+            yield [float(type(self)._counter)] + [0.0] * (self._dimension - 1)
+
+
+def test_c4_bites_a_non_deterministic_embedder_that_claims_determinism() -> None:
+    """C4 FAILs a deterministic-declaring Embedder whose vectors differ across two runs.
+
+    Regression guard: the embedding case must RETURN its vectors (not discard them), else C4
+    compares empty-string to empty-string and a lying embedder passes vacuously.
+    """
+    outcome = _check_c4_determinism(
+        case_for_provider("embedding.hashing"),
+        _NonDeterministicEmbedder,
+        _NonDeterministicEmbedder.profile(),
+    )
+    assert outcome.status is CheckStatus.FAIL
+    assert "differ" in outcome.detail
+
+
+def test_c4_passes_the_real_deterministic_embedder() -> None:
+    """C4 PASSes the in-core hashing Embedder — byte-identical vectors over two real runs."""
+    from latence_core.providers.profile import profile_of
+
+    embedder = _registry().load("embedding.hashing")
+    outcome = _check_c4_determinism(
+        case_for_provider("embedding.hashing"),
+        embedder,
+        profile_of(embedder),
+    )
+    assert outcome.status is CheckStatus.PASS
+    assert "byte-identical" in outcome.detail
+
+
+def test_c1_bites_an_out_of_range_mention_offset() -> None:
+    """C1's offset audit FAILs a mention whose char span runs past the document length.
+
+    Regression guard: the in-range half of C1 must BOUND offsets against the document, not merely
+    assert char_end >= char_start. The stronger page-map audit must see nonzero drift for an
+    out-of-bounds mention (page_for_offset clamps + records drift rather than raising).
+    """
+    from latence_core.conformance import cases as conf_cases
+    from latence_core.conformance import fixtures as conf_fixtures
+
+    doc = conf_fixtures.canonical_corpus().documents[0]
+    good_mention = conf_fixtures.canonical_corpus().mentions[0]
+    total = doc.page_map.total_chars if doc.page_map is not None else len(conf_fixtures.CANONICAL_TEXT)
+    # A mention whose span runs far past the assembled document — a broken/out-of-range offset.
+    bad_prov = good_mention.provenance.model_copy(
+        update={"char_start": total + 100, "char_end": total + 200}
+    )
+    bad_mention = good_mention.model_copy(update={"provenance": bad_prov})
+
+    # The bounded in-range check FAILs it.
+    assert conf_cases._offsets_in_range([bad_mention]) is False
+    # The ADR-0031 round-trip audit sees nonzero drift (out-of-range clamps + records drift).
+    assert conf_cases._page_offsets_resolve([bad_mention]) is False
+    # And a faithful in-range mention still passes both.
+    assert conf_cases._offsets_in_range([good_mention]) is True
+    assert conf_cases._page_offsets_resolve([good_mention]) is True
+
+
+def test_report_is_deterministic() -> None:
+    """Two conformance sweeps over the same registry produce byte-identical reports (seeded)."""
+    first = build_conformance_report(_registry()).model_dump_json()
+    second = build_conformance_report(_registry()).model_dump_json()
+    assert first == second
+
+
+def test_adversarial_outcome_graceful_predicate() -> None:
+    """An AdversarialOutcome is graceful iff it took any defined non-crash path."""
+    assert AdversarialOutcome(raised=True).graceful
+    assert AdversarialOutcome(quarantined=True).graceful
+    assert AdversarialOutcome(parse_error=True).graceful
+    assert AdversarialOutcome(empty=True).graceful
+    assert AdversarialOutcome(noop=True).graceful
+    assert not AdversarialOutcome().graceful
+
+
+def test_conformance_env_is_cpu_pinned() -> None:
+    """The suite runs with LATENCE_CUDA pinned to 0 (a reproducible CPU-only host)."""
+    assert os.environ.get("LATENCE_CUDA") == "0"

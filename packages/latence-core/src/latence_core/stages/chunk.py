@@ -121,6 +121,25 @@ class SentenceWindowChunker:
             IGNORED by this strategy (sentence-aligned boundaries need no overlap). Default 0.
     """
 
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The sentence-window Chunker is a pure-Python part of ``latence-core`` (Apache-2.0,
+        verified), ships no weights (``model_id=None``), is deterministic (greedy
+        sentence packing), CPU-only, does not batch, and has no per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self._budget = ChunkBudget(

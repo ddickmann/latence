@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Classification, ParserInput, Provenance
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -55,6 +56,26 @@ class LocalFolderSource:
             second Source Provider. Binary types are handed on as raw bytes with
             language ``und``; Parse attaches the authoritative Classification.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The local-folder Source is a pure-Python part of ``latence-core`` (Apache-2.0,
+        verified — the package's own code, weights-and-code trivially the same), ships no
+        model weights (``model_id=None``), is deterministic (files are read in sorted order
+        with content-addressed ids), CPU-only, does not batch, and has no per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

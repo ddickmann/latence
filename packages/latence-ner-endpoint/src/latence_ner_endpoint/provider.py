@@ -41,6 +41,7 @@ from latence_core.contracts import EntityMention
 from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -79,6 +80,29 @@ class EndpointEntityExtractor:
     The client is constructed lazily on first ``extract`` so building the Provider never needs the
     endpoint reachable.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): an OpenAI-compatible NER endpoint adapter.
+
+        ``compute="either"``: a thin HTTP client that runs on the local CPU (no local CUDA
+        required); the served NER model lives behind the endpoint, so the device seam does not
+        skip it on a CPU-only host. Real quality/throughput needs a live rig (#64); conformance
+        verifies it against a stub. ``model_id=None``: ships no weights (the served model id is
+        config-supplied). License is framework code (Apache-2.0, verified; the ``openai`` client
+        is Apache-2.0). ``deterministic=False`` (a served model is not byte-identical);
+        ``cost_per_1k=None`` (deployment/vendor-specific, not fabricated).
+        """
+        return ProviderProfile(
+            compute="either",
+            memory_mb=64,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=False,
+            batch=True,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

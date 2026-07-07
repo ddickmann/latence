@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, PIISpan, RedactionRecord
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
     apply_masking,
@@ -217,6 +218,27 @@ class HybridPIIRedactor:
         min_chars: int  — a document whose assembled text is shorter than this is
             emitted as a clean (no-PII) RedactionRecord (default 1).
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The hybrid-rule PII Redactor is a linear-time regex/gazetteer detector.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=32,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

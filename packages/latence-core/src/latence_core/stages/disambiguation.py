@@ -51,6 +51,7 @@ from latence_core.disambiguation import (
     ResolvedCluster,
     normalize_text,
 )
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -97,6 +98,27 @@ class CascadeDisambiguator:
             Provenance fallback (used only when an entity has no member mention Provenance —
             never in practice, since a cluster always has ≥1 mention). Default ``"internal"``.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The cascade Disambiguator is the ported 5-strategy resolver + Union-Find merge.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=64,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -345,6 +367,27 @@ class ExactSurfaceDisambiguator(CascadeDisambiguator):
     maps, …). ``exact_only`` is forced on regardless of the supplied value, and the fuzzy-rung
     knobs (``acronym_confidence``, ``min_substring_ratio``, ``enable_embedding``, …) are inert.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The exact-surface Disambiguator blocks on normalized surface (no fuzzy cascade).
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=64,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = dict(config or {})

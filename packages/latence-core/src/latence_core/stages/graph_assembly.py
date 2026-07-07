@@ -36,6 +36,7 @@ from latence_core.contracts import (
     GraphScope,
 )
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -52,6 +53,27 @@ class CanonicalGraphAssembler:
         max_evidence_per_node: int  — cap on mention ids folded into a node's Evidence
             (0 = unlimited; the ported F8 bound for hub entities). Default 0.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The canonical Graph Assembler builds content-addressed nodes/edges + Evidence.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=32,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -200,6 +222,27 @@ class WeightedGraphAssembler:
         max_evidence_per_node: int  — cap on mention ids folded into a node's Evidence
             (0 = unlimited). Default 0.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The weighted Graph Assembler folds parallel same-typed relations into weighted edges.
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012 — the
+        package's own code, weights-and-code trivially the same), it ships no model weights
+        (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call
+        cost, so a bake-off/conformance run reads honest, non-fabricated columns off it.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=32,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

@@ -43,6 +43,7 @@ from latence_core.contracts import (
     PageMap,
 )
 from latence_core.language import detect_language
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -78,6 +79,26 @@ class DocumentParser:
             unset, the ParserInput's inherited sensitivity is preserved.
         page_separator: str  — markdown joined between PDF pages (default '\\n\\n').
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, permissive.
+
+        Ships no model weights (``model_id=None``): decoding is deterministic pure-Python
+        (this Provider is Apache-2.0 framework code; its one dep ``pypdf`` is pure-Python,
+        BSD-3-Clause — both weights-and-code permissive, verified per ADR-0012). CPU-only,
+        does not batch (a per-document transform), and has no per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=64,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

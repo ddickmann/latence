@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from latence_core.conformance.report import ConformanceReport
 from latence_core.contracts import DeltaChurn, ScreeningFinding
 
 # v3 (S3): the report gains ``chunk`` (Chunk-Stage counts + offset-integrity) and
@@ -75,7 +76,16 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # (True when a GPU-only provider was skipped-with-flag on a CPU-only host — the G1 posture), and
 # ``skip_reason``. All default to None/False, so a v15 report still validates; a run whose
 # providers declare no profile leaves them None (never fabricated).
-QUALITY_SCHEMA_VERSION = 16
+# v17 (P3-F3, ADR-0036 §5): the report gains an optional ``conformance`` — the
+# :class:`~latence_core.conformance.report.ConformanceReport` roll-up of the enterprise-readiness
+# gate (every registered Provider's C1–C6 verdict: valid typed records, graceful failure, license
+# recorded + permissive-or-opt-in, determinism-or-documented, device honored, no PII leak). Counts
+# only (no record content), safe to persist. Present only when a conformance run was attached
+# (the gate is a test-time/tooling sweep, not a per-Stage run) — a normal pipeline run reports
+# ``conformance=None``, so a v16 report still validates. The report models live in the pure,
+# stage-free :mod:`latence_core.conformance.report`, so the lean quality contract imports no
+# heavy harness/fixtures.
+QUALITY_SCHEMA_VERSION = 17
 
 
 class StageMetrics(BaseModel):
@@ -620,6 +630,10 @@ class QualityReport(BaseModel):
     # reports ``delta=None``) — documents ±, entities created/merged/split, edges ±, records
     # retracted/purged, drift, and whether a full Reconciliation was triggered.
     delta: DeltaChurn | None = None
+    # P3-F3 (ADR-0036 §5): the Provider-conformance roll-up — every registered Provider's C1–C6
+    # enterprise-readiness verdict. Present only when a conformance sweep was attached (the gate
+    # is a tooling/test-time sweep, not a per-Stage run); a normal pipeline run reports None.
+    conformance: ConformanceReport | None = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
