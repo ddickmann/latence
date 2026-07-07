@@ -218,10 +218,13 @@ class DeltaRunner:
             intentional_deletion=True,
         )
         if deletion_mode is DeletionMode.PURGE and deleted:
-            # Expunge the purged documents' derived records from EVERY prior committed Version's
-            # record log and wipe the run checkpoints that hold their raw text — so an audit read
-            # of a prior Version, or a checkpoint scan, cannot resurrect the erased content. The
-            # head Version the commit above just wrote already omits them.
+            # Expunge the purged documents' derived records from EVERY records.jsonl under the
+            # corpus — committed Versions AND abandoned WAL staging dirs a crash left behind
+            # (H-D1) — re-fingerprinting each rewritten Version's manifest so the idempotency
+            # check is exact, and wipe the run checkpoints that hold their raw text. After this
+            # neither an audit read of a prior Version, a checkpoint scan, nor a filesystem/backup
+            # read of an abandoned staging file can resurrect the erased content. The head Version
+            # the commit above just wrote already omits them.
             store.expunge_records(set(deleted))
             self._purge_run_artifacts(pipeline)
         return self._attach_churn(pipeline, run_id, report, churn)

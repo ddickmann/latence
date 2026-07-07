@@ -422,6 +422,92 @@ def test_purge_leaves_no_trace_in_prior_versions_or_source(tmp_path: Path) -> No
     assert leaks == [], f"purged text survived in: {[str(p) for p in leaks]}"
 
 
+def test_purge_neutralises_abandoned_wal_residue_end_to_end(tmp_path: Path) -> None:
+    # H-D1 Gap 1 (security S2), end-to-end through the DeltaRunner: an abandoned WAL transaction
+    # (a crash mid-commit) leaves a fully-staged wal/v<N>/records.jsonl deriving from doc D, with
+    # NO manifest — invisible to read_records but recoverable in cleartext on disk. A GDPR Purge of
+    # D must neutralise it. The DoD walk: after purge, walk EVERY records.jsonl under the corpus
+    # root (committed AND abandoned) and assert none reaches D, and D's secret surface strings
+    # appear in no file on disk. This FAILS against main (the abandoned records.jsonl survives).
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    cs = CorpusStore(Storage.for_uri(store), store)
+    (docs / "a.txt").write_text("Alice works at Acme. IBM is here.\n", encoding="utf-8")
+    (docs / "keep.txt").write_text("Bob is here.\n", encoding="utf-8")
+    # (i) Commit a head Version deriving from doc D (a.txt).
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
+    a_id = _doc_id(docs / "a.txt")
+    head_records = cs.read_records(cs.head_version() or 0)
+    assert any(a_id in _record_reach_ids(r) for r in head_records)
+
+    # (ii) Stage an ABANDONED transaction whose records reach doc D (crash mid-commit): open a WAL
+    # txn, stage a records.jsonl derived from D, never write the manifest. Use a high version
+    # number so it is a distinct crashed attempt the upcoming purge (which commits head+1) never
+    # reaches — the residue must survive the purge's own commit and still be swept.
+    wal = cs._wal  # noqa: SLF001 — reproduces the crash residue the WAL recover() reports
+    abandoned_version = 99
+    wal.begin(abandoned_version)
+    wal.stage_text(abandoned_version, "records.jsonl", cs._encode_records(head_records))  # noqa: SLF001
+    assert wal.abandoned_versions() == (abandoned_version,)
+    corpus_root = tmp_path / "store"
+    abandoned = corpus_root / "_latence" / "corpus" / "wal" / f"v{abandoned_version}" / "records.jsonl"
+    assert "Acme" in abandoned.read_text(encoding="utf-8")  # residue present pre-purge
+
+    # (iii) Purge doc D.
+    DeltaRunner().purge(_pipeline(store, docs), run_id="pur", document_ids=[a_id])
+
+    # DoD 1 — walk EVERY records.jsonl under the corpus root: none may reach doc D.
+    for path in corpus_root.rglob("records.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            assert a_id not in line, f"purged doc reached in {path}"
+    # DoD 2 — D's secret surface strings appear in NO file anywhere on disk.
+    leaks = [
+        p
+        for p in corpus_root.rglob("*")
+        if p.is_file()
+        and any(
+            term in p.read_text(encoding="utf-8", errors="ignore")
+            for term in ("Alice", "Acme", "IBM")
+        )
+    ]
+    assert leaks == [], f"purged text survived in: {[str(p) for p in leaks]}"
+    # No-collateral still holds: the co-resident Bob (keep.txt) is untouched by the abandoned sweep.
+    assert (docs / "keep.txt").exists()
+
+
+def test_purge_then_reapply_identical_delta_is_a_noop_end_to_end(tmp_path: Path) -> None:
+    # H-D1 Gap 2 (correctness S3), end-to-end: commit, purge D, then re-apply the IDENTICAL delta
+    # over the post-purge live set. With the head manifest re-fingerprinted, re-running yields the
+    # existing head Version (a no-op), not a spurious duplicate. This FAILS against main (a
+    # duplicate Version is minted because the head fingerprint is stale). Also asserts every
+    # rewritten Version's stored record_count / fingerprint match its true post-purge records.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    cs = CorpusStore(Storage.for_uri(store), store)
+    (docs / "a.txt").write_text("Alice works at Acme. IBM is here.\n", encoding="utf-8")
+    (docs / "keep.txt").write_text("Bob is here.\n", encoding="utf-8")
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
+    a_id = _doc_id(docs / "a.txt")
+    DeltaRunner().purge(_pipeline(store, docs), run_id="pur", document_ids=[a_id])
+    head_after_purge = cs.head_version()
+    assert head_after_purge is not None
+
+    # Every rewritten Version's stored metadata matches its true post-purge records.
+    for version in range(head_after_purge + 1):
+        stored = cs.read_version(version)
+        records = cs.read_records(version)
+        assert stored.record_count == len(records), f"stale record_count on v{version}"
+        assert stored.fingerprint == CorpusStore._fingerprint(records), (  # noqa: SLF001
+            f"stale fingerprint on v{version}"
+        )
+
+    # Re-apply the identical delta over the (unchanged) post-purge source: a documented no-op.
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="rerun")
+    assert cs.head_version() == head_after_purge, "a spurious duplicate Version was minted"
+
+
 def test_delta_churn_lands_in_quality_report(tmp_path: Path) -> None:
     docs = tmp_path / "docs"
     docs.mkdir()

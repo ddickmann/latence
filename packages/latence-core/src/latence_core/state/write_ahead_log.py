@@ -169,6 +169,18 @@ class WriteAheadLog:
                 found.append(version)
         return sorted(found)
 
+    def abandoned_versions(self) -> tuple[int, ...]:
+        """Every abandoned (intent-record-but-no-manifest) version number, ascending.
+
+        A convenience view over :meth:`recover` for callers — such as the Purge residue sweep
+        (:meth:`~latence_core.state.corpus_store.CorpusStore.expunge_records`) — that must reach
+        into never-committed staging directories a crash left behind. These ``v<N>/`` dirs may
+        still hold a fully-staged ``records.jsonl`` (invisible to :meth:`is_committed`/
+        :meth:`read_manifest`), which is exactly the abandoned-WAL residue a GDPR erasure must
+        neutralise (audit THEME D / H-D1).
+        """
+        return self.recover().abandoned
+
     def recover(self) -> WalRecovery:
         """Scan for the last committed version and any abandoned (uncommitted) transactions.
 
