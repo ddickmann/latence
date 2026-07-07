@@ -272,12 +272,14 @@ class LocalRunner:
         # many transient failures it retried through); the Runner reads it after the Stage runs and
         # resets for the next. A CPU/in-process Provider has no such attribute → 0.
         self._last_stage_retries = 0
-        # Per-Stage relation quadratic-fan-out-guard tally (ADR-0033 / #63), keyed by Stage
-        # name: (documents capped, relations dropped). A RelationExtractor Provider that
-        # enforces the cap exposes ``fanout_capped_documents``/``fanout_dropped_relations``
-        # int attributes; the Runner reads them after the Stage runs and folds them into the
-        # Quality Report's RelationQuality. A Provider without them contributes (0, 0).
-        self._fanout_by_stage: dict[str, tuple[int, int]] = {}
+        # Per-Stage relation fan-out-guard tally, keyed by Stage name: (output-capped docs,
+        # relations dropped [ADR-0033 / #63], input-capped docs, mentions dropped [#68]). A
+        # RelationExtractor Provider exposes ``fanout_capped_documents``/
+        # ``fanout_dropped_relations`` (output cap) and ``mention_capped_documents``/
+        # ``mention_dropped_mentions`` (input cap) int attributes; the Runner reads them after
+        # the Stage runs and folds them into the Quality Report's RelationQuality. A Provider
+        # without them contributes (0, 0, 0, 0).
+        self._fanout_by_stage: dict[str, tuple[int, int, int, int]] = {}
         # #69: when True, a doc-level Stage's retained output is released from the in-memory
         # ``outputs`` dict once its last consumer has run (and a doc-level sink's output the moment
         # it commits) — the accumulators + Quality Report then read that output back from its
@@ -294,20 +296,27 @@ class LocalRunner:
         return count
 
     @staticmethod
-    def _provider_fanout(provider: object) -> tuple[int, int]:
-        """The (capped-documents, dropped-relations) fan-out-guard tally a Provider exposes.
+    def _provider_fanout(provider: object) -> tuple[int, int, int, int]:
+        """The relation fan-out-guard tally a Provider exposes.
 
-        A RelationExtractor Provider enforcing the ADR-0033 / #63 per-document relation cap
-        tallies how many documents it capped and how many relations it dropped in the
-        ``fanout_capped_documents``/``fanout_dropped_relations`` int attributes. Any Provider
-        without them (or with a non-int) contributes ``(0, 0)`` — read defensively so the seam
-        names no base class (ADR-0004).
+        Returns ``(output-capped-docs, dropped-relations, input-capped-docs,
+        dropped-mentions)``. A RelationExtractor Provider enforcing the ADR-0033 / #63
+        per-document relation OUTPUT cap tallies it in
+        ``fanout_capped_documents``/``fanout_dropped_relations``; the #68 per-document
+        mention INPUT cap tallies it in ``mention_capped_documents``/
+        ``mention_dropped_mentions``. Any Provider without an attribute (or with a non-int)
+        contributes ``0`` for it — read defensively so the seam names no base class (ADR-0004).
         """
-        capped = getattr(provider, "fanout_capped_documents", 0)
-        dropped = getattr(provider, "fanout_dropped_relations", 0)
+
+        def _int_attr(name: str) -> int:
+            value = getattr(provider, name, 0)
+            return value if isinstance(value, int) else 0
+
         return (
-            capped if isinstance(capped, int) else 0,
-            dropped if isinstance(dropped, int) else 0,
+            _int_attr("fanout_capped_documents"),
+            _int_attr("fanout_dropped_relations"),
+            _int_attr("mention_capped_documents"),
+            _int_attr("mention_dropped_mentions"),
         )
 
     @staticmethod
@@ -2082,28 +2091,33 @@ class LocalRunner:
         quality.per_type = dict(sorted(quality.per_type.items()))
         return quality
 
-    def _fanout_total(self, ordered: list[Stage]) -> tuple[int, int]:
-        """Sum the per-Stage relation fan-out-guard tallies across the run (ADR-0033 / #63).
+    def _fanout_total(self, ordered: list[Stage]) -> tuple[int, int, int, int]:
+        """Sum the per-Stage relation fan-out-guard tallies across the run (ADR-0033 / #63, #68).
 
-        Folds every relation/fused Stage's ``(capped-documents, dropped-relations)`` tally
-        (captured in :meth:`_execute_stage`) into one corpus-wide pair for the Quality Report.
-        A Stage restored from a checkpoint on resume never re-ran its Provider, so it
-        contributes nothing here — the audited tally reflects Providers that actually executed
-        this run (a resumed relation Stage's cap was already reflected in its committed output).
+        Folds every relation/fused Stage's ``(output-capped-docs, dropped-relations,
+        input-capped-docs, dropped-mentions)`` tally (captured in :meth:`_execute_stage`) into
+        one corpus-wide 4-tuple for the Quality Report. A Stage restored from a checkpoint on
+        resume never re-ran its Provider, so it contributes nothing here — the audited tally
+        reflects Providers that actually executed this run (a resumed relation Stage's caps were
+        already reflected in its committed output).
         """
-        capped = 0
-        dropped = 0
+        out_capped = 0
+        dropped_rel = 0
+        in_capped = 0
+        dropped_men = 0
         for stage in ordered:
-            c, d = self._fanout_by_stage.get(stage.name, (0, 0))
-            capped += c
-            dropped += d
-        return capped, dropped
+            oc, dr, ic, dm = self._fanout_by_stage.get(stage.name, (0, 0, 0, 0))
+            out_capped += oc
+            dropped_rel += dr
+            in_capped += ic
+            dropped_men += dm
+        return out_capped, dropped_rel, in_capped, dropped_men
 
     @staticmethod
     def _relation_quality(
         pipeline: Pipeline,
         records: list[StageOutput],
-        fanout: tuple[int, int] = (0, 0),
+        fanout: tuple[int, int, int, int] = (0, 0, 0, 0),
     ) -> RelationQuality | None:
         """Aggregate Relation-Extraction quality: per-type counts + confidence dist (S5).
 
@@ -2115,9 +2129,10 @@ class LocalRunner:
         original page) — so ``offset_resolving`` is True only when every relation
         carried a resolvable span. The per-type counts + confidence distribution are
         the S5 acceptance criterion ("relation counts + confidence land in the
-        Quality Report"). ``fanout`` is the run's ``(capped-documents, dropped-relations)``
-        quadratic-fan-out-guard tally (ADR-0033 / #63), surfaced as the audited "capped"
-        marker so a bounded pathological corpus is never silently truncated.
+        Quality Report"). ``fanout`` is the run's ``(output-capped-docs, dropped-relations,
+        input-capped-docs, dropped-mentions)`` fan-out-guard tally (ADR-0033 / #63 output cap;
+        #68 input mention cap), surfaced as the audited "capped" marker so a bounded
+        pathological corpus is never silently truncated.
         """
         relation_kinds = (
             CapabilityKind.RELATION_EXTRACTION,
@@ -2126,7 +2141,12 @@ class LocalRunner:
         if not any(s.capability in relation_kinds for s in pipeline.stages):
             return None
         quality = RelationQuality()
-        quality.fanout_capped_documents, quality.fanout_dropped_relations = fanout
+        (
+            quality.fanout_capped_documents,
+            quality.fanout_dropped_relations,
+            quality.mention_capped_documents,
+            quality.mention_dropped_mentions,
+        ) = fanout
         docs_with_relations: set[str] = set()
         for record in records:
             if not isinstance(record, RelationMention):

@@ -18,7 +18,7 @@ from latence_core.contracts import (
     Provenance,
 )
 from latence_core.stages.entity import GazetteerEntityExtractor
-from latence_core.stages.relation import PatternRelationExtractor
+from latence_core.stages.relation import PatternRelationExtractor, _Candidate
 
 _ENTITY_CONFIG = {
     "labels": {
@@ -376,3 +376,99 @@ def test_quadratic_fanout_guard_disabled_below_cap_is_noop() -> None:
     assert len(relations) == 1
     assert provider.fanout_capped_documents == 0
     assert provider.fanout_dropped_relations == 0
+
+
+def test_input_mention_cap_bounds_candidate_transient() -> None:
+    # #68 regression: the #63 output cap trims the EMITTED relations, but the O(mentions²)
+    # candidate list is still materialised in full BEFORE the sort trims it — unbounded
+    # when a wide window_chars defeats the inner-loop break. The input-side mention cap
+    # (max_mentions_per_document) bounds the mentions that reach the scan, so the transient
+    # candidate list is O(cap²), not O(count²). Reverting the input cap makes _find_candidates
+    # receive all `count` mentions and build the full quadratic transient — this assertion
+    # (the scan sees at most `mention_cap` mentions) then fails, and the audited input tallies
+    # would be 0.
+    count = 400  # 400 same-typed mentions => 400*399/2 = 79_800 pairs, uncapped.
+    chunk, mentions = _entity_storm_chunk(count)
+    mention_cap = 50
+    cfg = {
+        "relations": {
+            "co_occurs": {"head": "ORG", "tail": "ORG", "symmetric": True},
+        },
+        "window_chars": 100_000,  # wide window: the inner-loop break never fires.
+        # Output cap generous so it does NOT do the trimming — the input cap must.
+        "max_relations_per_document": 10_000,
+        "max_mentions_per_document": mention_cap,
+    }
+    provider = PatternRelationExtractor(cfg)
+
+    # Wrap _find_candidates to record how many mentions actually enter the O(mentions²) scan.
+    seen_input_sizes: list[int] = []
+    original = provider._find_candidates
+
+    def _spy(ordered: list[EntityMention], text: str) -> list[_Candidate]:
+        seen_input_sizes.append(len(ordered))
+        return original(ordered, text)
+
+    provider._find_candidates = _spy  # type: ignore[method-assign]
+    relations = list(provider.relate([chunk], mentions))
+
+    # The TRANSIENT is bounded on the input side: the scan never saw more than the cap.
+    assert seen_input_sizes == [mention_cap]
+    # So the emitted relations are O(cap²), not O(count²) — proving the output cap didn't
+    # do the trimming (it was set generously above the resulting count).
+    assert len(relations) == mention_cap * (mention_cap - 1) // 2
+    assert provider.fanout_capped_documents == 0  # output cap not hit
+    assert provider.fanout_dropped_relations == 0
+    # The input cap IS audited: one document trimmed, the excess mentions dropped.
+    assert provider.mention_capped_documents == 1
+    assert provider.mention_dropped_mentions == count - mention_cap
+
+
+def test_input_mention_cap_keeps_lowest_ordered_prefix_and_preserves_offsets() -> None:
+    # #68: the retained mentions are the lowest-ordered document-order prefix (by char
+    # offset, then record id), so the covering spans / provenance offsets of the retained
+    # relations are exactly those of the first `cap` mentions — unchanged, not a random
+    # subset. Determinism: a second run is byte-identical.
+    count = 200
+    chunk, mentions = _entity_storm_chunk(count)
+    mention_cap = 20
+    cfg = {
+        "relations": {"co_occurs": {"head": "ORG", "tail": "ORG", "symmetric": True}},
+        "window_chars": 100_000,
+        "max_mentions_per_document": mention_cap,
+    }
+    provider = PatternRelationExtractor(cfg)
+    relations = list(provider.relate([chunk], mentions))
+
+    # Every relation's endpoints are among the first `cap` mentions in document order.
+    kept_ids = {m.record_id for m in mentions[:mention_cap]}
+    for r in relations:
+        assert r.head_mention_id in kept_ids
+        assert r.tail_mention_id in kept_ids
+    # The covering span of every retained relation stays within the first cap mentions'
+    # char extent — offsets are preserved, never shifted by the cap.
+    max_kept_end = max(m.provenance.char_end or 0 for m in mentions[:mention_cap])
+    for r in relations:
+        assert r.provenance.char_start is not None
+        assert r.provenance.char_end is not None
+        assert r.provenance.char_end <= max_kept_end
+
+    # Deterministic: a fresh Provider yields byte-identical output.
+    provider2 = PatternRelationExtractor(cfg)
+    relations2 = list(provider2.relate([chunk], mentions))
+    assert [r.model_dump_json() for r in relations] == [r.model_dump_json() for r in relations2]
+
+
+def test_input_mention_cap_disabled_below_cap_is_noop() -> None:
+    # A normal document under the input cap is untouched and reports no input capping.
+    chunk = _doc_chunk("Alice works for Acme Corp.")
+    mentions = _mentions(chunk)
+    cfg = {
+        "relations": {"works_for": {"head": "PERSON", "tail": "ORG", "triggers": ["works for"]}},
+        "max_mentions_per_document": 5_000,
+    }
+    provider = PatternRelationExtractor(cfg)
+    relations = list(provider.relate([chunk], mentions))
+    assert len(relations) == 1
+    assert provider.mention_capped_documents == 0
+    assert provider.mention_dropped_mentions == 0

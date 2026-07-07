@@ -1,10 +1,11 @@
 # Streaming, memory-bounded local Runner (accepted)
 
-**Status: accepted** — built (from G1-RESULTS Lane 6 / issue #63, completed by #69). All three
-named transients are now bounded — the whole-corpus Export buffer, the whole-string checkpoint
-write, and (with #69) the executor's retained doc-level `outputs` dict — and the quadratic guard
-is in place; see **Built vs. remaining** below for exactly which mechanisms landed and which stay
-flagged for the perf rig.
+**Status: accepted** — built (from G1-RESULTS Lane 6 / issue #63, completed by #69, input-side
+relation transient bounded by #68). All three named transients are now bounded — the whole-corpus
+Export buffer, the whole-string checkpoint write, and (with #69) the executor's retained doc-level
+`outputs` dict — the quadratic guard bounds both the emitted relation output (#63) and the
+`O(mentions²)` candidate transient on the input side (#68); see **Built vs. remaining** below for
+exactly which mechanisms landed and which stay flagged for the perf rig.
 
 ## Problem
 The local Runner is a whole-corpus-in-memory DAG executor: `runner.py` holds `outputs: dict[str, list[StageOutput]]` (every stage's full record list simultaneously), each stage is materialized `list(provider.…)`, and `stages/export.py` does `pa.Table.from_pylist(flat)` (the entire corpus as one Python list + Arrow table before write). G1 measured peak RSS ≈ **62 MB per 1k docs, linear**; ceiling = `RAM / 62MB-per-1k`; a low-cardinality corpus drove records **quadratic** in docs (~0.084·n²; 5k docs → ~12 GB). No backpressure.
@@ -55,6 +56,21 @@ Runner execution loop + checkpoint format (batch-granular) + Export writer chang
   into the **persisted** Quality Report is covered by an end-to-end regression test
   (`test_fanout_cap_audit_reaches_quality_report_end_to_end`), not just the Provider-level cap —
   so a broken wiring can no longer silently zero the audited marker.
+* **Input-side mention cap (#68).** The emitted-fan-out cap above bounds the *output*, but
+  `_find_candidates` still materialised the full `O(mentions²)` candidate list on the **input**
+  side before the sort trimmed it — unbounded when a large operator-configured `window_chars`
+  defeats the inner-loop break (operator-config-gated, the same trust tier as the output cap).
+  Mirroring #33's input-side discipline exactly (profiling caps the *distinct entities* that enter
+  its `O(n²)` pairing), `PatternRelationExtractor` now caps the *mentions per document* that enter
+  the candidate scan (`max_mentions_per_document`, default 5_000), so the transient candidate list
+  is `O(cap²)` regardless of `window_chars`. The cap keeps the lowest-ordered document-order prefix
+  the scan already relies on, so covering spans / page provenance / Evidence offsets of the
+  retained relations are unchanged (a stable, deterministic prefix). Documents trimmed and mentions
+  dropped are audited into `RelationQuality` (`mention_capped_documents` /
+  `mention_dropped_mentions`), bumping `QUALITY_SCHEMA_VERSION` 14 → 15 (additive; a v14 report
+  still validates). The Runner threads the input-cap tally alongside the output-cap tally through
+  the same `_execute_stage` → `_fanout_total` → `_relation_quality` seam into the persisted report,
+  end-to-end regression-tested (`test_mention_cap_audit_reaches_quality_report_end_to_end`).
 * **Reduced-scale memory-scaling validation** — a `tracemalloc` test proves the Export's peak is
   bounded (not corpus-linear) when the corpus is fed as a generator; the determinism (byte-stable
   checkpoints), provenance/offset, Evidence, and delta/Purge-read guarantees are pinned by
@@ -83,10 +99,6 @@ Runner execution loop + checkpoint format (batch-granular) + Export writer chang
 * The real **100k / 1M peak-RSS + no-OOM-at-ceiling** numbers still need a dedicated perf rig
   (the DoD Hardening "no OOM at the documented ceiling" is validated at reduced scale here; the
   headline numbers stay flagged, per the issue).
-* `PatternRelationExtractor._find_candidates` still builds the full `O(mentions²)` candidate list
-  on the **input** side before the emitted-fan-out cap trims the output (operator-config-gated by
-  a large `window_chars`); bounding that input transient is #68, a separate follow-up.
-
 ## Rejected
 - Record-by-record streaming (batch amortizes overhead and matches batching providers).
 - A queue/thread backpressure model (the local Runner is single-process; bounded batches ARE the backpressure — a real distributed backpressure story is the Databricks/Airflow adapter's job, ADR-0003).

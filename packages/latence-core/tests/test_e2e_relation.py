@@ -392,6 +392,108 @@ def _storm_docs(tmp_path: Path, count: int) -> Path:
     return docs
 
 
+def _mention_cap_pipeline(store: str, docs_dir: Path, count: int, mention_cap: int) -> Pipeline:
+    """Same storm corpus, but the relation Stage sets ``max_mentions_per_document`` (#68)
+    with a generous ``max_relations_per_document`` — so the INPUT mention cap does the
+    bounding, not the output relation cap. The emitted relations become O(mention_cap²).
+    """
+    terms = ", ".join(f"E{i:03d}" for i in range(count))
+    return Pipeline.from_yaml_text(
+        f"""
+name: mention-cap-storm
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs_dir}'
+      sensitivity: internal
+      extensions: [txt, md]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [{terms}]
+          confidence: 0.9
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [chunk, entities]
+    config:
+      window_chars: 100000
+      max_relations_per_document: 10000000
+      max_mentions_per_document: {mention_cap}
+      relations:
+        co_occurs:
+          head: ORG
+          tail: ORG
+          symmetric: true
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [relations]
+"""
+    )
+
+
+def test_mention_cap_audit_reaches_quality_report_end_to_end(tmp_path: Path) -> None:
+    """#68 regression: the audited INPUT-side mention-cap marker must survive the full
+    Runner seam into the persisted Quality Report — not just the Provider.
+
+    A single low-cardinality storm document would build an O(count²) candidate transient;
+    the per-document mention INPUT cap bounds the mentions that enter the scan (so the
+    emitted relations are O(mention_cap²)), and the capped/dropped tallies must be threaded
+    from the Provider through _execute_stage -> _fanout_total -> _relation_quality into
+    RelationQuality.mention_capped_documents / mention_dropped_mentions. If any link of that
+    Runner wiring were reverted or broken, these fields would silently read 0 in the
+    persisted report while the Provider-level tests stayed green. This test locks it.
+    """
+    count = 120  # 120 ORG mentions; input cap trims them to `mention_cap` before the scan.
+    mention_cap = 30
+    docs = _storm_docs(tmp_path, count)
+    store = f"file://{tmp_path}/store"
+    report = LocalRunner().run(
+        _mention_cap_pipeline(store, docs, count, mention_cap), run_id="mcap"
+    )
+    s = Storage.for_uri(store)
+    base = f"{store}/_latence/runs/mcap"
+
+    # The exported relations are O(mention_cap²) — the input cap did the bounding (the
+    # output relation cap was set far above this count so it never triggered).
+    rows = [
+        json.loads(line)
+        for line in s.read_text(f"{base}/export/records.jsonl").splitlines()
+        if line.strip()
+    ]
+    relations = [r for r in rows if "head_mention_id" in r]
+    assert len(relations) == mention_cap * (mention_cap - 1) // 2
+
+    # The audited input-cap marker reached the PERSISTED Quality Report (the Runner seam).
+    persisted = QualityReport.model_validate_json(s.read_text(f"{base}/quality-report.json"))
+    assert persisted.relations is not None
+    assert persisted.relations.mention_capped_documents == 1
+    assert persisted.relations.mention_dropped_mentions == count - mention_cap
+    # The output relation cap was NOT the thing that bounded it.
+    assert persisted.relations.fanout_capped_documents == 0
+    assert persisted.relations.fanout_dropped_relations == 0
+    # The returned report agrees with the persisted one.
+    assert report.relations is not None
+    assert report.relations.mention_capped_documents == 1
+    assert report.relations.mention_dropped_mentions == count - mention_cap
+
+
 def _storm_pipeline(store: str, docs_dir: Path, count: int, cap: int) -> Pipeline:
     """Source -> Parse -> Chunk -> Entity -> Relation -> Export, configured so the single
     storm document blows past ``cap`` symmetric ORG-ORG relations. The gazetteer recognises

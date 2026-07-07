@@ -52,6 +52,27 @@ tallied on the Provider (``fanout_capped_documents`` / ``fanout_dropped_relation
 and surfaced into the Quality Report's RelationQuality — the audited "capped" marker,
 so a capped run is never silently truncated. This mirrors the discipline #33 already
 applied to profiling's per-document pair fan-out.
+
+**Input-side mention cap (#68).** The ``max_relations_per_document`` cap bounds the
+*emitted output*, but :meth:`_find_candidates` still materialises the full
+``O(mentions²)`` candidate list in memory **before** the sort trims it — so the
+transient itself is unbounded even when the output is capped. The inner-loop ``break``
+bounds that transient only under a small ``window_chars`` (the shipped default 200
+keeps pairs local); a large operator-configured ``window_chars`` defeats the break and
+lets one document's candidate list grow quadratic before the output cap ever applies
+(operator-config-gated, the same trust tier as the output cap). Mirroring the #33
+input-side discipline exactly (profiling caps the *distinct entities* that enter its
+``O(n²)`` pairing), the Provider caps the *mentions per document* that enter the
+candidate scan at ``max_mentions_per_document`` (default 5_000) — so the transient is
+``O(cap²)`` regardless of ``window_chars``, not just the output. The cap keeps the
+lowest-ordered mentions (by document char offset, then record id) — the same
+document-order prefix the scan already relies on, so covering spans, page provenance,
+and Evidence offsets of the retained relations are unchanged; it is a stable,
+deterministic prefix, never a random subset. Documents whose mention set was trimmed
+and the number of mentions dropped are tallied on the Provider
+(``mention_capped_documents`` / ``mention_dropped_mentions``) and surfaced into the
+Quality Report's RelationQuality — the audited marker, so a bounded document is never
+silently truncated.
 """
 
 from __future__ import annotations
@@ -102,6 +123,18 @@ _Candidate = tuple[_Rule, "EntityMention", "EntityMention", int, int]
 # quadratic. Configurable per Pipeline via ``max_relations_per_document``.
 _MAX_RELATIONS_PER_DOCUMENT = 10_000
 
+# Default per-document INPUT mention cap (#68): at most this many mentions from one
+# document enter the O(mentions²) candidate scan, so the transient candidate list is
+# O(cap²) rather than O(mentions²) — bounding it BEFORE the output cap trims, not just
+# after (which the #63 ``max_relations_per_document`` cap alone leaves unbounded when a
+# large ``window_chars`` defeats the inner-loop break). Sized generously above any
+# realistic document's mention count so it never trims real input, but a pathological
+# same-typed mention storm is bounded on the input side. This mirrors profiling's
+# ``_MAX_ENTITIES_PER_DOCUMENT`` (#33). Configurable via ``max_mentions_per_document``;
+# a value ``<= 0`` disables it (unbounded transient — not recommended on untrusted
+# corpora with a wide ``window_chars``).
+_MAX_MENTIONS_PER_DOCUMENT = 5_000
+
 
 class PatternRelationExtractor:
     """Zero-shot trigger-phrase RelationExtractor Provider.
@@ -133,14 +166,27 @@ class PatternRelationExtractor:
         max_relations_per_document: int  — quadratic-fan-out guard (ADR-0033 / #63):
             the max relations one document may emit (default 10_000). Applied after the
             deterministic candidate sort, so the retained relations are the
-            lowest-ordered stable prefix. Bounds the O(mentions²) a low-cardinality
-            corpus produces. A value ``<= 0`` disables the cap (unbounded, the old
-            behaviour) — not recommended on untrusted corpora.
+            lowest-ordered stable prefix. Bounds the O(mentions²) OUTPUT a
+            low-cardinality corpus produces. A value ``<= 0`` disables the cap
+            (unbounded, the old behaviour) — not recommended on untrusted corpora.
+        max_mentions_per_document: int  — input-side mention cap (#68): the max
+            mentions from one document that enter the O(mentions²) candidate scan
+            (default 5_000), so the transient candidate list is O(cap²) — bounding the
+            transient itself, not just the emitted output. The retained mentions are the
+            lowest-ordered by document char offset (then record id), the same
+            document-order prefix the scan relies on, so covering spans / page
+            provenance / Evidence offsets are unchanged. A value ``<= 0`` disables it
+            (unbounded transient) — not recommended on untrusted corpora with a wide
+            ``window_chars``.
 
     Audit attributes (read after ``relate`` returns, e.g. by the Runner into the
-    Quality Report — the ADR-0033 "capped" marker):
-        fanout_capped_documents: int  — how many documents hit the cap.
+    Quality Report — the audited "capped" markers):
+        fanout_capped_documents: int  — how many documents hit the output relation cap
+            (ADR-0033 / #63).
         fanout_dropped_relations: int  — total relations dropped across those documents.
+        mention_capped_documents: int  — how many documents hit the input mention cap
+            (#68).
+        mention_dropped_mentions: int  — total mentions dropped across those documents.
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -151,11 +197,17 @@ class PatternRelationExtractor:
         self._max_relations_per_document = int(
             config.get("max_relations_per_document", _MAX_RELATIONS_PER_DOCUMENT)
         )
+        self._max_mentions_per_document = int(
+            config.get("max_mentions_per_document", _MAX_MENTIONS_PER_DOCUMENT)
+        )
         self._rules = self._compile_rules(config.get("relations", {}))
         # Audited fan-out-guard tallies (ADR-0033 / #63), reset per ``relate`` call so a
         # reused Provider instance reports only the current run's capping.
         self.fanout_capped_documents = 0
         self.fanout_dropped_relations = 0
+        # Audited input-side mention-cap tallies (#68), likewise reset per ``relate`` call.
+        self.mention_capped_documents = 0
+        self.mention_dropped_mentions = 0
 
     # -- config compilation -------------------------------------------------
 
@@ -215,6 +267,8 @@ class PatternRelationExtractor:
         # Reset the fan-out-guard tallies so a reused Provider reports only this call.
         self.fanout_capped_documents = 0
         self.fanout_dropped_relations = 0
+        self.mention_capped_documents = 0
+        self.mention_dropped_mentions = 0
         chunk_list = list(chunks)
         # Reconstruct per-document text + page map from the chunks (each chunk knows
         # its own [char_start, char_end) in the parent document, S3). This lets a
@@ -254,6 +308,18 @@ class PatternRelationExtractor:
         # Mentions in document order, so the "between" text and covering span are
         # well-defined. Mentions always carry a char span (contract-enforced).
         ordered = sorted(mentions, key=lambda m: (m.provenance.char_start or 0, m.record_id))
+        # Input-side mention cap (#68): bound the mentions that enter the O(mentions²)
+        # candidate scan BEFORE it materialises the transient, so the candidate list is
+        # O(cap²) regardless of ``window_chars`` (the #63 output cap alone leaves the
+        # transient unbounded when a wide window defeats the inner-loop break). The
+        # lowest-ordered prefix is kept — the same document-order the scan relies on, so
+        # covering spans / page provenance / Evidence offsets of retained relations are
+        # unchanged. A cap <= 0 disables it. The drop is audited into the Quality Report.
+        mention_cap = self._max_mentions_per_document
+        if 0 < mention_cap < len(ordered):
+            self.mention_dropped_mentions += len(ordered) - mention_cap
+            self.mention_capped_documents += 1
+            ordered = ordered[:mention_cap]
         candidates = self._find_candidates(ordered, text)
         # Deterministic order within a document: by covering-span start, then label,
         # then head/tail ids.

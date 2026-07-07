@@ -62,7 +62,12 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # stable ``error_category`` tag (``"contract"``/``"config"``/``"provider"``/``"storage"``/
 # ``"screening"``/``"unknown"``); a Stage that succeeded records ``error_count=0`` and
 # ``error_category=None``. Additive with defaults, so a v13 report still validates.
-QUALITY_SCHEMA_VERSION = 14
+# v15 (#68): :class:`RelationQuality` gains ``mention_capped_documents`` and
+# ``mention_dropped_mentions`` — the audited input-side mention-cap marker (how many documents
+# hit the per-document mention INPUT cap that bounds the O(mentions²) candidate transient, and
+# how many mentions were dropped). Both default to 0, so a v14 report still validates, but a v14
+# and a v15 report differ in the RelationQuality shape, hence the bump.
+QUALITY_SCHEMA_VERSION = 15
 
 
 class StageMetrics(BaseModel):
@@ -292,9 +297,13 @@ class RelationQuality(BaseModel):
 
     ``fanout_capped_documents`` / ``fanout_dropped_relations`` are the audited
     quadratic-fan-out-guard marker (ADR-0033 / #63): how many documents hit the
-    per-document relation cap and how many relations were dropped as a result. Both
-    zero on a normal run; non-zero surfaces that a low-cardinality/pathological corpus
-    was bounded rather than silently allowed to blow up records + downstream graph edges.
+    per-document relation OUTPUT cap and how many relations were dropped as a result.
+    ``mention_capped_documents`` / ``mention_dropped_mentions`` are the audited
+    input-side marker (#68): how many documents hit the per-document mention INPUT cap
+    (bounding the ``O(mentions²)`` candidate transient before the output cap trims) and
+    how many mentions were dropped as a result. All zero on a normal run; non-zero
+    surfaces that a low-cardinality/pathological corpus was bounded rather than silently
+    allowed to blow up records + downstream graph edges (or the transient candidate list).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -304,6 +313,8 @@ class RelationQuality(BaseModel):
     documents_with_relations: int = 0
     fanout_capped_documents: int = 0
     fanout_dropped_relations: int = 0
+    mention_capped_documents: int = 0
+    mention_dropped_mentions: int = 0
     per_type: dict[str, int] = Field(default_factory=dict)
     confidence: ConfidenceHistogram = Field(default_factory=ConfidenceHistogram)
 
