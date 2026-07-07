@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
 
+from latence_core.providers.profile import ProviderProfile, profile_of
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
@@ -474,6 +476,11 @@ class ProviderRegistry:
         self._group = group
         self._entry_points: dict[str, metadata.EntryPoint] | None = None
         self._loaded: dict[str, type] = {}
+        # P3-F1: a provider's declared ProviderProfile, cached alongside ``_loaded``.
+        # A ``None`` value is a *cached* "declares no profile" (distinct from "not yet
+        # read", which is the key being absent), so ``profile()`` never re-reads a
+        # provider that legitimately declares none and never fabricates one.
+        self._profiles: dict[str, ProviderProfile | None] = {}
 
     def _discover(self) -> dict[str, metadata.EntryPoint]:
         if self._entry_points is None:
@@ -502,3 +509,47 @@ class ProviderRegistry:
             raise TypeError(msg)
         self._loaded[name] = obj
         return obj
+
+    def profile(self, name: str) -> ProviderProfile | None:
+        """Return the Provider's declared :class:`ProviderProfile`, or ``None`` if none (P3-F1).
+
+        Loads the Provider class (reading a profile requires the class object) and reads
+        whichever declaration form it uses — a ``profile`` classmethod or a ``PROFILE``
+        ClassVar (:func:`~latence_core.providers.profile.profile_of`). A Provider that
+        declares no profile returns ``None``; the registry **never fabricates** one
+        (ADR-0036 §2). The result is cached alongside ``_loaded`` so a second call is free,
+        with a cached ``None`` meaning "declares none" (not "not yet read").
+
+        Raises ``KeyError`` for an unknown name (same as :meth:`load`) and ``TypeError``
+        for a malformed declaration (e.g. a ``profile`` classmethod that returns a non-
+        ``ProviderProfile``) — a typo surfaces rather than reading as "no profile".
+        """
+        if name in self._profiles:
+            return self._profiles[name]
+        provider_cls = self.load(name)
+        prof = profile_of(provider_cls)
+        self._profiles[name] = prof
+        return prof
+
+    def profiles(self) -> dict[str, ProviderProfile | None]:
+        """Map every registered Provider name to its declared profile (or ``None``) (P3-F1).
+
+        Iterates :meth:`names` and reads each Provider's profile. Reading a profile
+        **requires loading** the Provider (importing it), which is acceptable for tooling
+        and the bake-off — the lazy single-name :meth:`profile` path stays lazy; only this
+        map forces the loads. A Provider whose **import raises** (a missing heavy/optional
+        dep, ADR-0016) is skipped-and-flagged — its name is simply omitted from the map,
+        never crashing the whole sweep — so a partially-installed workspace still yields
+        the profiles of every importable Provider. A Provider that imports cleanly but
+        declares no profile is present with a ``None`` value (a declared absence, distinct
+        from an import failure's omission).
+        """
+        result: dict[str, ProviderProfile | None] = {}
+        for name in self.names():
+            try:
+                result[name] = self.profile(name)
+            except Exception:  # noqa: BLE001 - skip-and-flag: one bad import never crashes the map
+                # An import error (missing torch/openai/… for an uninstalled heavy Provider,
+                # ADR-0016) or a malformed declaration is skipped, not fatal — omit the name.
+                continue
+        return result

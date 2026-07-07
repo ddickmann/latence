@@ -203,3 +203,20 @@ def test_missing_gliner_dependency_raises_clear_error(monkeypatch: pytest.Monkey
     extractor = GlinerEntityExtractor({"labels": ["person"]})
     with pytest.raises(ImportError, match="pip install latence-ner-gliner"):
         list(extractor.extract([_chunk("Alice spoke.")]))
+
+
+def test_declares_profile_either_verified_apache() -> None:
+    # P3-F1 (ADR-0036 §2): the GLiNER Provider declares a profile the registry surfaces.
+    # compute="either" (CPU or GPU), verified Apache-2.0 (weights AND code, ADR-0012),
+    # the default checkpoint as model_id, and deterministic=False (learned float inference).
+    from latence_core.providers.profile import ProviderProfile, profile_of
+
+    prof = profile_of(GlinerEntityExtractor)
+    assert isinstance(prof, ProviderProfile)
+    assert prof.compute == "either"
+    assert prof.model_id == "urchade/gliner_multi-v2.1"
+    assert prof.license == "Apache-2.0"
+    assert prof.license_verified is True
+    assert prof.deterministic is False
+    assert prof.batch is True
+    assert prof.cost_per_1k is None

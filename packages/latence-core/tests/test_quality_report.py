@@ -28,9 +28,10 @@ from latence_core.quality import (
 from latence_core.runner import LocalRunner
 
 
-def test_schema_version_is_v15() -> None:
-    assert QUALITY_SCHEMA_VERSION == 15
-    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 15
+def test_schema_version_is_v16() -> None:
+    # v16 (P3-F1): StageMetrics gained the provider-profile + device-routing columns.
+    assert QUALITY_SCHEMA_VERSION == 16
+    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 16
 
 
 def test_completeness_passes_only_when_provenance_classification_and_offsets_align() -> None:

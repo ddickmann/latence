@@ -67,7 +67,15 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # hit the per-document mention INPUT cap that bounds the O(mentions²) candidate transient, and
 # how many mentions were dropped). Both default to 0, so a v14 report still validates, but a v14
 # and a v15 report differ in the RelationQuality shape, hence the bump.
-QUALITY_SCHEMA_VERSION = 15
+# v16 (P3-F1, ADR-0036 §2): each :class:`StageMetrics` gains the provider-profile + device-routing
+# columns surfaced from the declared :class:`~latence_core.providers.profile.ProviderProfile` and
+# the :func:`~latence_core.providers.device.select_device` decision the Runner made for the Stage:
+# ``compute`` (cpu|gpu|either|None), ``model_id``, ``license`` (SPDX or UNVERIFIED), the requested
+# ``device`` config value, the ``device_selected`` the seam resolved (cpu/cuda/None), ``skipped``
+# (True when a GPU-only provider was skipped-with-flag on a CPU-only host — the G1 posture), and
+# ``skip_reason``. All default to None/False, so a v15 report still validates; a run whose
+# providers declare no profile leaves them None (never fabricated).
+QUALITY_SCHEMA_VERSION = 16
 
 
 class StageMetrics(BaseModel):
@@ -105,6 +113,20 @@ class StageMetrics(BaseModel):
     # that triggered the error (the no-PII discipline the whole report keeps).
     error_count: int = Field(default=0)
     error_category: str | None = Field(default=None)
+    # P3-F1 (ADR-0036 §2): the provider-profile + device-routing columns for this Stage,
+    # read from the Provider's declared ProviderProfile and the device seam's decision.
+    # A Provider that declares no profile leaves ``compute``/``model_id``/``license`` None
+    # (never fabricated). ``device`` is the requested config value (``auto`` default);
+    # ``device_selected`` is what ``select_device`` resolved (``"cpu"``/``"cuda"``, or None
+    # when skipped); ``skipped`` + ``skip_reason`` record the G1 skip-with-flag posture for a
+    # GPU-only provider on a CPU-only host. All counts/flags only — no fabricated GPU numbers.
+    compute: str | None = Field(default=None)
+    model_id: str | None = Field(default=None)
+    license: str | None = Field(default=None)
+    device: str | None = Field(default=None)
+    device_selected: str | None = Field(default=None)
+    skipped: bool = Field(default=False)
+    skip_reason: str | None = Field(default=None)
 
 
 class CompletenessCheck(BaseModel):

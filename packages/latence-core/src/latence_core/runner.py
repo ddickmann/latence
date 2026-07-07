@@ -66,6 +66,8 @@ from latence_core.goldset import (
 )
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
+from latence_core.providers.device import DeviceDecision, select_device
+from latence_core.providers.profile import ProviderProfile, profile_of
 from latence_core.quality import (
     ChunkQuality,
     CompletenessCheck,
@@ -330,6 +332,48 @@ class LocalRunner:
         """
         value = getattr(provider, "endpoint_retries", 0)
         return value if isinstance(value, int) else 0
+
+    # -- device routing (P3-F1, ADR-0036 §2) -------------------------------
+
+    def _route_device(
+        self, stage: Stage, profile: ProviderProfile | None
+    ) -> DeviceDecision:
+        """Route a Stage's requested device against its Provider's declared profile.
+
+        Reads the ``device`` config value (``auto|cpu|cuda``, default ``auto``) and calls
+        the dep-light :func:`~latence_core.providers.device.select_device` seam against the
+        Provider's declared :class:`~latence_core.providers.profile.ProviderProfile`
+        (``None`` when it declares none). Device *placement* stays the adapter's job
+        (ADR-0003/0036 §2) — the Runner only routes + records the decision. The returned
+        :class:`~latence_core.providers.device.DeviceDecision` drives the G1 skip-with-flag
+        posture: a GPU-only Provider on a CPU-only host is skipped (flagged), never crashed.
+        """
+        requested = stage.config.get("device", "auto")
+        # ``select_device`` validates the requested string (a bad value is a ConfigError-y
+        # ValueError); a non-string config value is coerced to its str form first so a typo
+        # surfaces as an "unknown device" message rather than a TypeError.
+        return select_device(str(requested), profile)
+
+    @staticmethod
+    def _profile_metric_fields(
+        profile: ProviderProfile | None, requested: str, decision: DeviceDecision
+    ) -> dict[str, object]:
+        """The StageMetrics profile/device columns for a Stage (P3-F1).
+
+        Surfaces the declared profile's ``compute``/``model_id``/``license`` (all ``None``
+        when the Provider declares no profile — never fabricated) plus the device routing:
+        the requested ``device``, the ``device_selected`` the seam resolved, and the
+        ``skipped``/``skip_reason`` skip-with-flag markers.
+        """
+        return {
+            "compute": profile.compute if profile is not None else None,
+            "model_id": profile.model_id if profile is not None else None,
+            "license": profile.license if profile is not None else None,
+            "device": requested,
+            "device_selected": decision.device,
+            "skipped": decision.skipped,
+            "skip_reason": decision.reason if decision.skipped else None,
+        }
 
     # -- state layout ------------------------------------------------------
 
@@ -726,10 +770,41 @@ class LocalRunner:
                 )
                 records_in = len(incoming)
 
+            # P3-F1 (ADR-0036 §2): the requested device + the Provider's declared profile
+            # are re-derived on BOTH the resume and the fresh path so the profile/device
+            # columns (incl. a skip flag) are STICKY across resume — reading the profile is
+            # a cached, cheap class import, and re-routing never executes the Provider. A
+            # malformed declaration or an unknown provider is NOT routed (it must re-surface
+            # as a real failure on the execution path), so it falls through as "no profile".
+            requested_device = str(stage.config.get("device", "auto"))
+            load_ok = True
+            try:
+                stage_profile = profile_of(self._registry.load(stage.provider))
+            except Exception:  # noqa: BLE001 - a load/declaration error is re-raised in the try below
+                # An unknown provider or a malformed profile declaration must NOT be routed
+                # (and never skipped-with-flag, which would mask the real error) — fall through
+                # to the normal execution path, which re-loads inside the try and re-raises with
+                # full failure handling (a FAIL Quality Report + a typed-error span). Route the
+                # metric columns as "no profile" but force the non-skip path below.
+                stage_profile = None
+                load_ok = False
+            if load_ok:
+                device_decision = self._route_device(stage, stage_profile)
+            else:
+                device_decision = DeviceDecision(
+                    device=None, skipped=False, reason="provider load deferred to execution"
+                )
+            profile_fields = self._profile_metric_fields(
+                stage_profile, requested_device, device_decision
+            )
+
             if storage.exists(ckpt_uri):
                 # Resume: this Stage already completed. Reload ITS OWN output into
                 # the dict and skip re-running. A downstream Stage still reads this
-                # value as one of its parents' outputs.
+                # value as one of its parents' outputs. The profile/device columns
+                # (re-derived above) are re-surfaced so a skipped GPU Stage still
+                # reports skipped=True + its profile columns on resume — sticky, not
+                # silently dropped to a plain non-skipped Stage.
                 own_output = self._read_checkpoint(
                     storage, ckpt_uri, self._output_type(stage, pipeline)
                 )
@@ -744,6 +819,47 @@ class LocalRunner:
                         duration_seconds=0.0,
                         from_checkpoint=True,
                         runner=runner_name,
+                        **profile_fields,  # type: ignore[arg-type]
+                    )
+                )
+                _release_dead_parents(stage)
+                continue
+
+            # P3-F1 (ADR-0036 §2): the requested device + declared profile were routed above
+            # (before the resume check) so the profile/device columns are sticky across resume.
+            # A GPU-only Provider on a CPU-only host is skipped-with-flag (the G1 posture) — the
+            # Stage produces an empty output, an (empty) checkpoint is written so the skip is
+            # sticky on resume, and the skip is recorded in the Quality Report — never crashed,
+            # never a fabricated GPU number. Device *placement* stays the adapter's job; the
+            # Runner only routes + records. A Provider that declares no profile follows the
+            # request; a malformed declaration / unknown provider (load_ok=False) is forced onto
+            # the non-skip path below, where execution re-loads and re-raises the real error.
+            if device_decision.skipped:
+                # Skip-with-flag: do not instantiate/run the Provider. Emit an empty output +
+                # empty checkpoint so a resume sees the Stage as already handled (the skip is
+                # sticky), and record the skip in the Stage's metrics. Downstream Stages read an
+                # empty parent output — the stack harness reads the skip flag from the report.
+                empty_output: list[StageOutput] = []
+                outputs[stage.name] = empty_output
+                self._write_checkpoint(
+                    storage,
+                    ckpt_uri,
+                    empty_output,
+                    wal_uri=wal_uri,
+                    stage_name=stage.name,
+                    tracer=tracer,
+                )
+                self._wal_append(storage, wal_uri, _WAL_STAGE_COMMIT, stage.name)
+                stage_metrics.append(
+                    StageMetrics(
+                        name=stage.name,
+                        capability=stage.capability.value,
+                        provider=stage.provider,
+                        records_in=records_in,
+                        records_out=0,
+                        duration_seconds=0.0,
+                        runner=runner_name,
+                        **profile_fields,  # type: ignore[arg-type]
                     )
                 )
                 _release_dead_parents(stage)
@@ -802,6 +918,7 @@ class LocalRunner:
                         endpoint_retries=self._drain_retry_count(),
                         error_count=1,
                         error_category=category,
+                        **profile_fields,  # type: ignore[arg-type]
                     )
                 )
                 try:
@@ -857,6 +974,7 @@ class LocalRunner:
                     duration_seconds=round(duration, 6),
                     runner=runner_name,
                     endpoint_retries=self._drain_retry_count(),
+                    **profile_fields,  # type: ignore[arg-type]
                 )
             )
             # #69: release any doc-level parent whose last consumer just ran — its checkpoint is

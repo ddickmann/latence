@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import EntityMention
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -74,6 +75,41 @@ class GlinerEntityExtractor:
     The model is loaded lazily and cached on first ``extract`` call, so constructing
     the Provider (which the Runner does for every Stage) never downloads weights.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2) for the default GLiNER checkpoint.
+
+        ``compute="either"``: GLiNER runs in-process on a laptop CPU (the ADR-0007 CPU
+        path — first contact is ``pip install`` → learned NER, no CUDA) and accelerates on
+        a GPU when one is present, so the device seam routes it to ``auto``/``cpu``/``cuda``
+        rather than skipping it on a CPU-only host.
+
+        License is **verified** per ADR-0012 (recorded 2026-07-06, mirrored from this
+        package's README + module docstring): the ``gliner`` library is Apache-2.0 (code)
+        and the default checkpoint ``urchade/gliner_multi-v2.1`` is Apache-2.0 (weights —
+        v2.1 relicensed from the earlier CC-BY-NC-4.0). Both weights AND code permissive, so
+        ``license="Apache-2.0"`` with ``license_verified=True``. (A CC-BY-NC checkpoint is a
+        deliberate config opt-in, never this default — the profile describes the default.)
+
+        ``deterministic=False``: learned float inference is not guaranteed byte-identical
+        across hardware/library versions (unlike the pure-code gazetteer), so the profile
+        declares it non-deterministic rather than overclaim reproducibility. ``memory_mb``
+        is the approximate resident footprint of the multi-v2.1 checkpoint + its transformers
+        stack (declared, not measured here — P3-F1 is descriptor-only). ``model_id`` is the
+        default checkpoint; a Pipeline that overrides ``config['model']`` changes what runs,
+        but the declared default descriptor is what the registry/bake-off reads.
+        """
+        return ProviderProfile(
+            compute="either",
+            memory_mb=2048,
+            model_id=_DEFAULT_MODEL,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=False,
+            batch=True,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

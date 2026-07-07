@@ -48,6 +48,7 @@ from latence_core.contracts import EntityMention
 from latence_core.errors import ConfigError
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -409,6 +410,27 @@ class GazetteerEntityExtractor:
     Determinism: matches are emitted in ``(char_start, label)`` order, so identical
     input + config yields byte-identical mentions.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        A gazetteer/regex extractor ships no model weights (``model_id=None``) and is a
+        pure-Python part of ``latence-core`` (Apache-2.0, verified — the package's own
+        license, weights-and-code trivially the same code). Deterministic by construction
+        (matches emitted in ``(char_start, label)`` order) and CPU-only; it does not batch
+        (a per-chunk scan), and has no per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

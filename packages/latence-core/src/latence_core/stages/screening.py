@@ -43,6 +43,7 @@ from latence_core.contracts import (
     ScreeningFinding,
     ScreeningVerdict,
 )
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -97,6 +98,26 @@ class SignatureSizeIntakeScreener:
             size (default 512 MiB) — catches a bomb whose ratio alone is modest.
         check_spoof: bool  — enable the magic-byte spoof check (default True).
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The intake Screener is a pure-Python part of ``latence-core`` (Apache-2.0, verified)
+        — signature/size/zip-bomb heuristics over the raw bytes, no model weights
+        (``model_id=None``), deterministic, CPU-only, no per-call cost. It screens a stream
+        of inputs (``batch=True``).
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=True,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

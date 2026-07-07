@@ -35,6 +35,7 @@ from latence_core.chunking import (
 )
 from latence_core.contracts import ChunkRecord, Disposition, OffsetMap, OffsetSegment
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -52,6 +53,26 @@ class MarkdownChunker:
         min_tokens: int  — a trailing remnant below this merges into the previous
             chunk instead of emitting a tiny fragment (default 16).
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        The offset-preserving Chunker is a pure-Python part of ``latence-core`` (Apache-2.0,
+        verified), ships no weights (``model_id=None``), is deterministic, CPU-only, and has
+        no per-call cost. It processes a stream of documents (``batch=True``: it accepts an
+        iterable and folds chunks per document).
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=True,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

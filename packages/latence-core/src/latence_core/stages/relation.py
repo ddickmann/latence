@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -216,6 +217,26 @@ class PatternRelationExtractor:
             (#68).
         mention_dropped_mentions: int  — total mentions dropped across those documents.
     """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        A trigger-phrase relation extractor ships no model weights (``model_id=None``) and
+        is a pure-Python part of ``latence-core`` (Apache-2.0, verified). Deterministic
+        (candidates emitted in covering-span/label/id order), CPU-only, no batching, no
+        per-call cost.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}

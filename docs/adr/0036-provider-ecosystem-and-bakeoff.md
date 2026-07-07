@@ -32,3 +32,14 @@ The harness runs fully for CPU providers here; GPU-model adapters (PaddleOCR-VL,
 - A new "adapter" protocol distinct from the Capability protocol (the Capability already IS the I/O contract; a second layer is ceremony).
 - The Runner orchestrating GPU placement/serving (ADR-0003: providers/endpoints own serving; the Runner is substrate-agnostic).
 - A monolithic "all providers installed" env (defeats ADR-0016 thin-core; the matrix installs only the candidates under test).
+
+## Status note — §2 realized (P3-F1, #86)
+
+**§2 (`ProviderProfile` + device handling) is BUILT** (Phase-3 Wave-0, slice P3-F1). Delivered in `latence-core`:
+
+- `latence_core.providers.profile.ProviderProfile` — a frozen, strict Pydantic v2 descriptor (`compute` cpu|gpu|either, `memory_mb`, `model_id`, SPDX `license` + `license_verified`, `deterministic`, `batch`, `cost_per_1k`), with the **UNVERIFIED invariant** enforced (`license == "UNVERIFIED"` ⇒ `license_verified` must be `False`, per ADR-0012). A provider declares it via a `profile` classmethod (preferred) or a `PROFILE` ClassVar; the `HasProfile` `runtime_checkable` Protocol + `profile_of()` read either without importing heavy deps.
+- `latence_core.providers.device` — the **dep-light, torch-free** device seam (ADR-0016): `cuda_available()` is override-driven under `LATENCE_CUDA=0|1` (deterministic for CI) and defaults `False` when unknown; `select_device(requested, profile)` returns a typed `DeviceDecision` and **skips-with-flag (never raises)** a GPU-only provider on a CPU-only host — the G1 posture. Device *placement* stays the adapter's job.
+- `ProviderRegistry.profile(name)` / `.profiles()` surface declared profiles (missing = `None`, never fabricated; an import-erroring provider is skipped-and-flagged, not fatal).
+- The `LocalRunner` routes each Stage's `device` config value against its provider's profile before running; a skipped GPU stage produces an empty output + records `skipped=True` + the profile columns in the Quality Report's `StageMetrics` (QUALITY_SCHEMA_VERSION 16). The in-core reference providers (gazetteer, pattern, markdown chunker, intake screener) and `entity.gliner` declare honest profiles; `license_verified=True` appears only where genuinely verified.
+
+§1 (`AdapterBase`), §3 (stacks), §4 (bake-off), §5 (conformance) remain **proposed** — the later Wave-0/Wave-1 slices (P3-F2…F5).
