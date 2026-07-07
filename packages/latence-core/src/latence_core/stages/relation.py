@@ -136,6 +136,34 @@ _MAX_RELATIONS_PER_DOCUMENT = 10_000
 _MAX_MENTIONS_PER_DOCUMENT = 5_000
 
 
+def _placed_chars(chunk: ChunkRecord) -> Iterator[tuple[int, str]]:
+    """Yield ``(original_offset, char)`` for a chunk's surviving content (issue #74).
+
+    Chunk ``content`` is markup-stripped and its ``offset_map`` records, per surviving
+    run, ``(local_start, doc_start)`` — the original-markdown offset of the run's first
+    character. Within a run the original offset of local char ``k`` is
+    ``doc_start + (k - local_start)`` (stripping only deletes, so a run is a constant
+    shift). Yielding each character at its TRUE original offset lets the document text be
+    reconstructed in the mentions' coordinate system, so the relation between-text lookup
+    aligns with the mention offsets. A chunk without an ``offset_map`` (pre-v11) degrades
+    to the identity placement at ``char_start`` (the markup-free / legacy path).
+    """
+    content = chunk.content
+    offset_map = chunk.offset_map
+    if offset_map is None:
+        base = chunk.provenance.char_start or 0
+        for k, ch in enumerate(content):
+            yield base + k, ch
+        return
+    segments = offset_map.segments
+    n = len(content)
+    for s, seg in enumerate(segments):
+        run_start = seg.local_start
+        run_end = segments[s + 1].local_start if s + 1 < len(segments) else n
+        for k in range(run_start, min(run_end, n)):
+            yield seg.doc_start + (k - run_start), content[k]
+
+
 class PatternRelationExtractor:
     """Zero-shot trigger-phrase RelationExtractor Provider.
 
@@ -413,26 +441,49 @@ class PatternRelationExtractor:
 
     @staticmethod
     def _document_texts(chunks: list[ChunkRecord]) -> dict[str, str]:
-        """Reconstruct each document's assembled text from its chunks' spans.
+        """Reconstruct each document's text at TRUE original-markdown offsets.
 
-        Each chunk carries the half-open ``[char_start, char_end)`` it occupies in the
-        parent document (S3), so writing every chunk's content at its own start
-        reconstructs the document text at exact document offsets — the coordinate
-        system a relation's covering span and its trigger between-text both use.
+        The reconstructed buffer is the coordinate system a relation's between-trigger
+        lookup reads: ``text[first_end:second_start]`` where ``first_end`` and
+        ``second_start`` are the mentions' *original-markdown* offsets (Entity
+        Extraction stamps a mention's TRUE original offset through the chunk's
+        ``offset_map``, ADR-0031). The reconstruction MUST therefore be in that same
+        coordinate system.
+
+        Chunk ``content`` is markup-stripped, so placing it naively at the chunk's
+        ``char_start`` (``buf[start:start+len(content)] = content``) writes each
+        surviving character one-for-one from ``char_start`` — which is only correct
+        when *no* markup was stripped inside the chunk. Once a chunk contains stripped
+        markup its content is shorter than its ``[char_start, char_end)`` span, so the
+        naive placement shifts every character after the first stripped run left of its
+        real offset (issue #74): the between-text lookup then reads the wrong region and
+        a genuine trigger between two mentions is missed (false negative) — or a
+        different span is shifted into the window (false positive).
+
+        The fix places each chunk's content through its ``offset_map``: the map's
+        ``(local_start, doc_start)`` runs give each surviving character's TRUE original
+        offset (``doc_start + (local - local_start)`` within a run), so a character is
+        written at exactly the offset the mention offsets use. Stripped-away positions
+        (the markup) stay as space gaps — harmless, since triggers are matched against
+        the surviving text and the window aligns with the mention coordinates. A chunk
+        with no ``offset_map`` (pre-v11) degrades to the identity placement at
+        ``char_start`` (unchanged behaviour on the markup-free / legacy path).
         """
         by_doc_chunks: dict[str, list[ChunkRecord]] = {}
         for chunk in chunks:
             by_doc_chunks.setdefault(chunk.document_record_id, []).append(chunk)
         texts: dict[str, str] = {}
         for doc_id, doc_chunks in by_doc_chunks.items():
+            placements = [
+                (orig, ch) for chunk in doc_chunks for orig, ch in _placed_chars(chunk)
+            ]
             end = 0
-            for chunk in doc_chunks:
-                start = chunk.provenance.char_start or 0
-                end = max(end, start + len(chunk.content))
+            for orig, _ in placements:
+                if orig + 1 > end:
+                    end = orig + 1
             buf = [" "] * end
-            for chunk in doc_chunks:
-                start = chunk.provenance.char_start or 0
-                buf[start : start + len(chunk.content)] = chunk.content
+            for orig, ch in placements:
+                buf[orig] = ch
             texts[doc_id] = "".join(buf)
         return texts
 

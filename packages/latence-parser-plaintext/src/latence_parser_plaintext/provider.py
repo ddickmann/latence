@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from latence_core.contracts import DocumentRecord, PageMap
+from latence_core.contracts import Disposition, DocumentRecord, PageMap
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -28,7 +28,9 @@ class PlaintextParser:
 
     Config:
         encoding: str  — decode encoding (default 'utf-8'). A per-input
-            ``config['encoding']`` on the ParserInput overrides this default.
+            ``config['encoding']`` on the ParserInput overrides this default. An
+            unknown codec name in that (untrusted) hint yields a ``PARSE_ERROR``
+            record, never an exception that aborts the run (ADR-0020).
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -44,7 +46,17 @@ class PlaintextParser:
             if isinstance(raw.content, str):
                 text = raw.content
             else:
-                text = raw.content.decode(encoding, errors="replace")
+                try:
+                    text = raw.content.decode(encoding, errors="replace")
+                except LookupError as exc:
+                    # An unknown codec NAME in the (untrusted) per-input encoding hint
+                    # raises LookupError from bytes.decode BEFORE errors="replace" can
+                    # act — that only tolerates undecodable BYTES, not a bad codec name.
+                    # A Parser must degrade a bad input to a PARSE_ERROR record, never
+                    # abort the whole run (ADR-0020, Disposition.PARSE_ERROR); mirror the
+                    # document Parser's graceful handling of the same hint (issue #74).
+                    yield self._parse_error(raw, f"Unknown text encoding {encoding!r}: {exc}")
+                    continue
             # A plain-text document is a single source page: one PageMap span
             # covering the whole decoded text, so any downstream offset resolves to
             # page 1 (Provenance integrity, S2). Assembling text and map together
@@ -68,3 +80,22 @@ class PlaintextParser:
                 media_type="text/markdown",
                 page_map=assembly.page_map,
             )
+
+    @staticmethod
+    def _parse_error(raw: ParserInput, reason: str) -> DocumentRecord:
+        """A PARSE_ERROR record: Provenance kept, no content/page map, reason recorded.
+
+        Emitted when the input cannot be decoded (an unknown codec hint) so the run
+        continues and the failure is auditable in the Quality Report — the downstream
+        Chunk stage skips a PARSE_ERROR record, so it never reaches the corpus.
+        """
+        return DocumentRecord(
+            record_id=raw.provenance.document_id,
+            provenance=raw.provenance,
+            classification=raw.classification,
+            content="",
+            media_type="text/markdown",
+            page_map=None,
+            disposition=Disposition.PARSE_ERROR,
+            error=reason,
+        )

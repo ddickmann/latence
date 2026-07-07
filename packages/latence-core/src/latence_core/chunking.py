@@ -107,7 +107,12 @@ _MARKUP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[ \t]*\|[ \t]*"), " "),
     # 14. Bold **x** / __x__ -> x
     (re.compile(r"(\*\*|__)(.+?)\1", re.DOTALL), r"\2"),
-    # 15. Italic *x* / _x_ -> x
+    # 15. Italic *x* -> x. Only the asterisk form is stripped: underscore italics
+    # (_x_) are deliberately left intact because `_` is ubiquitous in real text
+    # (identifiers like ``my_var``, filenames like ``a_b.txt``), and stripping it
+    # would corrupt legitimate content — the false-positive risk outweighs the rare
+    # underscore-emphasis case. Bold ``__x__`` is still handled by pattern 14 (the
+    # doubled marker is unambiguous); this pattern is single-asterisk emphasis only.
     (re.compile(r"(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)"), r"\1"),
     # 16. Strikethrough ~~x~~ -> x
     (re.compile(r"~~(.+?)~~", re.DOTALL), r"\1"),

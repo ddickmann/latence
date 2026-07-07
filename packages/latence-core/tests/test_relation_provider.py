@@ -257,16 +257,20 @@ def test_document_texts_reconstructs_and_stays_bounded_under_fuzz() -> None:
         texts = PatternRelationExtractor._document_texts(chunks)
         assert set(texts) == {"d1"}
         reconstructed = texts["d1"]
-        expected_end = max((c.provenance.char_start or 0) + len(c.content) for c in chunks)
-        # The buffer is exactly the document span — no amplification past the last char.
-        assert len(reconstructed) == expected_end
-        # Every chunk's content sits at its own offset (last writer wins on overlap,
-        # matching the in-place slice assignment).
-        placed = [" "] * expected_end
+        # No offset_map on these chunks ⇒ the identity placement path: each char lands
+        # at char_start + local. The buffer ends one past the last *placed* character
+        # (an empty chunk places nothing), never amplified beyond the true document span.
+        placements: dict[int, str] = {}
         for c in chunks:
             s = c.provenance.char_start or 0
-            placed[s : s + len(c.content)] = c.content
-        assert reconstructed == "".join(placed)
+            for k, ch in enumerate(c.content):
+                placements[s + k] = ch  # last writer wins on overlap
+        expected_end = max(placements) + 1 if placements else 0
+        assert len(reconstructed) == expected_end
+        expected = [" "] * expected_end
+        for pos, ch in placements.items():
+            expected[pos] = ch
+        assert reconstructed == "".join(expected)
 
 
 def test_relations_scoped_per_document() -> None:

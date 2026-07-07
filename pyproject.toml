@@ -47,6 +47,10 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.11",
+    # Property-based testing for the H-docstage hardening bar (issue #74). DEV-only:
+    # never a runtime dependency of any package, so thin-core (ADR-0016) is unaffected —
+    # hypothesis appears only in this dev group, not in latence-core's dependencies.
+    "hypothesis>=6.100",
 ]
 
 [tool.ruff]
