@@ -1091,7 +1091,7 @@ class LocalRunner:
                 pipeline, disambiguations, disambig_mentions_in
             ),
             graph=self._graph_quality(pipeline, graph_records),
-            drift=self._drift_diagnostics(chunked, parsed),
+            drift=self._drift_diagnostics(chunked),
             goldset=self._goldset_evaluation(pipeline, storage, mentions, relations),
         )
 
@@ -1135,18 +1135,18 @@ class LocalRunner:
         return check
 
     @staticmethod
-    def _drift_diagnostics(
-        chunked: list[StageOutput], parsed: list[StageOutput]
-    ) -> DriftDiagnostics | None:
-        """Corpus-level Provenance-integrity drift roll-up across derived offsets (S10).
+    def _drift_diagnostics(chunked: list[StageOutput]) -> DriftDiagnostics | None:
+        """Provenance-integrity drift roll-up across the chunk offsets (S10).
 
         Audits every :class:`ChunkRecord` that carries its parent document's page map by
         resolving the chunk's ``[char_start, char_end)`` endpoints through a
-        :class:`PageOffsetIndex` and accumulating the fuzzy recoveries — a finer,
-        cross-Stage drift signal than the Parse-only page-boundary audit. Returns ``None``
-        when there were no page-map-bearing chunk records to audit (a Parse-only or
-        chunk-free run), so a pipeline with nothing to audit reports no drift section rather
-        than a misleading all-zero one.
+        :class:`PageOffsetIndex` and accumulating the fuzzy recoveries — a finer drift
+        signal than the Parse-only page-boundary audit. Only ChunkRecords are audited:
+        mentions, relations, and redaction spans inherit the chunk offsets the Chunk Stage
+        already validated against the page map, so they carry no independent offset→page
+        drift. Returns ``None`` when there were no page-map-bearing chunk records to audit (a
+        Parse-only or chunk-free run), so a pipeline with nothing to audit reports no drift
+        section rather than a misleading all-zero one.
         """
         audited = 0
         resolutions = 0

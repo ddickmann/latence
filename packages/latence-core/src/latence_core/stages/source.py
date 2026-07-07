@@ -91,11 +91,30 @@ class LocalFolderSource:
             self._excluded = frozenset(raw_exclude)
 
     def produce(self, storage: Storage) -> Iterator[ParserInput]:
+        # Downstream keys (the gold-set harness, GoldDocument) bind annotations to a
+        # document by its Provenance ``file_name`` basename and assume it is unique within
+        # a corpus. Two source files with the same basename in different subfolders would
+        # silently merge under that key, so the reference Source enforces the assumption it
+        # documents: a basename collision is a configuration error, raised eagerly rather
+        # than corrupting scores. Only files that pass the extension filter are tracked; the
+        # check runs before the content-id exclusion so a retracted document sharing a
+        # basename with a kept one is still surfaced (the corpus itself is ambiguous).
+        seen_file_names: dict[str, str] = {}
         for uri in storage.walk_files(self._path, follow_symlinks=self._follow_symlinks):
             file_name = uri.rsplit("/", 1)[-1]
             ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
             if ext not in self._extensions:
                 continue
+            prior_uri = seen_file_names.get(file_name)
+            if prior_uri is not None:
+                msg = (
+                    f"LocalFolderSource: duplicate file name {file_name!r} at {uri!r} and "
+                    f"{prior_uri!r}. Source file names must be unique within a corpus so "
+                    "downstream keys (the gold-set harness, Provenance) do not merge "
+                    "distinct documents; rename one or point the Source at a flatter tree."
+                )
+                raise ValueError(msg)
+            seen_file_names[file_name] = uri
             data = storage.read_bytes(uri)
             document_id = _document_id(data)
             # Logically-deleted (retracted/purged) documents are skipped at Source.

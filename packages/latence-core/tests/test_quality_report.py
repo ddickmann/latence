@@ -7,6 +7,14 @@ render(), the gold-set evaluation shape, and the schema-version bump.
 
 from __future__ import annotations
 
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    EntityMention,
+    PageMap,
+    PageSpan,
+    Provenance,
+)
 from latence_core.quality import (
     QUALITY_SCHEMA_VERSION,
     CompletenessCheck,
@@ -17,6 +25,7 @@ from latence_core.quality import (
     StageMetrics,
     StageScore,
 )
+from latence_core.runner import LocalRunner
 
 
 def test_schema_version_is_v12() -> None:
@@ -65,6 +74,107 @@ def test_drift_diagnostics_clean_and_dirty() -> None:
     assert clean.clean is True
     dirty = DriftDiagnostics(resolutions=8, recovered=2, max_drift_chars=12, records_audited=4)
     assert dirty.clean is False
+
+
+def _chunk_with_page_map(
+    *, record_id: str, char_start: int, char_end: int, total_chars: int
+) -> ChunkRecord:
+    prov = Provenance(
+        source_uri="file:///c/doc.txt",
+        file_name="doc.txt",
+        file_type="txt",
+        file_size=total_chars,
+        document_id="sha256:doc",
+        page_start=1,
+        page_end=1,
+        char_start=char_start,
+        char_end=char_end,
+    )
+    page_map = PageMap(
+        pages=[PageSpan(page_number=1, char_start=0, char_end=total_chars)],
+        total_chars=total_chars,
+    )
+    return ChunkRecord(
+        record_id=record_id,
+        provenance=prov,
+        classification=Classification(language="en", sensitivity="internal"),
+        document_record_id="doc",
+        index=0,
+        token_count=1,
+        page_map=page_map,
+    )
+
+
+def test_drift_diagnostics_audits_only_chunk_records() -> None:
+    # Regression for the corrected DriftDiagnostics/_drift_diagnostics scope (issue #39.1):
+    # the audit resolves ONLY ChunkRecords with a page map — mentions/relations/redaction
+    # spans inherit chunk offsets and are not independently audited. An EntityMention mixed
+    # into the record list must not be counted, or the docstring would overclaim again.
+    chunk = _chunk_with_page_map(record_id="c1", char_start=0, char_end=10, total_chars=20)
+    mention = EntityMention(
+        record_id="m1",
+        provenance=Provenance(
+            source_uri="file:///c/doc.txt",
+            file_name="doc.txt",
+            file_type="txt",
+            file_size=20,
+            document_id="sha256:doc",
+            page_start=1,
+            page_end=1,
+            char_start=2,
+            char_end=7,
+        ),
+        classification=Classification(language="en", sensitivity="internal"),
+        document_record_id="doc",
+        chunk_record_id="c1",
+        index=0,
+        label="ORG",
+        text="Acme",
+        confidence=1.0,
+    )
+    diag = LocalRunner._drift_diagnostics([chunk, mention])
+    assert diag is not None
+    # Exactly one record audited: the chunk. The mention is ignored despite carrying a span.
+    assert diag.records_audited == 1
+    assert diag.clean is True
+
+
+def test_drift_diagnostics_recovers_offset_outside_every_page_span() -> None:
+    # A chunk whose end offset falls past the page map's total_chars needs the fuzzy
+    # fallback: the audit counts it as a recovery (drift), proving the roll-up is live.
+    chunk = _chunk_with_page_map(record_id="c1", char_start=0, char_end=30, total_chars=20)
+    diag = LocalRunner._drift_diagnostics([chunk])
+    assert diag is not None
+    assert diag.records_audited == 1
+    assert diag.recovered >= 1
+    assert diag.clean is False
+
+
+def test_drift_diagnostics_none_when_no_chunk_records() -> None:
+    # A chunk-free run (only a mention in the list) has nothing to audit -> None, not an
+    # all-zero section. Guards the "reports no drift section" contract.
+    mention = EntityMention(
+        record_id="m1",
+        provenance=Provenance(
+            source_uri="file:///c/doc.txt",
+            file_name="doc.txt",
+            file_type="txt",
+            file_size=20,
+            document_id="sha256:doc",
+            page_start=1,
+            page_end=1,
+            char_start=2,
+            char_end=7,
+        ),
+        classification=Classification(language="en", sensitivity="internal"),
+        document_record_id="doc",
+        chunk_record_id="c1",
+        index=0,
+        label="ORG",
+        text="Acme",
+        confidence=1.0,
+    )
+    assert LocalRunner._drift_diagnostics([mention]) is None
 
 
 def test_stage_score_totals() -> None:

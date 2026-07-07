@@ -224,6 +224,81 @@ def test_quality_slice_is_deterministic(tmp_path: Path) -> None:
     assert a.goldset.model_dump() == b.goldset.model_dump()
 
 
+def test_documents_matched_is_extraction_coverage_not_ingest_count(tmp_path: Path) -> None:
+    # Regression for the corrected documents_matched semantics (issue #39.2): it counts gold
+    # documents the run produced >=1 extraction for, NOT documents the Source read. A gold
+    # document that WAS ingested + parsed but from which nothing was extracted must fall out
+    # of documents_matched (coverage gap) while STILL contributing its annotations as false
+    # negatives to recall. If someone re-defined it as an ingest count, this fails.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # memo.txt yields an ORG extraction; silent.txt is read + parsed but its only annotation
+    # is a PERSON, which the gazetteer below is NOT configured to find -> zero extractions.
+    (docs / "memo.txt").write_text("Acme is here.\n", encoding="utf-8")
+    (docs / "silent.txt").write_text("Nobody notable here.\n", encoding="utf-8")
+    gold = {
+        "match_min_overlap": 0.0,
+        "documents": [
+            {
+                "file_name": "memo.txt",
+                "entities": [{"label": "ORG", "char_start": 0, "char_end": 4, "text": "Acme"}],
+            },
+            {
+                "file_name": "silent.txt",
+                "entities": [{"label": "PERSON", "char_start": 0, "char_end": 6, "text": "Nobody"}],
+            },
+        ],
+    }
+    gold_path = tmp_path / "gold.json"
+    gold_path.write_text(json.dumps(gold), encoding="utf-8")
+    store = f"file://{tmp_path}/store"
+    pipeline = Pipeline.from_yaml_text(
+        f"""
+name: coverage-slice
+storage_uri: {store}
+gold_set_uri: file://{gold_path}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [Acme]
+"""
+    )
+    report = LocalRunner().run(pipeline, run_id="coverage")
+    assert report.goldset is not None
+    gs = report.goldset
+    # Both documents are annotated; both were ingested and parsed.
+    assert gs.documents_annotated == 2
+    # Only memo.txt produced an extraction -> matched == 1, NOT 2. silent.txt was read but
+    # yielded nothing, so it is an un-scored coverage gap, not a match.
+    assert gs.documents_matched == 1
+    # P/R/F1 are unaffected by the coverage gap: silent.txt's PERSON annotation is a false
+    # negative (nothing matched it), so recall reflects the miss.
+    entities = next(s for s in gs.stages if s.stage == "entities")
+    assert entities.true_positives == 1  # Acme in memo.txt
+    assert entities.false_negatives == 1  # Nobody in silent.txt, never extracted
+    assert entities.recall == 0.5
+
+
 def test_quality_slice_resumes_from_checkpoints(tmp_path: Path) -> None:
     docs = _docs(tmp_path)
     gold = _gold_set_file(tmp_path)

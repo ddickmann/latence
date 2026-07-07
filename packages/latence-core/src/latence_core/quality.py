@@ -421,16 +421,20 @@ class GraphQuality(BaseModel):
 class DriftDiagnostics(BaseModel):
     """Corpus-level Provenance-integrity drift roll-up (S10 drift-diagnostics AC).
 
-    A finer-grained, cross-Stage view of the offset→page drift the ported
+    A finer-grained view of the offset→page drift the ported
     :class:`~latence_core.pagemap.PageOffsetIndex` recovers than the Parse-only
-    :class:`ParseQuality.page_drift_*` fields: it audits EVERY record that carries a char
-    span — chunks, mentions, relations, redaction spans — resolving each span's endpoints
-    through its parent page map and counting the fuzzy recoveries. ``resolutions`` is how
-    many offset→page lookups the audit performed, ``recovered`` how many needed the fuzzy
-    fallback (an offset outside any exact page span — a drift), and ``max_drift_chars`` the
-    worst such gap. ``clean`` (recovered == 0) is the headline the report renders: a
-    Provenance chain with zero drift means every derived offset resolves exactly to its
-    source page.
+    :class:`ParseQuality.page_drift_*` fields: it audits every :class:`ChunkRecord` that
+    carries its parent document's page map, resolving the chunk's ``[char_start, char_end)``
+    endpoints through that page map and counting the fuzzy recoveries. (Only ChunkRecords
+    are audited today — mentions, relations, and redaction spans inherit the chunk offsets
+    the Chunk Stage already validated against the page map, so they carry no independent
+    offset→page drift; :meth:`Runner._drift_diagnostics` is the single producer.)
+    ``resolutions`` is how many offset→page lookups the audit performed, ``recovered`` how
+    many needed the fuzzy fallback (an offset outside any exact page span — a drift), and
+    ``max_drift_chars`` the worst such gap. ``records_audited`` is the number of ChunkRecords
+    inspected. ``clean`` (recovered == 0) is the headline the report renders: a Provenance
+    chain with zero drift means every audited chunk offset resolves exactly to its source
+    page.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -493,11 +497,16 @@ class GoldSetEvaluation(BaseModel):
 
     Present in the Quality Report only when a gold set was supplied (an adopter dropped in
     20–50 annotated documents). ``documents_annotated`` is the number of gold documents;
-    ``documents_matched`` how many of those the run actually produced records for (an
-    annotated document the Source never read is un-scored and flagged by the gap). ``stages``
-    holds one :class:`StageScore` per evaluated Stage (``entities``, ``relations``). This is
-    the S10 headline: the "high-quality, AI-ready data" claim made auditable on the adopter's
-    OWN corpus, not a public benchmark.
+    ``documents_matched`` how many of those the run produced at least one extraction for
+    (a mention or relation whose Provenance ``file_name`` matched a gold file). It is a
+    *coverage* signal, not an ingest count: an annotated document the Source never read AND
+    one the run read but from which nothing was extracted BOTH fall out of the count, so the
+    gap ``documents_annotated - documents_matched`` flags un-scored coverage without
+    distinguishing "never ingested" from "ingested, zero extractions". Precision/recall/F1
+    are unaffected — a gold document with no matched extractions still contributes its
+    annotations as false negatives. ``stages`` holds one :class:`StageScore` per evaluated
+    Stage (``entities``, ``relations``). This is the S10 headline: the "high-quality,
+    AI-ready data" claim made auditable on the adopter's OWN corpus, not a public benchmark.
     """
 
     model_config = ConfigDict(extra="forbid")

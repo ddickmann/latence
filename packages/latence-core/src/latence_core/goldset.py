@@ -98,7 +98,9 @@ class GoldDocument(BaseModel):
     ``contract-01.pdf``) — the stable key an adopter knows, not the content-addressed
     ``document_id`` the run computes. The harness maps annotations onto the run's
     extracted records by resolving each document's records to their Provenance
-    ``file_name`` (unique within a corpus in the reference Source).
+    ``file_name``, which the reference :class:`~latence_core.stages.source.LocalFolderSource`
+    enforces to be unique within a corpus (a basename collision across subfolders raises at
+    Source) so an annotation binds to exactly one document.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
