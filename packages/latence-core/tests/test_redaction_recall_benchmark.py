@@ -1,10 +1,17 @@
-"""Redaction recall/precision benchmark — the Hardening-bar metric for #61.
+"""Redaction recall/precision benchmark — the Hardening-bar metric for #61 + H-C1.
 
 The G1 E2E found the hybrid-rule redactor masked email + phone but MISSED planted
 SSN, credit-card, and secret/API-key values (partial recall). Root cause: the built-in
 library had no ``aws_key``/``api_key``/``secret`` recogniser, and shipped configs
 narrowed ``detectors`` to a partial set. The fix adds those recognisers and makes the
 default comprehensive (all built-ins on when ``detectors`` is omitted).
+
+H-C1 extends the gold set with EVERY modern secret/token format the hostile audit
+found flowing unredacted at defaults — GitHub (``ghp_``/``github_pat_``), Stripe,
+OpenAI, Google, Slack, GitLab, PEM private-key blocks, password-embedding connection
+strings, the AWS **secret** access key in a labelled context — plus the digits-only /
+space-grouped SSN (§3) — so the gated recall assertion FAILs the moment any of them
+regresses. It is non-tautological: reverting a recogniser drops its type's recall.
 
 This module is a deterministic, labelled-PII benchmark: a fixed corpus with a known
 gold span per PII type, scored as **per-type recall + precision** against the redactor
@@ -65,6 +72,64 @@ _GOLD: tuple[tuple[str, str, str], ...] = (
         ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
         ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
     ),
+    # -- H-C1 §1 modern secret/token formats + §3 SSN-no-dash ----------------
+    # Each modern-secret family reports ``pii_type='secret'`` (its family is in the
+    # ``detector`` provenance). The gold span is the WHOLE secret value. These are the
+    # formats the audit found flowing UNREDACTED into the corpus at defaults.
+    (
+        "secret",
+        "Leaked GitHub token ghp_1234567890abcdefghijklmnopqrstuvwxyz in a gist.",
+        "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+    ),
+    (
+        "secret",
+        "Fine-grained PAT github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz1234567890 here.",
+        "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz1234567890",
+    ),
+    (
+        "secret",
+        "Stripe key sk_live_51H8xEXAMPLEabcdef1234567890 was committed.",
+        "sk_live_51H8xEXAMPLEabcdef1234567890",
+    ),
+    (
+        "secret",
+        "OpenAI key sk-proj-abcDEF1234567890ghijklmnop in the notebook.",
+        "sk-proj-abcDEF1234567890ghijklmnop",
+    ),
+    (
+        "secret",
+        "Google key AIzaSyD1234567890abcdefghijklmnopqrstuv in config.",
+        "AIzaSyD1234567890abcdefghijklmnopqrstuv",
+    ),
+    (
+        "secret",
+        "Slack token xoxb-1234567890-ABCDEFGHIJKLMNOPqrstuvwx leaked.",
+        "xoxb-1234567890-ABCDEFGHIJKLMNOPqrstuvwx",
+    ),
+    (
+        "secret",
+        "GitLab PAT glpat-ABCdef1234567890_xyz in the pipeline log.",
+        "glpat-ABCdef1234567890_xyz",
+    ),
+    (
+        "secret",
+        "Pasted -----BEGIN RSA PRIVATE KEY----- into the ticket.",
+        "-----BEGIN RSA PRIVATE KEY-----",
+    ),
+    (
+        "secret",
+        "DB url postgres://admin:s3cr3t!P4ss@db.example.com:5432/prod exposed.",
+        "s3cr3t!P4ss",
+    ),
+    (
+        "secret",
+        "env AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY set.",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ),
+    # §3: SSN with NO dashes and the space-grouped form — a real ``ssn`` label, not a
+    # ``phone`` mislabel. A ``types:["ssn"]`` policy must genuinely cover these.
+    ("ssn", "SSN digits-only on file: 123456789 (verify).", "123456789"),
+    ("ssn", "Space-grouped SSN 123 45 6789 in the export.", "123 45 6789"),
 )
 
 # Clean control documents: NO PII of any type. A recogniser that fires here is a false
@@ -132,6 +197,54 @@ def test_per_type_recall_is_perfect_on_the_gold_set() -> None:
             misses.append(f"{pii_type}: expected {value!r} at [{start},{end}); got {found}")
 
     assert not misses, "Redaction recall regressed (per-type gold miss):\n" + "\n".join(misses)
+
+
+def test_named_families_win_their_own_gold_span_provenance() -> None:
+    """Each named §1 family owns its gold span's ``detector`` provenance — not a proxy.
+
+    The per-type recall gate scores on ``pii_type`` alone, which is NOT enough on its
+    own: several §1 families report ``pii_type='secret'`` and, on a *labelled-assignment*
+    shape, the generic ``secret`` recogniser matches the SAME span with the SAME label.
+    So a named family whose gold case is a labelled assignment (``aws_secret_key`` on
+    ``AWS_SECRET_ACCESS_KEY=…``) is invisibly cross-covered: reverting its pattern leaves
+    the span redacted by ``regex:secret`` and the recall benchmark stays green, defeating
+    the issue's "each family a dedicated named recogniser so the per-type recall metric is
+    meaningful / the benchmark FAILs if a recogniser is reverted" guarantee.
+
+    This pins the winning span's ``detector`` to the named family, so reverting that
+    family's pattern (its span disappears and the generic ``secret`` wins with
+    ``regex:secret``) fails HERE — closing the cross-cover hole. Only families that are
+    NOT uniquely covered by their own value-shape need pinning; the whole-value families
+    (github_token, stripe_key, …) already bite via recall because nothing else matches
+    their prefix-anchored value.
+    """
+    # (gold-set text, gold value, the named family that MUST own the span's provenance).
+    # A labelled-assignment family whose value shape is also matched by the generic
+    # ``secret`` capture at the identical span — the cross-cover the recall gate can't see.
+    pinned: tuple[tuple[str, str, str], ...] = (
+        (
+            "env AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY set.",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "regex:aws_secret_key",
+        ),
+    )
+    misses: list[str] = []
+    for i, (text, value, want_detector) in enumerate(pinned):
+        rec = _redact_all([_doc(text, f"provenance-{i}")])[0]
+        start, end = text.index(value), text.index(value) + len(value)
+        owning = [
+            s for s in rec.pii_spans if s.char_start == start and s.char_end == end
+        ]
+        if not owning:
+            misses.append(f"{want_detector}: gold span {value!r} not redacted at all")
+        elif owning[0].detector != want_detector:
+            misses.append(
+                f"{want_detector}: span redacted by {owning[0].detector!r} instead — "
+                "the named family was reverted and is cross-covered by a generic recogniser"
+            )
+    assert not misses, "Named-family provenance regressed (cross-cover hole):\n" + "\n".join(
+        misses
+    )
 
 
 def test_no_false_positive_types_on_clean_controls() -> None:
@@ -333,3 +446,158 @@ def test_recognisers_are_linear_time_on_pathological_input() -> None:
     _redact_all([doc])
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"redaction took {elapsed:.2f}s on pathological input (possible ReDoS)"
+
+
+# -- H-C1 §2 compound-identifier api_key/token ---------------------------------
+
+
+def test_compound_identifier_token_labels_are_redacted() -> None:
+    """§2: a token keyword inside a larger UPPER_SNAKE identifier is caught.
+
+    ``GITHUB_TOKEN=…``, ``SESSION_TOKEN=…``, ``X_AUTH_TOKEN=…``, ``MY_API_KEY=…`` all
+    evaded the old ``api_key`` recogniser because its plain ``\\btoken\\b`` boundary
+    cannot match inside ``GITHUB_TOKEN`` (``_`` is a word char). The optional-affix
+    construction (identical to the ``secret`` fix) now catches them. Reverting to the
+    plain boundary leaves the credential in the clear and fails here.
+    """
+    cases = (
+        "GITHUB_TOKEN=ghp_ABCdef1234567890ABCdef1234567890abcd",
+        "SESSION_TOKEN=abcdefghij0123456789ABCDEF",
+        "X_AUTH_TOKEN: abcdefghij0123456789ABCDEF",
+        "MY_API_KEY=abcdefghij0123456789ABCDEF",
+    )
+    for i, text in enumerate(cases):
+        rec = _redact_all([_doc(text, f"compound-token-{i}")])[0]
+        value = text.split("=" if "=" in text else ":", 1)[1].strip()
+        assert value not in rec.masked_content, f"leaked token in {text!r}: {rec.masked_content!r}"
+        assert any(
+            s.pii_type in {"api_key", "secret"} for s in rec.pii_spans
+        ), rec.pii_spans
+
+
+def test_github_token_type_policy_covers_modern_secrets() -> None:
+    """A ``types:["secret"]`` policy genuinely masks the modern secret families.
+
+    The modern-secret families report ``pii_type='secret'`` (family in ``detector``),
+    so an operator restricting to ``types:["secret"]`` still redacts a GitHub/Stripe/
+    OpenAI/Google/Slack/GitLab token, a private-key header, and a conn-string password —
+    the per-type metric is honest and the restriction is meaningful.
+    """
+    text = (
+        "gh ghp_ABCdef1234567890ABCdef1234567890abcd "
+        "stripe sk_live_ABCdef1234567890abcdef "
+        "pem -----BEGIN OPENSSH PRIVATE KEY-----"
+    )
+    config = {"policies": {"public": {"types": ["secret"], "action": "mask"}}}
+    rec = list(HybridPIIRedactor(config).redact([_doc(text, "secret-only")]))[0]
+    assert "ghp_ABCdef1234567890ABCdef1234567890abcd" not in rec.masked_content
+    assert "sk_live_ABCdef1234567890abcdef" not in rec.masked_content
+    assert "-----BEGIN OPENSSH PRIVATE KEY-----" not in rec.masked_content
+    assert all(s.pii_type == "secret" for s in rec.pii_spans), rec.pii_spans
+
+
+def test_private_key_masks_the_whole_block_including_the_body() -> None:
+    """A full PEM block is masked in its entirety — the key *body* is the secret.
+
+    Masking only the ``-----BEGIN … -----`` header would leave the base64 key material
+    (the actual secret) in the corpus. The recogniser spans header→body→footer, so no
+    line of the key body survives into ``masked_content``. A truncated paste with no
+    footer still masks the header line (the fallback), covered by the gold-set case.
+    """
+    body = "\n".join("MIIEowIBAAKCAQEA" + "b64Key0123456789" * 3 for _ in range(6))
+    pem = f"-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----"
+    text = f"Customer pasted their key:\n{pem}\nplease rotate it."
+    rec = list(HybridPIIRedactor().redact([_doc(text, "pem-block")]))[0]
+    # No fragment of the key body or the anchors survives.
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in rec.masked_content
+    assert "-----END RSA PRIVATE KEY-----" not in rec.masked_content
+    for line in body.splitlines():
+        assert line not in rec.masked_content, f"key body line leaked: {line!r}"
+    assert any(s.pii_type == "secret" for s in rec.pii_spans), rec.pii_spans
+
+
+# -- H-C1 §3 SSN-no-dash label + false-positive guard --------------------------
+
+
+def test_ssn_nodash_is_labelled_ssn_not_phone() -> None:
+    """§3: a digits-only / space-grouped SSN is labelled ``ssn``, never ``phone``.
+
+    The audit found ``123456789`` masked only by accidental ``phone`` overlap and
+    mislabelled — so ``types:["ssn"]`` dropped it and the per-type metric was corrupted.
+    The dedicated recogniser fixes the label; the specificity rank makes ``ssn`` win the
+    tie over ``phone`` on the same span.
+    """
+    for i, (text, value) in enumerate(
+        (("SSN 123456789 recorded.", "123456789"), ("SSN 123 45 6789 filed.", "123 45 6789"))
+    ):
+        rec = _redact_all([_doc(text, f"ssn-nodash-{i}")])[0]
+        start, end = text.index(value), text.index(value) + len(value)
+        matched = [s for s in rec.pii_spans if s.char_start == start and s.char_end == end]
+        assert matched, f"SSN {value!r} not masked in {text!r}: {rec.pii_spans}"
+        assert matched[0].pii_type == "ssn", f"mislabelled {matched[0].pii_type} (want ssn)"
+
+
+def test_ssn_nodash_types_policy_covers_it() -> None:
+    """§3: a ``types:["ssn"]`` policy genuinely masks the digits-only SSN.
+
+    Before the dedicated recogniser this silently dropped (only ``phone`` matched it and
+    ``phone`` is excluded). Now ``ssn`` covers both dashed and digits-only forms.
+    """
+    text = "Dashed 123-45-6789 and bare 123456789 both here."
+    config = {"policies": {"public": {"types": ["ssn"], "action": "mask"}}}
+    rec = list(HybridPIIRedactor(config).redact([_doc(text, "ssn-typed")]))[0]
+    assert "123-45-6789" not in rec.masked_content
+    assert "123456789" not in rec.masked_content
+    assert all(s.pii_type == "ssn" for s in rec.pii_spans), rec.pii_spans
+
+
+def test_ssn_nodash_plausible_guard_rejects_invalid_ranges() -> None:
+    """§3 precision: the plausible-SSN guard rejects SSA-invalid area/group/serial.
+
+    Area ``000``/``666``/``9xx``, group ``00``, serial ``0000`` are never issued, so a
+    9-digit run in those ranges is NOT masked as an SSN — keeping recall gains from
+    drowning the corpus in mask noise on ordinary 9-digit numbers.
+    """
+    invalid = ("000112222", "666445555", "900445555", "123005555", "123450000")
+    for i, digits in enumerate(invalid):
+        text = f"Reference number {digits} in the ledger."
+        rec = _redact_all([_doc(text, f"ssn-invalid-{i}")])[0]
+        assert not any(
+            s.pii_type == "ssn" for s in rec.pii_spans
+        ), f"{digits} wrongly masked as SSN: {rec.pii_spans}"
+
+
+# -- H-C1 §1 per-family ReDoS probes ------------------------------------------
+
+
+def test_modern_secret_families_are_linear_time() -> None:
+    """§1 ReDoS probe: each new prefix-anchored family stays linear-time.
+
+    Every §1 family is a literal prefix + a single bounded character class (no nested or
+    overlapping quantifier). This hammers each with a long pathological run of its value
+    class and asserts a wall-clock bound — a ReDoS-prone form would time out.
+    """
+    import re
+    import time
+
+    from latence_core.stages.redaction import _BUILTIN_PATTERNS
+
+    probes = {
+        "github_token": "ghp_" + "A" * 60000,
+        "github_pat": "github_pat_" + "A" * 60000,
+        "stripe_key": "sk_live_" + "A" * 60000,
+        "openai_key": "sk-proj-" + "A" * 60000,
+        "google_api_key": "AIza" + "A" * 60000,
+        "slack_token": "xoxb-" + "A" * 60000,
+        "gitlab_token": "glpat-" + "A" * 60000,
+        "private_key": "-----BEGIN " + "A" * 60000,
+        "aws_secret_key": "aws_secret_access_key=" + "A" * 60000,
+        "conn_string": "postgres://u:" + "A" * 60000,
+        "ssn_nodash": "1" * 60000 + " " * 60000,
+    }
+    for name, probe in probes.items():
+        compiled = re.compile(_BUILTIN_PATTERNS[name], re.IGNORECASE)
+        start = time.perf_counter()
+        list(compiled.finditer(probe))
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"{name!r} took {elapsed:.2f}s on pathological input (possible ReDoS)"

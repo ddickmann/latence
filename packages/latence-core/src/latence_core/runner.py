@@ -2344,6 +2344,10 @@ class LocalRunner:
             quality.documents_redacted += 1
             if record.pii_spans:
                 quality.documents_with_pii += 1
+            if record.redaction_disabled_for_sensitive:
+                # §4 no-op floor: a sensitive doc whose control ran no detectors. LOUD,
+                # first-class — while this is > 0, documents_with_pii:0 is NOT a clean bill.
+                quality.redaction_disabled_for_sensitive += 1
             for span in record.pii_spans:
                 quality.pii_total += 1
                 quality.per_type[span.pii_type] = quality.per_type.get(span.pii_type, 0) + 1

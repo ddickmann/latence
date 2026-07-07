@@ -88,10 +88,15 @@ mirroring the Chunk Stage.)
 
 * **`redaction.hybrid_rule`** ships in `latence-core`: a pure-Python, dependency-free,
   deterministic **hybrid-rule** PII detector — a library of well-known-PII and secret
-  regexes (email / ssn / credit_card / phone / ip / iban / aws_key / api_key / jwt /
-  secret — the secret/API-key recognisers and comprehensive-by-default coverage added
-  for #61, and the compound-secret + structural-JWT recall extension for #66) plus a
-  config gazetteer and custom patterns. It is the "rule half" the S6 issue names; shipping it in core keeps first
+  regexes (email / ssn / ssn_nodash / credit_card / phone / ip / iban / aws_key /
+  api_key / jwt / secret plus the modern-secret families github_token / github_pat /
+  stripe_key / openai_key / google_api_key / slack_token / gitlab_token / private_key /
+  aws_secret_key / conn_string — the secret/API-key recognisers and comprehensive-by-
+  default coverage added for #61, the compound-secret + structural-JWT recall extension
+  for #66, and the modern-secret + SSN-no-dash + compound-token + no-op-floor hardening
+  for H-C1; coverage is described **accurately** below and proven by the gated recall
+  benchmark, not over-claimed) plus a config gazetteer and custom patterns. It is the
+  "rule half" the S6 issue names; shipping it in core keeps first
   `git clone` → working redaction free of torch and hash-stable for the Baseline bar.
   It is not a weaker reinvention of a learned model — the learned Provider is the
   drop-in below.
@@ -108,3 +113,43 @@ The PII detection counts land in the Quality Report as `RedactionQuality` (per-t
 per-action counts, documents-with-PII) — counts and type/action names only, **never a
 raw PII value**, satisfying the S6 "counts by type in the Quality Report; no raw PII in
 logs" criterion.
+
+## Amendment (H-C1): earned coverage, honest boundary, and a loud no-op floor
+
+The hostile 360 audit (THEME C, S1) verified that the docstring's "comprehensive
+PII+secret coverage" was **false at defaults**: modern secret/token formats were
+entirely unrecognised, a compound-identifier bug let `GITHUB_TOKEN=…` evade, SSN
+without dashes was caught only by accidental `phone` overlap (mislabelled and
+`types:["ssn"]`-invisible), and a `skip:true`/`types:[]` policy produced an empty span
+list **indistinguishable from "no PII found"** — a disabled control reading as a clean
+bill of health. H-C1 makes the claim earned and the disposition auditable:
+
+* **Named recognisers per modern-secret family** (§1) — GitHub (`ghp_`…/`github_pat_`),
+  Stripe, OpenAI, Google, Slack, GitLab, PEM private-key blocks, and password-embedding
+  connection strings — each a high-precision, prefix-anchored, linear-time pattern
+  reported under `pii_type='secret'` with a per-family `detector` provenance, so the
+  per-type recall metric stays meaningful and a ReDoS probe exists per pattern. The AWS
+  **secret** key is matched only in a *labelled* context; the bare 40-char form is
+  deliberately **not** recognised (documented boundary, not an over-claim).
+* **Compound-identifier fix** (§2) — the `api_key`/`token` family gets the same
+  optional leading/trailing identifier-component affix the `secret` recogniser already
+  used, so a keyword embedded in an `UPPER_SNAKE` name (`GITHUB_TOKEN`, `MY_API_KEY`) is
+  caught.
+* **Real digits-only SSN recogniser** (§3) — `ssn_nodash` (contiguous or space-grouped
+  9 digits) with a plausible-SSN guard (rejecting SSA-invalid area/group/serial),
+  reported as `ssn`, so `types:["ssn"]` genuinely covers it and the label is honest
+  (never `phone`).
+* **Sensitive-doc no-op floor** (§4) — a new `redaction_disabled_for_sensitive` flag on
+  `RedactionRecord` (bumps corpus `SCHEMA_VERSION` → 13) and a matching count on
+  `RedactionQuality` (bumps `QUALITY_SCHEMA_VERSION` → 18). When a document whose
+  Classification sensitivity is in the configured sensitive set
+  (`confidential`/`restricted`/…) has its policy run **no detectors**, that is surfaced
+  as a distinct, first-class signal — so `documents_with_pii: 0` can never hide a
+  `skip:true` on a `confidential` document. The floor does **not** force redaction on
+  (an operator may intentionally skip); it makes the disposition loud, not invisible.
+  Both bumps are additive and defaulted, so prior JSON still validates.
+
+The coverage is now described **accurately** in the Provider docstring (what is and
+isn't caught, and the AWS-bare boundary) and locked behind a **gated recall benchmark**
+(`test_redaction_recall_benchmark`) that FAILs if any format regresses — the claim is
+exactly what the benchmark proves, nothing more.

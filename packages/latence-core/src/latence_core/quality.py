@@ -85,7 +85,12 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # ``conformance=None``, so a v16 report still validates. The report models live in the pure,
 # stage-free :mod:`latence_core.conformance.report`, so the lean quality contract imports no
 # heavy harness/fixtures.
-QUALITY_SCHEMA_VERSION = 17
+# v18 (H-C1 §4): :class:`RedactionQuality` gains ``redaction_disabled_for_sensitive`` — the
+# LOUD count of sensitive-classified documents whose redaction control ran no detectors
+# (skip / empty types / empty detector set). While it is > 0, ``documents_with_pii: 0`` is
+# NOT a clean bill of health — a control was disabled on a sensitive doc. Additive and
+# defaulted 0, so a v17 report still validates.
+QUALITY_SCHEMA_VERSION = 18
 
 
 class StageMetrics(BaseModel):
@@ -378,6 +383,16 @@ class RedactionQuality(BaseModel):
     pii_total: int = 0
     per_type: dict[str, int] = Field(default_factory=dict)
     per_action: dict[str, int] = Field(default_factory=dict)
+    redaction_disabled_for_sensitive: int = Field(
+        default=0,
+        description=(
+            "Count of sensitive-classified documents (confidential/restricted/…) whose "
+            "redaction control ran NO detectors (skip / empty types / empty detector "
+            "set). A LOUD, first-class signal (H-C1 §4): while it is > 0, "
+            "``documents_with_pii: 0`` does NOT mean the corpus is clean — a control was "
+            "disabled on a sensitive doc. Distinct from 'genuinely no PII found'."
+        ),
+    )
 
 
 class ProfilingQuality(BaseModel):

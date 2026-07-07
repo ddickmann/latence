@@ -114,7 +114,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # v12: DeltaChurn gained ``affected_set_size`` / ``corpus_record_count`` — the perf-baseline
 # witness that the incremental delta recompute is affected-set-scoped, not O(corpus) (issue #42;
 # ADR-0018). Additive and defaulted, so a v11 DeltaChurn JSON still validates.
-SCHEMA_VERSION = 12
+#
+# v13 (H-C1 §4 redaction no-op floor): RedactionRecord gains
+# ``redaction_disabled_for_sensitive`` — a first-class flag that a document whose
+# Classification sensitivity is in the sensitive set (confidential/restricted/…) had its
+# redaction control run NO detectors (skip / empty types / empty detector set), so an
+# empty ``pii_spans`` there means "control OFF", never "clean". Additive and defaulted
+# False, so a v12 RedactionRecord JSON still validates (ADR-0024 amended).
+SCHEMA_VERSION = 13
 
 
 class Provenance(BaseModel):
@@ -833,6 +840,17 @@ class RedactionRecord(Record):
     policy: str = Field(default="default", description="Redaction policy applied (sensitivity).")
     pii_spans: list[PIISpan] = Field(
         default_factory=list, description="Every detected PII span (type/offset/action/placeholder)"
+    )
+    redaction_disabled_for_sensitive: bool = Field(
+        default=False,
+        description=(
+            "True when this document's Classification.sensitivity is in the sensitive "
+            "set (confidential/restricted/…) yet the applied policy ran NO detectors "
+            "(skip:true, empty types, or a detectors list that resolved to nothing) — "
+            "so an empty pii_spans here means 'the control was OFF', NOT 'no PII found'. "
+            "A first-class, auditable signal (H-C1 §4): a disabled control can never "
+            "masquerade as a clean bill of health."
+        ),
     )
 
     @model_validator(mode="after")

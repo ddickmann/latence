@@ -63,12 +63,18 @@ stages:
                                        # the coordinate system PII spans + pages use —
                                        # NOT the markup-stripped chunk stream
     config:
-      # The built-in rule library to enable. DEFAULT (omit this key) = ALL:
-      # email / ssn / credit_card / phone / ip / iban / aws_key / api_key / jwt /
-      # secret — comprehensive PII+secret coverage (#61, extended for #66: bare
-      # token:/JWT + compound secret keys). Narrow it only for a deliberate reason;
-      # a partial list silently lowers redaction recall.
-      detectors: [email, phone, ssn, credit_card, aws_key, api_key, jwt, secret]
+      # The built-in rule library to enable, by NAME. DEFAULT (omit this key) = ALL:
+      # email / ssn / ssn_nodash / credit_card / phone / ip / iban / aws_key /
+      # api_key / jwt / secret + the modern-secret families github_token /
+      # github_pat / stripe_key / openai_key / google_api_key / slack_token /
+      # gitlab_token / private_key / aws_secret_key / conn_string (H-C1). This is the
+      # coverage the gated recall benchmark proves. Narrow it only for a deliberate
+      # reason; a partial list lowers recall — and on a SENSITIVE doc a narrowing that
+      # runs no detectors is surfaced LOUDLY (redaction_disabled_for_sensitive), below.
+      # Left OMITTED on purpose = ALL families (the comprehensive, benchmark-proven default,
+      # including every modern-secret family above). Uncomment to narrow — but a partial list
+      # silently lowers secret recall, so only do it for a deliberate, documented reason:
+      # detectors: [email, phone, ssn, ssn_nodash, credit_card, aws_key, api_key, jwt, secret]
       # Extra config-supplied recognisers (the rest of the rule half):
       gazetteer:
         name: [Alice, Bob, Carol]      # literal terms to redact, keyed by PII type

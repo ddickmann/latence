@@ -52,9 +52,9 @@ def _relation(**overrides: object) -> RelationMention:
 
 
 def test_schema_version_is_current() -> None:
-    # SCHEMA_VERSION is corpus-wide (12 after the DeltaChurn affected-set fields, issue #42); a
+    # SCHEMA_VERSION is corpus-wide (13 after the H-C1 §4 redaction no-op-floor flag); a
     # RelationMention serialized now stamps the current version, still a valid RelationMention.
-    assert SCHEMA_VERSION == 12
+    assert SCHEMA_VERSION == 13
     assert _relation().schema_version == SCHEMA_VERSION
 
 

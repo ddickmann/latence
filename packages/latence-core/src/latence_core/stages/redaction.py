@@ -3,12 +3,34 @@
 The S6 Redaction reference Provider (ADR-0004; ships in core like the S3
 Chunker/Screeners, the S4 gazetteer and the S5 trigger extractor so the demo runs
 end to end, ADR-0007 CPU-first, ADR-0016 no extra deps). It is the **rule half** of
-the "hybrid rule+model" reference the issue calls for: a library of well-known-PII
-and secret recognisers (email, phone, SSN, credit card, IP, IBAN, AWS access-key id,
-labelled API token — bare ``token:``/``jwt:`` and the session/refresh variants
-included, structural JWT, and a password/secret assignment that also fires inside a
-compound identifier such as ``aws_secret_access_key``) enabled comprehensively by
-default, plus a config-supplied gazetteer and custom-pattern set. The **model half** is the drop-in,
+the "hybrid rule+model" reference the issue calls for.
+
+**Coverage (accurate, not "comprehensive" — H-C1).** The rule library recognises,
+enabled by default:
+
+* well-known PII: ``email``, ``phone``, ``ssn`` (both ``NNN-NN-NNNN`` and the
+  digits-only / space-grouped ``NNNNNNNNN`` / ``NNN NN NNNN`` form, with a
+  plausible-SSN guard), ``credit_card``, ``ip``, ``iban``;
+* the AWS access-key **id** (``aws_key``, the ``AKIA…`` public identifier);
+* modern secret/token formats, each a high-precision prefix-anchored recogniser
+  (reported under ``pii_type='secret'`` with a per-family ``detector`` provenance):
+  GitHub (``ghp_``/``gho_``/``ghu_``/``ghs_``/``ghr_``, ``github_pat_``), Stripe
+  (``sk_live_``/``sk_test_``/``rk_live_``/``pk_live_``), OpenAI (``sk-``/``sk-proj-``),
+  Google API key (``AIza…``), Slack (``xox[baprs]-…``), GitLab (``glpat-…``), PEM
+  private-key block headers, and a password-embedding connection string
+  (``scheme://user:PASSWORD@host``, password only masked);
+* labelled-assignment secrets: a generic ``api_key``/``token`` (also inside a compound
+  ``UPPER_SNAKE`` identifier such as ``GITHUB_TOKEN``), a structural bare-``JWT``, the
+  AWS **secret** access key in a labelled ``aws_secret_access_key=…`` context, and a
+  ``password``/``secret`` assignment (also inside a compound identifier).
+
+**Documented boundary (honest, not over-claimed).** The AWS **secret** access key is
+matched only in a *labelled* context (``aws_secret_access_key=<40-char>``); the **bare**
+40-char base64 form is deliberately NOT recognised because a bare high-entropy blob is
+high-false-positive. This Provider recognises the shapes above; it is not an exhaustive
+secret scanner, and the recall it guarantees is exactly what the gated recall benchmark
+(``test_redaction_recall_benchmark``) proves — nothing beyond it is claimed. The
+**model half** is the drop-in,
 separately-packaged ``latence-pii-gliner`` (a permissively-licensed GLiNER-PII
 checkpoint via plain ``transformers``, ADR-0012/0016) behind this same
 :class:`~latence_core.capability.PIIDetector` seam — shipping the deterministic
@@ -88,6 +110,23 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     ),
     # US SSN NNN-NN-NNNN.
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+    # US SSN with NO dashes (or single-space-grouped): a contiguous ``NNNNNNNNN`` or
+    # ``NNN NN NNNN`` (§3, H-C1). Today such a value is masked only by accidental
+    # ``phone`` overlap and MISLABELLED ``phone`` — so a ``types:["ssn"]`` policy or a
+    # ``detectors`` list excluding ``phone`` silently drops it. A dedicated recogniser
+    # with a **plausible-SSN guard** fixes both the coverage and the label: a leading
+    # negative lookahead rejects the SSA-invalid area/group/serial ranges (area
+    # ``000``/``666``/``9xx``, group ``00``, serial ``0000``) to cut the false positives
+    # a bare 9-digit run would otherwise cause. Linear-time: the guard is a bounded
+    # fixed-width lookahead and the body is a fixed count of digit classes with an
+    # optional single space between groups (no unbounded quantifier over an overlapping
+    # class). Emitted with ``pii_type='ssn'`` (see ``_DETECTOR_TYPE``) so the label is
+    # correct and ``types:["ssn"]`` genuinely covers it.
+    "ssn_nodash": (
+        r"(?<!\d)"
+        r"(?!000|666|9\d\d)\d{3} ?(?!00)\d{2} ?(?!0000)\d{4}"
+        r"(?!\d)"
+    ),
     # 13–16 digit card number, optional single space/dash between digits.
     "credit_card": r"\b\d(?:[ -]?\d){12,15}\b",
     # International-ish phone: optional +, 7–15 digits with separators.
@@ -100,11 +139,21 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     "aws_key": r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|A3T[A-Z0-9])[A-Z0-9]{16}\b",
     # Generic long high-entropy API token: a labelled key/token (including a bare
     # ``token:``/``jwt:`` and the session/refresh variants) followed by a 20+ char
-    # base64/hex-ish credential (bounded, linear-time). The label set is a fixed
-    # alternation of whole words — no nested quantifier over the value class.
+    # base64/hex-ish credential (bounded, linear-time). The keyword may be a
+    # **component of a larger UPPER_SNAKE identifier** (``GITHUB_TOKEN``,
+    # ``X_AUTH_TOKEN``, ``MY_API_KEY``, ``SESSION_TOKEN``): the plain ``\btoken\b``
+    # word boundary fails inside ``GITHUB_TOKEN`` because ``_`` is a word char, so —
+    # exactly as the ``secret`` recogniser already does — match an optional single
+    # leading identifier component and any number of trailing ones around the keyword
+    # (§2, H-C1). Linear-time: the leading component ends in a separator and each
+    # trailing component starts with one (both disjoint from the alnum run's edge), so
+    # there is no catastrophic backtracking on a pathological ``x_x_x…token…`` run;
+    # the value class ``[A-Za-z0-9/+_.=-]`` sits under a single bounded ``{20,}``.
     "api_key": (
-        r"(?i:\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|session[_-]?token"
-        r"|refresh[_-]?token|bearer|token|jwt|secret[_-]?key)\b)"
+        r"(?i:\b(?:[a-z0-9]+[_-])?"
+        r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|session[_-]?token"
+        r"|refresh[_-]?token|bearer|token|jwt|secret[_-]?key)"
+        r"(?:[_-][a-z0-9]+)*\b)"
         r"['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+_.=-]{20,})"
     ),
     # A structural JSON Web Token: three base64url segments joined by dots, the header
@@ -113,6 +162,68 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     # shape is the recogniser. Linear-time: each segment is a single character class
     # under a fixed `+`, the segments separated by literal dots (no overlap).
     "jwt": r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b",
+    # -- §1 modern secret/token formats (H-C1) ------------------------------
+    # Each family is a **high-precision, prefix-anchored** recogniser matching the
+    # whole secret value as the span (group 0), not a greedy high-entropy blob — so
+    # the per-type recall metric is meaningful and the false-positive rate is low.
+    # Every pattern is a literal prefix followed by a single bounded character class
+    # (no nested/overlapping quantifier), hence linear-time / ReDoS-safe. All emit
+    # ``pii_type='secret'`` via ``_DETECTOR_TYPE`` so they roll up under one honest
+    # per-type count while the ``detector`` field keeps the family provenance
+    # (``regex:github_token`` …) for the audit.
+    #
+    # GitHub: ``ghp_``/``gho_``/``ghu_``/``ghs_``/``ghr_`` + 36 base62; and the
+    # fine-grained ``github_pat_`` PAT (base62 with ``_``, bounded run).
+    "github_token": r"\bgh[pousr]_[A-Za-z0-9]{36}\b",
+    "github_pat": r"\bgithub_pat_[A-Za-z0-9_]{22,}\b",
+    # Stripe secret/restricted/publishable live+test keys: ``sk_live_``/``sk_test_``/
+    # ``rk_live_``/``pk_live_`` + a base62 run.
+    "stripe_key": r"\b[rsp]k_(?:live|test)_[A-Za-z0-9]{16,}\b",
+    # OpenAI: ``sk-`` and project ``sk-proj-`` keys (base62 with ``_``/``-``). Anchored
+    # on the literal ``sk-`` prefix so it does not fire on an arbitrary hyphenated word;
+    # the ``(?<![A-Za-z0-9])`` pin keeps it off a mid-identifier ``…sk-`` and there is a
+    # 20+ length floor to avoid short false positives.
+    "openai_key": r"(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_-]{20,}\b",
+    # Google API key: literal ``AIza`` + exactly 35 of ``[0-9A-Za-z_-]`` (the documented
+    # Google key shape).
+    "google_api_key": r"\bAIza[0-9A-Za-z_\-]{35}\b",
+    # Slack token: ``xox`` + one of ``baprs`` + ``-`` + hyphen-joined digit/hex groups.
+    # The trailing run is a single class (``[A-Za-z0-9-]``) under one bounded ``+``.
+    "slack_token": r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+    # GitLab personal access token: ``glpat-`` + 20 base62-with-``_``/``-``.
+    "gitlab_token": r"\bglpat-[A-Za-z0-9_-]{20}\b",
+    # PEM private-key block — masks the WHOLE block (header + base64 body + footer), not
+    # just the header: the key *body* is the secret, so masking only ``-----BEGIN…-----``
+    # would leave the key material in the corpus. The body is a bounded lazy run pinned by
+    # the ``-----END…-----`` footer; the bound (16 KiB, > an RSA-4096/OpenSSH PEM) keeps it
+    # linear-time (no catastrophic backtracking). If the footer is absent (a truncated
+    # paste), the optional group falls back to masking the header line alone. Fixed
+    # alternation of literal words on both anchors — ReDoS-safe.
+    "private_key": (
+        r"-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----"
+        r"(?:[\s\S]{0,16384}?-----END (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----)?"
+    ),
+    # AWS **secret** access key — the bare 40-char base64 form is high-false-positive,
+    # so this recogniser is deliberately **labelled-context only**: an
+    # ``aws_secret_access_key``/``aws-secret-access-key`` assignment followed by the
+    # 40-char ``[A-Za-z0-9/+]`` secret (captured as group 1, value only). The bare form
+    # is intentionally NOT matched here — that boundary is documented in the docstring
+    # rather than over-claimed (the labelled ``secret`` recogniser below also covers the
+    # assignment shape; this named family makes the AWS-secret recall metric explicit).
+    "aws_secret_key": (
+        r"(?i:\baws[_-]?secret[_-]?access[_-]?key\b)"
+        r"['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+]{40})"
+    ),
+    # A connection string embedding a password: ``scheme://user:PASSWORD@host`` for the
+    # common schemes (postgres/mysql/redis/amqp/mongodb/…). The captured span (group 1)
+    # is the **password only** — between the ``:`` and the ``@`` — so the masked corpus
+    # keeps the harmless scheme/user/host while the credential is gone. Linear-time: the
+    # password class ``[^:@/\s]`` excludes the ``@`` delimiter, so the single ``+`` has
+    # no overlapping alternative to backtrack into.
+    "conn_string": (
+        r"(?i:\b(?:postgres(?:ql)?|mysql|redis|amqp|mongodb(?:\+srv)?|rediss|ftp)"
+        r"://[^:@/\s]+:)([^:@/\s]+)(?=@)"
+    ),
     # A ``password``/``passwd``/``pwd``/``secret`` assignment — including when the
     # keyword is a **component of a compound identifier** (``aws_secret_access_key``,
     # ``client_secret``, ``db_password``): the plain ``\bsecret\b`` word boundary fails
@@ -127,9 +238,33 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     ),
 }
 # Recognisers whose credential value is captured in group(1) (a labelled
-# assignment): the span must cover only the secret, not the label. All other
-# recognisers match the whole PII value as group(0).
-_CAPTURE_GROUP_DETECTORS: frozenset[str] = frozenset({"api_key", "secret"})
+# assignment or a scheme://user:PASSWORD@host connection string): the span must
+# cover only the secret, not the surrounding label/context. All other recognisers
+# match the whole PII value as group(0).
+_CAPTURE_GROUP_DETECTORS: frozenset[str] = frozenset(
+    {"api_key", "secret", "aws_secret_key", "conn_string"}
+)
+
+# A recogniser NAME that emits a DIFFERENT ``pii_type`` label than its own name.
+# Multiple named families roll up under one honest per-type count while each keeps a
+# distinct ``detector`` provenance (``regex:github_token`` …) and its own linear-time
+# ReDoS probe. The modern-secret families (§1) all report as ``secret``; the digits-
+# only SSN recogniser (§3) reports as ``ssn`` so ``types:["ssn"]`` covers it and the
+# per-type metric is honest (SSN never mislabelled ``phone``). Names not listed here
+# use their own name as the ``pii_type`` (unchanged).
+_DETECTOR_TYPE: dict[str, str] = {
+    "ssn_nodash": "ssn",
+    "github_token": "secret",
+    "github_pat": "secret",
+    "stripe_key": "secret",
+    "openai_key": "secret",
+    "google_api_key": "secret",
+    "slack_token": "secret",
+    "gitlab_token": "secret",
+    "private_key": "secret",
+    "aws_secret_key": "secret",
+    "conn_string": "secret",
+}
 
 # Specificity rank used only to break ties when two recognisers claim the SAME
 # span (same start, same length): the more specific, structured recogniser wins its
@@ -192,11 +327,26 @@ class HybridPIIRedactor:
     hardcoded: that is the sensitivity-keyed ``policies`` map.
 
     Config:
-        detectors: list[str]  — which built-in recognisers to enable (subset of
-            ``email``/``ssn``/``credit_card``/``phone``/``ip``/``iban``/``aws_key``/
-            ``api_key``/``jwt``/``secret``). Default: **all** — comprehensive PII+secret
-            coverage, so a corpus is PII-handled by default (do not silently narrow
-            this to a partial set in production configs).
+        detectors: list[str]  — which built-in recognisers to enable, by NAME (subset
+            of ``email``/``ssn``/``ssn_nodash``/``credit_card``/``phone``/``ip``/
+            ``iban``/``aws_key``/``api_key``/``jwt``/``secret`` plus the modern-secret
+            families ``github_token``/``github_pat``/``stripe_key``/``openai_key``/
+            ``google_api_key``/``slack_token``/``gitlab_token``/``private_key``/
+            ``aws_secret_key``/``conn_string``). Default: **all** — the full coverage the
+            recall benchmark proves, so a corpus is PII-handled by default (do not
+            silently narrow this to a partial set in production configs; on a
+            sensitive-classified document a narrowing that runs no detectors is surfaced
+            LOUDLY via the §4 no-op floor, below).
+        sensitive_set: list[str]  — the ``Classification.sensitivity`` values treated as
+            SENSITIVE by the no-op floor (default ``["confidential", "restricted"]``).
+            When a document in this set has the redaction control run NO detectors
+            (``skip:true``, ``types: []``, or a ``detectors``/``types`` combination that
+            resolves to nothing), the emitted RedactionRecord's
+            ``redaction_disabled_for_sensitive`` flag is set and the Quality Report's
+            ``redaction_disabled_for_sensitive`` count increments — so a disabled
+            control is auditable and loud, never masquerading as "nothing to redact".
+            The floor does NOT force redaction on (an operator may intentionally skip);
+            it only makes the disposition first-class (H-C1 §4).
         gazetteer: dict[str, list[str]]  — extra literal terms to redact, keyed by PII
             type (e.g. ``{"name": ["Alice", "Bob"]}``) — whole-word, case-insensitive
             by default. The config-supplied half of the rule set.
@@ -248,6 +398,19 @@ class HybridPIIRedactor:
         default_action = parse_action(config.get("default_action", "mask"))
         self._policy = RedactionPolicy(config.get("policies"), default_action)
         self._detectors = self._compile_detectors(config)
+        # The set of pii_types some enabled detector can produce — the coverage the
+        # applied policy narrows. Used by the §4 no-op floor to tell "control ran no
+        # detectors" (empty intersection with the policy allow-list) apart from
+        # "genuinely no PII found".
+        self._detector_types = {d.pii_type for d in self._detectors}
+        # The Classification.sensitivity values considered SENSITIVE for the §4 no-op
+        # floor. Configurable; default confidential/restricted. A disabled control on
+        # one of these surfaces as a loud, first-class signal rather than a silent no-op.
+        sensitive = config.get("sensitive_set", ("confidential", "restricted"))
+        if not isinstance(sensitive, (list, tuple, set)):
+            msg = "'sensitive_set' config must be a list of Classification.sensitivity values."
+            raise TypeError(msg)
+        self._sensitive_set = {str(s) for s in sensitive}
 
     # -- config compilation -------------------------------------------------
 
@@ -267,9 +430,15 @@ class HybridPIIRedactor:
                 msg = f"Unknown built-in PII detector {name!r}. Available: {available}."
                 raise ValueError(msg)
             # Built-in patterns are ASCII-cased already; IGNORECASE is harmless.
-            group = 1 if name in _CAPTURE_GROUP_DETECTORS else 0
+            # ``name`` is the recogniser (→ ``detector`` provenance ``regex:<name>``);
+            # ``pii_type`` is the label it reports (``_DETECTOR_TYPE`` remaps a family
+            # like ``github_token``→``secret`` / ``ssn_nodash``→``ssn`` so the per-type
+            # count is honest, else it is the name itself).
+            name_s = str(name)
+            group = 1 if name_s in _CAPTURE_GROUP_DETECTORS else 0
+            pii_type = _DETECTOR_TYPE.get(name_s, name_s)
             detectors.append(
-                _Detector(str(name), re.compile(builtin, flags), f"regex:{name}", 0.9, group)
+                _Detector(pii_type, re.compile(builtin, flags), f"regex:{name_s}", 0.9, group)
             )
         gazetteer = config.get("gazetteer", {})
         if not isinstance(gazetteer, dict):
@@ -321,6 +490,22 @@ class HybridPIIRedactor:
         base_prov = document.provenance
         action, allowed, skip, policy_name = self._policy.resolve(classification.sensitivity)
 
+        # §4 no-op floor: would the applied policy run ANY detector on this document?
+        # No, if the policy skips, or restricts to a type set that intersects none of
+        # the enabled detectors' types (including an empty ``types: []``), or the
+        # Provider has no detectors enabled at all. When the document is also
+        # classified sensitive, that disposition is a LOUD, first-class signal — an
+        # empty ``pii_spans`` there is "control OFF", not "clean".
+        would_run_detectors = (not skip) and bool(
+            self._detector_types
+            if allowed is None
+            else self._detector_types & allowed
+        )
+        disabled_for_sensitive = (
+            not would_run_detectors
+            and classification.sensitivity in self._sensitive_set
+        )
+
         spans: list[PIISpan] = []
         masked = text
         if not skip and len(text.strip()) >= self._min_chars:
@@ -360,6 +545,7 @@ class HybridPIIRedactor:
             media_type="text/markdown",
             policy=policy_name,
             pii_spans=spans,
+            redaction_disabled_for_sensitive=disabled_for_sensitive,
             provenance=provenance,
             classification=classification,
         )
