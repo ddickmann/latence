@@ -2,9 +2,10 @@
 
 Run state is files-on-Storage, no database: a run manifest, per-Stage checkpoint
 files, and a write-ahead log, all under ``<storage_uri>/_latence/runs/<run_id>/``.
-Checkpoints are written with atomic temp-write→rename (WAL discipline), so a run
-killed mid-Stage leaves either the previous checkpoint or the complete new one —
-never a torn write. Re-running:
+Checkpoints are written batch-granularly and streamed to a temp file that is
+atomically published temp-write→rename (WAL discipline, ADR-0033), so the write
+transient is O(batch) not O(all-records) and a run killed mid-Stage leaves either
+the previous checkpoint or the complete new one — never a torn write. Re-running:
 
 * a Stage whose checkpoint exists is skipped (resume);
 * a fully-completed pipeline is a no-op.
@@ -115,6 +116,13 @@ _T = TypeVar("_T", bound=StageOutput)
 # (checkpoint presence is authoritative); it exists for audit and crash forensics.
 _WAL_STAGE_BEGIN = "stage_begin"
 _WAL_STAGE_COMMIT = "stage_commit"
+_WAL_STAGE_BATCH = "stage_batch"
+
+# Checkpoint write batch size (ADR-0033 / #63): the number of records serialized and
+# flushed to the temp checkpoint at once, so the write transient is O(batch) instead of the
+# old O(all-records) whole-string build. Purely a memory-shaping knob — the on-disk file
+# (newline-delimited records) and Stage-granular resume are identical regardless of the value.
+_CHECKPOINT_BATCH_RECORDS = 1024
 
 # Secret-handling (issue #30): the run manifest persists the whole Pipeline
 # (including every Stage's operator ``config``) verbatim. A Provider such as the S5
@@ -233,12 +241,35 @@ class LocalRunner:
         # many transient failures it retried through); the Runner reads it after the Stage runs and
         # resets for the next. A CPU/in-process Provider has no such attribute → 0.
         self._last_stage_retries = 0
+        # Per-Stage relation quadratic-fan-out-guard tally (ADR-0033 / #63), keyed by Stage
+        # name: (documents capped, relations dropped). A RelationExtractor Provider that
+        # enforces the cap exposes ``fanout_capped_documents``/``fanout_dropped_relations``
+        # int attributes; the Runner reads them after the Stage runs and folds them into the
+        # Quality Report's RelationQuality. A Provider without them contributes (0, 0).
+        self._fanout_by_stage: dict[str, tuple[int, int]] = {}
 
     def _drain_retry_count(self) -> int:
         """Read and reset the endpoint-retry tally the just-executed Stage's Provider reported."""
         count = self._last_stage_retries
         self._last_stage_retries = 0
         return count
+
+    @staticmethod
+    def _provider_fanout(provider: object) -> tuple[int, int]:
+        """The (capped-documents, dropped-relations) fan-out-guard tally a Provider exposes.
+
+        A RelationExtractor Provider enforcing the ADR-0033 / #63 per-document relation cap
+        tallies how many documents it capped and how many relations it dropped in the
+        ``fanout_capped_documents``/``fanout_dropped_relations`` int attributes. Any Provider
+        without them (or with a non-int) contributes ``(0, 0)`` — read defensively so the seam
+        names no base class (ADR-0004).
+        """
+        capped = getattr(provider, "fanout_capped_documents", 0)
+        dropped = getattr(provider, "fanout_dropped_relations", 0)
+        return (
+            capped if isinstance(capped, int) else 0,
+            dropped if isinstance(dropped, int) else 0,
+        )
 
     @staticmethod
     def _provider_retry_count(provider: object) -> int:
@@ -284,6 +315,29 @@ class LocalRunner:
 
     def _wal_append(self, storage: Storage, uri: str, event: str, stage: str) -> None:
         line = json.dumps({"ts": time.time(), "event": event, "stage": stage}, sort_keys=True)
+        existing = storage.read_text(uri) if storage.exists(uri) else ""
+        storage.write_atomic(uri, (existing + line + "\n").encode("utf-8"))
+
+    def _wal_append_batch(
+        self, storage: Storage, uri: str, stage: str, batch_index: int, records_so_far: int
+    ) -> None:
+        """Append a per-batch checkpoint-progress WAL event (ADR-0033 / #63).
+
+        Logged as each checkpoint batch is durably written, so the WAL records batch-granular
+        progress (``batch_index`` + cumulative ``records`` flushed) for crash forensics and
+        audit. Like the other WAL events it is append-only and not read for control flow — the
+        finalized checkpoint's presence remains authoritative for resume (Stage-granular skip).
+        """
+        line = json.dumps(
+            {
+                "ts": time.time(),
+                "event": _WAL_STAGE_BATCH,
+                "stage": stage,
+                "batch": batch_index,
+                "records": records_so_far,
+            },
+            sort_keys=True,
+        )
         existing = storage.read_text(uri) if storage.exists(uri) else ""
         storage.write_atomic(uri, (existing + line + "\n").encode("utf-8"))
 
@@ -372,12 +426,58 @@ class LocalRunner:
         return DocumentRecord
 
     def _write_checkpoint(
-        self, storage: Storage, uri: str, records: list[StageOutput]
-    ) -> None:
-        # model_dump_json round-trips ``bytes`` content losslessly (used for
-        # ParserInput's raw content); a bare dict + json.dumps would not.
-        payload = "\n".join(r.model_dump_json() for r in records)
-        storage.write_atomic(uri, (payload + ("\n" if records else "")).encode("utf-8"))
+        self,
+        storage: Storage,
+        uri: str,
+        records: Iterable[StageOutput],
+        *,
+        wal_uri: str | None = None,
+        stage_name: str | None = None,
+    ) -> int:
+        """Write a Stage checkpoint batch-granularly, bounding the write transient (ADR-0033).
+
+        The buffered path built the *entire* checkpoint as one ``"\\n".join(...)`` string before
+        writing — an O(all-records) transient that, with the pre-#63 whole-corpus Export, was one
+        of the peaks G1 measured. This streams instead: records are serialized in bounded batches
+        (``_CHECKPOINT_BATCH_RECORDS``) and each batch is appended to a sibling temp file, so at
+        most one batch's serialized text is live at once. Each completed batch is logged to the
+        WAL (``stage_batch`` events) for crash forensics + audit, then the temp file is atomically
+        published to the final ``uri`` (temp→rename, the WAL-atomic discipline ADR-0010 requires):
+        a crash mid-Stage leaves the previous checkpoint or the complete new one, never a torn
+        write — resume stays exact at Stage granularity (a finalized checkpoint ⇒ skip).
+
+        The on-disk format is unchanged — newline-delimited ``model_dump_json`` per record, one
+        record per line, trailing newline iff non-empty — so the delta engine's checkpoint reader
+        and the Airflow adapter's typed decode round-trip byte-identically. ``model_dump_json``
+        round-trips ``bytes`` content losslessly (ParserInput's raw content); a bare dict +
+        ``json.dumps`` would not. Returns the number of records written.
+        """
+        # Streaming opens bypass write_bytes' implicit parent-makedirs, so ensure the
+        # checkpoint directory exists before opening the temp file.
+        parent = uri.rsplit("/", 1)[0] if "/" in uri else uri
+        if parent and parent != uri:
+            storage.makedirs(parent)
+        tmp = storage.temp_uri(uri)
+        total = 0
+        batch_index = 0
+        with storage.open(tmp, "wb") as fh:
+            batch: list[str] = []
+            for record in records:
+                batch.append(record.model_dump_json())
+                if len(batch) >= _CHECKPOINT_BATCH_RECORDS:
+                    fh.write(("\n".join(batch) + "\n").encode("utf-8"))
+                    total += len(batch)
+                    batch = []
+                    if wal_uri is not None and stage_name is not None:
+                        self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
+                    batch_index += 1
+            if batch:
+                fh.write(("\n".join(batch) + "\n").encode("utf-8"))
+                total += len(batch)
+                if wal_uri is not None and stage_name is not None:
+                    self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
+        storage.finalize_atomic(tmp, uri)
+        return total
 
     def _read_checkpoint(
         self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
@@ -495,7 +595,12 @@ class LocalRunner:
             duration = time.perf_counter() - started
 
             outputs[stage.name] = own_output
-            self._write_checkpoint(storage, ckpt_uri, list(own_output))
+            # Batch-granular streamed checkpoint write (ADR-0033 / #63): the write transient is
+            # O(batch), not O(all-records); batch progress lands in the WAL; the final file is
+            # published atomically (temp→rename) so resume stays exact at Stage granularity.
+            self._write_checkpoint(
+                storage, ckpt_uri, own_output, wal_uri=wal_uri, stage_name=stage.name
+            )
             self._wal_append(storage, wal_uri, _WAL_STAGE_COMMIT, stage.name)
 
             stage_metrics.append(
@@ -539,6 +644,11 @@ class LocalRunner:
             return self._dispatch_stage(stage, provider, storage, pipeline, run_id, incoming)
         finally:
             self._last_stage_retries = self._provider_retry_count(provider)
+            if stage.capability in (
+                CapabilityKind.RELATION_EXTRACTION,
+                CapabilityKind.FUSED_ENTITY_RELATION,
+            ):
+                self._fanout_by_stage[stage.name] = self._provider_fanout(provider)
 
     def _dispatch_stage(
         self,
@@ -1084,7 +1194,7 @@ class LocalRunner:
             chunk=self._chunk_quality(pipeline, chunked, flagged_source),
             screening=self._screening_quality(pipeline, run_id, storage, ordered),
             entities=self._entity_quality(pipeline, mentions),
-            relations=self._relation_quality(pipeline, relations),
+            relations=self._relation_quality(pipeline, relations, self._fanout_total(ordered)),
             redaction=self._redaction_quality(pipeline, redactions),
             profiling=self._profiling_quality(pipeline, features),
             disambiguation=self._disambiguation_quality(
@@ -1423,9 +1533,28 @@ class LocalRunner:
         quality.per_type = dict(sorted(quality.per_type.items()))
         return quality
 
+    def _fanout_total(self, ordered: list[Stage]) -> tuple[int, int]:
+        """Sum the per-Stage relation fan-out-guard tallies across the run (ADR-0033 / #63).
+
+        Folds every relation/fused Stage's ``(capped-documents, dropped-relations)`` tally
+        (captured in :meth:`_execute_stage`) into one corpus-wide pair for the Quality Report.
+        A Stage restored from a checkpoint on resume never re-ran its Provider, so it
+        contributes nothing here — the audited tally reflects Providers that actually executed
+        this run (a resumed relation Stage's cap was already reflected in its committed output).
+        """
+        capped = 0
+        dropped = 0
+        for stage in ordered:
+            c, d = self._fanout_by_stage.get(stage.name, (0, 0))
+            capped += c
+            dropped += d
+        return capped, dropped
+
     @staticmethod
     def _relation_quality(
-        pipeline: Pipeline, records: list[StageOutput]
+        pipeline: Pipeline,
+        records: list[StageOutput],
+        fanout: tuple[int, int] = (0, 0),
     ) -> RelationQuality | None:
         """Aggregate Relation-Extraction quality: per-type counts + confidence dist (S5).
 
@@ -1437,7 +1566,9 @@ class LocalRunner:
         original page) — so ``offset_resolving`` is True only when every relation
         carried a resolvable span. The per-type counts + confidence distribution are
         the S5 acceptance criterion ("relation counts + confidence land in the
-        Quality Report").
+        Quality Report"). ``fanout`` is the run's ``(capped-documents, dropped-relations)``
+        quadratic-fan-out-guard tally (ADR-0033 / #63), surfaced as the audited "capped"
+        marker so a bounded pathological corpus is never silently truncated.
         """
         relation_kinds = (
             CapabilityKind.RELATION_EXTRACTION,
@@ -1446,6 +1577,7 @@ class LocalRunner:
         if not any(s.capability in relation_kinds for s in pipeline.stages):
             return None
         quality = RelationQuality()
+        quality.fanout_capped_documents, quality.fanout_dropped_relations = fanout
         docs_with_relations: set[str] = set()
         for record in records:
             if not isinstance(record, RelationMention):

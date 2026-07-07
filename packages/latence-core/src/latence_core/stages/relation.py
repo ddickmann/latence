@@ -36,6 +36,22 @@ relations (never an error) — the S5 acceptance criterion.
 Determinism: relations are emitted grouped by ``document_record_id`` (in first-seen
 order) then ordered within a document by ``(char_start, label, head, tail)``, so
 identical input + config yields byte-identical relations (the Baseline bar).
+
+**Quadratic-fan-out guard (ADR-0033 / #63).** The candidate scan is
+``O(mentions²)`` per document within the window. A low-cardinality corpus (many
+same-typed mentions crammed inside one window) is a pathological input that drives
+the emitted relation count — and every downstream graph edge — quadratic in the
+document's mention count, an algorithmic memory-DoS lever (G1 Lane 6 measured
+``~0.084·n²`` records; 5k docs → ~12 GB, killed). Independent of streaming, the
+Provider caps the relations emitted *per document* at ``max_relations_per_document``
+(default 10_000). The cap is applied **after** the deterministic candidate sort, so
+the retained relations are the lowest-ordered (by covering-span start, then label,
+then head/tail ids) — a stable, deterministic prefix, never a random subset. The
+number of documents whose fan-out was capped and the number of relations dropped are
+tallied on the Provider (``fanout_capped_documents`` / ``fanout_dropped_relations``)
+and surfaced into the Quality Report's RelationQuality — the audited "capped" marker,
+so a capped run is never silently truncated. This mirrors the discipline #33 already
+applied to profiling's per-document pair fan-out.
 """
 
 from __future__ import annotations
@@ -78,6 +94,14 @@ class _Rule:
 # the ordered head/tail mentions, and the covering document span.
 _Candidate = tuple[_Rule, "EntityMention", "EntityMention", int, int]
 
+# Default per-document relation fan-out cap (ADR-0033 / #63): the max relations one
+# document may emit, bounding the O(mentions²) a low-cardinality corpus produces.
+# Sized generously so it never trims a realistic document (real documents yield far
+# fewer than 10k typed, triggered relations), but a pathological same-typed mention
+# storm is bounded rather than driving records — and downstream graph edges —
+# quadratic. Configurable per Pipeline via ``max_relations_per_document``.
+_MAX_RELATIONS_PER_DOCUMENT = 10_000
+
 
 class PatternRelationExtractor:
     """Zero-shot trigger-phrase RelationExtractor Provider.
@@ -106,6 +130,17 @@ class PatternRelationExtractor:
         case_sensitive: bool  — match triggers case-sensitively (default False).
         window_chars: int  — max document-char gap between the head end and the tail
             start for a pair to be considered (default 200). Keeps relations local.
+        max_relations_per_document: int  — quadratic-fan-out guard (ADR-0033 / #63):
+            the max relations one document may emit (default 10_000). Applied after the
+            deterministic candidate sort, so the retained relations are the
+            lowest-ordered stable prefix. Bounds the O(mentions²) a low-cardinality
+            corpus produces. A value ``<= 0`` disables the cap (unbounded, the old
+            behaviour) — not recommended on untrusted corpora.
+
+    Audit attributes (read after ``relate`` returns, e.g. by the Runner into the
+    Quality Report — the ADR-0033 "capped" marker):
+        fanout_capped_documents: int  — how many documents hit the cap.
+        fanout_dropped_relations: int  — total relations dropped across those documents.
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -113,7 +148,14 @@ class PatternRelationExtractor:
         self._default_confidence = float(config.get("default_confidence", 0.75))
         self._case_sensitive = bool(config.get("case_sensitive", False))
         self._window_chars = int(config.get("window_chars", 200))
+        self._max_relations_per_document = int(
+            config.get("max_relations_per_document", _MAX_RELATIONS_PER_DOCUMENT)
+        )
         self._rules = self._compile_rules(config.get("relations", {}))
+        # Audited fan-out-guard tallies (ADR-0033 / #63), reset per ``relate`` call so a
+        # reused Provider instance reports only the current run's capping.
+        self.fanout_capped_documents = 0
+        self.fanout_dropped_relations = 0
 
     # -- config compilation -------------------------------------------------
 
@@ -170,6 +212,9 @@ class PatternRelationExtractor:
         from its chunks (each chunk carries its own document-level span), which the
         rules read to test trigger phrases *between* a candidate head and tail.
         """
+        # Reset the fan-out-guard tallies so a reused Provider reports only this call.
+        self.fanout_capped_documents = 0
+        self.fanout_dropped_relations = 0
         chunk_list = list(chunks)
         # Reconstruct per-document text + page map from the chunks (each chunk knows
         # its own [char_start, char_end) in the parent document, S3). This lets a
@@ -213,6 +258,15 @@ class PatternRelationExtractor:
         # Deterministic order within a document: by covering-span start, then label,
         # then head/tail ids.
         candidates.sort(key=lambda c: (c[3], c[0].label, c[1].record_id, c[2].record_id))
+        # Quadratic-fan-out guard (ADR-0033 / #63): bound the relations one document may
+        # emit. Applied AFTER the deterministic sort so the retained relations are the
+        # lowest-ordered stable prefix (never a random subset — determinism preserved),
+        # and the dropped count is audited into the Quality Report. A cap <= 0 disables it.
+        cap = self._max_relations_per_document
+        if 0 < cap < len(candidates):
+            self.fanout_dropped_relations += len(candidates) - cap
+            self.fanout_capped_documents += 1
+            candidates = candidates[:cap]
         page_index = PageOffsetIndex(page_map) if page_map is not None else None
         for i, (rule, head, tail, span_start, span_end) in enumerate(candidates):
             provenance = self._relation_provenance(

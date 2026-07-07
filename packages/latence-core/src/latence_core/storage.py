@@ -129,6 +129,28 @@ class Storage:
         # object stores implement move as an atomic server-side copy+delete.
         self._fs.mv(self._check(tmp), self._check(uri))
 
+    def temp_uri(self, uri: str) -> str:
+        """A unique sibling temp path for ``uri`` (the write side of :meth:`finalize_atomic`).
+
+        The write-atomic discipline (ADR-0010) for a *streamed* artifact too large to hold in
+        one ``bytes`` buffer (ADR-0033 incremental Export): a caller opens this temp path, writes
+        it incrementally (JSONL append / a Parquet ``ParquetWriter`` row-group stream), then
+        atomically publishes it with :meth:`finalize_atomic`. A reader never sees the temp path
+        under ``uri`` and never sees a torn ``uri`` — same guarantee as :meth:`write_atomic`,
+        without materialising the whole payload in memory first.
+        """
+        return f"{uri}.{_token()}.tmp"
+
+    def finalize_atomic(self, tmp_uri: str, uri: str) -> None:
+        """Atomically publish a fully-written temp file (from :meth:`temp_uri`) as ``uri``.
+
+        The rename half of the streamed write-atomic discipline: fsspec's local rename maps to
+        ``os.replace`` (atomic on POSIX); object stores implement move as an atomic server-side
+        copy+delete. After this returns the destination is the complete new file, never a torn
+        write — so an incremental Export (ADR-0033) is as crash-safe as the buffered path.
+        """
+        self._fs.mv(self._check(tmp_uri), self._check(uri))
+
     def remove(self, uri: str) -> None:
         """Physically delete a single file (the Purge / GDPR-erasure primitive, ADR-0018).
 

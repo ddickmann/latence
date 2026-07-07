@@ -376,6 +376,120 @@ def test_fused_stage_resumes_mixed_checkpoint(tmp_path: Path) -> None:
     assert report2.relations is not None and report2.relations.relations_total > 0
 
 
+# -- Quadratic-fan-out guard: Runner -> Quality-Report wiring (ADR-0033 / #63) --
+
+
+def _storm_docs(tmp_path: Path, count: int) -> Path:
+    """A pathological low-cardinality corpus: one document packing ``count`` same-typed
+    ORG surfaces tightly together, the adversarial input the ADR-0033 / #63 fan-out guard
+    exists to bound. With a symmetric no-trigger co-occurrence rule and a wide window every
+    ORG-ORG pair is a candidate, so the document alone yields O(count²) relations uncapped.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    surfaces = " ".join(f"E{i:03d}" for i in range(count))
+    (docs / "storm.txt").write_text(surfaces + "\n", encoding="utf-8")
+    return docs
+
+
+def _storm_pipeline(store: str, docs_dir: Path, count: int, cap: int) -> Pipeline:
+    """Source -> Parse -> Chunk -> Entity -> Relation -> Export, configured so the single
+    storm document blows past ``cap`` symmetric ORG-ORG relations. The gazetteer recognises
+    every ORG surface; the relation rule is symmetric with a wide window so the whole storm
+    lands in one window; ``max_relations_per_document`` caps the per-document fan-out.
+    """
+    terms = ", ".join(f"E{i:03d}" for i in range(count))
+    return Pipeline.from_yaml_text(
+        f"""
+name: fanout-storm
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs_dir}'
+      sensitivity: internal
+      extensions: [txt, md]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [{terms}]
+          confidence: 0.9
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [chunk, entities]
+    config:
+      window_chars: 100000
+      max_relations_per_document: {cap}
+      relations:
+        co_occurs:
+          head: ORG
+          tail: ORG
+          symmetric: true
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [relations]
+"""
+    )
+
+
+def test_fanout_cap_audit_reaches_quality_report_end_to_end(tmp_path: Path) -> None:
+    """#63 / ADR-0033 regression: the audited quadratic-fan-out marker must survive the
+    full Runner seam into the persisted Quality Report — not just the Provider.
+
+    A single low-cardinality storm document produces O(count²) symmetric candidate
+    relations; the per-document cap bounds the emitted relations, and the capped/dropped
+    tallies must be threaded from the Provider through _execute_stage -> _fanout_total ->
+    _relation_quality into RelationQuality.fanout_capped_documents / fanout_dropped_relations.
+    If any link of that Runner wiring were reverted or broken, these fields would silently
+    read 0 in the persisted report — exactly the "silently truncated" failure the marker
+    exists to prevent — while the Provider-level tests stayed green. This test locks it.
+    """
+    count = 60  # 60 ORG mentions => up to 60*59/2 = 1770 symmetric pairs, uncapped.
+    cap = 100
+    docs = _storm_docs(tmp_path, count)
+    store = f"file://{tmp_path}/store"
+    report = LocalRunner().run(_storm_pipeline(store, docs, count, cap), run_id="storm")
+    s = Storage.for_uri(store)
+    base = f"{store}/_latence/runs/storm"
+
+    # The exported relations are bounded by the cap, not the quadratic pair count.
+    rows = [
+        json.loads(line)
+        for line in s.read_text(f"{base}/export/records.jsonl").splitlines()
+        if line.strip()
+    ]
+    relations = [r for r in rows if "head_mention_id" in r]
+    assert len(relations) == cap
+
+    # The audited fan-out marker reached the PERSISTED Quality Report (the Runner seam).
+    persisted = QualityReport.model_validate_json(s.read_text(f"{base}/quality-report.json"))
+    assert persisted.relations is not None
+    total_pairs = count * (count - 1) // 2
+    assert persisted.relations.relations_total == cap
+    assert persisted.relations.fanout_capped_documents == 1
+    assert persisted.relations.fanout_dropped_relations == total_pairs - cap
+    # The returned report agrees with the persisted one.
+    assert report.relations is not None
+    assert report.relations.fanout_capped_documents == 1
+    assert report.relations.fanout_dropped_relations == total_pairs - cap
+
+
 def _colliding_prov() -> Provenance:
     return Provenance(
         source_uri="mem://d",

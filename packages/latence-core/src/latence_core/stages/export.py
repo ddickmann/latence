@@ -29,10 +29,20 @@ import pyarrow.parquet as pq
 from latence_core.capability import Embedder, ProviderRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
     from latence_core.contracts import Record
     from latence_core.storage import Storage
+
+# Row-group / JSONL flush granularity for the incremental Export (ADR-0033 / #63). The
+# Export no longer materialises the whole corpus as one Python list + one Arrow table
+# (``pa.Table.from_pylist(flat)``) — the single biggest transient G1 measured, coincident
+# with peak RSS. Instead it streams the input in bounded batches: each batch becomes one
+# Parquet row group (via a ``pq.ParquetWriter``) and one JSONL flush, so the Export's peak
+# memory is O(batch), not O(corpus). Byte-for-byte identical output to the buffered path
+# (same per-row dumps, same sorted-key JSONL, same flat Parquet schema + values) — only the
+# transient footprint changes.
+_EXPORT_BATCH_ROWS = 1024
 
 
 def _corpus_text(row: dict[str, Any]) -> str:
@@ -117,34 +127,111 @@ class JsonlParquetExport:
         return embedder
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
-        rows: list[dict[str, Any]] = [r.model_dump(mode="json") for r in records]
+        """Materialize records to ``<basename>.jsonl`` + ``<basename>.parquet``, streaming.
 
-        # Opt-in embeddings: attach one fixed-width vector per row (input order), embedding
-        # the row's corpus text (the PII-handled masked_content when present). Absent embedder
-        # ⇒ rows exported unchanged (embeddings are never required for Export — ADR-0017).
-        if self._embedder is not None:
-            vectors = list(self._embedder.embed(_corpus_text(row) for row in rows))
-            if len(vectors) != len(rows):  # pragma: no cover - defensive: Embedder contract
-                msg = (
-                    f"Embedder returned {len(vectors)} vectors for {len(rows)} records; "
-                    f"the Embedder contract yields one vector per input text, in order."
-                )
-                raise ValueError(msg)
-            for row, vector in zip(rows, vectors, strict=True):
-                row["embedding"] = vector
-
-        jsonl_uri = f"{out_dir.rstrip('/')}/{self._basename}.jsonl"
-        parquet_uri = f"{out_dir.rstrip('/')}/{self._basename}.parquet"
-
-        # JSONL: one canonical (sorted-key) object per line for byte-stable output.
-        lines = [json.dumps(row, sort_keys=True, ensure_ascii=False) for row in rows]
-        blob = "\n".join(lines) + ("\n" if lines else "")
-        storage.write_atomic(jsonl_uri, blob.encode("utf-8"))
-
-        # Parquet: nested contract fields are serialized as JSON strings so the
-        # schema stays flat and simple-Provider-authors friendly (ADR-0006). The
-        # optional embedding is a native list<double> column so a vector DB reads it directly.
+        Incremental (ADR-0033 / #63): the input is consumed in bounded batches of
+        ``_EXPORT_BATCH_ROWS``; each batch is dumped, (optionally) embedded, JSONL-appended,
+        and written as one Parquet row group — so the Export's peak memory is O(batch), not the
+        old O(corpus) ``from_pylist(whole)`` transient (peak RSS coincided with it). Both files
+        are written to sibling temp paths and atomically published (:meth:`Storage.temp_uri` +
+        :meth:`Storage.finalize_atomic`), so a crash mid-Export leaves the previous file or the
+        complete new one, never a torn write — the same WAL guarantee as the buffered path. The
+        bytes are identical to the buffered path: same per-row Pydantic JSON dumps, same
+        sorted-key JSONL line order + trailing-newline rule, same flat Parquet schema + values.
+        """
         embed = self._embedder is not None
+        schema = self._parquet_schema(embed)
+
+        out_dir = out_dir.rstrip("/")
+        # Streaming opens bypass write_bytes' implicit parent-makedirs, so ensure the export
+        # directory exists before opening the temp files (a fresh run has no export/ yet).
+        storage.makedirs(out_dir)
+        jsonl_uri = f"{out_dir}/{self._basename}.jsonl"
+        parquet_uri = f"{out_dir}/{self._basename}.parquet"
+        jsonl_tmp = storage.temp_uri(jsonl_uri)
+        parquet_tmp = storage.temp_uri(parquet_uri)
+
+        wrote_any = False
+        # Two streamed writers, both to temp paths, atomically published on success. The
+        # JSONL is byte-stable: one sorted-key object per line, and the trailing newline is
+        # written per line (so an N-line file ends in exactly one "\n"; an empty file is empty)
+        # — identical to the old ``"\n".join(lines) + ("\n" if lines else "")`` construction.
+        # The Parquet writer is handed the temp file handle directly (pyarrow streams row
+        # groups into any binary file-like), so it goes through the same Storage seam.
+        with (
+            storage.open(jsonl_tmp, "wb") as jsonl_fh,
+            storage.open(parquet_tmp, "wb") as parquet_fh,
+        ):
+            # pyarrow ships no type stubs; the writer calls are dynamically typed.
+            writer = pq.ParquetWriter(parquet_fh, schema)  # type: ignore[no-untyped-call]
+            try:
+                for batch_rows in self._batched(records, _EXPORT_BATCH_ROWS):
+                    self._attach_embeddings(batch_rows, embed)
+                    for row in batch_rows:
+                        line = json.dumps(row, sort_keys=True, ensure_ascii=False)
+                        jsonl_fh.write((line + "\n").encode("utf-8"))
+                    record_batch = self._record_batch(batch_rows, schema, embed)
+                    writer.write_table(pa.Table.from_batches([record_batch], schema))  # type: ignore[no-untyped-call]
+                    wrote_any = True
+                if not wrote_any:
+                    # No rows: still write the (empty) schema-only Parquet so a reader gets the
+                    # column set, matching the buffered path's empty ``pa.table(columns)``.
+                    writer.write_table(schema.empty_table())  # type: ignore[no-untyped-call]
+            finally:
+                writer.close()  # type: ignore[no-untyped-call]
+
+        storage.finalize_atomic(jsonl_tmp, jsonl_uri)
+        storage.finalize_atomic(parquet_tmp, parquet_uri)
+        return [jsonl_uri, parquet_uri]
+
+    def _attach_embeddings(self, rows: list[dict[str, Any]], embed: bool) -> None:
+        """Attach one fixed-width embedding vector per row in-place (opt-in, per batch).
+
+        Embeds the row's corpus text (the PII-handled ``masked_content`` when present, else
+        ``content``). Embedding per batch keeps the vector transient O(batch). Absent embedder
+        ⇒ rows unchanged (embeddings are never required for Export — ADR-0017).
+        """
+        if not embed or self._embedder is None:
+            return
+        vectors = list(self._embedder.embed(_corpus_text(row) for row in rows))
+        if len(vectors) != len(rows):  # pragma: no cover - defensive: Embedder contract
+            msg = (
+                f"Embedder returned {len(vectors)} vectors for {len(rows)} records; "
+                f"the Embedder contract yields one vector per input text, in order."
+            )
+            raise ValueError(msg)
+        for row, vector in zip(rows, vectors, strict=True):
+            row["embedding"] = vector
+
+    @staticmethod
+    def _parquet_schema(embed: bool) -> pa.Schema:
+        """The flat Parquet schema (ADR-0006): nested contract fields as JSON strings.
+
+        Fixing the schema up front lets the ``ParquetWriter`` stream row-group batches into one
+        file (and lets an all-empty corpus still write the column set). The optional embedding
+        is a native ``list<double>`` column so a vector DB reads it directly.
+        """
+        fields = [
+            pa.field("record_id", pa.string()),
+            pa.field("schema_version", pa.int64()),
+            pa.field("provenance", pa.string()),
+            pa.field("classification", pa.string()),
+            pa.field("content", pa.string()),
+            pa.field("media_type", pa.string()),
+        ]
+        if embed:
+            fields.append(pa.field("embedding", pa.list_(pa.float64())))
+        return pa.schema(fields)
+
+    @staticmethod
+    def _record_batch(
+        rows: list[dict[str, Any]], schema: pa.Schema, embed: bool
+    ) -> pa.RecordBatch:
+        """One Arrow RecordBatch (a Parquet row group) for a batch of dumped rows.
+
+        Same flat projection as the buffered path: nested Provenance/Classification serialized
+        as sorted-key JSON strings, content/media_type verbatim, optional embedding native.
+        """
         flat = [
             {
                 "record_id": row["record_id"],
@@ -157,19 +244,21 @@ class JsonlParquetExport:
             }
             for row in rows
         ]
-        columns: dict[str, pa.Array] = {
-            "record_id": pa.array([], type=pa.string()),
-            "schema_version": pa.array([], type=pa.int64()),
-            "provenance": pa.array([], type=pa.string()),
-            "classification": pa.array([], type=pa.string()),
-            "content": pa.array([], type=pa.string()),
-            "media_type": pa.array([], type=pa.string()),
-        }
-        if embed:
-            columns["embedding"] = pa.array([], type=pa.list_(pa.float64()))
-        table = pa.Table.from_pylist(flat) if flat else pa.table(columns)
-        with storage.open(parquet_uri, "wb") as fh:
-            # pyarrow ships no type stubs; the call is dynamically typed.
-            pq.write_table(table, fh)  # type: ignore[no-untyped-call]
+        return pa.RecordBatch.from_pylist(flat, schema=schema)
 
-        return [jsonl_uri, parquet_uri]
+    @staticmethod
+    def _batched(records: Iterable[Record], size: int) -> Iterator[list[dict[str, Any]]]:
+        """Yield the records dumped to JSON-able rows in bounded batches of ``size``.
+
+        The single place the corpus is pulled through: each record is ``model_dump``ed and
+        buffered only until the batch fills, so at most ``size`` rows are live at once — the
+        O(batch) bound that replaces the old whole-corpus list.
+        """
+        batch: list[dict[str, Any]] = []
+        for record in records:
+            batch.append(record.model_dump(mode="json"))
+            if len(batch) >= size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch

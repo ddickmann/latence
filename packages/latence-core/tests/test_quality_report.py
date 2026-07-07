@@ -28,9 +28,9 @@ from latence_core.quality import (
 from latence_core.runner import LocalRunner
 
 
-def test_schema_version_is_v12() -> None:
-    assert QUALITY_SCHEMA_VERSION == 12
-    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 12
+def test_schema_version_is_v13() -> None:
+    assert QUALITY_SCHEMA_VERSION == 13
+    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 13
 
 
 def test_completeness_passes_only_when_provenance_classification_and_offsets_align() -> None:

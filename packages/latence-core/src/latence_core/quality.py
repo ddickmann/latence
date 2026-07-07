@@ -51,7 +51,12 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # ``endpoint_retries`` (how many transient endpoint failures a Stage retried through — endpoint
 # fault-tolerance surfaced in the report, S12 AC). Additive with defaults, so a v11 report still
 # validates.
-QUALITY_SCHEMA_VERSION = 12
+# v13 (#63, ADR-0033): :class:`RelationQuality` gains ``fanout_capped_documents`` and
+# ``fanout_dropped_relations`` — the audited quadratic-fan-out-guard marker (how many documents
+# hit the per-document relation cap and how many relations were dropped as a result). Both default
+# to 0, so a v12 report still validates, but a v12 and a v13 report differ in the RelationQuality
+# shape, hence the bump.
+QUALITY_SCHEMA_VERSION = 13
 
 
 class StageMetrics(BaseModel):
@@ -266,6 +271,12 @@ class RelationQuality(BaseModel):
     ``documents_with_relations`` counts distinct parent documents that yielded at
     least one relation. The counts + distribution are the S5 acceptance criterion
     ("relation counts + confidence land in the Quality Report").
+
+    ``fanout_capped_documents`` / ``fanout_dropped_relations`` are the audited
+    quadratic-fan-out-guard marker (ADR-0033 / #63): how many documents hit the
+    per-document relation cap and how many relations were dropped as a result. Both
+    zero on a normal run; non-zero surfaces that a low-cardinality/pathological corpus
+    was bounded rather than silently allowed to blow up records + downstream graph edges.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -273,6 +284,8 @@ class RelationQuality(BaseModel):
     relations_total: int = 0
     relations_offset_resolving: int = 0
     documents_with_relations: int = 0
+    fanout_capped_documents: int = 0
+    fanout_dropped_relations: int = 0
     per_type: dict[str, int] = Field(default_factory=dict)
     confidence: ConfidenceHistogram = Field(default_factory=ConfidenceHistogram)
 

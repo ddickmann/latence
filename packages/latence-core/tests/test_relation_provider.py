@@ -292,3 +292,87 @@ def test_relations_scoped_per_document() -> None:
     for r in relations:
         assert r.head_mention_id.startswith(r.document_record_id)
         assert r.tail_mention_id.startswith(r.document_record_id)
+
+
+def _entity_storm_chunk(count: int) -> tuple[ChunkRecord, list[EntityMention]]:
+    """A pathological low-cardinality document: ``count`` same-typed mentions packed
+    tightly together, the adversarial input the ADR-0033 / #63 quadratic-fan-out guard
+    exists to bound. Every ORG mention sits within a small window of every other, so a
+    symmetric no-trigger co-occurrence rule matches O(count²) pairs in one document.
+    """
+    # Build a doc text of adjacent "Xn " tokens so every pair falls inside the window.
+    surfaces = [f"E{i:03d}" for i in range(count)]
+    text = " ".join(surfaces)
+    chunk = _doc_chunk(text, record_id="storm#chunk-0", document_record_id="storm")
+    mentions: list[EntityMention] = []
+    offset = 0
+    for i, surface in enumerate(surfaces):
+        start = text.index(surface, offset)
+        end = start + len(surface)
+        offset = end
+        prov = chunk.provenance.model_copy(
+            update={"char_start": start, "char_end": end, "page_start": 1, "page_end": 1}
+        )
+        mentions.append(
+            EntityMention(
+                record_id=f"storm#mention-{i}",
+                document_record_id="storm",
+                chunk_record_id="storm#chunk-0",
+                index=i,
+                label="ORG",
+                text=surface,
+                confidence=0.9,
+                provenance=prov,
+                classification=chunk.classification,
+            )
+        )
+    return chunk, mentions
+
+
+def test_quadratic_fanout_guard_caps_per_document_relations() -> None:
+    # #63 / ADR-0033 regression: a low-cardinality mention storm with a symmetric
+    # co-occurrence rule (no trigger, wide window) would otherwise emit O(n²) relations
+    # from ONE document — the ~0.084·n² blowup G1 Lane 6 measured (5k docs -> ~12 GB,
+    # killed). Reverting the cap makes this assertion fail (it would emit far more than
+    # the cap), and the audited capped tallies would be 0.
+    count = 60  # 60 mentions => up to 60*59/2 = 1770 symmetric pairs, uncapped.
+    chunk, mentions = _entity_storm_chunk(count)
+    cap = 100
+    cfg = {
+        "relations": {
+            # Symmetric, no trigger => every ORG-ORG pair in-window is a candidate.
+            "co_occurs": {"head": "ORG", "tail": "ORG", "symmetric": True},
+        },
+        "window_chars": 100_000,  # force every pair into one window
+        "max_relations_per_document": cap,
+    }
+    provider = PatternRelationExtractor(cfg)
+    relations = list(provider.relate([chunk], mentions))
+    # The emitted relations are bounded by the cap — not the quadratic pair count.
+    assert len(relations) == cap
+    # The guard is AUDITED, not silent: exactly one document was capped and the dropped
+    # count is the difference from the true (quadratic) candidate total.
+    assert provider.fanout_capped_documents == 1
+    total_pairs = count * (count - 1) // 2
+    assert provider.fanout_dropped_relations == total_pairs - cap
+    # Determinism: the retained relations are the lowest-ordered stable prefix, so a
+    # second run yields byte-identical output.
+    provider2 = PatternRelationExtractor(cfg)
+    relations2 = list(provider2.relate([chunk], mentions))
+    assert [r.record_id for r in relations] == [r.record_id for r in relations2]
+    assert [r.model_dump_json() for r in relations] == [r.model_dump_json() for r in relations2]
+
+
+def test_quadratic_fanout_guard_disabled_below_cap_is_noop() -> None:
+    # A normal document under the cap is untouched and reports no capping.
+    chunk = _doc_chunk("Alice works for Acme Corp.")
+    mentions = _mentions(chunk)
+    cfg = {
+        "relations": {"works_for": {"head": "PERSON", "tail": "ORG", "triggers": ["works for"]}},
+        "max_relations_per_document": 10_000,
+    }
+    provider = PatternRelationExtractor(cfg)
+    relations = list(provider.relate([chunk], mentions))
+    assert len(relations) == 1
+    assert provider.fanout_capped_documents == 0
+    assert provider.fanout_dropped_relations == 0
