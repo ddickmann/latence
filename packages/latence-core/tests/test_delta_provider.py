@@ -117,6 +117,74 @@ def test_delta_provider_add_keeps_untouched_record_verbatim() -> None:
     assert affected_parent not in outcome.records  # the stale parent was superseded
 
 
+def test_delta_provider_reports_affected_set_bound() -> None:
+    # The perf-baseline witness (issue #42): an incremental delta records how many corpus-level
+    # records the affected-set recompute re-resolved (affected_set_size) out of the whole current
+    # set (corpus_record_count), and the affected set is a strict subset — proof the recompute is
+    # affected-set-scoped, not O(corpus). Would fail if the wiring were reverted (both default 0).
+    processor = _load()
+    parent = [_entity("ibm", "IBM", 1, ["doc-a"]), _entity("globex", "Globex", 1, ["doc-z"])]
+    current = [
+        _entity("ibm", "IBM", 2, ["doc-a", "doc-b"]),  # affected: the added doc-b bridges it
+        _entity("globex", "Globex", 1, ["doc-z"]),  # untouched: unrelated to doc-b
+    ]
+    delta = Delta(
+        parent_version=0,
+        entries=[DeltaEntry(kind=DeltaKind.ADDED, document_id="doc-b", content_hash="sha256:b")],
+        drift=0.25,
+        triggered_reconciliation=False,
+    )
+    outcome = processor.apply_delta(parent, current, delta)
+    assert outcome.corpus_record_count == 2
+    assert outcome.affected_set_size == 1  # only the IBM region, not Globex
+    assert outcome.affected_set_size < outcome.corpus_record_count
+
+
+def test_delta_provider_reconciliation_affects_whole_corpus() -> None:
+    # The dual of the bound: on a full Reconciliation the affected set IS the whole corpus, so the
+    # two metrics are equal (the bounded-error backstop recomputes everything).
+    processor = _load()
+    parent = [_entity("old", "Old", 1, ["doc-a"])]
+    current = [_entity("new", "New", 1, ["doc-a"]), _entity("acme", "Acme", 1, ["doc-a"])]
+    delta = Delta(
+        parent_version=0,
+        entries=[DeltaEntry(kind=DeltaKind.UPDATED, document_id="doc-a", content_hash="sha256:x")],
+        drift=1.0,
+        triggered_reconciliation=True,
+    )
+    outcome = processor.apply_delta(parent, current, delta)
+    assert outcome.affected_set_size == outcome.corpus_record_count == 2
+
+
+def test_delta_provider_affected_set_closes_transitively() -> None:
+    # The affected set is the TRANSITIVE blocking-neighborhood closure (compute_affected_set),
+    # not a single-hop surface match (issue #42 / ADR-0018). A current record two blocks away —
+    # reachable only through a shared-key chain, never directly touching the changed document nor
+    # sharing a retracted surface — must still be pulled into the affected region. A one-hop match
+    # would miss it, so this fails if the closure wiring were reverted to the old surface-equality.
+    processor = _load()
+    # Parent: only "Acme Corp" exists. Current after adding doc-b: a chain
+    #   Acme Corp  <-shares "corp"->  Corp Holdings  <-shares "holdings"->  Holdings Group
+    # doc-b directly touches only "Acme Corp"; "Holdings Group" is two hops away.
+    parent = [_entity("acme", "Acme Corp", 1, ["doc-a"])]
+    current = [
+        _entity("acme", "Acme Corp", 2, ["doc-a", "doc-b"]),  # directly touched (doc-b)
+        _entity("corp", "Corp Holdings", 1, ["doc-c"]),  # 1 hop: shares "corp"
+        _entity("hold", "Holdings Group", 1, ["doc-d"]),  # 2 hops: shares "holdings"
+    ]
+    delta = Delta(
+        parent_version=0,
+        entries=[DeltaEntry(kind=DeltaKind.ADDED, document_id="doc-b", content_hash="sha256:b")],
+        drift=0.2,
+        triggered_reconciliation=False,
+    )
+    outcome = processor.apply_delta(parent, current, delta)
+    live_ids = {r.record_id for r in outcome.records}
+    # All three are in the affected neighborhood via the transitive closure.
+    assert {"acme#r", "corp#r", "hold#r"} <= live_ids
+    assert outcome.affected_set_size == 3
+
+
 def test_delta_provider_delete_splits() -> None:
     processor = _load()
     # Parent: a 2-member IBM merged across doc-a + doc-b. Current (doc-b deleted): 1-member IBM.

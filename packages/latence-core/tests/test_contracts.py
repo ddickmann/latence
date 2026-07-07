@@ -180,9 +180,10 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 11 by the S4 offset-map coordinate fix (ChunkRecord.offset_map +
-    # OffsetMap/OffsetSegment); 10 was S11 incremental-delta contracts.
-    assert SCHEMA_VERSION == 11
+    # Bumped to 12 by the DeltaChurn affected-set-witness fields (affected_set_size /
+    # corpus_record_count, issue #42); 11 was the S4 offset-map coordinate fix
+    # (ChunkRecord.offset_map + OffsetMap/OffsetSegment); 10 was S11 incremental-delta contracts.
+    assert SCHEMA_VERSION == 12
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

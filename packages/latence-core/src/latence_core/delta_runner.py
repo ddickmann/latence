@@ -3,16 +3,27 @@
 The DeltaRunner wraps :class:`~latence_core.runner.LocalRunner` and adds the lean-yet-enterprise
 delta machinery on top of it, without forking the Runner (ADR-0018 reuses the existing seams):
 
-* **A delta run** (:meth:`apply_delta`) executes the Pipeline once on the current source
-  (the Runner runs doc-level Stages incrementally on the changed documents and re-resolves the
-  corpus-level Stages), computes a content-hash :class:`~latence_core.contracts.Delta` of the
-  current manifest against the last committed Corpus Version (ports ``delta_detector``), feeds
-  the parent + current corpus-level records through the
-  :class:`~latence_core.capability.DeltaProcessor` (affected-set recompute + retract-by-provenance,
-  the merge-on-add / split-on-delete), applies the drift-triggered Reconciliation decision, and
-  commits an immutable Version N+1 via the WAL-backed
-  :class:`~latence_core.state.corpus_store.CorpusStore`. The delta churn lands in the run's
-  Quality Report.
+* **A delta run** (:meth:`apply_delta`) executes the Pipeline once on the current source,
+  computes a content-hash :class:`~latence_core.contracts.Delta` of the current manifest against
+  the last committed Corpus Version (ports ``delta_detector``), feeds the parent + current
+  corpus-level records through the :class:`~latence_core.capability.DeltaProcessor`
+  (blocking-neighborhood affected-set recompute + retract-by-provenance, the merge-on-add /
+  split-on-delete), applies the drift-triggered Reconciliation decision, and commits an
+  immutable Version N+1 via the WAL-backed
+  :class:`~latence_core.state.corpus_store.CorpusStore`. The delta churn — including the
+  affected-set size vs the whole corpus — lands in the run's Quality Report.
+
+  **What is affected-set-scoped today, and what is not** (issue #42, honest boundary). The
+  DeltaProcessor's *committed corpus-level output* is genuinely affected-set-scoped: only the
+  records in the blocking neighborhoods the delta touched are re-resolved and spliced, every
+  untouched cluster is carried forward verbatim (byte-identical), and the churn records the
+  affected-set size as the perf witness. What is NOT yet incremental is the **extraction pass**:
+  each delta uses a fresh ``run_id``, so the Runner re-parses / re-chunks / re-extracts the WHOLE
+  current source from scratch (there is no cross-run doc-level checkpoint reuse), then the
+  DeltaProcessor scopes the committed set. So the *stored* corpus honours ADR-0018's "recompute
+  only the affected set" property, but the *extraction cost* of a delta is still O(corpus).
+  Cross-run doc-level incremental execution (skipping unchanged documents' doc-level Stages) is a
+  Runner-core change tracked as follow-up work, not delivered here.
 * **Retraction** (:meth:`retract`) is the default soft deletion: the deleted documents' derived
   records are tombstoned (excluded from the live set, retained on Storage for audit and
   rollback), affected clusters re-resolved, a new Version committed.
@@ -85,11 +96,14 @@ class DeltaRunner:
     ) -> QualityReport:
         """Run the Pipeline on the current source and commit the resulting Corpus Version.
 
-        The Runner executes the DAG (doc-level Stages incremental on changed docs, corpus-level
-        re-resolved); this method then computes the :class:`~latence_core.contracts.Delta` of the
-        current manifest against the last committed Version, applies the affected-set recompute
-        + drift-triggered Reconciliation, commits Version N+1, and folds the
-        :class:`~latence_core.contracts.DeltaChurn` into the Quality Report. Returns that report.
+        The Runner executes the whole DAG over the current source (extraction is not yet
+        cross-run incremental — see the module docstring); this method then computes the
+        :class:`~latence_core.contracts.Delta` of the current manifest against the last committed
+        Version, applies the blocking-neighborhood affected-set recompute + drift-triggered
+        Reconciliation to produce the *committed* corpus-level set (affected-set-scoped: untouched
+        clusters carried forward verbatim), commits Version N+1, and folds the
+        :class:`~latence_core.contracts.DeltaChurn` (with the affected-set size) into the Quality
+        Report. Returns that report.
         """
         store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
         parent_version = store.head_version()
@@ -343,6 +357,8 @@ class DeltaRunner:
             edges_retracted=outcome.edges_retracted,
             records_retracted=records_retracted,
             records_purged=records_purged,
+            affected_set_size=outcome.affected_set_size,
+            corpus_record_count=outcome.corpus_record_count,
             drift=drift.drift,
             reconciliation_triggered=drift.triggered,
             deletion_mode=deletion_mode,

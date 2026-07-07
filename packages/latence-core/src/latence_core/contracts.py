@@ -110,7 +110,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # mention's TRUE original offset and page at source, so every downstream consumer inherits
 # correct offsets with no per-Stage relocation. Optional and additive: a chunk without it
 # (pre-v11, or a document with no map) degrades to the ``char_start + local`` shift.
-SCHEMA_VERSION = 11
+#
+# v12: DeltaChurn gained ``affected_set_size`` / ``corpus_record_count`` — the perf-baseline
+# witness that the incremental delta recompute is affected-set-scoped, not O(corpus) (issue #42;
+# ADR-0018). Additive and defaulted, so a v11 DeltaChurn JSON still validates.
+SCHEMA_VERSION = 12
 
 
 class Provenance(BaseModel):
@@ -1447,6 +1451,18 @@ class DeltaKind(StrEnum):
       records are retracted (or purged), affected clusters re-resolved.
     * ``UNCHANGED`` — same id, same hash: nothing re-runs; its committed records are carried
       forward verbatim.
+
+    **When is ``UPDATED`` reachable?** (issue #42). ``UPDATED`` fires only when a document id
+    *persists* across two manifests with a changed content hash — i.e. the Source assigns a
+    **stable identity independent of content**. The reference ``source.local_folder``
+    (:class:`~latence_core.stages.source.LocalFolderSource`) is content-addressed: a document's id
+    IS ``sha256`` of its bytes, so any in-place edit mints a *new* id and retires the old one, and
+    the detector classifies that as ``ADDED`` (new id) + ``DELETED`` (old id) — never ``UPDATED``.
+    So ``UPDATED`` is unreachable under the content-addressed local-folder Source and is exercised
+    only by a Source with content-independent stable ids (e.g. a path-keyed or database-keyed
+    Source). It is retained (not removed) because it is a valid, contract-versioned classification
+    the DeltaProcessor and ``DeltaRunner._commit`` already handle, and a stable-id Source is a
+    supported Source variant; removing it would be a lossy contract change.
     """
 
     ADDED = "added"
@@ -1633,6 +1649,13 @@ class DeltaChurn(BaseModel):
     ``drift`` is the metric and ``reconciliation_triggered`` whether it forced a full recompute,
     with ``deletion_mode`` recording how deletes were handled. ``from_version`` / ``to_version``
     bracket the transaction.
+
+    ``affected_set_size`` / ``corpus_record_count`` are the perf-baseline witness that the
+    recompute was affected-set-scoped, not O(corpus): on an incremental (non-reconciliation)
+    delta ``affected_set_size`` (the corpus-level records the blocking-neighborhood recompute
+    actually re-resolved) is ``<= corpus_record_count`` (the whole current corpus-level set),
+    and a genuinely local change touches only a small fraction — the measurable ADR-0018
+    "recompute only the affected set" bound. On a full Reconciliation the two are equal.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1651,6 +1674,8 @@ class DeltaChurn(BaseModel):
     edges_retracted: int = 0
     records_retracted: int = 0
     records_purged: int = 0
+    affected_set_size: int = Field(default=0, ge=0)
+    corpus_record_count: int = Field(default=0, ge=0)
     drift: float = Field(default=0.0, ge=0.0, le=1.0)
     reconciliation_triggered: bool = False
     deletion_mode: DeletionMode = Field(default=DeletionMode.RETRACTION)

@@ -77,6 +77,15 @@ def _doc_id(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _record_reach_ids(record: object) -> set[str]:
+    # The source documents a committed record draws on — the same reach signal expunge filters
+    # by (Evidence.document_ids ∪ source_document_ids ∪ provenance.document_id), read via the
+    # in-core reach helper so the test asserts on exactly what the retract/expunge uses.
+    from latence_core.state.graph_patcher import _record_reach
+
+    return set(_record_reach(record))  # type: ignore[arg-type]
+
+
 def _entity_sizes(records: list) -> dict[str, int]:
     return {
         r.entity.canonical_text: r.entity.mention_count
@@ -176,6 +185,14 @@ def test_surgical_merge_on_add_and_split_on_delete_below_drift(tmp_path: Path) -
     assert r1.delta.entities_merged >= 1  # merge-on-add via the affected-set splice
     assert _entity_sizes(cs.read_records(1)).get("IBM", 0) >= 2
 
+    # The perf-baseline witness (issue #42): the committed corpus-level recompute was
+    # affected-set-scoped, NOT O(corpus). The blocking-neighborhood closure re-resolved at least
+    # one record (the merged IBM region) but STRICTLY fewer than the whole current corpus-level
+    # set — the untouched Bob/Alice/Acme clusters were carried forward, not recomputed. Would fail
+    # if the affected-set wiring were reverted (the metric would default to 0, not >= 1).
+    assert r1.delta.affected_set_size >= 1
+    assert r1.delta.corpus_record_count > r1.delta.affected_set_size
+
     # A genuinely untouched entity (Bob, whose reach never touches the IBM/Globex bridge) is
     # carried forward byte-identical across the delta — the surgical splice preserves it; a full
     # recompute would re-derive it. Because reconciliation did NOT run (pinned above), byte-equality
@@ -230,6 +247,37 @@ def test_edit_then_revert_restores_content(tmp_path: Path) -> None:
     v2_sizes = _entity_sizes(cs.read_records(cs.head_version() or 0))
     assert "Acme" in v2_sizes  # reverted content restored, not silently dropped
     assert "IBM" not in v2_sizes
+
+
+def test_local_folder_edit_is_added_plus_deleted_never_updated(tmp_path: Path) -> None:
+    # Issue #42.3: under the content-addressed source.local_folder, DeltaKind.UPDATED is
+    # unreachable — an in-place edit mints a NEW content-id (ADDED) and retires the old one
+    # (DELETED), never UPDATED (which requires a content-independent stable id). This pins the
+    # documented behavior: it fails if the local-folder Source stopped content-addressing (which
+    # would make UPDATED reachable and the DeltaKind/DeltaDetector docstrings stale).
+    from latence_core.contracts import DeltaKind
+    from latence_core.state.corpus_store import CorpusStore
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    cs = CorpusStore(Storage.for_uri(store), store)
+    (docs / "a.txt").write_text("Acme is a company.\n", encoding="utf-8")
+    old_id = _doc_id(docs / "a.txt")
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
+
+    # Edit a.txt in place: same file name, new bytes -> new content-id.
+    (docs / "a.txt").write_text("IBM is here.\n", encoding="utf-8")
+    new_id = _doc_id(docs / "a.txt")
+    assert new_id != old_id  # content-addressing minted a fresh id
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v1")
+
+    entries = cs.read_version(cs.head_version() or 0).delta.entries
+    kinds = {e.document_id: e.kind for e in entries}
+    # The edit is classified ADDED (new id) + DELETED (old id) — NOT UPDATED.
+    assert kinds.get(new_id) is DeltaKind.ADDED
+    assert kinds.get(old_id) is DeltaKind.DELETED
+    assert all(e.kind is not DeltaKind.UPDATED for e in entries)
 
 
 def test_retracted_document_stays_gone_across_reruns(tmp_path: Path) -> None:
@@ -319,26 +367,48 @@ def test_purge_removes_all_derived_records(tmp_path: Path) -> None:
 
 
 def test_purge_leaves_no_trace_in_prior_versions_or_source(tmp_path: Path) -> None:
-    # Purge is a hard GDPR erasure: verified NOTHING derived survives (S11 AC). Beyond the head
-    # Version being empty, the purged document's raw text and derived records must not linger in
-    # any prior committed Version's record log, any run checkpoint/export artifact, or the on-disk
-    # source file. (A Retraction, by contrast, RETAINS them for audit — asserted elsewhere.)
+    # Purge is a hard GDPR erasure: verified NOTHING derived from the PURGED document survives
+    # (S11 AC) — AND that a co-resident, NON-purged document's records are NOT collaterally erased
+    # (expunge_records filters by reach-intersection, issue #42). Beyond the head Version omitting
+    # the purged records, the purged document's raw text and derived records must not linger in any
+    # prior committed Version's record log, any run checkpoint/export artifact, or the on-disk
+    # source file — while the co-resident document's records still survive in that prior Version.
+    # (A Retraction, by contrast, RETAINS the deleted records too — asserted elsewhere.)
     docs = tmp_path / "docs"
     docs.mkdir()
     store = f"file://{tmp_path}/store"
     cs = CorpusStore(Storage.for_uri(store), store)
+    # Two co-resident documents committed in the SAME Version 0. a.txt is purged; keep.txt must
+    # survive the purge intact in the prior Version's audit log. Bob (a gazetteer PERSON) shares no
+    # canonical surface with the purged Alice/Acme/IBM, so a correct reach-filtered expunge leaves
+    # its records untouched.
     (docs / "a.txt").write_text("Alice works at Acme. IBM is here.\n", encoding="utf-8")
+    (docs / "keep.txt").write_text("Bob is here.\n", encoding="utf-8")
     DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
-    assert len(cs.read_records(0)) >= 1  # v0 had derived records before the purge
+    v0_before = cs.read_records(0)
+    assert len(v0_before) >= 1  # v0 had derived records before the purge
+    keep_id = _doc_id(docs / "keep.txt")
+    # The co-resident document's records present in Version 0 BEFORE the purge (by reach).
+    keep_before = {
+        r.record_id for r in v0_before if keep_id in _record_reach_ids(r)
+    }
+    assert keep_before, "Bob (keep.txt) must have derived records in v0 before the purge"
 
     a_id = _doc_id(docs / "a.txt")
     DeltaRunner().purge(_pipeline(store, docs), run_id="pur", document_ids=[a_id])
 
-    # 1. The source file is physically deleted.
+    # 1. The purged source file is physically deleted; the co-resident one is untouched.
     assert not (docs / "a.txt").exists()
-    # 2. The prior Version's record log is expunged (nothing derived survives in the audit history).
-    assert cs.read_records(0) == []
-    # 3. No file anywhere under the store tree still holds the purged surfaces (raw text or derived).
+    assert (docs / "keep.txt").exists()
+    # 2. The prior Version's record log no longer holds the PURGED document's records...
+    v0_after = cs.read_records(0)
+    assert all(a_id not in _record_reach_ids(r) for r in v0_after)
+    # 2b. ...but the co-resident NON-purged document's records SURVIVE verbatim in that prior
+    #     Version — the collateral-erasure guard (expunge is reach-scoped, not a blanket wipe).
+    keep_after = {r.record_id for r in v0_after if keep_id in _record_reach_ids(r)}
+    assert keep_after == keep_before, "co-resident non-purged records were collaterally erased"
+    # 3. No file anywhere under the store tree still holds the purged surfaces (raw text or derived);
+    #    the co-resident Globex surface, by contrast, is allowed to remain.
     store_root = tmp_path / "store"
     leaks = [
         p

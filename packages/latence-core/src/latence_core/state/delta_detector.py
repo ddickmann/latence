@@ -17,6 +17,13 @@ corpus is not left stale after a re-extraction.
 
 Determinism: the hash inputs are sorted before hashing and the diff iterates sorted keys, so
 the same corpus state always yields the same manifest and the same delta (the Baseline bar).
+
+Note on *updated* (issue #42): the ``UPDATED`` class fires only when a document id **persists**
+across two manifests with a changed content hash — which requires a Source that assigns a stable
+identity independent of content. The reference content-addressed ``source.local_folder`` mints
+the id from ``sha256`` of the bytes, so an in-place edit produces a *new* id (``ADDED``) and
+retires the old one (``DELETED``), never ``UPDATED``; ``UPDATED`` is reachable only under a
+stable-id Source. See :class:`~latence_core.contracts.DeltaKind`.
 """
 
 from __future__ import annotations

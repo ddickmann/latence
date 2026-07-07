@@ -3,24 +3,36 @@
 The S11 Delta reference Provider (ADR-0004/0018; ships in core like every other reference
 Provider so the delta demo runs end to end, ADR-0007 CPU-first, ADR-0016 no extra deps). It
 composes the ported :class:`~latence_core.state.graph_patcher.GraphPatcher` (retract by
-Evidence provenance) with the affected-set recompute to turn a parent Corpus Version + the
-current run's freshly-extracted corpus-level records + a classified
-:class:`~latence_core.contracts.Delta` into the next live derived set — surgically, so the cost
-is proportional to the delta, not the corpus (ADR-0018).
+Evidence provenance) with the blocking-neighborhood affected-set recompute
+(:func:`~latence_core.state.incremental.compute_affected_set`) to turn a parent Corpus Version +
+the current run's freshly-extracted corpus-level records + a classified
+:class:`~latence_core.contracts.Delta` into the next live derived set — surgically, so the
+*committed* corpus-level set is proportional to the affected region, not the corpus (ADR-0018).
+
+The scope boundary (issue #42): this processor makes the **committed corpus-level record set**
+affected-set-scoped — untouched clusters are carried forward byte-identical and only the affected
+neighborhood is re-resolved-and-spliced. It does NOT make the upstream *extraction* incremental:
+the caller (:class:`~latence_core.delta_runner.DeltaRunner`) still re-runs the whole pipeline over
+the current source to produce ``current_records`` (extraction cost is O(corpus) — see the
+DeltaRunner docstring). ``affected_set_size`` / ``corpus_record_count`` on the returned
+:class:`~latence_core.capability.DeltaOutcome` are the measurable witness of the committed-side
+scoping.
 
 How the affected-set splice works. The current run re-extracts and re-disambiguates the WHOLE
 current corpus, so ``current_records`` are the correct fully-reconciled truth (a bridging doc's
 mentions were resolved together ⇒ merge-on-add; a deleted doc's mentions are absent ⇒
-split-on-delete). But blindly replacing the parent set with the current set is the O(corpus)
-recompute ADR-0018 rejects. Instead:
+split-on-delete). But blindly replacing the parent set with the current set discards the
+carry-forward and mis-reports the churn. Instead:
 
 1. **retract** the parent records whose source-document reach touches a changed (added/updated)
    or deleted document — these are the parent's stale view of the affected region (ports
    ``graph/patcher``);
 2. **keep** every other parent record verbatim (the untouched blocks — the lean win);
-3. **splice in** exactly the current records that cover the affected region (a current record
-   whose reach touches a changed document, or that shares a canonical surface with a retracted
-   parent record — the merge-on-add bridge), de-duplicated by ``record_id`` with the current
+3. **splice in** exactly the current records in the affected blocking neighborhood — the
+   *transitive* closure (:func:`compute_affected_set`) over shared blocking keys, seeded by the
+   current records whose reach touches a changed document or that share a canonical surface with a
+   retracted parent record (the merge-on-add bridge). The closure catches a bridge two blocks
+   away, which a single-hop surface match misses. De-duplicated by ``record_id`` with the current
    record winning.
 
 On a **Reconciliation** (the Delta's ``triggered_reconciliation``), the whole current set is
@@ -47,6 +59,7 @@ from latence_core.contracts import (
 )
 from latence_core.disambiguation import normalize_text
 from latence_core.state.graph_patcher import GraphPatcher, _record_reach
+from latence_core.state.incremental import MentionView, compute_affected_set
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -103,12 +116,9 @@ class AffectedSetDeltaProcessor:
             retracted_surfaces = {
                 surf for r in retracted for surf in _canonical_surfaces(r)
             }
-            affected_current = [
-                r
-                for r in current
-                if _touches(r, affected_docs)
-                or (_canonical_surfaces(r) & retracted_surfaces)
-            ]
+            affected_current = _affected_current_records(
+                current, affected_docs=affected_docs, retracted_surfaces=retracted_surfaces
+            )
             live = self._splice(kept_parent, affected_current)
 
         # The churn baseline is the parent's view of the affected region: every parent entity
@@ -137,6 +147,12 @@ class AffectedSetDeltaProcessor:
             entities_split=entities_split,
             edges_added=edges_added,
             edges_retracted=edges_retracted,
+            # The perf-baseline witness (issue #42): how many corpus-level records the
+            # blocking-neighborhood recompute actually re-resolved, out of the whole current
+            # corpus-level set. On an incremental delta this is the affected-set closure
+            # (<= the corpus); on a Reconciliation it is the whole corpus.
+            affected_set_size=len(affected_current),
+            corpus_record_count=len(current),
         )
 
     @staticmethod
@@ -150,6 +166,58 @@ class AffectedSetDeltaProcessor:
         for record in affected_current:
             merged[record.record_id] = record
         return [merged[key] for key in sorted(merged)]
+
+
+def _affected_current_records(
+    current: list[Record],
+    *,
+    affected_docs: set[str],
+    retracted_surfaces: set[str],
+) -> list[Record]:
+    """The current corpus-level records inside the affected blocking neighborhood (ADR-0018).
+
+    Wires the ported blocking-neighborhood engine (:func:`compute_affected_set`,
+    ``state/incremental.py``) onto the real delta path so the affected region is the genuine
+    *transitive* closure over shared blocking keys — "the affected blocks plus their immediate
+    neighbors" ADR-0018 promises — rather than a single-hop surface match. Each current
+    corpus-level record is folded in as one :class:`MentionView` keyed by ``record_id``, whose
+    blocking text is the record's canonical surface(s); records that share a surface (⇒ shared
+    tokens ⇒ shared blocking key) land in the same neighborhood, so a bridge two blocks away is
+    caught.
+
+    The seeds are the records whose provenance reach touches a changed/deleted document
+    (``affected_docs``) OR that carry a surface the retraction removed (``retracted_surfaces``,
+    the merge-on-add bridge). From those seeds the closure grows over shared blocking keys and
+    returns exactly the current records in the neighborhood — a strict superset of the old
+    one-hop match (so every merge-on-add / split-on-delete it caught is still caught), now
+    genuinely affected-set-scoped rather than surface-equality-scoped.
+    """
+    views: list[MentionView] = []
+    seed_docs: set[str] = set()
+    for record in current:
+        surfaces = _canonical_surfaces(record)
+        # A record with no canonical surface (e.g. a relation carrier already split into its
+        # head/tail surfaces, or an unscoped record) has empty blocking text — its neighborhood
+        # is only itself; direct-reach seeding below still pulls it in when touched.
+        blocking_text = " ".join(sorted(surfaces))
+        # Each record is its own pseudo-document so the closure keys on record identity; the
+        # real reach test that decides *seeding* is done separately below.
+        views.append(
+            MentionView(
+                mention_id=record.record_id,
+                document_id=record.record_id,
+                text=blocking_text,
+                label="",
+                confidence=1.0,
+            )
+        )
+        touched = _touches(record, affected_docs) or bool(surfaces & retracted_surfaces)
+        if touched:
+            seed_docs.add(record.record_id)
+    if not seed_docs:
+        return []
+    affected = compute_affected_set(views, sorted(seed_docs))
+    return [r for r in current if r.record_id in affected.mention_ids]
 
 
 def _touches(record: Record, docs: set[str]) -> bool:

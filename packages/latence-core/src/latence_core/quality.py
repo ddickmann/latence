@@ -652,5 +652,9 @@ class QualityReport(BaseModel):
                 f"- records: {dc.records_retracted} retracted, {dc.records_purged} purged "
                 f"({dc.deletion_mode.value})"
             )
+            lines.append(
+                f"- affected set: {dc.affected_set_size}/{dc.corpus_record_count} "
+                "corpus-level records recomputed"
+            )
             lines.append(f"- drift: {dc.drift:.3f}")
         return "\n".join(lines) + "\n"

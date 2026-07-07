@@ -360,6 +360,14 @@ class DeltaOutcome:
       recompute's effect on canonical entities vs the parent (a bridging doc that MERGED two
       clusters, a deleted doc that SPLIT one) — the S11 churn the Quality Report reports.
     * ``edges_added`` / ``edges_retracted`` — the graph patch counts.
+    * ``affected_set_size`` / ``corpus_record_count`` — the perf-baseline witness: how many
+      corpus-level records the affected-set recompute actually re-resolved
+      (``affected_set_size``) out of the whole current corpus-level set
+      (``corpus_record_count``). On an incremental (non-reconciliation) delta
+      ``affected_set_size`` is the blocking-neighborhood closure the recompute touched, which is
+      ``<= corpus_record_count`` — the measurable "recompute only the affected set" bound
+      (ADR-0018). On a full Reconciliation the two are equal (the whole corpus is the affected
+      region).
     """
 
     records: list[Record] = field(default_factory=list)
@@ -369,6 +377,8 @@ class DeltaOutcome:
     entities_split: int = 0
     edges_added: int = 0
     edges_retracted: int = 0
+    affected_set_size: int = 0
+    corpus_record_count: int = 0
 
 
 @runtime_checkable
@@ -384,15 +394,17 @@ class DeltaProcessor(Protocol):
     did not touch, spliced with the affected-set recompute), the retracted set, and the
     entity/edge churn counts.
 
-    Doc-level Stages (Parse … Redaction) are purely incremental and re-run by the Runner on the
-    changed documents; the DeltaProcessor owns only the **corpus-level** recompute — the
+    The DeltaProcessor owns the **corpus-level** recompute of the *committed* record set — the
     blocking-neighborhood affected set for Disambiguation and the graph patch by
-    ``source_document_ids`` (ports ``graph/patcher``). When the Delta signals a full
-    Reconciliation (drift crossed the threshold), the processor re-resolves ALL blocks rather
-    than only the affected set; the seam is identical, only the affected set differs. The
-    reference Provider is pure-Python, deterministic and CPU-viable (the affected-set
-    IncrementalDisambiguator + GraphPatcher); a distributed blocking Provider is a pluggable
-    upgrade behind this same seam.
+    ``source_document_ids`` (ports ``graph/patcher``). (Doc-level Stages, Parse … Redaction, are
+    re-run by the Runner; note the reference DeltaRunner currently re-runs them over the WHOLE
+    source per delta — extraction is not yet cross-run incremental, issue #42 — so only the
+    committed corpus-level set the processor emits is affected-set-scoped.) When the Delta signals
+    a full Reconciliation (drift crossed the threshold), the processor re-resolves ALL blocks
+    rather than only the affected set; the seam is identical, only the affected set differs. The
+    reference Provider is pure-Python, deterministic and CPU-viable (the blocking-neighborhood
+    :func:`~latence_core.state.incremental.compute_affected_set` closure + GraphPatcher); a
+    distributed blocking Provider is a pluggable upgrade behind this same seam.
     """
 
     def apply_delta(
