@@ -275,6 +275,43 @@ def test_extended_recognisers_are_linear_time_on_pathological_input() -> None:
     assert elapsed < 2.0, f"extended recognisers took {elapsed:.2f}s end-to-end (possible ReDoS)"
 
 
+def test_email_recogniser_is_linear_time_on_pathological_input() -> None:
+    """ReDoS guard: the ``email`` recogniser stays linear on a long dotted run.
+
+    Pre-existing (predates #66): a naive ``\\b[local]+@[domain]+\\.tld`` backtracks
+    catastrophically on a long letters-and-dots run with no ``@`` — the local and domain
+    classes both contain ``.`` and letters, and ``\\b`` matches at every word/non-word
+    transition, so ``finditer`` relaunches a full greedy scan from O(n) starts (measured
+    ~19s for this recogniser alone, ~53s end-to-end). The linear form (lookbehind-pinned
+    start + possessive local part + non-overlapping ``label.`` domain) finishes in
+    milliseconds; the ReDoS-prone form times out here.
+    """
+    import re
+    import time
+
+    from latence_core.stages.redaction import _BUILTIN_PATTERNS
+
+    pathological = "x." * 30000  # long letters-and-dots run, no ``@``
+    compiled = re.compile(_BUILTIN_PATTERNS["email"])
+    start = time.perf_counter()
+    list(compiled.finditer(pathological))
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"email took {elapsed:.2f}s on pathological input (possible ReDoS)"
+
+    # Also guard a long dotted run AFTER an ``@`` (the domain side) and end-to-end.
+    after_at = "a@" + "x." * 30000
+    start = time.perf_counter()
+    list(compiled.finditer(after_at))
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"email took {elapsed:.2f}s on post-@ run (possible ReDoS)"
+
+    doc = _doc(pathological, "email-redos")
+    start = time.perf_counter()
+    _redact_all([doc])
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"email recogniser took {elapsed:.2f}s end-to-end (possible ReDoS)"
+
+
 def test_recognisers_are_linear_time_on_pathological_input() -> None:
     """ReDoS guard: a pathological input cannot induce catastrophic backtracking.
 

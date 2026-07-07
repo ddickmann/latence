@@ -70,8 +70,21 @@ if TYPE_CHECKING:
 # quantifier over an overlapping class), so a pathological input cannot induce
 # catastrophic backtracking (ReDoS).
 _BUILTIN_PATTERNS: dict[str, str] = {
-    # RFC-5322-ish email (deliberately conservative, not exhaustive).
-    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    # RFC-5322-ish email (deliberately conservative, not exhaustive). Linear-time:
+    # a naive ``\b[local]+@[domain]+\.tld`` backtracks catastrophically on a long
+    # dotted run because the local class ``[A-Za-z0-9._%+-]`` and the domain class
+    # ``[A-Za-z0-9.-]`` both contain ``.`` and letters — and ``\b`` matches at every
+    # word/non-word transition in ``x.x.x…``, so ``finditer`` relaunches a full
+    # greedy scan from each of O(n) starts → O(n²). Fixed structurally: a negative
+    # lookbehind pins the local part to its true start (no re-entry mid-run, since the
+    # preceding char is never a local-part char), a possessive ``++`` local part never
+    # backtracks, and the domain is a run of ``label.`` units whose label class
+    # ``[A-Za-z0-9-]`` excludes ``.`` (no overlap). The single greedy outer ``+`` on
+    # the domain backtracks only to peel a trailing sentence dot off the last label,
+    # which is O(labels) once per (unique) ``@`` — linear overall.
+    "email": (
+        r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@(?:[A-Za-z0-9-]++\.)+[A-Za-z]{2,}\b"
+    ),
     # US SSN NNN-NN-NNNN.
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
     # 13–16 digit card number, optional single space/dash between digits.
