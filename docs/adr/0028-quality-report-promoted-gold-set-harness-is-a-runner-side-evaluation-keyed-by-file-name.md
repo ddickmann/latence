@@ -48,9 +48,13 @@ their Provenance. Annotations a document the Source never read simply go unscore
 
 Matching is **deterministic** (Baseline bar): a prediction matches a gold annotation when
 their labels are equal AND their character spans overlap by at least a configurable Jaccard
-threshold (`match_min_overlap`; 0.0 = any overlap). Assignment is greedy, order-stable, and
-**one-to-one** — each gold annotation and each prediction is consumed at most once, so
-precision and recall are well-defined and never double-count. A relation matches only when its
+threshold (`match_min_overlap`; 0.0 = any overlap). Entity assignment is a **maximum-cardinality**
+one-to-one matching (augmenting paths / Kuhn's algorithm, with deterministic tie-breaking) —
+never a single-pass greedy, which would under-count precision and recall by letting one prediction
+steal a gold span a later prediction was its only match for (#76). Relation assignment is likewise
+one-to-one and maximum-cardinality over the pairs whose *both* endpoints resolve. Each gold
+annotation and each prediction is consumed at most once, so precision and recall are well-defined
+and never double-count, and the matcher never leaves a matchable pair unmatched. A relation matches only when its
 label matches AND *both* endpoints resolve (by span + label) to the gold relation's head and
 tail entities — a label-only match is not credited. Scores are computed overall and per label;
 every derivation guards its empty denominator (no predictions ⇒ precision 0.0; no gold ⇒

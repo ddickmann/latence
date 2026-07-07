@@ -1,9 +1,10 @@
 """Gold-set scoring engine (S10): deterministic per-Stage precision/recall/F1.
 
 Unit tests for the pure scorer: ConfusionCounts derivations (incl. the empty-denominator
-guards), span-overlap matching (any-overlap vs a min-Jaccard threshold), one-to-one greedy
-assignment (no double-counting), per-label breakdown, relation endpoint resolution, and the
-contract validators on the annotation models.
+guards), span-overlap matching (any-overlap vs a min-Jaccard threshold), one-to-one
+maximum-cardinality assignment (no double-counting, no single-pass-greedy under-count),
+per-label breakdown, relation endpoint resolution, and the contract validators on the
+annotation models.
 """
 
 from __future__ import annotations

@@ -22,8 +22,9 @@ so a seeded run is byte-identical (Baseline bar). An entity matches a gold entit
 they share the same label and their character spans overlap by at least a configurable
 Jaccard threshold (default: any overlap, i.e. > 0); a relation matches when its label
 matches and BOTH endpoints resolve to the same gold entities (by span overlap). Each
-gold annotation and each prediction is consumed at most once (a greedy, order-stable
-one-to-one assignment), so precision and recall are well-defined and never double-count.
+gold annotation and each prediction is consumed at most once — a **maximum-cardinality**
+one-to-one assignment (deterministic tie-breaking), so precision and recall are the true
+best match, never double-counted and never a pessimistic single-pass-greedy under-count.
 """
 
 from __future__ import annotations
@@ -224,40 +225,123 @@ def _span_overlap_jaccard(
     return intersection / union
 
 
-def _greedy_match(
+def _maximum_matching(candidates: list[list[int]], n_gold: int) -> int:
+    """Maximum-cardinality bipartite matching count over precomputed candidate edges.
+
+    ``candidates[pi]`` is the deterministically-ordered list of gold indices prediction ``pi``
+    qualifies to match. Returns the size of the maximum matching (the true-positive count).
+
+    Implemented with augmenting paths (Kuhn's algorithm) but with an **explicit stack**, not
+    recursion: the alternating path can be as long as ``len(candidates)``, so a recursive
+    formulation blows Python's recursion limit on a densely-overlapping cluster of ~1000 same-label
+    spans and crashes the run with an uncaught ``RecursionError`` (#76 adversarial/DoS bar — a
+    semi-trusted gold file or a large document's extracted mentions can supply such input; there is
+    no per-document span cap on the gold side). The explicit-stack DFS is bounded by the heap, not
+    the C stack, so it scales linearly in path length with no depth limit.
+
+    Determinism: each prediction's candidate golds are tried in the given order (highest overlap
+    first, ties by gold index at the call site), so among the possibly-many maximum matchings of the
+    same cardinality exactly one is chosen reproducibly (Baseline/G1 seeded-run property).
+    """
+    gold_to_pred: dict[int, int] = {}
+    matched = 0
+    for start in range(len(candidates)):
+        # Iterative DFS for an augmenting path from ``start``. Each frame is a prediction whose
+        # candidate golds we scan by index (``cursor``); ``trail`` records the (pred, gold) we
+        # tentatively took so we can commit the whole alternating path when it terminates.
+        seen: set[int] = set()
+        # stack entries: (pred_index, next_candidate_cursor)
+        stack: list[list[int]] = [[start, 0]]
+        trail: list[tuple[int, int]] = []
+        augmented = False
+        while stack:
+            frame = stack[-1]
+            pi, cursor = frame[0], frame[1]
+            cand = candidates[pi]
+            advanced = False
+            while cursor < len(cand):
+                gi = cand[cursor]
+                cursor += 1
+                if gi in seen:
+                    continue
+                seen.add(gi)
+                if gi not in gold_to_pred:
+                    # Free gold: commit this edge plus every tentative edge on the trail.
+                    frame[1] = cursor
+                    trail.append((pi, gi))
+                    for tp, tg in trail:
+                        gold_to_pred[tg] = tp
+                    augmented = True
+                    break
+                # Gold is taken; try to re-route its current owner by descending into it.
+                frame[1] = cursor
+                trail.append((pi, gi))
+                stack.append([gold_to_pred[gi], 0])
+                advanced = True
+                break
+            if augmented:
+                break
+            if advanced:
+                continue
+            # This prediction exhausted its candidates without finding a free gold: backtrack,
+            # dropping the tentative edge that led into it.
+            stack.pop()
+            if trail:
+                trail.pop()
+        if augmented:
+            matched += 1
+    return matched
+
+
+def _max_match(
     gold: list[tuple[int, str, int, int]],
     pred: list[tuple[int, str, int, int]],
     min_overlap: float,
 ) -> ConfusionCounts:
-    """Greedy one-to-one label+span match between gold and predicted spans.
+    """One-to-one label+span match between gold and predicted spans (maximum matching).
 
-    Each tuple is ``(id, label, char_start, char_end)``. A gold and a prediction match
-    when their labels are equal AND their span Jaccard overlap is ``> min_overlap`` when
-    ``min_overlap == 0`` (any overlap) or ``>= min_overlap`` otherwise. The assignment
-    is greedy in a deterministic order: predictions are tried in input order, each taking
-    the first still-unmatched gold with the **highest** overlap (ties broken by gold input
-    order), so the result is stable and one-to-one — no gold or prediction is counted
-    twice. Leftover predictions are false positives; leftover gold are false negatives.
+    Each tuple is ``(id, label, char_start, char_end)``. A gold and a prediction *qualify* to
+    match when their labels are equal AND their span Jaccard overlap is ``> min_overlap`` when
+    ``min_overlap == 0`` (any overlap) or ``>= min_overlap`` otherwise. The assignment is the
+    **maximum-cardinality** one-to-one matching over the qualifying pairs — every prediction and
+    every gold is consumed at most once, and the matcher never leaves a matchable pair unmatched.
+
+    This is a genuine maximum bipartite matching (augmenting paths / Kuhn's algorithm), NOT a
+    single-pass "each prediction grabs its best-overlap gold" greedy. That naive greedy
+    under-counts: a prediction can grab a gold span a later prediction was its *only* match for,
+    losing a matchable pair and understating both recall and precision — precisely the numbers the
+    gold-set harness exists to report faithfully (ADR-0008; a pessimistic score would let a
+    Provider "beat" a baseline it did not actually beat). #76 (hardening) surfaced this with a
+    seeded property test that cross-checks the count against a brute-force oracle.
+
+    Determinism (Baseline/G1 seeded-run property): predictions are processed in input order and
+    each prediction's candidate golds are tried highest-overlap-first, ties broken by gold input
+    order — so among the (possibly many) maximum matchings of the same cardinality, exactly one is
+    chosen reproducibly. The result is one-to-one — no gold or prediction is counted twice.
+    Leftover predictions are false positives; leftover gold are false negatives.
     """
-    counts = ConfusionCounts()
-    matched_gold: set[int] = set()
+    # Candidate golds for each prediction, ordered highest-overlap-first (ties by gold index) so
+    # the augmenting search is deterministic and prefers tighter matches.
+    candidates: list[list[int]] = []
     for _pid, p_label, p_start, p_end in pred:
-        best_idx: int | None = None
-        best_overlap = 0.0
+        scored: list[tuple[float, int]] = []
         for gi, (_gid, g_label, g_start, g_end) in enumerate(gold):
-            if gi in matched_gold or g_label != p_label:
+            if g_label != p_label:
                 continue
             overlap = _span_overlap_jaccard(p_start, p_end, g_start, g_end)
             qualifies = overlap > 0.0 if min_overlap == 0.0 else overlap >= min_overlap
-            if qualifies and overlap > best_overlap:
-                best_overlap = overlap
-                best_idx = gi
-        if best_idx is None:
-            counts.false_positives += 1
-        else:
-            matched_gold.add(best_idx)
-            counts.true_positives += 1
-    counts.false_negatives = len(gold) - len(matched_gold)
+            if qualifies:
+                scored.append((overlap, gi))
+        # Highest overlap first; on a tie the lower gold index first (both keys deterministic).
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        candidates.append([gi for _overlap, gi in scored])
+
+    matched = _maximum_matching(candidates, len(gold))
+
+    counts = ConfusionCounts()
+    counts.true_positives = matched
+    counts.false_positives = len(pred) - matched
+    counts.false_negatives = len(gold) - matched
     return counts
 
 
@@ -306,13 +390,13 @@ def score_entities(
         labels_seen.update(g.label for g in doc.entities)
         labels_seen.update(m.label for m in doc_mentions)
         # Overall for the document.
-        overall.add(_greedy_match(gold_spans, pred_spans, gold.match_min_overlap))
+        overall.add(_max_match(gold_spans, pred_spans, gold.match_min_overlap))
         # Per-label: restrict both sides to one label at a time.
         for label in sorted({g.label for g in doc.entities} | {m.label for m in doc_mentions}):
             g_l = [t for t in gold_spans if t[1] == label]
             p_l = [t for t in pred_spans if t[1] == label]
             per_label.setdefault(label, ConfusionCounts()).add(
-                _greedy_match(g_l, p_l, gold.match_min_overlap)
+                _max_match(g_l, p_l, gold.match_min_overlap)
             )
     return overall, dict(sorted(per_label.items()))
 
@@ -386,31 +470,41 @@ def _match_relations(
     mention_by_id: Mapping[str, EntityMention],
     min_overlap: float,
 ) -> ConfusionCounts:
-    """Greedy one-to-one match of predicted relations to gold relations (both endpoints).
+    """One-to-one **maximum-cardinality** match of predicted relations to gold (both endpoints).
 
-    A prediction matches a gold relation when labels are equal and BOTH the head and tail
-    extracted mentions align with the gold head and tail entities (span overlap + label).
-    Greedy, deterministic (predictions in input order, first unmatched qualifying gold),
-    one-to-one; leftovers are FP (predictions) / FN (gold).
+    A prediction *qualifies* for a gold relation when labels are equal and BOTH the head and tail
+    extracted mentions align with the gold head and tail entities (span overlap + label). The
+    assignment is the maximum matching over those qualifying pairs — exactly like entity scoring
+    (:func:`_max_match`), and for the same reason: a single-pass greedy would let one prediction
+    grab a gold relation a later prediction was its *only* qualifying match for, understating both
+    precision and recall (#76). Each gold and each prediction is consumed at most once; leftover
+    predictions are FP, leftover gold are FN.
+
+    Determinism: gold candidates for each prediction are taken in gold input order (a stable,
+    reproducible order), and the maximum matcher (:func:`_maximum_matching`) resolves ties by that
+    order — so a seeded run is byte-identical (Baseline/G1).
     """
-    counts = ConfusionCounts()
-    matched_gold: set[int] = set()
+    # For each prediction, the (gold-position) indices of every gold relation it qualifies for.
+    # ``gi_of`` maps the compacted gold position back to the gold's original list index (unused for
+    # the count, but keeps the candidate space contiguous for the matcher).
+    candidates: list[list[int]] = []
     for _pi, rel in pred:
         head = mention_by_id.get(rel.head_mention_id)
         tail = mention_by_id.get(rel.tail_mention_id)
-        chosen: int | None = None
-        for gi, gold_rel in gold:
-            if gi in matched_gold or gold_rel.label != rel.label:
+        qualifying: list[int] = []
+        for gpos, (_gi, gold_rel) in enumerate(gold):
+            if gold_rel.label != rel.label:
                 continue
             if _endpoint_matches(gold_rel.head, head, min_overlap) and _endpoint_matches(
                 gold_rel.tail, tail, min_overlap
             ):
-                chosen = gi
-                break
-        if chosen is None:
-            counts.false_positives += 1
-        else:
-            matched_gold.add(chosen)
-            counts.true_positives += 1
-    counts.false_negatives = len(gold) - len(matched_gold)
+                qualifying.append(gpos)
+        candidates.append(qualifying)
+
+    matched = _maximum_matching(candidates, len(gold))
+
+    counts = ConfusionCounts()
+    counts.true_positives = matched
+    counts.false_positives = len(pred) - matched
+    counts.false_negatives = len(gold) - matched
     return counts
