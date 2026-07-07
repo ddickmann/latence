@@ -276,6 +276,7 @@ class EntityResolver:
         enable_embedding: bool = True,
         require_type_compatibility: bool = True,
         require_shared_document: bool = False,
+        exact_only: bool = False,
     ) -> None:
         # Aliases are normalised on both sides so lookup is case/whitespace-insensitive.
         self._aliases = {
@@ -296,6 +297,14 @@ class EntityResolver:
         # default, tunable off for the permissive original-cascade behaviour.
         self._require_type_compatibility = require_type_compatibility
         self._require_shared_document = require_shared_document
+        # exact_only restricts the cascade to the two highest-precision rungs — exact
+        # normalized-surface equality (handled by the by_norm grouping) and configured
+        # aliases — disabling the fuzzy acronym/substring/embedding rungs entirely. This is
+        # the high-precision blocking the second reference Disambiguator Provider
+        # (ExactSurfaceDisambiguator, #77) uses: no fuzzy rung can fire, so nothing is
+        # merged beyond identical surfaces + explicit aliases (and no spurious below-policy
+        # audit is produced by a fuzzy rung that would only be rejected anyway).
+        self._exact_only = exact_only
         self._mentions: list[MentionInput] = []
 
     def add(self, mention: MentionInput) -> None:
@@ -377,6 +386,10 @@ class EntityResolver:
                 src_disp, tgt_disp, Strategy.ALIAS, self._alias_confidence,
                 f"alias: {src_disp!r} ~ {tgt_disp!r}",
             )
+
+        # exact_only: stop after exact (implicit) + alias — the fuzzy rungs below never fire.
+        if self._exact_only:
+            return None
 
         # 3. acronym — gated by the precision guards (issue #35): a same-type compatibility
         #    check and a shared-document-evidence requirement, both restored from the

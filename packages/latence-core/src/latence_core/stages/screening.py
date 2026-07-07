@@ -239,7 +239,9 @@ class SignatureSizeIntakeScreener:
 # Prompt-injection patterns: lowercase substrings/regexes that strongly indicate an
 # attempt to subvert a downstream LLM. Deliberately small and high-precision — the
 # reference Provider marks (not drops), so a false positive costs a filterable flag,
-# not lost data. A heavier ML classifier is a drop-in second Provider (ADR-0004).
+# not lost data. A CPU obfuscation-tolerant second Provider ships behind the same seam
+# (FuzzyInjectionContentScreener, #77/ADR-0035); a heavier ML classifier remains a
+# further drop-in behind it (ADR-0004).
 _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"ignore\s+(all\s+)?(the\s+)?(previous|prior|above)\s+instructions"),
     re.compile(r"disregard\s+(all\s+)?(the\s+)?(previous|prior|above)"),
@@ -456,6 +458,206 @@ class KeywordContentScreener:
             verdict=verdict,
             document_id=chunk.provenance.document_id,
             detector="screening.content_keyword",
+            category=category,
+            reason=reason,
+            marker=marker,
+        )
+
+
+# Compacted injection signatures for the fuzzy Content Screener: the same intents as the
+# reference keyword screener's patterns, reduced to a canonical alphanumeric-only form so
+# an obfuscated variant ("i-g-n-o-r-e p.r.e.v.i.o.u.s") collapses onto the signature after
+# the same normalisation is applied to the input. Deliberately small + high-precision.
+_FUZZY_INJECTION_SIGNATURES: tuple[str, ...] = (
+    "ignoreallpreviousinstructions",
+    "ignorepreviousinstructions",
+    "ignorepriorinstructions",
+    "ignoreaboveinstructions",
+    "disregardpreviousinstructions",
+    "disregardallprevious",
+    "disregardpriorinstructions",
+    "systemprompt",
+    "revealyourprompt",
+    "revealthesystemprompt",
+    "revealyourinstructions",
+    "overridethesafety",
+    "overrideyourinstructions",
+    "overridethesafetyinstructions",
+    "doanythingnow",
+    "youarenowin",
+)
+_FUZZY_HARMFUL_SIGNATURES: tuple[str, ...] = (
+    "buildabomb",
+    "makeaweapon",
+)
+# Hard cap on the number of ALPHANUMERIC characters kept per chunk — i.e. on the length of
+# the COMPACTED form, not on the raw prefix. Compaction is a single linear pass (no regex, no
+# backtracking — ReDoS-proof by construction) and stops early once this many signal characters
+# have been collected, so the compacted string a signature is matched against is bounded and
+# the match cost is O(cap) regardless of chunk size. Capping the compacted length rather than a
+# raw prefix is deliberate: cost-free separators (whitespace/punctuation) do NOT consume the
+# budget, so an attacker cannot pad an injection past the window with leading separators — the
+# exact evasion a raw-prefix cap would let through (#77 security review). An injection signature
+# is at most a few dozen chars, so a window this wide cannot hide one that matters. The raw scan
+# is additionally bounded by ``_FUZZY_RAW_SCAN_CAP`` so a megabyte of pure separators (which
+# never fills the alphanumeric budget) still costs a bounded constant, not O(chunk length).
+_FUZZY_SCAN_CAP = 8192
+# Absolute ceiling on raw characters iterated, independent of how many are alphanumeric. Guards
+# the pathological all-separator chunk that would otherwise never reach ``_FUZZY_SCAN_CAP`` kept
+# characters and so scan the whole (arbitrarily large) input. Set well above ``_FUZZY_SCAN_CAP``
+# so a realistically-obfuscated injection (a bounded run of interleaved separators around a
+# few-dozen-char phrase) is never truncated before its signal characters are collected.
+_FUZZY_RAW_SCAN_CAP = 1 << 20  # 1 MiB of raw characters
+
+
+def _compact(text: str, max_kept: int = _FUZZY_SCAN_CAP) -> str:
+    """Collapse ``text`` to lowercase alphanumerics only — the fuzzy-match canonical form.
+
+    A single linear pass that keeps only ``[a-z0-9]`` (lowercasing as it goes) and drops
+    EVERYTHING else — whitespace, punctuation, zero-width and combining characters, and any
+    other separator an adversary interleaves to break a literal keyword match. There is no
+    regex and no backtracking, so it cannot be driven into super-linear time (ReDoS-proof).
+
+    The pass stops once ``max_kept`` alphanumeric characters have been collected — a cap on the
+    COMPACTED output, so free separators do not consume the budget and cannot push an injection
+    past the window (a raw-prefix cap could be defeated by leading separator-padding — #77). A
+    secondary ``_FUZZY_RAW_SCAN_CAP`` bounds the raw characters iterated so a pathological
+    all-separator chunk (which never fills the alphanumeric budget) is still O(1)-bounded.
+
+    So ``i g n o r e   p r e v i o u s`` and ``ig.no.re/pre.vi.ous`` both collapse onto the
+    same ``ignoreprevious…`` signature form.
+    """
+    out: list[str] = []
+    for scanned, ch in enumerate(text):
+        if scanned >= _FUZZY_RAW_SCAN_CAP:
+            break
+        if ch.isalnum():
+            # ASCII alphanumerics are the signature alphabet. A non-ASCII alphanumeric (e.g. a
+            # full-width or Cyrillic look-alike) is kept in lowercased form so a homoglyph-padded
+            # token is not silently dropped, but it only matches a signature if it lands on the
+            # same ASCII letters — which it will not for a genuine homoglyph, so this neither
+            # over- nor under-matches the ASCII set.
+            out.append(ch.lower())
+            if len(out) >= max_kept:
+                break
+    return "".join(out)
+
+
+class FuzzyInjectionContentScreener:
+    """Second reference Content Screener Provider (#77): obfuscation-tolerant injection detector.
+
+    An alternative CPU Content Screener behind the same
+    :class:`~latence_core.capability.ContentScreener` seam as :class:`KeywordContentScreener`,
+    satisfying the identical typed contract — it returns the passed chunks (some carrying a
+    propagated :class:`~latence_core.contracts.RiskMarker`), any Quarantined chunks, and the
+    per-chunk :class:`~latence_core.contracts.ScreeningFinding` log. Pure Python, deterministic,
+    zero extra deps (ADR-0007 CPU-first, ADR-0016 thin core); no model, so no license note
+    (ADR-0012).
+
+    The difference vs the reference is **recall against obfuscation**: the keyword screener
+    matches injection phrases as literal (whitespace-tolerant) regexes, so an attacker who
+    interleaves separators — ``i g n o r e   p r e v i o u s   i n s t r u c t i o n s`` or
+    ``ignore/previous.instructions`` — slips past it. This Provider reduces the chunk text to a
+    canonical alphanumeric-only form (:func:`_compact`) and matches a small set of compacted
+    injection signatures, so a separator-padded variant still fires. That is the measurable
+    benchmark vs the existing one (``test_screening_second_provider``): a corpus of obfuscated
+    injections the keyword screener misses and this one catches.
+
+    **Security / DoS.** Compaction is a single linear pass with no regex and no backtracking
+    (ReDoS-proof by construction). The pass stops after collecting ``_FUZZY_SCAN_CAP``
+    *alphanumeric* characters — a cap on the compacted output, so cost-free separators do not
+    consume the budget and an attacker cannot pad an injection past the window with leading
+    separators (a raw-prefix cap could be defeated that way — #77 security review); a secondary
+    ``_FUZZY_RAW_SCAN_CAP`` bounds the raw characters iterated, so a pathological all-punctuation
+    megabyte chunk still costs a bounded constant, not a blow-up. A hit **flags** (propagates a
+    marker) by default rather than dropping, mirroring the reference (a legitimate document may
+    quote an injection string); a ``quarantine_threshold`` below 1.0 escalates a hit to
+    Quarantine.
+
+    Config:
+        quarantine_threshold: float  — a chunk whose score reaches this is Quarantined instead
+            of flagged (default 1.01 — flag-only; set below 1.0 to escalate any hit).
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = config or {}
+        self._quarantine_threshold = float(config.get("quarantine_threshold", 1.01))
+
+    def screen_content(self, chunks: Iterable[ChunkRecord]) -> ScreeningOutcome[ChunkRecord]:
+        passed: list[ChunkRecord] = []
+        quarantined: list[QuarantineRecord] = []
+        findings: list[ScreeningFinding] = []
+        for chunk in chunks:
+            category, score, reason = self._score(chunk.content)
+            if category is None:
+                passed.append(chunk)
+                findings.append(self._finding(chunk, ScreeningVerdict.PASS, "clean", "ok", None))
+                continue
+            if score >= self._quarantine_threshold:
+                quarantined.append(self._quarantine(chunk, category, reason))
+                findings.append(
+                    self._finding(chunk, ScreeningVerdict.QUARANTINE, category, reason, None)
+                )
+                continue
+            marker = RiskMarker(
+                category=category,
+                detector="screening.content_fuzzy",
+                score=min(score, 1.0),
+                reason=reason,
+            )
+            flagged = chunk.model_copy(update={"risk_markers": [*chunk.risk_markers, marker]})
+            passed.append(flagged)
+            findings.append(self._finding(chunk, ScreeningVerdict.FLAG, category, reason, marker))
+        return ScreeningOutcome(passed=passed, quarantined=quarantined, findings=findings)
+
+    @staticmethod
+    def _score(text: str) -> tuple[str | None, float, str]:
+        """Return ``(category|None, score, reason)`` for a chunk's obfuscation-compacted text."""
+        # Cap the COMPACTED length inside _compact (free separators do not consume the budget),
+        # not a raw prefix — a raw-prefix cap is defeated by leading separator-padding (#77).
+        compacted = _compact(text)
+        for signature in _FUZZY_INJECTION_SIGNATURES:
+            if signature in compacted:
+                return (
+                    "prompt_injection",
+                    1.0,
+                    f"matched obfuscation-normalised injection signature {signature!r}",
+                )
+        for signature in _FUZZY_HARMFUL_SIGNATURES:
+            if signature in compacted:
+                return (
+                    "harmful",
+                    1.0,
+                    f"matched obfuscation-normalised harmful signature {signature!r}",
+                )
+        return (None, 0.0, "no risk signature matched")
+
+    @staticmethod
+    def _quarantine(chunk: ChunkRecord, category: str, reason: str) -> QuarantineRecord:
+        return QuarantineRecord(
+            record_id=chunk.record_id,
+            provenance=chunk.provenance,
+            classification=chunk.classification,
+            checkpoint=ScreeningCheckpoint.CONTENT,
+            detector="screening.content_fuzzy",
+            category=category,
+            reason=reason,
+            quarantined_bytes=len(chunk.content.encode("utf-8")),
+        )
+
+    @staticmethod
+    def _finding(
+        chunk: ChunkRecord,
+        verdict: ScreeningVerdict,
+        category: str,
+        reason: str,
+        marker: RiskMarker | None,
+    ) -> ScreeningFinding:
+        return ScreeningFinding(
+            checkpoint=ScreeningCheckpoint.CONTENT,
+            verdict=verdict,
+            document_id=chunk.provenance.document_id,
+            detector="screening.content_fuzzy",
             category=category,
             reason=reason,
             marker=marker,

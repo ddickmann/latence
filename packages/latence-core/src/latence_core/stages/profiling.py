@@ -224,3 +224,54 @@ class StatisticalProfiler:
             provenance=provenance,
             classification=classification,
         )
+
+
+class LightweightProfiler:
+    """Second reference Profiler Provider (#77): scale-oriented, co-occurrence-free.
+
+    An alternative CPU Profiler behind the same :class:`~latence_core.capability.Profiler`
+    seam as :class:`StatisticalProfiler`, satisfying the identical typed contract — one
+    ``DOCUMENT``-scope :class:`FeatureRecord` per parsed document plus exactly one
+    ``CORPUS``-scope record, both carrying the fixed feature set with Provenance +
+    Classification. Pure Python, streaming, deterministic, zero extra deps (ADR-0007
+    CPU-first, ADR-0016 thin core); no model, so no license note (ADR-0012).
+
+    The difference vs the reference is a scale trade-off: it **skips the O(distinct-
+    entities²) co-occurrence pairing** entirely (the corpus record's ``co_occurrences`` is
+    always empty) while still computing the cheap O(mentions) tallies — entity frequency,
+    type frequency, and type consensus. On a huge corpus with a hostile NER fan-out the
+    reference's pairing is the dominant cost even with its per-document cap; this Provider
+    removes that cost by construction, trading the co-occurrence feature for a strictly
+    linear-in-mentions pass. The per-document features are the same fixed set the contract
+    mandates (so they match the reference document-for-document — that is the required
+    parity), and the corpus features match except the intentionally-empty co-occurrences.
+    Benchmarked against the reference in ``test_profiling_second_provider``.
+
+    Config:
+        corpus_sensitivity: str  — sensitivity stamped on the CORPUS record (default
+            ``"internal"``).
+        corpus_category: str | None  — category stamped on the CORPUS record (default
+            ``"corpus_profile"``).
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = config or {}
+        # Reuse the reference's contract-stamping (identical per-document + corpus record
+        # shape), but force the co-occurrence pairing off: max_entities_per_document=0 makes
+        # the aggregator record no pairs, so the pass is linear in the mention count.
+        self._delegate = StatisticalProfiler(
+            {
+                "max_co_occurrences": 0,
+                "max_entities_per_document": 0,
+                "max_tracked_pairs": 0,
+                "corpus_sensitivity": str(config.get("corpus_sensitivity", "internal")),
+                "corpus_category": config.get("corpus_category", "corpus_profile"),
+            }
+        )
+
+    def profile(
+        self, documents: Iterable[DocumentRecord], mentions: Iterable[EntityMention]
+    ) -> Iterator[FeatureRecord]:
+        # Same streaming fold as the reference (documents one at a time); the delegate's
+        # aggregator, configured with a zero entity cap, never builds the O(n²) pair table.
+        yield from self._delegate.profile(documents, mentions)

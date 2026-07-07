@@ -49,8 +49,14 @@ latence = "latence_core.cli:app"
 # S3 built-ins: offset-preserving Chunker + the two Screening checkpoints. Pure
 # Python (no extra deps), so they ship in core for the end-to-end demo (ADR-0004).
 "chunk.markdown" = "latence_core.stages.chunk:MarkdownChunker"
+# Second reference Chunker (#77 'providers' hardening bar): whole-sentence packing,
+# sentence-aligned boundaries, no overlap — a distinct CPU strategy behind the same seam.
+"chunk.sentence_window" = "latence_core.stages.chunk:SentenceWindowChunker"
 "screening.intake_signature" = "latence_core.stages.screening:SignatureSizeIntakeScreener"
 "screening.content_keyword" = "latence_core.stages.screening:KeywordContentScreener"
+# Second reference Content Screener (#77): a bounded fuzzy/scoring injection detector
+# (obfuscation-tolerant token-gap matching) behind the same seam as the keyword screener.
+"screening.content_fuzzy" = "latence_core.stages.screening:FuzzyInjectionContentScreener"
 # S4 built-in: deterministic zero-shot gazetteer/regex entity extractor (pure
 # Python, no extra deps). The learned GLiNER Provider lives in latence-ner-gliner.
 "entity.gazetteer" = "latence_core.stages.entity:GazetteerEntityExtractor"
@@ -66,17 +72,27 @@ latence = "latence_core.cli:app"
 # readability / Zipf / compression + cross-document entity frequency / co-occurrence /
 # type consensus / source coverage). Pure Python, no extra deps (ADR-0025).
 "profiling.statistical" = "latence_core.stages.profiling:StatisticalProfiler"
+# Second reference Profiler (#77): a scale-oriented lightweight profiler — same feature
+# contract, streaming, but skips the O(n²) co-occurrence pairing for huge corpora.
+"profiling.lightweight" = "latence_core.stages.profiling:LightweightProfiler"
 # S8 built-in: deterministic CPU-viable cascade disambiguator (5-strategy entity
 # resolver + Union-Find + audited merge log; GLinker-style KB linking with graceful
 # fallback; relation normalizer with inverse detection). Pure Python, no extra deps —
 # the FAISS/GPU blocking Provider is a pluggable upgrade behind this same seam (ADR-0026).
 "disambiguation.cascade" = "latence_core.stages.disambiguation:CascadeDisambiguator"
+# Second reference Disambiguator (#77): exact normalized-surface blocking (no fuzzy
+# cascade) — a high-precision, alias/KB-driven CPU alternative behind the same seam.
+"disambiguation.exact_surface" = "latence_core.stages.disambiguation:ExactSurfaceDisambiguator"
 # S9 built-ins: the canonical Graph Assembler (deterministic content-addressed nodes/edges +
 # per-edge Evidence, ported graph builder) and the KG Export (Parquet + TTL + GraphML as
 # portable files, never a live DB — ADR-0017). Plus a deterministic reference Embedder (opt-in
 # RAG-corpus embeddings; the learned multilingual-e5-small is a pluggable package). Pure Python,
 # no extra deps (ADR-0007/0016).
 "graph.canonical" = "latence_core.stages.graph_assembly:CanonicalGraphAssembler"
+# Second reference Graph Assembler (#77): edge-weight-aggregating assembler that folds
+# parallel same-typed relations into one weighted edge — a distinct CPU strategy, same
+# deterministic-id + per-edge-Evidence contract, behind the same seam.
+"graph.weighted" = "latence_core.stages.graph_assembly:WeightedGraphAssembler"
 "export.knowledge_graph" = "latence_core.stages.graph_export:KnowledgeGraphExport"
 "embedding.hashing" = "latence_core.embedding:HashingEmbedder"
 # S11 built-in: the affected-set DeltaProcessor (retract-by-Evidence-provenance graph patcher +

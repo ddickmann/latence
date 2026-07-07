@@ -293,6 +293,101 @@ def chunk_document(text: str, budget: ChunkBudget | None = None) -> list[Chunk]:
     return chunks
 
 
+def chunk_document_by_sentence(text: str, budget: ChunkBudget | None = None) -> list[Chunk]:
+    """Chunk a parsed markdown ``text`` by greedily packing whole sentences.
+
+    A second, boundary-respecting chunking strategy behind the same offset-preserving
+    engine as :func:`chunk_document` (the reference window+best-break strategy). Where
+    :func:`chunk_document` grows a token window to the ceiling and then backs up to the
+    best available break (which can land mid-sentence when no earlier break exists),
+    this splits the *stripped* text into whole sentences and packs consecutive sentences
+    into a chunk until the next sentence would exceed ``max_tokens`` — so **no chunk ever
+    ends mid-sentence** unless a single sentence alone exceeds the budget (then it is its
+    own chunk). There is no token overlap: chunk boundaries fall on sentence ends, which
+    are natural retrieval units, so the redundant-overlap tokens are not needed.
+    ``overlap_tokens`` is therefore ignored by this strategy; ``min_tokens`` still folds a
+    trailing remnant into the previous chunk.
+
+    It shares :func:`strip_markup` and the strip offset map, so every emitted
+    :class:`Chunk`'s ``char_start``/``char_end`` and ``offset_map`` point into the
+    ORIGINAL parsed markdown exactly as the reference strategy does — the S3 round-trip
+    (chunk → offset → original page) holds identically. Deterministic: identical ``text``
+    + ``budget`` yields byte-identical chunks.
+    """
+    budget = budget or ChunkBudget()
+    strip = strip_markup(text)
+    stripped = strip.stripped
+    if not stripped.strip():
+        return []
+
+    pieces = _sentence_pieces(stripped, budget)
+    chunks: list[Chunk] = []
+    for start, end in pieces:
+        piece = stripped[start:end]
+        orig_start = strip.mapping[start]
+        orig_end = strip.mapping[end - 1] + 1 if end > start else strip.mapping[start]
+        chunks.append(
+            Chunk(
+                text=piece,
+                char_start=orig_start,
+                char_end=orig_end,
+                token_count=estimate_tokens(piece),
+                offset_map=_offset_segments(strip.mapping, start, end),
+            )
+        )
+    return chunks
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Half-open ``[start, end)`` spans of the sentences in ``text``.
+
+    Splits on sentence-terminating punctuation (``.!?`` followed by whitespace/end),
+    keeping the terminator and the trailing whitespace with the sentence that precedes
+    it, so the spans tile the whole text with no gaps (concatenating them reproduces
+    ``text``). The final run with no terminator is its own span. Deterministic.
+    """
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    length = len(text)
+    for m in _SENTENCE_RE.finditer(text):
+        end = m.end()
+        if end > cursor:
+            spans.append((cursor, end))
+            cursor = end
+    if cursor < length:
+        spans.append((cursor, length))
+    return spans
+
+
+def _sentence_pieces(text: str, budget: ChunkBudget) -> list[tuple[int, int]]:
+    """Greedily pack whole sentences into ``[start, end)`` pieces under the token budget.
+
+    Accumulates consecutive sentence spans while the running token estimate stays at or
+    below ``max_tokens``; when the next sentence would overflow a non-empty accumulator,
+    the accumulated span is emitted and a fresh one begins with that sentence. A single
+    sentence larger than the whole budget becomes its own (over-budget) piece rather than
+    being split mid-sentence — the deliberate strategy trade-off. The pieces tile the text
+    with no overlap; a trailing piece below ``min_tokens`` is folded into its predecessor.
+    """
+    spans = _sentence_spans(text)
+    if not spans:
+        return []
+    pieces: list[tuple[int, int]] = []
+    cur_start = spans[0][0]
+    cur_end = cur_start
+    for span_start, span_end in spans:
+        # Extend the current piece to include this sentence, then measure it. If that
+        # overflows a piece that already holds at least one sentence, flush first.
+        if cur_end > cur_start and estimate_tokens(text[cur_start:span_end]) > budget.max_tokens:
+            pieces.append((cur_start, cur_end))
+            cur_start = span_start
+        cur_end = span_end
+    if cur_end > cur_start:
+        pieces.append((cur_start, cur_end))
+    _merge_short_tail(text, pieces, budget)
+    return pieces
+
+
 def _offset_segments(mapping: list[int], start: int, end: int) -> tuple[tuple[int, int], ...]:
     """Run-length ``(local_start, doc_start)`` breakpoints for a piece's offset map.
 

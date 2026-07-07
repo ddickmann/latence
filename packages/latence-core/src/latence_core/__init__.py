@@ -27,7 +27,14 @@ from latence_core.capability import (
     ScreeningOutcome,
     Source,
 )
-from latence_core.chunking import Chunk, ChunkBudget, chunk_document, estimate_tokens, strip_markup
+from latence_core.chunking import (
+    Chunk,
+    ChunkBudget,
+    chunk_document,
+    chunk_document_by_sentence,
+    estimate_tokens,
+    strip_markup,
+)
 from latence_core.contracts import (
     SCHEMA_VERSION,
     CanonicalEntity,
@@ -286,6 +293,7 @@ __all__ = [
     "WalRecovery",
     "WriteAheadLog",
     "chunk_document",
+    "chunk_document_by_sentence",
     "compute_affected_set",
     "compute_drift",
     "detect_language",

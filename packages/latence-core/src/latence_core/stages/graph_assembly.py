@@ -35,7 +35,7 @@ from latence_core.contracts import (
     GraphRecord,
     GraphScope,
 )
-from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder
+from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -59,21 +59,7 @@ class CanonicalGraphAssembler:
         self._max_evidence_per_node = int(config.get("max_evidence_per_node", 0))
 
     def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
-        record_list = list(records)
-        # Partition the scoped Disambiguation carrier back into its two payload streams, and
-        # keep the source records so a node/edge inherits its source's Provenance/Classification.
-        entities: list[CanonicalEntity] = []
-        entity_src: dict[str, DisambiguationRecord] = {}
-        relations: list[NormalizedRelation] = []
-        relation_src: dict[str, DisambiguationRecord] = {}
-        for record in record_list:
-            if record.scope is DisambiguationScope.ENTITY and record.entity is not None:
-                entities.append(record.entity)
-                entity_src[record.entity.record_id] = record
-            elif record.scope is DisambiguationScope.RELATION and record.relation is not None:
-                relations.append(record.relation)
-                relation_src[record.relation.record_id] = record
-
+        entities, entity_src, relations, relation_src = _partition(records)
         builder = GraphBuilder(
             corpus_id=self._corpus_id, max_evidence_per_node=self._max_evidence_per_node
         )
@@ -145,3 +131,153 @@ class CanonicalGraphAssembler:
             provenance=source.provenance,
             classification=source.classification,
         )
+
+
+def _partition(
+    records: Iterable[DisambiguationRecord],
+) -> tuple[
+    list[CanonicalEntity],
+    dict[str, DisambiguationRecord],
+    list[NormalizedRelation],
+    dict[str, DisambiguationRecord],
+]:
+    """Split the scoped Disambiguation carrier back into its entity + relation streams.
+
+    Returns the entities and relations plus, for each, a ``record_id -> source record`` map
+    so an assembled node/edge inherits its source's Provenance + Classification. Shared by
+    both reference Graph Assembler Providers.
+    """
+    entities: list[CanonicalEntity] = []
+    entity_src: dict[str, DisambiguationRecord] = {}
+    relations: list[NormalizedRelation] = []
+    relation_src: dict[str, DisambiguationRecord] = {}
+    for record in records:
+        if record.scope is DisambiguationScope.ENTITY and record.entity is not None:
+            entities.append(record.entity)
+            entity_src[record.entity.record_id] = record
+        elif record.scope is DisambiguationScope.RELATION and record.relation is not None:
+            relations.append(record.relation)
+            relation_src[record.relation.record_id] = record
+    return entities, entity_src, relations, relation_src
+
+
+class WeightedGraphAssembler:
+    """Second reference GraphAssembler Provider (#77): parallel edges folded into weighted edges.
+
+    An alternative CPU graph-assembly strategy behind the same
+    :class:`~latence_core.capability.GraphAssembler` seam as :class:`CanonicalGraphAssembler`,
+    satisfying the identical typed contract — one ``NODE`` record per canonical entity and one
+    ``EDGE`` record per surviving edge, every record carrying a **deterministic** id, its
+    :class:`~latence_core.contracts.Evidence`, and inherited Provenance + Classification
+    (endpoint-validated, no dangling/self-loop edge). Pure Python, deterministic, zero extra
+    deps (ADR-0007 CPU-first, ADR-0016 thin core, ADR-0017 files-not-a-live-DB); no model, so
+    no license note (ADR-0012).
+
+    The difference vs the reference is the graph model: where
+    :class:`CanonicalGraphAssembler` emits **one edge per relation** (a multigraph — two
+    documents both asserting ``Acme —acquired→ Beta`` produce two parallel edges), this folds
+    every parallel same-``(head, tail, label)`` relation into **one weighted edge** (a simple
+    weighted graph) whose:
+
+    * ``edge_id`` is deterministic and content-addressed over the *endpoint pair + label* (so a
+      re-run over the same corpus yields the same edge id, S9 determinism), NOT over the source
+      relation id (which differs per parallel relation);
+    * ``confidence`` is the maximum over the folded relations (the strongest assertion wins);
+    * per-edge :class:`~latence_core.contracts.Evidence` is the **union** of the folded
+      relations' mention + document ids (deduplicated, sorted) — so the merged edge still cites
+      every source that justifies it (per-edge Evidence, the S9 acceptance criterion);
+    * ``properties["weight"]`` records how many source relations were folded (the multiplicity),
+      the feature a downstream ranker/KG consumer uses that the reference multigraph does not
+      expose directly.
+
+    Nodes are assembled by the same ported :class:`GraphBuilder` as the reference (node parity).
+    Deterministic: nodes in node-id order, then edges in edge-id order; every Evidence list is
+    sorted. Benchmarked against the reference in ``test_graph_second_provider``.
+
+    Config:
+        corpus_id: str  — the stable corpus identity mixed into every deterministic id.
+            Default ``"corpus"``.
+        max_evidence_per_node: int  — cap on mention ids folded into a node's Evidence
+            (0 = unlimited). Default 0.
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = config or {}
+        self._corpus_id = str(config.get("corpus_id", "corpus"))
+        self._max_evidence_per_node = int(config.get("max_evidence_per_node", 0))
+
+    def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
+        entities, entity_src, relations, relation_src = _partition(records)
+        builder = GraphBuilder(
+            corpus_id=self._corpus_id, max_evidence_per_node=self._max_evidence_per_node
+        )
+        nodes, edges = builder.build(entities, relations)
+
+        # Nodes are assembled identically to the reference (node parity).
+        for node in nodes:
+            yield CanonicalGraphAssembler._node_record(node, entity_src[node.entity_id])
+
+        # Fold parallel edges (same source, target, label) into one weighted edge.
+        yield from self._weighted_edge_records(edges, relation_src)
+
+    def _weighted_edge_records(
+        self, edges: list[BuiltEdge], relation_src: dict[str, DisambiguationRecord]
+    ) -> Iterator[GraphRecord]:
+        groups: dict[tuple[str, str, str], list[BuiltEdge]] = {}
+        for edge in edges:
+            key = (edge.source_node_id, edge.target_node_id, edge.label)
+            groups.setdefault(key, []).append(edge)
+
+        records: list[GraphRecord] = []
+        for (source_node, target_node, label), members in groups.items():
+            edge_id = make_graph_id(self._corpus_id, "wedge", source_node, target_node, label)
+            # Union the Evidence over every folded relation (dedup + sort for determinism).
+            mention_ids = sorted(
+                {mid for m in members for mid in m.evidence_mention_ids}
+            )
+            document_ids = sorted(
+                {did for m in members for did in m.evidence_document_ids}
+            )
+            # The strongest assertion wins; Evidence confidence tracks it too.
+            confidence = max(m.confidence for m in members)
+            evidence_confidence = max(m.evidence_confidence for m in members)
+            # A representative source relation supplies the inherited Provenance/Classification
+            # (deterministic: the lexicographically-first source relation id in the group).
+            representative = min(members, key=lambda m: m.relation_id)
+            source = relation_src[representative.relation_id]
+            evidence = Evidence(
+                mention_ids=mention_ids,
+                document_ids=document_ids,
+                snippet=f"weighted edge {label!r} {source_node} -> {target_node} "
+                f"(folded {len(members)} relation(s))",
+                confidence=evidence_confidence,
+            )
+            graph_edge = GraphEdge(
+                record_id=f"edge:{edge_id}",
+                edge_id=edge_id,
+                relation_id=representative.relation_id,
+                source_node_id=source_node,
+                target_node_id=target_node,
+                label=label,
+                confidence=confidence,
+                properties={
+                    "weight": len(members),
+                    "folded_relation_ids": sorted(m.relation_id for m in members),
+                    "confidence": confidence,
+                },
+                evidence=evidence,
+                provenance=source.provenance,
+                classification=source.classification,
+            )
+            records.append(
+                GraphRecord(
+                    record_id=f"edge:{edge_id}#graph",
+                    scope=GraphScope.EDGE,
+                    edge=graph_edge,
+                    provenance=source.provenance,
+                    classification=source.classification,
+                )
+            )
+        # Edge-id order for determinism (matches the reference's edge ordering discipline).
+        records.sort(key=lambda r: r.edge.edge_id if r.edge is not None else "")
+        yield from records

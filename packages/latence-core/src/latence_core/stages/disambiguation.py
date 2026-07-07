@@ -112,6 +112,7 @@ class CascadeDisambiguator:
                 config.get("require_type_compatibility", True)
             ),
             "require_shared_document": bool(config.get("require_shared_document", False)),
+            "exact_only": bool(config.get("exact_only", False)),
         }
         self._kb = self._build_kb(config)
         self._normalizer = RelationNormalizer(
@@ -313,6 +314,42 @@ class CascadeDisambiguator:
             provenance=relation.provenance,
             classification=relation.classification,
         )
+
+
+class ExactSurfaceDisambiguator(CascadeDisambiguator):
+    """Second reference Disambiguator Provider (#77): exact-surface + alias blocking only.
+
+    A high-precision CPU alternative behind the same
+    :class:`~latence_core.capability.Disambiguator` seam as :class:`CascadeDisambiguator`,
+    satisfying the identical typed contract — one ``ENTITY`` record per resolved cluster
+    (canonical-text order) with audited merge decisions, an optional KB link (graceful
+    fallback), page-accurate Provenance + Evidence, then ``RELATION`` records with normalized,
+    remapped, direction-canonicalised labels. Pure Python, deterministic, zero extra deps
+    (ADR-0007 CPU-first, ADR-0016 thin core, ADR-0026 CPU-viable linking); no model, so no
+    license note (ADR-0012).
+
+    The difference vs the reference is the **blocking strategy**: where
+    :class:`CascadeDisambiguator` runs the full 5-strategy cascade (exact → alias → acronym →
+    substring → embedding), this restricts merging to the two highest-precision rungs —
+    **exact normalized-surface equality and configured aliases** — and disables the fuzzy
+    acronym/substring/embedding rungs entirely (``exact_only``). It therefore never merges two
+    different surface strings unless an explicit alias links them, trading recall (it will not
+    unify "IBM" with "International Business Machines" without an alias) for precision (it can
+    never over-merge a fuzzy near-match). That is the classic exact-blocking baseline a fuzzy
+    resolver is measured against — the 'benchmark vs the existing one' the hardening bar
+    requires, exercised in ``test_disambiguation_second_provider``. The RelationNormalizer and
+    KB linking are shared with the reference (relation + linking parity); only entity blocking
+    differs.
+
+    Config: the same keys as :class:`CascadeDisambiguator` (``aliases``, ``kb``, relation-label
+    maps, …). ``exact_only`` is forced on regardless of the supplied value, and the fuzzy-rung
+    knobs (``acronym_confidence``, ``min_substring_ratio``, ``enable_embedding``, …) are inert.
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = dict(config or {})
+        config["exact_only"] = True  # the defining property; not overridable
+        super().__init__(config)
 
 
 def _merge_decision(audit: MergeAudit, cluster: ResolvedCluster) -> MergeDecision:

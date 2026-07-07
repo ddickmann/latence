@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from latence_core.chunking import ChunkBudget, chunk_document
+from latence_core.chunking import (
+    Chunk,
+    ChunkBudget,
+    chunk_document,
+    chunk_document_by_sentence,
+)
 from latence_core.contracts import ChunkRecord, Disposition, OffsetMap, OffsetSegment
 from latence_core.pagemap import PageOffsetIndex
 
@@ -65,46 +70,102 @@ class MarkdownChunker:
             yield from self._chunk_one(doc)
 
     def _chunk_one(self, doc: DocumentRecord) -> Iterator[ChunkRecord]:
-        chunks = chunk_document(doc.content, self._budget)
-        # Resolve page alignment through the parent's page map (present after a
-        # successful Parse). Absent (shouldn't happen for a PARSED doc), fall back
-        # to page 1 so a chunk always carries a page span.
-        index = PageOffsetIndex(doc.page_map) if doc.page_map is not None else None
-        for i, ch in enumerate(chunks):
-            if index is not None:
-                page_start = index.page_for_offset(ch.char_start)
-                # end offset is exclusive; resolve the last included character.
-                page_end = index.page_for_offset(max(ch.char_end - 1, ch.char_start))
-            else:  # pragma: no cover - PARSED records always carry a page map
-                page_start = page_end = 1
-            provenance = doc.provenance.model_copy(
-                update={
-                    "char_start": ch.char_start,
-                    "char_end": ch.char_end,
-                    "page_start": page_start,
-                    "page_end": page_end,
-                }
+        yield from _emit_chunk_records(doc, chunk_document(doc.content, self._budget))
+
+
+class SentenceWindowChunker:
+    """Second reference Chunker Provider: whole-sentence packing (offset-preserving).
+
+    An alternative CPU chunking strategy behind the same :class:`~latence_core.capability.Chunker`
+    seam as :class:`MarkdownChunker`, satisfying the identical typed contract — every emitted
+    :class:`ChunkRecord` preserves offsets, page alignment, Provenance and Classification
+    losslessly (it shares the same :func:`~latence_core.chunking.strip_markup` offset map, so
+    the S3 round-trip chunk → offset → original page holds identically). Pure Python, zero extra
+    deps, deterministic (ADR-0007 CPU-first, ADR-0016 thin core); no model, so no license note
+    (ADR-0012).
+
+    Where :class:`MarkdownChunker` grows a token window to the ceiling then backs up to the best
+    break (paragraph → sentence → whitespace, which can land mid-sentence when no earlier break
+    exists) with a configurable token overlap, this **packs whole sentences** greedily up to the
+    token ceiling with **no overlap**, so a chunk never ends mid-sentence unless a single sentence
+    alone exceeds the budget. That trades retrieval recall across a boundary (no overlap) for
+    coherent, sentence-aligned passages — a genuinely different segmentation, benchmarked against
+    the reference in ``test_chunk_second_provider``.
+
+    Config:
+        max_tokens: int  — per-chunk token ceiling (default 512).
+        min_tokens: int  — a trailing remnant below this merges into the previous chunk
+            (default 16).
+        overlap_tokens: int  — accepted for config parity with :class:`MarkdownChunker` but
+            IGNORED by this strategy (sentence-aligned boundaries need no overlap). Default 0.
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = config or {}
+        self._budget = ChunkBudget(
+            max_tokens=int(config.get("max_tokens", 512)),
+            # Sentence packing has no overlap; keep it 0 regardless of a supplied value so
+            # the ChunkBudget invariant (0 <= overlap < max_tokens) always holds.
+            overlap_tokens=0,
+            min_tokens=int(config.get("min_tokens", 16)),
+        )
+
+    def chunk(self, documents: Iterable[DocumentRecord]) -> Iterator[ChunkRecord]:
+        for doc in documents:
+            if doc.disposition is Disposition.PARSE_ERROR or not doc.content:
+                continue
+            yield from _emit_chunk_records(
+                doc, chunk_document_by_sentence(doc.content, self._budget)
             )
-            yield ChunkRecord(
-                record_id=f"{doc.record_id}#chunk-{i}",
-                document_record_id=doc.record_id,
-                index=i,
-                provenance=provenance,
-                classification=doc.classification,
-                content=ch.text,
-                media_type="text/markdown",
-                token_count=ch.token_count,
-                # Carry the parent's page map forward so a downstream Stage that
-                # finds a sub-chunk offset (an entity mention) can resolve *that*
-                # offset's own source page, not just inherit the chunk's range.
-                page_map=doc.page_map,
-                # Carry the stripped→original offset map so that same sub-chunk offset
-                # resolves to its TRUE original offset (content is markup-stripped, so
-                # char_start + local is only a lower bound once markup precedes it).
-                offset_map=OffsetMap(
-                    segments=[
-                        OffsetSegment(local_start=ls, doc_start=ds) for ls, ds in ch.offset_map
-                    ],
-                    length=len(ch.text),
-                ),
-            )
+
+
+def _emit_chunk_records(doc: DocumentRecord, chunks: list[Chunk]) -> Iterator[ChunkRecord]:
+    """Turn a document's engine :class:`Chunk`s into contract :class:`ChunkRecord`s.
+
+    Shared by both reference Chunker Providers so the contract-stamping — page resolution
+    through the parent :class:`PageOffsetIndex`, carried page map + stripped→original offset
+    map, inherited Provenance/Classification — is identical regardless of which segmentation
+    strategy produced the chunks.
+    """
+    # Resolve page alignment through the parent's page map (present after a successful
+    # Parse). Absent (shouldn't happen for a PARSED doc), fall back to page 1 so a chunk
+    # always carries a page span.
+    index = PageOffsetIndex(doc.page_map) if doc.page_map is not None else None
+    for i, ch in enumerate(chunks):
+        if index is not None:
+            page_start = index.page_for_offset(ch.char_start)
+            # end offset is exclusive; resolve the last included character.
+            page_end = index.page_for_offset(max(ch.char_end - 1, ch.char_start))
+        else:  # pragma: no cover - PARSED records always carry a page map
+            page_start = page_end = 1
+        provenance = doc.provenance.model_copy(
+            update={
+                "char_start": ch.char_start,
+                "char_end": ch.char_end,
+                "page_start": page_start,
+                "page_end": page_end,
+            }
+        )
+        yield ChunkRecord(
+            record_id=f"{doc.record_id}#chunk-{i}",
+            document_record_id=doc.record_id,
+            index=i,
+            provenance=provenance,
+            classification=doc.classification,
+            content=ch.text,
+            media_type="text/markdown",
+            token_count=ch.token_count,
+            # Carry the parent's page map forward so a downstream Stage that finds a
+            # sub-chunk offset (an entity mention) can resolve *that* offset's own source
+            # page, not just inherit the chunk's range.
+            page_map=doc.page_map,
+            # Carry the stripped→original offset map so that same sub-chunk offset resolves
+            # to its TRUE original offset (content is markup-stripped, so char_start + local
+            # is only a lower bound once markup precedes it).
+            offset_map=OffsetMap(
+                segments=[
+                    OffsetSegment(local_start=ls, doc_start=ds) for ls, ds in ch.offset_map
+                ],
+                length=len(ch.text),
+            ),
+        )
