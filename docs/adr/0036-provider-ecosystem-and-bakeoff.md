@@ -43,3 +43,17 @@ The harness runs fully for CPU providers here; GPU-model adapters (PaddleOCR-VL,
 - The `LocalRunner` routes each Stage's `device` config value against its provider's profile before running; a skipped GPU stage produces an empty output + records `skipped=True` + the profile columns in the Quality Report's `StageMetrics` (QUALITY_SCHEMA_VERSION 16). The in-core reference providers (gazetteer, pattern, markdown chunker, intake screener) and `entity.gliner` declare honest profiles; `license_verified=True` appears only where genuinely verified.
 
 §1 (`AdapterBase`), §3 (stacks), §4 (bake-off), §5 (conformance) remain **proposed** — the later Wave-0/Wave-1 slices (P3-F2…F5).
+
+## Status note — §1 realized (P3-F2, #87)
+
+**§1 (`AdapterBase`) is BUILT** (Phase-3 Wave-0, slice P3-F2). Delivered in `latence-core`, dep-light (no torch/model libs), as `latence_core.providers.adapter.AdapterBase` (re-exported from `latence_core`, `__all__`):
+
+- **Optional, not a new seam.** A thin base carrying the cross-cutting glue every adapter repeats; a Provider still satisfies a Capability Protocol structurally **without** it (the in-core reference Providers are unchanged and untested-migrated). It names no Capability method — no second protocol layer.
+- **Device resolution** — `super().__init__(config)` resolves `config.device` against the subclass's declared `ProviderProfile` via P3-F1's `select_device`; `self.device` exposes the `DeviceDecision` (skip-with-flag on a CPU-only host, never a fabricated device). Placement stays the adapter's job (ADR-0003).
+- **Batching** — `batched(items, run_batch)` groups into a validated `batch_size` (≥1) when `profile.batch`, degrades to one-item calls otherwise; deterministic input-order output, one-batch-at-a-time (no whole-corpus buffer — the ADR-0033 streaming posture).
+- **Native-exception → typed taxonomy (ADR-0034)** — `guard("<op>")` maps a native exception to `ProviderError` (runtime fault) or `ConfigError` (opted-in via `config_exceptions`), passes a framework `LatenceError` through unwrapped, and carries **no record content/PII** (provider + op + native *type name* only, never the native message).
+- **Provenance/offset carry** — `carry_provenance` / `rebase_offsets` / `resolve_pages` reuse the existing `OffsetIndex` / `PageOffsetIndex` seam (ADR-0031), not a weaker copy.
+
+**Also in P3-F2 (§2 malformed-profile fix, the deferred P3-F1 defect):** the `LocalRunner` now **FAILs a stage loud** (typed `ConfigError` + FAIL Quality Report + `config` span) when a Provider declares a **malformed** profile, instead of silently reading it as "no profile" and running. An **absent** profile still means follow-request (`None`); an import/load error still defers to the normal execution path. `profile_of` was hardened to recognise a profile **declaration** only as a genuine class-bound `@classmethod` (or `PROFILE` ClassVar / bare `ProviderProfile`), so the `Profiler` Capability's own `profile(self, …)` **instance** method is correctly read as "no declaration" rather than mislabelled malformed (a latent P3-F1 collision this slice surfaced and fixed).
+
+§3 (stacks), §4 (bake-off), §5 (conformance) remain **proposed** — P3-F3…F5.

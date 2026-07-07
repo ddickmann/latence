@@ -141,13 +141,23 @@ def profile_of(provider_cls: type) -> ProviderProfile | None:
     ``PROFILE`` that is not one) raises ``TypeError`` — a malformed declaration is a
     hard error, not a silently-dropped profile, so a typo surfaces rather than reading
     as "no profile declared".
+
+    A subtlety the reader MUST respect (else it corrupts a legitimate Provider): the
+    :class:`~latence_core.capability.Profiler` **Capability** method is itself named
+    ``profile`` — an *instance* method ``profile(self, documents, mentions)``, not a profile
+    declaration. Calling that with no args would raise a spurious ``TypeError`` and mislabel a
+    perfectly valid Provider as "malformed". So the profile-declaration form is recognised only
+    as a genuine ``@classmethod`` (accessed on the class, it is bound with ``__self__ is
+    provider_cls``); a plain instance method named ``profile`` is NOT a declaration and falls
+    through to the ``PROFILE`` ClassVar / ``None`` path. The malformed-declaration contract
+    still holds for a real ``profile`` classmethod that returns a non-:class:`ProviderProfile`.
     """
-    # Prefer the classmethod form. ``getattr`` on the class returns the bound
-    # classmethod; a plain function assigned as ``profile`` also works (called with no
-    # args). We only treat it as a declaration when it is callable — a data attribute
-    # named ``profile`` that is a ProviderProfile is handled as the ClassVar case below.
+    # Prefer the classmethod form. A genuine ``@classmethod`` accessed on the class is a
+    # bound method whose ``__self__`` is the class itself; that is how we tell a profile
+    # DECLARATION apart from the Profiler Capability's ``profile(self, ...)`` INSTANCE method
+    # (which has no ``__self__`` and expects args). Only the former is invoked with no args.
     prof_attr = getattr(provider_cls, "profile", None)
-    if callable(prof_attr):
+    if callable(prof_attr) and getattr(prof_attr, "__self__", None) is provider_cls:
         result = prof_attr()
         if not isinstance(result, ProviderProfile):
             msg = (
@@ -167,12 +177,20 @@ def profile_of(provider_cls: type) -> ProviderProfile | None:
             raise TypeError(msg)
         return class_var
 
-    # A ``profile`` attribute that is present but neither callable nor absent (e.g. a
-    # bare ProviderProfile assigned to ``profile`` instead of ``PROFILE``) is a
-    # malformed declaration — surface it rather than reading as "no profile".
+    # A ``profile`` attribute that is a bare :class:`ProviderProfile` assigned to ``profile``
+    # (instead of ``PROFILE``) is accepted as a declaration — a convenient ClassVar-style form.
+    if isinstance(prof_attr, ProviderProfile):
+        return prof_attr
+    # A ``profile`` that is a plain **instance method** (the Profiler Capability's
+    # ``profile(self, documents, mentions)``, callable but not a class-bound classmethod) is
+    # NOT a profile declaration — it is the Stage's own I/O method. Read it as "no profile
+    # declared" (``None``) rather than mislabelling a valid Provider as malformed.
+    if callable(prof_attr):
+        return None
+    # Anything else present under ``profile`` but neither a ProviderProfile, a classmethod,
+    # nor a callable (e.g. a stray string/int assigned to ``profile``) is a malformed
+    # declaration — surface it rather than reading as "no profile".
     if prof_attr is not None:
-        if isinstance(prof_attr, ProviderProfile):
-            return prof_attr
         msg = (
             f"Provider {provider_cls.__name__!r} has a 'profile' attribute that is neither a "
             f"classmethod returning a ProviderProfile nor a ProviderProfile "

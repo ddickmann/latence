@@ -770,25 +770,52 @@ class LocalRunner:
                 )
                 records_in = len(incoming)
 
-            # P3-F1 (ADR-0036 §2): the requested device + the Provider's declared profile
-            # are re-derived on BOTH the resume and the fresh path so the profile/device
-            # columns (incl. a skip flag) are STICKY across resume — reading the profile is
-            # a cached, cheap class import, and re-routing never executes the Provider. A
-            # malformed declaration or an unknown provider is NOT routed (it must re-surface
-            # as a real failure on the execution path), so it falls through as "no profile".
+            # P3-F1 (ADR-0036 §2) + P3-F2 (§2, the malformed-profile fix): the requested device
+            # + the Provider's declared profile are re-derived on BOTH the resume and the fresh
+            # path so the profile/device columns (incl. a skip flag) are STICKY across resume —
+            # reading the profile is a cached, cheap class import, and re-routing never executes
+            # the Provider. Three distinct outcomes, kept distinct (issue P3-F2 §2):
+            #
+            #   * load/import error (unknown provider, missing heavy dep) → DEFER: fall through
+            #     to the normal execution path, which re-loads inside the execution ``try`` and
+            #     re-raises with full failure handling (a FAIL report + a typed-error span). We do
+            #     NOT map or skip it here — that would double-handle or mask the real load error.
+            #   * profile declared but MALFORMED (``profile_of`` raises ``TypeError``) → FAIL
+            #     LOUD: an author bug that must surface as a typed ``ConfigError`` + a FAIL report,
+            #     not silently read as "no profile" and run normally (the P3-F1 deferred defect).
+            #     Captured here and raised inside the execution ``try`` below so it flows through
+            #     the exact same failure handling (span + FAIL report) as any Stage failure.
+            #   * absent profile (declares none) → ``None``: follow the request (unchanged).
             requested_device = str(stage.config.get("device", "auto"))
+            stage_profile = None
             load_ok = True
+            malformed_profile_error: ConfigError | None = None
             try:
-                stage_profile = profile_of(self._registry.load(stage.provider))
-            except Exception:  # noqa: BLE001 - a load/declaration error is re-raised in the try below
-                # An unknown provider or a malformed profile declaration must NOT be routed
-                # (and never skipped-with-flag, which would mask the real error) — fall through
-                # to the normal execution path, which re-loads inside the try and re-raises with
-                # full failure handling (a FAIL Quality Report + a typed-error span). Route the
-                # metric columns as "no profile" but force the non-skip path below.
-                stage_profile = None
+                provider_cls = self._registry.load(stage.provider)
+            except Exception:  # noqa: BLE001 - a load/import error re-surfaces on the execution path
+                # Load/import failure — deferred, NOT mapped (it must re-surface as the real
+                # error when execution re-loads). Route the columns as "no profile", non-skip.
                 load_ok = False
-            if load_ok:
+            else:
+                try:
+                    stage_profile = profile_of(provider_cls)
+                except Exception as exc:  # noqa: BLE001 - any profile-declaration/-computation error is an author bug
+                    # An author bug in the profile declaration — the provider class LOADED fine
+                    # (that is handled above), so anything ``profile_of`` raises now is the profile
+                    # itself being wrong. Two shapes, same disposition: a MALFORMED declaration
+                    # (wrong return type → ``profile_of`` raises ``TypeError``), OR a ``profile()``
+                    # classmethod whose BODY raises while building the descriptor (e.g. constructing
+                    # an invalid ``ProviderProfile`` → pydantic ``ValidationError``). Both must fail
+                    # the stage loud as a typed ConfigError (not run silently as "no profile").
+                    # Capture it and raise it inside the execution ``try`` so it gets the FAIL
+                    # report + typed-error span, exactly like an executed-Stage failure — never
+                    # skipped-with-flag (which would mask it).
+                    malformed_profile_error = ConfigError(
+                        f"Provider {stage.provider!r} for stage {stage.name!r} declares a "
+                        f"malformed ProviderProfile (invalid declaration or profile() error): {exc}"
+                    )
+                    stage_profile = None
+            if load_ok and malformed_profile_error is None:
                 device_decision = self._route_device(stage, stage_profile)
             else:
                 device_decision = DeviceDecision(
@@ -874,6 +901,14 @@ class LocalRunner:
             )
             started = time.perf_counter()
             try:
+                # P3-F2 §2: a malformed ProviderProfile declaration is fatal — raise the captured
+                # typed ConfigError HERE, inside the execution ``try``, so it flows through the
+                # exact same failure handling as any Stage failure (a FAIL Quality Report + a
+                # typed-error ``config`` span + re-raise), never silently read as "no profile"
+                # and run normally (the P3-F1 deferred defect). It fires before the Provider is
+                # instantiated — a bad declaration never gets to run.
+                if malformed_profile_error is not None:
+                    raise malformed_profile_error
                 own_output = self._execute_stage(
                     stage, storage, pipeline, run_id, incoming, outputs
                 )

@@ -116,7 +116,9 @@ from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers import (
+    DEFAULT_BATCH_SIZE,
     LATENCE_CUDA_ENV,
+    AdapterBase,
     DeviceDecision,
     HasProfile,
     ProviderProfile,
@@ -170,9 +172,11 @@ from latence_core.tracing import (
 )
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
     "ENTRY_POINT_GROUP",
     "SCHEMA_VERSION",
     "UNKNOWN_LANGUAGE",
+    "AdapterBase",
     "AffectedSet",
     "BuiltEdge",
     "BuiltNode",

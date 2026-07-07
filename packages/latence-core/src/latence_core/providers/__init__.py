@@ -13,10 +13,18 @@ contract every Wave-1 provider adapter is written against — dependency-light, 
   :func:`~latence_core.providers.device.select_device`, which routes a requested
   device against a profile and returns a skip-with-flag :class:`DeviceDecision` for a
   GPU-only provider on a CPU-only host (the G1 posture — flag, never fail).
+* :mod:`~latence_core.providers.adapter` — the **optional** :class:`AdapterBase`
+  (ADR-0036 §1, slice P3-F2): the thin base a Wave-1 provider adapter reuses for the
+  cross-cutting glue every adapter repeats — device resolution, deterministic
+  streaming-friendly batching, native-exception → typed-taxonomy mapping (ADR-0034),
+  and Provenance/offset carry over the existing OffsetIndex/PageOffsetIndex seam
+  (ADR-0031). Convenience, never a required layer — a Provider still satisfies a
+  Capability structurally without it.
 """
 
 from __future__ import annotations
 
+from latence_core.providers.adapter import DEFAULT_BATCH_SIZE, AdapterBase
 from latence_core.providers.device import (
     LATENCE_CUDA_ENV,
     DeviceDecision,
@@ -26,7 +34,9 @@ from latence_core.providers.device import (
 from latence_core.providers.profile import HasProfile, ProviderProfile, profile_of
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
     "LATENCE_CUDA_ENV",
+    "AdapterBase",
     "DeviceDecision",
     "HasProfile",
     "ProviderProfile",

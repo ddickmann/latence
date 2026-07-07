@@ -144,6 +144,44 @@ def test_profile_of_none_when_undeclared() -> None:
     assert profile_of(_NoProfileProvider) is None
 
 
+class _ProfilerCapabilityShaped:
+    """A Provider whose Capability method is *named* ``profile`` (like the Profiler seam).
+
+    The ``Profiler`` Capability's method is ``profile(self, documents, mentions)`` — an
+    INSTANCE method, not a ProviderProfile declaration. ``profile_of`` must NOT invoke it
+    (which would raise a spurious TypeError) and must read it as "no profile declared"
+    (``None``) — a Capability method named ``profile`` is not a malformed declaration.
+    """
+
+    def profile(self, documents: object, mentions: object) -> object:  # noqa: ARG002
+        return []
+
+
+class _ProfilerCapabilityWithProfileClassVar:
+    """A Profiler-shaped Provider that ALSO declares a real profile via the ``PROFILE`` ClassVar.
+
+    The instance ``profile`` method (the Capability) must not shadow the ``PROFILE`` ClassVar:
+    ``profile_of`` reads the declared profile, not "no profile".
+    """
+
+    PROFILE = _valid(compute="cpu", memory_mb=8)
+
+    def profile(self, documents: object, mentions: object) -> object:  # noqa: ARG002
+        return []
+
+
+def test_profile_of_ignores_capability_profile_instance_method() -> None:
+    # The Profiler-name-collision regression (P3-F2): a Capability method named ``profile``
+    # is NOT a profile declaration — read as None, never called-with-no-args → spurious error.
+    assert profile_of(_ProfilerCapabilityShaped) is None
+
+
+def test_profile_of_reads_classvar_despite_capability_profile_method() -> None:
+    prof = profile_of(_ProfilerCapabilityWithProfileClassVar)
+    assert prof is not None
+    assert prof.memory_mb == 8
+
+
 def test_profile_of_raises_on_bad_classmethod() -> None:
     with pytest.raises(TypeError, match="did not return a ProviderProfile"):
         profile_of(_BadClassmethodProvider)
