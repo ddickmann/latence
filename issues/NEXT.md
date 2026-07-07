@@ -17,18 +17,19 @@ Phase 1 is a strict build-through. Pull the top unblocked issue, meet the **Base
 - [x] **S12 — performance-path+runner** (endpoint Providers for the heavy Capabilities — one-config swap, byte-identical contracts, retries surfaced in the report — + an Airflow Runner adapter on platform state; ADR-0030)
 - [x] **S13 — demo-package** (`latence-demo`: one-command offline messy-corpus → PII-handled RAG corpus + browsable Evidence-bearing KG + Quality Report in a self-contained viewer; live one-line Provider swap; --strict smoke test; ADR-0011/0019)
 
-## Phase 1 COMPLETE — at the HARD STOP
+## Phase 1 ✓ · before-G1 debt ✓ · G1 gate ✓ PASSED · top hardening ✓
 
-All 13 slices merged to `main` (12 packages). Do **not** start Phase 2 until every G1 box is green.
+All 13 slices + all 12 before-G1 debt items merged; **G1 profound-testing gate PASSED** (`gate/G1-RESULTS.md`); G1-finding hardening done (#61 redaction recall, #62 screening, #63 streaming Runner).
 
-## Now
-- [ ] **G1 — profound-testing-gate (#14)** ← the hard stop. First burn down the before-G1 debt below, then run G1's exit criteria.
+## Now — Phase-2 hardening, ordered by **PHASE-2-ROADMAP.md**
+- [ ] **Wave 1 (Runner-first, serial):** #73 observability *(in flight)* → #69 stream executor outputs → #68 relation candidate bound
+- [ ] **Wave 2:** #66 extended secret recall
+- [ ] **Wave 3 (per-stage fuzz):** #74 doc-level ∥ #75 corpus-level → #76 quality/deltas chaos
+- [ ] **Wave 4:** #77 second CPU providers
+- [ ] **Wave 5 (manual publish):** #72 pre-publish polish → Dennis flips public + PyPI
+- **Parked (needs real env):** #64 GPU/perf-rig
 
-## Before-G1 debt (must be resolved at/by G1)
-#24 mypy-strict on tests · #26 chunking O(n²) DoS · #28 gazetteer ReDoS · #30 manifest secret scrub · #33 profiling pair-state memory + report PII · #35 disambiguation type-gate · #37 RAG PII-handled default + Embedder seam · #39 gold-set basename + docstrings · #42 true affected-set recompute + purge collateral guard · #44 endpoint size cap + Airflow real-path · #46 demo polish
-
-## Phase-2 queue (after G1)
-H-core · H2 · H3 · H4 · H5 · H6 · H7 · H8 · H9 · H10 · H11 · H12 · H13
+Rationale: Runner/architecture changes land **before** the fuzz waves so tests are written once against the final model. See PHASE-2-ROADMAP.md.
 
 ## Rules
 - One issue in progress at a time on the critical path.
