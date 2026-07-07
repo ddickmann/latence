@@ -6,8 +6,8 @@
 #                        |                                                              v
 #                        |                                                       Graph Assembly
 #                        |                                                        |          |
-#                        |                                                        v          |
-#                        \--------------------> Export (RAG corpus)      Export (knowledge graph)
+#                        v                                                        v          |
+#           Redaction -> Export (RAG corpus)                          Export (knowledge graph)
 #
 # Graph Assembly (CONTEXT `Graph Assembly`) is the CORPUS-LEVEL Stage that builds the canonical
 # knowledge graph — nodes, edges, and per-edge Evidence — from the disambiguated canonical
@@ -21,8 +21,9 @@
 #
 # Export materializes the TWO AI-ready deliverables as PORTABLE FILES ON STORAGE, never a live
 # database (ADR-0017):
-#   1. the RAG-ready corpus — cleaned/chunked/Screened/PII-handled text with full Provenance/
-#      Classification — as JSONL + Parquet (via export.jsonl_parquet, off Chunk);
+#   1. the RAG-ready corpus — cleaned/Screened/PII-handled text with full Provenance/
+#      Classification — as JSONL + Parquet (via export.jsonl_parquet, off REDACTION so the shipped
+#      corpus is genuinely PII-handled; drop the redact Stage to export the raw chunk text instead);
 #   2. the knowledge graph — nodes, edges, per-edge Evidence — as Parquet + TTL + GraphML (via
 #      export.knowledge_graph, off Graph Assembly), loadable into Neo4j, a triple store, or a
 #      graph-RAG engine.
@@ -114,9 +115,23 @@ stages:
     config:
       basename: graph
 
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule    # in-core hybrid PII redactor (S6): the PII-handling Stage
+    depends_on: [parse]                # scans the parsed document's ORIGINAL markdown coordinate
+    config:                            # system (where PII spans + pages live), NOT the chunk stream
+      detectors: [email, phone, ssn, credit_card]
+      gazetteer:
+        name: [Alice, Bob, Carol]      # the PERSON names in this corpus, masked out of the RAG text
+      default_action: mask
+      salt: change-me                  # salts replace/hash surrogates (deterministic)
+
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet     # the RAG-ready corpus as JSONL + Parquet
-    depends_on: [chunk]                # swap to a Redaction Stage upstream for the PII-handled
-    config:                            # variant (S6); embeddings are an opt-in Embedder Provider
+    depends_on: [redact]               # off REDACTION, so the shipped corpus IS PII-handled — the
+    config:                            # 'Screened/PII-handled' claim above is honest by default (#37)
       basename: corpus
+      # embedder:                      # OPTIONAL: attach a vector per corpus row for a vector DB —
+      #   provider: embedding.hashing  #   the in-core deterministic reference (swap to
+      #   config: { dimension: 64 }    #   embedding.endpoint for a real served model, ADR-0017)

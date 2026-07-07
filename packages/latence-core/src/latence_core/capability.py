@@ -434,7 +434,16 @@ class Embedder(Protocol):
 
 @runtime_checkable
 class Export(Protocol):
-    """Materializes AI-ready outputs (JSONL + Parquet in S1)."""
+    """Materializes AI-ready outputs (JSONL + Parquet in S1).
+
+    A corpus Export Provider may **optionally** attach embeddings (ADR-0017: an opt-in
+    Embedder augmentation). It opts in by naming an :class:`Embedder` Provider in its own
+    Stage ``config['embedder']`` (a ``{"provider": ..., "config": {...}}`` block); the Provider
+    resolves that Embedder and threads each exported record's text through it, adding a vector
+    per row. A Provider that names no embedder exports its text unchanged — embeddings are never
+    required for Export. The seam is one signature so a non-embedding Export (the KG / demo-site
+    Providers) satisfies it identically.
+    """
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         """Write records to ``out_dir`` on ``storage``; return the output URIs."""

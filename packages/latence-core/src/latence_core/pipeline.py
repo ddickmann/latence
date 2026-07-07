@@ -42,7 +42,16 @@ class CapabilityKind(StrEnum):
     (required — the mentions it resolves) and, optionally, Relation Extraction (the
     relations it normalises onto the canonical entities). S9 adds Graph Assembly (corpus-level
     knowledge-graph construction — nodes, edges, and per-edge Evidence — from the disambiguated
-    canonical entities + normalized relations), wired off Disambiguation.
+    canonical entities + normalized relations), wired off Disambiguation. S9 also adds the
+    **opt-in** Embedding Capability (ADR-0017): an Embedder maps RAG-corpus text to a fixed-width
+    vector so the exported corpus carries embeddings a vector DB can ingest. Embedding is *not* a
+    standalone DAG node — it augments the corpus Export: a corpus Export Stage names its Embedder
+    Provider in ``config['embedder']`` (a ``{provider, config}`` block) and the Runner resolves it
+    and attaches a vector per exported row. It is optional — a corpus Export with no ``embedder``
+    exports its text unchanged, so any vector DB can still ingest it (the ADR-0017 AC). The
+    ``EMBEDDING`` kind names the seam so a Provider can register + be discovered under it; the
+    in-core reference is the deterministic ``embedding.hashing`` (the learned e5-small is a
+    pluggable package).
     """
 
     SOURCE = "source"
@@ -57,6 +66,7 @@ class CapabilityKind(StrEnum):
     PROFILING = "profiling"
     DISAMBIGUATION = "disambiguation"
     GRAPH_ASSEMBLY = "graph_assembly"
+    EMBEDDING = "embedding"
     EXPORT = "export"
 
 

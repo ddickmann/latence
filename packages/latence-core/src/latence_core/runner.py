@@ -722,6 +722,20 @@ class LocalRunner:
             # Export is a sink: it passes its input records through unchanged.
             return list(exportable)
 
+        if stage.capability is CapabilityKind.EMBEDDING:
+            # Embedding is an opt-in *Export augmentation* (ADR-0017), not a standalone DAG node:
+            # a corpus Export names its Embedder in config['embedder'] and attaches a vector per
+            # exported row. There is no threaded EmbeddingRecord, so a bare `embedding` Stage has
+            # no carrier and is a wiring error — surface the fix, don't fall through to the opaque
+            # unknown-capability error.
+            msg = (
+                f"Stage {stage.name!r} declares the 'embedding' Capability as a standalone DAG "
+                f"Stage, but Embedding is an opt-in Export augmentation, not a DAG node "
+                f"(ADR-0017). Remove this Stage and name the Embedder in the corpus Export's "
+                f"config['embedder'] = {{'provider': {stage.provider!r}, 'config': {{...}}}}."
+            )
+            raise ValueError(msg)
+
         msg = f"Unknown capability {stage.capability!r} for stage {stage.name!r}."
         raise ValueError(msg)
 

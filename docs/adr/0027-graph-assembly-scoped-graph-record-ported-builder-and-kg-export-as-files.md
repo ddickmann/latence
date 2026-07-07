@@ -54,13 +54,18 @@ never silently mixed with an extracted one.
 ## Export writes files, never a live database (ADR-0017), and serves BOTH RAG and graph-RAG
 
 The Export Stage materializes the two AI-ready deliverables **as portable files on Storage,
-never a live database** (ADR-0017): (1) the **RAG-ready corpus** — the cleaned/chunked/
-Screened/PII-handled text with full Provenance/Classification — via the existing S1
+never a live database** (ADR-0017): (1) the **RAG-ready corpus** — the cleaned,
+Screened, PII-handled text with full Provenance/Classification — via the existing S1
 `export.jsonl_parquet` Provider (Parquet + JSONL); and (2) the **knowledge graph** — nodes,
 edges, per-edge Evidence — via a new `export.knowledge_graph` Provider as **Parquet + TTL +
 GraphML**. Both are wired as ordinary Export Stages off their respective upstreams (the KG
-export off Graph Assembly, the corpus export off Chunk/Redaction), so the one-command demo
-fans out to both deliverables from the one converging DAG. A downstream Neo4j / triple-store /
+export off Graph Assembly), so the one-command demo fans out to both deliverables from the one
+converging DAG. **The corpus export is wired off a Redaction Stage by default** (both the S13
+`demo-pipeline.yaml` and the `graph-slice.yaml` example route `export.jsonl_parquet` off
+`redaction.hybrid_rule`), so the shipped corpus is genuinely PII-handled — the "Screened,
+PII-handled" claim is honest by default, not aspirational (the reconciliation tracked in #37).
+An operator who wants the raw, un-redacted chunk text drops the Redaction Stage and points the
+corpus export back at Chunk. A downstream Neo4j / triple-store /
 graph-RAG consumer loads the files with no framework code in the loop; writing directly into
 an adopter's DB is rejected for v1 (ADR-0017) and is opt-in Provider work post-v1 behind the
 same seam.
@@ -81,6 +86,19 @@ reference in core is a deterministic, dependency-free **hashing embedder** (no m
 weights, no license to verify — ADR-0012/0016), so the seam is exercisable end to end offline.
 The default learned Embedder (`multilingual-e5-small`, MIT) is a **pluggable Provider
 package**, not a core dependency — the framework names the seam, not the model.
+
+**How it is wired (the #37 seam completion).** Embedding is not a standalone DAG node — it is an
+augmentation of the corpus **Export** Stage. A corpus Export names its Embedder Provider in its
+own `config['embedder']` (a `{"provider": ..., "config": {...}}` block); the corpus Export
+resolves that Provider from the `latence.providers` registry, checks it against the `Embedder`
+seam, and threads each exported record's corpus text (a RedactionRecord's PII-handled
+`masked_content`, else the `content`) through it, attaching a fixed-width `embedding` vector to
+every row — a JSONL key and a native Parquet `list<double>` column. An Export with no `embedder`
+attaches nothing (the text is still exported, so a vector DB can embed later). The
+`CapabilityKind.EMBEDDING` value names the seam so a Provider registers + is discovered under it;
+declaring a *bare* `embedding` DAG Stage is a wiring error the Runner rejects with a pointer to
+the Export-config form. The learned served model is the pluggable `embedding.endpoint` package,
+swapped in by pointing `config['embedder']['provider']` at it — one config line, no code change.
 
 ## Providers shipped (CPU-first reference, ADR-0007)
 
