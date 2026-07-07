@@ -87,9 +87,11 @@ mirroring the Chunk Stage.)
 ## Providers shipped (CPU-first reference, ADR-0007; licenses verified 2026-07-06)
 
 * **`redaction.hybrid_rule`** ships in `latence-core`: a pure-Python, dependency-free,
-  deterministic **hybrid-rule** PII detector — a library of well-known-PII regexes
-  (email / ssn / credit_card / phone / ip / iban) plus a config gazetteer and custom
-  patterns. It is the "rule half" the S6 issue names; shipping it in core keeps first
+  deterministic **hybrid-rule** PII detector — a library of well-known-PII and secret
+  regexes (email / ssn / credit_card / phone / ip / iban / aws_key / api_key / jwt /
+  secret — the secret/API-key recognisers and comprehensive-by-default coverage added
+  for #61, and the compound-secret + structural-JWT recall extension for #66) plus a
+  config gazetteer and custom patterns. It is the "rule half" the S6 issue names; shipping it in core keeps first
   `git clone` → working redaction free of torch and hash-stable for the Baseline bar.
   It is not a weaker reinvention of a learned model — the learned Provider is the
   drop-in below.

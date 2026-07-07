@@ -121,8 +121,9 @@ stages:
     depends_on: [parse]                # scans the parsed document's ORIGINAL markdown coordinate
     config:                            # system (where PII spans + pages live), NOT the chunk stream
       # No `detectors` key ⇒ ALL built-in recognisers (email, phone, ssn, credit_card,
-      # ip, iban, aws_key, api_key, secret): comprehensive PII+secret coverage by
-      # default, so the shipped RAG corpus is genuinely PII-handled (#61).
+      # ip, iban, aws_key, api_key, jwt, secret): comprehensive PII+secret coverage by
+      # default, so the shipped RAG corpus is genuinely PII-handled (#61; #66 added the
+      # bare token:/JWT + compound-secret-key recall).
       gazetteer:
         name: [Alice, Bob, Carol]      # the PERSON names in this corpus, masked out of the RAG text
       default_action: mask

@@ -4,9 +4,11 @@ The S6 Redaction reference Provider (ADR-0004; ships in core like the S3
 Chunker/Screeners, the S4 gazetteer and the S5 trigger extractor so the demo runs
 end to end, ADR-0007 CPU-first, ADR-0016 no extra deps). It is the **rule half** of
 the "hybrid rule+model" reference the issue calls for: a library of well-known-PII
-and secret recognisers (email, phone, SSN, credit card, IP, IBAN, AWS access key,
-labelled API token, labelled password/secret) enabled comprehensively by default,
-plus a config-supplied gazetteer and custom-pattern set. The **model half** is the drop-in,
+and secret recognisers (email, phone, SSN, credit card, IP, IBAN, AWS access-key id,
+labelled API token — bare ``token:``/``jwt:`` and the session/refresh variants
+included, structural JWT, and a password/secret assignment that also fires inside a
+compound identifier such as ``aws_secret_access_key``) enabled comprehensively by
+default, plus a config-supplied gazetteer and custom-pattern set. The **model half** is the drop-in,
 separately-packaged ``latence-pii-gliner`` (a permissively-licensed GLiNER-PII
 checkpoint via plain ``transformers``, ADR-0012/0016) behind this same
 :class:`~latence_core.capability.PIIDetector` seam — shipping the deterministic
@@ -82,15 +84,31 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     "iban": r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b",
     # AWS access key id: literal AKIA/ASIA/AGPA/… prefix + 16 uppercase alnum.
     "aws_key": r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|A3T[A-Z0-9])[A-Z0-9]{16}\b",
-    # Generic long high-entropy API token: a ``key``/``token``/``secret`` label
-    # followed by a 20+ char base64/hex-ish credential (bounded, linear-time).
+    # Generic long high-entropy API token: a labelled key/token (including a bare
+    # ``token:``/``jwt:`` and the session/refresh variants) followed by a 20+ char
+    # base64/hex-ish credential (bounded, linear-time). The label set is a fixed
+    # alternation of whole words — no nested quantifier over the value class.
     "api_key": (
-        r"(?i:\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|bearer|secret[_-]?key)\b)"
+        r"(?i:\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|session[_-]?token"
+        r"|refresh[_-]?token|bearer|token|jwt|secret[_-]?key)\b)"
         r"['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+_.=-]{20,})"
     ),
-    # A ``password``/``passwd``/``pwd`` assignment: mask the credential value.
+    # A structural JSON Web Token: three base64url segments joined by dots, the header
+    # segment starting ``eyJ`` (base64 of ``{"``). Catches a **bare** ``token: <JWT>``
+    # even when the label is unrecognised, absent, or on another line — the value's own
+    # shape is the recogniser. Linear-time: each segment is a single character class
+    # under a fixed `+`, the segments separated by literal dots (no overlap).
+    "jwt": r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b",
+    # A ``password``/``passwd``/``pwd``/``secret`` assignment — including when the
+    # keyword is a **component of a compound identifier** (``aws_secret_access_key``,
+    # ``client_secret``, ``db_password``): the plain ``\bsecret\b`` word boundary fails
+    # inside ``…_secret_…`` because ``_`` is a word char, so match an optional single
+    # leading identifier component and any number of trailing ones around the keyword.
+    # Linear-time: the leading component ends in a separator and each trailing component
+    # starts with one (both disjoint from the alnum run's edge), so there is no
+    # catastrophic backtracking on a pathological run.
     "secret": (
-        r"(?i:\b(?:password|passwd|pwd|secret)\b)"
+        r"(?i:\b(?:[a-z0-9]+[_.-])?(?:password|passwd|pwd|secret)(?:[_.-][a-z0-9]+)*)"
         r"['\"]?\s*[:=]\s*['\"]?(\S{3,})"
     ),
 }
@@ -111,6 +129,7 @@ _SPECIFICITY_RANK: dict[str, int] = {
     "credit_card": 0,
     "iban": 0,
     "aws_key": 0,
+    "jwt": 0,  # structural, whole-value token — wins a tie over a loose label capture
     "email": 1,
     "api_key": 1,
     "secret": 1,
@@ -161,7 +180,7 @@ class HybridPIIRedactor:
     Config:
         detectors: list[str]  — which built-in recognisers to enable (subset of
             ``email``/``ssn``/``credit_card``/``phone``/``ip``/``iban``/``aws_key``/
-            ``api_key``/``secret``). Default: **all** — comprehensive PII+secret
+            ``api_key``/``jwt``/``secret``). Default: **all** — comprehensive PII+secret
             coverage, so a corpus is PII-handled by default (do not silently narrow
             this to a partial set in production configs).
         gazetteer: dict[str, list[str]]  — extra literal terms to redact, keyed by PII

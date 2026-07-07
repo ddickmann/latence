@@ -64,10 +64,11 @@ stages:
                                        # NOT the markup-stripped chunk stream
     config:
       # The built-in rule library to enable. DEFAULT (omit this key) = ALL:
-      # email / ssn / credit_card / phone / ip / iban / aws_key / api_key / secret —
-      # comprehensive PII+secret coverage (#61). Narrow it only for a deliberate
-      # reason; a partial list silently lowers redaction recall.
-      detectors: [email, phone, ssn, credit_card, aws_key, api_key, secret]
+      # email / ssn / credit_card / phone / ip / iban / aws_key / api_key / jwt /
+      # secret — comprehensive PII+secret coverage (#61, extended for #66: bare
+      # token:/JWT + compound secret keys). Narrow it only for a deliberate reason;
+      # a partial list silently lowers redaction recall.
+      detectors: [email, phone, ssn, credit_card, aws_key, api_key, jwt, secret]
       # Extra config-supplied recognisers (the rest of the rule half):
       gazetteer:
         name: [Alice, Bob, Carol]      # literal terms to redact, keyed by PII type

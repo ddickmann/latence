@@ -42,6 +42,29 @@ _GOLD: tuple[tuple[str, str, str], ...] = (
     ("aws_key", "Rotate the leaked key AKIAIOSFODNN7EXAMPLE now.", "AKIAIOSFODNN7EXAMPLE"),
     ("api_key", "config api_key=sk-abc123XYZ4567890deadbeef in env.", "sk-abc123XYZ4567890deadbeef"),
     ("secret", "The dump had Password: hunter2 in plain text.", "hunter2"),
+    # -- #66 extended secret recall -----------------------------------------
+    # A secret whose keyword lives INSIDE a compound identifier: the plain
+    # ``\bsecret\b`` word boundary misses it because ``_`` is a word char. The gold
+    # substring is the credential value only (the ``secret`` recogniser's group 1).
+    (
+        "secret",
+        "env: aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY set.",
+        "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+    ),
+    # A bare ``token: <JWT>`` — the label is generic and the value is a JWT. The
+    # structural ``jwt`` recogniser fires on the value's own shape (three base64url
+    # segments, header starting ``eyJ``) even though ``#61``'s label set never named
+    # a bare ``token``. Gold = the whole JWT.
+    (
+        "jwt",
+        "Set header token: "
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U before send.",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    ),
 )
 
 # Clean control documents: NO PII of any type. A recogniser that fires here is a false
@@ -168,6 +191,88 @@ def test_secret_value_masked_but_label_not_leaked() -> None:
     assert "api_key=" in rec.masked_content
     assert "[SECRET]" in rec.masked_content
     assert "[API_KEY]" in rec.masked_content
+
+
+def test_compound_secret_key_is_redacted() -> None:
+    """#66: a secret keyword inside a COMPOUND identifier is redacted (value only).
+
+    ``aws_secret_access_key=<40-char secret>`` — the ``\\bsecret\\b`` denylist misses it
+    because ``_`` is a word char, so ``secret`` is not a standalone word. The extended
+    recogniser masks the credential value while keeping the harmless label. Reverting to
+    ``\\bsecret\\b`` leaves the AWS secret in the clear and fails this test. Also covers
+    the dash-separated and ``client_secret`` forms.
+    """
+    cases = (
+        ("aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"),
+        ("aws-secret-access-key: wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"),
+        ("client_secret = s3cr3t-Value-01234567", "s3cr3t-Value-01234567"),
+    )
+    for i, (text, secret_value) in enumerate(cases):
+        rec = _redact_all([_doc(text, f"compound-secret-{i}")])[0]
+        assert secret_value not in rec.masked_content, f"leaked secret in {text!r}: {rec.masked_content!r}"
+        # The label component is preserved; only the value is masked.
+        assert "secret" in rec.masked_content.lower()
+        assert any(s.pii_type == "secret" for s in rec.pii_spans), rec.pii_spans
+
+
+def test_bare_token_jwt_is_redacted() -> None:
+    """#66: a bare ``token: <JWT>`` is redacted by the structural JWT recogniser.
+
+    ``#61``'s label set never named a bare ``token``, and a JWT value contains dots. The
+    structural ``jwt`` recogniser fires on the value's own shape, so the JWT is masked
+    even with no recognised label at all. Reverting the ``jwt`` recogniser (and the
+    ``token`` label) leaves the JWT in the clear and fails this test.
+    """
+    jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    )
+    # Bare label, and no label at all (JWT alone on a line) — both must be caught.
+    for i, text in enumerate((f"token: {jwt}", f"The captured value was {jwt} in the log.")):
+        rec = _redact_all([_doc(text, f"jwt-{i}")])[0]
+        assert jwt not in rec.masked_content, f"leaked JWT: {rec.masked_content!r}"
+        assert any(s.pii_type == "jwt" for s in rec.pii_spans), rec.pii_spans
+
+
+def test_extended_recognisers_are_linear_time_on_pathological_input() -> None:
+    """#66 ReDoS guard: the compound-secret and JWT recognisers stay linear-time.
+
+    The compound-secret recogniser has an optional leading identifier component and any
+    number of trailing ones around the keyword; a naive form backtracks catastrophically
+    on a long ``x_x_x…secret…`` run with no closing assignment. The JWT recogniser must
+    not blow up on a long ``eyJ…`` run with missing segments. Both finish in
+    milliseconds; a ReDoS-prone form would time out here.
+    """
+    import re
+    import time
+
+    from latence_core.stages.redaction import _BUILTIN_PATTERNS
+
+    # Inputs that hammer exactly the constructs #66 added/changed: the compound-secret's
+    # optional leading component + unbounded trailing ``_x`` components around the keyword
+    # with no closing assignment, and a JWT header run with a missing segment.
+    pathological = (
+        "a" * 40000 + "_secret_" + "b" * 40000 + " "      # prefix+suffix, no assignment value
+        + "secret" + "_a" * 20000 + " "                    # long trailing-component chain
+        + "eyJ" + "A" * 60000 + " "                        # jwt header run, no dots
+        + "eyJ" + "A" * 30000 + "." + "B" * 30000          # jwt two segments, third missing
+    )
+    # Assert the bound on the #66 recognisers directly (isolating them from unrelated
+    # built-ins), so a ReDoS-prone form of THIS fix times out here.
+    for name in ("secret", "jwt", "api_key"):
+        compiled = re.compile(_BUILTIN_PATTERNS[name])
+        start = time.perf_counter()
+        list(compiled.finditer(pathological))
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"{name!r} took {elapsed:.2f}s on pathological input (possible ReDoS)"
+
+    # And end-to-end through the redactor on the same input stays well-bounded.
+    doc = _doc(pathological, "extended-redos")
+    start = time.perf_counter()
+    _redact_all([doc])
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"extended recognisers took {elapsed:.2f}s end-to-end (possible ReDoS)"
 
 
 def test_recognisers_are_linear_time_on_pathological_input() -> None:
