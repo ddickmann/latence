@@ -1,17 +1,11 @@
-"""Shared fixtures. Determinism is enforced via PYTHONHASHSEED in CI and pytest addopts."""
+"""Shared fixtures. Determinism (a pinned PYTHONHASHSEED) is enforced and verified
+by the repo-root conftest, not here."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def _deterministic_env() -> None:
-    # Belt-and-suspenders: keep any hash-dependent ordering stable within a test.
-    os.environ.setdefault("PYTHONHASHSEED", "0")
 
 
 @pytest.fixture()

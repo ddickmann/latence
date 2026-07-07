@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def _deterministic_env() -> None:
-    os.environ.setdefault("PYTHONHASHSEED", "0")
 
 
 @pytest.fixture()
