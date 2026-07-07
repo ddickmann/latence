@@ -31,11 +31,19 @@ from latence_core.providers.device import (
     cuda_available,
     select_device,
 )
-from latence_core.providers.profile import HasProfile, ProviderProfile, profile_of
+from latence_core.providers.profile import (
+    REPO_LICENSE_SOURCE,
+    UNVERIFIED_LICENSE,
+    HasProfile,
+    ProviderProfile,
+    profile_of,
+)
 
 __all__ = [
     "DEFAULT_BATCH_SIZE",
     "LATENCE_CUDA_ENV",
+    "REPO_LICENSE_SOURCE",
+    "UNVERIFIED_LICENSE",
     "AdapterBase",
     "DeviceDecision",
     "HasProfile",

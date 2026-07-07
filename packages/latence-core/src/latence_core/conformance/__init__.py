@@ -40,8 +40,11 @@ The C1–C6 checks (ADR-0036 §5):
 * **C1** valid typed records — contract-complete, Provenance/Classification + in-range offsets.
 * **C2** graceful failure — an adversarial input raises a **typed** ``LatenceError`` (or takes a
   Screening quarantine / PARSE_ERROR path), never a bare crash; **no PII in the error**.
-* **C3** license recorded + permissive-or-opt-in (ADR-0012) — every Provider declares a profile;
-  ``UNVERIFIED`` never appears with ``license_verified=True``; a restricted license is opt-in.
+* **C3** license recorded + **evidence-bearing** + permissive-or-opt-in (ADR-0012, H-B1) — every
+  Provider declares a profile; ``UNVERIFIED`` never appears with ``license_verified=True``; a
+  ``license_verified=True`` claim carries its complete evidence trail (source + ISO date + code
+  SPDX, plus a weights SPDX when ``model_id`` is set) and its license fields are mutually
+  consistent; a restricted license is opt-in. Self-attestation without evidence FAILs.
 * **C4** determinism-or-documented — a ``deterministic`` Provider is byte-identical over two runs.
 * **C5** resource/device honored — a ``compute="gpu"`` Provider on a CPU host is skipped-with-flag.
 * **C6** no secret/PII leak — a non-Redactor does not surface raw PII in non-content fields.

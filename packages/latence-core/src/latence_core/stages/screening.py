@@ -43,7 +43,7 @@ from latence_core.contracts import (
     ScreeningFinding,
     ScreeningVerdict,
 )
-from latence_core.providers.profile import ProviderProfile
+from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -114,6 +114,9 @@ class SignatureSizeIntakeScreener:
             model_id=None,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-06",
             deterministic=True,
             batch=True,
             cost_per_1k=None,
@@ -315,6 +318,9 @@ class KeywordContentScreener:
             model_id=None,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-06",
             deterministic=True,
             batch=False,
             cost_per_1k=None,
@@ -637,6 +643,9 @@ class FuzzyInjectionContentScreener:
             model_id=None,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-06",
             deterministic=True,
             batch=False,
             cost_per_1k=None,

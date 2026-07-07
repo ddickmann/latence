@@ -58,7 +58,7 @@ from latence_core.contracts import (
     Record,
 )
 from latence_core.disambiguation import normalize_text
-from latence_core.providers.profile import ProviderProfile
+from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_core.state.graph_patcher import GraphPatcher, _record_reach
 from latence_core.state.incremental import MentionView, compute_affected_set
 
@@ -93,6 +93,9 @@ class AffectedSetDeltaProcessor:
             model_id=None,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-06",
             deterministic=True,
             batch=False,
             cost_per_1k=None,

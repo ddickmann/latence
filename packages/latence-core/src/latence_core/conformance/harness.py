@@ -9,9 +9,11 @@ its Capability's :class:`~latence_core.conformance.cases.ConformanceCase`, and r
 * **C2** graceful failure — the adversarial input raises a **typed**
   :class:`~latence_core.errors.LatenceError` or takes a defined quarantine / PARSE_ERROR path;
   and the raised message / reason carries **no PII** (proven with a PII-bearing input).
-* **C3** license recorded + permissive-or-opt-in — the Provider declares a
-  :class:`~latence_core.providers.profile.ProviderProfile`; ``UNVERIFIED`` never appears with
-  ``license_verified=True``; a restricted (non-permissive) license is flagged opt-in.
+* **C3** license recorded + **evidence-bearing** + permissive-or-opt-in (H-B1) — the Provider
+  declares a :class:`~latence_core.providers.profile.ProviderProfile`; ``UNVERIFIED`` never
+  appears with ``license_verified=True``; a ``license_verified=True`` claim carries its complete
+  evidence (source + ISO date + code SPDX, + a weights SPDX when ``model_id`` is set) and its
+  license fields are mutually consistent; a restricted (non-permissive) license is flagged opt-in.
 * **C4** determinism-or-documented — a ``deterministic`` Provider is byte-identical over two
   runs; a non-deterministic one records its declaration (no assertion).
 * **C5** resource/device honored — a ``compute="gpu"`` Provider on a CPU-only host is
@@ -144,7 +146,19 @@ def _run_conformance_checks_for(
 
 
 def _check_c3_license(profile: ProviderProfile | None) -> CheckOutcome:
-    """C3: a declared profile with a real SPDX id or UNVERIFIED; restricted flagged opt-in."""
+    """C3: a declared profile with a real SPDX id or UNVERIFIED; restricted flagged opt-in.
+
+    H-B1 turns C3 into the real enforcement point the audit wanted: beyond "a profile is
+    declared" and the UNVERIFIED invariant, C3 FAILs a provider that claims
+    ``license_verified=True`` **without a complete evidence trail** (source + ISO date +
+    code SPDX, plus a weights SPDX when ``model_id`` is set), or whose
+    ``license``/``license_code``/``license_weights`` are mutually **inconsistent**. The
+    :class:`ProviderProfile` validator makes such a profile un-constructable, but C3
+    re-asserts the same rule at the provider level (defense-in-depth) so the gate *bites*
+    on a fake profile-holder that bypasses the model validator (a bare object carrying the
+    raw fields) — the evidence-bearing verification is enforced across every provider, not
+    merely relied on to have been enforced at construction.
+    """
     if profile is None:
         return CheckOutcome(
             check="C3_license",
@@ -159,6 +173,16 @@ def _check_c3_license(profile: ProviderProfile | None) -> CheckOutcome:
             status=CheckStatus.FAIL,
             detail="UNVERIFIED license marked verified (forbidden)",
         )
+    # H-B1: a verified claim must carry its evidence + be internally consistent, else FAIL —
+    # the theater ("license_verified=True" with nothing checked) is caught here too.
+    if profile.license_verified:
+        evidence_gap = _verified_evidence_gap(profile)
+        if evidence_gap is not None:
+            return CheckOutcome(
+                check="C3_license",
+                status=CheckStatus.FAIL,
+                detail=f"verified without complete evidence: {evidence_gap}",
+            )
     if profile.license == UNVERIFIED_LICENSE:
         # An honest gap — recorded, not a fail (the directive: flag, never fabricate).
         return CheckOutcome(
@@ -185,6 +209,41 @@ def _check_c3_license(profile: ProviderProfile | None) -> CheckOutcome:
         status=CheckStatus.FAIL,
         detail=f"restricted license {profile.license} not verified (must be opt-in-flagged)",
     )
+
+
+def _verified_evidence_gap(profile: object) -> str | None:
+    """Return the first missing/inconsistent evidence element for a verified claim, else ``None``.
+
+    Mirrors the :meth:`ProviderProfile._verified_requires_evidence` validator so C3 bites on a
+    provider that claims verified without its proof — including a fake profile-holder that
+    bypassed the model validator (a bare object carrying the raw fields). Reads the evidence
+    fields defensively (a stub may omit them), so a holder that carries only ``license`` +
+    ``license_verified`` (the exact audit-flagged shape) is caught as a missing evidence trail.
+    """
+    source = getattr(profile, "license_source", None)
+    verified_on = getattr(profile, "license_verified_on", None)
+    code = getattr(profile, "license_code", None)
+    weights = getattr(profile, "license_weights", None)
+    model_id = getattr(profile, "model_id", None)
+    headline = getattr(profile, "license", None)
+
+    if not (source or "").strip():
+        return "missing license_source (a citation for where the license was checked)"
+    if not (verified_on or "").strip():
+        return "missing license_verified_on (ISO date of the check)"
+    if not code or code == UNVERIFIED_LICENSE:
+        return "missing/UNVERIFIED license_code (the code/library SPDX)"
+    if model_id is not None:
+        if not weights or weights == UNVERIFIED_LICENSE:
+            return "model-bearing provider missing license_weights (ADR-0012: recorded separately)"
+        if headline != weights:
+            return f"headline license {headline!r} disagrees with license_weights {weights!r}"
+    else:
+        if weights is not None:
+            return f"pure-code provider must not declare license_weights (got {weights!r})"
+        if headline != code:
+            return f"headline license {headline!r} disagrees with license_code {code!r}"
+    return None
 
 
 def _check_c5_device(

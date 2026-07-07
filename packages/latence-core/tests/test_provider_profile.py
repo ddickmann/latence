@@ -25,6 +25,10 @@ def _valid(**overrides: object) -> ProviderProfile:
         "model_id": None,
         "license": "Apache-2.0",
         "license_verified": True,
+        "license_code": "Apache-2.0",
+        "license_weights": None,
+        "license_source": "LICENSE",
+        "license_verified_on": "2026-07-06",
         "deterministic": True,
         "batch": False,
         "cost_per_1k": None,
@@ -72,7 +76,13 @@ def test_negative_cost_rejected() -> None:
 
 
 def test_endpoint_cost_allowed() -> None:
-    p = _valid(compute="either", cost_per_1k=0.5, model_id="vendor/model")
+    p = _valid(
+        compute="either",
+        cost_per_1k=0.5,
+        model_id="vendor/model",
+        license_weights="Apache-2.0",
+        license_source="https://vendor/model-card",
+    )
     assert p.cost_per_1k == 0.5
 
 
@@ -87,6 +97,114 @@ def test_unverified_with_false_is_allowed() -> None:
     p = _valid(license=UNVERIFIED_LICENSE, license_verified=False, model_id="x/y", deterministic=False)
     assert p.license == UNVERIFIED_LICENSE
     assert p.license_verified is False
+
+
+# -- H-B1: evidence-bearing verification (the theater is now impossible) -------
+
+
+def test_verified_pure_code_carries_evidence() -> None:
+    # The reconciled happy path: a pure-code provider's verified claim names code SPDX, a
+    # citation, and a date; weights is None (ships no model).
+    p = _valid()
+    assert p.license_verified is True
+    assert p.license_code == "Apache-2.0"
+    assert p.license_weights is None
+    assert p.license_source == "LICENSE"
+    assert p.license_verified_on == "2026-07-06"
+
+
+def test_verified_without_source_raises() -> None:
+    # The exact audit finding: license="Apache-2.0", license_verified=True with NO evidence.
+    with pytest.raises(ValidationError, match="license_source"):
+        _valid(license_source=None)
+
+
+def test_verified_with_whitespace_only_source_raises() -> None:
+    # A blank/whitespace citation must not satisfy the letter of the evidence requirement
+    # while carrying no actual proof — the citation has to be substantive.
+    with pytest.raises(ValidationError, match="license_source"):
+        _valid(license_source="   ")
+
+
+def test_verified_without_date_raises() -> None:
+    with pytest.raises(ValidationError, match="license_verified_on"):
+        _valid(license_verified_on=None)
+
+
+def test_verified_with_whitespace_only_date_raises() -> None:
+    with pytest.raises(ValidationError, match="license_verified_on"):
+        _valid(license_verified_on="  ")
+
+
+def test_verified_without_code_spdx_raises() -> None:
+    with pytest.raises(ValidationError, match="license_code"):
+        _valid(license_code=UNVERIFIED_LICENSE)
+
+
+def test_model_bearing_verified_requires_weights_spdx() -> None:
+    # ADR-0012: weights recorded SEPARATELY. A model-bearing verified claim without a weights
+    # SPDX is un-constructable.
+    with pytest.raises(ValidationError, match="license_weights"):
+        _valid(
+            model_id="urchade/gliner_multi-v2.1",
+            license_source="https://huggingface.co/urchade/gliner_multi-v2.1",
+            deterministic=False,
+        )
+
+
+def test_model_bearing_headline_must_equal_weights() -> None:
+    # license / license_code / license_weights cannot silently disagree.
+    with pytest.raises(ValidationError, match="disagree|must equal"):
+        _valid(
+            model_id="x/y",
+            license="MIT",
+            license_weights="Apache-2.0",
+            license_source="https://hf.co/x/y",
+            deterministic=False,
+        )
+
+
+def test_pure_code_headline_must_equal_code() -> None:
+    with pytest.raises(ValidationError, match="disagree|must equal"):
+        _valid(license="MIT", license_code="Apache-2.0")
+
+
+def test_pure_code_must_not_declare_weights() -> None:
+    # A code-only provider (model_id None) declaring a weights SPDX is inconsistent.
+    with pytest.raises(ValidationError, match="license_weights"):
+        _valid(license_weights="Apache-2.0")
+
+
+def test_malformed_verified_on_date_raises() -> None:
+    # A non-ISO date is rejected even structurally — a real YYYY-MM-DD, not a free-form note.
+    with pytest.raises(ValidationError, match="ISO date"):
+        _valid(license_verified_on="July 6 2026")
+
+
+def test_model_bearing_verified_happy_path() -> None:
+    p = _valid(
+        model_id="urchade/gliner_multi-v2.1",
+        license="Apache-2.0",
+        license_weights="Apache-2.0",
+        license_source="https://huggingface.co/urchade/gliner_multi-v2.1",
+        deterministic=False,
+    )
+    assert p.license_weights == "Apache-2.0"
+    assert p.license == p.license_weights
+
+
+def test_unverified_needs_no_evidence() -> None:
+    # An honest gap: UNVERIFIED + not verified needs no source/date (nothing was checked).
+    p = _valid(
+        license=UNVERIFIED_LICENSE,
+        license_verified=False,
+        license_source=None,
+        license_verified_on=None,
+        model_id="x/y",
+        deterministic=False,
+    )
+    assert p.license_verified is False
+    assert p.license_source is None
 
 
 def test_empty_license_rejected() -> None:
@@ -109,7 +227,14 @@ class _ClassmethodProvider:
 
 
 class _ClassVarProvider:
-    PROFILE = _valid(memory_mb=48, compute="gpu", model_id="m", license="MIT")
+    PROFILE = _valid(
+        memory_mb=48,
+        compute="gpu",
+        model_id="m",
+        license="MIT",
+        license_weights="MIT",
+        license_source="https://hf.co/m",
+    )
 
 
 class _NoProfileProvider:

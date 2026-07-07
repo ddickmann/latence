@@ -92,7 +92,7 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 
 | Model | Capability | License | Note |
 |---|---|---|---|
-| google/embeddinggemma-300m | Embedding | Gemma | **Not a default.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). Available only as an explicitly opt-in Provider that surfaces the license at install time. Default Embedder is multilingual-e5-small (MIT). |
+| google/embeddinggemma-300m | Embedding | Gemma | **Not a default; no Gemma-backed Provider ships in this repo.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). POLICY: the Gemma family is non-default and, were a Gemma Provider offered, it would be an explicitly opt-in Provider carrying the license and its flow-down obligations. Default Embedder is multilingual-e5-small (MIT). |
 
 Per the project's research-diligence directive, a GLiNER/HF checkpoint's license
 is per-weight and cannot be inferred from the library. Any model whose license

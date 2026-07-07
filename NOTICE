@@ -35,8 +35,9 @@ OPT-IN, NON-DEFAULT model with license flow-down obligations:
     permits commercial use but carries Google's Prohibited Use Policy and a
     flow-down obligation (every downstream recipient must be bound to the Gemma
     use restrictions, with a Notice). The default Embedder is multilingual-e5-small
-    (MIT); EmbeddingGemma is available only as an explicitly opt-in Provider that
-    surfaces its license and flow-down obligations at install time.
+    (MIT). POLICY: the Gemma family is non-default and no Gemma-backed Provider ships
+    in this repo; were one offered, it would be an explicitly opt-in Provider carrying
+    the Gemma license and its flow-down obligations (not a default, not auto-installed).
 
 Standing rule: a GLiNER/HF checkpoint's license is per-weight and cannot be
 inferred from the library. Every new default Provider requires per-model

@@ -46,11 +46,18 @@ def _profile(**overrides: object) -> ProviderProfile:
         "model_id": None,
         "license": "Apache-2.0",
         "license_verified": True,
+        "license_code": "Apache-2.0",
+        "license_source": "LICENSE",
+        "license_verified_on": "2026-07-06",
         "deterministic": True,
         "batch": False,
         "cost_per_1k": None,
     }
     base.update(overrides)
+    # H-B1: a model-bearing profile records the weights SPDX separately + cites a model card.
+    if base.get("model_id") is not None and "license_weights" not in overrides:
+        base["license_weights"] = "Apache-2.0"
+        base["license_source"] = "https://huggingface.co/" + str(base["model_id"])
     return ProviderProfile(**base)  # type: ignore[arg-type]
 
 

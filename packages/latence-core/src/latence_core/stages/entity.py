@@ -48,7 +48,7 @@ from latence_core.contracts import EntityMention
 from latence_core.errors import ConfigError
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
-from latence_core.providers.profile import ProviderProfile
+from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -427,6 +427,9 @@ class GazetteerEntityExtractor:
             model_id=None,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-06",
             deterministic=True,
             batch=False,
             cost_per_1k=None,

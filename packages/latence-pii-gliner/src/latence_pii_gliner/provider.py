@@ -103,6 +103,14 @@ class GlinerPIIRedactor:
             model_id=_DEFAULT_MODEL,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_weights="Apache-2.0",
+            license_source=(
+                "https://huggingface.co/urchade/gliner_multi_pii-v1 (weights, Apache-2.0; "
+                "base urchade/gliner_multi-v2.1 also Apache-2.0); "
+                "https://github.com/urchade/GLiNER/blob/main/LICENSE (library, Apache-2.0)"
+            ),
+            license_verified_on="2026-07-06",
             deterministic=False,
             batch=True,
             cost_per_1k=None,

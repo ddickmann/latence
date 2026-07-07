@@ -22,9 +22,14 @@ can compute it from config) OR a ``PROFILE`` ClassVar; :class:`HasProfile` is th
 
 from __future__ import annotations
 
+import re
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# An ISO calendar date, ``YYYY-MM-DD`` — the only accepted shape for ``license_verified_on``
+# so a verification date is a real, comparable date, not a free-form note.
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # The sentinel a provider uses when its license could not be verified in-slice
 # (weights AND code, per ADR-0012 / the research-diligence directive). It is NEVER
@@ -32,6 +37,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # ``license_verified=False``, so an enterprise adopter reads an honest gap rather
 # than a fabricated permissive claim.
 UNVERIFIED_LICENSE = "UNVERIFIED"
+
+# The repo's own LICENSE path — the citation a pure-code (framework-code) Provider names
+# as its ``license_source``: its code license IS this repo's Apache-2.0, checked in the
+# tree. A model-bearing Provider instead cites the upstream model-card / LICENSE URL where
+# the weights license was actually read (H-B1: evidence must name *where* a human checked).
+REPO_LICENSE_SOURCE = "LICENSE"
 
 # The compute a provider requires: it runs on CPU only, needs a GPU, or runs on
 # either (following the requested device / availability). Drives device routing and
@@ -54,10 +65,22 @@ class ProviderProfile(BaseModel):
       provider (not measured here). ``>= 0``.
     * ``model_id`` — the HF/model identifier, or ``None`` for a pure-code provider
       (gazetteer, pattern) that ships no weights.
-    * ``license`` — an SPDX identifier (e.g. ``"Apache-2.0"``, ``"MIT"``) or the
-      sentinel :data:`UNVERIFIED_LICENSE` when it could not be verified in-slice.
+    * ``license`` — the headline/effective SPDX identifier (e.g. ``"Apache-2.0"``,
+      ``"MIT"``) or the sentinel :data:`UNVERIFIED_LICENSE` when it could not be
+      verified in-slice. Must be consistent with ``license_code`` / ``license_weights``.
     * ``license_verified`` — ``True`` only when BOTH weights and code were checked per
-      ADR-0012. The :data:`UNVERIFIED_LICENSE` invariant forbids a verified unknown.
+      ADR-0012, **and** the verification evidence is present (H-B1: a bare ``True`` with
+      no evidence is un-constructable). The :data:`UNVERIFIED_LICENSE` invariant forbids
+      a verified unknown.
+    * ``license_code`` — SPDX of the **code/library** (a provider's own package code is
+      the repo's ``"Apache-2.0"``). ADR-0012 records code separately from weights.
+    * ``license_weights`` — SPDX of the **weights**, or ``None`` for a pure-code provider
+      that ships no model (``model_id is None``). ADR-0012 records these **separately**.
+    * ``license_source`` — a citation for the verification: the HF model-card URL, the
+      GitHub LICENSE URL, or the repo's own LICENSE path — *where a human actually
+      checked*. Required whenever ``license_verified`` is ``True``.
+    * ``license_verified_on`` — ISO date (``YYYY-MM-DD``) the check was performed.
+      Required whenever ``license_verified`` is ``True``.
     * ``deterministic`` — whether identical input + config yields identical output
       (the Baseline/G1 determinism signal a bake-off reports).
     * ``batch`` — whether the adapter supports batched calls.
@@ -81,6 +104,23 @@ class ProviderProfile(BaseModel):
     )
     license_verified: bool = Field(
         ..., description="True only when BOTH weights and code were verified (ADR-0012)."
+    )
+    license_code: str = Field(
+        default="Apache-2.0",
+        min_length=1,
+        description="SPDX of the code/library (a provider's own code = the repo's Apache-2.0).",
+    )
+    license_weights: str | None = Field(
+        default=None,
+        description="SPDX of the weights, or None for a pure-code provider (no model).",
+    )
+    license_source: str | None = Field(
+        default=None,
+        description="Citation (HF model-card / GitHub LICENSE URL / repo LICENSE path).",
+    )
+    license_verified_on: str | None = Field(
+        default=None,
+        description="ISO date (YYYY-MM-DD) the license verification was performed.",
     )
     deterministic: bool = Field(
         ..., description="Identical input + config yields identical output."
@@ -106,6 +146,90 @@ class ProviderProfile(BaseModel):
                 "(an unverifiable license is never silently verified — ADR-0012)."
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _verified_requires_evidence(self) -> ProviderProfile:
+        """H-B1: ``license_verified=True`` is un-makeable without its verification evidence.
+
+        The audit's finding was that ``license_verified`` was a bare, self-attested ``bool`` —
+        a provider could claim ``license="Apache-2.0", license_verified=True`` on a restricted
+        checkpoint and pass every gate, because nothing recorded *what* was checked, *where*,
+        or *when*. This validator makes the claim inseparable from its proof (ADR-0012's
+        weights-and-code-separately, with a citation):
+
+        * ``license_source`` (a citation) and ``license_verified_on`` (an ISO date) MUST be
+          present and non-empty.
+        * ``license_code`` (the code SPDX) MUST be set (it always defaults, but must not be
+          the UNVERIFIED sentinel when claiming verified).
+        * For a **model-bearing** provider (``model_id is not None``) ``license_weights``
+          (the weights SPDX) MUST be set — ADR-0012 requires weights recorded separately.
+        * The headline ``license`` MUST be consistent with the components: it must equal the
+          weights SPDX for a model-bearing provider, else the code SPDX for a pure-code one —
+          so ``license``/``license_code``/``license_weights`` cannot silently disagree.
+
+        A verified date must be a real ``YYYY-MM-DD`` (checked regardless of the verified flag
+        so a malformed date never masquerades as a valid citation).
+        """
+        if self.license_verified_on is not None and not _ISO_DATE.match(self.license_verified_on):
+            msg = (
+                f"license_verified_on={self.license_verified_on!r} must be an ISO date "
+                "(YYYY-MM-DD)."
+            )
+            raise ValueError(msg)
+
+        if not self.license_verified:
+            return self
+
+        # -- verified=True: the evidence trail must be complete (honest-by-construction) --
+        # ``.strip()`` so a blank/whitespace-only citation cannot satisfy the letter of the
+        # requirement while carrying no actual evidence (the citation must be substantive).
+        if not (self.license_source or "").strip():
+            msg = (
+                "license_verified=True requires a non-empty license_source (a citation for "
+                "where the license was checked — HF model-card / GitHub LICENSE / repo LICENSE)."
+            )
+            raise ValueError(msg)
+        if not (self.license_verified_on or "").strip():
+            msg = "license_verified=True requires a license_verified_on ISO date (YYYY-MM-DD)."
+            raise ValueError(msg)
+        if not self.license_code or self.license_code == UNVERIFIED_LICENSE:
+            msg = (
+                "license_verified=True requires a concrete license_code SPDX "
+                "(the code/library license), not empty or UNVERIFIED."
+            )
+            raise ValueError(msg)
+        if self.model_id is not None:
+            # A model-bearing provider records the weights license separately (ADR-0012).
+            if not self.license_weights or self.license_weights == UNVERIFIED_LICENSE:
+                msg = (
+                    "license_verified=True on a model-bearing provider (model_id set) requires a "
+                    "concrete license_weights SPDX (ADR-0012 records weights separately from code)."
+                )
+                raise ValueError(msg)
+            if self.license != self.license_weights:
+                msg = (
+                    f"headline license={self.license!r} must equal the weights SPDX "
+                    f"{self.license_weights!r} for a model-bearing provider "
+                    "(license/license_code/license_weights must not silently disagree)."
+                )
+                raise ValueError(msg)
+        else:
+            # A pure-code provider ships no weights: the headline license IS the code license.
+            if self.license_weights is not None:
+                msg = (
+                    "pure-code provider (model_id is None) must not declare license_weights "
+                    f"(got {self.license_weights!r}); weights license is None for a code-only "
+                    "provider."
+                )
+                raise ValueError(msg)
+            if self.license != self.license_code:
+                msg = (
+                    f"headline license={self.license!r} must equal license_code "
+                    f"{self.license_code!r} for a pure-code provider "
+                    "(license/license_code must not silently disagree)."
+                )
+                raise ValueError(msg)
         return self
 
 

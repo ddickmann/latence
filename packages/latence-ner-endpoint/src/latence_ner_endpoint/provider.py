@@ -41,7 +41,7 @@ from latence_core.contracts import EntityMention
 from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
-from latence_core.providers.profile import ProviderProfile
+from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -99,6 +99,9 @@ class EndpointEntityExtractor:
             model_id=None,
             license="Apache-2.0",
             license_verified=True,
+            license_code="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-06",
             deterministic=False,
             batch=True,
             cost_per_1k=None,

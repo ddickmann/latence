@@ -16,13 +16,18 @@ from latence_core.providers.profile import ProviderProfile
 
 
 def _profile(compute: str) -> ProviderProfile:
+    is_pure_code = compute == "cpu"
     return ProviderProfile(
         compute=compute,  # type: ignore[arg-type]
         memory_mb=64,
-        model_id=None if compute == "cpu" else "m",
+        model_id=None if is_pure_code else "m",
         license="Apache-2.0",
         license_verified=True,
-        deterministic=compute == "cpu",
+        license_code="Apache-2.0",
+        license_weights=None if is_pure_code else "Apache-2.0",
+        license_source="LICENSE" if is_pure_code else "https://huggingface.co/m",
+        license_verified_on="2026-07-06",
+        deterministic=is_pure_code,
         batch=False,
         cost_per_1k=None,
     )

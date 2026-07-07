@@ -38,6 +38,56 @@ from latence_core.conformance.harness import (
 from latence_core.conformance.report import CheckStatus
 from latence_core.providers.profile import ProviderProfile
 
+# Evidence-bearing verified profiles (H-B1) built in-test. A pure-code profile cites the repo
+# LICENSE (weights None); a model-bearing profile records the weights SPDX + a model-card
+# citation (headline license == weights). Typed builders (not ``**dict`` spreads) so mypy
+# --strict can check every keyword against ProviderProfile's typed constructor.
+
+
+def _purecode_profile(
+    *, compute: str = "cpu", memory_mb: int = 1, deterministic: bool = True, batch: bool = False
+) -> ProviderProfile:
+    """A pure-code (model_id=None) evidence-bearing verified profile."""
+    return ProviderProfile(
+        compute=compute,  # type: ignore[arg-type]
+        memory_mb=memory_mb,
+        model_id=None,
+        license="Apache-2.0",
+        license_verified=True,
+        license_code="Apache-2.0",
+        license_weights=None,
+        license_source="LICENSE",
+        license_verified_on="2026-07-06",
+        deterministic=deterministic,
+        batch=batch,
+    )
+
+
+def _model_profile(
+    *,
+    model_id: str,
+    spdx: str,
+    source: str,
+    compute: str = "either",
+    memory_mb: int = 1,
+    deterministic: bool = False,
+    batch: bool = True,
+) -> ProviderProfile:
+    """A model-bearing evidence-bearing verified profile (weights SPDX + citation, headline==weights)."""
+    return ProviderProfile(
+        compute=compute,  # type: ignore[arg-type]
+        memory_mb=memory_mb,
+        model_id=model_id,
+        license=spdx,
+        license_verified=True,
+        license_code="Apache-2.0",
+        license_weights=spdx,
+        license_source=source,
+        license_verified_on="2026-07-06",
+        deterministic=deterministic,
+        batch=batch,
+    )
+
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
 # 29 Providers across 14 Capabilities (P3 landscape). If a Provider is added/removed, this list
 # is updated deliberately, so the count check catches an accidental un-covered Provider.
@@ -186,6 +236,72 @@ def test_c3_missing_profile_fails() -> None:
     assert outcome.status is CheckStatus.FAIL
 
 
+def test_c3_bites_verified_without_evidence() -> None:
+    """H-B1 bite-proof: a provider claiming license_verified=True with NO evidence FAILs C3.
+
+    The exact audit finding — ``license="Apache-2.0", license_verified=True`` with nothing
+    checked (no source, no date, no code SPDX). The ProviderProfile validator makes this
+    un-constructable, so the theater is reproduced via a fake profile-holder that bypasses it
+    (a bare object carrying just the two self-attested fields). C3 must FAIL it, not pass —
+    the evidence-bearing rule is the real enforcement point, not merely a construction-time hope.
+    """
+
+    class _SelfAttestedHolder:
+        license = "Apache-2.0"
+        license_verified = True
+        # No license_source / license_verified_on / license_code / license_weights / model_id.
+
+    outcome = _check_c3_license(_SelfAttestedHolder())  # type: ignore[arg-type]
+    assert outcome.status is CheckStatus.FAIL
+    assert "evidence" in outcome.detail
+
+
+def test_c3_bites_model_verified_without_weights_spdx() -> None:
+    """C3 FAILs a model-bearing provider that claims verified with a source/date but NO weights SPDX."""
+
+    class _NoWeightsHolder:
+        license = "Apache-2.0"
+        license_verified = True
+        license_code = "Apache-2.0"
+        license_weights = None  # missing — ADR-0012 requires it for a model-bearing provider
+        license_source = "https://huggingface.co/x/y"
+        license_verified_on = "2026-07-06"
+        model_id = "x/y"
+
+    outcome = _check_c3_license(_NoWeightsHolder())  # type: ignore[arg-type]
+    assert outcome.status is CheckStatus.FAIL
+    assert "weights" in outcome.detail
+
+
+def test_c3_bites_inconsistent_license_fields() -> None:
+    """C3 FAILs a provider whose headline license disagrees with its weights SPDX."""
+
+    class _InconsistentHolder:
+        license = "MIT"  # headline disagrees with the weights SPDX below
+        license_verified = True
+        license_code = "Apache-2.0"
+        license_weights = "Apache-2.0"
+        license_source = "https://huggingface.co/x/y"
+        license_verified_on = "2026-07-06"
+        model_id = "x/y"
+
+    outcome = _check_c3_license(_InconsistentHolder())  # type: ignore[arg-type]
+    assert outcome.status is CheckStatus.FAIL
+    assert "disagree" in outcome.detail
+
+
+def test_c3_passes_evidence_bearing_verified_provider() -> None:
+    """C3 PASSes a real evidence-bearing verified profile (the reconciled entity.gliner shape)."""
+    p = _model_profile(
+        model_id="urchade/gliner_multi-v2.1",
+        spdx="Apache-2.0",
+        source="https://huggingface.co/urchade/gliner_multi-v2.1",
+        memory_mb=2048,
+    )
+    outcome = _check_c3_license(p)
+    assert outcome.status is CheckStatus.PASS
+
+
 def test_c3_restricted_unverified_license_fails() -> None:
     """A restricted (non-permissive) license that is not verified fails C3 (must be opt-in)."""
     restricted = ProviderProfile(
@@ -203,14 +319,11 @@ def test_c3_restricted_unverified_license_fails() -> None:
 
 def test_c3_restricted_verified_license_is_opt_in_pass() -> None:
     """A restricted license that IS verified passes C3 as a flagged opt-in (ADR-0012)."""
-    opt_in = ProviderProfile(
-        compute="gpu",
-        memory_mb=1,
+    opt_in = _model_profile(
         model_id="google/embeddinggemma-300m",
-        license="LicenseRef-Gemma",
-        license_verified=True,
-        deterministic=False,
-        batch=True,
+        spdx="LicenseRef-Gemma",
+        source="https://huggingface.co/google/embeddinggemma-300m",
+        compute="gpu",
     )
     outcome = _check_c3_license(opt_in)
     assert outcome.status is CheckStatus.PASS
@@ -224,14 +337,12 @@ def test_c3_restricted_verified_license_is_opt_in_pass() -> None:
 
 def test_c5_gpu_provider_is_skipped_with_flag_on_cpu_host() -> None:
     """A compute="gpu" Provider on a CPU-only host is skipped-with-flag (never run, never faked)."""
-    gpu_profile = ProviderProfile(
+    gpu_profile = _model_profile(
+        model_id="some/gpu-only-model",
+        spdx="Apache-2.0",
+        source="https://huggingface.co/some/gpu-only-model",
         compute="gpu",
         memory_mb=4096,
-        model_id="some/gpu-only-model",
-        license="Apache-2.0",
-        license_verified=True,
-        deterministic=False,
-        batch=True,
     )
     outcome, skipped, reason = _check_c5_device(gpu_profile)
     assert skipped is True
@@ -245,14 +356,12 @@ def test_c5_gpu_provider_end_to_end_skip_records_but_does_not_run() -> None:
     class _GpuOnlyChunker:
         @classmethod
         def profile(cls) -> ProviderProfile:
-            return ProviderProfile(
+            return _model_profile(
+                model_id="gpu/chunker",
+                spdx="Apache-2.0",
+                source="https://huggingface.co/gpu/chunker",
                 compute="gpu",
                 memory_mb=4096,
-                model_id="gpu/chunker",
-                license="Apache-2.0",
-                license_verified=True,
-                deterministic=False,
-                batch=True,
             )
 
         def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -290,15 +399,8 @@ class _BrokenChunker:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        return ProviderProfile(
-            compute="cpu",
-            memory_mb=1,
-            model_id=None,
-            license="Apache-2.0",
-            license_verified=True,
-            deterministic=True,  # a LIE — C4 must catch it
-            batch=False,
-        )
+        # deterministic=True is a LIE (default) — C4 must catch it via the differing output.
+        return _purecode_profile()
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}
@@ -355,15 +457,7 @@ class _PIILeakingScreener:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        return ProviderProfile(
-            compute="cpu",
-            memory_mb=1,
-            model_id=None,
-            license="Apache-2.0",
-            license_verified=True,
-            deterministic=True,
-            batch=False,
-        )
+        return _purecode_profile()
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}
@@ -423,15 +517,8 @@ class _NonDeterministicEmbedder:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        return ProviderProfile(
-            compute="cpu",
-            memory_mb=1,
-            model_id=None,
-            license="Apache-2.0",
-            license_verified=True,
-            deterministic=True,  # a LIE — C4 must catch it via the returned vectors
-            batch=False,
-        )
+        # deterministic=True is a LIE (default) — C4 must catch it via the returned vectors.
+        return _purecode_profile()
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}
