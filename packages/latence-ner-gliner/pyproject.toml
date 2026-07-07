@@ -10,6 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "ner", "entity-extraction", "gliner", "zero-shot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 # Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER model stack
 # (gliner -> torch/transformers) ships with THIS Provider package, not the thin
 # core. Both the gliner library and the default urchade/gliner_multi-v2.1
@@ -23,6 +37,11 @@ dependencies = [
 # Registers this Provider under the framework's discovery group. Installing this
 # package makes 'entity.gliner' available to any Pipeline with no core change
 # (ADR-0004), alongside the in-core deterministic 'entity.gazetteer'.
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
 [project.entry-points."latence.providers"]
 "entity.gliner" = "latence_ner_gliner.provider:GlinerEntityExtractor"
 

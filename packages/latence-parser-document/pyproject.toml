@@ -10,6 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "pdf", "ocr", "document"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 # Heavy/optional deps stay OUT of latence-core (ADR-0016): the PDF reader ships
 # with this Provider package, not the thin core. pypdf is pure-Python, CPU-only,
 # and BSD-3-Clause (permissive per ADR-0012, weights/code verified 2026-07-06).
@@ -21,6 +35,11 @@ dependencies = [
 # Registers this Provider under the framework's discovery group. Installing this
 # package makes 'parser.document' available to any Pipeline with no core change
 # (ADR-0004), alongside the S1 'parser.plaintext'.
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
 [project.entry-points."latence.providers"]
 "parser.document" = "latence_parser_document.provider:DocumentParser"
 

@@ -4,7 +4,17 @@ A model-agnostic, cloud-agnostic framework for turning messy, siloed enterprise 
 
 The framework defines the **stack and the orchestration contracts**. It does **not** dictate which OCR parser, NER model, embedding model, or PII cleaner you use, or which cloud you run on. Those are plugins and configuration.
 
-> Status: **design phase.** This repository currently holds the grilled architecture — [`CONTEXT.md`](./CONTEXT.md) (the glossary) and [`docs/adr/`](./docs/adr/) (17 architecture decisions) — plus the [`docs/PORTING-MAP.md`](./docs/PORTING-MAP.md) that mines four private production repos into this design. Code follows.
+> Status: **built — Phase-1 complete and G1-passed.** The full 13-stage spine
+> (Source → … → Export) runs end-to-end through the local Runner on CPU, and the
+> G1 profound-testing gate is signed off — E2E on multiple messy corpora,
+> security review, reliability/chaos (crash-resume, Delta idempotency), a
+> performance baseline, and determinism ([`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md)).
+> The grilled architecture lives in [`CONTEXT.md`](./CONTEXT.md) (the glossary)
+> and [`docs/adr/`](./docs/adr/) (32 architecture decisions), with
+> [`docs/PORTING-MAP.md`](./docs/PORTING-MAP.md) recording what was mined from four
+> private production repos. **Not yet 1.0:** performance-at-scale and deeper
+> structural file validation are flagged as Phase-2 hardening; see the honest
+> residuals in the G1 results.
 
 ## The idea in one screen
 
@@ -28,14 +38,14 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 8. Python core and Providers; Rust only for proven text hot paths, behind a Python fallback (ADR-0015).
 9. Thin core plus per-Provider packages, so you install only what you use (ADR-0016).
 
-## Repository layout (target)
+## Repository layout
 
 ```
 latence-framework/
 ├── CONTEXT.md                 # glossary — the canonical language
 ├── docs/
-│   ├── adr/                   # architecture decisions (0001–0017)
-│   └── PORTING-MAP.md         # what to mine from the private repos
+│   ├── adr/                   # architecture decisions (0001–0033)
+│   └── PORTING-MAP.md         # what was mined from the private repos
 ├── packages/
 │   ├── latence-core/          # contracts, Capabilities, Runner, Storage (pure-Python)
 │   ├── latence-parser-*/      # Parser Providers
@@ -83,3 +93,52 @@ no extra packages.
 
 `diff examples/demo-pipeline.yaml examples/demo-pipeline.swap.yaml` shows the single-Provider
 change. See [`packages/latence-demo/README.md`](./packages/latence-demo/README.md) for details.
+
+## Install
+
+The framework is a thin core plus one installable package per Provider family
+(ADR-0016) — you install only what you use, so the CPU-first "runs on a laptop"
+promise holds (no torch/cloud client unless you ask for it).
+
+```bash
+pip install latence-core            # contracts, Capabilities, local Runner, Storage
+pip install latence-demo            # + the CPU demo set (real-PDF parser), one-command onboarding
+pip install latence-ner-gliner      # opt-in: a learned NER Provider (pulls torch/transformers)
+pip install latence-relation-llm    # opt-in: LLM relation extraction over any OpenAI-compatible endpoint
+```
+
+The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
+`latence-demo`); the heavy/endpoint Providers stay isolated. Python ≥ 3.11.
+
+## Package map
+
+| Package | What it is |
+|---|---|
+| `latence-core` | Contracts, Capability protocols, Pipeline, local Runner, Storage seam + all pure-Python in-core reference Providers. Near-zero deps. |
+| `latence-parser-plaintext` | Passthrough text/markdown Parser. |
+| `latence-parser-document` | CPU PDF+text → markdown + page map Parser (`pypdf`). |
+| `latence-parser-endpoint` | Parse performance path (any OpenAI-compatible vision endpoint). |
+| `latence-ner-gliner` | Learned zero-shot NER Provider (GLiNER). |
+| `latence-ner-endpoint` | NER performance path (endpoint-backed). |
+| `latence-relation-gliner` | Fused Entity+Relation Provider (gliner-relex). |
+| `latence-relation-llm` | LLM relation extraction (OpenAI-compatible / Ollama). |
+| `latence-pii-gliner` | Learned zero-shot PII Redaction Provider. |
+| `latence-embedder-endpoint` | Embedder performance path (endpoint-backed). |
+| `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
+| `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |
+
+## Documentation & governance
+
+- [`CONTEXT.md`](./CONTEXT.md) — the glossary; the canonical language of the project.
+- [`docs/adr/`](./docs/adr/) — the 32 architecture decisions.
+- [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.
+- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
+- [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
+- [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
+Copyright 2026 Dennis Dickmann (latence.ai). Open-source and personally owned
+(ADR-0001).

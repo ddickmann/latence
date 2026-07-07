@@ -10,6 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "ner", "entity-extraction", "endpoint"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 # The endpoint client is optional/heavy relative to the thin core (ADR-0016): it ships with THIS
 # Provider, not latence-core. The 'openai' client is Apache-2.0 (code); this Provider bundles NO
 # weights — it calls a user-supplied OpenAI-compatible / vLLM / Triton endpoint (ADR-0007: the
@@ -22,6 +36,11 @@ dependencies = [
 # Registers the NER performance Provider under the discovery group. Installing this package makes
 # 'entity.endpoint' available to any Pipeline with no core change (ADR-0004), swappable with the
 # in-core 'entity.gazetteer' / in-process 'entity.gliner' by one config line (ADR-0007).
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
 [project.entry-points."latence.providers"]
 "entity.endpoint" = "latence_ner_endpoint.provider:EndpointEntityExtractor"
 

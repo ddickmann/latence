@@ -10,6 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "airflow", "runner", "orchestration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 # apache-airflow is a heavy optional dependency isolated in THIS adapter (ADR-0016): it ships as an
 # EXTRA, not a hard dep, so the in-process second-Runner proof (and its tests) run offline with no
 # Airflow install. Apache Airflow is Apache-2.0. Only an adopter deploying a real Airflow DAG needs
@@ -17,6 +31,11 @@ authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 dependencies = [
     "latence-core",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
 
 [project.optional-dependencies]
 airflow = ["apache-airflow>=2.7"]

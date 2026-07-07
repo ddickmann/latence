@@ -10,6 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "relation-extraction", "gliner", "fused", "zero-shot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 # Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER model stack
 # (gliner -> torch/transformers) ships with THIS Provider package, not the thin
 # core. Both the gliner library and the default knowledgator/gliner-relex-multi-v1.0
@@ -23,6 +37,11 @@ dependencies = [
 # Registers the FUSED Provider under the discovery group. Installing this package
 # makes 'relation.gliner_relex' available to any Pipeline with no core change
 # (ADR-0004). It fulfils Entity+Relation Extraction in one pass (ADR-0013).
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
 [project.entry-points."latence.providers"]
 "relation.gliner_relex" = "latence_relation_gliner.provider:GlinerRelexExtractor"
 

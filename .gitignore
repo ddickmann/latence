@@ -10,3 +10,16 @@ build/
 .DS_Store
 demo/data/
 demo/out/
+
+# Secrets / credentials — never commit (see SECURITY.md)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.pypirc
+credentials
+credentials.*
+*.credentials
+secrets.*

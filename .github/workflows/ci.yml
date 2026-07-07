@@ -14,6 +14,37 @@ env:
   PYTHONHASHSEED: "0"
 
 jobs:
+  secret-scan:
+    name: secret scan (detect-secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # Fail CI if any NEW potential secret appears that is not accounted for in the
+      # audited .secrets.baseline (every baseline entry is audited is_secret=false:
+      # test fixtures, CI minio creds, doc placeholders). A real secret would not be
+      # in the baseline, so the gate surfaces it and this step exits non-zero.
+      #
+      # The gate is scripts/secret_scan_gate.py, NOT `detect-secrets scan --baseline`
+      # + `git diff --exit-code`. That form rewrites volatile fields (the generated_at
+      # timestamp and every finding's line_number) into the baseline on every run, so a
+      # raw diff is guaranteed non-zero on a pristine tree with no new secret — CI-red
+      # on merge, and it drowns a real new secret in constant noise. (`detect-secrets-hook
+      # --baseline` has the same failure mode: it too rewrites drifted line numbers.)
+      # The script instead runs a fresh scan and compares the SET of
+      # (filename, hashed_secret) pairs against the audited baseline, ignoring line
+      # numbers and the timestamp entirely — pristine tree is always green; only a
+      # genuinely new or newly-un-audited secret turns it red. It never mutates the
+      # baseline. `uv run --with detect-secrets --no-project` puts the `detect-secrets`
+      # CLI (which the script shells out to) on PATH without syncing the workspace.
+      - name: detect-secrets (audited baseline gate)
+        run: uv run --with detect-secrets --no-project python scripts/secret_scan_gate.py
+
   quality:
     name: lint · type · test · build (py${{ matrix.python-version }})
     runs-on: ubuntu-latest

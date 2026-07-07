@@ -1,0 +1,55 @@
+Latence Framework
+Copyright 2026 Dennis Dickmann (latence.ai)
+
+This product includes software developed by Dennis Dickmann (latence.ai).
+Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+================================================================================
+Third-party model weights offered as DEFAULT reference Providers
+================================================================================
+
+The framework never bundles model weights. It names Capabilities and lets
+Providers fulfil them; a Provider downloads its checkpoint only when a Pipeline
+configures it. The models below are the permissively-licensed DEFAULTS the
+reference Providers point at. Weights AND code licenses were verified separately
+on 2026-07-06 (see docs/adr/0012-permissive-only-reference-providers-gemma-opt-in.md).
+All are Apache-2.0 or MIT:
+
+  - PaddleOCR-VL-1.5 (Parse)                     — Apache-2.0
+  - LightOnOCR-2-1B (Parse)                      — Apache-2.0
+  - knowledgator/gliner-linker-large (Disambig)  — Apache-2.0
+  - knowledgator/gliner-relex-multi-v1.0 (Rel)   — Apache-2.0
+  - urchade/gliner_multi-v2.1 (Entity)           — Apache-2.0
+  - urchade/gliner_multi_pii-v1 (Redaction)      — Apache-2.0
+  - intfloat/multilingual-e5-small (Embed)       — MIT
+  - sentence-transformers/all-MiniLM-L6-v2       — Apache-2.0
+  - microsoft/llmlingua-2                        — MIT
+  - answerdotai/ModernBERT                       — Apache-2.0
+  - google/mt5                                   — Apache-2.0
+  - Qwen/Qwen3-* (dense + MoE, all sizes)        — Apache-2.0
+
+OPT-IN, NON-DEFAULT model with license flow-down obligations:
+
+  - google/embeddinggemma-300m (and unsloth mirror) — Gemma license.
+    This is NOT a default. The `gemma` license is not OSI open-source: it
+    permits commercial use but carries Google's Prohibited Use Policy and a
+    flow-down obligation (every downstream recipient must be bound to the Gemma
+    use restrictions, with a Notice). The default Embedder is multilingual-e5-small
+    (MIT); EmbeddingGemma is available only as an explicitly opt-in Provider that
+    surfaces its license and flow-down obligations at install time.
+
+Standing rule: a GLiNER/HF checkpoint's license is per-weight and cannot be
+inferred from the library. Every new default Provider requires per-model
+weights-and-code license verification recorded before it ships (ADR-0012).
+
+================================================================================
+Third-party Python runtime dependencies
+================================================================================
+
+The framework's own packages depend only on permissively-licensed libraries.
+Full list with verified licenses in THIRD-PARTY-LICENSES.md. Notable ones that
+distribute their own NOTICE (Apache-2.0) and whose attribution is preserved here:
+
+  - Apache Arrow / PyArrow  — Copyright The Apache Software Foundation, Apache-2.0
+  - Apache Airflow          — Copyright The Apache Software Foundation, Apache-2.0
+    (optional extra of latence-runner-airflow only)

@@ -10,6 +10,20 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "relation-extraction", "llm", "openai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 # The endpoint client is optional/heavy relative to the thin core (ADR-0016): it
 # ships with THIS Provider, not latence-core. The 'openai' client is Apache-2.0
 # (code); this Provider bundles NO weights — it calls a user-supplied endpoint
@@ -23,6 +37,11 @@ dependencies = [
 # Registers this Provider under the framework's discovery group. Installing this
 # package makes 'relation.llm' available to any Pipeline with no core change
 # (ADR-0004), alongside the in-core deterministic 'relation.pattern'.
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
 [project.entry-points."latence.providers"]
 "relation.llm" = "latence_relation_llm.provider:LLMRelationExtractor"
 
