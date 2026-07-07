@@ -45,6 +45,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import EntityMention
+from latence_core.errors import ConfigError
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 
@@ -351,18 +352,20 @@ def _has_catastrophic_backtracking(pattern: str) -> bool:
 def _guard_config_pattern(pattern: str) -> None:
     """Reject an operator config pattern that can cause catastrophic backtracking.
 
-    Raises :class:`ValueError` for an over-long pattern or a catastrophic-backtracking
-    ReDoS signature (issue #28): a nested/outer-unbounded-quantified group
-    (``(\\w+)+``, ``(a+){2,}``), an overlapping quantified alternation (``(a|a)+``), or a
-    run of adjacent unbounded quantifiers (``a*a*…b``). Only raw ``patterns`` are
-    guarded; escaped literal ``terms`` are always safe.
+    Raises :class:`~latence_core.errors.ConfigError` (a ``ValueError`` subclass, so the
+    pre-taxonomy ``except ValueError`` callers keep catching it — #73) for an over-long
+    pattern or a catastrophic-backtracking ReDoS signature (issue #28): a
+    nested/outer-unbounded-quantified group (``(\\w+)+``, ``(a+){2,}``), an overlapping
+    quantified alternation (``(a|a)+``), or a run of adjacent unbounded quantifiers
+    (``a*a*…b``). Only raw ``patterns`` are guarded; escaped literal ``terms`` are always
+    safe.
     """
     if len(pattern) > _MAX_PATTERN_LENGTH:
         msg = (
             f"Config pattern is too long ({len(pattern)} > {_MAX_PATTERN_LENGTH} chars); "
             "refuse to compile a potential ReDoS pattern."
         )
-        raise ValueError(msg)
+        raise ConfigError(msg)
     if _has_catastrophic_backtracking(pattern):
         msg = (
             f"Config pattern {pattern!r} has a catastrophic-backtracking signature "
@@ -371,7 +374,7 @@ def _guard_config_pattern(pattern: str) -> None:
             "'a*a*...b') that can cause exponential backtracking (ReDoS); rewrite it "
             "without the nesting/redundant repeats."
         )
-        raise ValueError(msg)
+        raise ConfigError(msg)
 
 
 class GazetteerEntityExtractor:

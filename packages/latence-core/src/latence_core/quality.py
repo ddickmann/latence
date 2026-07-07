@@ -56,7 +56,13 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # hit the per-document relation cap and how many relations were dropped as a result). Both default
 # to 0, so a v12 report still validates, but a v12 and a v13 report differ in the RelationQuality
 # shape, hence the bump.
-QUALITY_SCHEMA_VERSION = 13
+# v14 (#73, Hardening observability): each :class:`StageMetrics` gains ``error_count`` and
+# ``error_category`` — the per-Stage typed-error observability. A Stage that raised a
+# :class:`~latence_core.errors.LatenceError` (or any exception) records ``error_count=1`` and the
+# stable ``error_category`` tag (``"contract"``/``"config"``/``"provider"``/``"storage"``/
+# ``"screening"``/``"unknown"``); a Stage that succeeded records ``error_count=0`` and
+# ``error_category=None``. Additive with defaults, so a v13 report still validates.
+QUALITY_SCHEMA_VERSION = 14
 
 
 class StageMetrics(BaseModel):
@@ -82,6 +88,18 @@ class StageMetrics(BaseModel):
     # Provider or a first-try endpoint call). Surfaced so an operator sees a flaky endpoint in the
     # Quality Report rather than only in logs (S12 AC: failures retried/surfaced).
     endpoint_retries: int = Field(default=0)
+    # #73 (Hardening observability): the typed-error taxonomy surfaced per Stage. ``error_count``
+    # is 0 for a Stage that succeeded and 1 for the Stage that raised. On a Stage failure the Runner
+    # persists a FAIL Quality Report — the completed Stages plus the failed one (error_count=1) —
+    # and THEN re-raises, so the failed Stage's category lands in the report + logs, not only a
+    # transient span; a subsequent successful resume overwrites the report atomically (the failed
+    # Stage's checkpoint was never finalized, so no torn write). ``error_category`` is the stable
+    # :mod:`latence_core.errors` tag
+    # (``"contract"``/``"config"``/``"provider"``/``"storage"``/``"screening"``/``"unknown"``) of
+    # that failure, or ``None`` on success. Counts + a category tag only — never the record content
+    # that triggered the error (the no-PII discipline the whole report keeps).
+    error_count: int = Field(default=0)
+    error_category: str | None = Field(default=None)
 
 
 class CompletenessCheck(BaseModel):
@@ -607,10 +625,13 @@ class QualityReport(BaseModel):
         lines.append("## Stages")
         for m in self.stages:
             resumed = " (from checkpoint)" if m.from_checkpoint else ""
+            # #73: surface a Stage's typed-error category inline when one was recorded, so an
+            # operator reads the failure kind (contract/config/provider/…) at a glance.
+            errored = f" ERROR[{m.error_category}]" if m.error_count else ""
             lines.append(
                 f"- {m.name} [{m.capability}/{m.provider}]: "
                 f"{m.records_in} in -> {m.records_out} out, "
-                f"{m.duration_seconds:.3f}s{resumed}"
+                f"{m.duration_seconds:.3f}s{resumed}{errored}"
             )
         section_map = (
             ("Parse", self.parse),

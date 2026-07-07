@@ -38,6 +38,7 @@ from latence_core.contracts import (
     GraphRecord,
     Record,
 )
+from latence_core.errors import StorageError
 from latence_core.state.write_ahead_log import WriteAheadLog
 
 if TYPE_CHECKING:
@@ -58,8 +59,13 @@ _RECORD_TYPES: dict[str, type[Record]] = {
 _KIND_BY_TYPE: dict[type[Record], str] = {v: k for k, v in _RECORD_TYPES.items()}
 
 
-class CorpusStoreError(RuntimeError):
-    """Raised on an inconsistent Corpus Version operation (e.g. inspecting an uncommitted one)."""
+class CorpusStoreError(StorageError):
+    """Raised on an inconsistent Corpus Version operation (e.g. inspecting an uncommitted one).
+
+    A :class:`~latence_core.errors.StorageError` (a Corpus-Version/Storage inconsistency, #73)
+    — and, transitively, still a ``RuntimeError``, so the pre-taxonomy ``except RuntimeError`` /
+    ``except CorpusStoreError`` call sites keep catching it.
+    """
 
 
 class CorpusStore:

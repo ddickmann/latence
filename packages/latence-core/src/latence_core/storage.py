@@ -14,6 +14,8 @@ from typing import IO, TYPE_CHECKING, Any
 
 import fsspec
 
+from latence_core.errors import ConfigError
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
@@ -28,8 +30,13 @@ DEFAULT_ALLOWED_SCHEMES: frozenset[str] = frozenset(
 )
 
 
-class SchemeNotAllowedError(ValueError):
-    """Raised when a Storage is built for a URI scheme not on the allowlist."""
+class SchemeNotAllowedError(ConfigError):
+    """Raised when a Storage is built for a URI scheme not on the allowlist.
+
+    A :class:`~latence_core.errors.ConfigError` (a disallowed scheme is an operator config
+    mistake, #73) — and, transitively, still a ``ValueError``, so the pre-taxonomy
+    ``except ValueError`` / ``except SchemeNotAllowedError`` guards keep catching it.
+    """
 
 
 class Storage:

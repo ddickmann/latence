@@ -24,6 +24,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from latence_core.errors import ProviderError
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -46,16 +48,25 @@ def is_retryable_status(status: int) -> bool:
     return status >= _SERVER_ERROR_FLOOR
 
 
-class EndpointError(RuntimeError):
+class EndpointError(ProviderError):
     """An endpoint call failed. Carries the HTTP ``status`` when the failure was an HTTP error.
 
-    ``status is None`` marks a transport-level failure (connection reset, timeout) with no HTTP
-    status — treated as retryable, since a dropped connection to a heavy inference endpoint is the
-    canonical transient fault the ported retry exists for.
+    A :class:`~latence_core.errors.ProviderError` (a Provider — here a remote inference
+    endpoint — failed at runtime, #73) — and, transitively, still a ``RuntimeError``, so the
+    pre-taxonomy retry loop's ``except`` clauses keep catching it. ``status is None`` marks a
+    transport-level failure (connection reset, timeout) with no HTTP status — treated as
+    retryable, since a dropped connection to a heavy inference endpoint is the canonical
+    transient fault the ported retry exists for. ``retryable`` is computed from the HTTP
+    ``status`` here (429/5xx retryable, other 4xx terminal) rather than the base class's plain
+    flag, so it stays the single source of truth for the retry classing.
     """
 
     def __init__(self, message: str, *, status: int | None = None) -> None:
-        super().__init__(message)
+        # Seed the base ProviderError.retryable from the status classing so the taxonomy's
+        # ``retryable`` and this class's status-derived one always agree.
+        super().__init__(
+            message, retryable=(status is None or is_retryable_status(status))
+        )
         self.status = status
 
     @property

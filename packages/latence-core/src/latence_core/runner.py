@@ -57,6 +57,7 @@ from latence_core.contracts import (
     ScreeningCheckpoint,
     ScreeningFinding,
 )
+from latence_core.errors import ConfigError, ContractError, error_category
 from latence_core.goldset import (
     ConfusionCounts,
     GoldSet,
@@ -84,6 +85,7 @@ from latence_core.quality import (
     StageScore,
 )
 from latence_core.storage import Storage
+from latence_core.tracing import RunTracer, SpanSink
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -227,15 +229,24 @@ def topological_order(stages: list[Stage]) -> list[Stage]:
     if len(order) != len(stages):
         remaining = sorted(set(by_name) - set(order))
         msg = f"Pipeline has a dependency cycle among stages: {remaining}"
-        raise ValueError(msg)
+        # A dependency cycle is a malformed-Pipeline config error (#73). ConfigError is a
+        # ValueError subclass, so the pre-taxonomy ``except ValueError`` callers keep catching it.
+        raise ConfigError(msg)
     return [by_name[n] for n in order]
 
 
 class LocalRunner:
     """Executes a Pipeline on the local node with resumable file-based state."""
 
-    def __init__(self, registry: ProviderRegistry | None = None) -> None:
+    def __init__(
+        self, registry: ProviderRegistry | None = None, *, span_sink: SpanSink | None = None
+    ) -> None:
         self._registry = registry or ProviderRegistry()
+        # #73: the optional tracing sink. ``None`` ⇒ each run's RunTracer defaults to the
+        # silent-by-default LoggingSpanSink, so a normal run's output is unchanged; an operator
+        # (or a downstream tracer, or a test) passes a CollectingSpanSink / their own SpanSink to
+        # capture the per-Stage spans. Kept a thin seam — no OTel dep in core (ADR-0016).
+        self._span_sink = span_sink
         # Per-Stage endpoint-retry tally, drained into that Stage's StageMetrics (S12). An
         # endpoint-backed performance Provider exposes an ``endpoint_retries`` int attribute (how
         # many transient failures it retried through); the Runner reads it after the Stage runs and
@@ -433,6 +444,7 @@ class LocalRunner:
         *,
         wal_uri: str | None = None,
         stage_name: str | None = None,
+        tracer: RunTracer | None = None,
     ) -> int:
         """Write a Stage checkpoint batch-granularly, bounding the write transient (ADR-0033).
 
@@ -451,6 +463,10 @@ class LocalRunner:
         and the Airflow adapter's typed decode round-trip byte-identically. ``model_dump_json``
         round-trips ``bytes`` content losslessly (ParserInput's raw content); a bare dict +
         ``json.dumps`` would not. Returns the number of records written.
+
+        When a ``tracer`` is supplied (#73), each durably-written batch also emits a
+        ``stage_batch`` trace span (batch index + cumulative records, counts only) mirroring the
+        WAL batch event — so a downstream tracer sees checkpoint throughput at batch granularity.
         """
         # Streaming opens bypass write_bytes' implicit parent-makedirs, so ensure the
         # checkpoint directory exists before opening the temp file.
@@ -470,12 +486,20 @@ class LocalRunner:
                     batch = []
                     if wal_uri is not None and stage_name is not None:
                         self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
+                    # #73: mirror the WAL batch progress as a trace span (counts only), so a
+                    # downstream tracer sees checkpoint throughput per batch, not just per Stage.
+                    if tracer is not None and stage_name is not None:
+                        tracer.stage_batch(
+                            stage_name, batch_index=batch_index, records_so_far=total
+                        )
                     batch_index += 1
             if batch:
                 fh.write(("\n".join(batch) + "\n").encode("utf-8"))
                 total += len(batch)
                 if wal_uri is not None and stage_name is not None:
                     self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
+                if tracer is not None and stage_name is not None:
+                    tracer.stage_batch(stage_name, batch_index=batch_index, records_so_far=total)
         storage.finalize_atomic(tmp, uri)
         return total
 
@@ -553,6 +577,11 @@ class LocalRunner:
 
         ordered = topological_order(list(pipeline.stages))
         wal_uri = self._wal_uri(pipeline, run_id)
+        # #73: the run-scoped tracer. The correlation id is the ``run_id`` — the run *is* the
+        # trace — so every span of this run is greppable together and a downstream tracer can
+        # reconstruct the per-run tree. Silent by default (LoggingSpanSink at DEBUG) unless a
+        # sink was supplied; carries counts + typed-error categories only, never record content.
+        tracer = RunTracer(run_id, self._span_sink)
 
         stage_metrics: list[StageMetrics] = []
         # Per-Stage outputs keyed by Stage name. A Stage's INPUT is the gather of
@@ -590,8 +619,75 @@ class LocalRunner:
                 continue
 
             self._wal_append(storage, wal_uri, _WAL_STAGE_BEGIN, stage.name)
+            tracer.stage_begin(
+                stage.name,
+                capability=stage.capability.value,
+                provider=stage.provider,
+                records_in=len(incoming),
+            )
             started = time.perf_counter()
-            own_output = self._execute_stage(stage, storage, pipeline, run_id, incoming)
+            try:
+                own_output = self._execute_stage(stage, storage, pipeline, run_id, incoming)
+            except BaseException as exc:
+                # #73: a Stage failure emits a *failed* stage_end span stamped with the typed-error
+                # category (contract/config/provider/storage/screening/unknown) + message, then
+                # re-raises — the Runner never swallows a Stage failure (no torn commit), it just
+                # makes the failure kind observable first. Counts + category only, never content.
+                duration = time.perf_counter() - started
+                category = error_category(exc)
+                tracer.stage_end(
+                    stage.name,
+                    capability=stage.capability.value,
+                    provider=stage.provider,
+                    records_in=len(incoming),
+                    records_out=0,
+                    duration_ms=round(duration * 1000.0, 3),
+                    error_category=category,
+                    error_message=str(exc),
+                )
+                # #73: the taxonomy is surfaced in the report *and* the logs — so record the failed
+                # Stage's typed-error metric (error_count=1 + the stable category tag, counts only,
+                # never the exception message) and persist a FAIL Quality Report before re-raising.
+                # This is the report half of #73's "surfaced in the report + logs": a persisted
+                # report now carries the failed Stage's error_count, not only a transient span.
+                #
+                # No-torn-write is preserved: the failed Stage's *checkpoint* is still never
+                # finalized (we never reached ``_write_checkpoint``), so a resume re-runs it.
+                # The report is not a resume gate (resume keys off per-Stage checkpoints, not the
+                # report), so a subsequent successful resume overwrites this FAIL report atomically.
+                # Persisting must never mask the real failure: if the report build itself raises we
+                # swallow *that* and re-raise the original Stage exception.
+                stage_metrics.append(
+                    StageMetrics(
+                        name=stage.name,
+                        capability=stage.capability.value,
+                        provider=stage.provider,
+                        records_in=len(incoming),
+                        records_out=0,
+                        duration_seconds=round(duration, 6),
+                        runner=runner_name,
+                        endpoint_retries=self._drain_retry_count(),
+                        error_count=1,
+                        error_category=category,
+                    )
+                )
+                try:
+                    fail_report = self._build_report(
+                        pipeline,
+                        run_id,
+                        storage,
+                        ordered,
+                        stage_metrics,
+                        outputs,
+                        self._final_records(ordered, outputs),
+                    )
+                    storage.write_atomic(
+                        self._report_uri(pipeline, run_id),
+                        fail_report.to_json().encode("utf-8"),
+                    )
+                except Exception:  # noqa: BLE001 - never mask the real Stage failure
+                    pass
+                raise
             duration = time.perf_counter() - started
 
             outputs[stage.name] = own_output
@@ -599,9 +695,22 @@ class LocalRunner:
             # O(batch), not O(all-records); batch progress lands in the WAL; the final file is
             # published atomically (temp→rename) so resume stays exact at Stage granularity.
             self._write_checkpoint(
-                storage, ckpt_uri, own_output, wal_uri=wal_uri, stage_name=stage.name
+                storage,
+                ckpt_uri,
+                own_output,
+                wal_uri=wal_uri,
+                stage_name=stage.name,
+                tracer=tracer,
             )
             self._wal_append(storage, wal_uri, _WAL_STAGE_COMMIT, stage.name)
+            tracer.stage_end(
+                stage.name,
+                capability=stage.capability.value,
+                provider=stage.provider,
+                records_in=len(incoming),
+                records_out=len(own_output),
+                duration_ms=round(duration * 1000.0, 3),
+            )
 
             stage_metrics.append(
                 StageMetrics(
@@ -662,7 +771,7 @@ class LocalRunner:
         if stage.capability is CapabilityKind.SOURCE:
             if not isinstance(provider, Source):
                 msg = f"Provider {stage.provider!r} does not satisfy the Source capability."
-                raise TypeError(msg)
+                raise ContractError(msg)
             # A Source is a root: it reads Storage, not upstream records.
             return list(provider.produce(storage))
 
@@ -672,7 +781,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the IntakeScreener capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             raw_inputs = self._as_type(stage, incoming, ParserInput)
             intake_outcome = provider.screen_intake(raw_inputs)
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, intake_outcome)
@@ -683,14 +792,14 @@ class LocalRunner:
         if stage.capability is CapabilityKind.PARSE:
             if not isinstance(provider, Parser):
                 msg = f"Provider {stage.provider!r} does not satisfy the Parser capability."
-                raise TypeError(msg)
+                raise ContractError(msg)
             parser_inputs = self._as_type(stage, incoming, ParserInput)
             return list(provider.parse(parser_inputs))
 
         if stage.capability is CapabilityKind.CHUNK:
             if not isinstance(provider, Chunker):
                 msg = f"Provider {stage.provider!r} does not satisfy the Chunker capability."
-                raise TypeError(msg)
+                raise ContractError(msg)
             doc_records = self._as_type(stage, incoming, DocumentRecord)
             return list(provider.chunk(doc_records))
 
@@ -700,7 +809,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the ContentScreener capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             chunk_records = self._as_type(stage, incoming, ChunkRecord)
             content_outcome = provider.screen_content(chunk_records)
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, content_outcome)
@@ -714,7 +823,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the EntityExtractor capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             chunk_records = self._as_type(stage, incoming, ChunkRecord)
             return list(provider.extract(chunk_records))
 
@@ -724,7 +833,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the RelationExtractor capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             # Relation Extraction is multi-input: it wires BOTH a Chunk (or
             # Content-Screening) parent for text/page-map context AND an
             # Entity-Extraction parent for the mentions it relates. Partition the
@@ -740,7 +849,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the FusedEntityRelationExtractor capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             # One pass over the chunks yields BOTH mentions and relations; the fused
             # Stage threads them together downstream (no separate Entity-Extraction
             # Stage — the S5 no-double-extract routing).
@@ -755,7 +864,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the PIIDetector capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             # Redaction consumes the run's parsed DocumentRecords (the whole
             # document's assembled markdown + page map, at original-document offsets)
             # and emits one PII-handled RedactionRecord per document, keyed off
@@ -772,7 +881,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the Profiler capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             # Profiling is corpus-level and multi-input: it wires a Parse parent for
             # the DocumentRecords (per-document features) and OPTIONALLY an
             # Entity-Extraction parent for the EntityMentions (cross-document entity
@@ -791,7 +900,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the Disambiguator capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             # Disambiguation is corpus-level and multi-input: it wires an Entity-Extraction
             # (or fused) parent for the EntityMentions it resolves + links (REQUIRED — the
             # mentions are what it disambiguates) and OPTIONALLY a Relation-Extraction (or
@@ -810,7 +919,7 @@ class LocalRunner:
                     f"Provider {stage.provider!r} does not satisfy "
                     f"the GraphAssembler capability."
                 )
-                raise TypeError(msg)
+                raise ContractError(msg)
             # Graph Assembly is corpus-level: it consumes the whole run's DisambiguationRecords
             # (the canonical entities + normalized relations) and builds the knowledge graph —
             # nodes, edges, and per-edge Evidence. It depends on a Disambiguation parent; a
@@ -822,7 +931,7 @@ class LocalRunner:
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
-                raise TypeError(msg)
+                raise ContractError(msg)
             # Export materializes any inter-Stage Record: DocumentRecords (S1/S2
             # spine) or ChunkRecords (S3, when a Chunk Stage sits upstream). Only a
             # raw ParserInput (not a Record) is an invalid Export input.
@@ -844,10 +953,14 @@ class LocalRunner:
                 f"(ADR-0017). Remove this Stage and name the Embedder in the corpus Export's "
                 f"config['embedder'] = {{'provider': {stage.provider!r}, 'config': {{...}}}}."
             )
-            raise ValueError(msg)
+            # Embedding-as-a-standalone-Stage is a malformed-Pipeline config error (#73);
+            # ConfigError is a ValueError subclass, so the pre-taxonomy ``except ValueError``
+            # callers (and the standalone-embedding-rejection test) keep catching it.
+            raise ConfigError(msg)
 
         msg = f"Unknown capability {stage.capability!r} for stage {stage.name!r}."
-        raise ValueError(msg)
+        # An unknown capability is a malformed-Pipeline config error (#73), formerly a ValueError.
+        raise ConfigError(msg)
 
     # -- Screening sidecars (quarantine + findings, off the DAG) ------------
 
@@ -935,7 +1048,7 @@ class LocalRunner:
                 f"{expected.__name__} inputs but received: {', '.join(got)}. "
                 f"Check the Pipeline's depends_on wiring."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
         return [r for r in records if isinstance(r, expected)]
 
     @staticmethod
@@ -961,14 +1074,14 @@ class LocalRunner:
                 f"A Relation-Extraction Stage must depend on an Entity-Extraction Stage "
                 f"(the mentions it relates). Check the Pipeline's depends_on wiring."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
         if not chunks:
             msg = (
                 f"Stage {stage.name!r} (relation_extraction) received no ChunkRecords. "
                 f"A Relation-Extraction Stage must also depend on the Chunk (or "
                 f"Content-Screening) Stage for the text + page map. Check depends_on."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
 
     @staticmethod
     def _require_profiling_inputs(
@@ -993,7 +1106,7 @@ class LocalRunner:
                 f"(got: {', '.join(got)}). A Profiling Stage must depend on the Parse "
                 f"Stage (the documents it profiles). Check the Pipeline's depends_on wiring."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
 
     @staticmethod
     def _require_disambiguation_inputs(
@@ -1019,7 +1132,7 @@ class LocalRunner:
                 f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
                 f"the Pipeline's depends_on wiring."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
 
     @staticmethod
     def _require_graph_inputs(
@@ -1044,7 +1157,7 @@ class LocalRunner:
                 f"Disambiguation Stage (the canonical entities + relations it assembles). "
                 f"Check the Pipeline's depends_on wiring."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
 
     @staticmethod
     def _as_records(
@@ -1094,7 +1207,7 @@ class LocalRunner:
                 f"Entity-Extraction / Relation-Extraction / Redaction / Profiling / "
                 f"Disambiguation / Graph-Assembly) upstream."
             )
-            raise TypeError(msg)
+            raise ContractError(msg)
         return [r for r in records if isinstance(r, exportable)]
 
     @staticmethod
@@ -1352,7 +1465,9 @@ class LocalRunner:
             data = json.loads(text)
         if not isinstance(data, dict):
             msg = f"Gold set at {uri!r} must be a JSON/YAML mapping at the top level."
-            raise ValueError(msg)
+            # A malformed operator-supplied gold set is a config error (#73); ConfigError is a
+            # ValueError subclass, so pre-taxonomy ``except ValueError`` callers keep catching it.
+            raise ConfigError(msg)
         return GoldSet.from_mapping(data)
 
     @staticmethod
