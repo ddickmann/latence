@@ -1,8 +1,10 @@
 # Streaming, memory-bounded local Runner (accepted)
 
-**Status: accepted** — built (from G1-RESULTS Lane 6 / issue #63). The two biggest named
-transients are now bounded and the quadratic guard is in place; see **Built vs. remaining**
-below for exactly which mechanisms landed and which stay flagged for the perf rig.
+**Status: accepted** — built (from G1-RESULTS Lane 6 / issue #63, completed by #69). All three
+named transients are now bounded — the whole-corpus Export buffer, the whole-string checkpoint
+write, and (with #69) the executor's retained doc-level `outputs` dict — and the quadratic guard
+is in place; see **Built vs. remaining** below for exactly which mechanisms landed and which stay
+flagged for the perf rig.
 
 ## Problem
 The local Runner is a whole-corpus-in-memory DAG executor: `runner.py` holds `outputs: dict[str, list[StageOutput]]` (every stage's full record list simultaneously), each stage is materialized `list(provider.…)`, and `stages/export.py` does `pa.Table.from_pylist(flat)` (the entire corpus as one Python list + Arrow table before write). G1 measured peak RSS ≈ **62 MB per 1k docs, linear**; ceiling = `RAM / 62MB-per-1k`; a low-cardinality corpus drove records **quadratic** in docs (~0.084·n²; 5k docs → ~12 GB). No backpressure.
@@ -57,18 +59,33 @@ Runner execution loop + checkpoint format (batch-granular) + Export writer chang
   bounded (not corpus-linear) when the corpus is fed as a generator; the determinism (byte-stable
   checkpoints), provenance/offset, Evidence, and delta/Purge-read guarantees are pinned by
   regression tests.
+* **Streamed executor outputs — doc-level records released before accumulators (#69).** The DAG
+  executor no longer holds every Stage's doc-level output in the `outputs` dict for the whole run.
+  A doc-level Stage's output is **released** from the dict the moment its last consumer has run
+  (a reference-count over `depends_on`), and a doc-level *sink* (an Export, which passes its
+  input through unchanged) is released the moment it commits. The corpus-level accumulators
+  (Profiling / Disambiguation / Graph Assembly) then **stream** their doc-level input back from
+  the parents' checkpoints one record at a time (`_stream_checkpoint` / `_stream_inputs_of_type`),
+  and the Quality Report reads any released doc-level set back from its checkpoint per kind
+  (`_records_of_kind`), so the whole doc-level output is never materialised into a retained list.
+  Corpus-level memory is thereby bounded by the **live DAG fan-in + the accumulators' KG state**
+  (canonical entities + nodes/edges + corpus features), not by O(all doc-level records) — the
+  ADR's honest boundary, now actually reached. Determinism/resume/delta/Purge are preserved: the
+  on-disk checkpoints are byte-identical and re-readable, the streamed read yields the same
+  records in the same order as the buffered read, and the release is a pure memory-shaping step
+  (a `_release_doc_level_outputs` parity knob keeps the whole `outputs` dict retained for a
+  byte-for-byte differential check). A mis-wired accumulator still raises the same typed
+  `ContractError` through a streamed presence check. Regression tests
+  (`test_runner_executor_streaming.py`) pin the release, the checkpoint-streamed accumulator input
+  (the wired path), the peak-retained bound vs. retain-all, and report/KG byte-identity.
 
 **Remaining (explicitly out of this issue, still flagged):**
-* The Runner's DAG executor still holds the per-Stage `outputs` dict in memory for the
-  corpus-level Quality Report and the accumulator Stages (Profiling / Disambiguation / Graph
-  Assembly), which consume the whole doc-level output. Reading those inputs back from checkpoints
-  batch-by-batch (so the doc-level `outputs` are released before the accumulators run) is the
-  next increment — the doc-level pipeline's own *checkpoint/Export* transients are bounded now,
-  but the executor's retained output list is not yet streamed. Corpus-level memory remains
-  bounded by the KG state, as the Honest boundary states, not by O(1).
 * The real **100k / 1M peak-RSS + no-OOM-at-ceiling** numbers still need a dedicated perf rig
   (the DoD Hardening "no OOM at the documented ceiling" is validated at reduced scale here; the
   headline numbers stay flagged, per the issue).
+* `PatternRelationExtractor._find_candidates` still builds the full `O(mentions²)` candidate list
+  on the **input** side before the emitted-fan-out cap trims the output (operator-config-gated by
+  a large `window_chars`); bounding that input transient is #68, a separate follow-up.
 
 ## Rejected
 - Record-by-record streaming (batch amortizes overhead and matches batching providers).

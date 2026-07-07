@@ -88,7 +88,7 @@ from latence_core.storage import Storage
 from latence_core.tracing import RunTracer, SpanSink
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 # A Stage's output is one of the inter-Stage carriers the DAG threads between
 # Stages: Source→ParserInput; Parse→DocumentRecord; Chunk/Content-Screening→
@@ -125,6 +125,26 @@ _WAL_STAGE_BATCH = "stage_batch"
 # old O(all-records) whole-string build. Purely a memory-shaping knob — the on-disk file
 # (newline-delimited records) and Stage-granular resume are identical regardless of the value.
 _CHECKPOINT_BATCH_RECORDS = 1024
+
+# Checkpoint *read-back* batch size (ADR-0033 / #69): the number of newline-delimited records
+# decoded at once when an accumulator (or the Quality Report) reads a doc-level Stage's output
+# back from its checkpoint. Streaming the read means the doc-level ``outputs`` dict entry can be
+# released before the accumulators run — corpus-level memory then bounded by the KG state the
+# accumulators hold, not by the whole doc-level output (the ADR's honest boundary). Purely a
+# memory-shaping knob; the decoded records are identical regardless of the value.
+_CHECKPOINT_READ_BATCH_RECORDS = 1024
+
+# The corpus-level accumulator Capabilities (ADR-0033): Profiling, Disambiguation, Graph
+# Assembly. They inherently consume the whole doc-level output, but their own output is bounded
+# by the knowledge-graph size (canonical entities + nodes/edges + corpus features), not the
+# corpus size. Everything else is a per-document streaming transform whose retained output list
+# is released once its consumers have run (#69), so the executor no longer holds every Stage's
+# doc-level records simultaneously.
+_ACCUMULATOR_KINDS = (
+    CapabilityKind.PROFILING,
+    CapabilityKind.DISAMBIGUATION,
+    CapabilityKind.GRAPH_ASSEMBLY,
+)
 
 # Secret-handling (issue #30): the run manifest persists the whole Pipeline
 # (including every Stage's operator ``config``) verbatim. A Provider such as the S5
@@ -258,6 +278,14 @@ class LocalRunner:
         # int attributes; the Runner reads them after the Stage runs and folds them into the
         # Quality Report's RelationQuality. A Provider without them contributes (0, 0).
         self._fanout_by_stage: dict[str, tuple[int, int]] = {}
+        # #69: when True, a doc-level Stage's retained output is released from the in-memory
+        # ``outputs`` dict once its last consumer has run (and a doc-level sink's output the moment
+        # it commits) — the accumulators + Quality Report then read that output back from its
+        # checkpoint. This bounds corpus-level memory to the KG state (ADR-0033's honest boundary)
+        # rather than O(all doc-level records). Setting it False keeps every Stage's output
+        # retained (the pre-#69 behavior) — a parity/debug knob; the on-disk output, resume, and
+        # report are byte-identical either way, only peak memory differs.
+        self._release_doc_level_outputs = True
 
     def _drain_retry_count(self) -> int:
         """Read and reset the endpoint-retry tally the just-executed Stage's Provider reported."""
@@ -508,6 +536,35 @@ class LocalRunner:
     ) -> list[StageOutput]:
         return self._read_checkpoint_text(storage.read_text(uri), record_type)
 
+    def _stream_checkpoint(
+        self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
+    ) -> Iterator[StageOutput]:
+        """Yield a Stage checkpoint's records lazily, decoding at most one line at a time (#69).
+
+        The read-back companion to :meth:`_write_checkpoint`'s batch-granular write: rather than
+        materialising the whole checkpoint into a list (:meth:`_read_checkpoint`), this opens the
+        file and yields one typed record per non-blank line, so an accumulator (or the Quality
+        Report) that folds the doc-level output in one pass never holds it whole. This is what lets
+        the executor RELEASE a doc-level Stage's ``outputs`` entry before the accumulators run —
+        the corpus-level transient becomes O(batch) read-back + the accumulator's own bounded KG
+        state, not O(all doc-level records) (ADR-0033's honest boundary, completed by #69).
+
+        The typed decode is identical to :meth:`_read_checkpoint_text` (same
+        ``model_validate_json`` / mixed-carrier discrimination), so a streamed read and a whole
+        read produce byte-identical records in the same order — determinism and the
+        Provenance/offset/Evidence contracts are untouched. The file handle is closed when the
+        generator is exhausted or garbage-collected.
+        """
+        with storage.open(uri, "rb") as fh:
+            for raw_line in fh:
+                raw = raw_line.decode("utf-8")
+                if not raw.strip():
+                    continue
+                # Decode one line through the shared typed decode (identical validation +
+                # mixed-carrier discrimination as the whole-file read), so a streamed record is
+                # byte-identical to the buffered one. A blank line yields nothing.
+                yield from self._read_checkpoint_text(raw, record_type)
+
     def _read_checkpoint_text(
         self, text: str, record_type: type[StageOutput] | type[Record]
     ) -> list[StageOutput]:
@@ -590,11 +647,75 @@ class LocalRunner:
         # ``current`` var, which corrupted data on resume). A downstream Stage
         # always reads its parents' *current* outputs from this dict, so a parent
         # that had to re-run (its checkpoint absent) feeds the child fresh data.
+        #
+        # #69: a doc-level Stage's entry is RELEASED from this dict once every Stage that
+        # depends on it has run — its checkpoint on disk is then the source of truth. Live
+        # entries are bounded by the DAG fan-in, and the corpus-level accumulators
+        # (Profiling/Disambiguation/Graph) read their doc-level input back from checkpoints
+        # batch-by-batch (:meth:`_stage_records`) rather than holding it whole, so the
+        # executor no longer retains every Stage's doc-level output simultaneously (ADR-0033).
         outputs: dict[str, list[StageOutput]] = {}
+        # Remaining not-yet-run consumers per Stage (how many later Stages still depend on it),
+        # used to release a doc-level Stage's retained output the moment it goes dead. The
+        # Quality Report reads any released doc-level set back from its checkpoint (bounded), so
+        # release never loses data the report needs.
+        pending_consumers: dict[str, int] = {s.name: 0 for s in ordered}
+        for s in ordered:
+            for parent in s.depends_on:
+                if parent in pending_consumers:
+                    pending_consumers[parent] += 1
+
+        def _release_dead_parents(just_ran: Stage) -> None:
+            """Drop a parent's retained output once ``just_ran`` was its last pending consumer.
+
+            Accumulator outputs (Profiling/Disambiguation/Graph) are bounded by the KG state and
+            may still be read by the end-of-run Quality Report from the dict, so they are kept;
+            a doc-level parent's output is re-readable from its checkpoint, so it is released.
+            The ``_release_doc_level_outputs`` knob (default True) gates the whole mechanism.
+            """
+            if not self._release_doc_level_outputs:
+                return
+            for parent in just_ran.depends_on:
+                if parent not in pending_consumers:
+                    continue
+                pending_consumers[parent] -= 1
+                if pending_consumers[parent] > 0:
+                    continue
+                parent_stage = by_name.get(parent)
+                if parent_stage is not None and parent_stage.capability not in _ACCUMULATOR_KINDS:
+                    outputs.pop(parent, None)
+            # A doc-level SINK (nothing depends on it — e.g. an Export, which passes its input
+            # through unchanged) has no consumer to trigger its release, yet its retained output
+            # would linger for the whole run. Release it here the moment it commits; the Quality
+            # Report reads it back from its checkpoint. Accumulator sinks stay (bounded KG state).
+            if (
+                pending_consumers.get(just_ran.name, 0) == 0
+                and just_ran.capability not in _ACCUMULATOR_KINDS
+            ):
+                outputs.pop(just_ran.name, None)
+
+        by_name = {s.name: s for s in ordered}
 
         for stage in ordered:
             ckpt_uri = self._checkpoint_uri(pipeline, run_id, stage.name)
-            incoming = self._gather_inputs(stage, outputs)
+            # #69: a corpus-level accumulator (Profiling/Disambiguation/Graph) consumes the whole
+            # doc-level output — materialising it into a list here would reintroduce the O(all
+            # records) transient the ADR bounds. So its input is NOT gathered eagerly: the
+            # dispatch streams each carrier from the parents' checkpoints one record at a time
+            # (:meth:`_stream_inputs_of_type`). ``records_in`` for it is a streamed count only
+            # (:meth:`_gathered_count`), never a retained list. Every other Stage is per-document
+            # and small enough to gather eagerly (its own output is then released once dead).
+            is_accumulator = stage.capability in _ACCUMULATOR_KINDS
+            if is_accumulator:
+                incoming: list[StageOutput] = []
+                records_in = self._gathered_count(
+                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+            else:
+                incoming = self._gather_inputs(
+                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+                records_in = len(incoming)
 
             if storage.exists(ckpt_uri):
                 # Resume: this Stage already completed. Reload ITS OWN output into
@@ -609,13 +730,14 @@ class LocalRunner:
                         name=stage.name,
                         capability=stage.capability.value,
                         provider=stage.provider,
-                        records_in=len(incoming),
+                        records_in=records_in,
                         records_out=len(own_output),
                         duration_seconds=0.0,
                         from_checkpoint=True,
                         runner=runner_name,
                     )
                 )
+                _release_dead_parents(stage)
                 continue
 
             self._wal_append(storage, wal_uri, _WAL_STAGE_BEGIN, stage.name)
@@ -623,11 +745,13 @@ class LocalRunner:
                 stage.name,
                 capability=stage.capability.value,
                 provider=stage.provider,
-                records_in=len(incoming),
+                records_in=records_in,
             )
             started = time.perf_counter()
             try:
-                own_output = self._execute_stage(stage, storage, pipeline, run_id, incoming)
+                own_output = self._execute_stage(
+                    stage, storage, pipeline, run_id, incoming, outputs
+                )
             except BaseException as exc:
                 # #73: a Stage failure emits a *failed* stage_end span stamped with the typed-error
                 # category (contract/config/provider/storage/screening/unknown) + message, then
@@ -639,7 +763,7 @@ class LocalRunner:
                     stage.name,
                     capability=stage.capability.value,
                     provider=stage.provider,
-                    records_in=len(incoming),
+                    records_in=records_in,
                     records_out=0,
                     duration_ms=round(duration * 1000.0, 3),
                     error_category=category,
@@ -662,7 +786,7 @@ class LocalRunner:
                         name=stage.name,
                         capability=stage.capability.value,
                         provider=stage.provider,
-                        records_in=len(incoming),
+                        records_in=records_in,
                         records_out=0,
                         duration_seconds=round(duration, 6),
                         runner=runner_name,
@@ -679,7 +803,9 @@ class LocalRunner:
                         ordered,
                         stage_metrics,
                         outputs,
-                        self._final_records(ordered, outputs),
+                        self._final_records(
+                            ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                        ),
                     )
                     storage.write_atomic(
                         self._report_uri(pipeline, run_id),
@@ -707,7 +833,7 @@ class LocalRunner:
                 stage.name,
                 capability=stage.capability.value,
                 provider=stage.provider,
-                records_in=len(incoming),
+                records_in=records_in,
                 records_out=len(own_output),
                 duration_ms=round(duration * 1000.0, 3),
             )
@@ -717,15 +843,22 @@ class LocalRunner:
                     name=stage.name,
                     capability=stage.capability.value,
                     provider=stage.provider,
-                    records_in=len(incoming),
+                    records_in=records_in,
                     records_out=len(own_output),
                     duration_seconds=round(duration, 6),
                     runner=runner_name,
                     endpoint_retries=self._drain_retry_count(),
                 )
             )
+            # #69: release any doc-level parent whose last consumer just ran — its checkpoint is
+            # the source of truth for the end-of-run Quality Report, which reads it back
+            # (bounded) via _stage_records. This is what drops the retained doc-level executor
+            # transient the ADR flagged as remaining.
+            _release_dead_parents(stage)
 
-        final_records = self._final_records(ordered, outputs)
+        final_records = self._final_records(
+            ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
         report = self._build_report(
             pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
         )
@@ -739,18 +872,23 @@ class LocalRunner:
         pipeline: Pipeline,
         run_id: str,
         incoming: list[StageOutput],
+        outputs: dict[str, list[StageOutput]],
     ) -> list[StageOutput]:
         """Run one Stage and record any endpoint retries its Provider reported (S12).
 
         Delegates the capability dispatch to :meth:`_dispatch_stage`, then reads the endpoint-retry
         tally off the (endpoint-backed) Provider so ``run()`` can fold it into that Stage's metrics.
         Kept as the single seam a second Runner adapter reuses — identical Stage semantics + the
-        same retry accounting under any substrate (ADR-0003), no fork.
+        same retry accounting under any substrate (ADR-0003), no fork. ``outputs`` is threaded so a
+        corpus-level accumulator's dispatch can stream its input from parents' checkpoints (#69)
+        rather than receiving it pre-materialised in ``incoming`` (which is empty for accumulators).
         """
         provider_cls = self._registry.load(stage.provider)
         provider = provider_cls(stage.config)
         try:
-            return self._dispatch_stage(stage, provider, storage, pipeline, run_id, incoming)
+            return self._dispatch_stage(
+                stage, provider, storage, pipeline, run_id, incoming, outputs
+            )
         finally:
             self._last_stage_retries = self._provider_retry_count(provider)
             if stage.capability in (
@@ -767,6 +905,7 @@ class LocalRunner:
         pipeline: Pipeline,
         run_id: str,
         incoming: list[StageOutput],
+        outputs: dict[str, list[StageOutput]],
     ) -> list[StageOutput]:
         if stage.capability is CapabilityKind.SOURCE:
             if not isinstance(provider, Source):
@@ -885,13 +1024,22 @@ class LocalRunner:
             # Profiling is corpus-level and multi-input: it wires a Parse parent for
             # the DocumentRecords (per-document features) and OPTIONALLY an
             # Entity-Extraction parent for the EntityMentions (cross-document entity
-            # features). Partition the gathered inputs by carrier; the mentions side is
-            # optional (a Parse-only Profiling pipeline yields corpus text features with
-            # empty entity aggregates), so — unlike Relation Extraction — a missing
-            # mention side is NOT an error. Any other carrier (a raw ParserInput) is.
-            profile_docs = [r for r in incoming if isinstance(r, DocumentRecord)]
-            profile_mentions = [r for r in incoming if isinstance(r, EntityMention)]
-            self._require_profiling_inputs(stage, incoming, profile_docs)
+            # features). The mentions side is optional (a Parse-only Profiling pipeline yields
+            # corpus text features with empty entity aggregates), so — unlike Relation
+            # Extraction — a missing mention side is NOT an error. Any other carrier (a raw
+            # ParserInput) is. #69: the doc/mention streams are read lazily from the parents'
+            # checkpoints (the Profiler folds one at a time — the S7 streaming contract), so the
+            # accumulator never materialises the whole doc-level output. A pre-pass validates the
+            # wiring (below) before the provider consumes the streams.
+            self._require_profiling_inputs_streamed(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            profile_docs = self._stream_inputs_of_type(
+                stage, outputs, DocumentRecord, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            profile_mentions = self._stream_inputs_of_type(
+                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
             return list(provider.profile(profile_docs, profile_mentions))
 
         if stage.capability is CapabilityKind.DISAMBIGUATION:
@@ -905,12 +1053,21 @@ class LocalRunner:
             # (or fused) parent for the EntityMentions it resolves + links (REQUIRED — the
             # mentions are what it disambiguates) and OPTIONALLY a Relation-Extraction (or
             # fused) parent for the RelationMentions it normalises onto the canonical
-            # entities. Partition the gathered inputs by carrier; a fused parent supplies
-            # both from one mixed list. The mention side is required (unlike Profiling), so
-            # a non-empty input with no EntityMention is a wiring error.
-            disambig_mentions = [r for r in incoming if isinstance(r, EntityMention)]
-            disambig_relations = [r for r in incoming if isinstance(r, RelationMention)]
-            self._require_disambiguation_inputs(stage, incoming, disambig_mentions)
+            # entities. A fused parent supplies both from one mixed checkpoint. The mention
+            # side is required (unlike Profiling), so a non-empty input with no EntityMention
+            # is a wiring error. #69: mentions + relations are streamed lazily from the
+            # parents' checkpoints (a fused parent's mixed checkpoint is read twice, once per
+            # carrier — each pass O(batch)), so the disambiguator never materialises the whole
+            # mention/relation set. A pre-pass validates the wiring before the provider runs.
+            self._require_disambiguation_inputs_streamed(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            disambig_mentions = self._stream_inputs_of_type(
+                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            disambig_relations = self._stream_inputs_of_type(
+                stage, outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
             return list(provider.disambiguate(disambig_mentions, disambig_relations))
 
         if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
@@ -923,9 +1080,22 @@ class LocalRunner:
             # Graph Assembly is corpus-level: it consumes the whole run's DisambiguationRecords
             # (the canonical entities + normalized relations) and builds the knowledge graph —
             # nodes, edges, and per-edge Evidence. It depends on a Disambiguation parent; a
-            # non-empty input carrying no DisambiguationRecord is a wiring error.
-            graph_records = self._as_type(stage, incoming, DisambiguationRecord)
-            self._require_graph_inputs(stage, incoming, graph_records)
+            # non-empty input carrying no DisambiguationRecord is a wiring error. #69: the
+            # DisambiguationRecords are streamed from the parent (its bounded accumulator output,
+            # or its checkpoint), validated by a pre-pass that mirrors ``_as_type`` +
+            # ``_require_graph_inputs`` (any wrong carrier / an all-wrong non-empty input is a
+            # typed wiring error) before the assembler folds the stream.
+            self._require_graph_inputs_streamed(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            graph_records = self._stream_inputs_of_type(
+                stage,
+                outputs,
+                DisambiguationRecord,
+                storage=storage,
+                pipeline=pipeline,
+                run_id=run_id,
+            )
             return list(provider.assemble(graph_records))
 
         if stage.capability is CapabilityKind.EXPORT:
@@ -1015,18 +1185,116 @@ class LocalRunner:
             if line.strip()
         ]
 
-    @staticmethod
-    def _gather_inputs(stage: Stage, outputs: dict[str, list[StageOutput]]) -> list[StageOutput]:
+    def _stage_records(
+        self,
+        stage_name: str,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> Iterator[StageOutput]:
+        """Yield one Stage's output — from the live dict if retained, else its checkpoint (#69).
+
+        A doc-level Stage's output is released from ``outputs`` once its last consumer ran, so a
+        later reader (an accumulator, the Quality Report) re-reads it lazily from the on-disk
+        checkpoint here, batch-by-batch, instead of the executor holding it in memory. A retained
+        entry (a live doc-level parent, or an accumulator's bounded output) is yielded directly.
+        A Stage that never produced a checkpoint (not yet run, or a genuinely empty output) yields
+        nothing. The streamed and the live path yield byte-identical records in identical order.
+        """
+        if stage_name in outputs:
+            yield from outputs[stage_name]
+            return
+        by_name = {s.name: s for s in pipeline.stages}
+        stage = by_name.get(stage_name)
+        if stage is None:  # pragma: no cover - names come from the validated DAG
+            return
+        ckpt_uri = self._checkpoint_uri(pipeline, run_id, stage_name)
+        if not storage.exists(ckpt_uri):
+            return
+        yield from self._stream_checkpoint(
+            storage, ckpt_uri, self._output_type(stage, pipeline)
+        )
+
+    def _stream_inputs_of_type(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        expected: type[_T],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> Iterator[_T]:
+        """Lazily yield a Stage's gathered inputs narrowed to one carrier type (#69).
+
+        The streaming companion to :meth:`_gather_inputs` for the corpus-level accumulators
+        (Profiling/Disambiguation/Graph): it re-reads each parent's output from the live dict or
+        its checkpoint (:meth:`_stage_records`) one record at a time and yields only the
+        ``expected`` carrier, so an accumulator that needs the whole doc-level stream folds it in
+        without the executor materialising the stream into a retained list. A checkpoint is
+        re-readable, so calling this once per carrier (Disambiguation needs both mentions and
+        relations) keeps each pass O(batch), not O(all records). Parents are read in declared
+        ``depends_on`` order, so the yielded order is byte-identical to :meth:`_gather_inputs`
+        followed by an ``isinstance`` filter — determinism preserved.
+        """
+        for parent in stage.depends_on:
+            for record in self._stage_records(
+                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            ):
+                if isinstance(record, expected):
+                    yield record
+
+    def _gathered_count(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> int:
+        """Count a Stage's gathered inputs by streaming — never materialising them (#69).
+
+        The ``records_in`` metric for a corpus-level accumulator (whose input is the whole
+        doc-level output). Streams each parent's records one at a time (:meth:`_stage_records`)
+        and counts, so the count is exact without holding the input as a list — the memory bound
+        the ADR requires for the accumulator input side.
+        """
+        total = 0
+        for parent in stage.depends_on:
+            for _ in self._stage_records(
+                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            ):
+                total += 1
+        return total
+
+    def _gather_inputs(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> list[StageOutput]:
         """A Stage's input = the concatenation of ALL its parents' outputs.
 
         Parents are read in declared ``depends_on`` order for determinism. This
         is what makes a converging DAG ({a, b} -> c) correct and multi-input:
-        c sees a's records followed by b's, from the dict — never a single
-        overwritten variable, and always the parents' *current* outputs.
+        c sees a's records followed by b's — never a single overwritten variable,
+        and always the parents' *current* outputs. A parent whose retained output was
+        already released (#69) is streamed back from its checkpoint (:meth:`_stage_records`),
+        so gathering is release-transparent and byte-identical to reading the live dict.
         """
         gathered: list[StageOutput] = []
         for parent in stage.depends_on:
-            gathered.extend(outputs.get(parent, []))
+            gathered.extend(
+                self._stage_records(
+                    parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+            )
         return gathered
 
     @staticmethod
@@ -1159,6 +1427,113 @@ class LocalRunner:
             )
             raise ContractError(msg)
 
+    def _scan_input_carriers(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> tuple[set[type[StageOutput]], set[str]]:
+        """Stream a Stage's gathered inputs once, returning the carrier types present (#69).
+
+        The streaming replacement for materialising ``incoming`` just to validate an accumulator's
+        wiring: it reads each parent's records one at a time (:meth:`_stage_records`) and collects
+        only the set of carrier *types* (and their names) seen — O(distinct-carriers) memory, not
+        O(records). The three streamed ``_require_*`` checks below use this so a mis-wired
+        accumulator still raises the same typed error, without holding the input list.
+        """
+        present: set[type[StageOutput]] = set()
+        names: set[str] = set()
+        for parent in stage.depends_on:
+            for record in self._stage_records(
+                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            ):
+                present.add(type(record))
+                names.add(type(record).__name__)
+        return present, names
+
+    def _require_profiling_inputs_streamed(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> None:
+        """Streaming form of :meth:`_require_profiling_inputs` (#69) — same typed error."""
+        present, names = self._scan_input_carriers(
+            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+        if not present:
+            return
+        if DocumentRecord not in present:
+            got = sorted(names)
+            msg = (
+                f"Stage {stage.name!r} (profiling) received no DocumentRecords "
+                f"(got: {', '.join(got)}). A Profiling Stage must depend on the Parse "
+                f"Stage (the documents it profiles). Check the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+
+    def _require_disambiguation_inputs_streamed(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> None:
+        """Streaming form of :meth:`_require_disambiguation_inputs` (#69) — same typed error."""
+        present, names = self._scan_input_carriers(
+            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+        if not present:
+            return
+        if EntityMention not in present:
+            got = sorted(names)
+            msg = (
+                f"Stage {stage.name!r} (disambiguation) received no EntityMentions "
+                f"(got: {', '.join(got)}). A Disambiguation Stage must depend on an "
+                f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
+                f"the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+
+    def _require_graph_inputs_streamed(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> None:
+        """Streaming form of :meth:`_as_type` + :meth:`_require_graph_inputs` (#69).
+
+        Graph Assembly's input must be entirely DisambiguationRecords (``_as_type`` rejected any
+        other carrier); an empty run is legitimately empty. Preserves both the wrong-carrier and
+        the all-wrong-non-empty typed errors while streaming — the wrong-carrier set is bounded,
+        never the record list.
+        """
+        present, names = self._scan_input_carriers(
+            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+        if not present:
+            return
+        wrong = sorted(t.__name__ for t in present if t is not DisambiguationRecord)
+        if wrong:
+            # Mirror ``_as_type``'s exact message (the check this streamed path replaces).
+            msg = (
+                f"Stage {stage.name!r} ({stage.capability.value}) requires "
+                f"DisambiguationRecord inputs but received: {', '.join(wrong)}. "
+                f"Check the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+
     @staticmethod
     def _as_records(
         stage: Stage, records: list[StageOutput]
@@ -1210,21 +1585,31 @@ class LocalRunner:
             raise ContractError(msg)
         return [r for r in records if isinstance(r, exportable)]
 
-    @staticmethod
     def _final_records(
-        ordered: list[Stage], outputs: dict[str, list[StageOutput]]
+        self,
+        ordered: list[Stage],
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
     ) -> list[StageOutput]:
         """Records for the Quality Report: the outputs of the DAG's sink Stages.
 
         A sink is a Stage nothing depends on. Reporting on sinks (rather than a
         single threaded ``current``) keeps the report correct for a fan-out or
         converging DAG, where the last topological Stage is not the whole story.
+        A sink whose retained output was released (#69) is streamed back from its checkpoint.
         """
         depended_on = {p for s in ordered for p in s.depends_on}
         sinks = [s.name for s in ordered if s.name not in depended_on]
         final: list[StageOutput] = []
         for name in sinks:
-            final.extend(outputs.get(name, []))
+            final.extend(
+                self._stage_records(
+                    name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+            )
         return final
 
     def _build_report(
@@ -1253,14 +1638,23 @@ class LocalRunner:
         # Parse/Chunk quality scan the Stage that produced those records (not just
         # the sinks), so a Source→Parse→Chunk→Export pipeline (whose sinks are
         # ChunkRecords) still reports Parse metrics from the Parse Stage's output.
-        parsed = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.PARSE)
-        chunked = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.CHUNK)
+        parsed = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.PARSE, storage=storage, run_id=run_id
+        )
+        chunked = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.CHUNK, storage=storage, run_id=run_id
+        )
         # Content Screening attaches the risk markers, so the flagged count is read
         # from the FINAL corpus records (post-screening), not the raw Chunk output
         # (which has no markers yet). Falls back to the chunk output when there is
         # no Content-Screening Stage.
         post_content = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.CONTENT_SCREENING
+            pipeline,
+            ordered,
+            outputs,
+            CapabilityKind.CONTENT_SCREENING,
+            storage=storage,
+            run_id=run_id,
         )
         flagged_source = post_content if post_content else chunked
         # Mentions come from an Entity-Extraction Stage OR a fused Stage (which emits
@@ -1272,20 +1666,38 @@ class LocalRunner:
             ordered,
             outputs,
             (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
+            storage=storage,
+            run_id=run_id,
         )
         relations = self._records_of_kinds(
             pipeline,
             ordered,
             outputs,
             (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
+            storage=storage,
+            run_id=run_id,
         )
-        redactions = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.REDACTION)
-        features = self._records_of_kind(pipeline, ordered, outputs, CapabilityKind.PROFILING)
+        redactions = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.REDACTION, storage=storage, run_id=run_id
+        )
+        features = self._records_of_kind(
+            pipeline, ordered, outputs, CapabilityKind.PROFILING, storage=storage, run_id=run_id
+        )
         disambiguations = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.DISAMBIGUATION
+            pipeline,
+            ordered,
+            outputs,
+            CapabilityKind.DISAMBIGUATION,
+            storage=storage,
+            run_id=run_id,
         )
         graph_records = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.GRAPH_ASSEMBLY
+            pipeline,
+            ordered,
+            outputs,
+            CapabilityKind.GRAPH_ASSEMBLY,
+            storage=storage,
+            run_id=run_id,
         )
         # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
         # the Stage consumed — the count it resolved from.
@@ -1294,6 +1706,8 @@ class LocalRunner:
             ordered,
             outputs,
             (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
+            storage=storage,
+            run_id=run_id,
         )
         return QualityReport(
             pipeline_name=pipeline.name,
@@ -1498,38 +1912,58 @@ class LocalRunner:
             },
         )
 
-    @staticmethod
     def _records_of_kind(
+        self,
         pipeline: Pipeline,
         ordered: list[Stage],
         outputs: dict[str, list[StageOutput]],
         kind: CapabilityKind,
+        *,
+        storage: Storage,
+        run_id: str,
     ) -> list[StageOutput]:
-        """Flatten the outputs of every Stage fulfilling ``kind`` (order-stable)."""
+        """Flatten the outputs of every Stage fulfilling ``kind`` (order-stable).
+
+        A Stage whose retained output was released (#69) is streamed back from its checkpoint,
+        so the Quality Report's per-kind rollups are read one kind at a time rather than the
+        whole doc-level output being held across the run.
+        """
         result: list[StageOutput] = []
         for stage in ordered:
             if stage.capability is kind:
-                result.extend(outputs.get(stage.name, []))
+                result.extend(
+                    self._stage_records(
+                        stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                    )
+                )
         return result
 
-    @staticmethod
     def _records_of_kinds(
+        self,
         pipeline: Pipeline,
         ordered: list[Stage],
         outputs: dict[str, list[StageOutput]],
         kinds: tuple[CapabilityKind, ...],
+        *,
+        storage: Storage,
+        run_id: str,
     ) -> list[StageOutput]:
         """Flatten the outputs of every Stage fulfilling any of ``kinds`` (order-stable).
 
         Used where a record kind can be produced by more than one capability — a
         mention comes from an Entity-Extraction OR a fused Stage; a relation from a
         Relation-Extraction OR that same fused Stage — and the caller then filters the
-        gathered output by carrier type.
+        gathered output by carrier type. A released Stage's output is streamed from its
+        checkpoint (#69).
         """
         result: list[StageOutput] = []
         for stage in ordered:
             if stage.capability in kinds:
-                result.extend(outputs.get(stage.name, []))
+                result.extend(
+                    self._stage_records(
+                        stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                    )
+                )
         return result
 
     def _screening_quality(

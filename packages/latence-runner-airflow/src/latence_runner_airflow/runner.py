@@ -129,7 +129,12 @@ class AirflowRunner:
             stage_metrics.append(self._run_stage_task(pipeline, run_id, stage, storage, xcom))
 
         outputs = xcom.as_outputs()
-        final_records = self._engine._final_records(ordered, outputs)  # noqa: SLF001
+        # Airflow's XCom holds every Stage's output (nothing released), so ``_final_records`` +
+        # ``_build_report`` read straight from ``outputs`` — the #69 checkpoint fallback is only
+        # for the local Runner's released doc-level entries and is never taken here.
+        final_records = self._engine._final_records(  # noqa: SLF001
+            ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
         report = self._engine._build_report(  # noqa: SLF001
             pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
         )
@@ -158,9 +163,17 @@ class AirflowRunner:
         adapter never swallows a Stage failure, so a corrupt commit is impossible.
         """
         incoming = xcom.gather(stage)
+        # #69: a corpus-level accumulator streams its input from the parents' records rather than
+        # the materialised ``incoming`` list; supply those parents' XCom outputs as the ``outputs``
+        # map the engine streams from. (For every other Stage the engine reads ``incoming``, so the
+        # map is unused.) Under Airflow the XCom store IS the substrate — nothing is released, so
+        # the engine finds each parent in the map and never falls back to a checkpoint.
+        parent_outputs: dict[str, list[StageOutput]] = {
+            parent: xcom.pull(parent) for parent in stage.depends_on
+        }
         started = time.perf_counter()
         own_output = self._engine._execute_stage(  # noqa: SLF001
-            stage, storage, pipeline, run_id, incoming
+            stage, storage, pipeline, run_id, incoming, parent_outputs
         )
         duration = time.perf_counter() - started
         xcom.push(stage.name, own_output)
@@ -271,13 +284,19 @@ class AirflowRunner:
             ti = context["ti"]
             storage = Storage.for_uri(pipeline.storage_uri)
             incoming: list[StageOutput] = []
+            # #69: keep each parent's records keyed so a corpus-level accumulator can stream its
+            # input from them (the engine reads this map for accumulators; ``incoming`` for every
+            # other Stage). The XCom store is Airflow's substrate — nothing is released.
+            parent_outputs: dict[str, list[StageOutput]] = {}
             for parent in stage.depends_on:
                 raw = ti.xcom_pull(task_ids=parent) or []
                 parent_stage = _stage_by_name(pipeline, parent)
-                incoming.extend(_deserialize(engine, parent_stage, pipeline, raw))
+                parent_records = _deserialize(engine, parent_stage, pipeline, raw)
+                parent_outputs[parent] = parent_records
+                incoming.extend(parent_records)
             started = time.perf_counter()
             own_output = engine._execute_stage(  # noqa: SLF001
-                stage, storage, pipeline, run_id, incoming
+                stage, storage, pipeline, run_id, incoming, parent_outputs
             )
             duration = time.perf_counter() - started
             metrics = StageMetrics(
@@ -322,7 +341,9 @@ class AirflowRunner:
                 raw_metrics = ti.xcom_pull(task_ids=stage.name, key="metrics")
                 if raw_metrics is not None:
                     stage_metrics.append(StageMetrics.model_validate_json(raw_metrics))
-            final_records = engine._final_records(ordered, outputs)  # noqa: SLF001
+            final_records = engine._final_records(  # noqa: SLF001
+                ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
             report = engine._build_report(  # noqa: SLF001
                 pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
             )
