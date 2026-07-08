@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-pii-presidio"
+version = "0.1.0"
+description = "Real Microsoft Presidio PII Redaction Provider (spaCy NER + pattern/context recognizers, CPU) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "pii", "redaction", "presidio", "spacy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the Presidio stack
+# (presidio-analyzer -> spaCy + a spaCy model) ships with THIS Provider package, not the
+# thin core. Presidio (library, MIT) pairs a spaCy NER model with pattern + context
+# recognizers — a genuinely DIFFERENT detection engine from the in-core regex hybrid_rule
+# and the learned gliner_pii, so it is a real bake-off alternative. Both the presidio-analyzer
+# library (MIT) and spaCy (MIT) and the default en_core_web_sm model (MIT) are permissive
+# (weights AND code verified, ADR-0012, 2026-07-08); nothing downloads unless a Pipeline
+# configures this Provider (the analyzer import + model load are deferred to first use).
+#
+# The spaCy model itself is NOT a PyPI dependency (spaCy models are installed out-of-band via
+# `python -m spacy download en_core_web_sm`, or pip-installed from the spaCy release URL); this
+# package depends on the presidio-analyzer library, and the Provider raises a clear, actionable
+# error when the analyzer or the configured spaCy model is absent at run time.
+#
+# H-G1 dep cap: 'presidio-analyzer' is a 2.x line that moves its API across MINORS, so it
+# carries an upper cap so a downstream install can't silently pull an API-breaking release.
+# The current line is 2.2.x (verified 2026-07-08); the cap is '<3' (the current-major boundary).
+dependencies = [
+    "latence-core",
+    "presidio-analyzer>=2.2,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group. Installing this package
+# makes 'redaction.presidio' available to any Pipeline with no core change (ADR-0004),
+# alongside the in-core deterministic 'redaction.hybrid_rule' and the learned
+# 'redaction.gliner_pii' — a true drop-in, swappable by one config line (ADR-0007).
+[project.entry-points."latence.providers"]
+"redaction.presidio" = "latence_pii_presidio.provider:PresidioRedactor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_pii_presidio"]

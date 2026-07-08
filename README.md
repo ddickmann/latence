@@ -123,6 +123,7 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 | `latence-relation-gliner` | Fused Entity+Relation Provider (gliner-relex). |
 | `latence-relation-llm` | LLM relation extraction (OpenAI-compatible / Ollama). |
 | `latence-pii-gliner` | Learned zero-shot PII Redaction Provider. |
+| `latence-pii-presidio` | Real Microsoft Presidio PII Redaction Provider (spaCy NER + recognizers). |
 | `latence-embedder-endpoint` | Embedder performance path (endpoint-backed). |
 | `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
 | `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |

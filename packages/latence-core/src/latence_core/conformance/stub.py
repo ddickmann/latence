@@ -195,6 +195,123 @@ def install_sentence_transformers(*, dimension: int = 8) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# presidio-analyzer stub (the real Microsoft Presidio Redaction Provider)
+# ---------------------------------------------------------------------------
+
+
+class _StubRecognizerResult:
+    """Stands in for ``presidio_analyzer.RecognizerResult``: entity_type + start/end + score."""
+
+    def __init__(self, entity_type: str, start: int, end: int, score: float) -> None:
+        self.entity_type = entity_type
+        self.start = start
+        self.end = end
+        self.score = score
+
+
+class _StubAnalyzerEngine:
+    """Stands in for ``presidio_analyzer.AnalyzerEngine``: returns canned document-offset spans.
+
+    The real Presidio stack (presidio-analyzer -> spaCy + a spaCy model) is not installed in the
+    CPU-first, offline test env (ADR-0007/0016). This stub returns fixed spans (set by the
+    installer) keyed to the canonical fixture text, filtered to the requested entities + threshold
+    and bounded to the analysed text length — so the produced RedactionRecord carries a real,
+    resolvable, in-bounds offset (a genuine contract check, not a no-op), without a live model.
+    """
+
+    spans: list[dict[str, Any]] = []
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def analyze(
+        self,
+        text: str,
+        language: str,  # noqa: ARG002 - accepted for API parity
+        entities: list[str] | None = None,
+        score_threshold: float = 0.0,
+        **_kwargs: Any,
+    ) -> list[_StubRecognizerResult]:
+        wanted = set(entities) if entities is not None else None
+        out: list[_StubRecognizerResult] = []
+        for s in type(self).spans:
+            if wanted is not None and s["entity_type"] not in wanted:
+                continue
+            if float(s["score"]) < score_threshold:
+                continue
+            if int(s["end"]) > len(text):
+                continue
+            out.append(
+                _StubRecognizerResult(
+                    entity_type=str(s["entity_type"]),
+                    start=int(s["start"]),
+                    end=int(s["end"]),
+                    score=float(s["score"]),
+                )
+            )
+        return out
+
+
+class _StubNlpEngine:
+    """A do-nothing NLP engine handle (the stub AnalyzerEngine ignores it)."""
+
+
+class _StubNlpEngineProvider:
+    """Stands in for ``presidio_analyzer.nlp_engine.NlpEngineProvider``."""
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def create_engine(self) -> _StubNlpEngine:
+        return _StubNlpEngine()
+
+
+@contextlib.contextmanager
+def install_presidio(*, spans: list[dict[str, Any]] | None = None) -> Iterator[None]:
+    """Install a fake ``presidio_analyzer`` (+ its ``nlp_engine`` submodule) returning canned spans.
+
+    Fakes both the top-level ``presidio_analyzer`` module (``AnalyzerEngine`` +
+    ``RecognizerResult``) and its ``presidio_analyzer.nlp_engine`` submodule
+    (``NlpEngineProvider``), since the Provider imports from both. The canned ``spans`` are
+    document-offset dicts
+    (``{"entity_type", "start", "end", "score"}``) keyed to the fixture text.
+    """
+    _StubAnalyzerEngine.spans = spans or []
+    module = types.ModuleType("presidio_analyzer")
+    module.AnalyzerEngine = _StubAnalyzerEngine  # type: ignore[attr-defined]
+    module.RecognizerResult = _StubRecognizerResult  # type: ignore[attr-defined]
+    nlp_module = types.ModuleType("presidio_analyzer.nlp_engine")
+    nlp_module.NlpEngineProvider = _StubNlpEngineProvider  # type: ignore[attr-defined]
+    module.nlp_engine = nlp_module  # type: ignore[attr-defined]
+    saved = sys.modules.get("presidio_analyzer")
+    saved_nlp = sys.modules.get("presidio_analyzer.nlp_engine")
+    sys.modules["presidio_analyzer"] = module
+    sys.modules["presidio_analyzer.nlp_engine"] = nlp_module
+    try:
+        yield
+    finally:
+        for name, prior in (
+            ("presidio_analyzer", saved),
+            ("presidio_analyzer.nlp_engine", saved_nlp),
+        ):
+            if prior is not None:
+                sys.modules[name] = prior
+            else:
+                sys.modules.pop(name, None)
+
+
+def presidio_pii_spans() -> list[dict[str, Any]]:
+    """Canned document-offset PII spans the Presidio stub returns for the canonical fixture.
+
+    The canonical document is ``"Alice works for Acme Corp in Berlin. Contact
+    alice@example.com about Acme Corp."`` — the email ``alice@example.com`` sits at offsets
+    [45, 62). Returning it as an ``EMAIL_ADDRESS`` (Presidio's UPPER_SNAKE type) exercises the
+    Provider's type mapping, offset round-trip, and masking end to end.
+    """
+    return [{"entity_type": "EMAIL_ADDRESS", "start": 45, "end": 62, "score": 0.95}]
+
+
+# ---------------------------------------------------------------------------
 # Canned typed replies keyed to the canonical fixture
 # ---------------------------------------------------------------------------
 

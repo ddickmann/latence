@@ -10,6 +10,7 @@ latence-ner-gliner = { workspace = true }
 latence-relation-llm = { workspace = true }
 latence-relation-gliner = { workspace = true }
 latence-pii-gliner = { workspace = true }
+latence-pii-presidio = { workspace = true }
 latence-parser-endpoint = { workspace = true }
 latence-ner-endpoint = { workspace = true }
 latence-embedder-endpoint = { workspace = true }
@@ -24,11 +25,12 @@ version = "0.0.0"
 description = "Dev meta-project pinning the latence workspace for tooling (not published)."
 requires-python = ">=3.11"
 # latence-ner-gliner / latence-relation-gliner / latence-relation-llm /
-# latence-pii-gliner / latence-parser-endpoint / latence-ner-endpoint /
+# latence-pii-gliner / latence-pii-presidio / latence-parser-endpoint / latence-ner-endpoint /
 # latence-embedder-endpoint / latence-embedder-st / latence-runner-airflow are
 # intentionally NOT pinned here: the gliner packages pull the heavy GLiNER stack
 # (torch/transformers), the llm + the three -endpoint packages pull the openai client,
-# latence-embedder-st pulls the sentence-transformers stack (torch/transformers), and the
+# latence-embedder-st pulls the sentence-transformers stack (torch/transformers),
+# latence-pii-presidio pulls the Presidio + spaCy stack, and the
 # airflow adapter pulls apache-airflow — installing any would break the CPU-first, offline, deterministic
 # dev/test environment (ADR-0007/0016). They are still workspace members (built +
 # type-checked from source), just not installed into the default dev env. Each Provider
@@ -89,12 +91,15 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 disallow_any_generics = true
 no_implicit_reexport = true
-# pyarrow / fsspec / yaml ship without complete type stubs. gliner and openai are
-# optional heavy/endpoint deps isolated in their Provider packages (not installed in
-# the dev env by design, ADR-0016) and are treated as dynamically typed — the
-# Providers monkeypatch them with fakes in tests.
+# pyarrow / fsspec / yaml ship without complete type stubs. gliner, openai,
+# sentence_transformers and presidio_analyzer are optional heavy/endpoint deps isolated in their
+# Provider packages (not installed in the dev env by design, ADR-0016) and are treated as
+# dynamically typed — the Providers monkeypatch them with fakes in tests.
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "sentence_transformers", "airflow.*"]
+module = [
+    "pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "sentence_transformers",
+    "presidio_analyzer", "presidio_analyzer.*", "airflow.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

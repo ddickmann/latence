@@ -713,8 +713,15 @@ def _relation_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
     )
 
 
-def _redaction_case(*, stub_scoped: bool) -> ConformanceCase:
-    """Redaction: emit one RedactionRecord per doc; a PARSE_ERROR doc is skipped (graceful)."""
+def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> ConformanceCase:
+    """Redaction: emit one RedactionRecord per doc; a PARSE_ERROR doc is skipped (graceful).
+
+    ``backend`` selects the stub-scoped Provider's fake detection engine: ``"gliner"`` installs
+    the fake ``gliner`` module (the learned ``redaction.gliner_pii``), ``"presidio"`` installs the
+    fake ``presidio_analyzer`` module (the real Microsoft Presidio ``redaction.presidio``). Both
+    return canned document-offset PII spans keyed to the canonical fixture, so the same contract /
+    graceful-failure / license / no-PII-leak subset is checked without a live model.
+    """
     pii_labels = ["person", "email"]
 
     def valid_output(records: Sequence[object]) -> bool:
@@ -736,15 +743,32 @@ def _redaction_case(*, stub_scoped: bool) -> ConformanceCase:
         return _capture_raise(lambda: list(provider.redact([err_doc])))
 
     if stub_scoped:
+        @contextlib.contextmanager
+        def _install_backend(*, empty: bool = False) -> Iterator[None]:
+            if backend == "presidio":
+                spans = [] if empty else stubs.presidio_pii_spans()
+                with stubs.install_presidio(spans=spans):
+                    yield
+            else:
+                entities = [] if empty else stubs.gliner_pii_entities()
+                with stubs.install_gliner(entities=entities):
+                    yield
+
         def invoke(provider: Any) -> Sequence[Record]:
-            with stubs.install_gliner(entities=stubs.gliner_pii_entities()):
+            with _install_backend():
                 return _run_valid(provider)
 
         def adversarial(provider: Any) -> AdversarialOutcome:
-            with stubs.install_gliner(entities=[]):
+            with _install_backend(empty=True):
                 return _run_adversarial(provider)
 
-        config: dict[str, Any] = {"pii_labels": pii_labels}
+        # Presidio keys off Presidio entity types (config ``entities``); gliner off zero-shot
+        # ``pii_labels``. Each Provider's required config shape.
+        config: dict[str, Any] = (
+            {"entities": ["EMAIL_ADDRESS", "PERSON"]}
+            if backend == "presidio"
+            else {"pii_labels": pii_labels}
+        )
     else:
         invoke = _run_valid
         adversarial = _run_adversarial
@@ -1020,7 +1044,8 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "entity.gliner": _entity_case(stub_scoped=True, gliner=True),
     "relation.llm": _relation_case(stub_scoped=True, gliner=False),
     "relation.gliner_relex": _relation_case(stub_scoped=True, gliner=True),
-    "redaction.gliner_pii": _redaction_case(stub_scoped=True),
+    "redaction.gliner_pii": _redaction_case(stub_scoped=True, backend="gliner"),
+    "redaction.presidio": _redaction_case(stub_scoped=True, backend="presidio"),
     "embedding.endpoint": _embedding_case(stub_scoped=True),
     "embedding.sentence_transformers": _embedding_case(
         stub_scoped=True, backend="sentence_transformers"

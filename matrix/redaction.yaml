@@ -1,0 +1,32 @@
+# matrix/redaction.yaml — the Redaction bake-off (ADR-0036 §4, P3-F5; W1-pii, #95).
+#
+# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Redaction Stage (the `redact`
+# node, inferred from the unique redaction Stage in the base stack):
+#
+#   redaction.hybrid_rule — the in-core deterministic, dependency-free regex/gazetteer hybrid (CPU,
+#                           pure-Python, comprehensive-by-default H-C1) — RUNS in CI (a real,
+#                           measured row)
+#   redaction.presidio    — real Microsoft Presidio (spaCy NER + pattern/context recognizers, heavy
+#                           dep, device: cuda) — SKIPPED-WITH-FLAG on a CPU-only host (needs a rig,
+#                           #64); NEVER a fabricated quality/throughput number
+#
+# A genuinely DIFFERENT detection engine per row (regex hybrid vs Presidio's spaCy+recognizers), so
+# this is a real comparison, not two flavours of the same thing. The Presidio candidate pins
+# `device: cuda` (honest GPU intent). On a CPU-only host (or CI, LATENCE_CUDA=0) the harness resolves
+# that through the SAME `select_device` seam the Runner uses and records the row skipped-with-flag with
+# no measured columns; on a real host with latence-pii-presidio + a spaCy model installed it runs and
+# is measured for real.
+#
+# The Redaction Stage HAS a gold set when the base stack declares one (`gold_set_uri`), so quality
+# here is the S10 gold-set P/R/F1 (read off the Quality Report's `goldset` rollup — no reinvented
+# scoring). The blessed stacks/default.yaml declares no Redaction gold set, so the quality column
+# falls back to the stage metric (per-PII-type detection counts) unless a gold-set-bearing base
+# stack is supplied. Either way no numbers are fabricated for a skipped candidate.
+stage: redaction
+candidates:
+  - provider: redaction.hybrid_rule
+  - provider: redaction.presidio
+    config:
+      model: en_core_web_sm   # MIT; en_core_web_lg (also MIT) for higher recall
+      entities: [EMAIL_ADDRESS, PHONE_NUMBER, US_SSN, CREDIT_CARD, IP_ADDRESS, IBAN_CODE, PERSON, LOCATION, URL]
+      device: cuda            # honest GPU intent; skipped-with-flag where no CUDA (device seam)

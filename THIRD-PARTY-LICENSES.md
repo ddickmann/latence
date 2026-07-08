@@ -44,14 +44,17 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 | pypdf | 6.14.2 | BSD-3-Clause | latence-parser-document |
 | gliner | ≥0.2.5 | Apache-2.0 **(upstream)** | latence-ner-gliner, latence-relation-gliner, latence-pii-gliner |
 | openai | ≥1.0 | Apache-2.0 **(upstream)** | latence-*-endpoint, latence-relation-llm |
+| presidio-analyzer | ≥2.2 | MIT **(upstream)** | latence-pii-presidio |
+| spacy (+ en_core_web_sm model) | (Presidio dep) | MIT **(upstream)** | latence-pii-presidio |
 | apache-airflow | ≥2.7 | Apache-2.0 **(upstream)** | latence-runner-airflow (`airflow` extra only) |
 
-`gliner`, `openai`, and `apache-airflow` are heavy/optional dependencies kept out
-of the CPU-first dev environment by design (ADR-0016); their licenses are the
-licenses published by the respective upstream projects
+`gliner`, `openai`, `presidio-analyzer`/`spacy`, and `apache-airflow` are heavy/optional
+dependencies kept out of the CPU-first dev environment by design (ADR-0016); their licenses
+are the licenses published by the respective upstream projects
 (github.com/urchade/GLiNER — Apache-2.0; github.com/openai/openai-python —
-Apache-2.0; Apache Airflow — Apache-2.0). Verify against the installed
-`dist-info` when installing that Provider.
+Apache-2.0; github.com/microsoft/presidio — MIT; github.com/explosion/spaCy and the
+`en_core_web_sm`/`en_core_web_lg` models — MIT; Apache Airflow — Apache-2.0). Verify against
+the installed `dist-info` when installing that Provider.
 
 ### Dev-only tooling (not shipped in any wheel)
 

@@ -89,9 +89,10 @@ def _model_profile(
     )
 
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 31 Providers across 14 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
-# learned sentence-transformers Embedder W1-embed). If a Provider is added/removed, this list is
-# updated deliberately, so the count check catches an accidental un-covered Provider.
+# 32 Providers across 14 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
+# learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii). If a
+# Provider is added/removed, this list is updated deliberately, so the count check catches an
+# accidental un-covered Provider.
 _EXPECTED_PROVIDERS = frozenset(
     {
         "source.local_folder",
@@ -112,6 +113,7 @@ _EXPECTED_PROVIDERS = frozenset(
         "relation.gliner_relex",
         "redaction.hybrid_rule",
         "redaction.gliner_pii",
+        "redaction.presidio",
         "profiling.statistical",
         "profiling.lightweight",
         "disambiguation.cascade",
@@ -149,12 +151,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 31 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 32 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 31
+    assert len(names) == 32
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -190,12 +192,12 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 
 
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
-    """The rolled-up report: all 31 pass, and the endpoint/GPU Providers are stub-flagged."""
+    """The rolled-up report: all 32 pass, and the endpoint/GPU Providers are stub-flagged."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 31
+    assert report.providers_total == 32
     assert report.providers_failed == 0
     assert report.all_passed
-    # The eight endpoint/GPU Providers are flagged stub-scoped ("needs a rig"), never fabricated.
+    # The nine endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
     stub_scoped = {r.provider for r in report.results if r.stub_scoped}
     assert stub_scoped == {
         "parser.endpoint",
@@ -204,6 +206,7 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
         "relation.llm",
         "relation.gliner_relex",
         "redaction.gliner_pii",
+        "redaction.presidio",
         "embedding.endpoint",
         "embedding.sentence_transformers",
     }
