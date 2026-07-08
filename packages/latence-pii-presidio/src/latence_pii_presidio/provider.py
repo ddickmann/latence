@@ -354,7 +354,7 @@ class PresidioRedactor(AdapterBase):
         # true drop-in must too. NOTE: carry_provenance only applies non-None updates (it cannot
         # *clear* a field), so passing page_start=None there is a silent no-op that would leave the
         # source doc's stale page range on the record; clear it explicitly for hybrid_rule parity.
-        # (AdapterBase gap flagged in the seam-report: carry_provenance can set but not null a field.)
+        # (AdapterBase gap in the seam-report: carry_provenance can set but not null a field.)
         provenance, carried_classification = self.carry_provenance(
             document, char_start=0, char_end=len(text)
         )

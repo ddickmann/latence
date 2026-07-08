@@ -262,8 +262,8 @@ def test_airflow_report_path_has_no_slf001_reach_for_report_building() -> None:
                 f"Airflow adapter line {i} still reaches past the interface: {reach!r} in {line!r}"
             )
 
-    # 2. No ``# noqa: SLF001`` remains on a report-building line (the reaches the issue named to
-    #    kill; the execution-side reaches — _execute_stage etc. — may keep theirs).
+    # 2. No SLF001-suppressed reach remains on a report-building line (the reaches the issue named
+    #    to kill; the execution-side reaches — _execute_stage etc. — may keep theirs).
     for i, line in enumerate(lines, start=1):
         if "SLF001" in line:
             assert not any(
