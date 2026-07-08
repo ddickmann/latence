@@ -98,7 +98,7 @@ _EXPECTED_PROVIDERS = frozenset(
         "parser.plaintext",
         "parser.document",
         "parser.pdfplumber",
-        "parse.endpoint",
+        "parser.endpoint",
         "chunk.markdown",
         "chunk.sentence_window",
         "screening.intake_signature",
@@ -197,7 +197,7 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     # The seven endpoint/GPU Providers are flagged stub-scoped ("needs a rig"), never fabricated.
     stub_scoped = {r.provider for r in report.results if r.stub_scoped}
     assert stub_scoped == {
-        "parse.endpoint",
+        "parser.endpoint",
         "entity.endpoint",
         "entity.gliner",
         "relation.llm",

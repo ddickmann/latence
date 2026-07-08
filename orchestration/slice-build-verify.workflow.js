@@ -15,12 +15,21 @@ let a = args
 if (typeof a === 'string') { try { a = JSON.parse(a) } catch { a = {} } }
 if (!a || typeof a !== 'object') a = {}
 
+// Portable default repo root: prefer an explicit arg, then the LATENCE_REPO env var, then the repo
+// this script lives in (orchestration/ is one level below the toplevel), and finally the current
+// working directory. No maintainer-specific absolute path is baked in, so this runs on a fresh
+// clone in any location while still honoring an explicit `repo` arg when driven by args.
+const scriptRepoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+const defaultRepo = process.env.LATENCE_REPO || scriptRepoRoot || process.cwd()
+
 const slice = String(a.slice || 'slice')                   // e.g. "S2"
 const title = String(a.title || slice)                     // e.g. "S2 — Parse"
 const issueFile = String(a.issueFile || '')                // repo-relative, e.g. "issues/phase-1-machinery/S2-parse.md"
 const branch = String(a.branch || `${slice.toLowerCase()}-slice`)
-const repo = String(a.repo || '/Users/dennisdickmann/Developer/latence-framework')
-const worktree = String(a.worktree || `/Users/dennisdickmann/Developer/latence-framework-${slice.toLowerCase()}`)
+const repo = String(a.repo || defaultRepo)
+// Default the worktree as a sibling of the repo root (repo path + slice), so it is portable rather
+// than an absolute maintainer path.
+const worktree = String(a.worktree || `${repo.replace(/\/$/, '')}-${slice.toLowerCase()}`)
 const ghIssue = a.ghIssue != null ? a.ghIssue : null       // GitHub issue number to "Closes #", optional
 
 const DESIGN = [

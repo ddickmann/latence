@@ -12,11 +12,20 @@ let a = args
 if (typeof a === 'string') { try { a = JSON.parse(a) } catch { a = {} } }
 if (!a || typeof a !== 'object') a = {}
 
+// Portable default repo root: prefer an explicit arg, then the LATENCE_REPO env var, then the
+// repo this script lives in (orchestration/ is one level below the toplevel), and finally the
+// current working directory. No maintainer-specific absolute path is baked in, so this runs on a
+// fresh clone in any location while still honoring an explicit `repo` arg when driven by args.
+const scriptRepoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+const defaultRepo = process.env.LATENCE_REPO || scriptRepoRoot || process.cwd()
+
 const title = String(a.title || 'debt batch')
 const issues = Array.isArray(a.issues) ? a.issues : []
 const branch = String(a.branch || 'debt-fix')
-const repo = String(a.repo || '/Users/dennisdickmann/Developer/latence-framework')
-const worktree = String(a.worktree || `/Users/dennisdickmann/Developer/latence-framework-${branch}`)
+const repo = String(a.repo || defaultRepo)
+// Default the worktree as a sibling of the repo root (repo's parent + repo basename + branch),
+// so it too is portable rather than an absolute maintainer path.
+const worktree = String(a.worktree || `${repo.replace(/\/$/, '')}-${branch}`)
 const issueList = issues.join(', ')
 const closes = issues.map(n => `Closes #${n}`).join('\n')
 

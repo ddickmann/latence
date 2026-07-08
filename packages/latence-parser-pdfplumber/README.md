@@ -76,7 +76,7 @@ sharpened rather than bypassed.
 For this adapter, two profile fields are **inert** (declared truthfully, but nothing reads them):
 
 - **`cost_per_1k`** — `None`; correct for a local library (no per-call cost). Inert here; it earns
-  its keep only for endpoint/API providers (`parse.endpoint`, the embedder endpoint).
+  its keep only for endpoint/API providers (`parser.endpoint`, the embedder endpoint).
 - **`memory_mb`** — declared `96` (an honest small footprint for pdfplumber's page buffers), but
   the device seam routes only on `compute`; there is no memory-gated skip, so nothing consumes it.
   Inert here; it would earn its keep once a memory-aware host-fit check exists.

@@ -7,7 +7,7 @@
 # same downstream (ADR-0007: "switching is a config/URL swap, never a pipeline change").
 #
 # To go back to the laptop CPU path, change exactly two lines:
-#   parse:    provider: parse.endpoint   -> parser.document   (drop base_url/model)
+#   parse:    provider: parser.endpoint  -> parser.document   (drop base_url/model)
 #   entities: provider: entity.endpoint  -> entity.gliner     (drop base_url)
 #
 # The endpoint Providers live in their own packages (heavy `openai` client isolated
@@ -36,7 +36,7 @@ stages:
 
   - name: parse
     capability: parse
-    provider: parse.endpoint              # PERFORMANCE PATH (was: parser.document)
+    provider: parser.endpoint             # PERFORMANCE PATH (was: parser.document)
     depends_on: [source]
     config:
       base_url: "http://vllm-host:8000/v1"   # the only change vs the CPU path

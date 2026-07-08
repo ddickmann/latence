@@ -29,13 +29,17 @@ classifiers = [
 # weights — it calls a user-supplied OpenAI-compatible / vLLM / Triton endpoint. Nothing is called
 # unless a Pipeline configures this Provider (ADR-0007: the endpoint path is the performance path,
 # never forced into first-run).
+# H-G1 dep cap: 'openai' is a fast-moving lib whose API breaks across majors, so it carries an
+# upper cap to keep a downstream install from silently pulling an API-breaking major. The current
+# major is 2.x (verified 2026-07-08), so the cap is '<3' (the real current-major boundary) — NOT
+# the '<2' an older 1.x baseline would suggest, which would exclude the shipping 2.x line.
 dependencies = [
     "latence-core",
-    "openai>=1.0",
+    "openai>=1.0,<3",
 ]
 
 # Registers the Parse performance Provider under the discovery group. Installing this package makes
-# 'parse.endpoint' available to any Pipeline with no core change (ADR-0004), swappable with the
+# 'parser.endpoint' available to any Pipeline with no core change (ADR-0004), swappable with the
 # in-core CPU 'parser.document' by one config line (ADR-0007).
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"
@@ -43,7 +47,7 @@ Repository = "https://github.com/ddickmann/latence-framework"
 Issues = "https://github.com/ddickmann/latence-framework/issues"
 
 [project.entry-points."latence.providers"]
-"parse.endpoint" = "latence_parser_endpoint.provider:EndpointDocumentParser"
+"parser.endpoint" = "latence_parser_endpoint.provider:EndpointDocumentParser"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_parser_endpoint"]

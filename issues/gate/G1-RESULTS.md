@@ -1,7 +1,7 @@
 # G1 Profound-Testing Gate — Signed Results
 
 - **Date:** 2026-07-07
-- **Repo:** /Users/dennisdickmann/Developer/latence-framework
+- **Repo:** `<REPO_ROOT>` (the latence-framework checkout; e.g. the git toplevel of this clone)
 - **Commit at sign-off:** `28352f235f502aa102967f760207e9de795027ad` (`orchestration: G1 gate workflow (parallel verification lanes → signed G1-RESULTS.md)`)
 - **Branch:** main
 - **Gate spec:** [issues/gate/G1-profound-testing-gate.md](./G1-profound-testing-gate.md)
@@ -200,14 +200,14 @@ Every run reported `contracts_complete=True` and exported both `records.jsonl` a
 
 Repo read+run only (no commits). **Seam:** `latence_core.capability.ProviderRegistry.load()` resolves any `"latence.providers"` entry point; `LocalRunner._execute_stage` (`runner.py:536`) does `provider_cls=registry.load(stage.provider); provider=provider_cls(cfg)`; then `_dispatch_stage` isinstance-checks the capability Protocol. One uniform swap seam for every capability.
 
-**Capabilities with ≥2 providers (13 entry points across 12 packages):** Parser (plaintext + document [CPU] + parse.endpoint [openai]); EntityExtractor (gazetteer [CPU] + gliner [torch] + endpoint [openai]); RelationExtractor (pattern [CPU] + llm [openai]; gliner_relex FUSED, torch); PIIDetector (redaction.hybrid_rule [CPU] + gliner_pii [torch]); Embedder (embedding.hashing [CPU, zero-dep] + endpoint [openai]); Export (jsonl_parquet + knowledge_graph + demo_site, all CPU). (Screening's two providers are DISTINCT capabilities — IntakeScreener vs ContentScreener — not a swap pair.)
+**Capabilities with ≥2 providers (13 entry points across 12 packages):** Parser (plaintext + document [CPU] + parser.endpoint [openai]); EntityExtractor (gazetteer [CPU] + gliner [torch] + endpoint [openai]); RelationExtractor (pattern [CPU] + llm [openai]; gliner_relex FUSED, torch); PIIDetector (redaction.hybrid_rule [CPU] + gliner_pii [torch]); Embedder (embedding.hashing [CPU, zero-dep] + endpoint [openai]); Export (jsonl_parquet + knowledge_graph + demo_site, all CPU). (Screening's two providers are DISTINCT capabilities — IntakeScreener vs ContentScreener — not a swap pair.)
 
 **Live CPU swap — RAN, PASSED:**
 1. Parser swap via registry: `parser.plaintext` and `parser.document` both `isinstance(Parser)==True`; both emit `DocumentRecord` at schema_version=12 with provenance+classification present, identical `model_fields` set.
 2. Export swap: all 3 satisfy `isinstance(Export)==True` behind the single `export(records, storage, out_dir) -> list[str]` seam.
 3. Full-pipeline swap: `packages/latence-demo/tests/test_e2e_demo.py` — 6/6 green; `test_pipeline_swap_is_a_one_line_change` asserts the swap touches ONLY the target `Stage.provider`; `test_demo_runs_the_swapped_provider` injects a swapped registry and reruns the identical Pipeline (ADR-0011).
 
-**Heavy providers — register + seam verified (real installs, mocked model/endpoint):** each package depends on latence-core (shares the seam) + one heavy dep, defers the model/client import to first use, and passes its seam suite: `entity.gliner` 8/8, `relation.gliner_relex` 9/9, `redaction.gliner_pii` 10/10 (install torch, mock `gliner.GLiNER`); `entity.endpoint` 9/9, `relation.llm` 10/10, `embedding.endpoint` 9/9, `parse.endpoint` 12/12 (openai client mocked). All emit the SAME contract as their CPU sibling "modulo the model." Endpoint providers target any OpenAI-compatible/vLLM/Triton endpoint.
+**Heavy providers — register + seam verified (real installs, mocked model/endpoint):** each package depends on latence-core (shares the seam) + one heavy dep, defers the model/client import to first use, and passes its seam suite: `entity.gliner` 8/8, `relation.gliner_relex` 9/9, `redaction.gliner_pii` 10/10 (install torch, mock `gliner.GLiNER`); `entity.endpoint` 9/9, `relation.llm` 10/10, `embedding.endpoint` 9/9, `parser.endpoint` 12/12 (openai client mocked). All emit the SAME contract as their CPU sibling "modulo the model." Endpoint providers target any OpenAI-compatible/vLLM/Triton endpoint.
 
 **License audit** (consolidated from ADR-0012 + per-provider docstrings, re-verified 2026-07-06/07, weights+code separately):
 - **Defaults shipped — all permissive:** core in-process providers ship NO weights (Apache-2.0 framework code; `parser.document` uses pypdf BSD-3-Clause). `entity.gliner` default `urchade/gliner_multi-v2.1`: weights Apache-2.0 (relicensed from CC-BY-NC), lib Apache-2.0. `relation.gliner_relex` default `knowledgator/gliner-relex-multi-v1.0`: weights + code Apache-2.0. `redaction.gliner_pii` default `urchade/gliner_multi_pii-v1`: weights Apache-2.0. Endpoint providers bundle NO weights (openai client Apache-2.0). Default learned Embedder `multilingual-e5-small` = MIT; e5-large (endpoint default) same intfloat MIT family. Also verified clean in ADR-0012: PaddleOCR-VL-1.5, LightOnOCR-2-1B, gliner-linker-large+rerank, all-MiniLM-L6-v2, ModernBERT, google/mt5, microsoft/llmlingua-2, all Qwen3.

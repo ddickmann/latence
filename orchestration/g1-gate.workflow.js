@@ -7,7 +7,11 @@ export const meta = {
   ],
 }
 
-const repo = '/Users/dennisdickmann/Developer/latence-framework'
+// Portable repo root: prefer the LATENCE_REPO env var, then the repo this script lives in
+// (orchestration/ is one level below the toplevel), and finally the current working directory. No
+// maintainer-specific absolute path is baked in, so this runs on a fresh clone in any location.
+const scriptRepoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+const repo = process.env.LATENCE_REPO || scriptRepoRoot || process.cwd()
 const RESULT = {
   type: 'object', additionalProperties: false,
   properties: {

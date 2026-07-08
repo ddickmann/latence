@@ -29,9 +29,12 @@ classifiers = [
 # core. Both the gliner library and the default urchade/gliner_multi-v2.1
 # checkpoint are Apache-2.0 (weights AND code verified permissive, ADR-0012,
 # 2026-07-06); nothing downloads unless a Pipeline configures this Provider.
+# H-G1 dep cap: 'gliner' is pre-1.0 and moves its API across 0.x MINORS (the effective majors),
+# so it carries an upper cap so a downstream install can't silently pull an API-breaking release.
+# The current line is 0.2.x (verified 2026-07-08); the cap is '<0.3' (the current-minor boundary).
 dependencies = [
     "latence-core",
-    "gliner>=0.2.5",
+    "gliner>=0.2.5,<0.3",
 ]
 
 # Registers this Provider under the framework's discovery group. Installing this

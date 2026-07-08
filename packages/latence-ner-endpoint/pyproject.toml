@@ -28,9 +28,13 @@ classifiers = [
 # Provider, not latence-core. The 'openai' client is Apache-2.0 (code); this Provider bundles NO
 # weights — it calls a user-supplied OpenAI-compatible / vLLM / Triton endpoint (ADR-0007: the
 # endpoint path is the performance path).
+# H-G1 dep cap: 'openai' is a fast-moving lib whose API breaks across majors, so it carries an
+# upper cap to keep a downstream install from silently pulling an API-breaking major. The current
+# major is 2.x (verified 2026-07-08), so the cap is '<3' (the real current-major boundary) — NOT
+# the '<2' an older 1.x baseline would suggest, which would exclude the shipping 2.x line.
 dependencies = [
     "latence-core",
-    "openai>=1.0",
+    "openai>=1.0,<3",
 ]
 
 # Registers the NER performance Provider under the discovery group. Installing this package makes

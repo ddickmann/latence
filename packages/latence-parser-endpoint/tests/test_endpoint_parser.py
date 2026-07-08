@@ -221,3 +221,22 @@ def test_cap_disabled_allows_large_input(fake_openai: type[_FakeOpenAI]) -> None
     out = list(provider.parse([_parser_input(content=b"\x00" * 4096)]))
     assert out[0].disposition is Disposition.PARSED
     assert _FakeCompletions.calls == 1
+
+
+def test_provider_is_registered_under_the_unified_parser_namespace() -> None:
+    """H-G1: the Parse endpoint Provider registers as ``parser.endpoint``, not the odd ``parse.endpoint``.
+
+    The registry keys on the exact ``latence.providers`` entry-point name, so an adopter flipping
+    ``parser.document`` -> ``parser.endpoint`` (the "swap one line" story) must not hit a ``KeyError``.
+    This reads the installed package metadata, so it fails loudly if the rename is ever reverted.
+    """
+    from importlib.metadata import entry_points
+
+    names = {ep.name for ep in entry_points(group="latence.providers")}
+    assert "parser.endpoint" in names, "parser.endpoint entry point missing"
+    assert "parse.endpoint" not in names, "old parse.endpoint entry point must be gone"
+    # And it resolves to this Provider class (the entry point actually loads).
+    (endpoint_ep,) = [
+        ep for ep in entry_points(group="latence.providers") if ep.name == "parser.endpoint"
+    ]
+    assert endpoint_ep.load() is EndpointDocumentParser

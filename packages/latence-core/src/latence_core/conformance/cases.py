@@ -994,7 +994,7 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
 # Per-Provider overrides for the stub-scoped endpoint/GPU Providers (they need a stub-installing
 # invoke + the right config). Keyed by the exact Provider entry-point name.
 _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
-    "parse.endpoint": _parse_case(stub_scoped=True),
+    "parser.endpoint": _parse_case(stub_scoped=True),
     "entity.endpoint": _entity_case(stub_scoped=True, gliner=False),
     "entity.gliner": _entity_case(stub_scoped=True, gliner=True),
     "relation.llm": _relation_case(stub_scoped=True, gliner=False),

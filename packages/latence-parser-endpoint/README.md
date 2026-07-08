@@ -11,7 +11,7 @@ pipeline edit.
 ```yaml
 - name: parse
   capability: parse
-  provider: parse.endpoint      # was: parser.document
+  provider: parser.endpoint     # was: parser.document
   depends_on: [source]
   config:
     base_url: "http://vllm-host:8000/v1"   # the only change vs the CPU path

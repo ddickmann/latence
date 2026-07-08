@@ -29,9 +29,13 @@ classifiers = [
 # (code); this Provider bundles NO weights — it calls a user-supplied endpoint
 # (OpenAI, vLLM, Together, or a local Ollama). Nothing is called unless a Pipeline
 # configures this Provider.
+# H-G1 dep cap: 'openai' is a fast-moving lib whose API breaks across majors, so it carries an
+# upper cap to keep a downstream install from silently pulling an API-breaking major. The current
+# major is 2.x (verified 2026-07-08), so the cap is '<3' (the real current-major boundary) — NOT
+# the '<2' an older 1.x baseline would suggest, which would exclude the shipping 2.x line.
 dependencies = [
     "latence-core",
-    "openai>=1.0",
+    "openai>=1.0,<3",
 ]
 
 # Registers this Provider under the framework's discovery group. Installing this
