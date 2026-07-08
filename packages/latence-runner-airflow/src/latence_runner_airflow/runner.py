@@ -5,7 +5,10 @@ The framework core is a library of typed Stages; execution is delegated to inter
 Pipeline Stages inside **Apache Airflow**, so an adopter keeps their own orchestrator instead of
 adopting ours. The Stage *semantics* are not re-implemented — the adapter reuses
 :class:`latence_core.runner.LocalRunner`'s :meth:`~latence_core.runner.LocalRunner._execute_stage`
-and :meth:`~latence_core.runner.LocalRunner._build_report` seams verbatim (no fork). What differs is
+Stage-execution seam verbatim (no fork) and builds its Quality Report through the engine's
+**public** :class:`~latence_core.quality_report_builder.QualityReportBuilder`
+(:attr:`~latence_core.runner.LocalRunner.quality_report_builder`) — the report concern is a
+relocatable unit reused through the interface, not a private reach-through (H-F1). What differs is
 **where scheduling and run-state live**:
 
 * The **local** Runner persists run state — manifest, per-Stage checkpoints, resume metadata — as
@@ -119,8 +122,8 @@ class AirflowRunner:
         """
         storage = Storage.for_uri(pipeline.storage_uri)
         # The Export Stage writes into this run's export dir; reuse the engine's own layout so the
-        # data artifacts land where the report builder expects them.
-        storage.makedirs(self._engine._run_dir(pipeline, run_id))  # noqa: SLF001
+        # data artifacts land where the report builder expects them (public run_dir, H-F1).
+        storage.makedirs(self._engine.run_dir(pipeline, run_id))
 
         ordered = topological_order(list(pipeline.stages))
         xcom = XComBackend()
@@ -129,19 +132,22 @@ class AirflowRunner:
             stage_metrics.append(self._run_stage_task(pipeline, run_id, stage, storage, xcom))
 
         outputs = xcom.as_outputs()
-        # Airflow's XCom holds every Stage's output (nothing released), so ``_final_records`` +
-        # ``_build_report`` read straight from ``outputs`` — the #69 checkpoint fallback is only
-        # for the local Runner's released doc-level entries and is never taken here.
-        final_records = self._engine._final_records(  # noqa: SLF001
+        # H-F1: build the Quality Report through the engine's PUBLIC QualityReportBuilder — the same
+        # report seam the local Runner uses, reused through the interface, not a private reach into
+        # ``_build_report`` / ``_final_records`` / ``_report_uri``. Airflow's XCom holds every
+        # Stage's output (nothing released), so the builder reads straight from ``outputs`` — the
+        # #69 checkpoint fallback is only for the local Runner's released entries and never taken.
+        builder = self._engine.quality_report_builder
+        final_records = builder.final_records(
             ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
         )
-        report = self._engine._build_report(  # noqa: SLF001
+        report = builder.build(
             pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
         )
         # The report is a data artifact of the run; persist it alongside the exports (the engine's
         # own report location), so an adopter reads it the same way regardless of Runner.
         storage.write_atomic(
-            self._engine._report_uri(pipeline, run_id),  # noqa: SLF001
+            self._engine.report_uri(pipeline, run_id),
             report.to_json().encode("utf-8"),
         )
         return report
@@ -210,8 +216,9 @@ class AirflowRunner:
 
         A final ``<dag_id>.report`` task (:meth:`_airflow_report_callable`) is wired **downstream of
         every sink Stage** (issue #44.4): it gathers each Stage's records + metrics from XCom,
-        builds the Quality Report through the same shared ``_build_report`` seam the ``run()`` path
-        uses, and persists it — the explicit commit of the run's data artifacts. Because it is
+        builds the Quality Report through the same shared public ``QualityReportBuilder`` seam the
+        ``run()`` path uses, and persists it — the explicit commit of the run's data artifacts.
+        Because it is
         downstream of every Stage, Airflow only schedules it once all Stages have succeeded, so a
         mid-DAG Stage failure fails the DAG run *before* the report/commit task runs and leaves the
         last committed Corpus Version intact (never torn). Before this task the real DAG emitted no
@@ -323,9 +330,9 @@ class AirflowRunner:
         it fires — a mid-DAG failure fails the run before this task, so the report/commit only ever
         reflects a complete run (no torn commit). Gathers each Stage's records and metrics from
         XCom, rebuilds the same ``outputs`` / ``stage_metrics`` the in-process :meth:`run` builds,
-        and calls the shared ``_build_report`` seam — so the Quality Report is byte-identical in
-        shape to the local Runner's, then persists it to the engine's own report location (the
-        commit of the run's data artifacts).
+        and calls the shared public ``QualityReportBuilder`` seam — so the Quality Report is
+        byte-identical in shape to the local Runner's, then persists it to the engine's own report
+        location (the commit of the run's data artifacts).
         """
         engine = self._engine
 
@@ -341,14 +348,18 @@ class AirflowRunner:
                 raw_metrics = ti.xcom_pull(task_ids=stage.name, key="metrics")
                 if raw_metrics is not None:
                     stage_metrics.append(StageMetrics.model_validate_json(raw_metrics))
-            final_records = engine._final_records(  # noqa: SLF001
+            # H-F1: build + persist through the engine's PUBLIC QualityReportBuilder + report_uri —
+            # the same shared report seam ``run()`` uses, so the report is byte-identical in shape
+            # to the local Runner's, with no reach past the interface.
+            builder = engine.quality_report_builder
+            final_records = builder.final_records(
                 ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
             )
-            report = engine._build_report(  # noqa: SLF001
+            report = builder.build(
                 pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
             )
             storage.write_atomic(
-                engine._report_uri(pipeline, run_id),  # noqa: SLF001
+                engine.report_uri(pipeline, run_id),
                 report.to_json().encode("utf-8"),
             )
 

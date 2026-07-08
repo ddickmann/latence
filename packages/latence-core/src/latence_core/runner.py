@@ -16,7 +16,6 @@ spine (Source→Parse→Export) the order is linear, but the DAG machinery is re
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from typing import TYPE_CHECKING, TypeVar
@@ -41,56 +40,49 @@ from latence_core.capability import (
 from latence_core.contracts import (
     ChunkRecord,
     DisambiguationRecord,
-    DisambiguationScope,
-    Disposition,
     DocumentRecord,
     EntityMention,
     FeatureRecord,
-    FeatureScope,
     GraphRecord,
-    GraphScope,
     ParserInput,
     QuarantineRecord,
     Record,
     RedactionRecord,
     RelationMention,
-    ScreeningCheckpoint,
     ScreeningFinding,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
-from latence_core.goldset import (
-    ConfusionCounts,
-    GoldSet,
-    score_entities,
-    score_relations,
-)
-from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.profile import ProviderProfile, profile_of
 from latence_core.quality import (
-    ChunkQuality,
-    CompletenessCheck,
-    DisambiguationQuality,
     DriftDiagnostics,
-    EntityQuality,
-    GoldSetEvaluation,
-    GraphQuality,
-    LabelScore,
-    ParseQuality,
-    ProfilingQuality,
     QualityReport,
-    RedactionQuality,
-    RelationQuality,
-    ScreeningQuality,
     StageMetrics,
-    StageScore,
+)
+
+# H-F1: the co-occurrence fingerprint helpers now live in ``quality_report_builder`` (with the
+# report code that uses them). They are re-exported here — via redundant ``as`` aliases, the
+# explicit-re-export form mypy ``--strict`` and ruff both recognise — so callers that import them
+# from ``latence_core.runner`` (some tests do) keep working.
+from latence_core.quality_report_builder import (
+    _CO_OCCURRENCE_FINGERPRINT_LEN as _CO_OCCURRENCE_FINGERPRINT_LEN,
+)
+from latence_core.quality_report_builder import (
+    _DEFAULT_FINGERPRINT_SALT as _DEFAULT_FINGERPRINT_SALT,
+)
+from latence_core.quality_report_builder import QualityReportBuilder
+from latence_core.quality_report_builder import (
+    _co_occurrence_fingerprint as _co_occurrence_fingerprint,
+)
+from latence_core.quality_report_builder import (
+    _fingerprint_salt as _fingerprint_salt,
 )
 from latence_core.storage import Storage
 from latence_core.tracing import RunTracer, SpanSink
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Mapping
 
 # A Stage's output is one of the inter-Stage carriers the DAG threads between
 # Stages: Source→ParserInput; Parse→DocumentRecord; Chunk/Content-Screening→
@@ -189,50 +181,6 @@ def scrub_sensitive(value: object) -> object:
     return value
 
 
-_CO_OCCURRENCE_FINGERPRINT_LEN = 16
-_DEFAULT_FINGERPRINT_SALT = "latence"
-
-
-def _co_occurrence_fingerprint(left: str, right: str, salt: str) -> str:
-    """A deterministic, salted fingerprint of a co-occurrence pair.
-
-    The Quality Report is a shareable artifact; a co-occurring entity pair drawn from a
-    ``confidential`` source could carry PII in its raw surface. Rather than emit
-    ``"{left}|{right}"`` (the raw surfaces) into the report, we key the co-occurrence
-    entry by ``"pair:" + <sha256 hex prefix>`` over ``"{salt}:{left}|{right}"`` — the
-    same salted-digest construction S6 uses in
-    :func:`~latence_core.redaction_policy.placeholder_for` (``salt`` resolved from the
-    pipeline's Redaction Stage config, default ``"latence"``).
-
-    This is a **fingerprint, not encryption**: entity surfaces are low-entropy, so a
-    reader who can enumerate candidate names could recover a pair by dictionary attack.
-    The salt makes that attack per-deployment (the attacker must know the deployment's
-    salt) and defeats precomputed rainbow tables, matching S6's threat posture — it does
-    **not** make the digest irreversible. It removes the raw surface from the shareable
-    report; it does not make the report safe to publish to an untrusted audience. The
-    raw pair remains only in the exported, sensitivity-stamped ``CorpusFeatures`` data
-    artifact. Deterministic (byte-stable across processes, not the seed-salted builtin
-    ``hash``) so a seeded run renders identically, and stable per pair so the recurrence
-    signal survives.
-    """
-    digest = hashlib.sha256(f"{salt}:{left}|{right}".encode()).hexdigest()
-    return f"pair:{digest[:_CO_OCCURRENCE_FINGERPRINT_LEN]}"
-
-
-def _fingerprint_salt(pipeline: Pipeline) -> str:
-    """Resolve the co-occurrence fingerprint salt from the Redaction Stage config.
-
-    Uses the identical key + default as S6's Redaction Stage
-    (``config["salt"]``, default ``"latence"``) so a deployment that sets a custom salt
-    gets the same salt applied to both PII surrogates and co-occurrence fingerprints. If
-    the pipeline has no Redaction Stage, the default applies.
-    """
-    for stage in pipeline.stages:
-        if stage.capability is CapabilityKind.REDACTION:
-            return str(stage.config.get("salt", _DEFAULT_FINGERPRINT_SALT))
-    return _DEFAULT_FINGERPRINT_SALT
-
-
 def topological_order(stages: list[Stage]) -> list[Stage]:
     """Kahn's algorithm over ``depends_on`` edges. Raises on a cycle."""
     by_name = {s.name: s for s in stages}
@@ -290,6 +238,25 @@ class LocalRunner:
         # retained (the pre-#69 behavior) — a parity/debug knob; the on-disk output, resume, and
         # report are byte-identical either way, only peak memory differs.
         self._release_doc_level_outputs = True
+        # H-F1: the Quality Report half of the Runner, extracted into its own cohesive unit
+        # (``quality_report_builder``). The engine composes it — passing itself as the
+        # ``StageRecordReader`` (its public ``stage_records`` + ``read_findings``) and its live
+        # ``_fanout_by_stage`` tally — so the report build is the same byte-identical logic, now a
+        # relocatable module reused by both Runners through the public interface rather than via a
+        # private reach-through. ``_build_report`` / ``_final_records`` below are thin delegators.
+        self._report_builder = QualityReportBuilder(self, fanout_by_stage=self._fanout_by_stage)
+
+    @property
+    def quality_report_builder(self) -> QualityReportBuilder:
+        """The engine's composed :class:`~latence_core.quality_report_builder.QualityReportBuilder`.
+
+        Public so a second Runner reuses the *same* report seam this engine uses — bound to this
+        engine's live reader (``stage_records`` / ``read_findings``) and its ``_fanout_by_stage``
+        tally, so a report built through it is byte-identical to the local Runner's. This is the
+        interface the Airflow adapter builds its report through, instead of reaching into the
+        private ``_build_report`` / ``_final_records`` (the audit's THEME F fix, H-F1).
+        """
+        return self._report_builder
 
     def _drain_retry_count(self) -> int:
         """Read and reset the endpoint-retry tally the just-executed Stage's Provider reported."""
@@ -377,8 +344,18 @@ class LocalRunner:
 
     # -- state layout ------------------------------------------------------
 
-    def _run_dir(self, pipeline: Pipeline, run_id: str) -> str:
+    def run_dir(self, pipeline: Pipeline, run_id: str) -> str:
+        """The run's state/artifact directory on Storage (``<uri>/_latence/runs/<run_id>``).
+
+        Public so a second Runner reusing this engine's report path can land the run's data
+        artifacts where the shared report builder expects them, without reaching a private method
+        (H-F1). The local Runner's own file-state (manifest, checkpoints, WAL) still lives here.
+        """
         return f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
+
+    # Retained private name for the many internal call sites; a thin alias over the public method.
+    def _run_dir(self, pipeline: Pipeline, run_id: str) -> str:
+        return self.run_dir(pipeline, run_id)
 
     def _checkpoint_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
         return f"{self._run_dir(pipeline, run_id)}/checkpoints/{stage_name}.jsonl"
@@ -389,8 +366,18 @@ class LocalRunner:
     def _wal_uri(self, pipeline: Pipeline, run_id: str) -> str:
         return f"{self._run_dir(pipeline, run_id)}/wal.log"
 
-    def _report_uri(self, pipeline: Pipeline, run_id: str) -> str:
+    def report_uri(self, pipeline: Pipeline, run_id: str) -> str:
+        """The run's Quality Report location on Storage.
+
+        Public so a second Runner persists the report the shared
+        :class:`~latence_core.quality_report_builder.QualityReportBuilder` produced to the same
+        place an adopter reads it regardless of Runner — no private reach-through (H-F1).
+        """
         return f"{self._run_dir(pipeline, run_id)}/quality-report.json"
+
+    # Retained private name for the executor's own report writes; a thin alias.
+    def _report_uri(self, pipeline: Pipeline, run_id: str) -> str:
+        return self.report_uri(pipeline, run_id)
 
     def _export_dir(self, pipeline: Pipeline, run_id: str) -> str:
         return f"{self._run_dir(pipeline, run_id)}/export"
@@ -1335,9 +1322,17 @@ class LocalRunner:
             if line.strip()
         ]
 
-    def _read_findings(
+    def read_findings(
         self, storage: Storage, pipeline: Pipeline, run_id: str, stage_name: str
     ) -> list[ScreeningFinding]:
+        """Read a Screening Stage's persisted findings sidecar (empty if none written).
+
+        Public because it is one half of the
+        :class:`~latence_core.quality_report_builder.StageRecordReader` seam the shared
+        :class:`~latence_core.quality_report_builder.QualityReportBuilder` reads to build the
+        Screening rollup — the report builder no longer reaches into a private method for it
+        (H-F1). The executor's own screening path uses the same reader.
+        """
         uri = self._findings_uri(pipeline, run_id, stage_name)
         if not storage.exists(uri):
             return []
@@ -1347,10 +1342,30 @@ class LocalRunner:
             if line.strip()
         ]
 
+    def stage_records(
+        self,
+        stage_name: str,
+        outputs: Mapping[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> Iterator[StageOutput]:
+        """Public reader half of the report-builder seam — delegates to :meth:`_stage_records`.
+
+        The shared :class:`~latence_core.quality_report_builder.QualityReportBuilder` (and a second
+        Runner reusing it) reads each Stage's records back through this public method instead of the
+        private ``_stage_records`` — the report concern is a real, relocatable unit that composes
+        with the engine through its interface, never a ``# noqa: SLF001`` reach-through (H-F1).
+        """
+        yield from self._stage_records(
+            stage_name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+
     def _stage_records(
         self,
         stage_name: str,
-        outputs: dict[str, list[StageOutput]],
+        outputs: Mapping[str, list[StageOutput]],
         *,
         storage: Storage,
         pipeline: Pipeline,
@@ -1747,32 +1762,27 @@ class LocalRunner:
             raise ContractError(msg)
         return [r for r in records if isinstance(r, exportable)]
 
+    # -- Quality Report (delegated to the extracted builder, H-F1) ----------
+
     def _final_records(
         self,
         ordered: list[Stage],
-        outputs: dict[str, list[StageOutput]],
+        outputs: Mapping[str, list[StageOutput]],
         *,
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
     ) -> list[StageOutput]:
-        """Records for the Quality Report: the outputs of the DAG's sink Stages.
+        """The DAG's sink-Stage records for the Quality Report (delegates to the builder).
 
-        A sink is a Stage nothing depends on. Reporting on sinks (rather than a
-        single threaded ``current``) keeps the report correct for a fan-out or
-        converging DAG, where the last topological Stage is not the whole story.
-        A sink whose retained output was released (#69) is streamed back from its checkpoint.
+        Kept as a thin shim over :meth:`QualityReportBuilder.final_records
+        <latence_core.quality_report_builder.QualityReportBuilder.final_records>` so the executor's
+        own call sites (the end-of-run build and the mid-run FAIL-report build) read the same way;
+        the report logic itself now lives in the extracted builder (H-F1).
         """
-        depended_on = {p for s in ordered for p in s.depends_on}
-        sinks = [s.name for s in ordered if s.name not in depended_on]
-        final: list[StageOutput] = []
-        for name in sinks:
-            final.extend(
-                self._stage_records(
-                    name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-            )
-        return final
+        return self._report_builder.final_records(
+            ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
 
     def _build_report(
         self,
@@ -1781,834 +1791,30 @@ class LocalRunner:
         storage: Storage,
         ordered: list[Stage],
         stage_metrics: list[StageMetrics],
-        outputs: dict[str, list[StageOutput]],
+        outputs: Mapping[str, list[StageOutput]],
         final_records: Iterable[Record | StageOutput],
     ) -> QualityReport:
-        records = list(final_records)
-        completeness = self._completeness_check(records)
-        # Document count = distinct source documents seen across the run. Chunks
-        # fan out from a document (many chunks share one document_id), so counting
-        # distinct Provenance document ids is correct whether the sinks are
-        # DocumentRecords or ChunkRecords. A Profiling Stage's CORPUS-scope
-        # FeatureRecord carries a synthetic corpus-scope document_id (it is not a source
-        # document), so it is excluded from the source-document count.
-        doc_ids = {
-            r.provenance.document_id
-            for r in records
-            if not (isinstance(r, FeatureRecord) and r.scope is FeatureScope.CORPUS)
-        }
-        # Parse/Chunk quality scan the Stage that produced those records (not just
-        # the sinks), so a Source→Parse→Chunk→Export pipeline (whose sinks are
-        # ChunkRecords) still reports Parse metrics from the Parse Stage's output.
-        parsed = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.PARSE, storage=storage, run_id=run_id
-        )
-        chunked = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.CHUNK, storage=storage, run_id=run_id
-        )
-        # Content Screening attaches the risk markers, so the flagged count is read
-        # from the FINAL corpus records (post-screening), not the raw Chunk output
-        # (which has no markers yet). Falls back to the chunk output when there is
-        # no Content-Screening Stage.
-        post_content = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.CONTENT_SCREENING,
-            storage=storage,
-            run_id=run_id,
-        )
-        flagged_source = post_content if post_content else chunked
-        # Mentions come from an Entity-Extraction Stage OR a fused Stage (which emits
-        # mentions + relations together); relations from a Relation-Extraction Stage
-        # OR that same fused Stage. The quality builders isinstance-filter each list to
-        # its own carrier, so a fused Stage's mixed output is passed to both.
-        mentions = self._records_of_kinds(
-            pipeline,
-            ordered,
-            outputs,
-            (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
-            storage=storage,
-            run_id=run_id,
-        )
-        relations = self._records_of_kinds(
-            pipeline,
-            ordered,
-            outputs,
-            (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
-            storage=storage,
-            run_id=run_id,
-        )
-        redactions = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.REDACTION, storage=storage, run_id=run_id
-        )
-        features = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.PROFILING, storage=storage, run_id=run_id
-        )
-        disambiguations = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.DISAMBIGUATION,
-            storage=storage,
-            run_id=run_id,
-        )
-        graph_records = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.GRAPH_ASSEMBLY,
-            storage=storage,
-            run_id=run_id,
-        )
-        # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
-        # the Stage consumed — the count it resolved from.
-        disambig_mentions_in = self._records_of_kinds(
-            pipeline,
-            ordered,
-            outputs,
-            (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
-            storage=storage,
-            run_id=run_id,
-        )
-        return QualityReport(
-            pipeline_name=pipeline.name,
-            run_id=run_id,
-            document_count=len(doc_ids),
-            total_duration_seconds=round(sum(m.duration_seconds for m in stage_metrics), 6),
-            stages=stage_metrics,
-            completeness=completeness,
-            contracts_complete=completeness.passed,
-            parse=self._parse_quality(pipeline, parsed),
-            chunk=self._chunk_quality(pipeline, chunked, flagged_source),
-            screening=self._screening_quality(pipeline, run_id, storage, ordered),
-            entities=self._entity_quality(pipeline, mentions),
-            relations=self._relation_quality(pipeline, relations, self._fanout_total(ordered)),
-            redaction=self._redaction_quality(pipeline, redactions),
-            profiling=self._profiling_quality(pipeline, features),
-            disambiguation=self._disambiguation_quality(
-                pipeline, disambiguations, disambig_mentions_in
-            ),
-            graph=self._graph_quality(pipeline, graph_records),
-            drift=self._drift_diagnostics(chunked),
-            goldset=self._goldset_evaluation(pipeline, storage, mentions, relations),
-        )
+        """Build the run's Quality Report (delegates to the extracted builder, H-F1).
 
-    @staticmethod
-    def _completeness_check(records: list[Record | StageOutput]) -> CompletenessCheck:
-        """Contract-completeness over the exported records (Provenance/Classification + offsets).
-
-        Every record must carry Provenance and Classification (contract-guaranteed, audited
-        here). The S10 promotion also audits offset *alignment*: a record that carries a char
-        span must carry a **well-ordered** one, and if it also carries page coordinates those
-        must be well-ordered too — the "offsets aligned" half of the completeness AC. A record
-        with no char span at all is vacuously aligned and not counted. Page *presence* is not
-        re-required here: the sub-document carriers whose contracts require a page span
-        (EntityMention/RelationMention) already guarantee it at construction, while a
-        whole-document carrier (DocumentRecord/RedactionRecord/FeatureRecord) legitimately
-        holds a ``[0, len)`` char span with no page span.
+        A thin shim over :meth:`QualityReportBuilder.build
+        <latence_core.quality_report_builder.QualityReportBuilder.build>` for the executor's own
+        report writes. A second Runner does **not** call this private method — it constructs the
+        public :class:`~latence_core.quality_report_builder.QualityReportBuilder` and calls
+        ``build`` directly, so no Runner reaches past the interface (the audit's THEME F fix).
         """
-        check = CompletenessCheck(
-            records_checked=len(records),
-            records_with_provenance=sum(1 for r in records if r.provenance is not None),
-            records_with_classification=sum(1 for r in records if r.classification is not None),
+        return self._report_builder.build(
+            pipeline, run_id, storage, ordered, stage_metrics, outputs, final_records
         )
-        for record in records:
-            prov = record.provenance
-            if prov.char_start is None and prov.char_end is None:
-                # No char span to audit — vacuously aligned.
-                continue
-            check.offset_bearing_records += 1
-            span_ok = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            pages_ok = (
-                prov.page_start is None
-                or prov.page_end is None
-                or prov.page_end >= prov.page_start
-            )
-            if span_ok and pages_ok:
-                check.records_with_aligned_offsets += 1
-        return check
 
     @staticmethod
     def _drift_diagnostics(chunked: list[StageOutput]) -> DriftDiagnostics | None:
-        """Provenance-integrity drift roll-up across the chunk offsets (S10).
+        """Provenance-integrity drift roll-up over chunk offsets (moved to the builder, H-F1).
 
-        Audits every :class:`ChunkRecord` that carries its parent document's page map by
-        resolving the chunk's ``[char_start, char_end)`` endpoints through a
-        :class:`PageOffsetIndex` and accumulating the fuzzy recoveries — a finer drift
-        signal than the Parse-only page-boundary audit. Only ChunkRecords are audited:
-        mentions, relations, and redaction spans inherit the chunk offsets the Chunk Stage
-        already validated against the page map, so they carry no independent offset→page
-        drift. Returns ``None`` when there were no page-map-bearing chunk records to audit (a
-        Parse-only or chunk-free run), so a pipeline with nothing to audit reports no drift
-        section rather than a misleading all-zero one.
+        Retained as a static delegator on ``LocalRunner`` because the report's drift audit is
+        exercised directly as ``LocalRunner._drift_diagnostics([...])`` by the existing
+        DriftDiagnostics regression tests (issue #39.1). The logic itself now lives in
+        ``QualityReportBuilder._drift_diagnostics`` (H-F1); this forwards to it verbatim so those
+        tests keep passing unchanged (byte-identical behaviour).
         """
-        audited = 0
-        resolutions = 0
-        recovered = 0
-        max_drift = 0
-        for record in chunked:
-            if not isinstance(record, ChunkRecord) or record.page_map is None:
-                continue
-            prov = record.provenance
-            if prov.char_start is None or prov.char_end is None:
-                continue
-            index = PageOffsetIndex(record.page_map)
-            index.page_for_offset(prov.char_start)
-            index.page_for_offset(max(prov.char_end - 1, prov.char_start))
-            diag = index.diagnostics
-            audited += 1
-            resolutions += diag.resolutions
-            recovered += diag.recovered
-            max_drift = max(max_drift, diag.max_drift_chars)
-        if audited == 0:
-            return None
-        return DriftDiagnostics(
-            resolutions=resolutions,
-            recovered=recovered,
-            max_drift_chars=max_drift,
-            records_audited=audited,
-        )
+        return QualityReportBuilder._drift_diagnostics(chunked)  # noqa: SLF001
 
-    def _goldset_evaluation(
-        self,
-        pipeline: Pipeline,
-        storage: Storage,
-        mentions: list[StageOutput],
-        relations: list[StageOutput],
-    ) -> GoldSetEvaluation | None:
-        """Score the run against the adopter's gold set, when one is supplied (S10 harness).
-
-        Returns ``None`` unless the Pipeline declares a ``gold_set_uri`` — the harness is
-        opt-in (an adopter drops in 20–50 annotated documents). When present, the gold set is
-        loaded from Storage (JSON or YAML), the extracted mentions/relations are mapped to
-        their source file names, and per-Stage precision/recall/F1 are computed
-        deterministically against the annotations. The mention side is required for both
-        Stages (a relation's endpoints resolve through the mention spans), so a relations-only
-        gold set with no Entity-Extraction Stage simply yields no relation matches — never an
-        error.
-        """
-        if not pipeline.gold_set_uri:
-            return None
-        gold = self._load_gold_set(pipeline.gold_set_uri, storage)
-        typed_mentions = [m for m in mentions if isinstance(m, EntityMention)]
-        typed_relations = [r for r in relations if isinstance(r, RelationMention)]
-        # Map each mention/relation's parent document to its source file name so the gold
-        # annotations (keyed by file name) bind to the run's records.
-        file_name_of: dict[str, str] = {}
-        for m in typed_mentions:
-            file_name_of.setdefault(m.document_record_id, m.provenance.file_name)
-        for r in typed_relations:
-            file_name_of.setdefault(r.document_record_id, r.provenance.file_name)
-
-        gold_files = set(gold.by_file_name())
-        matched_files = {
-            file_name_of[doc_id]
-            for doc_id in file_name_of
-            if file_name_of[doc_id] in gold_files
-        }
-        evaluation = GoldSetEvaluation(
-            documents_annotated=len(gold.documents),
-            documents_matched=len(matched_files),
-            match_min_overlap=gold.match_min_overlap,
-        )
-        entity_overall, entity_labels = score_entities(typed_mentions, gold, file_name_of)
-        evaluation.stages.append(
-            self._stage_score("entities", entity_overall, entity_labels)
-        )
-        if gold.total_relations > 0:
-            relation_overall, relation_labels = score_relations(
-                typed_relations, typed_mentions, gold, file_name_of
-            )
-            evaluation.stages.append(
-                self._stage_score("relations", relation_overall, relation_labels)
-            )
-        return evaluation
-
-    @staticmethod
-    def _load_gold_set(uri: str, storage: Storage) -> GoldSet:
-        """Load + validate a gold set from Storage (JSON or YAML), by file extension."""
-        text = storage.read_text(uri)
-        if uri.endswith((".yaml", ".yml")):
-            import yaml
-
-            data = yaml.safe_load(text)
-        else:
-            data = json.loads(text)
-        if not isinstance(data, dict):
-            msg = f"Gold set at {uri!r} must be a JSON/YAML mapping at the top level."
-            # A malformed operator-supplied gold set is a config error (#73); ConfigError is a
-            # ValueError subclass, so pre-taxonomy ``except ValueError`` callers keep catching it.
-            raise ConfigError(msg)
-        return GoldSet.from_mapping(data)
-
-    @staticmethod
-    def _stage_score(
-        stage: str,
-        overall: ConfusionCounts,
-        per_label: dict[str, ConfusionCounts],
-    ) -> StageScore:
-        """Assemble a :class:`StageScore` from the confusion counts (overall + per label)."""
-        return StageScore(
-            stage=stage,
-            true_positives=overall.true_positives,
-            false_positives=overall.false_positives,
-            false_negatives=overall.false_negatives,
-            precision=overall.precision,
-            recall=overall.recall,
-            f1=overall.f1,
-            per_label={
-                label: LabelScore(
-                    true_positives=c.true_positives,
-                    false_positives=c.false_positives,
-                    false_negatives=c.false_negatives,
-                    precision=c.precision,
-                    recall=c.recall,
-                    f1=c.f1,
-                )
-                for label, c in per_label.items()
-            },
-        )
-
-    def _records_of_kind(
-        self,
-        pipeline: Pipeline,
-        ordered: list[Stage],
-        outputs: dict[str, list[StageOutput]],
-        kind: CapabilityKind,
-        *,
-        storage: Storage,
-        run_id: str,
-    ) -> list[StageOutput]:
-        """Flatten the outputs of every Stage fulfilling ``kind`` (order-stable).
-
-        A Stage whose retained output was released (#69) is streamed back from its checkpoint,
-        so the Quality Report's per-kind rollups are read one kind at a time rather than the
-        whole doc-level output being held across the run.
-        """
-        result: list[StageOutput] = []
-        for stage in ordered:
-            if stage.capability is kind:
-                result.extend(
-                    self._stage_records(
-                        stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                    )
-                )
-        return result
-
-    def _records_of_kinds(
-        self,
-        pipeline: Pipeline,
-        ordered: list[Stage],
-        outputs: dict[str, list[StageOutput]],
-        kinds: tuple[CapabilityKind, ...],
-        *,
-        storage: Storage,
-        run_id: str,
-    ) -> list[StageOutput]:
-        """Flatten the outputs of every Stage fulfilling any of ``kinds`` (order-stable).
-
-        Used where a record kind can be produced by more than one capability — a
-        mention comes from an Entity-Extraction OR a fused Stage; a relation from a
-        Relation-Extraction OR that same fused Stage — and the caller then filters the
-        gathered output by carrier type. A released Stage's output is streamed from its
-        checkpoint (#69).
-        """
-        result: list[StageOutput] = []
-        for stage in ordered:
-            if stage.capability in kinds:
-                result.extend(
-                    self._stage_records(
-                        stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                    )
-                )
-        return result
-
-    def _screening_quality(
-        self, pipeline: Pipeline, run_id: str, storage: Storage, ordered: list[Stage]
-    ) -> ScreeningQuality | None:
-        """Aggregate Screening findings across both checkpoints for the report.
-
-        Reads each Screening Stage's persisted findings + quarantine sidecars (so
-        the numbers are identical on fresh and resumed runs) and rolls them into
-        the Quality Report: every Quarantine disposition and reason, and every
-        propagated flag, are auditable there (S3 AC). Returns ``None`` when the
-        Pipeline has no Screening Stage.
-        """
-        screen_kinds = (CapabilityKind.INTAKE_SCREENING, CapabilityKind.CONTENT_SCREENING)
-        if not any(s.capability in screen_kinds for s in pipeline.stages):
-            return None
-        quality = ScreeningQuality()
-        for stage in ordered:
-            if stage.capability not in screen_kinds:
-                continue
-            findings = self._read_findings(storage, pipeline, run_id, stage.name)
-            quality.findings.extend(findings)
-            for finding in findings:
-                if finding.checkpoint is ScreeningCheckpoint.INTAKE:
-                    quality.intake_screened += 1
-                else:
-                    quality.content_screened += 1
-                if finding.verdict.value == "quarantine":
-                    quality.quarantined += 1
-                elif finding.verdict.value == "flag":
-                    quality.flagged += 1
-                else:
-                    quality.passed += 1
-        return quality
-
-    @staticmethod
-    def _chunk_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        flagged_source: list[StageOutput],
-    ) -> ChunkQuality | None:
-        """Aggregate Chunk-Stage quality: chunk counts, tokens, offset integrity.
-
-        Only computed when the Pipeline has a Chunk Stage. ``records`` is the Chunk
-        Stage's output (the canonical chunk set) from which counts, tokens, and the
-        offset-preservation invariant are measured: every :class:`ChunkRecord`'s
-        Provenance ``char_start``/``char_end`` must be a valid span and its
-        ``page_start``/``page_end`` populated — the S3 round-trip invariant, so
-        ``offset_preserving`` is True only if every chunk carried a resolvable span.
-        ``flagged_source`` is the POST-Content-Screening corpus (markers are
-        attached there, not at Chunk), so ``chunks_flagged`` reflects the corpus.
-        """
-        if not any(s.capability is CapabilityKind.CHUNK for s in pipeline.stages):
-            return None
-        quality = ChunkQuality()
-        for record in records:
-            if not isinstance(record, ChunkRecord):
-                continue
-            quality.chunks_total += 1
-            quality.tokens_total += record.token_count
-            prov = record.provenance
-            has_span = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            has_pages = prov.page_start is not None and prov.page_end is not None
-            if has_span and has_pages:
-                quality.chunks_offset_preserving += 1
-        quality.chunks_flagged = sum(
-            1 for r in flagged_source if isinstance(r, ChunkRecord) and r.flagged
-        )
-        return quality
-
-    @staticmethod
-    def _entity_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> EntityQuality | None:
-        """Aggregate Entity-Extraction quality: per-type counts + confidence dist.
-
-        Only computed when the Pipeline has an Entity-Extraction Stage. ``records``
-        is that Stage's output (the mention set) from which per-label counts, the
-        confidence histogram, and the offset-resolution invariant are measured:
-        every :class:`~latence_core.contracts.EntityMention`'s Provenance must carry
-        a valid char span AND a page span — the S4 round-trip (mention → offset →
-        original page) — so ``offset_resolving`` is True only when every mention
-        carried a resolvable span. The confidence distribution + per-type counts are
-        the S4 acceptance criterion (they "land in the Quality Report").
-        """
-        entity_kinds = (
-            CapabilityKind.ENTITY_EXTRACTION,
-            CapabilityKind.FUSED_ENTITY_RELATION,
-        )
-        if not any(s.capability in entity_kinds for s in pipeline.stages):
-            return None
-        quality = EntityQuality()
-        chunk_ids_with_mentions: set[str] = set()
-        for record in records:
-            if not isinstance(record, EntityMention):
-                continue
-            quality.mentions_total += 1
-            quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
-            quality.confidence.add(record.confidence)
-            chunk_ids_with_mentions.add(record.chunk_record_id)
-            prov = record.provenance
-            has_span = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            has_pages = prov.page_start is not None and prov.page_end is not None
-            if has_span and has_pages:
-                quality.mentions_offset_resolving += 1
-        quality.chunks_with_mentions = len(chunk_ids_with_mentions)
-        # Sort per_type for a stable, deterministic report.
-        quality.per_type = dict(sorted(quality.per_type.items()))
-        return quality
-
-    def _fanout_total(self, ordered: list[Stage]) -> tuple[int, int, int, int]:
-        """Sum the per-Stage relation fan-out-guard tallies across the run (ADR-0033 / #63, #68).
-
-        Folds every relation/fused Stage's ``(output-capped-docs, dropped-relations,
-        input-capped-docs, dropped-mentions)`` tally (captured in :meth:`_execute_stage`) into
-        one corpus-wide 4-tuple for the Quality Report. A Stage restored from a checkpoint on
-        resume never re-ran its Provider, so it contributes nothing here — the audited tally
-        reflects Providers that actually executed this run (a resumed relation Stage's caps were
-        already reflected in its committed output).
-        """
-        out_capped = 0
-        dropped_rel = 0
-        in_capped = 0
-        dropped_men = 0
-        for stage in ordered:
-            oc, dr, ic, dm = self._fanout_by_stage.get(stage.name, (0, 0, 0, 0))
-            out_capped += oc
-            dropped_rel += dr
-            in_capped += ic
-            dropped_men += dm
-        return out_capped, dropped_rel, in_capped, dropped_men
-
-    @staticmethod
-    def _relation_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        fanout: tuple[int, int, int, int] = (0, 0, 0, 0),
-    ) -> RelationQuality | None:
-        """Aggregate Relation-Extraction quality: per-type counts + confidence dist (S5).
-
-        Only computed when the Pipeline has a Relation-Extraction (or fused) Stage.
-        ``records`` is the relation set from which per-label counts, the confidence
-        histogram, and the offset-resolution invariant are measured: every
-        :class:`~latence_core.contracts.RelationMention`'s Provenance must carry a
-        valid char span AND a page span — the S5 round-trip (relation → offset →
-        original page) — so ``offset_resolving`` is True only when every relation
-        carried a resolvable span. The per-type counts + confidence distribution are
-        the S5 acceptance criterion ("relation counts + confidence land in the
-        Quality Report"). ``fanout`` is the run's ``(output-capped-docs, dropped-relations,
-        input-capped-docs, dropped-mentions)`` fan-out-guard tally (ADR-0033 / #63 output cap;
-        #68 input mention cap), surfaced as the audited "capped" marker so a bounded
-        pathological corpus is never silently truncated.
-        """
-        relation_kinds = (
-            CapabilityKind.RELATION_EXTRACTION,
-            CapabilityKind.FUSED_ENTITY_RELATION,
-        )
-        if not any(s.capability in relation_kinds for s in pipeline.stages):
-            return None
-        quality = RelationQuality()
-        (
-            quality.fanout_capped_documents,
-            quality.fanout_dropped_relations,
-            quality.mention_capped_documents,
-            quality.mention_dropped_mentions,
-        ) = fanout
-        docs_with_relations: set[str] = set()
-        for record in records:
-            if not isinstance(record, RelationMention):
-                continue
-            quality.relations_total += 1
-            quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
-            quality.confidence.add(record.confidence)
-            docs_with_relations.add(record.document_record_id)
-            prov = record.provenance
-            has_span = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            has_pages = prov.page_start is not None and prov.page_end is not None
-            if has_span and has_pages:
-                quality.relations_offset_resolving += 1
-        quality.documents_with_relations = len(docs_with_relations)
-        quality.per_type = dict(sorted(quality.per_type.items()))
-        return quality
-
-    @staticmethod
-    def _redaction_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> RedactionQuality | None:
-        """Aggregate Redaction quality: per-PII-type + per-action detection counts (S6).
-
-        Only computed when the Pipeline has a Redaction Stage. ``records`` is the set
-        of one :class:`~latence_core.contracts.RedactionRecord` per document, from
-        which the per-type and per-action span counts, the documents-redacted, and the
-        documents-with-PII are measured — the S6 acceptance criterion ("PII detection
-        counts by type land in the Quality Report"). Only counts and type/action names
-        cross into the report; **no raw PII value** ever does (a PIISpan never stores
-        the surface string, so this rollup cannot leak one).
-        """
-        if not any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages):
-            return None
-        quality = RedactionQuality()
-        for record in records:
-            if not isinstance(record, RedactionRecord):
-                continue
-            quality.documents_redacted += 1
-            if record.pii_spans:
-                quality.documents_with_pii += 1
-            if record.redaction_disabled_for_sensitive:
-                # §4 no-op floor: a sensitive doc whose control ran no detectors. LOUD,
-                # first-class — while this is > 0, documents_with_pii:0 is NOT a clean bill.
-                quality.redaction_disabled_for_sensitive += 1
-            for span in record.pii_spans:
-                quality.pii_total += 1
-                quality.per_type[span.pii_type] = quality.per_type.get(span.pii_type, 0) + 1
-                action = span.action.value
-                quality.per_action[action] = quality.per_action.get(action, 0) + 1
-        quality.per_type = dict(sorted(quality.per_type.items()))
-        quality.per_action = dict(sorted(quality.per_action.items()))
-        return quality
-
-    @staticmethod
-    def _profiling_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> ProfilingQuality | None:
-        """Aggregate Profiling quality: per-document feature averages + corpus aggregates (S7).
-
-        Only computed when the Pipeline has a Profiling Stage. ``records`` is the mix of
-        DOCUMENT-scope and the single CORPUS-scope
-        :class:`~latence_core.contracts.FeatureRecord`s. The document-scope records are
-        averaged into a compact readability/density/diversity summary, and the
-        corpus-scope record's aggregates (word/vocabulary counts, corpus Zipf α, source
-        coverage, entity-type frequency, top co-occurrences) are surfaced verbatim —
-        the S7 acceptance criterion ("feature summary lands in the Quality Report").
-        Counts and averages only (no raw document text). All maps are already
-        engine-sorted; the co-occurrence list is rendered as ``pair-fingerprint`` →
-        document-count — the raw entity surfaces (possible PII from a ``confidential``
-        source that would otherwise land in an ``internal``-stamped report) are replaced
-        by a deterministic, **salted** sha256 fingerprint of the ``left|right`` pair (the
-        same salted-digest construction S6 uses; salt from the Redaction Stage config).
-        The fingerprint keeps the raw surface out of the report and defeats rainbow-table
-        recovery, but it is not irreversible — a reader who can enumerate candidate
-        entity names and knows the salt could still recover a pair by dictionary attack,
-        so the report is *not* safe to publish to an untrusted audience. The raw surfaces
-        remain only in the exported, sensitivity-stamped ``CorpusFeatures`` data artifact.
-        """
-        if not any(s.capability is CapabilityKind.PROFILING for s in pipeline.stages):
-            return None
-        quality = ProfilingQuality()
-        doc_features = [
-            r
-            for r in records
-            if isinstance(r, FeatureRecord)
-            and r.scope is FeatureScope.DOCUMENT
-            and r.document is not None
-        ]
-        n = len(doc_features)
-        quality.documents_profiled = n
-        if n:
-            quality.avg_readability = round(
-                sum(r.document.readability for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_density = round(
-                sum(r.document.density for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_type_token_ratio = round(
-                sum(r.document.type_token_ratio for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_zipf_alpha = round(
-                sum(r.document.zipf_alpha for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_compression_ratio = round(
-                sum(r.document.compression_ratio for r in doc_features if r.document) / n, 6
-            )
-        corpus = next(
-            (
-                r
-                for r in records
-                if isinstance(r, FeatureRecord)
-                and r.scope is FeatureScope.CORPUS
-                and r.corpus is not None
-            ),
-            None,
-        )
-        if corpus is not None and corpus.corpus is not None:
-            cf = corpus.corpus
-            quality.corpus_total_words = cf.total_words
-            quality.corpus_unique_words = cf.total_unique_words
-            quality.corpus_zipf_alpha = cf.corpus_zipf_alpha
-            quality.language_coverage = dict(cf.language_coverage)
-            quality.category_coverage = dict(cf.category_coverage)
-            quality.sensitivity_coverage = dict(cf.sensitivity_coverage)
-            quality.distinct_entities = len(cf.entity_frequency)
-            quality.entity_type_frequency = dict(cf.entity_type_frequency)
-            # Fingerprint each pair rather than emit the raw entity surfaces: a co-occurring
-            # pair drawn from a ``confidential`` source must not have its (possibly PII)
-            # surface rendered into the ``internal``-stamped Quality Report. The salted
-            # sha256 fingerprint (same construction as S6's placeholder_for; salt resolved
-            # from the Redaction Stage config) is deterministic, so equal pairs map to equal
-            # keys (the recurrence signal is preserved) without printing the surface. It is a
-            # fingerprint, not encryption — low-entropy surfaces remain dictionary-recoverable
-            # by a reader who knows the salt, so this removes the surface from the report but
-            # does not make the report publishable to an untrusted audience. The raw pair
-            # remains only in the exported, sensitivity-stamped CorpusFeatures data artifact.
-            salt = _fingerprint_salt(pipeline)
-            quality.top_co_occurrences = {
-                _co_occurrence_fingerprint(co.left, co.right, salt): co.document_count
-                for co in cf.co_occurrences
-            }
-        return quality
-
-    @staticmethod
-    def _disambiguation_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        mentions_in: list[StageOutput],
-    ) -> DisambiguationQuality | None:
-        """Aggregate Disambiguation merge/link/normalisation statistics for the report (S8).
-
-        Only computed when the Pipeline has a Disambiguation Stage. ``records`` is the mix of
-        ENTITY-scope (canonical entities) and RELATION-scope (normalized relations)
-        :class:`~latence_core.contracts.DisambiguationRecord`s; ``mentions_in`` the
-        Entity-Extraction output the Stage consumed. Rolls up: mentions in vs canonical
-        entities out; the created/merged/singleton breakdown; applied vs below-policy merges
-        (the no-silent-over-merge audit) broken down by strategy; KB-linked vs unlinked
-        entities; and relations normalized (with the inverted count). Counts only (no raw
-        text) — the S8 acceptance criterion, safe to persist.
-        """
-        if not any(s.capability is CapabilityKind.DISAMBIGUATION for s in pipeline.stages):
-            return None
-        quality = DisambiguationQuality()
-        quality.mentions_in = sum(1 for r in mentions_in if isinstance(r, EntityMention))
-        entities = [
-            r
-            for r in records
-            if isinstance(r, DisambiguationRecord)
-            and r.scope is DisambiguationScope.ENTITY
-            and r.entity is not None
-        ]
-        quality.entities_out = len(entities)
-        confidence_sum = 0.0
-        for record in entities:
-            entity = record.entity
-            if entity is None:  # pragma: no cover - filtered above
-                continue
-            if entity.mention_count > 1:
-                quality.entities_merged += 1
-            else:
-                quality.entities_singleton += 1
-            if entity.linked:
-                quality.entities_linked += 1
-            else:
-                quality.entities_unlinked += 1
-            confidence_sum += entity.evidence.confidence
-            for decision in entity.merge_decisions:
-                if decision.applied:
-                    quality.merges_applied += 1
-                    key = decision.strategy.value
-                    quality.merges_by_strategy[key] = quality.merges_by_strategy.get(key, 0) + 1
-                else:
-                    quality.merges_below_policy += 1
-        if entities:
-            quality.avg_entity_confidence = round(confidence_sum / len(entities), 6)
-        quality.merges_by_strategy = dict(sorted(quality.merges_by_strategy.items()))
-        relations = [
-            r
-            for r in records
-            if isinstance(r, DisambiguationRecord)
-            and r.scope is DisambiguationScope.RELATION
-            and r.relation is not None
-        ]
-        quality.relations_normalized = len(relations)
-        quality.relations_inverted = sum(
-            1 for r in relations if r.relation is not None and r.relation.inverted
-        )
-        return quality
-
-    @staticmethod
-    def _graph_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> GraphQuality | None:
-        """Aggregate Graph-Assembly KG statistics for the report (S9).
-
-        Only computed when the Pipeline has a Graph Assembly Stage. ``records`` is the mix of
-        NODE-scope (graph nodes) and EDGE-scope (graph edges)
-        :class:`~latence_core.contracts.GraphRecord`s. Rolls up: node/edge counts; nodes by
-        entity type and edges by relation label; KB-linked node count; and — the S9 acceptance
-        criterion — evidence coverage, the fraction of edges whose Evidence names at least one
-        source mention (1.0 = every edge is justified). Counts only (no raw text), safe to
-        persist. All maps are sorted for a deterministic report.
-        """
-        if not any(s.capability is CapabilityKind.GRAPH_ASSEMBLY for s in pipeline.stages):
-            return None
-        quality = GraphQuality()
-        nodes = [
-            r.node
-            for r in records
-            if isinstance(r, GraphRecord) and r.scope is GraphScope.NODE and r.node is not None
-        ]
-        edges = [
-            r.edge
-            for r in records
-            if isinstance(r, GraphRecord) and r.scope is GraphScope.EDGE and r.edge is not None
-        ]
-        quality.nodes_total = len(nodes)
-        quality.edges_total = len(edges)
-        node_conf = 0.0
-        for node in nodes:
-            quality.nodes_by_type[node.label] = quality.nodes_by_type.get(node.label, 0) + 1
-            if node.linked:
-                quality.nodes_linked += 1
-            node_conf += node.confidence
-        edge_conf = 0.0
-        for edge in edges:
-            quality.edges_by_label[edge.label] = quality.edges_by_label.get(edge.label, 0) + 1
-            if edge.evidence.mention_ids:
-                quality.edges_with_evidence += 1
-            edge_conf += edge.confidence
-        if nodes:
-            quality.avg_node_confidence = round(node_conf / len(nodes), 6)
-        if edges:
-            quality.avg_edge_confidence = round(edge_conf / len(edges), 6)
-            quality.evidence_coverage = round(quality.edges_with_evidence / len(edges), 6)
-        quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
-        quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
-        return quality
-
-    @staticmethod
-    def _parse_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> ParseQuality | None:
-        """Aggregate Parse-Stage quality: page-map drift + parse-error counts.
-
-        Only computed when the Pipeline actually has a Parse Stage, so a
-        Source→Export pipeline reports ``parse=None`` rather than a misleading
-        all-zero section. For each parsed :class:`DocumentRecord` that carries a
-        page map, the Runner builds a :class:`PageOffsetIndex` and audits it —
-        resolving each page's boundary offsets — so the drift diagnostics the
-        ported asset produces surface in the Quality Report (S2: "drift
-        diagnostics in the Quality Report"). A clean parse resolves every offset
-        exactly (``page_maps_clean``). Each parsed record's assembled-markdown
-        byte size is summed into ``bytes_after_parse`` — the observable rollup of
-        the Provenance 'size-after-parse'.
-        """
-        if not any(s.capability is CapabilityKind.PARSE for s in pipeline.stages):
-            return None
-
-        quality = ParseQuality()
-        for record in records:
-            if not isinstance(record, DocumentRecord):
-                continue
-            if record.disposition is Disposition.PARSE_ERROR:
-                quality.parse_errors += 1
-                continue
-            quality.documents_parsed += 1
-            # Provenance 'size-after-parse', aggregated: the assembled-markdown
-            # byte size of each parsed record (mirrors the parser's per-record
-            # ``size_after_parse`` helper, summed here into the observable report).
-            quality.bytes_after_parse += len(record.content.encode("utf-8"))
-            page_map = record.page_map
-            if page_map is None:
-                continue
-            quality.page_map_present += 1
-            quality.pages_total += len(page_map.pages)
-            index = PageOffsetIndex(page_map)
-            # Audit: resolve each page's start and last-char offset. With exact
-            # boundaries every lookup is exact; any drift the map carries is
-            # detected here and accumulated into the diagnostics.
-            for span in page_map.pages:
-                index.page_for_offset(span.char_start)
-                index.page_for_offset(max(span.char_end - 1, span.char_start))
-            diag = index.diagnostics
-            quality.page_drift_resolutions += diag.resolutions
-            quality.page_drift_recovered += diag.recovered
-            quality.page_drift_max_chars = max(quality.page_drift_max_chars, diag.max_drift_chars)
-        return quality

@@ -151,6 +151,7 @@ from latence_core.quality import (
     StageMetrics,
     StageScore,
 )
+from latence_core.quality_report_builder import QualityReportBuilder, StageRecordReader
 from latence_core.runner import LocalRunner, topological_order
 from latence_core.state import (
     AffectedSet,
@@ -291,6 +292,7 @@ __all__ = [
     "ProviderProfile",
     "ProviderRegistry",
     "QualityReport",
+    "QualityReportBuilder",
     "QuarantineRecord",
     "Record",
     "RedactionAction",
@@ -314,6 +316,7 @@ __all__ = [
     "SpanSink",
     "Stage",
     "StageMetrics",
+    "StageRecordReader",
     "StageScore",
     "Storage",
     "StorageError",
