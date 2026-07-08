@@ -48,7 +48,7 @@ The four reusable pieces (compose them; the base does not force a god-class shap
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, runtime_checkable
 
 from latence_core.errors import ConfigError, LatenceError, ProviderError
 from latence_core.offsetmap import OffsetIndex
@@ -64,7 +64,6 @@ if TYPE_CHECKING:
         OffsetMap,
         PageMap,
         Provenance,
-        Record,
     )
 
 # The default batch size when a batch-capable adapter's config supplies none. Small,
@@ -74,6 +73,31 @@ DEFAULT_BATCH_SIZE = 32
 
 _In = TypeVar("_In")
 _Out = TypeVar("_Out")
+
+
+@runtime_checkable
+class ProvenanceCarrier(Protocol):
+    """The structural source :meth:`AdapterBase.carry_provenance` reads: anything with a frozen
+    :class:`~latence_core.contracts.Provenance` + :class:`~latence_core.contracts.Classification`.
+
+    P3-F2's helper originally typed its source as a :class:`~latence_core.contracts.Record`, but
+    the FIRST real adapter over it (H-A1, the pdfplumber Parser) exposed a genuine misfit: a
+    Parser's source is a :class:`~latence_core.contracts.ParserInput` (a *raw document*, ADR-0019),
+    which carries Provenance + Classification but is **not** a ``Record`` subclass — so a real
+    Parser could not reuse the helper for a whole-document carry without a hand-rolled cast (the
+    exact "weaker mapper" the audit forbids). Widening the source to this structural Protocol is
+    the minimal, backward-compatible fix: every ``Record`` satisfies it (it has both attributes),
+    and so does a ``ParserInput``, so both the sub-document carriers (mentions/chunks, ``Record``s)
+    and the whole-document Parser carry through the *same* base helper. The helper only ever reads
+    ``.provenance`` (frozen, ``model_copy``-ed) and ``.classification`` (returned unchanged), so
+    the Protocol names exactly those and nothing more.
+    """
+
+    @property
+    def provenance(self) -> Provenance: ...
+
+    @property
+    def classification(self) -> Classification: ...
 
 # A native-library exception type the adapter classifies as an operator **config** error
 # rather than a runtime provider fault. The subclass declares which native exceptions mean
@@ -293,17 +317,22 @@ class AdapterBase:
 
     @staticmethod
     def carry_provenance(
-        source: Record,
+        source: ProvenanceCarrier,
         *,
         char_start: int | None = None,
         char_end: int | None = None,
         page_start: int | None = None,
         page_end: int | None = None,
     ) -> tuple[Provenance, Classification]:
-        """Carry a source record's Provenance + Classification onto a produced record.
+        """Carry a source's Provenance + Classification onto a produced record.
 
-        The default so an adapter never hand-rolls the Provenance chain: it takes the input
-        record's immutable :class:`~latence_core.contracts.Provenance` and narrows only the
+        ``source`` is any :class:`ProvenanceCarrier` — a :class:`~latence_core.contracts.Record`
+        (a sub-document mention/chunk) OR a :class:`~latence_core.contracts.ParserInput` (a Parser's
+        raw-document source, ADR-0019); both carry the two fields this helper reads, so a real
+        Parser reuses it for a whole-document carry rather than hand-rolling the chain (H-A1).
+
+        The default so an adapter never hand-rolls the Provenance chain: it takes the source's
+        immutable :class:`~latence_core.contracts.Provenance` and narrows only the
         offset/page fields the produced record occupies (a sub-record's own span), leaving the
         source lineage (``source_uri``/``document_id``/``file_*``) intact, and returns the
         source :class:`~latence_core.contracts.Classification` **unchanged** (Classification is

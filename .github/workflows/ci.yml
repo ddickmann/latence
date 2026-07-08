@@ -118,6 +118,7 @@ jobs:
           uv build --package latence-core
           uv build --package latence-parser-plaintext
           uv build --package latence-parser-document
+          uv build --package latence-parser-pdfplumber
           uv build --package latence-ner-gliner
           uv build --package latence-relation-gliner
           uv build --package latence-relation-llm

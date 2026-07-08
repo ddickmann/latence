@@ -89,13 +89,15 @@ def _model_profile(
     )
 
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 29 Providers across 14 Capabilities (P3 landscape). If a Provider is added/removed, this list
-# is updated deliberately, so the count check catches an accidental un-covered Provider.
+# 30 Providers across 14 Capabilities (P3 landscape + the first real Wave-1 adapter, H-A1). If a
+# Provider is added/removed, this list is updated deliberately, so the count check catches an
+# accidental un-covered Provider.
 _EXPECTED_PROVIDERS = frozenset(
     {
         "source.local_folder",
         "parser.plaintext",
         "parser.document",
+        "parser.pdfplumber",
         "parse.endpoint",
         "chunk.markdown",
         "chunk.sentence_window",
@@ -146,12 +148,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 29 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 30 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 29
+    assert len(names) == 30
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -187,9 +189,9 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 
 
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
-    """The rolled-up report: all 29 pass, and the endpoint/GPU Providers are stub-flagged."""
+    """The rolled-up report: all 30 pass, and the endpoint/GPU Providers are stub-flagged."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 29
+    assert report.providers_total == 30
     assert report.providers_failed == 0
     assert report.all_passed
     # The seven endpoint/GPU Providers are flagged stub-scoped ("needs a rig"), never fabricated.

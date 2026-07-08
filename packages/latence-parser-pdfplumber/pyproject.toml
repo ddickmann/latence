@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-pdfplumber"
+version = "0.1.0"
+description = "CPU pdfplumber Parser Provider (page-aware PDF -> markdown + page map) over AdapterBase, for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "pdf", "pdfplumber", "adapter"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the PDF reader ships
+# with this Provider package, not the thin core. pdfplumber is CPU-only and MIT
+# (pdfminer.six core likewise MIT) — permissive per ADR-0012. It needs no OS-level
+# system binaries (no pandoc/tesseract to apt-install) for the text-layer path this
+# Provider uses, so it installs from wheels + runs offline in CI without a dedicated
+# heavy lane (contrast torch/openai/airflow). NOTE (not pure-Python): the install
+# closure pulls native code via wheels — pillow (C-ext) and pypdfium2 (bundled PDFium),
+# plus cryptography under pdfminer.six — all permissive, all latent (the used path is
+# pdfminer.six-only). See the provider profile() license note for the full closure.
+dependencies = [
+    "latence-core",
+    "pdfplumber>=0.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'parser.pdfplumber' available to any Pipeline with no core change
+# (ADR-0004), alongside 'parser.plaintext' and the pypdf 'parser.document'. It is
+# the FIRST real Wave-1 adapter implemented THROUGH AdapterBase (H-A1) — turning the
+# hypothetical P3-F2 seam (validated only by fabricated fake subclasses) into a real
+# two-adapter seam.
+[project.entry-points."latence.providers"]
+"parser.pdfplumber" = "latence_parser_pdfplumber.provider:PdfPlumberParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_pdfplumber"]

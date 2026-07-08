@@ -5,6 +5,7 @@ members = ["packages/*"]
 latence-core = { workspace = true }
 latence-parser-plaintext = { workspace = true }
 latence-parser-document = { workspace = true }
+latence-parser-pdfplumber = { workspace = true }
 latence-ner-gliner = { workspace = true }
 latence-relation-llm = { workspace = true }
 latence-relation-gliner = { workspace = true }
@@ -35,6 +36,11 @@ dependencies = [
     "latence-core",
     "latence-parser-plaintext",
     "latence-parser-document",
+    # The first real Wave-1 adapter over AdapterBase (H-A1) — CPU-only, offline, pure-Python
+    # (pdfplumber, MIT), no system binaries. Like latence-parser-document, it installs into the
+    # default dev env so its tests + the conformance suite run offline/deterministically (unlike
+    # the heavy/endpoint Provider packages below).
+    "latence-parser-pdfplumber",
     # The S13 showable demo — CPU-only, offline, only depends on latence-core +
     # latence-parser-document (both already pinned), so it installs into the default
     # dev env and its tests run offline/deterministically (unlike the heavy/endpoint
