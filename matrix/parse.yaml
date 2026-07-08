@@ -1,14 +1,21 @@
-# matrix/parse.yaml — the Parse-Stage bake-off (ADR-0036 §4, P3-F5).
+# matrix/parse.yaml — the Parse-Stage bake-off (ADR-0036 §4, P3-F5; W1-lighton, #91).
 #
-# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Parse Stage across three REAL
-# CPU parser Providers — a genuine controlled comparison on the bundled corpus:
+# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Parse Stage across the parser
+# Providers — a genuine controlled comparison on the bundled corpus:
 #
-#   parser.plaintext  — pure-Python text passthrough (no PDF page extraction)
-#   parser.pdfplumber — the real CPU PDF+text adapter (H-A1), page-aware
-#   parser.document   — pypdf-backed PDF+text parser
+#   parser.plaintext  — pure-Python text passthrough (no PDF page extraction) — RUNS in CI
+#   parser.pdfplumber — the real CPU PDF+text adapter (H-A1), page-aware      — RUNS in CI
+#   parser.document   — pypdf-backed PDF+text parser                          — RUNS in CI
+#   parser.lighton    — the real GPU LightOn-OCR image->markdown parser (reads pixels, not a text
+#                       layer), device: cuda — SKIPPED-WITH-FLAG on a CPU-only host (needs a rig,
+#                       #64); NEVER a fabricated quality/throughput number
 #
-# Run it with `latence bake-off matrix/parse.yaml`. All three are offline, permissive, pure-Python,
-# so the whole matrix runs deterministically in CI (LATENCE_CUDA=0) with NO fabricated numbers.
+# Run it with `latence bake-off matrix/parse.yaml`. The three CPU parsers are offline, permissive,
+# pure-Python, so they run deterministically in CI (LATENCE_CUDA=0) with NO fabricated numbers. The
+# lighton candidate pins `device: cuda` (honest GPU intent); on a CPU-only host the harness resolves
+# that through the SAME `select_device` seam the Runner uses and records the row skipped-with-flag
+# with no measured columns; on a real GPU host with latence-parser-lighton installed it runs
+# (device: cuda) and is measured for real.
 #
 # Quality here is the stage-specific Parse metric (chars-extracted + offset-drift-recovered), NOT a
 # gold-set P/R/F1 — Parse has no gold set. The bake-off reads it off the Quality Report's `parse`
@@ -18,3 +25,5 @@ candidates:
   - provider: parser.plaintext
   - provider: parser.pdfplumber
   - provider: parser.document
+  - provider: parser.lighton
+    config: { device: cuda }   # honest GPU intent; skipped-with-flag where no CUDA (device seam)

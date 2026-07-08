@@ -15,8 +15,7 @@ reference Providers point at. Weights AND code licenses were verified separately
 on 2026-07-06 (see docs/adr/0012-permissive-only-reference-providers-gemma-opt-in.md).
 All are Apache-2.0 or MIT:
 
-  - PaddleOCR-VL-1.5 (Parse)                     — Apache-2.0
-  - LightOnOCR-2-1B (Parse)                      — Apache-2.0
+  - lightonai/LightOnOCR-1B-1025 (Parse/OCR)     — Apache-2.0
   - knowledgator/gliner-linker-large (Disambig)  — Apache-2.0
   - knowledgator/gliner-relex-multi-v1.0 (Rel)   — Apache-2.0
   - urchade/gliner_multi-v2.1 (Entity)           — Apache-2.0

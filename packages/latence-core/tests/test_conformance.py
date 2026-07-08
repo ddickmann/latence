@@ -89,16 +89,17 @@ def _model_profile(
     )
 
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 32 Providers across 14 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
-# learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii). If a
-# Provider is added/removed, this list is updated deliberately, so the count check catches an
-# accidental un-covered Provider.
+# 33 Providers across 14 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
+# learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii + the real
+# GPU LightOn-OCR Parser W1-lighton). If a Provider is added/removed, this list is updated
+# deliberately, so the count check catches an accidental un-covered Provider.
 _EXPECTED_PROVIDERS = frozenset(
     {
         "source.local_folder",
         "parser.plaintext",
         "parser.document",
         "parser.pdfplumber",
+        "parser.lighton",
         "parser.endpoint",
         "chunk.markdown",
         "chunk.sentence_window",
@@ -156,7 +157,7 @@ def test_registry_discovers_the_expected_provider_roster() -> None:
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 32
+    assert len(names) == 33
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -192,9 +193,9 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 
 
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
-    """The rolled-up report: all 32 pass, and the endpoint/GPU Providers are stub-flagged."""
+    """The rolled-up report: all 33 pass, endpoint/GPU stub-flagged, the GPU OCR Parser skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 32
+    assert report.providers_total == 33
     assert report.providers_failed == 0
     assert report.all_passed
     # The nine endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
@@ -210,6 +211,10 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
         "embedding.endpoint",
         "embedding.sentence_transformers",
     }
+    # The GPU-only LightOn-OCR Parser (compute="gpu") is skipped-with-flag on this CPU host (the G1
+    # posture) — recorded as device-skipped, still passing (a SKIP is never a FAIL), never faked.
+    device_skipped = {r.provider for r in report.results if r.device_skipped}
+    assert device_skipped == {"parser.lighton"}
 
 
 def test_cpu_providers_run_for_real_not_stub() -> None:

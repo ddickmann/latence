@@ -70,8 +70,10 @@ jobs:
       # workspace members but NOT in the dev env's deps: the two gliner packages pull
       # the heavy GLiNER stack (torch/transformers), the llm + the three -endpoint
       # packages pull the openai client, latence-embedder-st pulls the
-      # sentence-transformers stack (torch/transformers), and the airflow adapter pulls
-      # apache-airflow — any would break the CPU-first, offline, deterministic test env (ADR-0007/0016).
+      # sentence-transformers stack (torch/transformers), latence-parser-lighton pulls the
+      # LightOn-OCR transformers/torch/pillow/pypdfium2 stack (its tests monkeypatch those with
+      # shape-matching fakes), and the airflow adapter pulls apache-airflow — any would break the
+      # CPU-first, offline, deterministic test env (ADR-0007/0016).
       # Install ONLY their source (no deps) so their src is type-checked and their tests
       # (which monkeypatch the heavy/endpoint dep with a fake, or, for the Airflow
       # adapter, use its Airflow-free in-process path) collect and run offline.
@@ -86,6 +88,7 @@ jobs:
           uv pip install --no-deps -e packages/latence-ner-endpoint
           uv pip install --no-deps -e packages/latence-embedder-endpoint
           uv pip install --no-deps -e packages/latence-embedder-st
+          uv pip install --no-deps -e packages/latence-parser-lighton
           uv pip install --no-deps -e packages/latence-runner-airflow
 
       - name: Ruff (lint)
@@ -123,12 +126,16 @@ jobs:
       # failing check gates the push, so the blessed stack is proven green on every commit. The
       # gpu-sota.yaml run reports its learned Stages skipped-with-flag on this CPU host (never
       # faked) and validates the CPU-reachable spine, so both committed stacks stand a standing gate.
+      # gpu-ocr.yaml (the scanned-document / OCR-first stack, W1-lighton #91) swaps Parse for the
+      # GPU parser.lighton: on this CPU host Parse (and its dependents) skip-with-flag and the
+      # CPU-reachable head still validates — never a fabricated CPU run of the GPU OCR model.
       - name: Validate default stack (Goal A — end-to-end, one command)
         env:
           LATENCE_CUDA: "0"
         run: |
           uv run latence stack validate stacks/default.yaml
           uv run latence stack validate stacks/gpu-sota.yaml
+          uv run latence stack validate stacks/gpu-ocr.yaml
 
       # Goal B (P3-F5, ADR-0036 §4): the per-Stage bake-off. Runs the two shipped CPU matrices —
       # matrix/parse.yaml + matrix/chunk.yaml — end-to-end on the bundled corpus: each candidate
@@ -163,6 +170,7 @@ jobs:
           uv build --package latence-ner-endpoint
           uv build --package latence-embedder-endpoint
           uv build --package latence-embedder-st
+          uv build --package latence-parser-lighton
           uv build --package latence-runner-airflow
           uv build --package latence-demo
 

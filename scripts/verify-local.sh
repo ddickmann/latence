@@ -31,7 +31,7 @@ uv sync
 for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence-pii-gliner \
          latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
-         latence-parser-paddle; do
+         latence-parser-lighton; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
 done
 ok "workspace synced + heavy sources installed --no-deps"
@@ -53,9 +53,10 @@ uv run pytest packages/latence-core/tests/test_conformance.py \
               packages/latence-core/tests/test_e2e_conformance.py -q
 ok "conformance"
 
-step "stack validate (Goal A — default + gpu-sota, end-to-end)"
+step "stack validate (Goal A — default + gpu-sota + gpu-ocr, end-to-end)"
 uv run latence stack validate stacks/default.yaml
 uv run latence stack validate stacks/gpu-sota.yaml
+uv run latence stack validate stacks/gpu-ocr.yaml
 ok "stack validate"
 
 step "bake-off matrices (Goal B — the shipped CPU matrices)"

@@ -12,6 +12,7 @@ latence-relation-gliner = { workspace = true }
 latence-pii-gliner = { workspace = true }
 latence-pii-presidio = { workspace = true }
 latence-parser-endpoint = { workspace = true }
+latence-parser-lighton = { workspace = true }
 latence-ner-endpoint = { workspace = true }
 latence-embedder-endpoint = { workspace = true }
 latence-embedder-st = { workspace = true }
@@ -99,6 +100,9 @@ no_implicit_reexport = true
 module = [
     "pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "sentence_transformers",
     "presidio_analyzer", "presidio_analyzer.*", "airflow.*",
+    # LightOn-OCR heavy stack (latence-parser-lighton, GPU) — not in the CPU-first dev env
+    # (ADR-0016); the Provider monkeypatches them with shape-matching fakes in tests.
+    "pypdfium2", "transformers", "torch",
 ]
 ignore_missing_imports = true
 

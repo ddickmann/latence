@@ -78,8 +78,7 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 
 | Model | Capability | Weights license |
 |---|---|---|
-| PaddleOCR-VL-1.5 | Parse | Apache-2.0 |
-| LightOnOCR-2-1B | Parse | Apache-2.0 |
+| lightonai/LightOnOCR-1B-1025 | Parse (OCR, `parser.lighton`) | Apache-2.0 |
 | urchade/gliner_multi-v2.1 | Entity Extraction | Apache-2.0 |
 | knowledgator/gliner-relex-multi-v1.0 | Relation Extraction | Apache-2.0 |
 | urchade/gliner_multi_pii-v1 | Redaction | Apache-2.0 |

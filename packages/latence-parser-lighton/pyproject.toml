@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-lighton"
+version = "0.1.0"
+description = "GPU LightOn-OCR Parser Provider (image/scanned-PDF -> markdown + page map) over AdapterBase, for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "ocr", "lighton", "vision-language", "adapter", "gpu"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the vision-language OCR stack ships with
+# this Provider package, not the thin core. LightOn-OCR is a torch/transformers VLM (Apache-2.0
+# weights AND code — permissive per ADR-0012); pypdfium2 (Apache-2.0/BSD-3, bundled PDFium) and
+# pillow (HPND) rasterise a PDF/image to page bitmaps. These pull compiled/native code and are GPU-
+# oriented, so this package is NOT installed into the CPU-first dev/CI env — its tests monkeypatch
+# the model with a shape-matching fake; the real OCR is validated on a CUDA pod
+# (scripts/validate-lighton-on-gpu.md). LightOn-OCR support currently requires a recent transformers
+# (install-from-source per the model card until it lands in a release), so transformers is pinned
+# loosely and the real run is pod-gated.
+dependencies = [
+    "latence-core",
+    "transformers>=4.45",
+    "torch>=2.1",
+    "pillow>=10.0",
+    "pypdfium2>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group. Installing this package makes
+# 'parser.lighton' available to any Pipeline with no core change (ADR-0004), alongside
+# 'parser.pdfplumber' / 'parser.document' / 'parser.plaintext'. It is the first GPU-class,
+# image->markdown Parser (reads pixels, not a text layer), built THROUGH AdapterBase (H-A1).
+[project.entry-points."latence.providers"]
+"parser.lighton" = "latence_parser_lighton.provider:LightOnOcrParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_lighton"]

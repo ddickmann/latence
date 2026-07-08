@@ -20,6 +20,7 @@ members = [
     "latence-ner-gliner",
     "latence-parser-document",
     "latence-parser-endpoint",
+    "latence-parser-lighton",
     "latence-parser-pdfplumber",
     "latence-parser-plaintext",
     "latence-pii-gliner",
@@ -1696,6 +1697,27 @@ dependencies = [
 requires-dist = [
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "openai", specifier = ">=1.0,<3" },
+]
+
+[[package]]
+name = "latence-parser-lighton"
+version = "0.1.0"
+source = { editable = "packages/latence-parser-lighton" }
+dependencies = [
+    { name = "latence-core" },
+    { name = "pillow" },
+    { name = "pypdfium2" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latence-core", editable = "packages/latence-core" },
+    { name = "pillow", specifier = ">=10.0" },
+    { name = "pypdfium2", specifier = ">=4.0" },
+    { name = "torch", specifier = ">=2.1" },
+    { name = "transformers", specifier = ">=4.45" },
 ]
 
 [[package]]

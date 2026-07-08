@@ -36,6 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STACKS = _REPO_ROOT / "stacks"
 _DEFAULT = _STACKS / "default.yaml"
 _GPU_SOTA = _STACKS / "gpu-sota.yaml"
+_GPU_OCR = _STACKS / "gpu-ocr.yaml"
 
 cli = CliRunner()
 
@@ -127,6 +128,22 @@ def test_gpu_sota_skips_learned_stages_with_flag(tmp_path: Path) -> None:
     assert checks["graceful_failure"].passed
     # The KG/RAG/determinism/resume checks skip-clean (their producing Stages were skipped).
     assert checks["kg"].skipped
+    assert checks["rag"].skipped
+
+
+def test_gpu_ocr_skips_the_ocr_parser_with_flag(tmp_path: Path) -> None:
+    """gpu-ocr's LightOn-OCR Parse (compute='gpu') is skipped-with-flag on a CPU host (W1-lighton).
+
+    Parse is GPU-gated (``parser.lighton``, device: cuda) so on this CPU host it skips-with-flag and
+    everything depending on it skips too; the CPU-reachable head (Source -> Intake Screening) still
+    validates, and a skip is NOT a failure (device honesty — never a fabricated OCR run).
+    """
+    result = validate_stack(_GPU_OCR, storage_root=f"file://{tmp_path}/store")
+    assert result.ok, result.render()
+    assert "parse" in result.skipped_stages  # the OCR Parser skipped-with-flag, never run/faked
+    checks = _checks_by_name(result.checks)
+    assert checks["contracts"].passed  # the CPU-reachable head proved contracts
+    # The RAG-corpus Export depends on the skipped Parse, so its check skips-clean.
     assert checks["rag"].skipped
 
 
