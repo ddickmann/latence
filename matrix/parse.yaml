@@ -1,0 +1,20 @@
+# matrix/parse.yaml — the Parse-Stage bake-off (ADR-0036 §4, P3-F5).
+#
+# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Parse Stage across three REAL
+# CPU parser Providers — a genuine controlled comparison on the bundled corpus:
+#
+#   parser.plaintext  — pure-Python text passthrough (no PDF page extraction)
+#   parser.pdfplumber — the real CPU PDF+text adapter (H-A1), page-aware
+#   parser.document   — pypdf-backed PDF+text parser
+#
+# Run it with `latence bake-off matrix/parse.yaml`. All three are offline, permissive, pure-Python,
+# so the whole matrix runs deterministically in CI (LATENCE_CUDA=0) with NO fabricated numbers.
+#
+# Quality here is the stage-specific Parse metric (chars-extracted + offset-drift-recovered), NOT a
+# gold-set P/R/F1 — Parse has no gold set. The bake-off reads it off the Quality Report's `parse`
+# rollup (no reinvented scoring).
+stage: parse
+candidates:
+  - provider: parser.plaintext
+  - provider: parser.pdfplumber
+  - provider: parser.document

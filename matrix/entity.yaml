@@ -1,0 +1,22 @@
+# matrix/entity.yaml — the Entity-Extraction bake-off (ADR-0036 §4, P3-F5).
+#
+# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Entity-Extraction Stage:
+#
+#   entity.gazetteer — deterministic, offline, pure-Python zero-shot NER (CPU) — RUNS in CI
+#   entity.gliner    — learned zero-shot NER (GPU/heavy dep, device: cuda) — SKIPPED-WITH-FLAG on a
+#                      CPU-only host (needs a rig, #64); NEVER a fabricated quality/throughput number
+#
+# This matrix demonstrates the honest device boundary the whole workstream holds: on a CPU-only host
+# (or CI, LATENCE_CUDA=0) the gliner row is recorded skipped-with-flag with no measured columns; on a
+# real GPU host with latence-ner-gliner installed it runs (device: cuda) and is measured for real.
+#
+# The Entity Stage HAS a gold set when the base stack declares `gold_set_uri`, so quality here is the
+# S10 gold-set P/R/F1 (read off the Quality Report's `goldset` rollup — no reinvented scoring). The
+# blessed stacks/default.yaml declares no gold set, so the quality column falls back to n/a unless a
+# gold-set-bearing base stack is supplied.
+stage: entity_extraction
+candidates:
+  - provider: entity.gazetteer
+  - provider: entity.gliner
+    config:
+      device: cuda   # honest GPU intent; skipped-with-flag where no CUDA (P3-F1 device seam)

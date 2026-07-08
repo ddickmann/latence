@@ -5,6 +5,10 @@
   corpus and assert the G1-style checks (contracts/KG/RAG/report + determinism + resume +
   graceful-failure + device-honesty), write a signed-style summary, and exit non-zero on
   failure so it gates CI/publish (ADR-0036 §3, P3-F4).
+* ``latence bake-off <matrix.yaml>`` — run a per-Stage provider bake-off: hold every OTHER
+  Stage at ``stacks/default.yaml`` and run the SAME bundled corpus through each candidate for
+  ONE Stage, writing a signed-style ``MATRIX-RESULTS-<stage>.md`` + a JSON companion with
+  per-candidate quality/latency/memory/cost/license/determinism/error-rate (ADR-0036 §4, P3-F5).
 """
 
 from __future__ import annotations
@@ -129,6 +133,82 @@ def stack_validate(
         typer.echo("stack validation FAILED:", err=True)
         typer.echo(_describe_failures(result.checks), err=True)
         raise typer.Exit(code=1)
+
+
+@app.command("bake-off")
+def bake_off(
+    matrix_path: Annotated[
+        Path, typer.Argument(help="Path to the matrix YAML (e.g. matrix/parse.yaml).")
+    ],
+    base_stack: Annotated[
+        Path | None,
+        typer.Option(
+            "--base-stack",
+            help="Stack whose OTHER stages are held constant. Defaults to the repo's "
+            "stacks/default.yaml (resolved relative to the matrix file's repo root).",
+        ),
+    ] = None,
+    out_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--out-dir",
+            help="Directory to write MATRIX-RESULTS-<stage>.md + .json. Defaults to the matrix "
+            "file's parent directory.",
+        ),
+    ] = None,
+    storage_root: Annotated[
+        str | None,
+        typer.Option(
+            "--storage-root",
+            help="Storage URI the harness owns for the bake-off (state/exports/corpus). "
+            "Defaults to a fresh temp dir so a bake-off never collides with a real run.",
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Run a per-Stage provider bake-off and write ``MATRIX-RESULTS-<stage>.md`` + a JSON companion.
+
+    Holds every OTHER Stage at the base stack and runs the SAME bundled corpus through each
+    for the ONE target Stage (ADR-0036 §4). Degrades per-candidate — a candidate that crashes / is
+    device-skipped is a row, never an aborted matrix — so this exits 0 when the harness itself
+    ran (the enterprise reads the table; a failed/skipped candidate is a documented row).
+    """
+    _configure_logging(verbose)
+    if not matrix_path.exists():
+        typer.echo(f"Matrix file not found: {matrix_path}", err=True)
+        raise typer.Exit(code=2)
+
+    # Default base stack: the blessed stacks/default.yaml at the matrix file's repo root
+    # (matrix/<stage>.yaml -> repo-root/stacks/default.yaml). An explicit --base-stack overrides.
+    resolved_base = base_stack or (matrix_path.resolve().parent.parent / "stacks" / "default.yaml")
+    if not resolved_base.exists():
+        typer.echo(f"Base stack not found: {resolved_base}", err=True)
+        raise typer.Exit(code=2)
+
+    destination = (out_dir or matrix_path.resolve().parent).resolve()
+
+    # Lazy import so a bare ``latence run`` does not pull the bake-off harness + its runner graph.
+    from latence_core.bakeoff.harness import run_bakeoff
+
+    if storage_root is not None:
+        result = run_bakeoff(
+            matrix_path, base_stack_path=resolved_base, storage_root=storage_root
+        )
+    else:
+        with tempfile.TemporaryDirectory(prefix="latence-bakeoff-") as tmp:
+            result = run_bakeoff(
+                matrix_path, base_stack_path=resolved_base, storage_root=f"file://{tmp}"
+            )
+
+    destination.mkdir(parents=True, exist_ok=True)
+    md_path = destination / f"MATRIX-RESULTS-{result.stage}.md"
+    json_path = destination / f"MATRIX-RESULTS-{result.stage}.json"
+    md_path.write_text(result.render(), encoding="utf-8")
+    json_path.write_text(result.to_json() + "\n", encoding="utf-8")
+
+    typer.echo(result.render())
+    typer.echo(f"results written to: {md_path}", err=True)
+    typer.echo(f"machine-readable companion: {json_path}", err=True)
 
 
 def main() -> None:  # pragma: no cover - console entry shim

@@ -127,6 +127,21 @@ jobs:
           uv run latence stack validate stacks/default.yaml
           uv run latence stack validate stacks/gpu-sota.yaml
 
+      # Goal B (P3-F5, ADR-0036 §4): the per-Stage bake-off. Runs the two shipped CPU matrices —
+      # matrix/parse.yaml + matrix/chunk.yaml — end-to-end on the bundled corpus: each candidate
+      # Provider run through the REAL pipeline (other stages held at stacks/default.yaml), measuring
+      # quality/latency/memory(declared-vs-measured)/cost/license/determinism/error-rate. Offline +
+      # deterministic (LATENCE_CUDA=0), so the bake-off runs end-to-end and its numbers are
+      # reproducible on every push. GPU matrices (matrix/entity.yaml's gliner candidate) are NOT run
+      # here — a GPU/endpoint candidate is skipped-with-flag on this CPU host, never a fabricated
+      # number (#64). Writes MATRIX-RESULTS-<stage>.md + .json to a temp dir (proving the CLI path).
+      - name: Run CPU bake-offs (Goal B — per-Stage provider matrix, end-to-end)
+        env:
+          LATENCE_CUDA: "0"
+        run: |
+          uv run latence bake-off matrix/parse.yaml --out-dir "$(mktemp -d)"
+          uv run latence bake-off matrix/chunk.yaml --out-dir "$(mktemp -d)"
+
       - name: Build wheels
         run: |
           uv build --package latence-core

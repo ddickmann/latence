@@ -1,0 +1,19 @@
+# matrix/chunk.yaml — the Chunk-Stage bake-off (ADR-0036 §4, P3-F5).
+#
+# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Chunk Stage across two REAL CPU
+# chunker Providers — a genuine controlled comparison on the bundled corpus:
+#
+#   chunk.markdown        — markdown-aware, offset/page/Provenance-preserving, configurable overlap
+#   chunk.sentence_window — whole-sentence packing, sentence-aligned boundaries, no overlap
+#
+# Run it with `latence bake-off matrix/chunk.yaml`. Both are offline, permissive, pure-Python, so
+# the whole matrix runs deterministically in CI (LATENCE_CUDA=0) with NO fabricated numbers.
+#
+# Quality here is the stage-specific Chunk metric (chunk count + offset-preserving fraction), NOT a
+# gold-set P/R/F1 — Chunk has no gold set. The bake-off reads it off the Quality Report's `chunk`
+# rollup (no reinvented scoring). Each candidate inherits the base stage's config (max_tokens etc.)
+# unless it names an override.
+stage: chunk
+candidates:
+  - provider: chunk.markdown
+  - provider: chunk.sentence_window

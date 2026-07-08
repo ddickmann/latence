@@ -131,6 +131,8 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary; the canonical language of the project.
 - [`docs/adr/`](./docs/adr/) — the 32 architecture decisions.
+- [`docs/running-a-stack.md`](./docs/running-a-stack.md) — run + validate a full-spine stack (`latence stack validate`).
+- [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) — run a per-Stage provider bake-off (`latence bake-off`).
 - [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.
 - [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
