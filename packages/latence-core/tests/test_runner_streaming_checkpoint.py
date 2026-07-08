@@ -26,6 +26,7 @@ from pathlib import Path
 
 import latence_core.runner as runner_mod
 import pytest
+from _resume_equality import output_artifacts
 from latence_core.contracts import ChunkRecord
 from latence_core.pipeline import Pipeline
 from latence_core.runner import LocalRunner
@@ -131,12 +132,71 @@ def test_streamed_checkpoints_are_deterministic_across_runs(
 
 
 def test_resume_exact_after_streamed_write(docs_dir: Path, tmp_path: Path) -> None:
+    """Resume is *exact*: the resumed run's output is byte-identical to the first run's.
+
+    H-E1 Part 1. The old assertion (``all(m.from_checkpoint)`` + ``contracts_complete``) is a
+    boolean-not-a-property check — a resume that dropped/duplicated/reordered a record passes it
+    (the P3-F1 sticky-resume bug class). This runs to completion, captures every output artifact
+    (the exported ``records.{jsonl,parquet}`` + every Stage checkpoint), resumes the same
+    ``run_id``, and asserts the resumed output is **byte-identical**. Byte-identity — not
+    record-set identity — is the right assertion here because the dumps are deterministic
+    (``model_dump_json`` line order is stable), so a correct resume reproduces the exact bytes.
+    """
     store = f"file://{tmp_path}/store"
     p = _pipeline(docs_dir, store)
-    LocalRunner().run(p, run_id="r1")
+    s = Storage.for_uri(store)
+
+    report1 = LocalRunner().run(p, run_id="r1")
+    first = output_artifacts(s, store, "r1")
+    assert first, "the first run must have produced output artifacts"
+    assert not any(m.from_checkpoint for m in report1.stages)  # fresh run ran every Stage
+
     report2 = LocalRunner().run(p, run_id="r1")
+    second = output_artifacts(s, store, "r1")
+
     assert all(m.from_checkpoint for m in report2.stages)
     assert report2.contracts_complete
+    # The property the old test never checked: the actual output is identical across resume.
+    assert second == first, "resumed run's output artifacts diverged from the first run's"
+
+
+def test_resume_equality_bites_on_a_corrupt_resume(docs_dir: Path, tmp_path: Path) -> None:
+    """Prove the byte-equality assertion BITES: a corrupt resume must be caught, not passed.
+
+    H-E1 Part 1 reviewer check. Run to completion; capture the export. Then DROP a record from
+    the ``chunk`` checkpoint and delete the ``export`` checkpoint so the Export re-runs from the
+    corrupted upstream — a resume that silently dropped a chunk. The re-exported corpus must now
+    DIFFER from the first run's, so the byte-equality assertion (the one the upgraded resume test
+    relies on) would fail — the resume test genuinely detects a dropped/duplicated/reordered
+    record rather than just re-asserting a ``from_checkpoint`` flag.
+    """
+    store = f"file://{tmp_path}/store"
+    p = _pipeline(docs_dir, store)
+    s = Storage.for_uri(store)
+    base = f"{store}/_latence/runs/r1"
+
+    LocalRunner().run(p, run_id="r1")
+    first = output_artifacts(s, store, "r1")
+    first_export = first["export/records.jsonl"]
+
+    # Corrupt the chunk checkpoint: drop its last record. The fixture yields >1 chunk, so this
+    # is a genuine record loss, not an empty-corpus no-op.
+    ckpt = f"{base}/checkpoints/chunk.jsonl"
+    lines = [line for line in s.read_text(ckpt).splitlines() if line.strip()]
+    assert len(lines) >= 2, "fixture must produce >1 chunk for the drop to bite"
+    s.write_bytes(ckpt, ("\n".join(lines[:-1]) + "\n").encode("utf-8"))
+    # Delete the export checkpoint so the Export Stage re-runs from the (now corrupt) chunk
+    # checkpoint instead of resuming its own finalized output.
+    s._fs.rm(f"{base}/checkpoints/export.jsonl")  # noqa: SLF001
+
+    LocalRunner().run(p, run_id="r1")
+    corrupted = output_artifacts(s, store, "r1")
+
+    # The equality assertion the resume test makes would now FAIL — the corrupt resume is caught.
+    assert corrupted != first
+    assert corrupted["export/records.jsonl"] != first_export
+    # Specifically: a record was dropped from the exported corpus (fewer JSONL lines).
+    assert corrupted["export/records.jsonl"].count(b"\n") < first_export.count(b"\n")
 
 
 def test_no_tmp_checkpoint_left_behind(docs_dir: Path, tmp_path: Path) -> None:

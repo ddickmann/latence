@@ -52,6 +52,38 @@ def test_walk_files_sorted_and_recursive() -> None:
     assert len(files) == 3
 
 
+def test_walk_files_yields_scheme_bearing_uris_on_object_store() -> None:
+    """Regression (H-E1 blocker): every ``walk_files`` result must round-trip back through
+    ``read_bytes`` under the SAME Storage binding.
+
+    ``memory://`` shares the object-store ``_strip_protocol`` behaviour that broke the s3:// e2e:
+    fsspec's ``walk`` strips the scheme, so before the fix ``walk_files`` yielded a bare
+    ``bucket/key`` that ``read_bytes`` rejected (``_protocol_of`` mis-read it as ``file`` and
+    ``_check`` failed against the ``memory``/``s3`` binding). Assert the yielded URI is
+    scheme-bearing AND that feeding it straight back into ``read_bytes`` returns the bytes.
+    """
+    s = Storage.for_uri("memory://objbucket/run")
+    s.write_bytes("memory://objbucket/run/export/records.jsonl", b"payload")
+    yielded = list(s.walk_files("memory://objbucket/run"))
+    assert yielded, "walk_files must find the written file"
+    for uri in yielded:
+        assert uri.startswith("memory://"), f"expected a scheme-bearing URI, got {uri!r}"
+        # The exact round-trip that used to raise ValueError on object stores.
+        assert s.read_bytes(uri) == b"payload"
+
+
+def test_walk_files_yields_scheme_bearing_uris_on_local(tmp_path: Path) -> None:
+    """The local lane must also yield scheme-bearing ``file://`` URIs (uniform contract), and the
+    symlink-escape guard must still run on the real path before the scheme is re-attached."""
+    root = tmp_path / "src"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "doc.txt").write_text("hi")
+    s = Storage.for_uri(f"file://{root}")
+    yielded = list(s.walk_files(f"file://{root}"))
+    assert yielded == [f"file://{root}/a/doc.txt"]
+    assert s.read_bytes(yielded[0]) == b"hi"
+
+
 # -- scheme allowlist (SSRF / arbitrary-fetch guard) ------------------------
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,27 @@ from latence_core.storage import Storage
 from latence_runner_airflow import RUNNER_NAME, AirflowRunner
 
 _HAS_AIRFLOW = importlib.util.find_spec("airflow") is not None
+# The dedicated CI "Airflow DAG" lane (H-E1 Part 3) sets this so a SILENT skip of the real-airflow
+# tests — the failure mode the audit found: CI installed the package ``--no-deps`` and never
+# installed apache-airflow, so both ``@skipif(not _HAS_AIRFLOW)`` tests ALWAYS skipped and the
+# package's raison d'être had zero enforced coverage — turns RED instead of green.
+_REQUIRE_AIRFLOW = os.environ.get("LATENCE_REQUIRE_AIRFLOW") == "1"
+
+
+def test_airflow_is_actually_installed_when_required() -> None:
+    """Guard (H-E1 Part 3): in the Airflow CI lane, apache-airflow MUST be importable.
+
+    Off by default (``LATENCE_REQUIRE_AIRFLOW`` unset) so the hermetic lanes are unaffected. In the
+    dedicated Airflow job the env var is set, and this asserts ``_HAS_AIRFLOW`` — so if the install
+    ever regresses (airflow missing / unimportable), the real ``build_dag`` tests below don't just
+    quietly skip: this fails loudly, proving the DAG-structure coverage actually executed.
+    """
+    if not _REQUIRE_AIRFLOW:
+        pytest.skip("LATENCE_REQUIRE_AIRFLOW unset (hermetic lane); the Airflow CI job sets it")
+    assert _HAS_AIRFLOW, (
+        "LATENCE_REQUIRE_AIRFLOW=1 but apache-airflow is not importable — the real build_dag "
+        "DAG-structure tests would silently skip. Install the 'airflow' extra in this CI lane."
+    )
 
 
 def _pipeline(store: str, docs_dir: Path) -> Pipeline:

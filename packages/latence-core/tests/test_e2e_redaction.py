@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from _resume_equality import output_artifacts
 from latence_core.contracts import RedactionRecord
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import Pipeline
@@ -156,18 +157,67 @@ def test_redaction_slice_is_deterministic(tmp_path: Path) -> None:
 
 
 def test_redaction_slice_resumes_from_checkpoints(tmp_path: Path) -> None:
+    """Redaction resume is *exact*: the resumed output is byte-identical to the first run's.
+
+    H-E1 Part 1. The old test asserted only ``all(m.from_checkpoint)`` (+ that each redact
+    checkpoint record has non-null offsets) — never that the resumed **output** equals the first
+    run's, so a resume that dropped/duplicated/reordered a RedactionRecord (the P3-F1 class) would
+    pass. It now captures every output artifact (the exported ``records.{jsonl,parquet}`` + every
+    Stage checkpoint, incl. ``redact``), resumes, and asserts byte-identity.
+    """
     docs = _docs(tmp_path)
     store = f"file://{tmp_path}/store"
     pipeline = _pipeline(store, docs)
+    s = Storage.for_uri(store)
+
     LocalRunner().run(pipeline, run_id="resume")
+    first = output_artifacts(s, store, "resume")
+    assert "checkpoints/redact.jsonl" in first  # the redaction Stage's record-set is captured
+
     report2 = LocalRunner().run(pipeline, run_id="resume")
+    second = output_artifacts(s, store, "resume")
+
     # Every Stage (incl. redaction) resumes from its checkpoint.
     assert all(m.from_checkpoint for m in report2.stages)
-    s = Storage.for_uri(store)
-    ckpt = f"{store}/_latence/runs/resume/checkpoints/redact.jsonl"
-    lines = [x for x in s.read_text(ckpt).splitlines() if x.strip()]
+    # The property the old test never checked: the actual output is identical across resume.
+    assert second == first, "resumed redaction output diverged from the first run's"
+
+    # The redact checkpoint still carries valid, offset-preserving RedactionRecords.
+    lines = [x for x in first["checkpoints/redact.jsonl"].decode("utf-8").splitlines() if x.strip()]
     assert lines
     for line in lines:
         r = RedactionRecord.model_validate_json(line)
         assert r.provenance.char_start is not None
         assert r.provenance.char_end is not None
+
+
+def test_redaction_resume_equality_bites_on_dropped_record(tmp_path: Path) -> None:
+    """Prove the redaction resume equality BITES: a dropped RedactionRecord is caught.
+
+    H-E1 Part 1 reviewer check. Drop a record from the ``redact`` checkpoint and delete the
+    ``export`` checkpoint so the Export re-runs from the corrupted redaction output. The exported
+    corpus must now DIFFER from the first run's — so the byte-equality assertion the resume test
+    relies on genuinely detects a dropped record, not just a second ``from_checkpoint`` flag.
+    """
+    docs = _docs(tmp_path)
+    store = f"file://{tmp_path}/store"
+    pipeline = _pipeline(store, docs)
+    s = Storage.for_uri(store)
+    base = f"{store}/_latence/runs/resume"
+
+    LocalRunner().run(pipeline, run_id="resume")
+    first = output_artifacts(s, store, "resume")
+
+    redact_ckpt = f"{base}/checkpoints/redact.jsonl"
+    lines = [x for x in s.read_text(redact_ckpt).splitlines() if x.strip()]
+    assert len(lines) >= 2, "fixture must produce >1 redaction record for the drop to bite"
+    s.write_bytes(redact_ckpt, ("\n".join(lines[:-1]) + "\n").encode("utf-8"))
+    s._fs.rm(f"{base}/checkpoints/export.jsonl")  # noqa: SLF001
+
+    LocalRunner().run(pipeline, run_id="resume")
+    corrupted = output_artifacts(s, store, "resume")
+
+    assert corrupted != first
+    assert corrupted["export/records.jsonl"].count(b"\n") < first["export/records.jsonl"].count(
+        b"\n"
+    )

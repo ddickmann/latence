@@ -194,6 +194,16 @@ class Storage:
     def walk_files(self, uri: str, follow_symlinks: bool = False) -> Iterator[str]:
         """Yield every file (not directory) under ``uri``, recursively, sorted.
 
+        Every yielded path is a **scheme-bearing URI** the same Storage can read
+        back: ``fsspec``'s ``walk`` strips the protocol and yields bare
+        ``bucket/key`` (object stores) or bare filesystem paths (local), so each
+        result is re-decorated with this Storage's protocol via
+        ``unstrip_protocol`` before being yielded. Without this, feeding a
+        ``walk_files`` result straight back into :meth:`read_bytes` on an object
+        store raised ``ValueError`` (a bare ``bucket/key`` has no ``://``, so
+        :meth:`_protocol_of` mis-reads it as ``file`` and :meth:`_check` rejects
+        it against the ``s3``/``memory`` binding) — the H-E1 s3:// e2e blocker.
+
         With ``follow_symlinks=False`` (the secure default) a file whose real,
         symlink-resolved path escapes ``uri``'s own real path is dropped, so a
         symlink planted inside the folder cannot be used to read files outside
@@ -213,9 +223,14 @@ class Storage:
         for root, _dirs, files in self._fs.walk(checked):
             for name in files:
                 path = f"{root.rstrip('/')}/{name}"
+                # The symlink-escape check runs on the bare local path (that is
+                # what ``os.path.realpath`` understands); re-decorate afterwards.
                 if not follow_symlinks and is_local and self._escapes(path, root_real):
                     continue
-                found.append(path)
+                # Yield a scheme-bearing URI so the caller can round-trip it back
+                # through read_bytes/open under this Storage's binding (s3://,
+                # memory://, file://) — not a bare, binding-mismatched path.
+                found.append(self._fs.unstrip_protocol(path))
         yield from sorted(found)
 
     @staticmethod

@@ -8,6 +8,14 @@ allocation with ``tracemalloc`` for a corpus and a 4x-larger corpus: a whole-cor
 would grow peak ~4x, whereas the streamed path holds only a bounded batch, so peak stays close
 to flat. The real 100k/1M peak-RSS numbers still need a dedicated perf rig (flagged in #63 /
 ADR-0033) — this is the deterministic, in-suite scaling assertion, not the perf-rig number.
+
+**Honest scope (H-E1 Part 4).** This test bounds **Python-object allocations** (``tracemalloc``
+tracks the CPython heap), NOT Arrow/Parquet **off-heap RSS** — pyarrow's own buffers and the OS
+page cache live outside ``tracemalloc``'s view, so this asserts the Python-side transient is
+sub-linear, not the process's total RSS (that is the perf rig's job, #63). It also validates ONLY
+the Export transient; the doc-level Stage chain still materialises ``O(corpus-slice)`` per stage
+(``batch_docs`` is deferred — ADR-0033 "Honest memory boundary" + issue #110), which this test
+does not exercise.
 """
 
 from __future__ import annotations
