@@ -15,12 +15,13 @@ let a = args
 if (typeof a === 'string') { try { a = JSON.parse(a) } catch { a = {} } }
 if (!a || typeof a !== 'object') a = {}
 
-// Portable default repo root: prefer an explicit arg, then the LATENCE_REPO env var, then the repo
-// this script lives in (orchestration/ is one level below the toplevel), and finally the current
-// working directory. No maintainer-specific absolute path is baked in, so this runs on a fresh
-// clone in any location while still honoring an explicit `repo` arg when driven by args.
-const scriptRepoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
-const defaultRepo = process.env.LATENCE_REPO || scriptRepoRoot || process.cwd()
+// Portable default repo root WITHOUT import.meta: this script is executed by the Workflow runtime as
+// a non-module (import.meta is a syntax error there) and Node's fs/env/cwd may be absent, so derive
+// defensively — prefer the explicit `repo` arg (callers pass it), then a guarded LATENCE_REPO env /
+// cwd, else '.'. No maintainer-specific absolute path is baked in.
+const _env = (typeof process !== 'undefined' && process.env) ? process.env : {}
+const _cwd = (typeof process !== 'undefined' && typeof process.cwd === 'function') ? process.cwd() : '.'
+const defaultRepo = _env.LATENCE_REPO || _cwd
 
 const slice = String(a.slice || 'slice')                   // e.g. "S2"
 const title = String(a.title || slice)                     // e.g. "S2 — Parse"

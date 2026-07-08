@@ -16,8 +16,10 @@ if (!a || typeof a !== 'object') a = {}
 // repo this script lives in (orchestration/ is one level below the toplevel), and finally the
 // current working directory. No maintainer-specific absolute path is baked in, so this runs on a
 // fresh clone in any location while still honoring an explicit `repo` arg when driven by args.
-const scriptRepoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
-const defaultRepo = process.env.LATENCE_REPO || scriptRepoRoot || process.cwd()
+// No import.meta (invalid in the non-module Workflow runtime); guard process (may be absent).
+const _env = (typeof process !== 'undefined' && process.env) ? process.env : {}
+const _cwd = (typeof process !== 'undefined' && typeof process.cwd === 'function') ? process.cwd() : '.'
+const defaultRepo = _env.LATENCE_REPO || _cwd
 
 const title = String(a.title || 'debt batch')
 const issues = Array.isArray(a.issues) ? a.issues : []

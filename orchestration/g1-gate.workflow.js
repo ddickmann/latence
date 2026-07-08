@@ -10,8 +10,10 @@ export const meta = {
 // Portable repo root: prefer the LATENCE_REPO env var, then the repo this script lives in
 // (orchestration/ is one level below the toplevel), and finally the current working directory. No
 // maintainer-specific absolute path is baked in, so this runs on a fresh clone in any location.
-const scriptRepoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
-const repo = process.env.LATENCE_REPO || scriptRepoRoot || process.cwd()
+// No import.meta (invalid in the non-module Workflow runtime); guard process (may be absent).
+const _env = (typeof process !== 'undefined' && process.env) ? process.env : {}
+const _cwd = (typeof process !== 'undefined' && typeof process.cwd === 'function') ? process.cwd() : '.'
+const repo = _env.LATENCE_REPO || _cwd
 const RESULT = {
   type: 'object', additionalProperties: false,
   properties: {
