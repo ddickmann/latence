@@ -1,0 +1,463 @@
+"""Unit tests for the GLM-OCR Parser adapter (W1-glm) — happy path + key failures + pixel-bomb.
+
+These prove the slice EXERCISES ``AdapterBase`` (H-A1), the GPU device gate, and the OCR seam:
+the shape-matching offline fake (the anti-false-green rule), the markdown-per-page → PageMap
+(exact offsets round-trip), the Provenance carry, the batching path over documents, the declared
+GPU ``ProviderProfile`` (evidence-bearing MIT), the graceful PARSE_ERROR path with NO
+image/OCR-text/PII leak, and — the GLM addition — the **pixel-bomb DoS cap** (render-scale clamp +
+decompression-bomb image → graceful PARSE_ERROR, never a crash / huge alloc).
+
+Deterministic + seeded (``PYTHONHASHSEED`` pinned by the repo-root conftest). The ``fake_glm``
+fixture pins ``LATENCE_CUDA=1`` so the ``compute="gpu"`` seam routes to cuda and the real parse
+path runs against the fake (offline, no real GPU).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import pytest
+from latence_core.capability import Parser
+from latence_core.contracts import (
+    Classification,
+    Disposition,
+    ParserInput,
+    Provenance,
+)
+from latence_core.errors import LatenceError, ProviderError
+from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.adapter import AdapterBase
+from latence_core.providers.profile import UNVERIFIED_LICENSE
+from latence_parser_glm.provider import (
+    _MAX_RENDER_PIXELS,
+    GlmOcrParser,
+    size_after_parse,
+)
+
+
+def _provenance(file_name: str, file_type: str, size: int = 100) -> Provenance:
+    return Provenance(
+        source_uri=f"mem://docs/{file_name}",
+        file_name=file_name,
+        file_type=file_type,
+        file_size=size,
+        document_id=f"sha256:{file_name}",
+    )
+
+
+def _pdf_input(content: bytes, file_name: str = "scan.pdf", sensitivity: str = "internal") -> ParserInput:
+    return ParserInput(
+        provenance=_provenance(file_name, "pdf", size=len(content)),
+        classification=Classification(language="und", sensitivity=sensitivity),
+        content=content,
+    )
+
+
+def _image_input(content: bytes, file_name: str = "page.png") -> ParserInput:
+    return ParserInput(
+        provenance=_provenance(file_name, "png", size=len(content)),
+        classification=Classification(language="und", sensitivity="internal"),
+        content=content,
+    )
+
+
+# --- the adapter genuinely uses AdapterBase (structural + seam) --------------
+
+
+def test_is_adapterbase_subclass_and_parser() -> None:
+    """The Provider is an AdapterBase subclass AND satisfies the Parser Capability structurally."""
+    assert issubclass(GlmOcrParser, AdapterBase)
+    provider = GlmOcrParser({})
+    assert isinstance(provider, Parser)  # runtime_checkable structural check
+
+
+def test_profile_is_gpu_evidence_bearing_mit() -> None:
+    """The declared ProviderProfile: GPU, model-bearing, non-deterministic, evidence-bearing MIT."""
+    profile = GlmOcrParser.profile()
+    assert profile.compute == "gpu"
+    assert profile.model_id == "zai-org/GLM-OCR"
+    assert profile.license == "MIT"
+    assert profile.license != UNVERIFIED_LICENSE
+    assert profile.license_verified is True
+    assert profile.license_code == "MIT"
+    assert profile.license_weights == "MIT"  # weights recorded separately (ADR-0012)
+    assert "huggingface.co/zai-org/GLM-OCR" in (profile.license_source or "")
+    assert "Apache-2.0" in (profile.license_source or "")  # the layout component noted honestly
+    assert profile.license_verified_on == "2026-07-08"
+    assert profile.deterministic is False  # VLM decoding: not promised byte-identical
+    assert profile.batch is True
+    assert profile.cost_per_1k is None
+
+
+def test_device_skips_with_flag_on_cpu_only_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compute='gpu' provider on a CPU-only host resolves to the skip-with-flag decision (G1)."""
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    provider = GlmOcrParser({})
+    assert provider.device.skipped is True
+    assert provider.device.device is None
+
+
+def test_device_routes_to_cuda_on_a_rig(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a CUDA host the device seam routes the GPU provider to cuda (placement flows through)."""
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    provider = GlmOcrParser({})
+    assert provider.device.skipped is False
+    assert provider.device.device == "cuda"
+
+
+# --- happy path: OCR markdown-per-page, offsets round-trip, Provenance carry --
+
+
+def test_multipage_pdf_ocrs_to_correct_pages_and_roundtrip_offsets(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """A multi-page scanned PDF → PARSED record; 2-page map from OCR markdown; offsets round-trip."""
+    pdf = make_glm_pdf(
+        ["# The quarterly report\n\nRevenue up.", "## Page two\n\nOutlook follows."]
+    )
+    provider = GlmOcrParser({})
+    (record,) = list(provider.parse([_pdf_input(pdf, sensitivity="confidential")]))
+
+    assert record.disposition is Disposition.PARSED
+    assert record.error is None
+    assert record.page_map is not None
+    assert len(record.page_map.pages) == 2
+    # EXACT content — the load-bearing regression guard for the decode-slice contract (the issue's #1
+    # non-negotiable). If the Provider ever drops ``generated_ids[0][prompt_len:]``, the fake's
+    # ``<|prompt-scaffold|>`` prompt tokens leak in front of EVERY page and this exact-equality fails.
+    # (Substring ``in`` assertions cannot catch a leaked prefix — they stay green on the corrupted
+    # output — so this test exercises the PROVIDER path, not just the fake's faithfulness.)
+    assert record.content == (
+        "# The quarterly report\n\nRevenue up.\n\n## Page two\n\nOutlook follows."
+    )
+    assert "prompt-scaffold" not in record.content  # an un-sliced provider FAILS here
+    assert record.media_type == "text/markdown"
+
+    # Provenance carried (source lineage intact; char/page span filled to what the record occupies).
+    assert record.provenance.file_name == "scan.pdf"
+    assert record.provenance.char_start == 0
+    assert record.provenance.char_end == len(record.content)
+    assert record.provenance.page_start == 1
+    assert record.provenance.page_end == 2
+    # Classification carried; sensitivity inherited from the input's Classification.
+    assert record.classification.sensitivity == "confidential"
+
+    # Offsets round-trip with ZERO drift (ADR-0031, the same PageOffsetIndex the Runner audit uses).
+    index = PageOffsetIndex(record.page_map)
+    for span in record.page_map.pages:
+        assert index.page_for_offset(span.char_start) == span.page_number
+        assert index.page_for_offset(span.char_end - 1) == span.page_number
+    assert index.diagnostics.max_drift_chars == 0
+    assert index.diagnostics.recovered == 0
+
+
+def test_pages_land_in_input_order(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """Per-page OCR markdown is assembled in page order — page 1 precedes page 2."""
+    pdf = make_glm_pdf(["AAA first page", "ZZZ second page"])
+    (record,) = list(GlmOcrParser({}).parse([_pdf_input(pdf)]))
+    assert record.content.index("AAA first page") < record.content.index("ZZZ second page")
+
+
+def test_single_image_input_single_page(
+    fake_glm: None, make_glm_image: Callable[..., bytes]
+) -> None:
+    """A single scanned image → a single-page markdown record with language detected at Parse."""
+    img = make_glm_image("the framework reads the pixels and extracts the text\n")
+    (record,) = list(GlmOcrParser({}).parse([_image_input(img)]))
+    assert record.disposition is Disposition.PARSED
+    assert record.page_map is not None
+    assert len(record.page_map.pages) == 1
+    assert record.classification.language == "en"
+
+
+def test_size_after_parse_is_assembled_byte_length(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """size_after_parse is the assembled-markdown byte size (the S2 observability signal)."""
+    (record,) = list(GlmOcrParser({}).parse([_pdf_input(make_glm_pdf(["hello world"]))]))
+    assert size_after_parse(record) == len(record.content.encode("utf-8"))
+    assert size_after_parse(record) > 0
+
+
+def test_model_placed_on_resolved_cuda_device(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """The model is moved to the device the seam resolved (cuda), i.e. placement flows through."""
+    provider = GlmOcrParser({})
+    list(provider.parse([_pdf_input(make_glm_pdf(["x"]))]))
+    assert provider._model is not None
+    assert provider._model.device == "cuda"  # model.to("cuda") was called via the seam
+
+
+def test_ocr_instruction_prompt_is_sent_with_the_image(
+    fake_glm: None, make_glm_image: Callable[..., bytes]
+) -> None:
+    """GLM-OCR is prompted with a text instruction alongside the image (unlike image-only LightOn)."""
+    provider = GlmOcrParser({"prompt": "Text Recognition:"})
+    messages = provider._build_messages("FAKE_PAGE::x")
+    parts = messages[0]["content"]
+    kinds = [p["type"] for p in parts]
+    assert "image" in kinds and "text" in kinds
+    text_part = next(p for p in parts if p["type"] == "text")
+    assert text_part["text"] == "Text Recognition:"
+
+
+# --- the shape-matching fake really mirrors the real output shape ------------
+
+
+def test_offline_fake_is_faithful_to_generate_slice_decode_contract(fake_glm: None) -> None:
+    """The anti-false-green anchor: the fake models the REAL generate/slice/decode contract.
+
+    A reviewer points at THIS test to confirm the offline double matches the real model — the single
+    thing whose divergence made PaddleOCR-VL a false green. The real GLM model-card API is:
+
+        generated_ids = model.generate(**inputs)                       # FULL: prompt + continuation
+        continuation  = generated_ids[0][inputs["input_ids"].shape[1]:]  # SLICE off the prompt tokens
+        text          = processor.decode(continuation, skip_special_tokens=True)  # -> str
+
+    The fake is faithful to that: ``generate`` returns prompt+continuation, ``input_ids.shape[1]``
+    is the prompt length, and ``decode`` of the SLICED continuation is the clean markdown — while
+    decoding the FULL (un-sliced) sequence would visibly include the prompt scaffolding. So a
+    Provider that forgets the slice FAILS here rather than passing green.
+    """
+    from transformers import (  # the injected fakes
+        AutoProcessor,
+        GlmOcrForConditionalGeneration,
+    )
+
+    processor = AutoProcessor.from_pretrained("zai-org/GLM-OCR")
+    model = GlmOcrForConditionalGeneration.from_pretrained("zai-org/GLM-OCR")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "FAKE_PAGE::# heading"},
+                {"type": "text", "text": "Text Recognition:"},
+            ],
+        }
+    ]
+    inputs = processor.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
+    )
+    prompt_len = inputs["input_ids"].shape[1]
+    assert prompt_len > 0  # the prompt (chat scaffolding) genuinely occupies tokens
+
+    generated_ids = model.generate(**inputs, max_new_tokens=64, do_sample=False)
+    # The FULL sequence is longer than the prompt — generate() appended a real continuation.
+    assert generated_ids.shape[1] > prompt_len
+
+    # Decoding the SLICED continuation is the clean markdown (the Provider's correct path).
+    sliced = generated_ids[0][prompt_len:]
+    assert processor.decode(sliced, skip_special_tokens=True) == "# heading"
+
+    # Decoding the FULL sequence (the BUG — no slice) visibly PREPENDS the prompt scaffolding, so
+    # an un-sliced Provider would corrupt every page. This is the false-green trap, made to fail.
+    unsliced = generated_ids[0][0:]
+    corrupted = processor.decode(unsliced, skip_special_tokens=True)
+    assert corrupted != "# heading"
+    assert corrupted.endswith("# heading")
+    assert "prompt-scaffold" in corrupted
+
+
+# --- batching over multiple documents (AdapterBase.batched) ------------------
+
+
+def test_batches_multiple_documents_in_input_order(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """The batching path runs over multiple documents, preserving input order (any batch_size)."""
+    inputs = [
+        _pdf_input(make_glm_pdf([f"document number {i}"]), file_name=f"d{i}.pdf")
+        for i in range(5)
+    ]
+    provider = GlmOcrParser({"batch_size": 2})
+    records = list(provider.parse(inputs))
+    assert [r.provenance.file_name for r in records] == [f"d{i}.pdf" for i in range(5)]
+    assert all(r.disposition is Disposition.PARSED for r in records)
+
+
+def test_batch_size_invariant_output_identical(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """Batching is purely memory-shaping: batch_size=1 and batch_size=32 yield identical output."""
+    inputs = [
+        _pdf_input(make_glm_pdf([f"content {i}"]), file_name=f"d{i}.pdf") for i in range(4)
+    ]
+    one = [r.model_dump_json() for r in GlmOcrParser({"batch_size": 1}).parse(inputs)]
+    many = [r.model_dump_json() for r in GlmOcrParser({"batch_size": 32}).parse(inputs)]
+    assert one == many
+
+
+# --- the pixel-bomb DoS cap (built in from the start — the LightOn finding) ---
+
+
+def test_clamp_scale_reduces_oversized_page_under_budget() -> None:
+    """A giant page's render scale is clamped so the bitmap area stays under the megapixel budget."""
+    provider = GlmOcrParser({})
+    # A 100 000 x 100 000-pt page at scale ~2.78 (200 DPI) would be ~7.7e10 px — far over budget.
+    clamped = provider._clamp_scale(100_000.0, 100_000.0, 200.0 / 72.0)
+    area_px = 100_000.0 * clamped * 100_000.0 * clamped
+    assert area_px <= _MAX_RENDER_PIXELS + 1  # clamped to the budget (float slack)
+    assert clamped < 200.0 / 72.0  # genuinely reduced
+
+
+def test_clamp_scale_leaves_normal_page_untouched() -> None:
+    """A normal (in-budget) page keeps its requested scale — the clamp only shrinks oversized pages."""
+    provider = GlmOcrParser({})
+    requested = 200.0 / 72.0
+    # A US-Letter page (612 x 792 pt) at 200 DPI is ~1.5 MP — well under budget, so unchanged.
+    assert provider._clamp_scale(612.0, 792.0, requested) == requested
+
+
+def test_oversized_pdf_page_clamped_not_crashed(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """An oversized PDF page rasterises with a CLAMPED scale (bitmap under budget), still PARSED."""
+    pdf = make_glm_pdf(["# still legible"], oversized=True)
+    (record,) = list(GlmOcrParser({}).parse([_pdf_input(pdf)]))
+    # The page still OCRs (the clamp shrinks the raster, it does not drop the page).
+    assert record.disposition is Disposition.PARSED
+    assert "still legible" in record.content
+
+
+def test_decompression_bomb_image_degrades_to_parse_error(
+    fake_glm: None, make_glm_image: Callable[..., bytes]
+) -> None:
+    """A decompression-bomb image (pixel count over budget) → graceful PARSE_ERROR, no huge alloc."""
+    bomb = make_glm_image("evil", pixels=_MAX_RENDER_PIXELS + 1)
+    (record,) = list(GlmOcrParser({}).parse([_image_input(bomb, file_name="bomb.png")]))
+    assert record.disposition is Disposition.PARSE_ERROR
+    assert record.error is not None
+    # The typed error names the op + native type, never the (untrusted) image content.
+    assert "decode_image" in record.error
+    assert "evil" not in record.error
+
+
+def test_in_budget_image_loads_and_restores_max_image_pixels(
+    fake_glm: None, make_glm_image: Callable[..., bytes]
+) -> None:
+    """An in-budget image OCRs fine, and the global Image.MAX_IMAGE_PIXELS is restored afterwards."""
+    from PIL import Image  # the injected fake
+
+    original = Image.MAX_IMAGE_PIXELS
+    img = make_glm_image("legible page\n", pixels=1000)
+    (record,) = list(GlmOcrParser({}).parse([_image_input(img)]))
+    assert record.disposition is Disposition.PARSED
+    assert original == Image.MAX_IMAGE_PIXELS  # global Pillow state restored (no side effect)
+
+
+# --- graceful failure: native exception → typed → PARSE_ERROR (no PII) -------
+
+
+def test_type_spoofed_pdf_rejected_before_rasteriser(fake_glm: None) -> None:
+    """A .pdf whose bytes are not a PDF is rejected as a PARSE_ERROR (offset-0 spoof guard)."""
+    spoof = b"MZ\x90\x00this is actually an executable, not a pdf"
+    (record,) = list(GlmOcrParser({}).parse([_pdf_input(spoof, file_name="spoof.pdf")]))
+    assert record.disposition is Disposition.PARSE_ERROR
+    assert "spoof" in (record.error or "").lower() or "signature" in (record.error or "").lower()
+
+
+def test_type_spoofed_image_rejected_before_decode(fake_glm: None) -> None:
+    """A .png whose bytes are not a PNG is rejected as a PARSE_ERROR (image spoof guard)."""
+    spoof = b"not-a-png-at-all"
+    (record,) = list(GlmOcrParser({}).parse([_image_input(spoof, file_name="spoof.png")]))
+    assert record.disposition is Disposition.PARSE_ERROR
+    assert "signature" in (record.error or "").lower() or "spoof" in (record.error or "").lower()
+
+
+def test_unsupported_file_type_is_parse_error(fake_glm: None) -> None:
+    """An unsupported file type degrades gracefully to a PARSE_ERROR, never a crash."""
+    inp = ParserInput(
+        provenance=_provenance("thing.xyz", "xyz"),
+        classification=Classification(language="und"),
+        content=b"whatever",
+    )
+    (record,) = list(GlmOcrParser({}).parse([inp]))
+    assert record.disposition is Disposition.PARSE_ERROR
+    assert "xyz" in (record.error or "")
+
+
+def test_native_model_fault_maps_to_typed_error_no_leak(
+    fake_glm: None,
+    monkeypatch: pytest.MonkeyPatch,
+    make_glm_pdf: Callable[..., bytes],
+) -> None:
+    """A native model fault → typed error → graceful PARSE_ERROR; NO image/OCR-text/PII leak.
+
+    Force the fake model's ``generate`` to raise a native exception whose message echoes a secret;
+    the guard must map it to a typed error carrying only the provider + op + native TYPE name — the
+    OCR-is-PII-bearing discipline (C2/C6).
+    """
+    from transformers import GlmOcrForConditionalGeneration  # the injected fake
+
+    class _NativeBoom(Exception):
+        def __str__(self) -> str:  # a native message echoing a secret — must NOT leak
+            return "boom sk-live-OCR-LEAK alice@example.com"
+
+    def _explode(self: object, *_a: object, **_k: object) -> object:
+        raise _NativeBoom
+
+    monkeypatch.setattr(GlmOcrForConditionalGeneration, "generate", _explode)
+    provider = GlmOcrParser({})
+    (record,) = list(provider.parse([_pdf_input(make_glm_pdf(["secret page"]))]))
+    assert record.disposition is Disposition.PARSE_ERROR
+    assert record.error is not None
+    assert "sk-live-OCR-LEAK" not in record.error
+    assert "alice@example.com" not in record.error
+    assert "_NativeBoom" in record.error  # only the native TYPE name
+    assert "parse" in record.error  # the op label
+
+
+def test_parse_error_carries_no_ocr_text_or_pii(
+    fake_glm: None,
+    monkeypatch: pytest.MonkeyPatch,
+    make_glm_pdf: Callable[..., bytes],
+) -> None:
+    """The mapped ProviderError never carries the raw OCR text / the input content (C6)."""
+    from transformers import GlmOcrForConditionalGeneration
+
+    def _explode(self: object, *_a: object, **_k: object) -> object:
+        raise RuntimeError("cuda OOM while decoding SECRET-CONTENT-abc")
+
+    monkeypatch.setattr(GlmOcrForConditionalGeneration, "generate", _explode)
+    with pytest.raises(ProviderError) as exc_info:
+        # Drive the OCR path directly so the typed error surfaces (not yet degraded).
+        GlmOcrParser({})._ocr_pages(["FAKE_PAGE::x"])
+    assert isinstance(exc_info.value, LatenceError)
+    assert "SECRET-CONTENT" not in str(exc_info.value)  # native message not leaked
+    assert "parse" in str(exc_info.value)
+
+
+def test_bad_config_native_exception_maps_to_config_error(
+    fake_glm: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native ValueError from the loader (bad model id) → a typed ConfigError via the guard."""
+    from latence_core.errors import ConfigError
+    from transformers import GlmOcrForConditionalGeneration
+
+    def _bad_load(model_id: str, **_k: object) -> object:
+        msg = "no such model checkpoint"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(GlmOcrForConditionalGeneration, "from_pretrained", _bad_load)
+    with pytest.raises(ConfigError):
+        GlmOcrParser({"model": "does/not-exist"})._load_model()
+
+
+def test_bad_max_new_tokens_is_config_time_error() -> None:
+    """A non-positive max_new_tokens is rejected at construction (a bounded decode ceiling)."""
+    with pytest.raises(ProviderError):
+        GlmOcrParser({"max_new_tokens": 0})
+
+
+def test_empty_pdf_yields_empty_page_not_crash(
+    fake_glm: None, make_glm_pdf: Callable[..., bytes]
+) -> None:
+    """A zero-page/empty source yields a single empty page (recorded), not a crash."""
+    (record,) = list(GlmOcrParser({}).parse([_pdf_input(make_glm_pdf([""]))]))
+    assert record.disposition is Disposition.PARSED
+    assert record.page_map is not None
+    assert isinstance(record.content, str)

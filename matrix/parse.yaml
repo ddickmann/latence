@@ -9,6 +9,9 @@
 #   parser.lighton    — the real GPU LightOn-OCR image->markdown parser (reads pixels, not a text
 #                       layer), device: cuda — SKIPPED-WITH-FLAG on a CPU-only host (needs a rig,
 #                       #64); NEVER a fabricated quality/throughput number
+#   parser.glm        — the real GPU GLM-OCR image->markdown parser (zai-org/GLM-OCR, MIT), the
+#                       second GPU OCR candidate; device: cuda — SKIPPED-WITH-FLAG on a CPU-only
+#                       host (needs a rig, #64); NEVER a fabricated number
 #
 # Run it with `latence bake-off matrix/parse.yaml`. The three CPU parsers are offline, permissive,
 # pure-Python, so they run deterministically in CI (LATENCE_CUDA=0) with NO fabricated numbers. The
@@ -27,3 +30,5 @@ candidates:
   - provider: parser.document
   - provider: parser.lighton
     config: { device: cuda }   # honest GPU intent; skipped-with-flag where no CUDA (device seam)
+  - provider: parser.glm
+    config: { device: cuda }   # the second GPU OCR candidate (GLM-OCR, MIT); skipped-with-flag on CPU

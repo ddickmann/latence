@@ -70,9 +70,10 @@ jobs:
       # workspace members but NOT in the dev env's deps: the two gliner packages pull
       # the heavy GLiNER stack (torch/transformers), the llm + the three -endpoint
       # packages pull the openai client, latence-embedder-st pulls the
-      # sentence-transformers stack (torch/transformers), latence-parser-lighton pulls the
-      # LightOn-OCR transformers/torch/pillow/pypdfium2 stack (its tests monkeypatch those with
-      # shape-matching fakes), and the airflow adapter pulls apache-airflow — any would break the
+      # sentence-transformers stack (torch/transformers), latence-parser-lighton /
+      # latence-parser-glm pull the LightOn-OCR / GLM-OCR transformers/torch/pillow/pypdfium2
+      # stack (their tests monkeypatch those with shape-matching fakes), and the airflow adapter
+      # pulls apache-airflow — any would break the
       # CPU-first, offline, deterministic test env (ADR-0007/0016).
       # Install ONLY their source (no deps) so their src is type-checked and their tests
       # (which monkeypatch the heavy/endpoint dep with a fake, or, for the Airflow
@@ -89,6 +90,7 @@ jobs:
           uv pip install --no-deps -e packages/latence-embedder-endpoint
           uv pip install --no-deps -e packages/latence-embedder-st
           uv pip install --no-deps -e packages/latence-parser-lighton
+          uv pip install --no-deps -e packages/latence-parser-glm
           uv pip install --no-deps -e packages/latence-runner-airflow
 
       - name: Ruff (lint)
@@ -171,6 +173,7 @@ jobs:
           uv build --package latence-embedder-endpoint
           uv build --package latence-embedder-st
           uv build --package latence-parser-lighton
+          uv build --package latence-parser-glm
           uv build --package latence-runner-airflow
           uv build --package latence-demo
 

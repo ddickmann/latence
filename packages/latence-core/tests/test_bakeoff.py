@@ -82,6 +82,7 @@ def test_committed_matrices_are_valid_specs() -> None:
         "parser.pdfplumber",
         "parser.document",
         "parser.lighton",  # the GPU OCR candidate (W1-lighton) — skipped-with-flag on CPU
+        "parser.glm",  # the second GPU OCR candidate (W1-glm, MIT) — skipped-with-flag on CPU
     ]
     chunk = MatrixSpec.from_yaml_text(_CHUNK_MATRIX.read_text(encoding="utf-8"))
     assert chunk.stage is CapabilityKind.CHUNK
@@ -156,9 +157,10 @@ def test_resolve_stage_name_ambiguous_export_requires_explicit(tmp_path: Path) -
 def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
     """The parse matrix runs the three CPU parsers for real; the GPU OCR one is skipped-with-flag.
 
-    W1-lighton device honesty on the Parse Stage: the three CPU parsers RUN (measured); the GPU
-    ``parser.lighton`` (pinned ``device: cuda``) is skipped-with-flag on this CPU host — recorded,
-    never a fabricated OCR quality/throughput number (cites #64).
+    W1-lighton/W1-glm device honesty on the Parse Stage: the three CPU parsers RUN (measured); the
+    two GPU OCR parsers ``parser.lighton`` / ``parser.glm`` (pinned ``device: cuda``) are
+    skipped-with-flag on this CPU host — recorded, never a fabricated OCR quality/throughput number
+    (cites #64).
     """
     result = run_bakeoff(
         _PARSE_MATRIX, base_stack_path=_DEFAULT, storage_root=f"file://{tmp_path}/store"
@@ -172,8 +174,10 @@ def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
         "parser.pdfplumber",
         "parser.document",
         "parser.lighton",
+        "parser.glm",
     }
-    cpu_rows = {k: v for k, v in rows.items() if k != "parser.lighton"}
+    gpu_ocr = {"parser.lighton", "parser.glm"}
+    cpu_rows = {k: v for k, v in rows.items() if k not in gpu_ocr}
     for row in cpu_rows.values():
         assert row.ran  # every CPU candidate ran (all installed)
         # -- the ADR-0036 §4 columns are all populated for a run candidate --
@@ -193,16 +197,19 @@ def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
         assert row.determinism.mismatch is False
         assert row.error_count == 0
         assert row.compute == "cpu"
-    # The GPU OCR candidate is skipped-with-flag — no fabricated columns, cites the rig gap (#64).
-    lighton = rows["parser.lighton"]
-    assert lighton.ran is False
-    assert lighton.skipped is True
-    assert lighton.skip_reason is not None
-    assert "#64" in lighton.skip_reason
-    assert lighton.compute == "gpu"
-    # Its license IS still read off the declared profile (the descriptor needs no rig).
-    assert lighton.license.spdx == "Apache-2.0"
-    assert lighton.license.verified is True
+    # Both GPU OCR candidates are skipped-with-flag — no fabricated columns, cite the rig gap (#64).
+    for name in gpu_ocr:
+        gpu = rows[name]
+        assert gpu.ran is False
+        assert gpu.skipped is True
+        assert gpu.skip_reason is not None
+        assert "#64" in gpu.skip_reason
+        assert gpu.compute == "gpu"
+        # The license IS still read off the declared profile (the descriptor needs no rig).
+        assert gpu.license.verified is True
+    # LightOn's model is Apache-2.0; GLM's is MIT — both permissive, read off the descriptor.
+    assert rows["parser.lighton"].license.spdx == "Apache-2.0"
+    assert rows["parser.glm"].license.spdx == "MIT"
 
 
 def test_parse_bakeoff_is_a_real_comparison(tmp_path: Path) -> None:
@@ -530,7 +537,7 @@ def test_cli_bakeoff_writes_md_and_json(tmp_path: Path) -> None:
     # The JSON companion round-trips to a MatrixResult (schema-valid, consumable numbers).
     parsed = MatrixResult.model_validate_json(js.read_text(encoding="utf-8"))
     assert parsed.stage == "parse"
-    assert len(parsed.candidates) == 4  # 3 CPU parsers + the GPU OCR one (skipped-with-flag on CPU)
+    assert len(parsed.candidates) == 5  # 3 CPU parsers + 2 GPU OCR (skipped-with-flag on CPU)
 
 
 def test_cli_bakeoff_missing_file_exits_two(tmp_path: Path) -> None:

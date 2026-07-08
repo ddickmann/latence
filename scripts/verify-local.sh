@@ -31,7 +31,7 @@ uv sync
 for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence-pii-gliner \
          latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
-         latence-parser-lighton; do
+         latence-parser-lighton latence-parser-glm; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
 done
 ok "workspace synced + heavy sources installed --no-deps"
