@@ -1,0 +1,116 @@
+# stacks/gpu-sota.yaml — the GPU / high-accuracy stack (learned + endpoint Providers).
+#
+# Same spine as stacks/default.yaml, but the accuracy-critical Stages swap the deterministic
+# in-core Providers for the learned/endpoint ones:
+#
+#   Entity Extraction   entity.gazetteer   -> entity.gliner        (learned zero-shot NER)
+#   Relation Extraction relation.pattern   -> relation.gliner_relex(fused NER+RE, learned)
+#   Redaction           redaction.hybrid_rule -> redaction.gliner_pii (learned PII)
+#   Export (RAG corpus) adds an embedder    -> embedding.endpoint   (served embeddings)
+#
+# DEVICE HONESTY (P3-F1 / the G1 skip-with-flag posture). Each learned/endpoint Stage pins
+# `device: cuda` and its Provider ships in a SEPARATE heavy package (ADR-0016) that is NOT in the
+# CPU-only dev/CI env. On a CPU-only host `latence stack validate stacks/gpu-sota.yaml`:
+#   * reports these Stages as **skipped-with-flag** — not installed / no CUDA — NEVER faked, never
+#     a fabricated quality/throughput number (#64);
+#   * still validates the **CPU-reachable spine** (Source -> Intake -> Parse -> Chunk -> Content
+#     Screening -> RAG-corpus Export) end-to-end, so the stack is proven as far as this host allows.
+# On a real GPU host with the heavy packages installed, the learned Stages run (device: cuda) and
+# the full spine — including Disambiguation + Graph Assembly over the learned mentions — validates.
+#
+# stacks/<client>.yaml is the documented extension point: copy either stack and swap Providers.
+name: latence-gpu-sota-stack
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152
+      max_zip_ratio: 50.0
+
+  - name: parse
+    capability: parse
+    provider: parser.pdfplumber
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  # --- Learned / endpoint Stages: skipped-with-flag on a CPU-only host (device: cuda) ---
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gliner        # learned zero-shot NER (latence-ner-gliner, GPU/heavy dep)
+    depends_on: [content_screen]
+    config:
+      device: cuda                 # honest GPU intent; skipped-with-flag where no CUDA (P3-F1)
+      labels: [ORG, PERSON]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.gliner_relex  # fused learned NER+RE (latence-relation-gliner)
+    depends_on: [content_screen, entities]
+    config:
+      device: cuda
+      relations: [works_for, partner_of]
+
+  - name: redact
+    capability: redaction
+    provider: redaction.gliner_pii   # learned PII (latence-pii-gliner)
+    depends_on: [parse]              # Redaction consumes DocumentRecords (the parsed doc)
+    config:
+      device: cuda
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical  # CPU: runs on the CPU host; but depends on learned entities
+    depends_on: [parse, entities]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [entities, relations]
+    config:
+      kb:
+        - {kb_id: Q1, name: Acme, entity_type: ORG}
+        - {kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM]}
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-gpu-sota-stack}
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+    config:
+      basename: corpus
+      embedder:
+        provider: embedding.endpoint   # served embeddings (latence-embedder-endpoint)
+        config: {device: cuda}

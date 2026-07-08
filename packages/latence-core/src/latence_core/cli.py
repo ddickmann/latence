@@ -1,8 +1,16 @@
-"""``latence`` CLI (typer). S1 exposes one command: ``latence run``."""
+"""``latence`` CLI (typer).
+
+* ``latence run <pipeline.yaml>`` — execute a Pipeline on the local Runner (S1).
+* ``latence stack validate <stack.yaml>`` — run a named stack end-to-end on the bundled
+  corpus and assert the G1-style checks (contracts/KG/RAG/report + determinism + resume +
+  graceful-failure + device-honesty), write a signed-style summary, and exit non-zero on
+  failure so it gates CI/publish (ADR-0036 §3, P3-F4).
+"""
 
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +21,11 @@ from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
 app = typer.Typer(add_completion=False, help="Latence — AI-ready data pipelines.")
+
+# The ``stack`` sub-command group (``latence stack validate ...``). A Typer sub-app keeps the
+# stack tooling namespaced without cluttering the top-level command list.
+stack_app = typer.Typer(add_completion=False, help="Full-stack Pipeline configs + validation.")
+app.add_typer(stack_app, name="stack")
 
 logger = logging.getLogger("latence")
 
@@ -67,6 +80,55 @@ def run(
     typer.echo(report.to_json())
     if not storage.exists(report_uri):  # pragma: no cover - defensive
         typer.echo("warning: quality report was not persisted", err=True)
+
+
+@stack_app.command("validate")
+def stack_validate(
+    stack_path: Annotated[
+        Path, typer.Argument(help="Path to the stack YAML (e.g. stacks/default.yaml).")
+    ],
+    storage_root: Annotated[
+        str | None,
+        typer.Option(
+            "--storage-root",
+            help="Storage URI the harness owns for this validation (state/exports/corpus). "
+            "Defaults to a fresh temp dir so a validation never collides with a real run.",
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Run a named stack end-to-end on the bundled corpus and assert the G1-style checks.
+
+    Exits 0 when every check passes (a skipped GPU stage on a CPU-only host is a PASS, not a
+    failure — the device-honesty posture), non-zero otherwise, so this command gates CI/publish.
+    """
+    _configure_logging(verbose)
+    if not stack_path.exists():
+        typer.echo(f"Stack file not found: {stack_path}", err=True)
+        raise typer.Exit(code=2)
+
+    # Lazy import so a bare ``latence run`` (or ``import latence_core.cli``) does not pull the
+    # harness + its runner/stage graph.
+    from latence_core.stacks.validate import _describe_failures, validate_stack
+
+    # A pinned ``--storage-root`` is honored (so an operator can inspect the artifacts after the
+    # run); otherwise a dedicated temp dir keeps the harness hermetic + non-colliding by default.
+    # The temp dir is torn down only after the checks + summary have been read out.
+    if storage_root is not None:
+        result = validate_stack(stack_path, storage_root=storage_root)
+    else:
+        with tempfile.TemporaryDirectory(prefix="latence-stack-validate-") as tmp:
+            result = validate_stack(stack_path, storage_root=f"file://{tmp}")
+
+    logger.info("stack validation summary:\n%s", result.render())
+    typer.echo(result.render())
+    if result.summary_uri is not None:
+        typer.echo(f"summary written to: {result.summary_uri}", err=True)
+
+    if not result.ok:
+        typer.echo("stack validation FAILED:", err=True)
+        typer.echo(_describe_failures(result.checks), err=True)
+        raise typer.Exit(code=1)
 
 
 def main() -> None:  # pragma: no cover - console entry shim

@@ -1,0 +1,120 @@
+# stacks/default.yaml — the BLESSED DEFAULT stack (CPU-first, offline, deterministic).
+#
+# The whole AI-ready-data spine, wired to in-core deterministic Providers + the real CPU
+# adapter where it adds value:
+#
+#   Source
+#     -> Intake Screening      (before Parse: malware/zip-bomb/spoof/oversized -> Quarantine)
+#     -> Parse                 (parser.pdfplumber: real PDFs + text -> markdown + page map)
+#     -> Chunk                 (chunk.markdown: retrieval-sized, offset/page/Provenance-preserving)
+#     -> Content Screening     (after Chunk: prompt-injection -> a filterable RiskMarker)
+#     -> Entity Extraction     (entity.gazetteer: deterministic zero-shot NER)
+#     -> Relation Extraction   (relation.pattern: deterministic windowed relations)
+#     -> Redaction             (redaction.hybrid_rule: comprehensive-by-default PII, H-C1)
+#     -> Profiling             (profiling.statistical: corpus-level quality features)
+#     -> Disambiguation        (disambiguation.cascade: ported 5-strategy resolver + merge)
+#     -> Graph Assembly        (graph.canonical: nodes/edges + per-edge Evidence)
+#     -> Export (KG)           (export.knowledge_graph: Parquet + TTL + GraphML)
+#     -> Export (RAG corpus)   (export.jsonl_parquet: the redacted, chunked, embeddable corpus)
+#
+# This is what an adopter runs OUT OF THE BOX (ADR-0007 CPU-first): fully offline, permissive
+# (every Provider Apache-2.0/MIT, verified), and deterministic (a seeded run is byte-reproducible).
+# NO learned/endpoint Provider appears here — those live in stacks/gpu-sota.yaml.
+#
+# `latence stack validate stacks/default.yaml` runs this end-to-end on the bundled corpus and
+# asserts contracts/KG/RAG/report + determinism + resume + graceful-failure. The `{STORAGE_URI}`
+# and `{CORPUS_DIR}` placeholders are filled by the harness (a temp dir in CI, or an adopter path);
+# to run it directly with `latence run`, replace them with your own storage URI + a folder of docs.
+name: latence-default-stack
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152        # 2 MiB — the planted 3 MiB oversized fixture is Quarantined
+      max_zip_ratio: 50.0       # the planted zip bomb exceeds this ratio (metadata-only check)
+
+  - name: parse
+    capability: parse
+    provider: parser.pdfplumber   # real PDFs (per-page) + text -> markdown + page map (H-A1)
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword   # flags the prompt-injection fixture chunk
+    depends_on: [chunk]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer   # deterministic, offline, zero extra deps (ADR-0007/0022)
+    depends_on: [content_screen]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, Acme Corporation, International Business Machines, IBM, Globex]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [content_screen, entities]
+    config:
+      window_chars: 200
+      relations:
+        works_for: {head: PERSON, tail: ORG, triggers: [works at, employed by, joined]}
+        partner_of: {head: ORG, tail: ORG, triggers: [partner of, partnered with]}
+
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule   # comprehensive-by-default PII handling (H-C1)
+    depends_on: [parse]               # Redaction consumes DocumentRecords (the parsed doc)
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical
+    depends_on: [parse, entities]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade   # ported EntityResolver cascade (ASSET-INVENTORY, S8)
+    depends_on: [entities, relations]
+    config:
+      kb:
+        - {kb_id: Q1, name: Acme, entity_type: ORG}
+        - {kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM]}
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-default-stack}
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph   # KG as Parquet + TTL + GraphML (ADR-0017)
+    depends_on: [graph]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet     # the RAG-ready corpus (PII-handled)
+    depends_on: [redact]
+    config: {basename: corpus}

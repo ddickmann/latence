@@ -113,6 +113,20 @@ jobs:
           LATENCE_CUDA: "0"
         run: uv run pytest packages/latence-core/tests/test_conformance.py packages/latence-core/tests/test_e2e_conformance.py -q
 
+      # Goal A (P3-F4, ADR-0036 §3): "test the default stack, one command". Runs the blessed
+      # stacks/default.yaml end-to-end on the bundled corpus — the REAL pipeline (Source ->…->
+      # Export), not a config-parse smoke — and asserts contracts/KG/RAG/report + determinism +
+      # resume + graceful-failure. Offline + deterministic (LATENCE_CUDA=0); non-zero exit on any
+      # failing check gates the push, so the blessed stack is proven green on every commit. The
+      # gpu-sota.yaml run reports its learned Stages skipped-with-flag on this CPU host (never
+      # faked) and validates the CPU-reachable spine, so both committed stacks stand a standing gate.
+      - name: Validate default stack (Goal A — end-to-end, one command)
+        env:
+          LATENCE_CUDA: "0"
+        run: |
+          uv run latence stack validate stacks/default.yaml
+          uv run latence stack validate stacks/gpu-sota.yaml
+
       - name: Build wheels
         run: |
           uv build --package latence-core
