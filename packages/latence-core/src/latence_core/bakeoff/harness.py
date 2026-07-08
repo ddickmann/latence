@@ -77,7 +77,12 @@ def _restricted_opt_in_license(profile: ProviderProfile | None) -> bool:
 
 
 def _swap_target_stage(
-    base: Pipeline, stage_name: str, candidate_provider: str, candidate_config: dict[str, object]
+    base: Pipeline,
+    stage_name: str,
+    candidate_provider: str,
+    candidate_config: dict[str, object],
+    *,
+    embedder_swap: bool = False,
 ) -> Pipeline:
     """Return a copy of ``base`` with ONE Stage's Provider swapped + its config overridden.
 
@@ -86,14 +91,29 @@ def _swap_target_stage(
     The candidate's ``config`` is merged ONTO the base stage's config so a candidate overrides only
     the keys it names (e.g. ``device: cuda``) and inherits the rest — the base stack stays the
     control. A brand-new provider gets a fresh config from the base + the override.
+
+    When ``embedder_swap`` is True (the EMBEDDING target, W1-embed), the candidate is the opt-in
+    *Embedder* Provider, NOT the Export Provider: the Export node named by ``stage_name`` keeps its
+    own Provider and every other config key, and only its ``config['embedder']`` block is replaced
+    with ``{"provider": candidate_provider, "config": candidate_config}``. This makes the Embedder a
+    proper bake-off dimension (each candidate a distinct embedder) without changing the Export
+    Provider — a genuine controlled comparison of the two embedders (the Export augmentation is not
+    a DAG Stage, ADR-0017, so it is swapped inside the Export config, not as a top-level node).
     """
     new_stages: list[Stage] = []
     for stage in base.stages:
         if stage.name == stage_name:
-            merged = {**stage.config, **candidate_config}
-            new_stages.append(
-                stage.model_copy(update={"provider": candidate_provider, "config": merged})
-            )
+            if embedder_swap:
+                merged = {
+                    **stage.config,
+                    "embedder": {"provider": candidate_provider, "config": candidate_config},
+                }
+                new_stages.append(stage.model_copy(update={"config": merged}))
+            else:
+                merged = {**stage.config, **candidate_config}
+                new_stages.append(
+                    stage.model_copy(update={"provider": candidate_provider, "config": merged})
+                )
         else:
             new_stages.append(stage.model_copy())
     return base.model_copy(update={"stages": new_stages})
@@ -107,6 +127,29 @@ def _resolve_stage_name(base: Pipeline, spec: MatrixSpec) -> str:
     Stages of the kind — e.g. two Export nodes) requires an explicit ``stage_name`` and raises here
     rather than silently swapping the wrong one.
     """
+    # The EMBEDDING target is special: the Embedder is an OPT-IN Export augmentation (ADR-0017),
+    # not a DAG Stage, so a base stack has NO `embedding` node. The bake-off swaps the embedder
+    # INSIDE an Export node's `config['embedder']`, so `stage_name` must name a real Export node
+    # (required, since a stack typically has >1 Export). We validate it is an Export node here and
+    # let the harness do the nested embedder swap (W1-embed).
+    if spec.stage == CapabilityKind.EMBEDDING:
+        if spec.stage_name is None:
+            msg = (
+                "an embedding matrix must set stage_name to the Export node whose embedder is "
+                "swapped (the Embedder is an opt-in Export augmentation, not a DAG Stage)."
+            )
+            raise ValueError(msg)
+        match = [s for s in base.stages if s.name == spec.stage_name]
+        if not match:
+            msg = f"matrix stage_name {spec.stage_name!r} is not a Stage in the base stack."
+            raise ValueError(msg)
+        if match[0].capability != CapabilityKind.EXPORT:
+            msg = (
+                f"an embedding matrix's stage_name {spec.stage_name!r} must name an Export node "
+                f"(the embedder lives in its config), not a {match[0].capability.value!r} Stage."
+            )
+            raise ValueError(msg)
+        return spec.stage_name
     if spec.stage_name is not None:
         match = [s for s in base.stages if s.name == spec.stage_name]
         if not match:
@@ -233,12 +276,14 @@ class BakeOffHarness:
 
         base = load_stack(self._base_stack_path, storage_uri=self._root, corpus_dir=corpus_dir)
         stage_name = _resolve_stage_name(base, spec)
+        embedder_swap = spec.stage == CapabilityKind.EMBEDDING
 
         results: list[CandidateResult] = []
         for candidate in spec.candidates:
             results.append(
                 self._bake_candidate(
-                    base, spec, stage_name, candidate.provider, candidate.config
+                    base, spec, stage_name, candidate.provider, candidate.config,
+                    embedder_swap=embedder_swap,
                 )
             )
 
@@ -257,6 +302,8 @@ class BakeOffHarness:
         stage_name: str,
         provider: str,
         config: dict[str, object],
+        *,
+        embedder_swap: bool = False,
     ) -> CandidateResult:
         """Measure one candidate — or record it skipped-with-flag / failed (degrade per-candidate).
 
@@ -269,7 +316,9 @@ class BakeOffHarness:
         # Per-candidate Storage namespace so two candidates never collide on run state.
         cand_root = f"{self._root}/candidates/{provider.replace('.', '_')}"
         cand_storage = Storage.for_uri(cand_root)
-        swapped = _swap_target_stage(base, stage_name, provider, config)
+        swapped = _swap_target_stage(
+            base, stage_name, provider, config, embedder_swap=embedder_swap
+        )
         # Re-point the swapped pipeline's storage at the per-candidate root so runs are isolated.
         swapped = swapped.model_copy(update={"storage_uri": cand_root})
         target_stage = next(s for s in swapped.stages if s.name == stage_name)

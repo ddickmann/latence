@@ -210,6 +210,51 @@ def _skip_reason_for_stage(stage: Stage, registry: ProviderRegistry) -> str | No
     decision = select_device(requested, profile)
     if decision.skipped:
         return decision.reason
+    # An Export stage may opt into a *nested* Embedder Provider (ADR-0017 opt-in augmentation) that
+    # is itself GPU/endpoint-gated (e.g. embedding.sentence_transformers pinned device: cuda, or an
+    # endpoint embedder whose package is absent). The embedder is not a top-level DAG node, so the
+    # check above never sees it; inspect it through the SAME select_device seam so the embed
+    # bake-off's ST candidate is honestly skipped-with-flag on a CPU host rather than run-and-fail
+    # (W1-embed — the same device-honesty posture applied to the nested embedder).
+    return _embedder_skip_reason(stage, registry)
+
+
+def _embedder_skip_reason(stage: Stage, registry: ProviderRegistry) -> str | None:
+    """Why this Export stage's nested ``config['embedder']`` Provider is not runnable here, or None.
+
+    The Embedder is an opt-in Export sub-config (``{"provider": ..., "config": {...}}``), not a DAG
+    Stage, so :func:`_skip_reason_for_stage`'s top-level check never inspects it. This applies the
+    identical honest skip conditions to the nested embedder Provider: **not installed** (its heavy
+    package is absent) OR **GPU-only, no CUDA** (its declared profile + the embedder config's
+    requested ``device`` resolve to a skip through the SAME :func:`select_device` seam). A CPU/auto
+    embedder whose package fails to load is a REAL breakage (return None ⇒ run + FAIL loudly), never
+    silently skipped. A stage with no embedder returns None.
+    """
+    spec = stage.config.get("embedder")
+    if not isinstance(spec, dict):
+        return None
+    provider = spec.get("provider")
+    if not isinstance(provider, str) or not provider:
+        return None
+    if provider not in registry.names():
+        return (
+            f"embedder {provider!r} not installed on this host (needs its GPU/endpoint package)"
+        )
+    embedder_config = spec.get("config", {})
+    requested = (
+        str(embedder_config.get("device", "auto"))
+        if isinstance(embedder_config, dict)
+        else "auto"
+    )
+    try:
+        profile = registry.profile(provider)
+    except Exception:  # noqa: BLE001 - triage a nested-embedder load error by its requested device
+        if requested in ("cuda", "gpu"):
+            return f"embedder {provider!r} failed to load on this host (missing GPU dep)"
+        return None
+    decision = select_device(requested, profile)
+    if decision.skipped:
+        return f"embedder {provider!r}: {decision.reason}"
     return None
 
 

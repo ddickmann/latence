@@ -69,8 +69,9 @@ jobs:
       # latence-ner-gliner / latence-relation-gliner / latence-relation-llm are
       # workspace members but NOT in the dev env's deps: the two gliner packages pull
       # the heavy GLiNER stack (torch/transformers), the llm + the three -endpoint
-      # packages pull the openai client, and the airflow adapter pulls apache-airflow,
-      # which would break the CPU-first, offline, deterministic test env (ADR-0007/0016).
+      # packages pull the openai client, latence-embedder-st pulls the
+      # sentence-transformers stack (torch/transformers), and the airflow adapter pulls
+      # apache-airflow — any would break the CPU-first, offline, deterministic test env (ADR-0007/0016).
       # Install ONLY their source (no deps) so their src is type-checked and their tests
       # (which monkeypatch the heavy/endpoint dep with a fake, or, for the Airflow
       # adapter, use its Airflow-free in-process path) collect and run offline.
@@ -83,6 +84,7 @@ jobs:
           uv pip install --no-deps -e packages/latence-parser-endpoint
           uv pip install --no-deps -e packages/latence-ner-endpoint
           uv pip install --no-deps -e packages/latence-embedder-endpoint
+          uv pip install --no-deps -e packages/latence-embedder-st
           uv pip install --no-deps -e packages/latence-runner-airflow
 
       - name: Ruff (lint)
@@ -132,15 +134,17 @@ jobs:
       # Provider run through the REAL pipeline (other stages held at stacks/default.yaml), measuring
       # quality/latency/memory(declared-vs-measured)/cost/license/determinism/error-rate. Offline +
       # deterministic (LATENCE_CUDA=0), so the bake-off runs end-to-end and its numbers are
-      # reproducible on every push. GPU matrices (matrix/entity.yaml's gliner candidate) are NOT run
-      # here — a GPU/endpoint candidate is skipped-with-flag on this CPU host, never a fabricated
-      # number (#64). Writes MATRIX-RESULTS-<stage>.md + .json to a temp dir (proving the CLI path).
+      # reproducible on every push. GPU matrices (matrix/entity.yaml's gliner candidate, and
+      # matrix/embed.yaml's sentence_transformers candidate) have their GPU candidate skipped-with-
+      # flag on this CPU host, never a fabricated number (#64); their CPU candidate (hashing embedder
+      # for embed) runs for real. Writes MATRIX-RESULTS-<stage>.md + .json to a temp dir (CLI path).
       - name: Run CPU bake-offs (Goal B — per-Stage provider matrix, end-to-end)
         env:
           LATENCE_CUDA: "0"
         run: |
           uv run latence bake-off matrix/parse.yaml --out-dir "$(mktemp -d)"
           uv run latence bake-off matrix/chunk.yaml --out-dir "$(mktemp -d)"
+          uv run latence bake-off matrix/embed.yaml --out-dir "$(mktemp -d)"
 
       - name: Build wheels
         run: |
@@ -155,6 +159,7 @@ jobs:
           uv build --package latence-parser-endpoint
           uv build --package latence-ner-endpoint
           uv build --package latence-embedder-endpoint
+          uv build --package latence-embedder-st
           uv build --package latence-runner-airflow
           uv build --package latence-demo
 

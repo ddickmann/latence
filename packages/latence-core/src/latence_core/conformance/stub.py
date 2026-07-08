@@ -146,6 +146,55 @@ def install_gliner(
 
 
 # ---------------------------------------------------------------------------
+# sentence-transformers stub (the learned in-process Embedder Provider)
+# ---------------------------------------------------------------------------
+
+
+class _StubSentenceTransformer:
+    """Stands in for ``sentence_transformers.SentenceTransformer``: fixed-width vectors in order.
+
+    The learned Embedder Provider (``embedding.sentence_transformers``) can't run its real backend
+    (``sentence-transformers`` → torch) in the CPU-first, offline test env (ADR-0007/0016). This
+    stub returns a deterministic, fixed-width vector per input text (not semantic — it only proves
+    the contract: one uniform-width vector per input, in order, at the model's declared width), so
+    the conformance C1/C2/C3/C5/C6 subset is checked without a live model.
+    """
+
+    dimension: int = 8
+
+    def __init__(self, model_id: str, device: str | None = None) -> None:
+        self.model_id = model_id
+        self.device = device
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return type(self).dimension
+
+    def encode(self, texts: list[str], **_kwargs: Any) -> list[list[float]]:
+        # A deterministic, fixed-width vector per input (keyed by index+width), input order.
+        return [
+            [float((i + j) % 3) for j in range(type(self).dimension)]
+            for i, _text in enumerate(texts)
+        ]
+
+
+@contextlib.contextmanager
+def install_sentence_transformers(*, dimension: int = 8) -> Iterator[None]:
+    """Install a fake ``sentence_transformers`` returning fixed-width deterministic vectors."""
+    _StubSentenceTransformer.dimension = dimension
+    module = types.ModuleType("sentence_transformers")
+    module.SentenceTransformer = _StubSentenceTransformer  # type: ignore[attr-defined]
+    saved = sys.modules.get("sentence_transformers")
+    sys.modules["sentence_transformers"] = module
+    try:
+        yield
+    finally:
+        if saved is not None:
+            sys.modules["sentence_transformers"] = saved
+        else:
+            sys.modules.pop("sentence_transformers", None)
+
+
+# ---------------------------------------------------------------------------
 # Canned typed replies keyed to the canonical fixture
 # ---------------------------------------------------------------------------
 

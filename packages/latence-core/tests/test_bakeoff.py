@@ -55,6 +55,7 @@ _DEFAULT = _STACKS / "default.yaml"
 _PARSE_MATRIX = _MATRIX / "parse.yaml"
 _CHUNK_MATRIX = _MATRIX / "chunk.yaml"
 _ENTITY_MATRIX = _MATRIX / "entity.yaml"
+_EMBED_MATRIX = _MATRIX / "embed.yaml"
 
 cli = CliRunner()
 
@@ -229,6 +230,49 @@ def test_entity_matrix_gpu_candidate_skipped_with_flag(tmp_path: Path) -> None:
     assert gliner.determinism.checked is False
     # The CPU candidate in the same matrix still ran.
     assert rows["entity.gazetteer"].ran
+
+
+def test_embed_matrix_is_a_valid_spec() -> None:
+    """The committed embed matrix parses: an ``embedding`` target swapping the Export's embedder."""
+    embed = MatrixSpec.from_yaml_text(_EMBED_MATRIX.read_text(encoding="utf-8"))
+    assert embed.stage is CapabilityKind.EMBEDDING
+    assert embed.stage_name == "export_corpus"
+    assert [c.provider for c in embed.candidates] == [
+        "embedding.hashing",
+        "embedding.sentence_transformers",
+    ]
+
+
+def test_embed_matrix_hashing_runs_st_skipped_with_flag(tmp_path: Path) -> None:
+    """The embed bake-off: the CPU hashing embedder RUNS (measured), the learned ST is skipped.
+
+    W1-embed device honesty applied to the *nested* embedder (the opt-in Export augmentation is not
+    a DAG Stage): ``embedding.hashing`` is swapped into the corpus Export and measured for real;
+    ``embedding.sentence_transformers`` (pinned ``device: cuda``) is skipped-with-flag on this
+    CPU-only host through the SAME ``select_device`` seam — NO fabricated numbers (references #64).
+    """
+    result = run_bakeoff(
+        _EMBED_MATRIX, base_stack_path=_DEFAULT, storage_root=f"file://{tmp_path}/store"
+    )
+    rows = _by_provider(result)
+    # The in-core hashing embedder ran for real (measured, deterministic, its Apache-2.0 license).
+    hashing = rows["embedding.hashing"]
+    assert hashing.ran
+    assert hashing.skipped is False
+    assert hashing.determinism.checked is True
+    assert hashing.license is not None and hashing.license.spdx == "Apache-2.0"
+    # The learned ST embedder is skipped-with-flag — no fabricated columns, cites the rig gap.
+    st = rows["embedding.sentence_transformers"]
+    assert st.skipped is True
+    assert st.skip_reason is not None
+    assert "#64" in st.skip_reason
+    assert "embedder" in st.skip_reason  # the nested-embedder skip, not a top-level stage skip
+    assert st.quality is None
+    assert st.stage_seconds is None
+    assert st.memory is None
+    assert st.determinism.checked is False
+    # Its license column is still surfaced from the declared profile (MIT weights), never faked.
+    assert st.license is not None and st.license.spdx == "MIT"
 
 
 # -- The determinism cross-check BITES: a lying declared=True is flagged ------

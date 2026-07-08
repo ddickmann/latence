@@ -1,0 +1,33 @@
+# matrix/embed.yaml — the Embedder bake-off (ADR-0036 §4, P3-F5; W1-embed, #93).
+#
+# The Embedder is an OPT-IN Export augmentation (ADR-0017), not a standalone DAG Stage — it lives
+# inside a corpus Export's `config.embedder`. So this matrix's `stage: embedding` target swaps ONLY
+# the embedder INSIDE the RAG-corpus Export node (`export_corpus`, named by `stage_name`), holding
+# every OTHER Stage — and the Export Provider itself (`export.jsonl_parquet`) — byte-identical. A
+# genuine controlled comparison of the two Embedder Providers on the bundled corpus:
+#
+#   embedding.hashing                — the in-core deterministic, dependency-free hashing embedder
+#                                      (CPU, pure-Python) — RUNS in CI (a real, measured row)
+#   embedding.sentence_transformers  — the learned e5-small semantic embedder (torch/ST, heavy dep,
+#                                      device: cuda) — SKIPPED-WITH-FLAG on a CPU-only host (needs a
+#                                      rig, #64); NEVER a fabricated quality/throughput number
+#
+# The ST candidate pins `device: cuda` (honest GPU intent). On a CPU-only host (or CI,
+# LATENCE_CUDA=0) the harness's nested-embedder device pre-flight resolves that through the SAME
+# `select_device` seam the Runner uses and records the row skipped-with-flag with no measured
+# columns; on a real GPU host with latence-embedder-st installed it runs (device: cuda) and is
+# measured for real. e5 prefix/normalization follows the model card (passage: + L2-normalise).
+#
+# Embedding has no gold set, so the quality column is n/a; the row still records
+# latency/memory/license/determinism/error-rate. `stage_name` is REQUIRED for an embedding matrix
+# (a stack typically has >1 Export node; this names the one whose embedder is swapped).
+stage: embedding
+stage_name: export_corpus
+candidates:
+  - provider: embedding.hashing
+    config: { dimension: 64 }
+  - provider: embedding.sentence_transformers
+    config:
+      model: intfloat/multilingual-e5-small   # MIT, 384-dim
+      dimension: 384
+      device: cuda   # honest GPU intent; skipped-with-flag where no CUDA (device seam)

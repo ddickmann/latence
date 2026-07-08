@@ -13,6 +13,7 @@ latence-pii-gliner = { workspace = true }
 latence-parser-endpoint = { workspace = true }
 latence-ner-endpoint = { workspace = true }
 latence-embedder-endpoint = { workspace = true }
+latence-embedder-st = { workspace = true }
 latence-runner-airflow = { workspace = true }
 latence-demo = { workspace = true }
 
@@ -24,10 +25,11 @@ description = "Dev meta-project pinning the latence workspace for tooling (not p
 requires-python = ">=3.11"
 # latence-ner-gliner / latence-relation-gliner / latence-relation-llm /
 # latence-pii-gliner / latence-parser-endpoint / latence-ner-endpoint /
-# latence-embedder-endpoint / latence-runner-airflow are intentionally NOT pinned here:
-# the gliner packages pull the heavy GLiNER stack (torch/transformers), the llm + the
-# three -endpoint packages pull the openai client, and the airflow adapter pulls
-# apache-airflow — installing any would break the CPU-first, offline, deterministic
+# latence-embedder-endpoint / latence-embedder-st / latence-runner-airflow are
+# intentionally NOT pinned here: the gliner packages pull the heavy GLiNER stack
+# (torch/transformers), the llm + the three -endpoint packages pull the openai client,
+# latence-embedder-st pulls the sentence-transformers stack (torch/transformers), and the
+# airflow adapter pulls apache-airflow — installing any would break the CPU-first, offline, deterministic
 # dev/test environment (ADR-0007/0016). They are still workspace members (built +
 # type-checked from source), just not installed into the default dev env. Each Provider
 # / adapter is exercised with its heavy/endpoint dep monkeypatched with a fake (or, for
@@ -92,7 +94,7 @@ no_implicit_reexport = true
 # the dev env by design, ADR-0016) and are treated as dynamically typed — the
 # Providers monkeypatch them with fakes in tests.
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "airflow.*"]
+module = ["pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "sentence_transformers", "airflow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

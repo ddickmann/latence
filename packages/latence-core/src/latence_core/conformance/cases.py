@@ -21,7 +21,8 @@ subset is checked without a live backend (their real numbers need a rig, #64).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import contextlib
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
@@ -863,7 +864,7 @@ def _export_case() -> ConformanceCase:
     )
 
 
-def _embedding_case(*, stub_scoped: bool) -> ConformanceCase:
+def _embedding_case(*, stub_scoped: bool, backend: str = "endpoint") -> ConformanceCase:
     """Embedding: map texts to fixed-width vectors — returned to the harness so C4 audits them.
 
     Unlike the record-producing Capabilities, an Embedder yields raw ``list[float]`` vectors (not
@@ -873,6 +874,12 @@ def _embedding_case(*, stub_scoped: bool) -> ConformanceCase:
     archetypal case where determinism is a real, checkable property of the *output*, and it is the
     signal the bake-off (P3-F5) trusts. :func:`_embedding_valid` is this case's C1: one vector per
     input text, each of the declared width (order preserved by construction of the tuple list).
+
+    ``backend`` selects the stub-scoped Provider's fake backend: ``"endpoint"`` installs the fake
+    ``openai`` client (``embedding.endpoint``), ``"sentence_transformers"`` installs the fake
+    ``sentence_transformers`` model (``embedding.sentence_transformers``) — both return
+    deterministic fixed-width vectors so the contract subset is checked offline (their live numbers
+    need a rig, #64). It is ignored when ``stub_scoped`` is False (the in-core hashing embedder).
     """
 
     texts = ["alpha beta", "gamma delta", "epsilon"]
@@ -895,18 +902,32 @@ def _embedding_case(*, stub_scoped: bool) -> ConformanceCase:
     if stub_scoped:
         stub_dim = 8
 
+        @contextlib.contextmanager
+        def _install_backend() -> Iterator[None]:
+            if backend == "sentence_transformers":
+                with stubs.install_sentence_transformers(dimension=stub_dim):
+                    yield
+            else:
+                with stubs.install_openai(dimension=stub_dim):
+                    yield
+
         def invoke(provider: Any) -> Sequence[object]:
-            with stubs.install_openai(dimension=stub_dim):
+            with _install_backend():
                 return _run(provider)
 
         def valid_output(vectors: Sequence[object]) -> bool:
             return _embedding_valid(vectors, dim=stub_dim)
 
         def adversarial_stub(provider: Any) -> AdversarialOutcome:
-            with stubs.install_openai(dimension=stub_dim):
+            with _install_backend():
                 return _capture_raise(lambda: list(provider.embed([])))
 
-        config: dict[str, Any] = {"dimension": stub_dim, "base_url": "http://stub/v1"}
+        if backend == "sentence_transformers":
+            # The ST Provider needs no endpoint base_url; it reads the width from the loaded
+            # (stub) model, so declaring the stub width keeps the C1 check exact.
+            config: dict[str, Any] = {"dimension": stub_dim}
+        else:
+            config = {"dimension": stub_dim, "base_url": "http://stub/v1"}
         adversarial_fn = adversarial_stub
     else:
         cpu_dim = int(_embedding_cpu_dimension())
@@ -1001,6 +1022,9 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "relation.gliner_relex": _relation_case(stub_scoped=True, gliner=True),
     "redaction.gliner_pii": _redaction_case(stub_scoped=True),
     "embedding.endpoint": _embedding_case(stub_scoped=True),
+    "embedding.sentence_transformers": _embedding_case(
+        stub_scoped=True, backend="sentence_transformers"
+    ),
 }
 
 

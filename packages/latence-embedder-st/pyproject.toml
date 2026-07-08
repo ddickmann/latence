@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-embedder-st"
+version = "0.1.0"
+description = "Learned sentence-transformers Embedder Provider (multilingual-e5-small, CPU/GPU) — the in-process semantic Embedder for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "embeddings", "sentence-transformers", "e5"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the sentence-transformers
+# stack (sentence-transformers -> torch/transformers) ships with THIS Provider package,
+# not the thin core. The sentence-transformers library is Apache-2.0 (code); the default
+# checkpoint intfloat/multilingual-e5-small is MIT (weights) — both verified permissive
+# (ADR-0012, 2026-07-08); nothing downloads unless a Pipeline configures this Provider.
+# H-G1 dep cap: 'sentence-transformers' moves its API across MINORS (the effective majors
+# for a 3.x/4.x/5.x library), so it carries an upper cap so a downstream install can't
+# silently pull an API-breaking release. The current line is 5.x (verified 2026-07-08);
+# the cap is '<6' (the current-major boundary).
+dependencies = [
+    "latence-core",
+    "sentence-transformers>=3.0,<6",
+]
+
+# Registers this Provider under the framework's discovery group. Installing this package
+# makes 'embedding.sentence_transformers' available to any Pipeline with no core change
+# (ADR-0004), alongside the in-core deterministic 'embedding.hashing' reference and the
+# 'embedding.endpoint' performance path — swappable by one config line (ADR-0007).
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+[project.entry-points."latence.providers"]
+"embedding.sentence_transformers" = "latence_embedder_st.provider:SentenceTransformersEmbedder"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_embedder_st"]
