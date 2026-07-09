@@ -52,6 +52,14 @@ class _CapturingGLiNER:
         _CAPTURED_LABELS.append(list(labels))
         return []  # no mentions needed — the test asserts the LABELS, not the extraction result
 
+    def batch_predict_entities(
+        self, texts: list[str], labels: list[str], threshold: float = 0.5  # noqa: ARG002
+    ) -> list[list[dict[str, Any]]]:
+        # W7: the batched entry point the extractor now calls; capture the labels once per batch
+        # (they are the same for every text in the batch), return an empty list per text.
+        _CAPTURED_LABELS.append(list(labels))
+        return [[] for _ in texts]
+
 
 @pytest.fixture(autouse=True)
 def _pin_cpu_host(monkeypatch: pytest.MonkeyPatch) -> None:

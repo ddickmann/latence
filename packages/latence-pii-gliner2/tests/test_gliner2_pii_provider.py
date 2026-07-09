@@ -69,14 +69,26 @@ class _FakeGLiNER2:
     """
 
     entities: list[dict[str, Any]] = []
+    #: an optional per-text map (text -> flat entity rows) so batched inputs get DISTINCT results;
+    #: the equivalence test needs distinct per-doc results to catch an off-by-one / wrong-order map.
+    per_text: dict[str, list[dict[str, Any]]] | None = None
     model_id: str = ""
     raise_on_extract: bool = False
+
+    def __init__(self) -> None:
+        self.batch_calls = 0
 
     @classmethod
     def from_pretrained(cls, model_id: str) -> _FakeGLiNER2:
         inst = cls()
         inst.model_id = model_id
         return inst
+
+    def _rows_for(self, text: str) -> list[dict[str, Any]]:
+        per_text = type(self).per_text
+        if per_text is not None:
+            return per_text.get(text, [])
+        return type(self).entities
 
     def extract_entities(
         self,
@@ -90,7 +102,7 @@ class _FakeGLiNER2:
             # A native gliner2 fault echoing the input text — the Provider must NOT leak it.
             raise RuntimeError(f"cuda oom while extracting {text!r}")
         by_label: dict[str, list[dict[str, Any]]] = {}
-        for e in type(self).entities:
+        for e in self._rows_for(text):
             label = e["label"]
             if label not in entity_types or e["confidence"] < threshold:
                 continue
@@ -106,6 +118,28 @@ class _FakeGLiNER2:
             )
         return {"entities": by_label}
 
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        threshold: float = 0.5,
+        include_spans: bool = False,
+        include_confidence: bool = False,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        # The real batched API: one forward pass over all texts; result[i] is texts[i]'s per-label
+        # dict — the exact single-text shape, one per input.
+        self.batch_calls += 1
+        return [
+            self.extract_entities(
+                text,
+                entity_types,
+                threshold=threshold,
+                include_spans=include_spans,
+                include_confidence=include_confidence,
+            )
+            for text in texts
+        ]
+
 
 @pytest.fixture()
 def fake_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER2]:
@@ -113,6 +147,7 @@ def fake_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER2]:
     module.GLiNER2 = _FakeGLiNER2  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "gliner2", module)
     _FakeGLiNER2.entities = []
+    _FakeGLiNER2.per_text = None
     _FakeGLiNER2.raise_on_extract = False
     return _FakeGLiNER2
 
@@ -311,3 +346,123 @@ def test_missing_gliner2_dependency_raises_clear_error(monkeypatch: pytest.Monke
     provider = Gliner2PIIRedactor(_config())
     with pytest.raises(ImportError, match="pip install latence-pii-gliner2"):
         list(provider.redact([_doc(_TEXT)]))
+
+
+# --- W7 encoder batching (ADR-0036 §1 / ADR-0033) --------------------------------------------
+
+
+def _distinct_docs(n: int) -> list[DocumentRecord]:
+    # N docs each with a DISTINCT person name AND a DISTINCT span (doc i is prefixed with i filler
+    # chars so its name sits at offset i, span [i, i+9)). Distinct spans give the equivalence test
+    # teeth: a mis-mapped batch hands doc i another doc's raw PII dict (start=j != i), so doc i
+    # masks the WRONG offsets and its masked_content diverges from the single-item path — the
+    # assertions FAIL. (A shared [0,9) span would let a reversed map slip through, since every
+    # record still masks its OWN content at [0,9); H-E1/E2 PII false-green hardening.)
+    docs: list[DocumentRecord] = []
+    for i in range(n):
+        content = ("." * i) + f"Person{i:03d} was here."
+        prov = Provenance(
+            source_uri=f"file:///c/{i}.txt",
+            file_name=f"{i}.txt",
+            file_type="txt",
+            file_size=100,
+            document_id=f"sha256:doc{i}",
+            char_start=0,
+            char_end=len(content),
+            page_start=1,
+            page_end=1,
+        )
+        docs.append(
+            DocumentRecord(
+                record_id=f"doc{i}",
+                provenance=prov,
+                classification=Classification(language="en", sensitivity="public"),
+                content=content,
+            )
+        )
+    return docs
+
+
+def _per_text_person_map(docs: list[DocumentRecord]) -> dict[str, list[dict[str, Any]]]:
+    # Each doc "<i dots>PersonNNN was here." -> a person entity spanning the name at its OWN doc
+    # offset i (span [i, i+9)). Keyed by index so doc i carries start=i; a batch that maps results
+    # back out of order gives a doc a DIFFERENT start than i — caught by the record-for-record test.
+    return {
+        d.content: [{"start": i, "end": i + 9, "label": "person", "confidence": 0.9}]
+        for i, d in enumerate(docs)
+    }
+
+
+def test_batched_equals_unbatched_record_for_record(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    docs = _distinct_docs(7)
+    fake_gliner2.per_text = _per_text_person_map(docs)
+    cfg = {"pii_labels": ["person"]}
+
+    unbatched = [
+        r for d in docs for r in Gliner2PIIRedactor({**cfg, "batch_size": 1}).redact([d])
+    ]
+    batched = list(Gliner2PIIRedactor({**cfg, "batch_size": 4}).redact(docs))
+
+    assert len(batched) == len(unbatched) == 7
+    for b, u in zip(batched, unbatched, strict=True):
+        assert b.record_id == u.record_id
+        assert b.masked_content == u.masked_content
+        assert [(s.char_start, s.char_end, s.pii_type) for s in b.pii_spans] == [
+            (s.char_start, s.char_end, s.pii_type) for s in u.pii_spans
+        ]
+    for i, rec in enumerate(batched):
+        assert f"Person{i:03d}" not in rec.masked_content
+        assert "[PERSON]" in rec.masked_content
+
+
+def test_model_called_ceil_n_over_batch_size_times(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    docs = _distinct_docs(7)
+    fake_gliner2.per_text = _per_text_person_map(docs)
+    provider = Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 3})
+    list(provider.redact(docs))
+    # 7 docs at batch_size=3 => ceil(7/3)=3 forward passes, not 7.
+    assert provider._model.batch_calls == 3
+
+
+def test_batch_size_must_be_positive_int() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="batch_size must be >= 1"):
+        Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 0})
+
+
+class _NoBatchGLiNER2:
+    """A checkpoint that exposes only the single-text ``extract_entities``, NOT the W7 batched
+    ``batch_extract_entities`` — the false-green class the provider guard must catch legibly.
+
+    Does NOT subclass ``_FakeGLiNER2`` (which defines the batched method): a bare class genuinely
+    lacking it is what makes ``hasattr(model, "batch_extract_entities")`` False at runtime, unlike
+    an ``= None`` shadow (still an attribute — ``hasattr`` stays True).
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_id: str) -> _NoBatchGLiNER2:  # noqa: ARG003
+        return cls()
+
+    def extract_entities(
+        self,
+        text: str,  # noqa: ARG002
+        entity_types: list[str],  # noqa: ARG002
+        threshold: float = 0.5,  # noqa: ARG002
+        include_spans: bool = False,  # noqa: ARG002
+        include_confidence: bool = False,  # noqa: ARG002
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return {"entities": {}}
+
+
+def test_missing_batch_extract_entities_raises_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The batched entry point is offline-unverifiable, so if the real checkpoint lacks it the
+    # provider must fail with an actionable message naming the batched API, not a bare
+    # AttributeError buried in the guard. Offline stand-in for the pod script's Gate 0.
+    module = types.ModuleType("gliner2")
+    module.GLiNER2 = _NoBatchGLiNER2  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gliner2", module)
+    with pytest.raises(AttributeError, match="batch_extract_entities"):
+        list(Gliner2PIIRedactor(_config()).redact([_doc(_TEXT)]))

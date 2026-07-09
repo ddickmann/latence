@@ -55,10 +55,21 @@ def _doc(
 
 
 class _FakeGLiNER:
-    """Stands in for gliner.GLiNER with a predict_entities method."""
+    """Stands in for gliner.GLiNER with predict_entities AND batch_predict_entities (W7).
+
+    The real batched API is ``batch_predict_entities(texts, labels, threshold=…) ->
+    list[list[dict]]`` (result ``i`` for ``texts[i]``). The W7 provider calls the batched form;
+    the fake keeps a per-instance ``batch_calls`` counter so a test asserts ``ceil(N/batch_size)``
+    calls, not N. An optional ``per_text`` map gives DISTINCT results per document text so a
+    mis-mapped batch (off-by-one / wrong order) is caught by the equivalence test.
+    """
 
     entities: list[dict[str, Any]] = []
+    per_text: dict[str, list[dict[str, Any]]] | None = None
     model_id: str = ""
+
+    def __init__(self) -> None:
+        self.batch_calls = 0
 
     @classmethod
     def from_pretrained(cls, model_id: str) -> _FakeGLiNER:
@@ -66,12 +77,21 @@ class _FakeGLiNER:
         inst.model_id = model_id
         return inst
 
+    def _for_text(self, text: str, labels: list[str], threshold: float) -> list[dict[str, Any]]:
+        per_text = type(self).per_text
+        source = per_text.get(text, []) if per_text is not None else type(self).entities
+        return [e for e in source if e["label"] in labels and e["score"] >= threshold]
+
     def predict_entities(
         self, text: str, labels: list[str], threshold: float = 0.5
     ) -> list[dict[str, Any]]:
-        return [
-            e for e in type(self).entities if e["label"] in labels and e["score"] >= threshold
-        ]
+        return self._for_text(text, labels, threshold)
+
+    def batch_predict_entities(
+        self, texts: list[str], labels: list[str], threshold: float = 0.5
+    ) -> list[list[dict[str, Any]]]:
+        self.batch_calls += 1
+        return [self._for_text(text, labels, threshold) for text in texts]
 
 
 @pytest.fixture()
@@ -80,6 +100,7 @@ def fake_gliner(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER]:
     module.GLiNER = _FakeGLiNER  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "gliner", module)
     _FakeGLiNER.entities = []
+    _FakeGLiNER.per_text = None
     return _FakeGLiNER
 
 
@@ -188,3 +209,112 @@ def test_missing_gliner_dependency_raises_clear_error(monkeypatch: pytest.Monkey
     provider = GlinerPIIRedactor(_config())
     with pytest.raises(ImportError, match="pip install latence-pii-gliner"):
         list(provider.redact([_doc(_TEXT)]))
+
+
+# --- W7 encoder batching (ADR-0036 §1 / ADR-0033) --------------------------------------------
+
+
+def _distinct_docs(n: int) -> list[DocumentRecord]:
+    # N docs each with a DISTINCT person name AND a DISTINCT span (doc i is prefixed with i filler
+    # chars so its name sits at offset i, span [i, i+9)). Distinct spans give the equivalence test
+    # teeth: a mis-mapped batch hands doc i another doc's raw PII dict (start=j != i), so doc i
+    # masks the WRONG offsets and its masked_content diverges from the single-item path — the
+    # assertions FAIL. (A shared [0,9) span would let a reversed map slip through, since every
+    # record still masks its OWN content at [0,9); H-E1/E2 PII false-green hardening.)
+    docs: list[DocumentRecord] = []
+    for i in range(n):
+        content = ("." * i) + f"Person{i:03d} was here."
+        prov = Provenance(
+            source_uri=f"file:///c/{i}.txt",
+            file_name=f"{i}.txt",
+            file_type="txt",
+            file_size=100,
+            document_id=f"sha256:doc{i}",
+            char_start=0,
+            char_end=len(content),
+            page_start=1,
+            page_end=1,
+        )
+        docs.append(
+            DocumentRecord(
+                record_id=f"doc{i}",
+                provenance=prov,
+                classification=Classification(language="en", sensitivity="public"),
+                content=content,
+            )
+        )
+    return docs
+
+
+def _per_text_person_map(docs: list[DocumentRecord]) -> dict[str, list[dict[str, Any]]]:
+    # Each doc "<i dots>PersonNNN was here." -> a person entity spanning the name at its OWN doc
+    # offset i (span [i, i+9)). Keyed by index so doc i carries start=i; a batch that maps results
+    # back out of order gives a doc a DIFFERENT start than i — caught by the record-for-record test.
+    return {
+        d.content: [{"start": i, "end": i + 9, "label": "person", "score": 0.9}]
+        for i, d in enumerate(docs)
+    }
+
+
+def test_batched_equals_unbatched_record_for_record(fake_gliner: type[_FakeGLiNER]) -> None:
+    docs = _distinct_docs(7)
+    fake_gliner.per_text = _per_text_person_map(docs)
+    cfg = {"pii_labels": ["person"]}
+
+    unbatched = [
+        r for d in docs for r in GlinerPIIRedactor({**cfg, "batch_size": 1}).redact([d])
+    ]
+    batched = list(GlinerPIIRedactor({**cfg, "batch_size": 4}).redact(docs))
+
+    assert len(batched) == len(unbatched) == 7
+    for b, u in zip(batched, unbatched, strict=True):
+        assert b.record_id == u.record_id
+        assert b.masked_content == u.masked_content
+        assert [(s.char_start, s.char_end, s.pii_type) for s in b.pii_spans] == [
+            (s.char_start, s.char_end, s.pii_type) for s in u.pii_spans
+        ]
+    # Each doc masked its OWN name (a wrong-order batch would mask a different doc's name).
+    for i, rec in enumerate(batched):
+        assert f"Person{i:03d}" not in rec.masked_content
+        assert "[PERSON]" in rec.masked_content
+
+
+def test_model_called_ceil_n_over_batch_size_times(fake_gliner: type[_FakeGLiNER]) -> None:
+    docs = _distinct_docs(7)
+    fake_gliner.per_text = _per_text_person_map(docs)
+    provider = GlinerPIIRedactor({"pii_labels": ["person"], "batch_size": 3})
+    list(provider.redact(docs))
+    # 7 docs at batch_size=3 => ceil(7/3)=3 forward passes, not 7.
+    assert provider._model.batch_calls == 3
+
+
+def test_skipped_docs_need_no_model_call(fake_gliner: type[_FakeGLiNER]) -> None:
+    # A skip-policy doc + a near-empty doc need no model call; a real doc still batches once.
+    docs = _distinct_docs(1)
+    fake_gliner.per_text = _per_text_person_map(docs)
+    cfg = {
+        "pii_labels": ["person"],
+        "batch_size": 8,
+        "policies": {"secret": {"skip": True}},
+    }
+    empty = DocumentRecord(
+        record_id="empty",
+        provenance=docs[0].provenance.model_copy(update={"char_end": 0}),
+        classification=Classification(language="en", sensitivity="public"),
+        content="",
+    )
+    secret = docs[0].model_copy(
+        update={"classification": Classification(language="en", sensitivity="secret")}
+    )
+    provider = GlinerPIIRedactor(cfg)
+    out = list(provider.redact([empty, secret, docs[0]]))
+    assert len(out) == 3
+    # Only the one real doc triggered detection — a single batched forward pass.
+    assert provider._model.batch_calls == 1
+
+
+def test_batch_size_must_be_positive_int() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="batch_size must be >= 1"):
+        GlinerPIIRedactor({"pii_labels": ["person"], "batch_size": 0})

@@ -53,6 +53,14 @@ class _CapturingGLiNER:
         _CAPTURED_PII_LABELS.append(list(labels))
         return []  # no spans needed — the test asserts the LABELS, not the redaction result
 
+    def batch_predict_entities(
+        self, texts: list[str], labels: list[str], threshold: float = 0.5  # noqa: ARG002
+    ) -> list[list[dict[str, Any]]]:
+        # W7: the batched entry point the redactor now calls; capture the PII labels once per batch
+        # (same for every document in the batch), return an empty list per document.
+        _CAPTURED_PII_LABELS.append(list(labels))
+        return [[] for _ in texts]
+
 
 @pytest.fixture(autouse=True)
 def _pin_cpu_host(monkeypatch: pytest.MonkeyPatch) -> None:

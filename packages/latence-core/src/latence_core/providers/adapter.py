@@ -75,6 +75,25 @@ _In = TypeVar("_In")
 _Out = TypeVar("_Out")
 
 
+def validate_batch_size(raw: object, *, provider_name: str) -> int:
+    """Validate a ``config.batch_size`` value to a positive int, or raise ConfigError (W7).
+
+    The shared, dep-light validator the learned ENCODER providers reuse so a ``batch_size`` knob
+    is checked **one right way** whether or not the provider subclasses :class:`AdapterBase`
+    (:meth:`AdapterBase.batch_size` delegates here). A ``batch_size`` must be an ``int >= 1`` — a
+    batch of zero would never make progress, and a ``bool``/float/str is a config typo, not a
+    valid size — so a non-positive or non-int value is an operator
+    :class:`~latence_core.errors.ConfigError` naming the provider, never a silent fallback.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        msg = f"{provider_name}: batch_size must be an int >= 1, got {raw!r}"
+        raise ConfigError(msg)
+    if raw < 1:
+        msg = f"{provider_name}: batch_size must be >= 1, got {raw}"
+        raise ConfigError(msg)
+    return raw
+
+
 @runtime_checkable
 class ProvenanceCarrier(Protocol):
     """The structural source :meth:`AdapterBase.carry_provenance` reads: anything with a frozen
@@ -212,13 +231,7 @@ class AdapterBase:
         :class:`~latence_core.errors.ConfigError` (a batch of zero would never make progress).
         """
         raw = self._config.get("batch_size", DEFAULT_BATCH_SIZE)
-        if isinstance(raw, bool) or not isinstance(raw, int):
-            msg = f"{self.provider_name}: batch_size must be an int >= 1, got {raw!r}"
-            raise ConfigError(msg)
-        if raw < 1:
-            msg = f"{self.provider_name}: batch_size must be >= 1, got {raw}"
-            raise ConfigError(msg)
-        return raw
+        return validate_batch_size(raw, provider_name=self.provider_name)
 
     def batched(
         self,

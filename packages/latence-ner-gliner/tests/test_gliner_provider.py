@@ -61,11 +61,24 @@ def _chunk(
 
 
 class _FakeGLiNER:
-    """Stands in for gliner.GLiNER: returns fixed chunk-local spans + scores."""
+    """Stands in for gliner.GLiNER: returns fixed chunk-local spans + scores.
+
+    Exposes BOTH the single-text ``predict_entities`` and the batched
+    ``batch_predict_entities`` (the real GLiNER API: ``batch_predict_entities(texts, labels,
+    threshold=…) -> list[list[dict]]``, result ``i`` for ``texts[i]``). The W7 provider calls the
+    batched form; the fake keeps a per-instance ``batch_calls`` counter so a test can assert the
+    model is called ``ceil(N/batch_size)`` times, not N.
+    """
 
     #: chunk-local entity dicts the fake "model" returns for any predict call.
     returns: list[dict[str, Any]] = []
+    #: an optional per-text mapping (text -> its entity dicts) so batched inputs get DISTINCT
+    #: results per item — the off-by-one / wrong-order equivalence trap needs distinct results.
+    per_text: dict[str, list[dict[str, Any]]] | None = None
     model_id: str = ""
+
+    def __init__(self) -> None:
+        self.batch_calls = 0
 
     @classmethod
     def from_pretrained(cls, model_id: str) -> _FakeGLiNER:
@@ -73,14 +86,24 @@ class _FakeGLiNER:
         inst.model_id = model_id
         return inst
 
+    def _for_text(self, text: str, labels: list[str], threshold: float) -> list[dict[str, Any]]:
+        per_text = type(self).per_text
+        source = per_text.get(text, []) if per_text is not None else type(self).returns
+        return [e for e in source if e["label"] in labels and e["score"] >= threshold]
+
     def predict_entities(
         self, text: str, labels: list[str], threshold: float = 0.5
     ) -> list[dict[str, Any]]:
         # Echo only entities whose label is in the requested set (zero-shot), above
         # the threshold — mirroring the real API's contract.
-        return [
-            e for e in type(self).returns if e["label"] in labels and e["score"] >= threshold
-        ]
+        return self._for_text(text, labels, threshold)
+
+    def batch_predict_entities(
+        self, texts: list[str], labels: list[str], threshold: float = 0.5
+    ) -> list[list[dict[str, Any]]]:
+        # The real batched API: one forward pass over all texts; result[i] is texts[i]'s entities.
+        self.batch_calls += 1
+        return [self._for_text(text, labels, threshold) for text in texts]
 
 
 @pytest.fixture()
@@ -88,6 +111,8 @@ def fake_gliner(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER]:
     module = types.ModuleType("gliner")
     module.GLiNER = _FakeGLiNER  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "gliner", module)
+    _FakeGLiNER.returns = []
+    _FakeGLiNER.per_text = None
     return _FakeGLiNER
 
 
@@ -220,3 +245,76 @@ def test_declares_profile_either_verified_apache() -> None:
     assert prof.deterministic is False
     assert prof.batch is True
     assert prof.cost_per_1k is None
+
+
+# --- W7 encoder batching (ADR-0036 §1 / ADR-0033) --------------------------------------------
+
+
+def _distinct_chunks(n: int) -> list[ChunkRecord]:
+    # N chunks each with a DISTINCT single-entity content AND a DISTINCT chunk-local span (chunk i
+    # is prefixed with i filler chars so its name sits at offset i, span [i, i+7)). Distinct spans
+    # are what give the equivalence test teeth: a mis-mapped batch (off-by-one / wrong order) hands
+    # chunk i the raw dict of some OTHER chunk j (start=j), so this chunk slices content[j:j+7] —
+    # the WRONG substring / offset — and the record-for-record assertions FAIL. (With a shared
+    # [0,7) span across all items a reversed map would be invisible, because every record still
+    # slices its OWN content at [0,7); H-E1/E2 false-green hardening.)
+    chunks: list[ChunkRecord] = []
+    for i in range(n):
+        content = ("." * i) + f"Name{i:03d} spoke."
+        chunks.append(_chunk(content, char_start=100 + i * 1000, record_id=f"doc{i}#chunk-0"))
+    return chunks
+
+
+def _per_text_person_map(chunks: list[ChunkRecord]) -> dict[str, list[dict[str, Any]]]:
+    # Each chunk's content is "<i dots>NameNNN spoke." -> a person entity spanning the name at its
+    # OWN chunk-local offset i (span [i, i+7)), keyed by index so item i carries start=i. A batch
+    # that maps results back out of order gives a chunk a DIFFERENT start than i — caught below.
+    return {
+        c.content: [{"start": i, "end": i + 7, "label": "person", "score": 0.9}]
+        for i, c in enumerate(chunks)
+    }
+
+
+def test_batched_equals_unbatched_record_for_record(fake_gliner: type[_FakeGLiNER]) -> None:
+    # THE equivalence crux: batched(N) must equal N single-item calls, record-for-record
+    # (text/label/offsets/order). Distinct per-chunk results make a mis-map FAIL.
+    chunks = _distinct_chunks(7)
+    fake_gliner.per_text = _per_text_person_map(chunks)
+    cfg = {"labels": ["person"]}
+
+    unbatched = [
+        m
+        for c in chunks
+        for m in GlinerEntityExtractor({**cfg, "batch_size": 1}).extract([c])
+    ]
+    batched = list(GlinerEntityExtractor({**cfg, "batch_size": 4}).extract(chunks))
+
+    assert len(batched) == len(unbatched) == 7
+    for b, u in zip(batched, unbatched, strict=True):
+        assert b.text == u.text
+        assert b.label == u.label
+        assert (b.provenance.char_start, b.provenance.char_end) == (
+            u.provenance.char_start,
+            u.provenance.char_end,
+        )
+        assert b.record_id == u.record_id
+    # Each mention's text matches its OWN chunk (a wrong-order batch would cross names).
+    assert [m.text for m in batched] == [f"Name{i:03d}" for i in range(7)]
+
+
+def test_model_called_ceil_n_over_batch_size_times(fake_gliner: type[_FakeGLiNER]) -> None:
+    # Batching is REAL: 7 chunks at batch_size=3 => ceil(7/3)=3 forward passes, not 7.
+    chunks = _distinct_chunks(7)
+    fake_gliner.per_text = _per_text_person_map(chunks)
+    extractor = GlinerEntityExtractor({"labels": ["person"], "batch_size": 3})
+    list(extractor.extract(chunks))
+    assert extractor._model.batch_calls == 3
+
+
+def test_batch_size_must_be_positive_int() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="batch_size must be >= 1"):
+        GlinerEntityExtractor({"labels": ["person"], "batch_size": 0})
+    with pytest.raises(ConfigError, match="batch_size must be an int"):
+        GlinerEntityExtractor({"labels": ["person"], "batch_size": "8"})

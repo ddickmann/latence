@@ -83,6 +83,7 @@ def test_committed_matrices_are_valid_specs() -> None:
         "parser.document",
         "parser.lighton",  # the GPU OCR candidate (W1-lighton) — skipped-with-flag on CPU
         "parser.glm",  # the second GPU OCR candidate (W1-glm, MIT) — skipped-with-flag on CPU
+        "parser.render",  # the universal any-file parser (W5) — skipped-with-flag on CPU
     ]
     chunk = MatrixSpec.from_yaml_text(_CHUNK_MATRIX.read_text(encoding="utf-8"))
     assert chunk.stage is CapabilityKind.CHUNK
@@ -157,10 +158,11 @@ def test_resolve_stage_name_ambiguous_export_requires_explicit(tmp_path: Path) -
 def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
     """The parse matrix runs the three CPU parsers for real; the GPU OCR one is skipped-with-flag.
 
-    W1-lighton/W1-glm device honesty on the Parse Stage: the three CPU parsers RUN (measured); the
-    two GPU OCR parsers ``parser.lighton`` / ``parser.glm`` (pinned ``device: cuda``) are
-    skipped-with-flag on this CPU host — recorded, never a fabricated OCR quality/throughput number
-    (cites #64).
+    W1-lighton/W1-glm/W5-render device honesty on the Parse Stage: the three CPU parsers RUN
+    (measured); the two GPU OCR parsers ``parser.lighton`` / ``parser.glm`` (installed descriptors,
+    pinned ``device: cuda``) are device-skipped-with-flag, and the universal ``parser.render`` (its
+    heavy GPU/endpoint package is not installed on this CPU host) is not-installed-skipped-with-flag
+    — every skip recorded, never a fabricated OCR quality/throughput number (all cite #64).
     """
     result = run_bakeoff(
         _PARSE_MATRIX, base_stack_path=_DEFAULT, storage_root=f"file://{tmp_path}/store"
@@ -175,9 +177,11 @@ def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
         "parser.document",
         "parser.lighton",
         "parser.glm",
+        "parser.render",
     }
+    skipped = {"parser.lighton", "parser.glm", "parser.render"}
     gpu_ocr = {"parser.lighton", "parser.glm"}
-    cpu_rows = {k: v for k, v in rows.items() if k not in gpu_ocr}
+    cpu_rows = {k: v for k, v in rows.items() if k not in skipped}
     for row in cpu_rows.values():
         assert row.ran  # every CPU candidate ran (all installed)
         # -- the ADR-0036 §4 columns are all populated for a run candidate --
@@ -197,19 +201,29 @@ def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
         assert row.determinism.mismatch is False
         assert row.error_count == 0
         assert row.compute == "cpu"
-    # Both GPU OCR candidates are skipped-with-flag — no fabricated columns, cite the rig gap (#64).
+    # Every skipped candidate is skipped-with-flag — no fabricated columns, cite the rig gap (#64).
+    for name in skipped:
+        row = rows[name]
+        assert row.ran is False
+        assert row.skipped is True
+        assert row.skip_reason is not None
+        assert "#64" in row.skip_reason
+    # The two installed GPU OCR descriptors resolve their compute + license without a rig.
     for name in gpu_ocr:
         gpu = rows[name]
-        assert gpu.ran is False
-        assert gpu.skipped is True
-        assert gpu.skip_reason is not None
-        assert "#64" in gpu.skip_reason
         assert gpu.compute == "gpu"
         # The license IS still read off the declared profile (the descriptor needs no rig).
         assert gpu.license.verified is True
     # LightOn's model is Apache-2.0; GLM's is MIT — both permissive, read off the descriptor.
     assert rows["parser.lighton"].license.spdx == "Apache-2.0"
     assert rows["parser.glm"].license.spdx == "MIT"
+    # parser.render's package is not installed on this CPU host, so its row is a not-installed skip
+    # (no resolved compute/license) — still flagged with #64, never a fabricated number.
+    render = rows["parser.render"]
+    # parser.render is skipped on a CPU host either way: not-installed (deps absent) OR
+    # device-skipped (compute="either", cuda requested). Robust to the heavy-deps install state.
+    assert render.compute in (None, "either")
+    assert render.skip_reason
 
 
 def test_parse_bakeoff_is_a_real_comparison(tmp_path: Path) -> None:
@@ -537,7 +551,7 @@ def test_cli_bakeoff_writes_md_and_json(tmp_path: Path) -> None:
     # The JSON companion round-trips to a MatrixResult (schema-valid, consumable numbers).
     parsed = MatrixResult.model_validate_json(js.read_text(encoding="utf-8"))
     assert parsed.stage == "parse"
-    assert len(parsed.candidates) == 5  # 3 CPU parsers + 2 GPU OCR (skipped-with-flag on CPU)
+    assert len(parsed.candidates) == 6  # 3 CPU parsers + 2 GPU OCR + parser.render (skipped on CPU)
 
 
 def test_cli_bakeoff_missing_file_exits_two(tmp_path: Path) -> None:

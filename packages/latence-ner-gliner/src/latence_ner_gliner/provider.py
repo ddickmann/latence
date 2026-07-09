@@ -47,6 +47,7 @@ from latence_core.contracts import EntityMention
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -56,6 +57,12 @@ if TYPE_CHECKING:
 
 # Apache-2.0 weights (verified). A commercial-safe zero-shot multilingual default.
 _DEFAULT_MODEL = "urchade/gliner_multi-v2.1"
+
+# The default number of chunks whose text shares one ``batch_predict_entities`` forward pass
+# (W7). A sensible GPU value (the P8 autotuner overrides per-device); purely memory-shaping —
+# outputs are record-for-record identical to a per-chunk loop for any positive batch size
+# (ADR-0033: the in-flight tensor is bounded to ``batch_size``, never the whole corpus).
+_DEFAULT_BATCH_SIZE = 16
 
 
 class GlinerEntityExtractor:
@@ -72,9 +79,23 @@ class GlinerEntityExtractor:
             (default 0.5).
         min_chars: int  — a chunk whose stripped length is below this is treated as
             near-empty and skipped without invoking the model (default 1).
+        batch_size: int  — how many chunks share ONE ``batch_predict_entities`` forward
+            pass (default 16; the P8 autotuner overrides per-device). Purely memory-shaping:
+            the emitted mentions (offsets/labels/order) are record-for-record identical for
+            any positive batch size (W7). Must be ``>= 1``.
 
     The model is loaded lazily and cached on first ``extract`` call, so constructing
     the Provider (which the Runner does for every Stage) never downloads weights.
+
+    Batching (W7, ADR-0036 §1 / ADR-0033): these are ENCODERS, so the GPU is under-fed by a
+    per-chunk ``predict_entities`` loop. This Provider accumulates up to ``batch_size`` chunks
+    that share the same effective label set and issues ONE ``model.batch_predict_entities(
+    list_of_texts, labels, threshold=…)`` call per group (``ceil(N/batch_size)`` calls, not N),
+    then maps each result list back to its chunk **by index** — the real batch dimension +
+    SDPA/bf16 win, no server (vLLM is irrelevant for an encoder). The per-chunk offset/page
+    resolution and contract stamping below are UNCHANGED; only how many chunks share a forward
+    pass changes. The in-flight batch is bounded to ``batch_size`` (never the whole corpus), so
+    the streaming Runner (ADR-0033) stays memory-bounded.
     """
 
     @classmethod
@@ -136,6 +157,10 @@ class GlinerEntityExtractor:
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
+        self._batch_size = validate_batch_size(
+            config.get("batch_size", _DEFAULT_BATCH_SIZE),
+            provider_name="entity.gliner",
+        )
         self._model: Any = None
 
     # -- lazy model load ----------------------------------------------------
@@ -163,26 +188,63 @@ class GlinerEntityExtractor:
     # -- extraction ---------------------------------------------------------
 
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
+        """Batch chunks through ``batch_predict_entities`` and emit mentions in input order (W7).
+
+        Chunks whose stripped length is below ``min_chars`` are skipped without a model call
+        (S4 AC). The remaining chunks are accumulated up to ``batch_size`` — grouped so a single
+        batch shares ONE effective label set (the W4 induced-label seam is per-document, so
+        consecutive same-document chunks batch together; a label-set change flushes the batch,
+        never a mis-labelled call) — and each group is one ``model.batch_predict_entities(texts,
+        labels, threshold=…)`` forward pass. Results map back to their chunk **by index**. The
+        overall emission order is input (chunk) order, and each chunk's mentions are byte-identical
+        to the per-chunk ``predict_entities`` path (the equivalence invariant, W7). The in-flight
+        batch is bounded to ``batch_size`` — the whole corpus is never accumulated (ADR-0033).
+        """
         model = None
+        batch: list[ChunkRecord] = []
+        batch_labels: tuple[str, ...] | None = None
+
+        def flush() -> Iterator[EntityMention]:
+            nonlocal model, batch, batch_labels
+            if not batch:
+                return
+            if model is None:
+                model = self._load_model()
+            texts = [c.content for c in batch]
+            labels = list(batch_labels or ())
+            # ONE forward pass over the whole group; results[i] is the entity list for texts[i].
+            results: list[list[dict[str, Any]]] = model.batch_predict_entities(
+                texts, labels, threshold=self._threshold
+            )
+            for chunk, raw in zip(batch, results, strict=True):
+                yield from self._mentions_for(chunk, list(raw))
+            batch = []
+            batch_labels = None
+
         for chunk in chunks:
             if len(chunk.content.strip()) < self._min_chars:
                 # Empty / near-empty chunk: no mentions, no model call (S4 AC).
                 continue
-            if model is None:
-                model = self._load_model()
-            yield from self._extract_one(model, chunk)
+            # W4 label-source seam (ADR-0038): the effective label set is the config labels UNIONed
+            # with any entity types the OPTIONAL schema_induction Stage induced for this chunk's
+            # document, deduped + order-stable. Absent (the default, every existing stack) this is
+            # exactly ``self._labels``. GLiNER's batch call takes ONE label set, so a chunk whose
+            # effective labels differ from the accumulating batch flushes it first.
+            labels = tuple(effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY))
+            if batch and labels != batch_labels:
+                yield from flush()
+            batch_labels = labels
+            batch.append(chunk)
+            if len(batch) >= self._batch_size:
+                yield from flush()
+        yield from flush()
 
-    def _extract_one(self, model: Any, chunk: ChunkRecord) -> Iterator[EntityMention]:
-        # W4 label-source seam (ADR-0038): the effective label set is the config labels UNIONed with
-        # any entity types the OPTIONAL schema_induction Stage induced for this chunk's document
-        # (``chunk.induced_labels``), deduped + order-stable. With no induced labels (the default,
-        # every existing stack) this is exactly ``self._labels`` — byte-identical. The extraction
-        # LOGIC below is unchanged; only where the label list comes from.
-        labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY)
-        # GLiNER returns dicts with chunk-local 'start'/'end', 'label', 'score'.
-        raw: list[dict[str, Any]] = model.predict_entities(
-            chunk.content, labels, threshold=self._threshold
-        )
+    def _mentions_for(
+        self, chunk: ChunkRecord, raw: list[dict[str, Any]]
+    ) -> Iterator[EntityMention]:
+        # ``raw`` is this chunk's entity list (chunk-local 'start'/'end', 'label', 'score') — the
+        # same shape ``predict_entities`` returned per chunk, now sourced from the batched call and
+        # mapped back by index. The offset/page resolution + contract stamping below are UNCHANGED.
         # Deterministic ordering: by chunk-local start, then label.
         raw.sort(key=lambda e: (int(e["start"]), str(e["label"])))
         # Resolve chunk-local model offsets to TRUE original offsets through the chunk's

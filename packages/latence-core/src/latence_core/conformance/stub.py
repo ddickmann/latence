@@ -127,6 +127,13 @@ class _StubGLiNER:
             if e["label"] in labels and e["score"] >= threshold and e["end"] <= len(text)
         ]
 
+    def batch_predict_entities(
+        self, texts: list[str], labels: list[str], threshold: float = 0.5
+    ) -> list[list[dict[str, Any]]]:
+        # The REAL batched GLiNER API (W7): one forward pass over all texts; result[i] is the
+        # entity list for texts[i] — the exact per-text ``predict_entities`` shape, one per input.
+        return [self.predict_entities(text, labels, threshold) for text in texts]
+
     def predict_relations(
         self,
         text: str,
@@ -142,6 +149,23 @@ class _StubGLiNER:
         ents = self.predict_entities(text, labels, threshold)
         rels = [r for r in type(self).relations if r.get("score", 1.0) >= threshold]
         return ents, rels
+
+    def inference(
+        self,
+        texts: list[str],
+        labels: list[str],
+        relations: list[str],  # noqa: ARG002 - accepted for API parity
+        threshold: float = 0.5,
+        return_relations: bool = True,  # noqa: ARG002 - always returns relations offline
+        **kwargs: Any,  # noqa: ARG002 - relation_threshold/flat_ner/... accepted for parity
+    ) -> tuple[list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
+        # The REAL batched fused entry point (W7): ONE forward pass over all texts; two parallel
+        # lists (entities-per-text, relations-per-text) indexed by input position. Each text sees
+        # the same canned relations (score-filtered), matching the per-text predict_relations path.
+        entities_per_text = [self.predict_entities(text, labels, threshold) for text in texts]
+        rels = [r for r in type(self).relations if r.get("score", 1.0) >= threshold]
+        relations_per_text = [list(rels) for _ in texts]
+        return entities_per_text, relations_per_text
 
 
 @contextlib.contextmanager
@@ -211,6 +235,27 @@ class _StubGLiNER2:
                 }
             )
         return {"entities": by_label}
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        threshold: float = 0.5,
+        include_spans: bool = False,
+        include_confidence: bool = False,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        # The REAL batched GLiNER2 API (W7): one forward pass over all texts; result[i] is the
+        # per-label dict for texts[i] — the exact single-text ``extract_entities`` shape per input.
+        return [
+            self.extract_entities(
+                text,
+                entity_types,
+                threshold=threshold,
+                include_spans=include_spans,
+                include_confidence=include_confidence,
+            )
+            for text in texts
+        ]
 
 
 @contextlib.contextmanager

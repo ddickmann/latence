@@ -34,11 +34,13 @@ when the Provider is run. Redaction is metadata-aware: policy keys off the docum
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
@@ -52,8 +54,35 @@ if TYPE_CHECKING:
 
     from latence_core.contracts import DocumentRecord
 
+
+@dataclass(frozen=True)
+class _PendingDoc:
+    """A document's per-document, model-independent context, resolved before the batched call (W7).
+
+    Everything the detection + record building needs that does NOT depend on the model output is
+    computed once up front (policy action/allow-list, the skip/near-empty decision, the page index,
+    the effective PII label set), so a flush issues at most one ``batch_predict_entities`` call per
+    same-label group and maps each raw entity list back to its document by identity — keeping
+    emission in input-document order and the output record-for-record identical to the per-doc path.
+    """
+
+    document: DocumentRecord
+    text: str
+    action: RedactionAction
+    allowed: set[str] | None
+    page_index: PageOffsetIndex | None
+    policy_name: str
+    needs_model: bool
+    labels: tuple[str, ...]
+
 # Apache-2.0 weights (verified 2026-07-06). Multilingual zero-shot PII NER.
 _DEFAULT_MODEL = "urchade/gliner_multi_pii-v1"
+
+# The default number of documents sharing ONE ``batch_predict_entities`` forward pass (W7). A
+# sensible GPU value (the P8 autotuner overrides per-device); purely memory-shaping — the emitted
+# PIISpans/masking are record-for-record identical to a per-document loop for any positive batch
+# size (ADR-0033: the in-flight tensor is bounded to ``batch_size``, never the whole corpus).
+_DEFAULT_BATCH_SIZE = 16
 
 
 class GlinerPIIRedactor:
@@ -75,9 +104,23 @@ class GlinerPIIRedactor:
         salt: str  — salt mixed into ``replace``/``hash`` surrogates (default 'latence').
         min_chars: int  — a document whose assembled text is shorter is emitted clean
             (default 1).
+        batch_size: int  — how many documents share ONE ``batch_predict_entities`` forward pass
+            (default 16; the P8 autotuner overrides per-device). Purely memory-shaping: the
+            emitted RedactionRecords (PIISpans/masking/order) are record-for-record identical for
+            any positive batch size (W7). Must be ``>= 1``.
 
     The model is loaded lazily and cached on first use, so constructing the Provider
     never downloads weights.
+
+    Batching (W7, ADR-0036 §1 / ADR-0033): GLiNER-PII is an ENCODER, so a per-document
+    ``predict_entities`` loop under-feeds the GPU. This Provider buffers up to ``batch_size``
+    documents and, on flush, runs ONE ``model.batch_predict_entities(texts, labels, threshold=…)``
+    forward pass per group of same-label detect-needing documents (``ceil(N/batch_size)`` calls,
+    not N), mapping each raw entity list back to its document **by index**. Documents that a
+    policy SKIPS or that are near-empty need no model call and are emitted clean, in input order.
+    The per-document policy resolution, span building, masking, and Provenance carry are UNCHANGED
+    (batching only changes how many documents share a forward pass); the in-flight buffer is
+    bounded to ``batch_size`` (never the whole corpus, ADR-0033).
     """
 
     @classmethod
@@ -130,6 +173,10 @@ class GlinerPIIRedactor:
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
+        self._batch_size = validate_batch_size(
+            config.get("batch_size", _DEFAULT_BATCH_SIZE),
+            provider_name="redaction.gliner_pii",
+        )
         self._salt = str(config.get("salt", "latence"))
         default_action = parse_action(config.get("default_action", "mask"))
         # The framework owns policy + masking (shared with the in-core rule Provider);
@@ -163,37 +210,91 @@ class GlinerPIIRedactor:
         masked variant and every :class:`PIISpan` use. A ``PARSE_ERROR`` document (no
         usable content) is skipped. Documents are emitted in first-seen order.
         """
-        model = None
+        buffer: list[_PendingDoc] = []
+
+        def flush() -> Iterator[RedactionRecord]:
+            yield from self._flush_buffer(buffer)
+            buffer.clear()
+
         for document in documents:
             if document.disposition is Disposition.PARSE_ERROR:
                 continue
-            doc_id = document.record_id
-            text = document.content
-            page_map = document.page_map
-            classification = document.classification
-            base_prov = document.provenance
-            action, allowed, skip, policy_name = self._policy.resolve(classification.sensitivity)
+            buffer.append(self._prepare(document))
+            if len(buffer) >= self._batch_size:
+                yield from flush()
+        yield from flush()
 
-            spans: list[PIISpan] = []
-            masked = text
-            if not skip and len(text.strip()) >= self._min_chars:
-                if model is None:
-                    model = self._load_model()
-                page_index = PageOffsetIndex(page_map) if page_map is not None else None
-                # W4 label-source seam (ADR-0038): UNION the config PII types with any pii_types the
-                # OPTIONAL schema_induction Stage induced for this document (``induced_labels``),
-                # deduped + order-stable. Absent (the default, every existing stack) these are
-                # exactly the config labels — byte-identical. The detection LOGIC below is the same.
-                pii_labels = effective_labels(
-                    self._labels, document.induced_labels, LabelSlot.PII
+    def _prepare(self, document: DocumentRecord) -> _PendingDoc:
+        """Resolve everything a document needs BEFORE the (possibly batched) model call.
+
+        Policy resolution, the near-empty/skip decision, the page index, and the effective PII
+        label set (config ∪ induced) are all per-document and model-independent, so they are
+        computed here up front; the flush then issues at most one model call per same-label group.
+        """
+        classification = document.classification
+        text = document.content
+        action, allowed, skip, policy_name = self._policy.resolve(classification.sensitivity)
+        needs_model = not skip and len(text.strip()) >= self._min_chars
+        page_index = (
+            PageOffsetIndex(document.page_map) if document.page_map is not None else None
+        )
+        # W4 label-source seam (ADR-0038): UNION the config PII types with any pii_types the
+        # OPTIONAL schema_induction Stage induced for this document (``induced_labels``), deduped +
+        # order-stable. Absent (the default, every existing stack) these are exactly the config
+        # labels — byte-identical. The detection LOGIC is unchanged; only where the label list
+        # comes from and how many documents share the forward pass (W7).
+        pii_labels = effective_labels(self._labels, document.induced_labels, LabelSlot.PII)
+        return _PendingDoc(
+            document=document,
+            text=text,
+            action=action,
+            allowed=allowed,
+            page_index=page_index,
+            policy_name=policy_name,
+            needs_model=needs_model,
+            labels=tuple(pii_labels),
+        )
+
+    def _flush_buffer(self, buffer: list[_PendingDoc]) -> Iterator[RedactionRecord]:
+        """Batch the detect-needing docs (grouped by label set), then emit records in input order.
+
+        The model is called ONCE per group of same-label detect-needing documents via
+        ``batch_predict_entities`` (``ceil/`` group, not one-per-doc), and each raw entity list is
+        mapped back to its document by index. Documents that skip / are near-empty need no model
+        call. Emission is in the buffer's (input document) order regardless of grouping, so the
+        output is record-for-record identical to the per-document path (the equivalence invariant).
+        """
+        if not buffer:
+            return
+        # Group detect-needing docs by their effective label set (GLiNER's batch call takes ONE
+        # label set). Map each pending doc to its raw entity list by identity so emission stays in
+        # input order. Docs that need no model call get an empty raw list.
+        raw_by_doc: dict[int, list[dict[str, Any]]] = {}
+        groups: dict[tuple[str, ...], list[_PendingDoc]] = {}
+        for pending in buffer:
+            if pending.needs_model:
+                groups.setdefault(pending.labels, []).append(pending)
+        if groups:
+            model = self._load_model()
+            for labels, pendings in groups.items():
+                texts = [p.text for p in pendings]
+                # ONE forward pass over the group; results[i] is the entity list for texts[i].
+                results: list[list[dict[str, Any]]] = model.batch_predict_entities(
+                    texts, list(labels), threshold=self._threshold
                 )
-                spans = self._detect(model, text, action, allowed, page_index, pii_labels)
-                masked = apply_masking(text, spans)
-
-            provenance = base_prov.model_copy(
+                for pending, raw in zip(pendings, results, strict=True):
+                    raw_by_doc[id(pending)] = list(raw)
+        for pending in buffer:
+            raw = raw_by_doc.get(id(pending), [])
+            spans = self._spans_from_raw(
+                pending.text, raw, pending.action, pending.allowed, pending.page_index
+            )
+            masked = apply_masking(pending.text, spans) if spans else pending.text
+            doc_id = pending.document.record_id
+            provenance = pending.document.provenance.model_copy(
                 update={
                     "char_start": 0,
-                    "char_end": len(text),
+                    "char_end": len(pending.text),
                     "page_start": None,
                     "page_end": None,
                 }
@@ -203,32 +304,29 @@ class GlinerPIIRedactor:
                 document_record_id=doc_id,
                 masked_content=masked,
                 media_type="text/markdown",
-                policy=policy_name,
+                policy=pending.policy_name,
                 pii_spans=spans,
                 provenance=provenance,
-                classification=classification,
+                classification=pending.document.classification,
             )
 
-    def _detect(
+    def _spans_from_raw(
         self,
-        model: Any,
         text: str,
+        raw: list[dict[str, Any]],
         action: RedactionAction,
         allowed: set[str] | None,
         page_index: PageOffsetIndex | None,
-        labels: list[str],
     ) -> list[PIISpan]:
-        """Run the model over the whole document text and build non-overlapping PIISpans.
+        """Build non-overlapping PIISpans from THIS document's raw GLiNER entity list.
 
-        GLiNER's ``predict_entities`` returns entity dicts with document-offset
-        ``start``/``end``, ``label``, and ``score``. ``labels`` is the effective PII-type set
-        (config ∪ induced). A type not in a policy's allow-list is dropped; overlaps are resolved
-        (earlier start, longer span, type) so a stable, non-overlapping span set results — the
-        invariant the RedactionRecord contract enforces and the masking relies on.
+        GLiNER's ``predict_entities`` / ``batch_predict_entities`` return entity dicts with
+        document-offset ``start``/``end``, ``label``, and ``score``; ``raw`` is this document's list
+        (mapped back by index from the batched call, W7). A type not in a policy's allow-list is
+        dropped; overlaps are resolved (earlier start, longer span, type) so a stable,
+        non-overlapping span set results — the invariant the RedactionRecord contract enforces and
+        the masking relies on. This logic is UNCHANGED from the per-document path.
         """
-        raw: list[dict[str, Any]] = model.predict_entities(
-            text, labels, threshold=self._threshold
-        )
         # (start, end, type, value, score) tuples, filtered + sorted deterministically.
         candidates: list[tuple[int, int, str, str, float]] = []
         for ent in raw:

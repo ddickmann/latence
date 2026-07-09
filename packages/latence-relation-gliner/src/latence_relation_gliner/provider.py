@@ -50,6 +50,7 @@ from latence_core.contracts import EntityMention, RelationMention
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -59,6 +60,11 @@ if TYPE_CHECKING:
 
 # Apache-2.0 weights (verified 2026-07-06). Multilingual fused NER+RE.
 _DEFAULT_MODEL = "knowledgator/gliner-relex-multi-v1.0"
+
+# The default number of chunks sharing ONE fused forward pass (W7). A sensible GPU value (the
+# P8 autotuner overrides per-device); purely memory-shaping — the emitted mentions/relations
+# are record-for-record identical to a per-chunk loop for any positive batch size (ADR-0033).
+_DEFAULT_BATCH_SIZE = 16
 
 
 class GlinerRelexExtractor:
@@ -75,11 +81,33 @@ class GlinerRelexExtractor:
             (default 0.5).
         min_chars: int  — a chunk whose stripped length is below this is skipped
             without invoking the model (default 1).
+        batch_size: int  — how many chunks share ONE fused forward pass (default 16; the P8
+            autotuner overrides per-device). Purely memory-shaping: the emitted mentions AND
+            relations (offsets/labels/endpoints/order) are record-for-record identical for any
+            positive batch size (W7). Must be ``>= 1``.
 
     Fulfils BOTH the EntityExtractor and the FusedEntityRelationExtractor seam: it
     also exposes ``extract`` so it can stand in for a plain Entity-Extraction Stage
     when a Pipeline wants only its NER half. The model is loaded lazily and cached on
     first use, so constructing the Provider never downloads weights.
+
+    Batching (W7, ADR-0036 §1 / ADR-0033): a fused NER+RE checkpoint is an ENCODER, so a
+    per-chunk loop under-feeds the GPU. This Provider accumulates up to ``batch_size`` chunks
+    sharing one effective (entity, relation) label set and issues ONE batched fused call per
+    group (``ceil(N/batch_size)`` calls, not N) via the batched entry point —
+    ``model.inference(texts, labels=…, relations=…, threshold=…, return_relations=True)`` —
+    which returns two parallel lists (entities-per-text, relations-per-text) that map back to
+    each chunk **by index**. The per-chunk offset/page resolution and relation→mention span
+    resolution below are UNCHANGED; only how many chunks share a forward pass changes. The
+    in-flight batch is bounded to ``batch_size`` (never the whole corpus, ADR-0033).
+
+    ⚠ The batched ``inference`` entry point is **offline-unverifiable** (the offline fake mirrors
+    it), so — mirroring the W1-relex false-green scar — ``flush`` guards with a ``hasattr`` check
+    that raises a clear, actionable error (naming the pinned batched API and the W1-verified
+    single-text fallback ``predict_relations``) if the real checkpoint lacks it, and the pod
+    script (``scripts/validate-encoder-batching-on-gpu.md`` Gate 0) asserts it EXISTS on
+    ``knowledgator/gliner-relex-multi-v1.0`` with the pinned two-list shape BEFORE any throughput
+    number is folded in. Until that pod gate is run, the batched call is *asserted*, not verified.
     """
 
     @classmethod
@@ -139,6 +167,10 @@ class GlinerRelexExtractor:
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
+        self._batch_size = validate_batch_size(
+            config.get("batch_size", _DEFAULT_BATCH_SIZE),
+            provider_name="relation.gliner_relex",
+        )
         self._model: Any = None
 
     # -- lazy model load ----------------------------------------------------
@@ -160,18 +192,90 @@ class GlinerRelexExtractor:
     # -- fused extraction ---------------------------------------------------
 
     def extract_fused(self, chunks: Iterable[ChunkRecord]) -> FusedExtraction:
-        """One pass over the chunks yielding both mentions and relations."""
+        """Batch chunks through ONE fused forward pass per group; yield mentions + relations (W7).
+
+        Chunks below ``min_chars`` are skipped without a model call. The rest accumulate up to
+        ``batch_size``, grouped so a batch shares one effective (entity, relation) label set (the
+        W4 induced-label seam is per-document, so a label-set change flushes the batch, never a
+        mis-labelled call). Each group is ONE ``model.inference(texts, labels=…, relations=…,
+        threshold=…, return_relations=True)`` fused pass — the batched entry point, ``hasattr``-
+        guarded here and pod-Gate-0 asserted (offline-unverifiable; not yet pod-confirmed) —
+        returning two parallel lists (entities-per-text, relations-per-text) mapped back to each
+        chunk **by index**. Per-chunk record building is byte-identical to the single-item path
+        (the equivalence invariant, W7); overall order is input (chunk) order. The in-flight batch
+        is bounded to ``batch_size`` (never the whole corpus, ADR-0033).
+        """
         model = None
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
+        batch: list[ChunkRecord] = []
+        batch_labels: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+
+        def flush() -> None:
+            nonlocal model, batch, batch_labels
+            if not batch or batch_labels is None:
+                return
+            if model is None:
+                model = self._load_model()
+            entity_labels, relation_labels = batch_labels
+            texts = [c.content for c in batch]
+            # ONE fused forward pass over the group; entities_per_text[i]/relations_per_text[i]
+            # belong to texts[i] — the batched relex entry point. This method is offline-
+            # UNVERIFIABLE (the fake mirrors it), so guard against the false-green that already bit
+            # this provider once (W1-relex: a plausible-but-nonexistent method passed offline and
+            # only failed on real weights). A missing method here surfaces a clear, actionable error
+            # naming the pinned batched API AND the W1-verified single-text fallback, not a bare
+            # AttributeError — and the pod script's Gate 0 asserts it exists before any timing.
+            if not hasattr(model, "inference"):
+                msg = (
+                    "relation.gliner_relex batches via model.inference(texts, labels=…, "
+                    "relations=…, threshold=…, return_relations=True), but the loaded checkpoint "
+                    f"{self._model_id!r} exposes no 'inference' method. This is the W1-relex "
+                    "false-green class: re-introspect the checkpoint (the W1-verified single-text "
+                    "API is predict_relations(text, …) -> (entities, relations)) and fix the "
+                    "batched call. See scripts/validate-encoder-batching-on-gpu.md Gate 0."
+                )
+                raise AttributeError(msg)
+            entities_per_text, relations_per_text = model.inference(
+                texts,
+                labels=list(entity_labels),
+                relations=list(relation_labels),
+                threshold=self._threshold,
+                return_relations=True,
+            )
+            for chunk, raw_ents, raw_rels in zip(
+                batch, entities_per_text, relations_per_text, strict=True
+            ):
+                chunk_mentions, chunk_relations = self._build_records(
+                    chunk, list(raw_ents), list(raw_rels)
+                )
+                mentions.extend(chunk_mentions)
+                relations.extend(chunk_relations)
+            batch = []
+            batch_labels = None
+
         for chunk in chunks:
             if len(chunk.content.strip()) < self._min_chars:
                 continue
-            if model is None:
-                model = self._load_model()
-            chunk_mentions, chunk_relations = self._extract_one(model, chunk)
-            mentions.extend(chunk_mentions)
-            relations.extend(chunk_relations)
+            # W4 label-source seam (ADR-0038): UNION the config labels with any entity/relation
+            # types the OPTIONAL schema_induction Stage induced for this chunk's document, deduped +
+            # order-stable. Absent (the default, every existing stack) these are exactly the config
+            # labels. The fused call takes ONE (entity, relation) label set, so a chunk whose
+            # effective labels differ from the accumulating batch flushes it first.
+            entity_labels = tuple(
+                effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY)
+            )
+            relation_labels = tuple(
+                effective_labels(self._relation_labels, chunk.induced_labels, LabelSlot.RELATION)
+            )
+            labels = (entity_labels, relation_labels)
+            if batch and labels != batch_labels:
+                flush()
+            batch_labels = labels
+            batch.append(chunk)
+            if len(batch) >= self._batch_size:
+                flush()
+        flush()
         return FusedExtraction(mentions=mentions, relations=relations)
 
     # -- plain Entity-Extraction half (so it also fits the EntityExtractor seam) --
@@ -180,33 +284,20 @@ class GlinerRelexExtractor:
         """The NER half alone (for a Pipeline that wants only entities from this model)."""
         return self.extract_fused(chunks).mentions
 
-    def _extract_one(
-        self, model: Any, chunk: ChunkRecord
+    def _build_records(
+        self,
+        chunk: ChunkRecord,
+        raw_entities: list[dict[str, Any]],
+        raw_relations: list[dict[str, Any]],
     ) -> tuple[list[EntityMention], list[RelationMention]]:
-        # The REAL gliner-relex API (introspected + run on the pod, W1-relex FIX): the
-        # checkpoint exposes ``predict_relations`` (NOT ``predict_with_relations`` — that
-        # method never existed and was the false-green trap) returning a **TUPLE**
-        # ``(entities, relations)``, NOT a dict. Entity dicts carry chunk-local
-        # 'start'/'end', 'text', 'label', 'score' (identical shape to ``predict_entities``).
-        # Relation dicts carry 'head'/'tail' sub-dicts ('start'/'end'/'text'/'type'/
-        # 'entity_idx') plus 'relation' + 'score'. We resolve the relations back to the
-        # EntityMentions we stamp by their (start, end) span.
-        # W4 label-source seam (ADR-0038): UNION the config labels with any entity/relation types
-        # the OPTIONAL schema_induction Stage induced for this chunk's document, deduped +
-        # order-stable. Absent (the default, every existing stack) these are exactly the config
-        # labels — byte-identical. The extraction LOGIC below is unchanged.
-        entity_labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY)
-        relation_labels = effective_labels(
-            self._relation_labels, chunk.induced_labels, LabelSlot.RELATION
-        )
-        raw_entities, raw_relations = model.predict_relations(
-            chunk.content,
-            entity_labels,
-            relation_labels,
-            threshold=self._threshold,
-        )
-        raw_entities = list(raw_entities)
-        raw_relations = list(raw_relations)
+        # ``raw_entities`` / ``raw_relations`` are THIS chunk's fused output, mapped back by index
+        # from the batched ``inference`` call (W7). Their shape is the REAL gliner-relex contract
+        # (introspected + run on the pod, W1-relex FIX): entity dicts carry chunk-local
+        # 'start'/'end', 'text', 'label', 'score'; relation dicts carry 'head'/'tail' sub-dicts
+        # ('start'/'end'/'text'/'type'/'entity_idx') plus 'relation' + 'score'. We resolve the
+        # relations back to the EntityMentions we stamp by their (start, end) span. The record
+        # building below is UNCHANGED from the per-chunk path — only where the raw came from
+        # changed (a shared forward pass instead of a per-chunk call).
         raw_entities.sort(key=lambda e: (int(e["start"]), str(e["label"])))
 
         # Resolve chunk-local model offsets to TRUE original offsets through the
