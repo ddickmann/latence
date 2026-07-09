@@ -9,6 +9,8 @@ sleeps and nothing depends on wall-time.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from latence_core.endpoint import (
     EndpointError,
@@ -16,6 +18,7 @@ from latence_core.endpoint import (
     EndpointPool,
     RetryPolicy,
     call_with_retry,
+    call_with_retry_async,
     is_retryable_status,
 )
 
@@ -201,3 +204,89 @@ def test_zero_attempts_is_clamped_to_one_try() -> None:
             always_503, RetryPolicy(attempts=0), rng=lambda: 0.0, sleep=lambda _d: None
         )
     assert fail_calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# call_with_retry_async — the async twin (W6). Same classing/backoff, awaited.
+# ---------------------------------------------------------------------------
+
+
+async def _noop_sleep(_d: float) -> None:
+    return None
+
+
+def test_async_retry_succeeds_after_transient_failures() -> None:
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    async def flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise EndpointError("overloaded", status=503)
+        return "ok"
+
+    async def rec_sleep(d: float) -> None:
+        slept.append(d)
+
+    async def run() -> object:
+        return await call_with_retry_async(
+            flaky, RetryPolicy(attempts=4, base_delay=1.0), rng=lambda: 0.5, sleep=rec_sleep
+        )
+
+    assert asyncio.run(run()) == "ok"
+    assert calls["n"] == 3
+    # Identical full-jitter shape to the sync twin: 0.5*min(1*2^0,30)=0.5, 0.5*min(1*2^1,30)=1.0.
+    assert slept == [0.5, 1.0]
+
+
+def test_async_retry_terminal_error_not_retried() -> None:
+    calls = {"n": 0}
+
+    async def bad_request() -> str:
+        calls["n"] += 1
+        raise EndpointError("bad request", status=400)
+
+    async def run() -> object:
+        return await call_with_retry_async(
+            bad_request, RetryPolicy(attempts=5), rng=lambda: 0.0, sleep=_noop_sleep
+        )
+
+    with pytest.raises(EndpointError, match="bad request"):
+        asyncio.run(run())
+    assert calls["n"] == 1  # 4xx fails fast, no retry
+
+
+def test_async_retry_gives_up_and_surfaces() -> None:
+    async def always_503() -> str:
+        raise EndpointError("still down", status=503)
+
+    async def run() -> object:
+        return await call_with_retry_async(
+            always_503, RetryPolicy(attempts=3), rng=lambda: 0.0, sleep=_noop_sleep
+        )
+
+    with pytest.raises(EndpointError, match="still down"):
+        asyncio.run(run())
+
+
+def test_async_retry_tallies_on_retry() -> None:
+    retries = {"n": 0}
+    calls = {"n": 0}
+
+    async def flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise EndpointError("overloaded", status=503)
+        return "ok"
+
+    async def run() -> object:
+        return await call_with_retry_async(
+            flaky,
+            RetryPolicy(attempts=4),
+            rng=lambda: 0.0,
+            sleep=_noop_sleep,
+            on_retry=lambda: retries.__setitem__("n", retries["n"] + 1),
+        )
+
+    assert asyncio.run(run()) == "ok"
+    assert retries["n"] == 2  # two retries taken → two on_retry calls (the endpoint_retries tally)

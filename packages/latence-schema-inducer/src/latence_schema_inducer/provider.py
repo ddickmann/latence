@@ -37,10 +37,21 @@ The LLM is UNTRUSTED output — every safety net is mandatory (the run NEVER cra
      typed, no-content log + a Quality-Report note (``induction_fallbacks``). A missing/unreachable
      endpoint is a skip-with-flag (fail-open), not a crash.
 
+Concurrency (W6, ADR-0036): the LLM calls are pure per-request latency, so ``induce`` **fans the
+per-item calls out concurrently** — the ``openai`` async client (:class:`~openai.AsyncOpenAI`) +
+an :class:`asyncio.Semaphore` (``max_concurrency``, default 8) + a single
+:func:`asyncio.run` over :func:`asyncio.gather` (``return_exceptions=True``) inside the SYNC
+``induce`` (the Runner is sync). The wall-clock collapses from ``N × latency`` to
+``ceil(N / max_concurrency) × latency``. Every safety net above is applied PER concurrent result,
+and a single item's failure fails open for THAT item only (the gather never aborts the batch);
+results are re-assembled in **input order** (index-keyed) so the concurrency does not perturb the
+byte-identical output. ``max_concurrency=1`` is exactly today's sequential behaviour.
+
 Deterministic: ``temperature`` 0 and stable label order (sanitization preserves first-seen order),
-so a seeded run is byte-reproducible (Baseline bar). The real ``gpt-4.1-mini`` numbers come from the
-maintainer's keyed pod run (``scripts/validate-schema-induction-on-gpu.md``); the offline mock
-proves the machinery + every safety net.
+plus index-keyed reassembly, so a seeded run is byte-reproducible **regardless of completion
+order** (Baseline bar; a shuffled-completion mock proves it). The real ``gpt-4.1-mini`` numbers come
+from the maintainer's keyed pod run (``scripts/validate-schema-induction-on-gpu.md``); the offline
+mock proves the machinery + every safety net.
 
 Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied endpoint; it
 bundles NO model weights. The ``openai`` client is Apache-2.0 (code). No key or endpoint is embedded
@@ -50,6 +61,7 @@ this module (for Provider discovery) never requires the client installed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -57,7 +69,7 @@ import random
 from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.contracts import InducedLabels
-from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
+from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 from latence_schema_inducer.prompts import (
@@ -85,10 +97,23 @@ _SLOTS = ("entity_types", "relation_types", "pii_types")
 # A chunk shorter than this (stripped) is treated as too small to induce a schema from — skipped,
 # its induced_labels left None (the extractors use config labels). Bounds a pointless LLM call.
 _DEFAULT_MIN_CHARS = 1
+# The default bound on in-flight concurrent LLM calls (W6). 8 collapses the lbbw induce stage from
+# ~44s to ~6-8s; 1 = today's sequential behaviour. Clamped to >= 1 in __init__.
+_DEFAULT_MAX_CONCURRENCY = 8
 
 
 class _Truncated(Exception):
     """Internal signal: the reply's ``finish_reason`` was ``length`` (truncated, safety net #2)."""
+
+
+async def _async_noop_sleep(_delay: float) -> None:
+    """The injected async backoff sleep — a no-op, mirroring the sync path's ``lambda _d: None``.
+
+    The endpoint Providers pass an instant sleep to the ported retry (the retry's value is the
+    classing + the ``endpoint_retries`` tally, not wall-time backoff in this batch context); keeping
+    it a no-op makes a seeded test instant and byte-stable and preserves the pre-W6 behaviour.
+    """
+    return None
 
 
 class LLMLabelInducer:
@@ -114,6 +139,10 @@ class LLMLabelInducer:
         retry_attempts / retry_base_delay / retry_max_delay  — the ported endpoint-retry policy
             knobs (identical to the other endpoint Providers); retries surface on
             ``endpoint_retries``.
+        max_concurrency: int  — the bound on in-flight concurrent LLM calls (W6, default 8; 1 =
+            sequential). The per-item calls fan out under an ``asyncio.Semaphore(max_concurrency)``.
+        request_timeout: float | None  — a per-call timeout (seconds) passed to the async client
+            (``None`` ⇒ the client default). A timeout is a transport fault → retried like a 5xx.
     The client is constructed lazily on first ``induce`` so building the Provider (which the Runner
     does for every Stage) never needs the endpoint reachable.
     """
@@ -174,6 +203,13 @@ class LLMLabelInducer:
             max_delay=float(config.get("retry_max_delay", 30.0)),
         )
         self._rng = random.Random(f"{self._base_url}|{self._model}")
+        # W6 concurrency: bound the in-flight per-item LLM calls. Clamped to >= 1 so a configured
+        # 0/negative means "one at a time" (sequential), never a zero-permit deadlock.
+        self._max_concurrency = max(1, int(config.get("max_concurrency", _DEFAULT_MAX_CONCURRENCY)))
+        # Per-call timeout (seconds) forwarded to AsyncOpenAI; None ⇒ the client default. A timeout
+        # is a transport fault → classed retryable by the ported retry (same as a 5xx).
+        request_timeout = config.get("request_timeout")
+        self._request_timeout = None if request_timeout is None else float(request_timeout)
         self._client: Any = None
         # Observability seams the Runner folds into the Quality Report (read defensively — ADR-0004,
         # no base class). ``endpoint_retries``: transient endpoint failures retried through (same
@@ -190,7 +226,7 @@ class LLMLabelInducer:
         if self._client is not None:
             return self._client
         try:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
             msg = (
                 "The 'openai' package is required to run LLMLabelInducer. "
@@ -207,7 +243,14 @@ class LLMLabelInducer:
         )
         env_key = next((os.environ[n] for n in env_names if os.environ.get(n)), None)
         api_key = self._api_key or env_key or "not-needed"
-        self._client = OpenAI(base_url=self._base_url, api_key=api_key)
+        # The ASYNC client (W6): the per-item calls fan out concurrently under one event loop per
+        # induce() run. A per-call ``timeout`` is passed only when configured (None ⇒ client
+        # default). base_url/key sourcing is unchanged, so the OpenAI/OpenRouter/vLLM swap is
+        # byte-identical to the sync path.
+        kwargs: dict[str, Any] = {"base_url": self._base_url, "api_key": api_key}
+        if self._request_timeout is not None:
+            kwargs["timeout"] = self._request_timeout
+        self._client = AsyncOpenAI(**kwargs)
         return self._client
 
     # -- induction ----------------------------------------------------------
@@ -230,8 +273,8 @@ class LLMLabelInducer:
         yield from self._induce_per_document(chunk_list)
 
     def _induce_per_document(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
-        # Assemble each document's text (in chunk order) once, induce a schema per document, then
-        # broadcast to that document's chunks. Documents are processed in first-seen order.
+        # Assemble each document's text (in chunk order) once, induce a schema per document
+        # concurrently, then broadcast to that document's chunks. Documents keep first-seen order.
         by_doc: dict[str, list[ChunkRecord]] = {}
         order: list[str] = []
         for chunk in chunk_list:
@@ -240,39 +283,75 @@ class LLMLabelInducer:
                 order.append(chunk.document_record_id)
             by_doc[chunk.document_record_id].append(chunk)
 
-        induced_by_doc: dict[str, InducedLabels | None] = {}
-        client = None
+        # Build the induction jobs (index-keyed by document) for the ones big enough to induce.
+        # A too-small document maps to None with no LLM call (its key is simply absent from jobs).
+        jobs: list[tuple[str, str]] = []
         for doc_id in order:
-            doc_chunks = by_doc[doc_id]
-            text = "\n".join(c.content for c in doc_chunks).strip()
-            if len(text) < self._min_chars:
-                induced_by_doc[doc_id] = None
-                continue
-            self.induction_documents += 1
-            if client is None:
-                client = self._get_client()
-            induced_by_doc[doc_id] = self._induce_one(client, text)
+            text = "\n".join(c.content for c in by_doc[doc_id]).strip()
+            if len(text) >= self._min_chars:
+                jobs.append((doc_id, text))
 
+        induced_by_doc = self._induce_all(jobs)
         for chunk in chunk_list:
             induced = induced_by_doc.get(chunk.document_record_id)
             yield chunk if induced is None else chunk.model_copy(update={"induced_labels": induced})
 
     def _induce_per_chunk(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
-        client = None
+        # One job per big-enough chunk, index-keyed by the chunk record_id (unique). Results are
+        # reassembled in input order below, so completion order never perturbs the output.
+        jobs: list[tuple[str, str]] = []
         for chunk in chunk_list:
             text = chunk.content.strip()
-            if len(text) < self._min_chars:
-                yield chunk
-                continue
-            self.induction_documents += 1
-            if client is None:
-                client = self._get_client()
-            induced = self._induce_one(client, text)
+            if len(text) >= self._min_chars:
+                jobs.append((chunk.record_id, text))
+
+        induced_by_key = self._induce_all(jobs)
+        for chunk in chunk_list:
+            induced = induced_by_key.get(chunk.record_id)
             yield chunk if induced is None else chunk.model_copy(
                 update={"induced_labels": induced}
             )
 
-    def _induce_one(self, client: Any, text: str) -> InducedLabels | None:
+    def _induce_all(self, jobs: list[tuple[str, str]]) -> dict[str, InducedLabels | None]:
+        """Induce every job's schema CONCURRENTLY (bounded), keyed by its key for order-stable use.
+
+        The W6 fan-out: each ``(key, text)`` job's LLM induction runs under an
+        ``asyncio.Semaphore(max_concurrency)`` and they are gathered with ``return_exceptions=True``
+        so one item's failure fails open for THAT item only (never aborts the batch). One event loop
+        per ``induce`` run via a single :func:`asyncio.run`. The wall-clock is
+        ``ceil(len(jobs) / max_concurrency) × latency`` (proven by the timing test).
+        ``induction_documents`` counts every attempted job. Reassembly is index-keyed (the returned
+        dict), so the caller re-emits in input order — byte-identical whatever the completion order.
+        """
+        if not jobs:
+            return {}
+        self.induction_documents += len(jobs)
+        client = self._get_client()
+
+        async def _run() -> list[tuple[str, InducedLabels | None]]:
+            semaphore = asyncio.Semaphore(self._max_concurrency)
+
+            async def _one(key: str, text: str) -> tuple[str, InducedLabels | None]:
+                async with semaphore:
+                    return key, await self._induce_one(client, text)
+
+            gathered = await asyncio.gather(
+                *(_one(key, text) for key, text in jobs), return_exceptions=True
+            )
+            # return_exceptions=True: a genuinely-unexpected exception that escaped _induce_one's
+            # own fail-open guard (belt-and-suspenders) fails open for THAT item — never the batch.
+            resolved: list[tuple[str, InducedLabels | None]] = []
+            for (key, _text), outcome in zip(jobs, gathered, strict=True):
+                if isinstance(outcome, BaseException):
+                    self._record_fallback(f"unexpected concurrent error ({type(outcome).__name__})")
+                    resolved.append((key, None))
+                else:
+                    resolved.append(outcome)
+            return resolved
+
+        return dict(asyncio.run(_run()))
+
+    async def _induce_one(self, client: Any, text: str) -> InducedLabels | None:
         """Induce one document's label schema with EVERY safety net; None ⇒ fall back to config.
 
         Runs the structured LLM call, detects truncation (retry at double budget), parses (repair
@@ -283,7 +362,7 @@ class LLMLabelInducer:
         failing document's content is NEVER logged (the no-PII discipline).
         """
         try:
-            raw = self._call_with_truncation_and_repair(client, text)
+            raw = await self._call_with_truncation_and_repair(client, text)
         except EndpointError as exc:
             # Network / auth / terminal-4xx / unreachable endpoint: fail open, never crash.
             self._record_fallback(f"endpoint error ({exc.__class__.__name__})")
@@ -315,7 +394,9 @@ class LLMLabelInducer:
 
     # -- the structured call + truncation + repair (safety nets #1, #2, #3) --
 
-    def _call_with_truncation_and_repair(self, client: Any, text: str) -> dict[str, Any] | None:
+    async def _call_with_truncation_and_repair(
+        self, client: Any, text: str
+    ) -> dict[str, Any] | None:
         """Return the parsed JSON object, or ``None`` when repair/truncation retries are exhausted.
 
         Applies safety nets #2 (truncation) and #3 (parse-and-repair) in one bounded sequence, each
@@ -332,10 +413,10 @@ class LLMLabelInducer:
         """
         # --- attempt 1 (with a one-shot doubled-budget retry on truncation) ---
         try:
-            content = self._chat(client, text, max_tokens=self._max_tokens, repair=False)
+            content = await self._chat(client, text, max_tokens=self._max_tokens, repair=False)
         except _Truncated:
             try:
-                content = self._chat(
+                content = await self._chat(
                     client, text, max_tokens=self._max_tokens * 2, repair=False
                 )
             except _Truncated:
@@ -350,12 +431,12 @@ class LLMLabelInducer:
             return parsed
         # --- one corrective repair retry (safety net #3) ---
         try:
-            repaired = self._chat(client, text, max_tokens=self._max_tokens * 2, repair=True)
+            repaired = await self._chat(client, text, max_tokens=self._max_tokens * 2, repair=True)
         except _Truncated:
             return None
         return _try_parse(repaired)
 
-    def _chat(self, client: Any, text: str, *, max_tokens: int, repair: bool) -> str:
+    async def _chat(self, client: Any, text: str, *, max_tokens: int, repair: bool) -> str:
         """One structured chat-completions call; returns the reply string or raises on truncation.
 
         Requests ``response_format={"type":"json_object"}`` (safety net #1, portable) at
@@ -374,9 +455,9 @@ class LLMLabelInducer:
             {"role": "user", "content": user},
         ]
 
-        def do_call() -> tuple[str, str | None]:
+        async def do_call() -> tuple[str, str | None]:
             try:
-                response = client.chat.completions.create(
+                response = await client.chat.completions.create(
                     model=self._model,
                     temperature=self._temperature,
                     max_tokens=max_tokens,
@@ -390,11 +471,11 @@ class LLMLabelInducer:
             finish_reason = getattr(choice, "finish_reason", None)
             return str(content), (str(finish_reason) if finish_reason is not None else None)
 
-        result = call_with_retry(
+        result = await call_with_retry_async(
             do_call,
             self._policy,
             rng=self._rng.random,
-            sleep=lambda _d: None,
+            sleep=_async_noop_sleep,
             on_retry=self._count_retry,
         )
         content, finish_reason = cast("tuple[str, str | None]", result)

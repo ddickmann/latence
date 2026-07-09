@@ -96,7 +96,9 @@ class _FakeCompletions:
     calls: int = 0
     last_messages: list[dict[str, Any]] = []
 
-    def create(self, **kwargs: Any) -> Any:
+    async def create(self, **kwargs: Any) -> Any:
+        # Since W6 the RE Provider fans its per-document calls out with AsyncOpenAI, so ``create``
+        # is a coroutine — the mock matches the real async client's shape.
         type(self).calls += 1
         type(self).last_messages = list(kwargs.get("messages", []))
         err = type(self).error
@@ -123,7 +125,7 @@ class _FakeOpenAI:
 @pytest.fixture()
 def fake_openai(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOpenAI]:
     module = types.ModuleType("openai")
-    module.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    module.AsyncOpenAI = _FakeOpenAI  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", module)
     _FakeCompletions.reply = "{}"
     _FakeCompletions.error = None

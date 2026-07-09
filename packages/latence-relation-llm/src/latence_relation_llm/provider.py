@@ -22,12 +22,28 @@ un-resolvable record.
 
 Fault tolerance is the ported endpoint machinery (:mod:`latence_core.endpoint`),
 the same as the other endpoint Providers (Parse/NER/Embedder): the chat call goes
-through :func:`~latence_core.endpoint.call_with_retry` with
+through :func:`~latence_core.endpoint.call_with_retry_async` with
 exponential-backoff-with-jitter, so a 429/5xx/transport blip is retried and a
 terminal 4xx fails fast. The count of transient failures a run absorbed is exposed
 on ``endpoint_retries`` and folded into the Quality Report by the Runner (issue
 #44.3: RE retries surface for observability consistency with the other endpoint
 Stages, not silently).
+
+Concurrency (W6, ADR-0036): a document's relations are one LLM call, and the calls
+are pure per-request latency, so ``relate`` fans the per-document calls out
+concurrently — the ``openai`` async client (:class:`~openai.AsyncOpenAI`) + an
+:class:`asyncio.Semaphore` (``max_concurrency``, default 8) + a single
+:func:`asyncio.run` over :func:`asyncio.gather` (``return_exceptions=True``) inside
+the SYNC ``relate`` (the Runner is sync). The public method stays a plain
+``Iterator[RelationMention]``. The wall-clock collapses from ``N × latency`` to
+``ceil(N / max_concurrency) × latency``. Only the network call is concurrent; the
+deterministic index-resolution / provenance stamping runs afterward in **input
+document order**, so a shuffled completion order never perturbs the byte-identical
+output (temperature 0). A single document's endpoint failure surfaces as an
+:class:`EndpointError` for that document (the gather is ``return_exceptions=True``,
+so it never aborts the other documents' work); a well-formed non-JSON body still
+yields no relations for that document, exactly as before. ``max_concurrency=1`` is
+byte-identical to the pre-W6 sequential behaviour.
 
 Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied
 endpoint; it bundles no model weights. The ``openai`` client is Apache-2.0 (code).
@@ -40,13 +56,15 @@ optional dep raises a clear, actionable error only when the Provider is run.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
-from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
+from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
@@ -63,6 +81,9 @@ if TYPE_CHECKING:
     )
 
 _DEFAULT_MODEL = "gpt-4o-mini"
+# The default bound on in-flight concurrent per-document LLM calls (W6). 8 collapses a
+# multi-document relate stage from N×latency to ceil(N/8)×latency; 1 = sequential. Clamped >= 1.
+_DEFAULT_MAX_CONCURRENCY = 8
 _SYSTEM_PROMPT = (
     "You are a precise relation-extraction engine. Given a document's text and a "
     "numbered list of entity mentions found in it, identify the typed, directed "
@@ -71,6 +92,32 @@ _SYSTEM_PROMPT = (
     '{"relations": [{"head": <int>, "tail": <int>, "label": "<relation>", '
     '"confidence": <0..1>}]}. Emit no relation you cannot support from the text.'
 )
+
+
+async def _async_noop_sleep(_delay: float) -> None:
+    """The injected async backoff sleep — a no-op, mirroring the sync path's ``lambda _d: None``.
+
+    The endpoint Providers pass an instant sleep to the ported retry (the retry's value is the
+    classing + the ``endpoint_retries`` tally, not wall-time backoff in this batch context); keeping
+    it a no-op makes a seeded test instant and byte-stable and preserves the pre-W6 behaviour.
+    """
+    return None
+
+
+@dataclass(frozen=True)
+class _DocJob:
+    """One document's fully-resolved relate job: everything the network + resolution steps need.
+
+    Built ONCE per document (in first-seen order) before the concurrent fetch, so the effective
+    label resolution, reading-ordered + capped mention list, text, and page map are all fixed and
+    the fan-out is pure network — the resolution afterward is deterministic and network-free.
+    """
+
+    doc_id: str
+    mentions: list[EntityMention]
+    text: str
+    page_map: PageMap | None
+    labels: list[str]
 
 
 class LLMRelationExtractor:
@@ -93,6 +140,12 @@ class LLMRelationExtractor:
         retry_attempts / retry_base_delay / retry_max_delay  — the ported retry policy
             knobs (issue #44.3), identical to the other endpoint Providers; retries
             absorbed surface on ``endpoint_retries`` for the Quality Report.
+        max_concurrency: int  — the bound on in-flight concurrent per-document LLM calls
+            (W6, default 8; 1 = sequential). The calls fan out under an
+            ``asyncio.Semaphore(max_concurrency)``.
+        request_timeout: float | None  — a per-call timeout (seconds) passed to the async
+            client (``None`` ⇒ the client default). A timeout is a transport fault → retried
+            like a 5xx.
 
     The client is constructed lazily on first ``relate`` so building the Provider
     (which the Runner does for every Stage) never needs the endpoint reachable.
@@ -154,6 +207,13 @@ class LLMRelationExtractor:
             max_delay=float(config.get("retry_max_delay", 30.0)),
         )
         self._rng = random.Random(f"{self._base_url}|{self._model}")
+        # W6 concurrency: bound in-flight per-document LLM calls. Clamped >= 1 so a configured
+        # 0/negative means "one at a time" (sequential), never a zero-permit deadlock.
+        self._max_concurrency = max(1, int(config.get("max_concurrency", _DEFAULT_MAX_CONCURRENCY)))
+        # Per-call timeout (seconds) forwarded to AsyncOpenAI; None ⇒ the client default. A timeout
+        # is a transport fault → classed retryable by the ported retry (same as a 5xx).
+        request_timeout = config.get("request_timeout")
+        self._request_timeout = None if request_timeout is None else float(request_timeout)
         self._client: Any = None
         # Observability: transient endpoint failures this Provider retried through. The Runner
         # reads this after the Stage runs (via the generic ``endpoint_retries`` attribute seam)
@@ -166,7 +226,7 @@ class LLMRelationExtractor:
         if self._client is not None:
             return self._client
         try:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
             msg = (
                 "The 'openai' package is required to run LLMRelationExtractor. "
@@ -174,7 +234,13 @@ class LLMRelationExtractor:
             )
             raise ImportError(msg) from exc
         api_key = self._api_key or os.environ.get("OPENAI_API_KEY") or "not-needed"
-        self._client = OpenAI(base_url=self._base_url, api_key=api_key)
+        # The ASYNC client (W6): per-document calls fan out concurrently under one event loop per
+        # relate() run. A per-call ``timeout`` is passed only when configured (None ⇒ client
+        # default); base_url/key sourcing is unchanged, so the OpenAI/vLLM/Ollama swap is identical.
+        kwargs: dict[str, Any] = {"base_url": self._base_url, "api_key": api_key}
+        if self._request_timeout is not None:
+            kwargs["timeout"] = self._request_timeout
+        self._client = AsyncOpenAI(**kwargs)
         return self._client
 
     # -- extraction ---------------------------------------------------------
@@ -199,49 +265,85 @@ class LLMRelationExtractor:
                 order.append(m.document_record_id)
             by_doc[m.document_record_id].append(m)
 
-        client = None
+        # Build one job per document with >= 2 mentions, in first-seen order, resolving its
+        # effective labels + reading-ordered mentions ONCE. A single-mention document is skipped.
+        jobs: list[_DocJob] = []
         for doc_id in order:
             doc_mentions = by_doc[doc_id]
             if len(doc_mentions) < 2:
                 continue
-            if client is None:
-                client = self._get_client()
-            labels = effective_labels(
-                self._labels, doc_induced.get(doc_id), LabelSlot.RELATION
+            labels = effective_labels(self._labels, doc_induced.get(doc_id), LabelSlot.RELATION)
+            ordered = sorted(
+                doc_mentions, key=lambda m: (m.provenance.char_start or 0, m.record_id)
+            )[: self._max_mentions]
+            jobs.append(
+                _DocJob(
+                    doc_id=doc_id,
+                    mentions=ordered,
+                    text=doc_text.get(doc_id, ""),
+                    page_map=doc_page_map.get(doc_id),
+                    labels=labels,
+                )
             )
-            yield from self._relate_one_document(
-                client,
-                doc_id,
-                doc_mentions,
-                doc_text.get(doc_id, ""),
-                doc_page_map.get(doc_id),
-                labels,
+        if not jobs:
+            return
+
+        # W6 fan-out: fetch every document's raw model output concurrently (bounded), index-keyed by
+        # job position; then run the deterministic sync resolution below in input document order.
+        raw_by_index = self._call_models_concurrent(jobs)
+        for i, job in enumerate(jobs):
+            yield from self._resolve_document(job, raw_by_index[i])
+
+    def _call_models_concurrent(self, jobs: list[_DocJob]) -> list[list[dict[str, Any]]]:
+        """Fetch each document's raw relation list CONCURRENTLY, keyed by input-order index (W6).
+
+        The latency-bound network call per document runs under an
+        ``asyncio.Semaphore(max_concurrency)`` and the jobs are gathered with
+        ``return_exceptions=True`` so one document's endpoint fault never aborts the others' work.
+        The wall-clock is ``ceil(len(jobs) / max_concurrency) x latency`` (the timing test proves).
+        The results are returned in input-order index, so the sync resolution stays byte-identical
+        whatever the completion order. If any document's call raised an :class:`EndpointError`, the
+        FIRST one in document order is re-raised (preserving the pre-W6 "endpoint failure surfaces"
+        contract — the RE Stage fails loud, deterministically, not on whichever finished first).
+        """
+        client = self._get_client()
+
+        async def _run() -> list[list[dict[str, Any]] | BaseException]:
+            semaphore = asyncio.Semaphore(self._max_concurrency)
+
+            async def _one(job: _DocJob) -> list[dict[str, Any]]:
+                async with semaphore:
+                    return await self._call_model(client, job.text, job.mentions, job.labels)
+
+            return await asyncio.gather(
+                *(_one(job) for job in jobs), return_exceptions=True
             )
 
-    def _relate_one_document(
-        self,
-        client: Any,
-        doc_id: str,
-        mentions: list[EntityMention],
-        text: str,
-        page_map: PageMap | None,
-        labels: list[str],
+        gathered = asyncio.run(_run())
+        # Deterministic error surfacing: re-raise the FIRST document-order EndpointError, not the
+        # first to complete. A non-EndpointError (unexpected) is also surfaced in document order.
+        for outcome in gathered:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return [outcome for outcome in gathered if not isinstance(outcome, BaseException)]
+
+    def _resolve_document(
+        self, job: _DocJob, raw: list[dict[str, Any]]
     ) -> Iterator[RelationMention]:
-        # Order mentions in document position so the numbered list is stable and the
-        # model sees them in reading order. Cap the count to bound the prompt.
-        ordered = sorted(mentions, key=lambda m: (m.provenance.char_start or 0, m.record_id))[
-            : self._max_mentions
-        ]
-        raw = self._call_model(client, text, ordered, labels)
-        page_index = PageOffsetIndex(page_map) if page_map is not None else None
-        for emitted, rel in enumerate(self._valid_relations(raw, ordered, labels)):
+        """Deterministic, network-free resolution of a document's raw relations → RelationMentions.
+
+        Runs AFTER the concurrent fetch, in input document order, so the offset math + index
+        resolution + provenance stamping are byte-identical to the pre-W6 sequential path.
+        """
+        page_index = PageOffsetIndex(job.page_map) if job.page_map is not None else None
+        for emitted, rel in enumerate(self._valid_relations(raw, job.mentions, job.labels)):
             head, tail, label, confidence = rel
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
             provenance = _relation_provenance(head, tail, span_start, span_end, page_index)
             yield RelationMention(
-                record_id=f"{doc_id}#relation-{emitted}",
-                document_record_id=doc_id,
+                record_id=f"{job.doc_id}#relation-{emitted}",
+                document_record_id=job.doc_id,
                 index=emitted,
                 label=label,
                 head_mention_id=head.record_id,
@@ -253,7 +355,7 @@ class LLMRelationExtractor:
                 classification=head.classification,
             )
 
-    def _call_model(
+    async def _call_model(
         self, client: Any, text: str, mentions: list[EntityMention], labels: list[str]
     ) -> list[dict[str, Any]]:
         numbered = "\n".join(
@@ -270,7 +372,7 @@ class LLMRelationExtractor:
         # fast. Only the network call is wrapped — a well-formed HTTP 200 whose *body* is non-JSON
         # is a model-quality issue, not a transient fault, and still drops to no relations (below),
         # so retrying does not burn budget on a reply that will never parse.
-        content = self._call_endpoint(client, user)
+        content = await self._call_endpoint(client, user)
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
@@ -279,19 +381,19 @@ class LLMRelationExtractor:
         relations = parsed.get("relations", []) if isinstance(parsed, dict) else []
         return [r for r in relations if isinstance(r, dict)]
 
-    def _call_endpoint(self, client: Any, user: str) -> str:
+    async def _call_endpoint(self, client: Any, user: str) -> str:
         """One chat-completions call through the ported retry, returning the raw reply string.
 
         Classes any client exception into a :class:`EndpointError` (429/5xx retryable, other 4xx
-        terminal, transport retryable) so :func:`call_with_retry` decides retry-vs-fail; the retry
-        count is tallied on ``endpoint_retries`` via ``on_retry``. An exhausted / terminal failure
-        re-raises the :class:`EndpointError` — the Runner surfaces the Stage failure, identical to
-        the NER/Parse endpoint Providers.
+        terminal, transport retryable) so :func:`call_with_retry_async` decides retry-vs-fail; the
+        retry count is tallied on ``endpoint_retries`` via ``on_retry``. An exhausted / terminal
+        failure re-raises the :class:`EndpointError` — the Runner surfaces the Stage failure,
+        identical to the NER/Parse endpoint Providers.
         """
 
-        def do_call() -> str:
+        async def do_call() -> str:
             try:
-                response = client.chat.completions.create(
+                response = await client.chat.completions.create(
                     model=self._model,
                     temperature=self._temperature,
                     response_format={"type": "json_object"},
@@ -304,11 +406,11 @@ class LLMRelationExtractor:
                 raise _classify_exception(exc) from exc
             return response.choices[0].message.content or "{}"
 
-        result = call_with_retry(
+        result = await call_with_retry_async(
             do_call,
             self._policy,
             rng=self._rng.random,
-            sleep=lambda _d: None,
+            sleep=_async_noop_sleep,
             on_retry=self._count_retry,
         )
         return str(result)

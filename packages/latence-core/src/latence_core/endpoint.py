@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Protocol
 from latence_core.errors import ProviderError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 # HTTP status classes for the ported error-classing (retry_utils): a 429 (rate limit) or any 5xx
 # (server/overloaded) is transient and retryable; a 4xx other than 429 is a terminal client error
@@ -256,5 +256,44 @@ def call_with_retry(
             sleep(policy.backoff(attempt, rng()))
     # Unreachable: ``policy.attempts`` is clamped to >= 1 (RetryPolicy.__post_init__), so the loop
     # always runs at least once and either returns or raises. Guards the type-checker.
+    assert last_error is not None  # noqa: S101
+    raise last_error
+
+
+async def call_with_retry_async(
+    fn: Callable[[], Awaitable[object]],
+    policy: RetryPolicy,
+    *,
+    rng: Callable[[], float],
+    sleep: Callable[[float], Awaitable[None]],
+    on_retry: Callable[[], None] | None = None,
+) -> object:
+    """Async twin of :func:`call_with_retry` — awaits ``fn`` with the SAME backoff+classing (W6).
+
+    The per-item network call in the concurrent LLM Stages (``label_inducer.llm`` / ``relation.llm``
+    ) is an ``await``, so it cannot ride the sync :func:`call_with_retry`. This coroutine applies
+    the identical ported algorithm — retry only on a retryable :class:`EndpointError` (429 / 5xx /
+    transport), a terminal 4xx re-raised on the first failure, the final error surfaced after the
+    last attempt — but ``await``s the supplied coroutine and an injected async ``sleep`` (e.g.
+    :func:`asyncio.sleep`, or an instant no-op under test). ``rng`` (uniform ``[0,1)``), ``sleep``,
+    and ``on_retry`` have the exact same contract as the sync version, so a Provider tallies the
+    same ``endpoint_retries`` and a seeded test is byte-stable and instant. Backoff jitter is
+    per-item (each concurrent item draws its own ``rng``), so a burst of items retrying one
+    overloaded endpoint de-correlates — the whole reason the ported retry exists.
+    """
+    last_error: EndpointError | None = None
+    for attempt in range(policy.attempts):
+        try:
+            return await fn()
+        except EndpointError as exc:
+            last_error = exc
+            if not exc.retryable:
+                raise
+            if attempt == policy.attempts - 1:
+                raise
+            if on_retry is not None:
+                on_retry()
+            await sleep(policy.backoff(attempt, rng()))
+    # Unreachable: ``policy.attempts`` is clamped to >= 1 (see the sync twin); guards the checker.
     assert last_error is not None  # noqa: S101
     raise last_error

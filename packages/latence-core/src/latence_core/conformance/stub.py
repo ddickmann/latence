@@ -77,6 +77,37 @@ class _StubOpenAI:
         self.embeddings = _StubEmbeddings()
 
 
+# -- async twins (the W6 LLM Stages use the openai AsyncOpenAI client) --------
+
+
+class _StubAsyncCompletions:
+    """Async ``chat.completions`` for the W6 concurrent LLM Providers — same canned reply, awaited.
+
+    ``label_inducer.llm`` / ``relation.llm`` now fan their calls out with ``AsyncOpenAI``, so their
+    ``create`` is a coroutine. It returns the SAME ``choices[0].message.content`` + finish_reason
+    shape as the sync stub, off the same class-level ``_StubCompletions.reply`` — one installer
+    drives both the sync endpoint Providers and the async LLM Stages the same.
+    """
+
+    async def create(self, **_kwargs: Any) -> Any:
+        message = types.SimpleNamespace(content=_StubCompletions.reply)
+        choice = types.SimpleNamespace(
+            message=message, finish_reason=_StubCompletions.finish_reason
+        )
+        return types.SimpleNamespace(choices=[choice])
+
+
+class _StubAsyncChat:
+    def __init__(self) -> None:
+        self.completions = _StubAsyncCompletions()
+
+
+class _StubAsyncOpenAI:
+    def __init__(self, **_kwargs: Any) -> None:
+        self.chat = _StubAsyncChat()
+        self.embeddings = _StubEmbeddings()
+
+
 @contextlib.contextmanager
 def install_openai(
     *, reply: str = "{}", dimension: int = 8, finish_reason: str = "stop"
@@ -91,6 +122,9 @@ def install_openai(
     _StubEmbeddings.dimension = dimension
     module = types.ModuleType("openai")
     module.OpenAI = _StubOpenAI  # type: ignore[attr-defined]
+    # The W6 LLM Stages (label_inducer.llm / relation.llm) import AsyncOpenAI — expose the async
+    # twin off the same canned reply so one installer drives sync endpoint + async LLM Providers.
+    module.AsyncOpenAI = _StubAsyncOpenAI  # type: ignore[attr-defined]
     saved = sys.modules.get("openai")
     sys.modules["openai"] = module
     try:

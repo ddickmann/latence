@@ -99,6 +99,7 @@ from latence_core.endpoint import (
     EndpointPool,
     RetryPolicy,
     call_with_retry,
+    call_with_retry_async,
     is_retryable_status,
 )
 from latence_core.errors import (
@@ -343,6 +344,7 @@ __all__ = [
     "select_device",
     "strip_markup",
     "call_with_retry",
+    "call_with_retry_async",
     "is_retryable_status",
     "topological_order",
 ]
