@@ -11,9 +11,23 @@ ADR-0036 §3.
 | Stack | What it is | Providers |
 |---|---|---|
 | `stacks/default.yaml` | The **blessed default** — CPU-first, offline, permissive, deterministic (ADR-0007/0012). What an adopter runs out of the box. | In-core deterministic Providers + the real CPU adapter where it adds value (`parser.pdfplumber`, `chunk.markdown`, `entity.gazetteer`, `relation.pattern`, `redaction.hybrid_rule` (comprehensive-by-default, H-C1), `profiling.statistical`, `disambiguation.cascade`, `graph.canonical`, `export.knowledge_graph` + `export.jsonl_parquet`, both Screening checkpoints). |
-| `stacks/gpu-sota.yaml` | The GPU / high-accuracy stack. | The learned/endpoint Providers (`entity.gliner`, `relation.gliner_relex`, `redaction.gliner_pii`, `embedding.endpoint`). On a CPU-only host these Stages are **skipped-with-flag** — never faked. |
+| `stacks/gpu-sota.yaml` | The GPU / high-accuracy stack. | ONE **fused** Entity+Relation Stage (`relation.gliner_relex` — joint NER+RE in one pass), learned `redaction.gliner_pii`, and the served `embedding.endpoint` for the RAG export. On a CPU-only host these Stages are **skipped-with-flag** — never faked. |
+| `stacks/gpu-sota-pod.yaml` | The **self-contained GPU-pod** variant of `gpu-sota.yaml`. | Identical to `gpu-sota.yaml` except the RAG-corpus embedder is the **in-process** `embedding.sentence_transformers` instead of the served `embedding.endpoint` — so the whole stack runs on a single GPU pod with no external service to stand up. This is the stack the maintainer runs to validate the fused SOTA path end-to-end (`LATENCE_CUDA=1 latence stack validate stacks/gpu-sota-pod.yaml`). |
 
-`stacks/<client>.yaml` is the documented extension point: copy either stack and swap Providers.
+### The fused extraction Stage (why extraction is ONE Stage, not two)
+
+`relation.gliner_relex` is a **Fused Provider**: it fulfils *both* Entity Extraction and Relation
+Extraction in one pass (`extract_fused`), satisfying the `FusedEntityRelationExtractor` Capability —
+**not** the standalone `RelationExtractor.relate` seam. So the SOTA stacks declare a single
+`fused_entity_relation` Stage (`extract`), and the Runner routes its `FusedExtraction` (mentions +
+relations) to *both* downstream consumers (Profiling, Disambiguation). Pairing it with a separate
+`entity.gliner` Entity Stage would double-run NER, and declaring it under a `relation_extraction`
+Stage raises `ContractError` at run (it does not satisfy that seam). A stack that wants standalone
+learned NER can still wire `entity.gliner` + a non-fused RE provider; the blessed SOTA path is the
+single fused pass. The CPU **capability-satisfaction guard** (`test_stack_capability_guard.py`)
+statically checks this wiring on every push — see below.
+
+`stacks/<client>.yaml` is the documented extension point: copy any stack and swap Providers.
 
 ## Running a stack directly
 
@@ -63,14 +77,29 @@ latence stack validate stacks/default.yaml --storage-root file:///tmp/stack-run
 ## Device honesty on a CPU-only host
 
 `latence stack validate stacks/gpu-sota.yaml` on a machine with no CUDA (or without the heavy
-Provider packages installed) reports the learned Stages as **skipped-with-flag** — `entity.gliner`,
-`relation.gliner_relex`, `redaction.gliner_pii`, `embedding.endpoint` and everything that depends
-on them — and still validates the CPU-reachable spine (Source → … → Content Screening). No
-fabricated quality/throughput numbers ever appear (#64). On a real GPU host with the packages
-installed, the learned Stages run (`device: cuda`) and the full spine validates.
+Provider packages installed) reports the learned Stages as **skipped-with-flag** — the fused
+`extract` (`relation.gliner_relex`), `redact` (`redaction.gliner_pii`), the served-embedder RAG
+export, and everything that depends on them — and still validates the CPU-reachable spine
+(Source → … → Content Screening). No fabricated quality/throughput numbers ever appear (#64). On a
+real GPU host with the packages installed, the learned Stages run (`device: cuda`) and the full
+spine validates.
+
+### The capability-satisfaction guard (CPU-visible wiring check)
+
+Because a CPU-only `stack validate` *skips* every `device: cuda` Stage, the Runner's dispatch-time
+`isinstance(provider, <Protocol>)` check — the one that raises `ContractError` for a mis-wired Stage
+— never runs for a GPU Stage in CI. That is how the fused/standalone miswiring (a Fused Provider
+under a `relation_extraction` Stage) once hid until a real pod run. `check_stack_capabilities`
+(`latence_core.stacks.capability_guard`) closes the gap: it loads each Provider **class** (a
+torch-free import — the heavy dep is deferred) and structurally checks it against the Protocol its
+Stage's Capability declares, the SAME mapping the Runner enforces. `test_stack_capability_guard.py`
+asserts the committed stacks have zero findings **and** that the guard bites on the exact miswiring
+— so a fused-under-relation slip fails CI on a CPU host, never reaching a pod.
 
 ## CI
 
-CI runs `latence stack validate stacks/default.yaml` (and `stacks/gpu-sota.yaml`) on every push
-with `LATENCE_CUDA=0` — the blessed stack is proven end-to-end (the real pipeline, not a
-config-parse smoke) on a tiny corpus, offline and deterministic, as a standing gate.
+CI runs `latence stack validate stacks/default.yaml` (and `stacks/gpu-sota.yaml` /
+`stacks/gpu-sota-pod.yaml`) on every push with `LATENCE_CUDA=0` — the blessed stacks are proven
+end-to-end (the real pipeline, not a config-parse smoke) on a tiny corpus, offline and
+deterministic, as a standing gate — plus the CPU capability-satisfaction guard over every stack's
+wiring.

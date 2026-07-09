@@ -115,8 +115,13 @@ python -m pytest packages/latence-core/tests/test_conformance.py \
 ## 5. Full gpu-sota stack over a real corpus (optional, end-to-end)
 
 ```bash
-# the relations stage now carries valid labels + relation_labels (the wiring fix);
-# on a CUDA host with the heavy packages installed the learned stages run for real.
+# W2-gpu-sota-fix: extraction is now ONE fused `extract` stage (capability:
+# fused_entity_relation, provider: relation.gliner_relex, labels + relation_labels +
+# threshold 0.3) — NOT separate entity+relation stages. On a CUDA host with the heavy
+# packages installed the learned stages run for real. Prefer the self-contained pod
+# variant (in-process ST embedder, no served endpoint to stand up):
+LATENCE_CUDA=1 latence stack validate stacks/gpu-sota-pod.yaml
+# or the served-embedder blessed stack (needs an embedding endpoint host up):
 LATENCE_CUDA=1 latence stack validate stacks/gpu-sota.yaml
 ```
 

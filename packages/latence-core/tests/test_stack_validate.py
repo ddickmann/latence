@@ -119,8 +119,9 @@ def test_gpu_sota_skips_learned_stages_with_flag(tmp_path: Path) -> None:
     """On a CPU-only host the learned Stages are skipped-with-flag; the CPU spine still validates."""
     result = validate_stack(_GPU_SOTA, storage_root=f"file://{tmp_path}/store")
     assert result.ok, result.render()  # a skip is NOT a failure (device honesty)
-    # The learned Providers were skipped-with-flag, never run, never faked.
-    assert "entities" in result.skipped_stages
+    # The learned Providers were skipped-with-flag, never run, never faked. The SOTA path's
+    # extraction is now ONE fused Stage (``extract``), not separate entity+relation Stages.
+    assert "extract" in result.skipped_stages
     assert "redact" in result.skipped_stages
     checks = _checks_by_name(result.checks)
     # The CPU-reachable spine still proved contracts + graceful-failure.
@@ -151,10 +152,10 @@ def test_cpu_reachable_subpipeline_drops_gpu_and_dependents() -> None:
     """The reduction drops the learned Stages AND everything transitively depending on them."""
     declared = load_stack(_GPU_SOTA, storage_uri="file:///tmp/x", corpus_dir="file:///tmp/c")
     _reduced, dropped = _cpu_reachable_subpipeline(declared, ProviderRegistry())
-    # Directly-skipped learned Stages:
-    assert "entities" in dropped and "redact" in dropped and "relations" in dropped
+    # Directly-skipped learned Stages (the single fused ``extract`` Stage + the learned Redactor):
+    assert "extract" in dropped and "redact" in dropped
     # Transitively dropped (depend on a skipped Stage):
-    assert "disambiguate" in dropped  # depends on entities/relations
+    assert "disambiguate" in dropped  # depends on the fused extract Stage
     assert "graph" in dropped  # depends on disambiguate
     assert "export_corpus" in dropped  # depends on redact
     # The CPU spine survives.

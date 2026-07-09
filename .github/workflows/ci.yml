@@ -137,6 +137,7 @@ jobs:
         run: |
           uv run latence stack validate stacks/default.yaml
           uv run latence stack validate stacks/gpu-sota.yaml
+          uv run latence stack validate stacks/gpu-sota-pod.yaml
           uv run latence stack validate stacks/gpu-ocr.yaml
 
       # Goal B (P3-F5, ADR-0036 §4): the per-Stage bake-off. Runs the two shipped CPU matrices —

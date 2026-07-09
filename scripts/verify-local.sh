@@ -53,9 +53,10 @@ uv run pytest packages/latence-core/tests/test_conformance.py \
               packages/latence-core/tests/test_e2e_conformance.py -q
 ok "conformance"
 
-step "stack validate (Goal A — default + gpu-sota + gpu-ocr, end-to-end)"
+step "stack validate (Goal A — default + gpu-sota + gpu-sota-pod + gpu-ocr, end-to-end)"
 uv run latence stack validate stacks/default.yaml
 uv run latence stack validate stacks/gpu-sota.yaml
+uv run latence stack validate stacks/gpu-sota-pod.yaml
 uv run latence stack validate stacks/gpu-ocr.yaml
 ok "stack validate"
 

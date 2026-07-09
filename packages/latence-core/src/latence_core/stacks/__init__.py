@@ -23,6 +23,11 @@ runner + stages only when a validation actually runs).
 
 from __future__ import annotations
 
+from latence_core.stacks.capability_guard import (
+    SatisfactionFinding,
+    capability_protocol,
+    check_stack_capabilities,
+)
 from latence_core.stacks.corpus import (
     ValidationCorpusManifest,
     build_validation_corpus_bytes,
@@ -36,9 +41,12 @@ from latence_core.stacks.validate import (
 
 __all__ = [
     "CheckResult",
+    "SatisfactionFinding",
     "StackValidationResult",
     "ValidationCorpusManifest",
     "build_validation_corpus_bytes",
+    "capability_protocol",
+    "check_stack_capabilities",
     "stage_validation_corpus",
     "validate_stack",
 ]

@@ -3,10 +3,15 @@
 # Same spine as stacks/default.yaml, but the accuracy-critical Stages swap the deterministic
 # in-core Providers for the learned/endpoint ones:
 #
-#   Entity Extraction   entity.gazetteer   -> entity.gliner        (learned zero-shot NER)
-#   Relation Extraction relation.pattern   -> relation.gliner_relex(fused NER+RE, learned)
+#   Entity + Relation  entity.gazetteer + relation.pattern -> ONE fused relation.gliner_relex
+#                       (fused NER+RE in one pass — a single `fused_entity_relation` Stage, ADR-0013)
 #   Redaction           redaction.hybrid_rule -> redaction.gliner_pii (learned PII)
 #   Export (RAG corpus) adds an embedder    -> embedding.endpoint   (served embeddings)
+#
+# Extraction is ONE fused Stage (not separate entity+relation Stages): `relation.gliner_relex`
+# fulfils BOTH Capabilities in one pass, so pairing it with a standalone Entity Stage would
+# double-run NER and mis-declare it under the RelationExtractor seam (ContractError). See
+# stacks/gpu-sota-pod.yaml for the self-contained, in-process-embedder pod variant.
 #
 # DEVICE HONESTY (P3-F1 / the G1 skip-with-flag posture). Each learned/endpoint Stage pins
 # `device: cuda` and its Provider ships in a SEPARATE heavy package (ADR-0016) that is NOT in the
@@ -55,24 +60,28 @@ stages:
     depends_on: [chunk]
 
   # --- Learned / endpoint Stages: skipped-with-flag on a CPU-only host (device: cuda) ---
-  - name: entities
-    capability: entity_extraction
-    provider: entity.gliner        # learned zero-shot NER (latence-ner-gliner, GPU/heavy dep)
+  # ONE fused Entity+Relation Extraction Stage (ADR-0013/0036). `relation.gliner_relex` is a
+  # FUSED Provider — it does joint NER+RE in one pass via `extract_fused`, satisfying the
+  # `FusedEntityRelationExtractor` Capability, NOT the standalone `RelationExtractor.relate`
+  # seam. Declaring it under a `relation_extraction` stage (paired with a separate
+  # `entity.gliner` Entity Stage) is the miswiring the pod E2E hit: it raised
+  # `ContractError: does not satisfy the RelationExtractor capability` AND double-ran NER.
+  # The blessed SOTA path is this single `fused_entity_relation` stage — the Runner routes its
+  # FusedExtraction (mentions + relations) to BOTH downstream consumers (Profiling,
+  # Disambiguation) with no separate Entity Stage. A stack that wants standalone learned NER can
+  # still wire `entity.gliner` + a non-fused RE provider; the SOTA path does not.
+  - name: extract
+    capability: fused_entity_relation
+    provider: relation.gliner_relex  # fused learned NER+RE (latence-relation-gliner, GPU/heavy dep)
     depends_on: [content_screen]
     config:
       device: cuda                 # honest GPU intent; skipped-with-flag where no CUDA (P3-F1)
-      labels: [organization, person]  # GLiNER scores best lower/title-case (pod: 0.95–0.99)
-
-  - name: relations
-    capability: relation_extraction
-    provider: relation.gliner_relex  # fused learned NER+RE (latence-relation-gliner)
-    depends_on: [content_screen, entities]
-    config:
-      device: cuda
       # The fused provider REQUIRES both label sets (a missing key is a ConfigError at load).
-      # W1-relex FIX: the old `relations:` key was wrong — it is `labels` + `relation_labels`.
+      # Lower-case labels: GLiNER scores best lower/title-case (pod: 0.95–0.99) AND the KB linker's
+      # type filter is case-sensitive, so these must match the KB `entity_type` below.
       labels: [organization, person]
       relation_labels: [works for, partner of]
+      threshold: 0.3
 
   - name: redact
     capability: redaction
@@ -80,16 +89,24 @@ stages:
     depends_on: [parse]              # Redaction consumes DocumentRecords (the parsed doc)
     config:
       device: cuda
+      # REQUIRED non-empty zero-shot PII types (a missing/empty list is a ValueError at load —
+      # the pod E2E bug: the stage carried only `{device: cuda}`). Lower-case, matching the
+      # GLiNER zero-shot convention used for the extract labels above.
+      pii_labels: [person, email, phone number, address, credit card number, social security number]
 
   - name: profiling
     capability: profiling
-    provider: profiling.statistical  # CPU: runs on the CPU host; but depends on learned entities
-    depends_on: [parse, entities]
+    provider: profiling.statistical  # CPU: runs on the CPU host; but depends on learned mentions
+    # The fused `extract` Stage supplies the EntityMentions (its mixed carrier); Profiling reads
+    # the doc side from `parse` and the mention side from `extract` (ADR-0013 fused routing).
+    depends_on: [parse, extract]
 
   - name: disambiguate
     capability: disambiguation
     provider: disambiguation.embedding   # learned surface+context ER (W1 rework, #94)
-    depends_on: [entities, relations]
+    # Disambiguation consumes the fused Stage's mixed carrier: its EntityMentions (required) +
+    # RelationMentions (normalised onto the canonical entities) come from the ONE `extract` Stage.
+    depends_on: [extract]
     config:
       threshold: 0.90        # context-safe default (pod margins); NOT the fragile bare-surface 0.83
       context_window: 160
