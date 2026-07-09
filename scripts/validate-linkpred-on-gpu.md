@@ -42,7 +42,11 @@ uv pip install -e "packages/latence-linkpred-ultra[pykeen]"
 
 The ULTRA checkpoint is a **config path** — weights are NOT vendored. Point `checkpoint` at your
 local ckpt (the warm pod has `ultra_3g` under `/root/ULTRA/ckpts/`, or fetch from HF
-`mgalkin/ultra_3g`, `license: mit`). ULTRA's `rspmm` C++/CUDA extension compiles on first use.
+`mgalkin/ultra_3g`, `license: mit`). **No `rspmm` build or upstream ULTRA repo is required** — the
+vendored subset has a pure-PyTorch fallback for the fused kernel that is numerically identical to it
+(a compiled `ultra.rspmm` on the host is used automatically if present, else the pure path runs).
+To confirm equivalence on the rig, run the check once as-is and once with `PYTHONPATH=/path/to/ULTRA`
+(the compiled kernel): the held-out MRR/Hits@k and predicted edges are the same.
 
 ## 2. The decisive load + zero-shot ranking check — the REAL recipe
 

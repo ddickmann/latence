@@ -38,7 +38,14 @@ pip install "latence-linkpred-ultra[pykeen]"
 ```
 
 The ULTRA **checkpoint is a config path** (default `ultra_3g`) — **weights are NOT vendored**; point
-`checkpoint` at your local ULTRA ckpt. ULTRA's `rspmm` C++/CUDA extension compiles on first use (GPU).
+`checkpoint` at your local ULTRA ckpt.
+
+**Self-contained — no C++/CUDA build, no upstream ULTRA repo.** The vendored ULTRA subset ships a
+pure-PyTorch fallback for ULTRA's fused `rspmm` message-passing kernel, so it runs on any CPU/GPU host
+with just `torch` + `torch-geometric` installed. The fallback is **numerically identical** to the
+compiled kernel (proven on GPU: same held-out MRR/Hits@k and predicted edges). If ULTRA's compiled
+`rspmm` extension happens to be importable on the host, it is used automatically as a faster path;
+otherwise the pure fallback runs. Nothing to build.
 
 > **Security — trust your checkpoint.** The checkpoint is loaded with `torch.load(..., weights_only=True)`
 > so a tampered `.pth` cannot execute code at load time. Still point `checkpoint` **only at a trusted
