@@ -56,3 +56,30 @@ def test_resolve_clamps_out_of_range_without_crashing() -> None:
     # An empty/inverted local span collapses to a zero-width span at the start.
     assert idx.resolve_span(4, 4) == (idx.resolve(4), idx.resolve(4))
     assert idx.resolve_span(4, 2) == (idx.resolve(4), idx.resolve(4))
+
+
+def test_resolve_original_is_the_inverse_of_resolve() -> None:
+    # Identity map: original offset - char_start == local (a markup-free chunk).
+    idx = OffsetIndex(_map([(0, 100)], length=10))
+    for k in range(10):
+        assert idx.resolve_original(100 + k) == k
+
+    # Gap map ("**Hi** Alice." → "Hi Alice."): original→local inverts resolve exactly on kept chars.
+    idx = OffsetIndex(_map([(0, 2), (2, 6)], length=9))
+    for local in range(9):
+        assert idx.resolve_original(idx.resolve(local)) == local
+    # 'A' of Alice is at original 7 → content-local 3 (NOT the naive 7 - 2 = 5 lower bound).
+    assert idx.resolve_original(7) == 3
+
+
+def test_resolve_original_gap_and_bounds_clamp_without_crashing() -> None:
+    # local 0->orig 2 ("Hi"), local 2->orig 6 (after a stripped "**" at original [4,6)). length 9.
+    idx = OffsetIndex(_map([(0, 2), (2, 6)], length=9))
+    # An original offset inside the stripped gap [4, 6) has no surviving character → clamps to the
+    # start of the next surviving run (content-local 2).
+    assert idx.resolve_original(4) == 2
+    assert idx.resolve_original(5) == 2
+    # Before the chunk clamps to content start 0; far past the chunk clamps to content length.
+    assert idx.resolve_original(0) == 0
+    assert idx.resolve_original(-5) == 0
+    assert idx.resolve_original(9999) == idx._length  # noqa: SLF001 - assert the exclusive bound

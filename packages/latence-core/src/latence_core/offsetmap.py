@@ -81,3 +81,43 @@ class OffsetIndex:
         # Original coordinates are monotonic in local, but clamp defensively so the
         # span is never inverted for a downstream contract that forbids it.
         return start, max(end, start)
+
+    def resolve_original(self, original: int) -> int:
+        """The chunk-local ``content`` offset of an ORIGINAL-markdown character ``original``.
+
+        The inverse of :meth:`resolve`: given a coordinate in the parent document's
+        original markdown (where a downstream Stage records an entity mention's
+        ``char_start``), return the offset into this chunk's markup-stripped ``content``
+        that indexes the same character. Needed because ``content`` is stripped while a
+        mention's ``char_start`` is in original coordinates, so ``original - char_start``
+        (the naive shift) over-shoots once markup was stripped before the mention within
+        its chunk — the exact drift :class:`OffsetIndex` exists to correct (ADR-0031).
+
+        Segment ``i`` maps local run ``[local_start[i], local_start[i+1])`` (the last runs
+        to ``length``) to original ``[doc_start[i], doc_start[i] + run_len)`` with a
+        constant shift, so an original offset inside that run inverts to
+        ``local_start[i] + (original - doc_start[i])``. An original offset that lands in a
+        stripped gap (no surviving character) or before/after the chunk clamps to the
+        nearest content boundary, so — like :meth:`resolve` — it never raises: a
+        malformed or gap offset degrades rather than aborting the run.
+        """
+        first_doc = self._doc_starts[0]
+        if original <= first_doc:
+            return 0
+        # Walk segments to find the run whose ORIGINAL span covers ``original``.
+        n = len(self._local_starts)
+        for i in range(n):
+            local_start = self._local_starts[i]
+            doc_start = self._doc_starts[i]
+            # This segment's local run length (to the next segment, or to content end).
+            next_local = self._local_starts[i + 1] if i + 1 < n else self._length
+            run_len = next_local - local_start
+            doc_end = doc_start + run_len  # exclusive original end of this run
+            if original < doc_end:
+                # Inside this run (or, if original < doc_start, in the preceding stripped
+                # gap → clamp to this run's start, the first surviving character after it).
+                if original < doc_start:
+                    return local_start
+                return local_start + (original - doc_start)
+        # Past the last surviving character → clamp to content end (exclusive bound).
+        return self._length

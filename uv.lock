@@ -13,6 +13,7 @@ resolution-markers = [
 members = [
     "latence-core",
     "latence-demo",
+    "latence-disambig-embedding",
     "latence-embedder-endpoint",
     "latence-embedder-st",
     "latence-framework-dev",
@@ -1574,6 +1575,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "latence-disambig-embedding"
+version = "0.1.0"
+source = { editable = "packages/latence-disambig-embedding" }
+dependencies = [
+    { name = "latence-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "latence-core", editable = "packages/latence-core" }]
+
+[[package]]
 name = "latence-embedder-endpoint"
 version = "0.1.0"
 source = { editable = "packages/latence-embedder-endpoint" }
@@ -1610,6 +1622,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "latence-core" },
     { name = "latence-demo" },
+    { name = "latence-disambig-embedding" },
     { name = "latence-parser-document" },
     { name = "latence-parser-pdfplumber" },
     { name = "latence-parser-plaintext" },
@@ -1627,6 +1640,7 @@ dev = [
 requires-dist = [
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "latence-demo", editable = "packages/latence-demo" },
+    { name = "latence-disambig-embedding", editable = "packages/latence-disambig-embedding" },
     { name = "latence-parser-document", editable = "packages/latence-parser-document" },
     { name = "latence-parser-pdfplumber", editable = "packages/latence-parser-pdfplumber" },
     { name = "latence-parser-plaintext", editable = "packages/latence-parser-plaintext" },

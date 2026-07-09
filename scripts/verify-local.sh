@@ -60,7 +60,7 @@ uv run latence stack validate stacks/gpu-ocr.yaml
 ok "stack validate"
 
 step "bake-off matrices (Goal B — the shipped CPU matrices)"
-for m in parse chunk embed redaction; do
+for m in parse chunk embed redaction disambiguation; do
   [ -f "matrix/$m.yaml" ] && uv run latence bake-off "matrix/$m.yaml" --out-dir "$(mktemp -d)" >/dev/null
 done
 ok "bake-off"

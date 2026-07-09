@@ -56,7 +56,7 @@ from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import EntityMention, RelationMention
+    from latence_core.contracts import ChunkRecord, EntityMention, RelationMention
     from latence_core.disambiguation import MergeAudit
 
 # The engine Strategy enum values line up 1:1 with the contract MergeStrategy values, so a
@@ -168,27 +168,23 @@ class CascadeDisambiguator:
         return KnowledgeBase(entries, threshold=float(config.get("kb_threshold", 0.5)))
 
     def disambiguate(
-        self, mentions: Iterable[EntityMention], relations: Iterable[RelationMention]
+        self,
+        mentions: Iterable[EntityMention],
+        relations: Iterable[RelationMention],
+        chunks: Iterable[ChunkRecord] = (),
     ) -> Iterator[DisambiguationRecord]:
         mention_list = list(mentions)
         # Index each mention by record_id so a canonical entity can inherit the page-accurate
         # Provenance of its chosen representative mention (S8 page-map integration).
         by_id = {m.record_id: m for m in mention_list}
 
-        resolver = EntityResolver(**self._resolver_kwargs)
-        resolver.add_all(
-            [
-                MentionInput(
-                    mention_id=m.record_id,
-                    document_id=m.provenance.document_id,
-                    text=m.text,
-                    label=m.label,
-                    confidence=m.confidence,
-                )
-                for m in mention_list
-            ]
-        )
-        clusters, _audits = resolver.resolve()
+        # Resolve the mention set into canonical clusters. The blocking/merge STRATEGY is the one
+        # overridable seam (W1 rework, #94): the cascade uses the surface 5-strategy resolver and
+        # ignores ``chunks``; a context-embedding subclass reads the chunks to embed
+        # surface+context. Everything after — record building, KB linking, relation
+        # normalisation, determinism — is shared, so both Providers emit the identical
+        # DisambiguationRecord contract and a stack can swap one for the other.
+        clusters = self._resolve_clusters(mention_list, chunks)
 
         # Build the mention_id -> canonical entity record_id map (for relation remapping),
         # and emit the ENTITY-scope records first (canonical-text order, from the engine).
@@ -215,6 +211,39 @@ class CascadeDisambiguator:
             )
             if relation_record is not None:
                 yield relation_record
+
+    # -- cluster resolution (the overridable blocking/merge seam, W1 rework #94) --------
+
+    def _resolve_clusters(
+        self,
+        mention_list: list[EntityMention],
+        chunks: Iterable[ChunkRecord],
+    ) -> list[ResolvedCluster]:
+        """Fold the run's mentions into canonical clusters via the surface 5-strategy cascade.
+
+        The cascade resolves by surface (exact/alias/acronym/substring/lexical-embedding), so it
+        does NOT use the run's ``chunks`` — the third carrier is accepted to satisfy the widened
+        :class:`~latence_core.capability.Disambiguator` Protocol (W1 rework, #94) and deliberately
+        ignored, leaving the cascade's algorithmic path (and its tests) byte-identical. Only a
+        context-embedding subclass overrides this to read the chunks. The iterable is not consumed
+        here, so the Runner may hand it lazily.
+        """
+        del chunks
+        resolver = EntityResolver(**self._resolver_kwargs)
+        resolver.add_all(
+            [
+                MentionInput(
+                    mention_id=m.record_id,
+                    document_id=m.provenance.document_id,
+                    text=m.text,
+                    label=m.label,
+                    confidence=m.confidence,
+                )
+                for m in mention_list
+            ]
+        )
+        clusters, _audits = resolver.resolve()
+        return clusters
 
     # -- entity records -----------------------------------------------------
 

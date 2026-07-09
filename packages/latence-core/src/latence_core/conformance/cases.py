@@ -813,14 +813,17 @@ def _disambiguation_case() -> ConformanceCase:
 
     def invoke(provider: Any) -> Sequence[Record]:
         c = fixtures.canonical_corpus()
-        return list(provider.disambiguate(c.mentions, c.relations))
+        # Thread the run's chunks (W1 rework, #94): the algorithmic cascade ignores them, and a
+        # context-embedding Disambiguator reads them — so the case exercises both drop-in Providers
+        # through the widened signature.
+        return list(provider.disambiguate(c.mentions, c.relations, c.chunks))
 
     def valid_output(records: Sequence[object]) -> bool:
         return _records_contract_valid(records, empty_ok=False)
 
     def adversarial(provider: Any) -> AdversarialOutcome:
-        # No mentions to resolve → no records, never a crash (the defined empty).
-        return _capture_raise(lambda: list(provider.disambiguate([], [])))
+        # No mentions to resolve → no records, never a crash (the defined empty). Empty chunks too.
+        return _capture_raise(lambda: list(provider.disambiguate([], [], [])))
 
     return ConformanceCase(
         capability=Capability.DISAMBIGUATION,

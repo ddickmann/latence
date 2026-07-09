@@ -1217,7 +1217,22 @@ class LocalRunner:
             disambig_relations = self._stream_inputs_of_type(
                 stage, outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
             )
-            return list(provider.disambiguate(disambig_mentions, disambig_relations))
+            # W1 rework (#94): thread the run's ChunkRecords so a context-embedding Disambiguator
+            # can locate each mention's parent chunk and embed surface+surrounding-context (the pod
+            # proved bare-surface ER over-merges distinct short surfaces). Chunks are gathered from
+            # the WHOLE pipeline — not just this Stage's ``depends_on`` — because the Chunk Stage
+            # is a mention/relation ancestor, not a direct Disambiguation parent, yet the Runner
+            # already holds every Stage's output (live dict or checkpoint). Same #69 streaming
+            # discipline as the mention/relation gather: chunks are yielded lazily from each Stage's
+            # bounded output/checkpoint, so the Runner never materialises them; the cascade ignores
+            # them (byte-identical), and a run with no Chunk Stage yields an empty stream. The
+            # algorithmic-path Disambiguators accept ``chunks=()`` by default, so this is additive.
+            disambig_chunks = self._stream_all_records_of_type(
+                outputs, ChunkRecord, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            return list(
+                provider.disambiguate(disambig_mentions, disambig_relations, disambig_chunks)
+            )
 
         if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
             if not isinstance(provider, GraphAssembler):
@@ -1419,6 +1434,35 @@ class LocalRunner:
         for parent in stage.depends_on:
             for record in self._stage_records(
                 parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            ):
+                if isinstance(record, expected):
+                    yield record
+
+    def _stream_all_records_of_type(
+        self,
+        outputs: dict[str, list[StageOutput]],
+        expected: type[_T],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> Iterator[_T]:
+        """Lazily yield every Stage's output narrowed to one carrier — corpus-wide (W1 rework #94).
+
+        A corpus-level Stage sometimes needs a carrier that is NOT one of its direct
+        ``depends_on`` parents. Disambiguation depends on the Entity-Extraction (mentions) and
+        optional Relation-Extraction (relations) parents, but a context-embedding Disambiguator
+        also needs the run's :class:`~latence_core.contracts.ChunkRecord`s — produced by the
+        Chunk Stage, a *mention ancestor*, not a Disambiguation parent. This streams every
+        Stage's output in topological order (the same order :meth:`_gather_inputs` reads parents,
+        so it is deterministic) from the live dict or its checkpoint (:meth:`_stage_records`), one
+        record at a time, yielding only the ``expected`` carrier — so the accumulator folds the
+        corpus-wide stream in without the executor materialising it (#69 memory bound preserved).
+        A run with no producing Stage yields nothing (the empty-chunks fallback).
+        """
+        for stage in topological_order(list(pipeline.stages)):
+            for record in self._stage_records(
+                stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
             ):
                 if isinstance(record, expected):
                     yield record

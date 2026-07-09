@@ -85,9 +85,14 @@ stages:
 
   - name: disambiguate
     capability: disambiguation
-    provider: disambiguation.cascade
+    provider: disambiguation.embedding   # learned surface+context ER (W1 rework, #94)
     depends_on: [entities, relations]
     config:
+      threshold: 0.90        # context-safe default (pod margins); NOT the fragile bare-surface 0.83
+      context_window: 160
+      embedder:              # served/learned embeddings; skipped-with-flag where no CUDA (device seam)
+        provider: embedding.sentence_transformers
+        config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
       kb:
         - {kb_id: Q1, name: Acme, entity_type: ORG}
         - {kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM]}

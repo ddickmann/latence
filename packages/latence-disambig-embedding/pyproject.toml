@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-disambig-embedding"
+version = "0.1.0"
+description = "Learned (embedding-based) Disambiguation Provider — surface+context entity resolution, a drop-in for disambiguation.cascade for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "entity-resolution", "disambiguation", "nlp", "data-pipeline", "model-agnostic", "embeddings"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# The learned Disambiguator embeds mention surface+context and merges by cosine similarity. It
+# depends ONLY on latence-core: it resolves its Embedder Provider from the plugin registry
+# (default the in-core, dependency-free, deterministic 'embedding.hashing'), so it is CPU-viable
+# and OFFLINE by default — no heavy dep in this package (ADR-0016). A Pipeline opts into a learned
+# embedder (e.g. 'embedding.sentence_transformers', which ships its own torch/ST stack) with one
+# config line (ADR-0007), never a dep of this package. So, like latence-parser-pdfplumber and
+# latence-demo, this installs into the default CPU-first dev env and its tests run offline.
+dependencies = [
+    "latence-core",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group (ADR-0004). Installing this
+# package makes 'disambiguation.embedding' available to any Pipeline with no core change,
+# alongside the in-core 'disambiguation.cascade' reference and 'disambiguation.exact_surface'
+# — a true drop-in swap by one config line (ADR-0007), same DisambiguationRecord contract.
+[project.entry-points."latence.providers"]
+"disambiguation.embedding" = "latence_disambig_embedding.provider:EmbeddingDisambiguator"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_disambig_embedding"]

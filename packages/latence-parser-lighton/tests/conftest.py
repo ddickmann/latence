@@ -23,6 +23,11 @@ scaffolding and break the offset round-trip. :class:`_FakeProcessor.decode` deco
 slice is exercised for real. If the Provider ever drops the slice, the fake makes it FAIL — never
 pass green.
 
+The pixel-bomb DoS cap is exercised offline too: :class:`_FakePage` reports a per-page point size so
+the Provider's render-scale clamp (``_clamp_scale``) genuinely runs, and the fake ``PIL.Image``
+honors ``MAX_IMAGE_PIXELS`` — an over-budget fixture image raises a ``DecompressionBombError`` on
+``load()`` exactly like real Pillow, so the graceful-degradation path is real, not stubbed green.
+
 These fakes are injected into ``sys.modules`` (``transformers``, ``pypdfium2``, ``PIL``) so the
 Provider's deferred imports pick them up in-process — the established gliner/st/endpoint offline
 discipline. The real deps are NOT installed in the CPU-first env (ADR-0016); the real OCR is
@@ -189,12 +194,23 @@ class _FakeModel:
 
 
 class _FakePage:
-    """A fake pypdfium2 page: ``render(scale=...).to_pil()`` yields the page's marker image."""
+    """A fake pypdfium2 page: ``get_size()`` reports its point size; ``render(scale=...).to_pil()``.
 
-    def __init__(self, marker: str) -> None:
+    The point size is what the Provider's render-scale clamp reads (``_clamp_scale``) — an oversized
+    page (huge point size) forces the clamp to shrink the scale so the bitmap stays under budget.
+    """
+
+    def __init__(self, marker: str, width_pt: float = 612.0, height_pt: float = 792.0) -> None:
         self._marker = marker
+        self._width_pt = width_pt
+        self._height_pt = height_pt
+        self.rendered_scale: float | None = None
 
-    def render(self, **_kwargs: Any) -> _FakePage:
+    def get_size(self) -> tuple[float, float]:
+        return (self._width_pt, self._height_pt)
+
+    def render(self, scale: float = 1.0, **_kwargs: Any) -> _FakePage:
+        self.rendered_scale = scale
         return self
 
     def to_pil(self) -> str:
@@ -206,19 +222,30 @@ class _FakePdfDocument:
 
     The fixture PDF bytes are ``%PDF-1.4`` + newline-joined page markdowns after a marker line, so
     the fake rasteriser yields one :class:`_FakePage` per intended page carrying
-    ``FAKE_PAGE::<md>`` — the deterministic offline stand-in for a rendered bitmap.
+    ``FAKE_PAGE::<md>`` — the deterministic offline stand-in for a rendered bitmap. An optional
+    ``SIZE:<w>x<h>`` header line sets an oversized point size for every page — the pixel-bomb
+    fixture, so the Provider's render-scale clamp is genuinely exercised offline.
     """
 
     def __init__(self, buffer: Any) -> None:
         data = buffer.read() if hasattr(buffer, "read") else buffer
         text = bytes(data).decode("utf-8", errors="replace")
+        # Optional oversized point-size header (the pixel-bomb fixture): "SIZE:WxH\n".
+        self._width_pt = 612.0
+        self._height_pt = 792.0
+        if text.startswith("SIZE:"):
+            header, _, text = text.partition("\n")
+            dims = header[len("SIZE:") :]
+            w_str, _, h_str = dims.partition("x")
+            self._width_pt = float(w_str)
+            self._height_pt = float(h_str)
         # Pages are the lines after the "PAGES:" marker (see make_lighton_pdf below).
         _, _, body = text.partition("PAGES:\n")
         self._pages = body.split("\n---PAGE---\n") if body else [""]
 
     def __iter__(self) -> Any:
         for md in self._pages:
-            yield _FakePage(FAKE_PAGE_MARKER + md)
+            yield _FakePage(FAKE_PAGE_MARKER + md, width_pt=self._width_pt, height_pt=self._height_pt)
 
     def close(self) -> None:
         pass
@@ -237,14 +264,28 @@ def _install_pdfium(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "pypdfium2", module)
 
 
-class _FakePilImage:
-    """A minimal fake PIL.Image.Image: open().load()/convert() round-trip the marker string."""
+class _FakeDecompressionBombError(Exception):
+    """Stand-in for ``PIL.Image.DecompressionBombError`` — raised when a fixture image is over budget."""
 
-    def __init__(self, marker: str) -> None:
+
+class _FakePilImage:
+    """A minimal fake PIL.Image.Image: open().load()/convert() round-trip the marker string.
+
+    ``load()`` honors the module-level ``MAX_IMAGE_PIXELS`` cap: if the fixture image declares a pixel
+    count above the cap, it raises :class:`_FakeDecompressionBombError` (like real Pillow) rather than
+    "allocating" — so the Provider's decompression-bomb guard is genuinely exercised offline.
+    """
+
+    def __init__(self, marker: str, pixels: int, image_module: Any) -> None:
         self._marker = marker
+        self._pixels = pixels
+        self._image_module = image_module
 
     def load(self) -> None:
-        pass
+        cap = self._image_module.MAX_IMAGE_PIXELS
+        if cap is not None and self._pixels > cap:
+            msg = f"Image size ({self._pixels} pixels) exceeds limit of {cap} pixels"
+            raise _FakeDecompressionBombError(msg)
 
     def convert(self, _mode: str) -> str:
         return self._marker
@@ -253,13 +294,22 @@ class _FakePilImage:
 def _install_pil(monkeypatch: pytest.MonkeyPatch) -> None:
     pil = types.ModuleType("PIL")
     image_mod = types.ModuleType("PIL.Image")
+    image_mod.MAX_IMAGE_PIXELS = 89478485  # type: ignore[attr-defined]  # Pillow's real default
+    image_mod.DecompressionBombError = _FakeDecompressionBombError  # type: ignore[attr-defined]
 
     def _open(buffer: Any) -> _FakePilImage:
         data = buffer.read() if hasattr(buffer, "read") else buffer
         text = bytes(data).decode("utf-8", errors="replace")
-        # A single-image fixture carries "IMG:<md>" after its magic bytes; strip to the markdown.
+        # A single-image fixture carries an optional "PIXELS:<n>|" segment (the bomb fixture) before
+        # "IMG:<md>", after the PNG magic bytes. Default to a small in-budget pixel count. Use
+        # ``partition`` (not ``startswith``) so the leading magic bytes do not defeat the parse.
+        pixels = 1024
+        if "PIXELS:" in text:
+            _, _, after = text.partition("PIXELS:")
+            count_str, _, text = after.partition("|")
+            pixels = int(count_str)
         _, _, md = text.partition("IMG:")
-        return _FakePilImage(FAKE_PAGE_MARKER + md)
+        return _FakePilImage(FAKE_PAGE_MARKER + md, pixels=pixels, image_module=image_mod)
 
     image_mod.open = _open  # type: ignore[attr-defined]
     pil.Image = image_mod  # type: ignore[attr-defined]
@@ -287,20 +337,34 @@ def make_lighton_pdf() -> Any:
 
     Valid ``%PDF-`` magic (passes the offset-0 spoof guard) + a ``PAGES:`` marker + the intended
     per-page markdown joined by ``---PAGE---`` — the deterministic offline stand-in for a real PDF.
+    An optional ``oversized`` flag prepends a huge ``SIZE:WxH`` header so every page reports an
+    over-budget point size — the pixel-bomb fixture that forces the Provider's render-scale clamp to
+    shrink the scale.
     """
 
-    def _build(pages: list[str]) -> bytes:
+    def _build(pages: list[str], *, oversized: bool = False) -> bytes:
         body = "\n---PAGE---\n".join(pages)
-        return b"%PDF-1.4\nPAGES:\n" + body.encode("utf-8")
+        prefix = "%PDF-1.4\n"
+        if oversized:
+            # 100 000 x 100 000 pt at 200 DPI (scale ~2.78) would be ~7.7e10 px — far over budget.
+            prefix += "SIZE:100000x100000\n"
+        return (prefix + "PAGES:\n" + body).encode("utf-8")
 
     return _build
 
 
 @pytest.fixture()
 def make_lighton_image() -> Any:
-    """A builder emitting fixture PNG bytes (valid PNG magic) carrying one page's markdown."""
+    """A builder emitting fixture PNG bytes (valid PNG magic) carrying one page's markdown.
 
-    def _build(markdown: str) -> bytes:
-        return b"\x89PNG\r\n\x1a\nIMG:" + markdown.encode("utf-8")
+    An optional ``pixels`` count declares the image's pixel size; when it exceeds the Provider's
+    tightened ``MAX_IMAGE_PIXELS`` budget the fake Pillow raises a decompression-bomb error on load —
+    the image pixel-bomb fixture.
+    """
+
+    def _build(markdown: str, *, pixels: int | None = None) -> bytes:
+        head = b"\x89PNG\r\n\x1a\n"
+        prefix = f"PIXELS:{pixels}|".encode() if pixels is not None else b""
+        return head + prefix + b"IMG:" + markdown.encode("utf-8")
 
     return _build

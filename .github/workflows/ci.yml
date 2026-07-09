@@ -156,6 +156,7 @@ jobs:
           uv run latence bake-off matrix/chunk.yaml --out-dir "$(mktemp -d)"
           uv run latence bake-off matrix/embed.yaml --out-dir "$(mktemp -d)"
           uv run latence bake-off matrix/redaction.yaml --out-dir "$(mktemp -d)"
+          uv run latence bake-off matrix/disambiguation.yaml --out-dir "$(mktemp -d)"
 
       - name: Build wheels
         run: |
@@ -176,6 +177,7 @@ jobs:
           uv build --package latence-parser-glm
           uv build --package latence-runner-airflow
           uv build --package latence-demo
+          uv build --package latence-disambig-embedding
 
   storage-s3:
     name: Pipeline e2e on MinIO (s3://)

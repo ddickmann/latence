@@ -16,6 +16,7 @@ latence-parser-lighton = { workspace = true }
 latence-ner-endpoint = { workspace = true }
 latence-embedder-endpoint = { workspace = true }
 latence-embedder-st = { workspace = true }
+latence-disambig-embedding = { workspace = true }
 latence-runner-airflow = { workspace = true }
 latence-demo = { workspace = true }
 
@@ -51,6 +52,12 @@ dependencies = [
     # dev env and its tests run offline/deterministically (unlike the heavy/endpoint
     # Provider packages above).
     "latence-demo",
+    # The learned (embedding-based) Disambiguator (W1 rework, #94) — CPU-viable and OFFLINE by
+    # default: it resolves its Embedder from the registry defaulting to the in-core, deterministic,
+    # dependency-free 'embedding.hashing', so it pulls NO heavy dep (only latence-core). Like
+    # latence-parser-pdfplumber and latence-demo it installs into the default dev env so its tests +
+    # the conformance suite run offline/deterministically (a learned embedder is a one-line opt-in).
+    "latence-disambig-embedding",
 ]
 
 [dependency-groups]

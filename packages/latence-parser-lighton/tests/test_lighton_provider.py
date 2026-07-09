@@ -3,8 +3,9 @@
 These prove the slice EXERCISES ``AdapterBase`` (H-A1), the GPU device gate, and the OCR seam:
 the shape-matching offline fake (the anti-false-green rule), the markdown-per-page → PageMap
 (exact offsets round-trip), the Provenance carry, the batching path over documents, the declared
-GPU ``ProviderProfile`` (evidence-bearing Apache-2.0), and the graceful PARSE_ERROR path with NO
-image/OCR-text/PII leak in the error.
+GPU ``ProviderProfile`` (evidence-bearing Apache-2.0), the graceful PARSE_ERROR path with NO
+image/OCR-text/PII leak in the error, and — the Hardening-bar addition — the **pixel-bomb DoS cap**
+(render-scale clamp + decompression-bomb image → graceful PARSE_ERROR, never a crash / huge alloc).
 
 Deterministic + seeded (``PYTHONHASHSEED`` pinned by the repo-root conftest). The ``fake_lighton``
 fixture pins ``LATENCE_CUDA=1`` so the ``compute="gpu"`` seam routes to cuda and the real parse
@@ -27,7 +28,11 @@ from latence_core.errors import LatenceError, ProviderError
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.profile import UNVERIFIED_LICENSE
-from latence_parser_lighton.provider import LightOnOcrParser, size_after_parse
+from latence_parser_lighton.provider import (
+    _MAX_RENDER_PIXELS,
+    LightOnOcrParser,
+    size_after_parse,
+)
 
 
 def _provenance(file_name: str, file_type: str, size: int = 100) -> Provenance:
@@ -116,8 +121,15 @@ def test_multipage_pdf_ocrs_to_correct_pages_and_roundtrip_offsets(
     assert record.error is None
     assert record.page_map is not None
     assert len(record.page_map.pages) == 2
-    assert "quarterly report" in record.content
-    assert "Page two" in record.content
+    # EXACT content — the load-bearing regression guard for the decode-slice contract (the issue's #1
+    # non-negotiable). If the Provider ever drops ``output_ids[0, prompt_len:]``, the fake's
+    # ``<|prompt-scaffold|>`` prompt tokens leak in front of EVERY page and this exact-equality fails.
+    # (Substring ``in`` assertions cannot catch a leaked prefix — they stay green on the corrupted
+    # output — so this test exercises the PROVIDER path, not just the fake's faithfulness.)
+    assert record.content == (
+        "# The quarterly report\n\nRevenue up.\n\n## Page two\n\nOutlook follows."
+    )
+    assert "prompt-scaffold" not in record.content  # an un-sliced provider FAILS here
     assert record.media_type == "text/markdown"
 
     # Provenance carried (source lineage intact; char/page span filled to what the record occupies).
@@ -255,6 +267,64 @@ def test_batch_size_invariant_output_identical(
     one = [r.model_dump_json() for r in LightOnOcrParser({"batch_size": 1}).parse(inputs)]
     many = [r.model_dump_json() for r in LightOnOcrParser({"batch_size": 32}).parse(inputs)]
     assert one == many
+
+
+# --- the pixel-bomb DoS cap (the Hardening-bar item; untrusted input is rasterised) ----------
+
+
+def test_clamp_scale_reduces_oversized_page_under_budget() -> None:
+    """A giant page's render scale is clamped so the bitmap area stays under the megapixel budget."""
+    provider = LightOnOcrParser({})
+    # A 100 000 x 100 000-pt page at scale ~2.78 (200 DPI) would be ~7.7e10 px — far over budget.
+    clamped = provider._clamp_scale(100_000.0, 100_000.0, 200.0 / 72.0)
+    area_px = 100_000.0 * clamped * 100_000.0 * clamped
+    assert area_px <= _MAX_RENDER_PIXELS + 1  # clamped to the budget (float slack)
+    assert clamped < 200.0 / 72.0  # genuinely reduced
+
+
+def test_clamp_scale_leaves_normal_page_untouched() -> None:
+    """A normal (in-budget) page keeps its requested scale — the clamp only shrinks oversized pages."""
+    provider = LightOnOcrParser({})
+    requested = 200.0 / 72.0
+    # A US-Letter page (612 x 792 pt) at 200 DPI is ~1.5 MP — well under budget, so unchanged.
+    assert provider._clamp_scale(612.0, 792.0, requested) == requested
+
+
+def test_oversized_pdf_page_clamped_not_crashed(
+    fake_lighton: None, make_lighton_pdf: Callable[..., bytes]
+) -> None:
+    """An oversized PDF page rasterises with a CLAMPED scale (bitmap under budget), still PARSED."""
+    pdf = make_lighton_pdf(["# still legible"], oversized=True)
+    (record,) = list(LightOnOcrParser({}).parse([_pdf_input(pdf)]))
+    # The page still OCRs (the clamp shrinks the raster, it does not drop the page).
+    assert record.disposition is Disposition.PARSED
+    assert "still legible" in record.content
+
+
+def test_decompression_bomb_image_degrades_to_parse_error(
+    fake_lighton: None, make_lighton_image: Callable[..., bytes]
+) -> None:
+    """A decompression-bomb image (pixel count over budget) → graceful PARSE_ERROR, no huge alloc."""
+    bomb = make_lighton_image("evil", pixels=_MAX_RENDER_PIXELS + 1)
+    (record,) = list(LightOnOcrParser({}).parse([_image_input(bomb, file_name="bomb.png")]))
+    assert record.disposition is Disposition.PARSE_ERROR
+    assert record.error is not None
+    # The typed error names the op + native type, never the (untrusted) image content.
+    assert "decode_image" in record.error
+    assert "evil" not in record.error
+
+
+def test_in_budget_image_loads_and_restores_max_image_pixels(
+    fake_lighton: None, make_lighton_image: Callable[..., bytes]
+) -> None:
+    """An in-budget image OCRs fine, and the global Image.MAX_IMAGE_PIXELS is restored afterwards."""
+    from PIL import Image  # the injected fake
+
+    original = Image.MAX_IMAGE_PIXELS
+    img = make_lighton_image("legible page\n", pixels=1000)
+    (record,) = list(LightOnOcrParser({}).parse([_image_input(img)]))
+    assert record.disposition is Disposition.PARSED
+    assert original == Image.MAX_IMAGE_PIXELS  # global Pillow state restored (no side effect)
 
 
 # --- graceful failure: native exception → typed → PARSE_ERROR (no PII) -------

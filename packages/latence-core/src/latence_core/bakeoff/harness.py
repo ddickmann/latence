@@ -239,6 +239,30 @@ def _quality_of(report: QualityReport, spec: MatrixSpec, stage_name: str) -> Qua
                 "offset_preserving_fraction": round(coverage, 6),
             },
         )
+    if spec.stage == CapabilityKind.DISAMBIGUATION and report.disambiguation is not None:
+        # The enterprise ER lens (W1 rework, #94): reuse the DisambiguationQuality the run ALREADY
+        # computed (no reinvented scoring). The primary metric is the cross-surface merge rate —
+        # merges_applied / mentions_in — the signal the whole slice exists to move: a bare-surface
+        # embedder over-merges (a HIGH but WRONG rate collapsing distinct entities), a
+        # surface+context embedder merges genuine duplicates while merges_below_policy captures the
+        # audited non-merges. A real precision/recall lands here when a Disambiguation gold-set is
+        # declared; until then these honest counts are the comparison, never a fabricated P/R.
+        dq = report.disambiguation
+        merge_rate = (dq.merges_applied / dq.mentions_in) if dq.mentions_in else 0.0
+        return QualityMetric(
+            kind="metric",
+            primary_name="merge_rate",
+            primary=round(merge_rate, 6),
+            metrics={
+                "mentions_in": float(dq.mentions_in),
+                "entities_out": float(dq.entities_out),
+                "entities_merged": float(dq.entities_merged),
+                "merges_applied": float(dq.merges_applied),
+                "merges_below_policy": float(dq.merges_below_policy),
+                "entities_linked": float(dq.entities_linked),
+                "avg_entity_confidence": round(dq.avg_entity_confidence, 6),
+            },
+        )
     return None
 
 

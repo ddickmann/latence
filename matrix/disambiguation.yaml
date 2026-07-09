@@ -1,0 +1,40 @@
+# matrix/disambiguation.yaml — the Disambiguation bake-off (ADR-0036 §4, P3-F5; W1 rework, #94).
+#
+# Holds every OTHER Stage at stacks/default.yaml and swaps ONLY the Disambiguation Stage (the
+# `disambiguate` node, inferred from the unique disambiguation Stage in the base stack):
+#
+#   disambiguation.cascade   — the in-core ported 5-strategy EntityResolver (exact/alias/acronym/
+#                              substring + lexical-embedding + Union-Find), CPU, pure-Python,
+#                              deterministic — RUNS in CI (a real, measured row)
+#   disambiguation.embedding — the learned surface+CONTEXT embedding resolver (W1 rework). Offline by
+#                              default (resolves the in-core deterministic `embedding.hashing`), so
+#                              it ALSO RUNS in CI as a real, measured row — a genuinely DIFFERENT
+#                              blocking engine (cosine over surface+context vs the lexical cascade),
+#                              not two flavours of the same thing.
+#
+# The learned candidate is the ENTERPRISE-ER point of this slice: the pod proved a bare-surface
+# embedder over-merges distinct entities (IBM ~ Apple 0.870, no safe threshold); embedding
+# surface+context separates them (IBM ~ Apple 0.808, genuine duplicates ≈0.96–0.99) at the
+# context-safe default threshold 0.90. To get the REAL pod numbers, swap the `embedder` block to
+# `embedding.sentence_transformers` (device: cuda) on a GPU host — see
+# scripts/validate-disambig-on-gpu.md; on a CPU-only host the hashing embedder is a real (if weaker)
+# measured row, never a fabricated one.
+#
+# Quality lens: Disambiguation has no bundled gold set on stacks/default.yaml, so the quality column
+# is the stage-metric ER lens off the Quality Report's DisambiguationQuality that the run ALREADY
+# computes (no reinvented scoring) — the cross-surface merge_rate (merges_applied / mentions_in) plus
+# entities_out / entities_merged / merges_below_policy / entities_linked. A real precision/recall
+# lands here automatically when a Disambiguation gold-set is declared on the base stack; until then
+# these honest counts are the comparison, never a fabricated P/R.
+stage: disambiguation
+candidates:
+  - provider: disambiguation.cascade
+  - provider: disambiguation.embedding
+    config:
+      threshold: 0.90        # the context-safe default (pod margins); NOT the fragile bare-surface 0.83
+      context_window: 160    # a sentence-ish window of the mention's chunk content
+      # Offline default: resolves the in-core deterministic `embedding.hashing`. For the real pod
+      # separation, uncomment the learned embedder (needs latence-embedder-st + a GPU):
+      # embedder:
+      #   provider: embedding.sentence_transformers
+      #   config: { model: intfloat/multilingual-e5-small, dimension: 384, device: cuda }

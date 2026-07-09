@@ -305,12 +305,27 @@ class Disambiguator(Protocol):
     records in canonical-text order, then RELATION records), so a seeded run is
     byte-identical (Baseline bar). The CPU reference path must work with no embedder/KB; a
     FAISS/GPU blocking Provider is a pluggable option, not required (S8 AC).
+
+    ``chunks`` is a **third, additive, defaulted** carrier: the run's
+    :class:`~latence_core.contracts.ChunkRecord`s, so a Provider that resolves mentions by
+    their *surrounding context* (the learned ``disambiguation.embedding`` Provider — the pod
+    proved a bare-surface embedding over-merges distinct short surfaces like ``IBM`` and
+    ``Apple``, but surface+context separates them cleanly) can locate a mention's parent chunk
+    (by ``EntityMention.chunk_record_id``) and read a bounded window of its ``content`` around
+    the mention's offset. It defaults to an empty tuple so the signature is backward-compatible:
+    the algorithmic cascade ignores it (its behaviour is unchanged), a mentions-only run passes
+    no chunks, and any existing Provider that only accepts ``(mentions, relations)`` still
+    satisfies the Protocol — the Runner threads chunks only when the parameter exists (W1
+    rework, #94).
     """
 
     def disambiguate(
-        self, mentions: Iterable[EntityMention], relations: Iterable[RelationMention]
+        self,
+        mentions: Iterable[EntityMention],
+        relations: Iterable[RelationMention],
+        chunks: Iterable[ChunkRecord] = (),
     ) -> Iterator[DisambiguationRecord]:
-        """Consume the run's mentions (+ optional relations); yield entities + relations."""
+        """Consume the run's mentions (+ optional relations + optional chunks); yield records."""
         ...
 
 

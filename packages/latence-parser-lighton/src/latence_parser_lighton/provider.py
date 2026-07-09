@@ -44,6 +44,24 @@ matches the model card's ``generate`` → slice → ``decode`` contract, prompt 
 single thing whose divergence made PaddleOCR-VL a false green was a fabricated output shape; here
 the fake mirrors the real sequence shape *including the prompt tokens the Provider must slice*.
 
+**Pixel-bomb DoS cap (the Hardening-bar item — this is the first framework Parser that rasterises
+untrusted input).** The sibling CPU parsers only extract an existing text layer; this one **reads
+pixels**, so a maliciously oversized page or a decompression-bomb image could drive a multi-GB
+allocation — and the intake ``max_bytes`` cap does **not** bound it (a tiny PDF can declare huge
+page dimensions; an image's declared pixel count is independent of its byte size). Before any
+``.to_pil()`` / ``.load()`` the Provider bounds the raster:
+
+* it clamps the PDF render scale by a **max-megapixel budget** (:data:`_MAX_RENDER_MEGAPIXELS`):
+  it probes each page's point size via ``pypdfium2`` (:meth:`_clamp_scale`) and reduces the
+  DPI-derived scale so the rasterised bitmap stays under the budget — a 10 000×10 000-pt page can
+  never rasterise to a gigapixel bitmap;
+* it sets a conservative ``Image.MAX_IMAGE_PIXELS`` (restored afterwards, no global side effect) so
+  Pillow **raises** ``DecompressionBombError`` on an over-budget image rather than allocating it —
+  that native fault maps through :meth:`guard` to a typed ProviderError and degrades to a graceful
+  ``PARSE_ERROR`` record, never a crash or a multi-GB allocation.
+
+A regression fixture asserts an oversized page/image degrades to a PARSE_ERROR (never a huge alloc).
+
 What it EXERCISES on ``AdapterBase`` (H-A1 — use the seam, do not bypass):
 
 * **device gating** (:meth:`AdapterBase.device`): ``compute="gpu"`` — on a CPU-only host the device
@@ -95,6 +113,16 @@ _DEFAULT_MODEL = "lightonai/LightOnOCR-1B-1025"
 # The model card's recommended decode ceiling per page. Bounded so a pathological page cannot
 # generate unboundedly; overridable via config.
 _DEFAULT_MAX_NEW_TOKENS = 4096
+
+# --- Pixel-bomb DoS cap (the Hardening-bar item; this Parser rasterises untrusted input) ------
+# The maximum megapixels a rasterised page / decoded image may occupy. A PDF page's render scale is
+# clamped so its bitmap stays under this budget (a giant page cannot force a gigapixel bitmap), and
+# Pillow's ``Image.MAX_IMAGE_PIXELS`` is set to this budget so a decompression-bomb image RAISES
+# rather than allocating multi-GB. ~25 MP is generous for a legible document scan (≈ an A4 page at
+# 600 DPI) while bounding a single page's raster to well under a gigabyte. The intake max_bytes cap
+# does NOT bound this — page dimensions / declared pixel counts are independent of file byte size.
+_MAX_RENDER_MEGAPIXELS = 25.0
+_MAX_RENDER_PIXELS = int(_MAX_RENDER_MEGAPIXELS * 1_000_000)
 
 # File types this Provider rasterises to page images then OCRs. A PDF is rendered page-by-page
 # (pypdfium2) so the page map is real (one OCR pass per page); a bare image is a single page.
@@ -301,15 +329,17 @@ class LightOnOcrParser(AdapterBase):
             error=reason,
         )
 
-    # -- rasterise raw bytes → page images (spoof-guarded) ------------------
+    # -- rasterise raw bytes → page images (spoof-guarded, pixel-capped) ----
 
     def _rasterise(self, raw: ParserInput, file_type: str) -> list[Any]:
-        """Turn the raw source bytes into one Pillow image per page (spoof-guarded, ordered).
+        """Turn the raw source bytes into one Pillow image per page (spoof-guarded, pixel-capped).
 
         A PDF is rendered page-by-page via ``pypdfium2`` (the per-page split is what makes the page
         map real — one OCR pass per page); a bare image is a single page. An unsupported type or a
         type-spoofed file (bytes not matching the declared type) is a graceful parse failure
-        (``_ParseFailure`` → PARSE_ERROR), not a crash — mirroring ``parser.pdfplumber`` / #62.
+        (``_ParseFailure`` → PARSE_ERROR), not a crash — mirroring ``parser.pdfplumber`` / #62. The
+        rasteriser clamps the render scale / decode by the max-megapixel budget so an oversized page
+        or a decompression-bomb image degrades gracefully rather than allocating multi-GB.
         """
         data = raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
         if file_type in _PDF_EXTENSIONS:
@@ -343,14 +373,33 @@ class LightOnOcrParser(AdapterBase):
             )
             raise _ParseFailure(msg)
 
+    def _clamp_scale(self, width_pt: float, height_pt: float, scale: float) -> float:
+        """Reduce a PDF render scale so the rasterised bitmap stays under the megapixel budget.
+
+        pypdfium2 renders a page of ``width_pt × height_pt`` points at ``scale`` px/pt, so the
+        bitmap is ``(width_pt*scale) × (height_pt*scale)`` pixels. If that exceeds
+        :data:`_MAX_RENDER_PIXELS` (the pixel-bomb budget) the scale is reduced by ``sqrt(budget /
+        pixels)`` so the area lands exactly at the budget — a 10 000×10 000-pt page can never
+        rasterise to a gigapixel bitmap (the Hardening-bar finding). A degenerate (zero-area) page
+        keeps the requested scale (nothing to clamp).
+        """
+        area_pt = max(width_pt, 0.0) * max(height_pt, 0.0)
+        if area_pt <= 0.0 or scale <= 0.0:
+            return scale
+        pixels = area_pt * scale * scale
+        if pixels <= _MAX_RENDER_PIXELS:
+            return scale
+        return float(scale * (_MAX_RENDER_PIXELS / pixels) ** 0.5)
+
     def _pdf_to_images(self, data: bytes) -> list[Any]:
-        """Rasterise every PDF page to a Pillow image via ``pypdfium2`` (ordered, one per page).
+        """Rasterise every PDF page to a Pillow image via ``pypdfium2`` (ordered, pixel-capped).
 
         Imported inside the method so a missing/malformed dependency never breaks Provider
         discovery, and so ``latence-core`` stays free of the heavy dep (ADR-0016). A missing dep is
-        a graceful parse failure. The native pypdfium2 fault a corrupt PDF raises is mapped by
-        :meth:`AdapterBase.guard` to a typed ProviderError (no content), then degraded to a
-        PARSE_ERROR record by :meth:`_parse_one`.
+        a graceful parse failure. Each page's render scale is clamped by :meth:`_clamp_scale` so an
+        oversized page cannot force a gigapixel bitmap (the pixel-bomb cap). The native pypdfium2
+        fault a corrupt PDF raises is mapped by :meth:`AdapterBase.guard` to a typed ProviderError
+        (no content), then degraded to a PARSE_ERROR record by :meth:`_parse_one`.
         """
         try:
             import io
@@ -360,12 +409,14 @@ class LightOnOcrParser(AdapterBase):
             msg = "pypdfium2 is required to rasterise PDFs for OCR."
             raise _ParseFailure(msg) from exc
 
-        scale = self._dpi / 72.0  # pypdfium2 renders at 72 DPI * scale
+        requested_scale = self._dpi / 72.0  # pypdfium2 renders at 72 DPI * scale
         images: list[Any] = []
         with self.guard("rasterise"):
             pdf = pdfium.PdfDocument(io.BytesIO(data))
             try:
                 for page in pdf:
+                    width_pt, height_pt = page.get_size()
+                    scale = self._clamp_scale(width_pt, height_pt, requested_scale)
                     bitmap = page.render(scale=scale)
                     images.append(bitmap.to_pil())
             finally:
@@ -373,7 +424,15 @@ class LightOnOcrParser(AdapterBase):
         return images or []
 
     def _image_from_bytes(self, data: bytes) -> Any:
-        """Decode a single raster image from bytes via Pillow (dep-isolated; guarded)."""
+        """Decode a single raster image from bytes via Pillow (dep-isolated; guarded; bomb-capped).
+
+        ``Image.MAX_IMAGE_PIXELS`` is tightened to the megapixel budget so a decompression-bomb
+        image (declared pixel count above the budget) makes Pillow **raise**
+        ``DecompressionBombError`` during ``.load()`` rather than allocating multi-GB — that native
+        fault maps through :meth:`guard` to a typed ProviderError and degrades to a PARSE_ERROR
+        record. The prior value is restored in a ``finally`` so we never leave global Pillow state
+        mutated for other users of the process.
+        """
         try:
             import io
 
@@ -381,10 +440,15 @@ class LightOnOcrParser(AdapterBase):
         except ImportError as exc:  # pragma: no cover - the dep is declared for this package
             msg = "pillow is required to decode images for OCR."
             raise _ParseFailure(msg) from exc
-        with self.guard("decode_image"):
-            image = Image.open(io.BytesIO(data))
-            image.load()
-            return image.convert("RGB")
+        previous_cap = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = _MAX_RENDER_PIXELS
+        try:
+            with self.guard("decode_image"):
+                image = Image.open(io.BytesIO(data))
+                image.load()  # a decompression-bomb image raises here (bounded, no huge alloc)
+                return image.convert("RGB")
+        finally:
+            Image.MAX_IMAGE_PIXELS = previous_cap
 
     # -- LightOn-OCR inference: page image(s) → markdown per page -----------
 
