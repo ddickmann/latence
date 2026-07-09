@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-linkpred-ultra"
+version = "0.1.0"
+description = "Learned graph-completion Provider (graph_completion.ultra) — inductive ULTRA zero-shot scorer + PyKEEN fallback on the GraphCompleter seam for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "link-prediction", "graph-completion", "ultra", "pykeen", "inductive", "zero-shot", "data-pipeline", "model-agnostic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+# Heavy deps stay OUT of latence-core (ADR-0016). The learned link-prediction stack (torch +
+# torch-geometric + torch-scatter for the vendored MIT ULTRA inference subset; easydict for its
+# EasyDict config; pykeen for the graceful fallback scorer) ships with THIS Provider package, not
+# the thin core. The framework code (this package + latence-core) is Apache-2.0; the vendored
+# ULTRA inference subset is MIT (MilaGraph, cited in NOTICE / THIRD-PARTY-LICENSES) and PyKEEN is
+# MIT — weights AND code verified permissive (ADR-0012, 2026-07-09). No model WEIGHTS are vendored:
+# the ULTRA checkpoint is a config path (default ``ultra_3g``), documented, downloaded only when a
+# Pipeline actually configures this Provider on a host with the extras installed.
+#
+# The heavy extras are OPTIONAL so `pip install latence-linkpred-ultra` (base) stays importable for
+# provider DISCOVERY without torch (the adapter lazy-imports torch/pykeen at first scoring call).
+# Install `latence-linkpred-ultra[ultra]` (or `[pykeen]`) to actually run a scorer; the matched
+# torch-geometric/torch-scatter wheels come from the PyG wheel index, e.g.:
+#   pip install latence-linkpred-ultra[ultra] -f https://data.pyg.org/whl/torch-2.4.1+cu124.html
+dependencies = [
+    "latence-core",
+]
+
+[project.optional-dependencies]
+# The vendored MIT ULTRA inference subset (models/layers/tasks/base_nbfnet) needs torch +
+# torch-geometric + torch-scatter + easydict. Only torch + easydict are declared here (they ship
+# universal wheels); torch-geometric and torch-scatter MUST come from the PyG wheel index matched
+# to the installed torch/CUDA and are therefore NOT declarable as plain PyPI pins (torch-scatter has
+# no universal wheel and fails to build without torch present). Install them explicitly, e.g.:
+#   pip install "latence-linkpred-ultra[ultra]" torch-geometric torch-scatter \
+#       -f https://data.pyg.org/whl/torch-2.4.1+cu124.html
+# ULTRA's rspmm C++/CUDA extension compiles on first use (GPU); the CPU path never touches it. Pins
+# are conservative upper caps so a downstream install can't silently pull an API-breaking release.
+ultra = [
+    "torch>=2.1,<3",
+    "easydict>=1.10,<2",
+]
+# The graceful fallback scorer: a transductive PyKEEN model (MIT). Kept separate so a host can
+# install just the ULTRA path or just the PyKEEN path.
+pykeen = [
+    "torch>=2.1,<3",
+    "pykeen>=1.10,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers the learned GraphCompleter Provider under the discovery group (ADR-0004). Installing
+# this package makes 'graph_completion.ultra' available to any Pipeline with no core change — a
+# drop-in on the Slice-1 GraphCompleter seam (ADR-0037), alongside the in-core
+# 'graph_completion.reference'.
+[project.entry-points."latence.providers"]
+"graph_completion.ultra" = "latence_linkpred_ultra.provider:UltraGraphCompleter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_linkpred_ultra"]

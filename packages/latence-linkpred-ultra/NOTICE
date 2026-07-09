@@ -1,0 +1,39 @@
+latence-linkpred-ultra
+Copyright (c) 2026 ddickmann
+
+This product includes software developed as part of the Latence Framework
+(Apache License 2.0).
+
+------------------------------------------------------------------------------
+Third-party components (see THIRD-PARTY-LICENSES for full license texts)
+------------------------------------------------------------------------------
+
+ULTRA (inductive knowledge-graph reasoning), ICLR 2024
+  Source:  https://github.com/DeepGraphLearning/ULTRA (commit 427966a)
+  Copyright (c) 2023 MilaGraph
+  License: MIT
+
+  A MINIMAL INFERENCE SUBSET of the ULTRA model code is VENDORED into this
+  package under src/latence_linkpred_ultra/_vendor/ultra/:
+    - models.py       (Ultra, RelNBFNet, EntityNBFNet, QueryNBFNet)
+    - base_nbfnet.py  (BaseNBFNet)
+    - layers.py       (GeneralizedRelationalConv)
+    - tasks.py        (build_relation_graph, all_negative, compute_ranking, ...)
+  The files are verbatim upstream except a single import in models.py made
+  relative so the subset resolves inside this package; the algorithm is
+  byte-for-byte upstream. The upstream MIT LICENSE ships alongside them at
+  src/latence_linkpred_ultra/_vendor/ultra/LICENSE.
+
+  NO ULTRA model WEIGHTS are vendored. The pretrained checkpoint is a config
+  path/id (default "ultra_3g"); the released ULTRA weights are MIT
+  (Hugging Face model cards mgalkin/ultra_3g, ultra_4g, ultra_50g: license: mit)
+  and are downloaded/provided by the operator, never bundled here.
+
+PyKEEN (knowledge-graph embeddings), the graceful fallback scorer
+  Source:  https://github.com/pykeen/pykeen
+  Copyright (c) PyKEEN Project Team
+  License: MIT
+  Not vendored — an optional dependency (the [pykeen] extra), imported lazily.
+
+License verification (ADR-0012, weights AND code checked SEPARATELY): 2026-07-09.
+All three components (ULTRA code, ULTRA weights, PyKEEN) are permissive MIT.

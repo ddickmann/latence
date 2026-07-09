@@ -884,6 +884,43 @@ def _graph_completion_case() -> ConformanceCase:
     )
 
 
+def _graph_completion_ultra_case() -> ConformanceCase:
+    """Graph Completion, LEARNED ULTRA/PyKEEN Provider (W2-linkpred Slice 2) — stub-scoped.
+
+    ``graph_completion.ultra`` (latence-linkpred-ultra) ships its scorer's heavy deps
+    (torch-geometric / torch-scatter / easydict / pykeen) in a SEPARATE package (ADR-0016), absent
+    from the CPU-only conformance env — so latence-core cannot import a real ULTRA to exercise here.
+    The honest disposition (the same skip-with-flag posture the gpu-sota stack uses for this Stage):
+    run it with ``skip_if_unavailable=True`` so on this host it yields the contract-defined EMPTY
+    (no scorer → no inferred edges, logged) — NOT a fabricated prediction. C1 (empty_ok is
+    contract-valid), C2 (empty input is graceful), C3 (its declared MIT license), C4 (empty is
+    trivially deterministic), C5 (device), C6 (no PII) are all checked without a rig; the row is
+    flagged ``stub_scoped`` ("needs a rig"). The REAL ULTRA inference + its C1 over real predictions
+    are validated on the pod (scripts/validate-linkpred-on-gpu.md), never faked here.
+    """
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        return list(provider.complete(fixtures.assembled_graph()))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        return _records_contract_valid(records, empty_ok=True)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        return _capture_raise(lambda: list(provider.complete([])))
+
+    return ConformanceCase(
+        capability=Capability.GRAPH_COMPLETION,
+        # skip_if_unavailable: on this CPU host with no scorer deps, yield empty (skip-with-flag),
+        # never a crash and never a fabricated prediction — the honest, contract-valid disposition.
+        config={"scorer": "auto", "skip_if_unavailable": True},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+        stub_scoped=True,
+    )
+
+
 def _export_case() -> ConformanceCase:
     """Export: write records to Storage and return URIs; a disallowed URI is a graceful failure."""
 
@@ -1083,6 +1120,7 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "embedding.sentence_transformers": _embedding_case(
         stub_scoped=True, backend="sentence_transformers"
     ),
+    "graph_completion.ultra": _graph_completion_ultra_case(),
 }
 
 

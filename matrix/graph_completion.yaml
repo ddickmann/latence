@@ -1,0 +1,43 @@
+# matrix/graph_completion.yaml — the Graph Completion (link-prediction) bake-off (ADR-0036 §4;
+# W2-linkpred Slice 2, ADR-0037).
+#
+# Holds every OTHER Stage at stacks/linkpred-base.yaml (the default spine + a graph_completion Stage)
+# and swaps ONLY the link-prediction Provider (the `complete` node) between:
+#
+#   graph_completion.reference — the in-core, deterministic, zero-dep 2-hop transitive/symmetric
+#                                closure (Slice 1). CPU, pure-Python — RUNS in CI as a real, measured
+#                                row (the honest reference baseline the learned scorer must beat).
+#   graph_completion.ultra     — the learned inductive ULTRA scorer (zero-shot) + PyKEEN fallback
+#                                (Slice 2, latence-linkpred-ultra, MIT weights+code). Its heavy deps
+#                                (torch-geometric / torch-scatter / easydict / pykeen) ship in the
+#                                SEPARATE package (ADR-0016), absent from the CPU-only CI env; with
+#                                `skip_if_unavailable: true` the CI row is an HONEST skip-with-flag
+#                                (no scorer → no inferred edges, logged) — never a fabricated number.
+#                                On a GPU host with latence-linkpred-ultra[ultra] + an ULTRA
+#                                checkpoint it RUNS (device: cuda) and the row carries real inferred
+#                                edges + real MRR/Hits@k. I re-validate those on the pod
+#                                (scripts/validate-linkpred-on-gpu.md).
+#
+# Quality lens: Graph Completion has no bundled gold set on the base stack, so the quality column is
+# the Quality Report's per-run GraphQuality the run ALREADY computes (no reinvented scoring) —
+# inferred_edge_count + inferred_edges_by_scorer (the separately-counted predicted edges, never
+# mixed into asserted counts). The learned scorer's real MRR/Hits@k are computed on a GPU host into
+# the provider's last_metrics and emitted on a structured LOG line (not yet folded into the Quality
+# Report / matrix columns); the pod operator reads them from the run log per
+# scripts/validate-linkpred-on-gpu.md. On CPU the reference row's honest counts are the comparison,
+# never a fabricated metric.
+stage: graph_completion
+stage_name: complete
+base_stack: stacks/linkpred-base.yaml
+candidates:
+  - provider: graph_completion.reference
+    config:
+      transitive_labels: [partner_of]
+      symmetric_labels: [partner_of]
+  - provider: graph_completion.ultra
+    config:
+      scorer: auto                 # ULTRA zero-shot; PyKEEN fallback (graceful)
+      checkpoint: ultra_3g         # a config path; weights NOT vendored (operator provides)
+      device: cuda                 # honest GPU intent; skip-with-flag where no CUDA/deps
+      target_precision: 0.9
+      skip_if_unavailable: true    # CPU CI: honest skip-with-flag row, never a fabricated metric

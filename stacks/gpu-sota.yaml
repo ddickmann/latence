@@ -127,10 +127,31 @@ stages:
     depends_on: [disambiguate]
     config: {corpus_id: latence-gpu-sota-stack}
 
+  # --- OPTIONAL trailing Stage: learned link prediction (W2-linkpred Slice 2, ADR-0037 §7) ---
+  # Predicts missing KG edges with the inductive ULTRA scorer (zero-shot) + PyKEEN fallback
+  # (latence-linkpred-ultra, MIT weights+code). It appends inferred EDGE records (properties.inferred,
+  # honest empty-mention Evidence) that flow to export_kg alongside the asserted graph, never merged.
+  # DEVICE HONESTY: the ULTRA/PyKEEN heavy deps ship in the SEPARATE latence-linkpred-ultra package
+  # (ADR-0016), absent from the CPU-only dev/CI env; `skip_if_unavailable: true` makes this Stage
+  # skip-with-flag there (no scorer → no inferred edges, logged, never faked), so the CPU-reachable
+  # spine still validates. On a GPU host with `latence-linkpred-ultra[ultra]` + an ULTRA checkpoint,
+  # it runs (device: cuda) and predicts real edges — I re-validate the MRR/Hits@k on the pod.
+  - name: complete
+    capability: graph_completion
+    provider: graph_completion.ultra
+    depends_on: [graph]
+    config:
+      corpus_id: latence-gpu-sota-stack
+      scorer: auto                 # ULTRA zero-shot; PyKEEN fallback (graceful)
+      checkpoint: ultra_3g         # a config path; weights NOT vendored (operator provides)
+      device: cuda                 # honest GPU intent; skip-with-flag where no CUDA/deps (P3-F1)
+      target_precision: 0.9        # precision-targeted emit threshold (calibrated prob only)
+      skip_if_unavailable: true    # OPTIONAL trailing stage: skip-with-flag on CPU-only hosts
+
   - name: export_kg
     capability: export
     provider: export.knowledge_graph
-    depends_on: [graph]
+    depends_on: [graph, complete]  # inferred edges flow into the KG export (marked inferred)
     config: {basename: graph}
 
   - name: export_corpus

@@ -108,10 +108,22 @@ stages:
     depends_on: [disambiguate]
     config: {corpus_id: latence-gpu-sota-pod-stack}
 
+  - name: complete
+    capability: graph_completion
+    provider: graph_completion.ultra
+    depends_on: [graph]
+    config:
+      corpus_id: latence-gpu-sota-pod
+      scorer: auto                 # ULTRA zero-shot; PyKEEN fallback (graceful)
+      checkpoint: /root/ULTRA/ckpts/ultra_3g.pth   # pod-local ULTRA checkpoint (weights NOT vendored; needs the rspmm kernel)
+      device: cuda
+      target_precision: 0.9
+      skip_if_unavailable: false
+
   - name: export_kg
     capability: export
     provider: export.knowledge_graph
-    depends_on: [graph]
+    depends_on: [graph, complete]
     config: {basename: graph}
 
   # The ONE difference from gpu-sota.yaml: the RAG-corpus embedder is the IN-PROCESS

@@ -1,8 +1,9 @@
 # Graph Completion is an OPTIONAL post-Assembly Capability; a predicted edge is an inferred-marked EDGE-scope GraphRecord counted separately from asserted edges
 
-**Status: accepted** — W2-linkpred Slice 1/2. Establishes the link-prediction seam, the runner
-wiring, the inferred-edge contract, and a pure-Python **reference completer**; the learned
-ULTRA/PyKEEN scorer is Slice 2 behind this same seam. Builds on ADR-0004 (Capability protocols +
+**Status: accepted** — W2-linkpred Slice 1/2 (seam) + **Slice 2/2 (learned scorer — BUILT**, see the
+closing note). Establishes the link-prediction seam, the runner wiring, the inferred-edge contract,
+and a pure-Python **reference completer**; the learned ULTRA/PyKEEN scorer (Slice 2) is now built
+behind this same seam as `graph_completion.ultra` (`latence-linkpred-ultra`). Builds on ADR-0004 (Capability protocols +
 Provider plugins), ADR-0007 (CPU-first reference providers), ADR-0016 (thin core, heavy deps
 isolated), ADR-0017 (Export writes files, never a live DB), ADR-0027 (Graph Assembly's scoped
 GraphRecord + the `is_predicted` predicted-vs-extracted split), ADR-0033 (streaming, memory-bounded
@@ -129,3 +130,41 @@ opt-in needed. Slice 2 records the citation + verification date on its ProviderP
   `inferred` marker + honest empty-mention Evidence); the Stage is genuinely OPTIONAL (byte-identical
   without it); determinism byte-identical over two runs, bounded fan-out, collision-drop logged; the
   reference completer is a real explainable heuristic, not a stub.
+
+## Slice 2 landed — the learned ULTRA/PyKEEN scorer (W2-linkpred Slice 2/2)
+
+Decision 7 is now BUILT in the isolated `latence-linkpred-ultra` package (ADR-0016), registered as
+`graph_completion.ultra` on this exact seam — a drop-in for `graph_completion.reference` with the
+inferred-edge contract reused verbatim (`properties.inferred`, `scorer="ultra"`, calibrated
+`score`, `rank`, honest empty-mention Evidence, deterministic `edge_id`, asserted-collision drop,
+separate `inferred_edge_count`). What Slice 2 adds behind the seam:
+
+- **Scorer abstraction** — an inductive **ULTRA** scorer (ICLR'24, zero-shot from a pretrained
+  checkpoint; default `ultra_3g`, a config path — **weights NOT vendored**) with a **PyKEEN**
+  transductive-KGE **graceful fallback**; if NEITHER is available a **typed `ProviderError`**, never
+  a silent no-op (a stack may opt a trailing stage into `skip_if_unavailable` skip-with-flag).
+- **Type-aware tiered 2-hop candidate generation** — bounded per-relation fan-out with a **rare-
+  relation full-recall guarantee**; every cap that drops candidates is **logged** (no silent
+  truncation).
+- **Calibrator** — temperature scaling + a **precision-targeted threshold**: only edges whose
+  *calibrated probability* clears a configurable target precision are emitted, and the emitted
+  `confidence` IS that calibrated probability (`calibrated=True`) — a raw scorer logit is never
+  emitted as confidence.
+- **KG-quality metrics** — held-out **MRR / Hits@k** with genuine **leak detection** (the held-out
+  edges *and their inverses* are removed from the observed graph before scoring; a leak raises
+  rather than fabricating a metric).
+
+**Anti-false-green (non-negotiable):** the offline provider is FAITHFUL to the REAL ULTRA API
+(`Ultra(rel_model_cfg, entity_model_cfg)`; `model(data, batch) -> [B, num_nodes]`; the `tasks`
+helpers `build_relation_graph` / `all_negative` / `compute_ranking` at their real shapes). An
+un-faithful shim FAILS the anchor tests: `tests/test_ultra_scorer_faithful.py` (guard #1 — a
+torch-FREE AST anchor over the vendored `models.py` / `tasks.py` API surface, so it runs in the
+CPU/offline merge gate and turns RED on any vendored-API drift) and `tests/test_ultra_scorer_drive.py`
+(guard #2 — drives `UltraScorer` end-to-end against a shape-faithful fake wherever torch is
+installed). The heavy deps (torch / torch-geometric / torch-scatter / easydict / pykeen) are isolated
+and lazily imported so provider discovery stays torch-free; the real MRR/Hits@k are re-validated on
+the CUDA pod (`scripts/validate-linkpred-on-gpu.md`), never fabricated. **Licenses (ADR-0012,
+verified 2026-07-09, weights AND code separately):** ULTRA code MIT, ULTRA weights MIT, PyKEEN MIT —
+all permissive; the vendored ULTRA inference subset is attributed in the package NOTICE /
+THIRD-PARTY-LICENSES. Wired into `stacks/gpu-sota.yaml` + `stacks/gpu-sota-pod.yaml` as an OPTIONAL
+trailing Stage and `matrix/graph_completion.yaml` (reference vs ultra bake-off).

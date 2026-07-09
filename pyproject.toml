@@ -110,8 +110,21 @@ module = [
     # LightOn-OCR heavy stack (latence-parser-lighton, GPU) — not in the CPU-first dev env
     # (ADR-0016); the Provider monkeypatches them with shape-matching fakes in tests.
     "pypdfium2", "transformers", "torch",
+    # Learned link-prediction heavy stack (latence-linkpred-ultra, GPU/heavy) — the ULTRA inference
+    # deps (torch-geometric / torch-scatter / easydict) + the PyKEEN fallback are isolated in that
+    # package (ADR-0016), NOT in the CPU-first dev env; the Provider lazily imports them and the
+    # scorer tests monkeypatch a faithful fake, so they are treated as dynamically typed here.
+    "torch_geometric", "torch_geometric.*", "torch_scatter", "easydict",
+    "pykeen", "pykeen.*",
 ]
 ignore_missing_imports = true
+
+# The VENDORED MIT ULTRA inference subset (models/layers/tasks/base_nbfnet) is third-party code kept
+# verbatim (each file is ``# type: ignore``), so it is not type-checked and mypy treats it as
+# dynamically typed — a strict pass over the framework's own code never fails on upstream ULTRA.
+[[tool.mypy.overrides]]
+module = ["latence_linkpred_ultra._vendor.*"]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 addopts = "-q"

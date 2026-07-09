@@ -72,8 +72,11 @@ jobs:
       # packages pull the openai client, latence-embedder-st pulls the
       # sentence-transformers stack (torch/transformers), latence-parser-lighton /
       # latence-parser-glm pull the LightOn-OCR / GLM-OCR transformers/torch/pillow/pypdfium2
-      # stack (their tests monkeypatch those with shape-matching fakes), and the airflow adapter
-      # pulls apache-airflow — any would break the
+      # stack (their tests monkeypatch those with shape-matching fakes), the airflow adapter
+      # pulls apache-airflow, and latence-linkpred-ultra pulls the ULTRA/PyKEEN link-prediction
+      # stack (torch/torch-geometric/torch-scatter/pykeen — its tests monkeypatch the Scorer with
+      # a faithful fake and AST-parse the vendored ULTRA API surface, so the merge gate runs
+      # torch-free) — any would break the
       # CPU-first, offline, deterministic test env (ADR-0007/0016).
       # Install ONLY their source (no deps) so their src is type-checked and their tests
       # (which monkeypatch the heavy/endpoint dep with a fake, or, for the Airflow
@@ -92,6 +95,7 @@ jobs:
           uv pip install --no-deps -e packages/latence-parser-lighton
           uv pip install --no-deps -e packages/latence-parser-glm
           uv pip install --no-deps -e packages/latence-runner-airflow
+          uv pip install --no-deps -e packages/latence-linkpred-ultra
 
       - name: Ruff (lint)
         run: uv run ruff check packages
@@ -177,6 +181,7 @@ jobs:
           uv build --package latence-parser-lighton
           uv build --package latence-parser-glm
           uv build --package latence-runner-airflow
+          uv build --package latence-linkpred-ultra
           uv build --package latence-demo
           uv build --package latence-disambig-embedding
 

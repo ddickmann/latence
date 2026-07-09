@@ -1,0 +1,113 @@
+# stacks/linkpred-base.yaml — the base stack for the graph_completion bake-off (matrix/graph_completion.yaml).
+#
+# The blessed default spine (stacks/default.yaml) PLUS an OPTIONAL graph_completion Stage after
+# Graph Assembly, so matrix/graph_completion.yaml can hold every OTHER Stage constant and swap ONLY
+# the link-prediction Provider (graph_completion.reference <-> graph_completion.ultra) — a real
+# controlled comparison (ADR-0036 §4). default.yaml itself declares NO graph_completion Stage (the
+# Stage is genuinely optional, ADR-0037), so the bake-off needs this dedicated base with the seam
+# present. Every non-completion Stage is byte-identical to default.yaml.
+name: latence-linkpred-base-stack
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152
+      max_zip_ratio: 50.0
+
+  - name: parse
+    capability: parse
+    provider: parser.pdfplumber
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [content_screen]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, Acme Corporation, International Business Machines, IBM, Globex]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [content_screen, entities]
+    config:
+      window_chars: 200
+      relations:
+        works_for: {head: PERSON, tail: ORG, triggers: [works at, employed by, joined]}
+        partner_of: {head: ORG, tail: ORG, triggers: [partner of, partnered with]}
+
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule
+    depends_on: [parse]
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical
+    depends_on: [parse, entities]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [entities, relations]
+    config:
+      kb:
+        - {kb_id: Q1, name: Acme, entity_type: ORG}
+        - {kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM]}
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-linkpred-base-stack}
+
+  # The OPTIONAL link-prediction Stage the bake-off swaps. The base uses the in-core deterministic
+  # reference completer (CPU, zero-dep) so the base validates offline; matrix/graph_completion.yaml
+  # swaps in graph_completion.ultra (learned) as the second candidate.
+  - name: complete
+    capability: graph_completion
+    provider: graph_completion.reference
+    depends_on: [graph]
+    config:
+      corpus_id: latence-linkpred-base-stack
+      transitive_labels: [partner_of]
+      symmetric_labels: [partner_of]
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph, complete]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+    config: {basename: corpus}
