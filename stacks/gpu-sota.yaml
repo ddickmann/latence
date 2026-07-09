@@ -61,7 +61,7 @@ stages:
     depends_on: [content_screen]
     config:
       device: cuda                 # honest GPU intent; skipped-with-flag where no CUDA (P3-F1)
-      labels: [ORG, PERSON]
+      labels: [organization, person]  # GLiNER scores best lower/title-case (pod: 0.95–0.99)
 
   - name: relations
     capability: relation_extraction
@@ -69,7 +69,10 @@ stages:
     depends_on: [content_screen, entities]
     config:
       device: cuda
-      relations: [works_for, partner_of]
+      # The fused provider REQUIRES both label sets (a missing key is a ConfigError at load).
+      # W1-relex FIX: the old `relations:` key was wrong — it is `labels` + `relation_labels`.
+      labels: [organization, person]
+      relation_labels: [works for, partner of]
 
   - name: redact
     capability: redaction
@@ -94,8 +97,11 @@ stages:
         provider: embedding.sentence_transformers
         config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
       kb:
-        - {kb_id: Q1, name: Acme, entity_type: ORG}
-        - {kb_id: Q2, name: International Business Machines, entity_type: ORG, aliases: [IBM]}
+        # entity_type MUST match the (lowercased) GLiNER mention labels above — the KB linker
+        # type filter is case-sensitive (disambiguation.py: bare `!=`), so `ORG` would never
+        # match the `organization` mention label and KB linking would silently drop every candidate.
+        - {kb_id: Q1, name: Acme, entity_type: organization}
+        - {kb_id: Q2, name: International Business Machines, entity_type: organization, aliases: [IBM]}
       kb_threshold: 0.5
 
   - name: graph

@@ -182,18 +182,22 @@ class GlinerRelexExtractor:
     def _extract_one(
         self, model: Any, chunk: ChunkRecord
     ) -> tuple[list[EntityMention], list[RelationMention]]:
-        # gliner-relex exposes predict_with_relations returning entity dicts (with
-        # chunk-local 'start'/'end', 'label', 'score') and relation dicts referencing
-        # entities by their position + a 'relation'/'label' + 'score'. We resolve the
-        # relations back to the EntityMentions we stamp.
-        result: dict[str, Any] = model.predict_with_relations(
+        # The REAL gliner-relex API (introspected + run on the pod, W1-relex FIX): the
+        # checkpoint exposes ``predict_relations`` (NOT ``predict_with_relations`` — that
+        # method never existed and was the false-green trap) returning a **TUPLE**
+        # ``(entities, relations)``, NOT a dict. Entity dicts carry chunk-local
+        # 'start'/'end', 'text', 'label', 'score' (identical shape to ``predict_entities``).
+        # Relation dicts carry 'head'/'tail' sub-dicts ('start'/'end'/'text'/'type'/
+        # 'entity_idx') plus 'relation' + 'score'. We resolve the relations back to the
+        # EntityMentions we stamp by their (start, end) span.
+        raw_entities, raw_relations = model.predict_relations(
             chunk.content,
             self._labels,
             self._relation_labels,
             threshold=self._threshold,
         )
-        raw_entities: list[dict[str, Any]] = list(result.get("entities", []))
-        raw_relations: list[dict[str, Any]] = list(result.get("relations", []))
+        raw_entities = list(raw_entities)
+        raw_relations = list(raw_relations)
         raw_entities.sort(key=lambda e: (int(e["start"]), str(e["label"])))
 
         # Resolve chunk-local model offsets to TRUE original offsets through the

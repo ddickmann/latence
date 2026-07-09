@@ -111,16 +111,21 @@ class _StubGLiNER:
             if e["label"] in labels and e["score"] >= threshold and e["end"] <= len(text)
         ]
 
-    def predict_with_relations(
+    def predict_relations(
         self,
         text: str,
         labels: list[str],
         relation_labels: list[str],  # noqa: ARG002 - accepted for API parity
         threshold: float = 0.5,
-    ) -> dict[str, Any]:
+        **kwargs: Any,  # noqa: ARG002 - flat_ner/adjacency_threshold/... accepted for parity
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        # Faithful to the REAL knowledgator/gliner-relex predict_relations TUPLE contract
+        # (W1-relex FIX): returns ``(entities, relations)``, NOT a dict. A provider that
+        # still calls ``predict_with_relations`` (which never existed) or does
+        # ``result.get(...)`` on this tuple FAILS — the false-green trap this closes.
         ents = self.predict_entities(text, labels, threshold)
         rels = [r for r in type(self).relations if r.get("score", 1.0) >= threshold]
-        return {"entities": ents, "relations": rels}
+        return ents, rels
 
 
 @contextlib.contextmanager
@@ -354,5 +359,18 @@ def gliner_pii_entities() -> list[dict[str, Any]]:
 
 
 def gliner_relations() -> list[dict[str, Any]]:
-    """Canned relation the gliner-relex stub returns, referencing the two canned entities."""
-    return [{"head": 0, "tail": 1, "relation": "works_for", "label": "works_for", "score": 0.8}]
+    """Canned relation the gliner-relex stub returns, referencing the two canned entities.
+
+    Faithful to the REAL ``predict_relations`` relation-dict shape (W1-relex FIX): ``head``/
+    ``tail`` are sub-dicts carrying ``start``/``end``/``text``/``type``/``entity_idx`` (keyed by
+    the chunk-local span, the same coordinates the provider resolves endpoints by) — NOT bare
+    entity indices. person [0,5) works_for org [16,25), matching ``gliner_entities()``.
+    """
+    return [
+        {
+            "head": {"start": 0, "end": 5, "text": "Alice", "type": "person", "entity_idx": 0},
+            "tail": {"start": 16, "end": 25, "text": "Acme Corp", "type": "org", "entity_idx": 1},
+            "relation": "works_for",
+            "score": 0.8,
+        }
+    ]
