@@ -360,6 +360,46 @@ class GraphAssembler(Protocol):
         ...
 
 
+@runtime_checkable
+class GraphCompleter(Protocol):
+    """Predicts missing KG edges over the assembled graph (CONTEXT ``Graph Assembly``; W2-linkpred).
+
+    The **post-Assembly link-prediction** Capability (ADR-0037): an OPTIONAL corpus-level Stage
+    that consumes the whole run's assembled :class:`~latence_core.contracts.GraphRecord`s (NODE +
+    EDGE) and yields ADDITIONAL EDGE-scope :class:`~latence_core.contracts.GraphRecord`s for
+    **predicted** edges — the ``§19`` predicted-vs-extracted split GraphAssembler carried as
+    ``is_predicted`` (ADR-0027) turned into its own Stage. It never re-emits the input nodes/edges
+    and never mutates an asserted edge; it only appends new predicted edges.
+
+    A predicted edge is a :class:`~latence_core.contracts.GraphEdge` at ``scope=EDGE``,
+    UNMISTAKABLY marked ``properties["inferred"] = True`` (plus ``scorer``/``score``/``rank``/
+    ``calibrated``) so it is never silently merged into the asserted stream — the enterprise-honesty
+    crux (ADR-0037). Its Evidence is honest and model-derived, NOT fabricated mention offsets:
+    ``mention_ids = []`` (there is no textual mention to cite), ``document_ids`` = the union of the
+    head + tail nodes' ``source_document_ids``, ``snippet`` a human justification naming the
+    scorer + score, and ``confidence`` the calibrated score. A predicted edge that COLLIDES
+    (same endpoints +
+    label) with an asserted edge is DROPPED — it is already asserted — logged, not emitted.
+
+    Mirroring :class:`GraphAssembler`: corpus-level, ``Iterable`` in / ``Iterator`` out,
+    deterministic + seeded → byte-identical (predicted edges yielded in edge-id order), the CPU
+    reference (``graph_completion.reference``) pure-Python, no torch. A learned ULTRA/PyKEEN scorer
+    is a pluggable Provider behind this same seam (Slice 2). The Stage is genuinely OPTIONAL: a
+    stack with no ``graph_completion`` Stage behaves exactly as today.
+    """
+
+    def complete(self, records: Iterable[GraphRecord]) -> Iterator[GraphRecord]:
+        """Consume the assembled graph (NODE + EDGE); yield ADDITIONAL predicted EDGE records.
+
+        Never re-emits the input, never mutates asserted edges — only appends predicted
+        EDGE-scope :class:`~latence_core.contracts.GraphRecord`s, each marked
+        ``properties["inferred"] = True`` with honest model-derived Evidence, in edge-id order
+        (deterministic). A predicted edge colliding with an asserted edge (same endpoints +
+        label) is dropped, not emitted.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class DeltaOutcome:
     """The result of applying a :class:`Delta` to the parent corpus (S11 affected-set recompute).

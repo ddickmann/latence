@@ -42,7 +42,12 @@ class CapabilityKind(StrEnum):
     (required — the mentions it resolves) and, optionally, Relation Extraction (the
     relations it normalises onto the canonical entities). S9 adds Graph Assembly (corpus-level
     knowledge-graph construction — nodes, edges, and per-edge Evidence — from the disambiguated
-    canonical entities + normalized relations), wired off Disambiguation. S9 also adds the
+    canonical entities + normalized relations), wired off Disambiguation. W2-linkpred adds the
+    OPTIONAL Graph Completion Capability (ADR-0037): a post-Assembly link-prediction Stage that
+    consumes the assembled GraphRecords and appends PREDICTED EDGE-scope GraphRecords, each
+    UNMISTAKABLY marked ``properties["inferred"] = True`` (never merged into the asserted edges,
+    counted separately in the Quality Report). It depends_on Graph Assembly and is genuinely
+    optional — a stack without it is byte-identical to today. S9 also adds the
     **opt-in** Embedding Capability (ADR-0017): an Embedder maps RAG-corpus text to a fixed-width
     vector so the exported corpus carries embeddings a vector DB can ingest. Embedding is *not* a
     standalone DAG node — it augments the corpus Export: a corpus Export Stage names its Embedder
@@ -66,6 +71,7 @@ class CapabilityKind(StrEnum):
     PROFILING = "profiling"
     DISAMBIGUATION = "disambiguation"
     GRAPH_ASSEMBLY = "graph_assembly"
+    GRAPH_COMPLETION = "graph_completion"
     EMBEDDING = "embedding"
     EXPORT = "export"
 

@@ -89,11 +89,11 @@ def _model_profile(
     )
 
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 35 Providers across 14 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
+# 36 Providers across 15 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
 # learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii + the real
-# GPU LightOn-OCR Parser W1-lighton + its MIT twin the GPU GLM-OCR Parser W1-glm). If a Provider is
-# added/removed, this list is updated deliberately, so the count check catches an accidental
-# un-covered Provider.
+# GPU LightOn-OCR Parser W1-lighton + its MIT twin the GPU GLM-OCR Parser W1-glm + the OPTIONAL
+# reference GraphCompleter W2-linkpred). If a Provider is added/removed, this list is updated
+# deliberately, so the count check catches an accidental un-covered Provider.
 _EXPECTED_PROVIDERS = frozenset(
     {
         "source.local_folder",
@@ -124,6 +124,7 @@ _EXPECTED_PROVIDERS = frozenset(
         "disambiguation.embedding",
         "graph.canonical",
         "graph.weighted",
+        "graph_completion.reference",
         "export.jsonl_parquet",
         "export.knowledge_graph",
         "export.demo_site",
@@ -155,12 +156,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 35 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 36 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 35
+    assert len(names) == 36
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -196,9 +197,9 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 
 
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
-    """The rolled-up report: all 35 pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
+    """The rolled-up report: all 36 pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 35
+    assert report.providers_total == 36
     assert report.providers_failed == 0
     assert report.all_passed
     # The nine endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
@@ -225,7 +226,12 @@ def test_cpu_providers_run_for_real_not_stub() -> None:
     """The in-core CPU reference Providers are NOT stub-scoped — they run for real."""
     report = build_conformance_report(_registry())
     for res in report.results:
-        if res.provider in {"chunk.markdown", "entity.gazetteer", "graph.canonical"}:
+        if res.provider in {
+            "chunk.markdown",
+            "entity.gazetteer",
+            "graph.canonical",
+            "graph_completion.reference",
+        }:
             assert not res.stub_scoped
 
 

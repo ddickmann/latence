@@ -505,6 +505,13 @@ class GraphQuality(BaseModel):
     evidence_coverage: float = 0.0
     avg_node_confidence: float = 0.0
     avg_edge_confidence: float = 0.0
+    # W2-linkpred (ADR-0037): predicted/inferred edges from an OPTIONAL Graph Completion Stage,
+    # counted SEPARATELY — NEVER merged into the asserted ``edges_total`` / ``edges_by_label`` /
+    # ``evidence_coverage`` (the enterprise-honesty crux — an inferred edge must never inflate the
+    # asserted-edge statistics). ``inferred_edges_by_scorer`` breaks them down by the scorer that
+    # proposed them. A run with no Graph Completion Stage has ``inferred_edge_count == 0``.
+    inferred_edge_count: int = 0
+    inferred_edges_by_scorer: dict[str, int] = Field(default_factory=dict)
 
 
 class DriftDiagnostics(BaseModel):

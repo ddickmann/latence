@@ -28,6 +28,7 @@ from latence_core.capability import (
     Export,
     FusedEntityRelationExtractor,
     GraphAssembler,
+    GraphCompleter,
     IntakeScreener,
     Parser,
     PIIDetector,
@@ -138,6 +139,10 @@ _ACCUMULATOR_KINDS = (
     CapabilityKind.PROFILING,
     CapabilityKind.DISAMBIGUATION,
     CapabilityKind.GRAPH_ASSEMBLY,
+    # W2-linkpred: Graph Completion consumes the whole assembled graph (NODE + EDGE GraphRecords),
+    # so it is a corpus-level accumulator like Graph Assembly — its input is the KG, its output the
+    # bounded set of predicted edges.
+    CapabilityKind.GRAPH_COMPLETION,
 )
 
 # Secret-handling (issue #30): the run manifest persists the whole Pipeline
@@ -449,6 +454,11 @@ class LocalRunner:
             return DisambiguationRecord
         if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
             return GraphRecord
+        if stage.capability is CapabilityKind.GRAPH_COMPLETION:
+            # W2-linkpred: Graph Completion emits PREDICTED EDGE-scope GraphRecords (same carrier as
+            # Graph Assembly, marked properties.inferred=True), so its checkpoint reads back as
+            # GraphRecord and its predicted edges flow to Export alongside the asserted graph.
+            return GraphRecord
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
@@ -491,7 +501,10 @@ class LocalRunner:
                 return FeatureRecord
             if parent.capability is CapabilityKind.DISAMBIGUATION:
                 return DisambiguationRecord
-            if parent.capability is CapabilityKind.GRAPH_ASSEMBLY:
+            if parent.capability in (
+                CapabilityKind.GRAPH_ASSEMBLY,
+                CapabilityKind.GRAPH_COMPLETION,
+            ):
                 return GraphRecord
             if parent.capability is CapabilityKind.RELATION_EXTRACTION:
                 return RelationMention
@@ -1262,6 +1275,36 @@ class LocalRunner:
             )
             return list(provider.assemble(graph_records))
 
+        if stage.capability is CapabilityKind.GRAPH_COMPLETION:
+            if not isinstance(provider, GraphCompleter):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the GraphCompleter capability."
+                )
+                raise ContractError(msg)
+            # W2-linkpred: Graph Completion is the OPTIONAL post-Assembly link-prediction Stage. It
+            # consumes the whole run's assembled GraphRecords (NODE + EDGE) from its Graph-Assembly
+            # parent and yields ADDITIONAL PREDICTED EDGE-scope GraphRecords (marked
+            # properties.inferred=True, honest model-derived Evidence), which thread downstream to
+            # Export alongside the asserted graph — distinguished by properties.inferred, never
+            # merged into the asserted edges. It depends_on Graph Assembly; a non-empty input
+            # carrying no GraphRecord is a wiring error. Same #69 streaming discipline as assembly:
+            # the GraphRecords are streamed from the parent (bounded output/checkpoint), validated
+            # by a pre-pass, before the completer folds the stream. The Stage is genuinely optional
+            # — a stack without it is byte-identical to today (no predicted edges appear).
+            self._require_graph_completion_inputs_streamed(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            assembled = self._stream_inputs_of_type(
+                stage,
+                outputs,
+                GraphRecord,
+                storage=storage,
+                pipeline=pipeline,
+                run_id=run_id,
+            )
+            return list(provider.complete(assembled))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -1751,6 +1794,38 @@ class LocalRunner:
             msg = (
                 f"Stage {stage.name!r} ({stage.capability.value}) requires "
                 f"DisambiguationRecord inputs but received: {', '.join(wrong)}. "
+                f"Check the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+
+    def _require_graph_completion_inputs_streamed(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> None:
+        """A Graph Completion Stage must be wired to a Graph-Assembly parent (W2-linkpred).
+
+        Graph Completion consumes the assembled graph's GraphRecords (NODE + EDGE). Its input must
+        be entirely GraphRecords; a non-empty input carrying any other carrier means the Pipeline
+        wired Graph Completion to the wrong parent (it must depend on the Graph Assembly Stage, not
+        Disambiguation or anything else). An empty run (no documents ⇒ no graph) is legitimately
+        empty. Streams the carrier types once (bounded), never the record list (#69).
+        """
+        present, names = self._scan_input_carriers(
+            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+        if not present:
+            return
+        wrong = sorted(t.__name__ for t in present if t is not GraphRecord)
+        if wrong:
+            msg = (
+                f"Stage {stage.name!r} (graph_completion) requires GraphRecord inputs "
+                f"but received: {', '.join(wrong)}. A Graph Completion Stage must depend on "
+                f"the Graph Assembly Stage (the assembled nodes + edges it completes). "
                 f"Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)

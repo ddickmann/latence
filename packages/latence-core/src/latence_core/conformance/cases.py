@@ -60,6 +60,7 @@ class Capability(StrEnum):
     PROFILING = "profiling"
     DISAMBIGUATION = "disambiguation"
     GRAPH = "graph"
+    GRAPH_COMPLETION = "graph_completion"
     EXPORT = "export"
     EMBEDDING = "embedding"
     DELTA = "delta"
@@ -81,6 +82,7 @@ _PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     "profiling": Capability.PROFILING,
     "disambiguation": Capability.DISAMBIGUATION,
     "graph": Capability.GRAPH,
+    "graph_completion": Capability.GRAPH_COMPLETION,
     "export": Capability.EXPORT,
     "embedding": Capability.EMBEDDING,
     "delta": Capability.DELTA,
@@ -855,6 +857,33 @@ def _graph_case() -> ConformanceCase:
     )
 
 
+def _graph_completion_case() -> ConformanceCase:
+    """Graph Completion: predicted inferred EDGE records from the assembled graph (W2-linkpred).
+
+    Invokes the completer on the reference-assembled graph (NODE + EDGE GraphRecords). The output
+    is a (possibly empty) set of predicted EDGE-scope GraphRecords — ``empty_ok=True`` because a
+    small graph may have no 2-hop closure to propose, yet the run must still be contract-valid +
+    deterministic (C4). An empty input yields no predictions, never a crash (the defined empty).
+    """
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        return list(provider.complete(fixtures.assembled_graph()))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        return _records_contract_valid(records, empty_ok=True)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        return _capture_raise(lambda: list(provider.complete([])))
+
+    return ConformanceCase(
+        capability=Capability.GRAPH_COMPLETION,
+        config={},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+    )
+
+
 def _export_case() -> ConformanceCase:
     """Export: write records to Storage and return URIs; a disallowed URI is a graceful failure."""
 
@@ -1033,6 +1062,7 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
     Capability.PROFILING: _profiling_case(),
     Capability.DISAMBIGUATION: _disambiguation_case(),
     Capability.GRAPH: _graph_case(),
+    Capability.GRAPH_COMPLETION: _graph_completion_case(),
     Capability.EXPORT: _export_case(),
     Capability.EMBEDDING: _embedding_case(stub_scoped=False),
     Capability.DELTA: _delta_case(),

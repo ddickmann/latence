@@ -29,6 +29,7 @@ from latence_core.contracts import (
     DocumentRecord,
     EntityMention,
     FeatureRecord,
+    GraphRecord,
     ParserInput,
     Provenance,
     RelationMention,
@@ -36,6 +37,7 @@ from latence_core.contracts import (
 from latence_core.stages.chunk import MarkdownChunker
 from latence_core.stages.disambiguation import CascadeDisambiguator
 from latence_core.stages.entity import GazetteerEntityExtractor
+from latence_core.stages.graph_assembly import CanonicalGraphAssembler
 from latence_core.stages.profiling import StatisticalProfiler
 from latence_core.stages.relation import PatternRelationExtractor
 
@@ -171,3 +173,14 @@ def canonical_corpus() -> CanonicalCorpus:
 def graph_records() -> list[DisambiguationRecord]:
     """The DisambiguationRecords a Graph Assembler consumes (its valid input)."""
     return canonical_corpus().disambiguation
+
+
+def assembled_graph() -> list[GraphRecord]:
+    """The assembled GraphRecords (NODE + EDGE) a Graph Completer consumes (its valid input).
+
+    Built by running the in-core reference Graph Assembler over the canonical corpus's
+    DisambiguationRecords — so the completer's input is a genuinely contract-valid assembled graph
+    (nodes + edges with per-edge Evidence), exactly what the runner threads into the completion
+    Stage. Deterministic + cached (the reference Provider is pure).
+    """
+    return list(CanonicalGraphAssembler({}).assemble(graph_records()))

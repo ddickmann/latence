@@ -93,6 +93,11 @@ latence = "latence_core.cli:app"
 # parallel same-typed relations into one weighted edge — a distinct CPU strategy, same
 # deterministic-id + per-edge-Evidence contract, behind the same seam.
 "graph.weighted" = "latence_core.stages.graph_assembly:WeightedGraphAssembler"
+# W2-linkpred Slice 1/2: the OPTIONAL post-Assembly GraphCompleter reference Provider — a
+# deterministic, bounded 2-hop transitive/symmetric closure that appends PREDICTED edges marked
+# properties.inferred=True (honest model-derived Evidence, never merged into asserted edges). Pure
+# Python, no torch (ADR-0037). The learned ULTRA/PyKEEN scorer is Slice 2, behind the same seam.
+"graph_completion.reference" = "latence_core.stages.graph_completion:ReferenceGraphCompleter"
 "export.knowledge_graph" = "latence_core.stages.graph_export:KnowledgeGraphExport"
 "embedding.hashing" = "latence_core.embedding:HashingEmbedder"
 # S11 built-in: the affected-set DeltaProcessor (retract-by-Evidence-provenance graph patcher +

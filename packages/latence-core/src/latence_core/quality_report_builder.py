@@ -320,6 +320,18 @@ class QualityReportBuilder:
             storage=storage,
             run_id=run_id,
         )
+        # W2-linkpred: the OPTIONAL Graph Completion Stage's predicted edges, gathered SEPARATELY
+        # from the asserted graph so an inferred edge can never inflate the asserted-edge count
+        # (they are a distinct capability's output, not part of graph_assembly). Empty when the
+        # stack declares no Graph Completion Stage (byte-identical to today).
+        inferred_records = self._records_of_kind(
+            pipeline,
+            ordered,
+            outputs,
+            CapabilityKind.GRAPH_COMPLETION,
+            storage=storage,
+            run_id=run_id,
+        )
         # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
         # the Stage consumed — the count it resolved from.
         disambig_mentions_in = self._records_of_kinds(
@@ -348,7 +360,7 @@ class QualityReportBuilder:
             disambiguation=self._disambiguation_quality(
                 pipeline, disambiguations, disambig_mentions_in
             ),
-            graph=self._graph_quality(pipeline, graph_records),
+            graph=self._graph_quality(pipeline, graph_records, inferred_records),
             drift=self._drift_diagnostics(chunked),
             goldset=self._goldset_evaluation(pipeline, storage, mentions, relations),
         )
@@ -980,17 +992,26 @@ class QualityReportBuilder:
 
     @staticmethod
     def _graph_quality(
-        pipeline: Pipeline, records: list[StageOutput]
+        pipeline: Pipeline,
+        records: list[StageOutput],
+        inferred_records: list[StageOutput] | None = None,
     ) -> GraphQuality | None:
-        """Aggregate Graph-Assembly KG statistics for the report (S9).
+        """Aggregate Graph-Assembly KG statistics for the report (S9; + W2 inferred edges).
 
         Only computed when the Pipeline has a Graph Assembly Stage. ``records`` is the mix of
         NODE-scope (graph nodes) and EDGE-scope (graph edges)
-        :class:`~latence_core.contracts.GraphRecord`s. Rolls up: node/edge counts; nodes by
-        entity type and edges by relation label; KB-linked node count; and — the S9 acceptance
-        criterion — evidence coverage, the fraction of edges whose Evidence names at least one
-        source mention (1.0 = every edge is justified). Counts only (no raw text), safe to
-        persist. All maps are sorted for a deterministic report.
+        :class:`~latence_core.contracts.GraphRecord`s from the ASSERTED graph (the Graph Assembly
+        Stage). Rolls up: node/edge counts; nodes by entity type and edges by relation label;
+        KB-linked node count; and — the S9 acceptance criterion — evidence coverage, the fraction of
+        edges whose Evidence names at least one source mention (1.0 = every edge is justified).
+
+        ``inferred_records`` (W2-linkpred, ADR-0037) is the OPTIONAL Graph Completion Stage's
+        PREDICTED EDGE-scope GraphRecords, counted SEPARATELY into ``inferred_edge_count`` /
+        ``inferred_edges_by_scorer`` — NEVER folded into ``edges_total`` / ``edges_by_label`` /
+        ``evidence_coverage``. An inferred edge must never inflate the asserted-edge statistics (the
+        enterprise-honesty crux). A run with no Graph Completion Stage has ``inferred_edge_count ==
+        0``. Counts only (no raw text), safe to persist. All maps are sorted for a deterministic
+        report.
         """
         if not any(s.capability is CapabilityKind.GRAPH_ASSEMBLY for s in pipeline.stages):
             return None
@@ -1026,6 +1047,20 @@ class QualityReportBuilder:
             quality.evidence_coverage = round(quality.edges_with_evidence / len(edges), 6)
         quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
         quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
+        # W2-linkpred: count the OPTIONAL Graph Completion Stage's predicted edges SEPARATELY. They
+        # are marked properties["inferred"]=True; we count only edges that carry that marker (a
+        # defensive guard so nothing but a genuinely-inferred edge is ever tallied here).
+        for r in inferred_records or []:
+            if not isinstance(r, GraphRecord) or r.scope is not GraphScope.EDGE or r.edge is None:
+                continue
+            if r.edge.properties.get("inferred") is not True:
+                continue
+            quality.inferred_edge_count += 1
+            scorer = str(r.edge.properties.get("scorer", "unknown"))
+            quality.inferred_edges_by_scorer[scorer] = (
+                quality.inferred_edges_by_scorer.get(scorer, 0) + 1
+            )
+        quality.inferred_edges_by_scorer = dict(sorted(quality.inferred_edges_by_scorer.items()))
         return quality
 
     @staticmethod

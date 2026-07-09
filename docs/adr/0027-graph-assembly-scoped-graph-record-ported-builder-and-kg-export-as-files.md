@@ -51,6 +51,13 @@ property: v1 has no link-prediction Stage (that is the post-v1 P3 plugin), so ev
 extracted (`is_predicted=False`), but the attribute is carried so a future predicted edge is
 never silently mixed with an extracted one.
 
+**Update (W2-linkpred, ADR-0037):** that "future predicted edge" now exists — the OPTIONAL
+post-Assembly `GraphCompleter` Capability appends predicted EDGE-scope GraphRecords marked
+`properties["inferred"] = True` (with `scorer`/`score`/`rank`/`calibrated`), counted separately in
+the Quality Report and never merged into the asserted edges. The `is_predicted` attribute this ADR
+carried is the seed of that split; ADR-0037 promotes it to its own Stage's output with the honest
+inferred-edge contract (empty-mention Evidence, deterministic `edge_id` distinct from asserted).
+
 ## Export writes files, never a live database (ADR-0017), and serves BOTH RAG and graph-RAG
 
 The Export Stage materializes the two AI-ready deliverables **as portable files on Storage,
