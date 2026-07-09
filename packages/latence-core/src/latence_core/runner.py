@@ -30,6 +30,7 @@ from latence_core.capability import (
     GraphAssembler,
     GraphCompleter,
     IntakeScreener,
+    LabelInducer,
     Parser,
     PIIDetector,
     Profiler,
@@ -53,6 +54,7 @@ from latence_core.contracts import (
     ScreeningFinding,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
+from latence_core.induced import project_induced_onto_documents
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.profile import ProviderProfile, profile_of
@@ -227,6 +229,12 @@ class LocalRunner:
         # many transient failures it retried through); the Runner reads it after the Stage runs and
         # resets for the next. A CPU/in-process Provider has no such attribute → 0.
         self._last_stage_retries = 0
+        # W4 (ADR-0038): per-Stage schema-induction fail-open tally, drained into that Stage's
+        # StageMetrics. A LabelInducer Provider exposes ``induction_fallbacks`` /
+        # ``induction_documents`` int attributes (how many documents fell back to config labels out
+        # of how many attempted); the Runner reads them after the Stage runs and resets. A
+        # non-induction Provider → (0, 0).
+        self._last_stage_induction = (0, 0)
         # Per-Stage relation fan-out-guard tally, keyed by Stage name: (output-capped docs,
         # relations dropped [ADR-0033 / #63], input-capped docs, mentions dropped [#68]). A
         # RelationExtractor Provider exposes ``fanout_capped_documents``/
@@ -269,6 +277,12 @@ class LocalRunner:
         self._last_stage_retries = 0
         return count
 
+    def _drain_induction_tally(self) -> tuple[int, int]:
+        """Read + reset the schema-induction fail-open tally the just-run Stage reported (W4)."""
+        tally = self._last_stage_induction
+        self._last_stage_induction = (0, 0)
+        return tally
+
     @staticmethod
     def _provider_fanout(provider: object) -> tuple[int, int, int, int]:
         """The relation fan-out-guard tally a Provider exposes.
@@ -304,6 +318,23 @@ class LocalRunner:
         """
         value = getattr(provider, "endpoint_retries", 0)
         return value if isinstance(value, int) else 0
+
+    @staticmethod
+    def _provider_induction_tally(provider: object) -> tuple[int, int]:
+        """The schema-induction fail-open tally a LabelInducer Provider exposes (W4, ADR-0038).
+
+        Returns ``(fallbacks, documents)``: how many documents fell back to config labels (a safety
+        net bit — malformed/truncated/schema-invalid/empty output, or an unreachable endpoint) out
+        of how many the Stage attempted. A Provider without the attributes (every non-induction
+        Provider) contributes ``(0, 0)`` — read defensively so the seam names no base class
+        (ADR-0004), the same discipline as ``_provider_retry_count`` / ``_provider_fanout``.
+        """
+
+        def _int_attr(name: str) -> int:
+            value = getattr(provider, name, 0)
+            return value if isinstance(value, int) else 0
+
+        return (_int_attr("induction_fallbacks"), _int_attr("induction_documents"))
 
     # -- device routing (P3-F1, ADR-0036 §2) -------------------------------
 
@@ -440,7 +471,14 @@ class LocalRunner:
         """
         if stage.capability in (CapabilityKind.SOURCE, CapabilityKind.INTAKE_SCREENING):
             return ParserInput
-        if stage.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
+        if stage.capability in (
+            CapabilityKind.CHUNK,
+            CapabilityKind.CONTENT_SCREENING,
+            CapabilityKind.SCHEMA_INDUCTION,
+        ):
+            # Schema Induction is a chunk→chunk transform (it emits the SAME ChunkRecords with
+            # ``induced_labels`` populated), so it checkpoints and threads ChunkRecords exactly
+            # like Chunk / Content Screening.
             return ChunkRecord
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             return EntityMention
@@ -510,7 +548,11 @@ class LocalRunner:
                 return RelationMention
             if parent.capability is CapabilityKind.ENTITY_EXTRACTION:
                 return EntityMention
-            if parent.capability in (CapabilityKind.CHUNK, CapabilityKind.CONTENT_SCREENING):
+            if parent.capability in (
+                CapabilityKind.CHUNK,
+                CapabilityKind.CONTENT_SCREENING,
+                CapabilityKind.SCHEMA_INDUCTION,
+            ):
                 return ChunkRecord
             if parent.capability is CapabilityKind.PARSE:
                 return DocumentRecord
@@ -999,6 +1041,7 @@ class LocalRunner:
                 duration_ms=round(duration * 1000.0, 3),
             )
 
+            induction_fallbacks, induction_documents = self._drain_induction_tally()
             stage_metrics.append(
                 StageMetrics(
                     name=stage.name,
@@ -1009,6 +1052,8 @@ class LocalRunner:
                     duration_seconds=round(duration, 6),
                     runner=runner_name,
                     endpoint_retries=self._drain_retry_count(),
+                    induction_fallbacks=induction_fallbacks,
+                    induction_documents=induction_documents,
                     **profile_fields,  # type: ignore[arg-type]
                 )
             )
@@ -1053,6 +1098,7 @@ class LocalRunner:
             )
         finally:
             self._last_stage_retries = self._provider_retry_count(provider)
+            self._last_stage_induction = self._provider_induction_tally(provider)
             if stage.capability in (
                 CapabilityKind.RELATION_EXTRACTION,
                 CapabilityKind.FUSED_ENTITY_RELATION,
@@ -1118,6 +1164,25 @@ class LocalRunner:
             # Export; quarantined chunks are removed and persisted for audit.
             return list(content_outcome.passed)
 
+        if stage.capability is CapabilityKind.SCHEMA_INDUCTION:
+            if not isinstance(provider, LabelInducer):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the LabelInducer capability."
+                )
+                raise ContractError(msg)
+            # W4: a chunk→chunk transform (the Content-Screening shape). It consumes the run's
+            # chunks and returns the SAME chunks with ``induced_labels`` populated (one LLM call
+            # per document, broadcast to that doc's chunks). Fail-open lives in the Provider: a
+            # chunk it could not annotate flows through with ``induced_labels`` still None, so a
+            # downstream extractor falls back to its config labels and the run never crashes. The
+            # 1:1 chunk stream then feeds Entity/Relation Extraction, which read induced labels off
+            # the chunk directly. Redaction reads a per-document DocumentRecord, so when a stack
+            # also wires this chunk stream into ``redact`` the Runner projects each document's
+            # induced labels onto its DocumentRecord (the bridge in the REDACTION dispatch below).
+            induce_chunks = self._as_type(stage, incoming, ChunkRecord)
+            return list(provider.induce(induce_chunks))
+
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             if not isinstance(provider, EntityExtractor):
                 msg = (
@@ -1173,7 +1238,24 @@ class LocalRunner:
             # corpus's PII variant. It depends on Parse (not Chunk): the chunk stream
             # is markup-stripped with remapped offsets, so scanning it would fabricate
             # a broken coordinate system for the spans and page resolution.
-            redaction_docs = self._as_type(stage, incoming, DocumentRecord)
+            #
+            # W4 (ADR-0038 §2): the induced PII schema lives on the CHUNKs the
+            # schema_induction Stage annotated, but Redaction reads a DocumentRecord.
+            # When a stack ALSO wires the induced chunk stream (``redact depends_on:
+            # [parse, induce]``), project each document's chunk-carried induced labels
+            # onto its DocumentRecord (chunk→document bridge) so redaction.gliner_pii's
+            # ``document.induced_labels`` UNIONs the induced pii_types onto its config
+            # floor. A ChunkRecord side is OPTIONAL: with no induced chunks wired (every
+            # existing stack) the documents pass through unchanged (induced_labels stays
+            # None ⇒ config PII labels, byte-identical). A non-DocumentRecord, non-Chunk
+            # carrier is still rejected by ``_as_type``.
+            redaction_docs = [r for r in incoming if isinstance(r, DocumentRecord)]
+            redaction_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
+            self._require_redaction_inputs(stage, incoming, redaction_docs)
+            if redaction_chunks:
+                redaction_docs = project_induced_onto_documents(
+                    redaction_docs, redaction_chunks
+                )
             return list(provider.redact(redaction_docs))
 
         if stage.capability is CapabilityKind.PROFILING:
@@ -1612,6 +1694,31 @@ class LocalRunner:
                 f"Stage {stage.name!r} (relation_extraction) received no ChunkRecords. "
                 f"A Relation-Extraction Stage must also depend on the Chunk (or "
                 f"Content-Screening) Stage for the text + page map. Check depends_on."
+            )
+            raise ContractError(msg)
+
+    @staticmethod
+    def _require_redaction_inputs(
+        stage: Stage, incoming: list[StageOutput], documents: list[DocumentRecord]
+    ) -> None:
+        """A Redaction Stage must be wired to a Parse parent (the documents it redacts).
+
+        Redaction depends on a Parse parent for the DocumentRecords (the whole-document markdown +
+        page map its PII spans are keyed to). It MAY additionally depend on the schema_induction
+        Stage's ChunkRecord stream (W4) — the runner projects those chunks' induced pii_types onto
+        the DocumentRecords so Redaction unions them onto its config floor. So a ChunkRecord side is
+        optional (and any leftover carrier is rejected by ``_as_type`` on the doc side already), but
+        a non-empty input that carries NO DocumentRecord means the Pipeline wired Redaction to the
+        wrong parent — surface it as a clear typed error. An empty run is legitimately empty.
+        """
+        if not incoming:
+            return
+        if not documents:
+            got = sorted({type(r).__name__ for r in incoming})
+            msg = (
+                f"Stage {stage.name!r} (redaction) received no DocumentRecords "
+                f"(got: {', '.join(got)}). A Redaction Stage must depend on the Parse "
+                f"Stage (the documents it redacts). Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)
 

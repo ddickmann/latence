@@ -37,6 +37,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
+from latence_core.induced import LabelSlot, effective_labels
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
@@ -179,7 +180,14 @@ class GlinerPIIRedactor:
                 if model is None:
                     model = self._load_model()
                 page_index = PageOffsetIndex(page_map) if page_map is not None else None
-                spans = self._detect(model, text, action, allowed, page_index)
+                # W4 label-source seam (ADR-0038): UNION the config PII types with any pii_types the
+                # OPTIONAL schema_induction Stage induced for this document (``induced_labels``),
+                # deduped + order-stable. Absent (the default, every existing stack) these are
+                # exactly the config labels — byte-identical. The detection LOGIC below is the same.
+                pii_labels = effective_labels(
+                    self._labels, document.induced_labels, LabelSlot.PII
+                )
+                spans = self._detect(model, text, action, allowed, page_index, pii_labels)
                 masked = apply_masking(text, spans)
 
             provenance = base_prov.model_copy(
@@ -208,17 +216,18 @@ class GlinerPIIRedactor:
         action: RedactionAction,
         allowed: set[str] | None,
         page_index: PageOffsetIndex | None,
+        labels: list[str],
     ) -> list[PIISpan]:
         """Run the model over the whole document text and build non-overlapping PIISpans.
 
         GLiNER's ``predict_entities`` returns entity dicts with document-offset
-        ``start``/``end``, ``label``, and ``score``. A type not in a policy's allow-list
-        is dropped; overlaps are resolved (earlier start, longer span, type) so a
-        stable, non-overlapping span set results — the invariant the RedactionRecord
-        contract enforces and the masking relies on.
+        ``start``/``end``, ``label``, and ``score``. ``labels`` is the effective PII-type set
+        (config ∪ induced). A type not in a policy's allow-list is dropped; overlaps are resolved
+        (earlier start, longer span, type) so a stable, non-overlapping span set results — the
+        invariant the RedactionRecord contract enforces and the masking relies on.
         """
         raw: list[dict[str, Any]] = model.predict_entities(
-            text, self._labels, threshold=self._threshold
+            text, labels, threshold=self._threshold
         )
         # (start, end, type, value, score) tuples, filtered + sorted deterministically.
         candidates: list[tuple[int, int, str, str, float]] = []

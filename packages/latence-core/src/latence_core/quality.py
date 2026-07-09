@@ -128,6 +128,17 @@ class StageMetrics(BaseModel):
     # that triggered the error (the no-PII discipline the whole report keeps).
     error_count: int = Field(default=0)
     error_category: str | None = Field(default=None)
+    # W4 (schema induction, ADR-0038): how many documents the OPTIONAL ``schema_induction`` Stage
+    # **failed open** on — an induction that hit a safety net (malformed/truncated/schema-invalid/
+    # empty output, or an unreachable endpoint) and fell back to the extractors' config labels so
+    # the run continued. 0 for a Stage that induced every document cleanly, and 0 for every
+    # non-induction Stage (it never populates this). A count only — never the failing document's
+    # content (the no-PII discipline the whole report keeps) — the Quality-Report note the W4
+    # fail-open-never-crash posture requires, so an operator sees the LLM degraded rather than only
+    # a log line. ``induction_documents`` is the total documents the Stage attempted, so the note
+    # reads "N of M documents fell back to config labels".
+    induction_fallbacks: int = Field(default=0)
+    induction_documents: int = Field(default=0)
     # P3-F1 (ADR-0036 §2): the provider-profile + device-routing columns for this Stage,
     # read from the Provider's declared ProviderProfile and the device seam's decision.
     # A Provider that declares no profile leaves ``compute``/``model_id``/``license`` None

@@ -180,10 +180,12 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 13 by the H-C1 §4 redaction no-op floor (RedactionRecord gains
-    # ``redaction_disabled_for_sensitive``); 12 was the DeltaChurn affected-set-witness fields
-    # (issue #42); 11 the S4 offset-map coordinate fix; 10 the S11 incremental-delta contracts.
-    assert SCHEMA_VERSION == 13
+    # Bumped to 14 by W4 schema induction (InducedLabels contract + ChunkRecord/DocumentRecord gain
+    # the additive ``induced_labels`` field); 13 was the H-C1 §4 redaction no-op floor
+    # (RedactionRecord gains ``redaction_disabled_for_sensitive``); 12 the DeltaChurn
+    # affected-set-witness fields (issue #42); 11 the S4 offset-map coordinate fix; 10 the S11
+    # incremental-delta contracts.
+    assert SCHEMA_VERSION == 14
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

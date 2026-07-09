@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-schema-inducer"
+version = "0.1.0"
+description = "Unsupervised schema-induction (LabelInducer) Provider — a small OpenAI-compatible LLM induces a document's own entity/relation/PII label schema — for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "schema-induction", "zero-shot", "llm", "openai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# The endpoint client is optional/heavy relative to the thin core (ADR-0016): it
+# ships with THIS Provider, not latence-core. The 'openai' client is Apache-2.0
+# (code); this Provider bundles NO weights — it calls a user-supplied endpoint
+# (OpenAI, OpenRouter, or an on-prem/air-gapped vLLM). Nothing is called unless a
+# Pipeline configures this Provider.
+# H-G1 dep cap: 'openai' is a fast-moving lib whose API breaks across majors, so it carries an
+# upper cap to keep a downstream install from silently pulling an API-breaking major. The current
+# major is 2.x (verified 2026-07-08), so the cap is '<3' (the real current-major boundary) — the
+# same cap latence-relation-llm uses.
+dependencies = [
+    "latence-core",
+    "openai>=1.0,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'label_inducer.llm' available to any Pipeline with no core change
+# (ADR-0004/0038). Off by default: a stack with no schema_induction Stage is byte-identical.
+[project.entry-points."latence.providers"]
+"label_inducer.llm" = "latence_schema_inducer.provider:LLMLabelInducer"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_schema_inducer"]

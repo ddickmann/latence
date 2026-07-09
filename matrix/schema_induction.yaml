@@ -1,0 +1,34 @@
+# matrix/schema_induction.yaml — the Schema Induction bake-off (ADR-0036 §4; W4-schema-induction).
+#
+# Holds every OTHER Stage at stacks/schema-induction.yaml (the default spine + a schema_induction
+# Stage + the induced∪config extractor seam) and measures ONLY the schema-induction Provider (the
+# `induce` node):
+#
+#   label_inducer.llm — a small OpenAI-compatible LLM (default gpt-4.1-mini) that induces a
+#                       document's {entity,relation,pii} label schema with structured JSON output +
+#                       every safety net. Its `openai` client + a key/served model are the heavy
+#                       path (ADR-0016), absent from the CPU-only CI env; it pins `device: cuda`
+#                       (honest "needs a served LLM" intent), so the CI row is an HONEST
+#                       skip-with-flag (no key/model → no induced labels; the extractors fall back to
+#                       their config labels) — NEVER a fabricated quality/throughput number (#64).
+#
+# There is (today) ONE schema-induction Provider, so this matrix is a single-candidate measurement
+# harness rather than a two-way comparison: it exists so an operator on a KEYED host (with
+# latence-schema-inducer installed + OPENAI_API_KEY, or a base_url pointing at OpenRouter/vLLM) can
+# measure induced-label quality + throughput through the SAME bake-off harness the other Capabilities
+# use, and so a second inducer Provider (a different LLM / prompt) drops in as a second row with no
+# harness change. Real gpt-4.1-mini numbers come from the maintainer's keyed pod run
+# (scripts/validate-schema-induction-on-gpu.md) — never fabricated here.
+stage: schema_induction
+
+base_stack: stacks/schema-induction.yaml
+
+candidates:
+  - provider: label_inducer.llm
+    config:
+      model: gpt-4.1-mini    # base_url: https://openrouter.ai/api/v1 (OpenRouter) | http://<vllm>:8000/v1
+      granularity: doc
+      max_tokens: 2048
+      max_labels: 40
+      temperature: 0.0
+      device: cuda           # honest "needs a served LLM"; skipped-with-flag where none (device seam)

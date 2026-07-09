@@ -128,6 +128,42 @@ class ContentScreener(Protocol):
 
 
 @runtime_checkable
+class LabelInducer(Protocol):
+    """Induces a document's own label schema and annotates its chunks (CONTEXT ``Classification``).
+
+    The W4 **schema-induction** Capability (ADR-0038): an OPTIONAL Stage inserted right after
+    Content Screening and before the extraction Stages. It restores the "point it at a folder and
+    it discovers its own schema" property — a small OpenAI-compatible LLM with structured JSON
+    output reads the document text and induces the entity / relation / PII **types** actually
+    evidenced in it, then broadcasts that :class:`~latence_core.contracts.InducedLabels` schema
+    onto every :class:`~latence_core.contracts.ChunkRecord` of the document. The extraction Stages
+    then UNION the induced types onto their config labels (the ``latence_core.induced`` seam), so a
+    Stage with no config labels becomes fully unsupervised and one with config labels is
+    supervised-plus-augmented — without any extractor rewrite.
+
+    It is a **chunk→chunk transform** (the Content-Screening shape): it consumes the run's chunks
+    and yields the SAME chunks with ``induced_labels`` populated (a doc-level Provider groups chunks
+    by ``document_record_id`` and makes one LLM call per document by default, broadcasting the doc's
+    induced labels to all its chunks). The Capability names no LLM and no label set — the Provider
+    supplies both. It is **fail-open (G1 posture)**: any inducer failure (network, malformed output,
+    truncation, schema-invalid, empty) leaves a chunk's ``induced_labels`` ``None`` so the extractor
+    falls back to its config labels and the run never crashes — the untrusted-LLM discipline lives
+    entirely in the Provider. A chunk it could not annotate simply flows through unchanged.
+    """
+
+    def induce(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """Consume the run's chunks; yield the same chunks with ``induced_labels`` set.
+
+        The stream is threaded through 1:1 (never dropped or reordered): a chunk the Provider could
+        induce labels for carries a populated :class:`~latence_core.contracts.InducedLabels`; a
+        chunk whose induction failed (fail-open) flows through with ``induced_labels`` still
+        ``None``. Deterministic + seeded (temperature 0, stable label order) so a run is
+        byte-reproducible (Baseline bar).
+        """
+        ...
+
+
+@runtime_checkable
 class EntityExtractor(Protocol):
     """Finds typed entity mentions in chunked text (CONTEXT ``Entity Extraction``).
 

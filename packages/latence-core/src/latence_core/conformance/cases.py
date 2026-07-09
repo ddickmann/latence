@@ -54,6 +54,7 @@ class Capability(StrEnum):
     CHUNK = "chunk"
     INTAKE_SCREENING = "intake_screening"
     CONTENT_SCREENING = "content_screening"
+    SCHEMA_INDUCTION = "schema_induction"
     ENTITY = "entity"
     RELATION = "relation"
     REDACTION = "redaction"
@@ -76,6 +77,7 @@ _PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     "parse": Capability.PARSE,
     "parser": Capability.PARSE,
     "chunk": Capability.CHUNK,
+    "label_inducer": Capability.SCHEMA_INDUCTION,
     "entity": Capability.ENTITY,
     "relation": Capability.RELATION,
     "redaction": Capability.REDACTION,
@@ -559,6 +561,58 @@ def _content_screening_case() -> ConformanceCase:
         valid_output=valid_output,
         adversarial=adversarial,
         empty_ok=True,
+    )
+
+
+def _schema_induction_case() -> ConformanceCase:
+    """Schema Induction (W4): induce a doc's labels + annotate its chunks; a bad reply fails open.
+
+    Stub-scoped (an OpenAI-compatible LLM endpoint): the valid invoke installs the ``openai`` stub
+    with a canned ``{entity,relation,pii}`` reply and asserts every returned chunk is the SAME chunk
+    (1:1, order-stable) now carrying a populated
+    :class:`~latence_core.contracts.InducedLabels`. The adversarial invoke installs a reply that is
+    NOT valid JSON of the required shape (a schema-invalid safety-net trigger): the Provider FAILS
+    OPEN — it returns the chunks unchanged with ``induced_labels`` still ``None`` and never crashes
+    (the W4 fail-open-never-crash posture), a graceful no-op C2 accepts.
+    """
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        with stubs.install_openai(reply=stubs.schema_induction_reply()):
+            return list(provider.induce(fixtures.canonical_corpus().chunks))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        # C1 boundary contract (Provenance/Classification/offsets) — a chunk→chunk transform.
+        if not _records_contract_valid(records, empty_ok=True):
+            return False
+        from latence_core.contracts import ChunkRecord, InducedLabels
+
+        chunks = [r for r in records if isinstance(r, ChunkRecord)]
+        if not chunks:
+            return False
+        # Every chunk carries the induced schema (the canned reply had non-empty slots), and the
+        # model_id is stamped (audit) — the genuine annotation check, not a no-op.
+        return all(
+            isinstance(c.induced_labels, InducedLabels)
+            and bool(c.induced_labels.entity_types)
+            and bool(c.induced_labels.model_id)
+            for c in chunks
+        )
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # A schema-invalid reply (valid JSON, wrong shape): the Provider falls back to config labels
+        # (induced_labels stays None) and returns the chunks unchanged — a graceful, non-crashing
+        # no-op. NOT a raise: fail-open is the W4 requirement.
+        with stubs.install_openai(reply='{"not_the_shape": [1, 2, 3]}'):
+            return _capture_raise(lambda: list(provider.induce(fixtures.canonical_corpus().chunks)))
+
+    return ConformanceCase(
+        capability=Capability.SCHEMA_INDUCTION,
+        config={"base_url": "http://stub/v1"},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+        stub_scoped=True,
     )
 
 
@@ -1099,6 +1153,7 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
     Capability.CHUNK: _chunk_case(),
     Capability.INTAKE_SCREENING: _intake_screening_case(),
     Capability.CONTENT_SCREENING: _content_screening_case(),
+    Capability.SCHEMA_INDUCTION: _schema_induction_case(),
     Capability.ENTITY: _entity_case(stub_scoped=False, gliner=False),
     Capability.RELATION: _relation_case(stub_scoped=False, gliner=False),
     Capability.REDACTION: _redaction_case(stub_scoped=False),

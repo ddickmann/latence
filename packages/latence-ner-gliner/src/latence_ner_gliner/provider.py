@@ -44,6 +44,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import EntityMention
+from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import ProviderProfile
@@ -172,9 +173,15 @@ class GlinerEntityExtractor:
             yield from self._extract_one(model, chunk)
 
     def _extract_one(self, model: Any, chunk: ChunkRecord) -> Iterator[EntityMention]:
+        # W4 label-source seam (ADR-0038): the effective label set is the config labels UNIONed with
+        # any entity types the OPTIONAL schema_induction Stage induced for this chunk's document
+        # (``chunk.induced_labels``), deduped + order-stable. With no induced labels (the default,
+        # every existing stack) this is exactly ``self._labels`` — byte-identical. The extraction
+        # LOGIC below is unchanged; only where the label list comes from.
+        labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY)
         # GLiNER returns dicts with chunk-local 'start'/'end', 'label', 'score'.
         raw: list[dict[str, Any]] = model.predict_entities(
-            chunk.content, self._labels, threshold=self._threshold
+            chunk.content, labels, threshold=self._threshold
         )
         # Deterministic ordering: by chunk-local start, then label.
         raw.sort(key=lambda e: (int(e["start"]), str(e["label"])))

@@ -65,9 +65,9 @@ def _record(**overrides: object) -> RedactionRecord:
 
 
 def test_schema_version_is_current() -> None:
-    # SCHEMA_VERSION is corpus-wide (13 after the H-C1 §4 redaction no-op-floor flag on
+    # SCHEMA_VERSION is corpus-wide (14 after the W4 induced-labels field, on
     # RedactionRecord); a RedactionRecord serialized now stamps it, still a valid record.
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     assert _record().schema_version == SCHEMA_VERSION
 
 

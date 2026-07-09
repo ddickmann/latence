@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
+from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import ProviderProfile
@@ -190,10 +191,18 @@ class GlinerRelexExtractor:
         # Relation dicts carry 'head'/'tail' sub-dicts ('start'/'end'/'text'/'type'/
         # 'entity_idx') plus 'relation' + 'score'. We resolve the relations back to the
         # EntityMentions we stamp by their (start, end) span.
+        # W4 label-source seam (ADR-0038): UNION the config labels with any entity/relation types
+        # the OPTIONAL schema_induction Stage induced for this chunk's document, deduped +
+        # order-stable. Absent (the default, every existing stack) these are exactly the config
+        # labels — byte-identical. The extraction LOGIC below is unchanged.
+        entity_labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY)
+        relation_labels = effective_labels(
+            self._relation_labels, chunk.induced_labels, LabelSlot.RELATION
+        )
         raw_entities, raw_relations = model.predict_relations(
             chunk.content,
-            self._labels,
-            self._relation_labels,
+            entity_labels,
+            relation_labels,
             threshold=self._threshold,
         )
         raw_entities = list(raw_entities)

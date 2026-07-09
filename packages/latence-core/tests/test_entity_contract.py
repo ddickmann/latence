@@ -50,9 +50,9 @@ def _mention(**overrides: object) -> EntityMention:
 
 
 def test_schema_version_is_current() -> None:
-    # SCHEMA_VERSION is corpus-wide (13 after the H-C1 §4 redaction no-op-floor flag). An
+    # SCHEMA_VERSION is corpus-wide (14 after the W4 induced-labels field). An
     # EntityMention serialized now stamps the current version, still a valid EntityMention.
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     assert _mention().schema_version == SCHEMA_VERSION
 
 

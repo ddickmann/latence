@@ -47,13 +47,20 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
+from latence_core.induced import LabelSlot, effective_labels
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import ChunkRecord, EntityMention, PageMap, Provenance
+    from latence_core.contracts import (
+        ChunkRecord,
+        EntityMention,
+        InducedLabels,
+        PageMap,
+        Provenance,
+    )
 
 _DEFAULT_MODEL = "gpt-4o-mini"
 _SYSTEM_PROMPT = (
@@ -130,7 +137,8 @@ class LLMRelationExtractor:
             )
             raise ValueError(msg)
         self._labels = [str(label) for label in labels]
-        self._label_set = set(self._labels)
+        # NOTE: the label SET is now computed per-document from the effective labels (config ∪
+        # induced, W4/ADR-0038) in ``_valid_relations``, not a fixed instance set.
         self._model = str(config.get("model", _DEFAULT_MODEL))
         self._base_url = config.get("base_url")
         self._api_key = config.get("api_key")
@@ -177,6 +185,11 @@ class LLMRelationExtractor:
         chunk_list = list(chunks)
         doc_text = _document_texts(chunk_list)
         doc_page_map = _document_page_maps(chunk_list)
+        # W4 label-source seam (ADR-0038): the relation types the OPTIONAL schema_induction Stage
+        # induced per document, read off the document's chunks. UNIONed onto the config labels
+        # per document below; absent (the default) ⇒ the effective labels are exactly the config
+        # labels (byte-identical to every existing stack).
+        doc_induced = _document_induced_labels(chunk_list)
 
         by_doc: dict[str, list[EntityMention]] = {}
         order: list[str] = []
@@ -193,8 +206,16 @@ class LLMRelationExtractor:
                 continue
             if client is None:
                 client = self._get_client()
+            labels = effective_labels(
+                self._labels, doc_induced.get(doc_id), LabelSlot.RELATION
+            )
             yield from self._relate_one_document(
-                client, doc_id, doc_mentions, doc_text.get(doc_id, ""), doc_page_map.get(doc_id)
+                client,
+                doc_id,
+                doc_mentions,
+                doc_text.get(doc_id, ""),
+                doc_page_map.get(doc_id),
+                labels,
             )
 
     def _relate_one_document(
@@ -204,15 +225,16 @@ class LLMRelationExtractor:
         mentions: list[EntityMention],
         text: str,
         page_map: PageMap | None,
+        labels: list[str],
     ) -> Iterator[RelationMention]:
         # Order mentions in document position so the numbered list is stable and the
         # model sees them in reading order. Cap the count to bound the prompt.
         ordered = sorted(mentions, key=lambda m: (m.provenance.char_start or 0, m.record_id))[
             : self._max_mentions
         ]
-        raw = self._call_model(client, text, ordered)
+        raw = self._call_model(client, text, ordered, labels)
         page_index = PageOffsetIndex(page_map) if page_map is not None else None
-        for emitted, rel in enumerate(self._valid_relations(raw, ordered)):
+        for emitted, rel in enumerate(self._valid_relations(raw, ordered, labels)):
             head, tail, label, confidence = rel
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
@@ -232,13 +254,13 @@ class LLMRelationExtractor:
             )
 
     def _call_model(
-        self, client: Any, text: str, mentions: list[EntityMention]
+        self, client: Any, text: str, mentions: list[EntityMention], labels: list[str]
     ) -> list[dict[str, Any]]:
         numbered = "\n".join(
             f"{i}: {m.text} ({m.label})" for i, m in enumerate(mentions)
         )
         user = (
-            f"Relation labels: {', '.join(self._labels)}\n\n"
+            f"Relation labels: {', '.join(labels)}\n\n"
             f"Document text:\n{text}\n\n"
             f"Entity mentions:\n{numbered}\n\n"
             "Return the JSON object of relations now."
@@ -295,20 +317,21 @@ class LLMRelationExtractor:
         self.endpoint_retries += 1
 
     def _valid_relations(
-        self, raw: list[dict[str, Any]], mentions: list[EntityMention]
+        self, raw: list[dict[str, Any]], mentions: list[EntityMention], labels: list[str]
     ) -> Iterator[tuple[EntityMention, EntityMention, str, float]]:
         """Resolve model output to valid (head, tail, label, confidence) tuples.
 
-        Drops any relation with an out-of-range mention index, an unknown label, or a
-        head == tail self-reference — so a hallucinated reference never becomes an
-        un-resolvable record. Deterministic order (as returned, then de-duplicated on
-        head/tail/label).
+        Drops any relation with an out-of-range mention index, an unknown label (a label not in
+        the per-document effective set — config ∪ induced), or a head == tail self-reference — so a
+        hallucinated reference never becomes an un-resolvable record. Deterministic order (as
+        returned, then de-duplicated on head/tail/label).
         """
+        label_set = set(labels)
         n = len(mentions)
         seen: set[tuple[str, str, str]] = set()
         for rel in raw:
             label = str(rel.get("label", ""))
-            if label not in self._label_set:
+            if label not in label_set:
                 continue
             try:
                 head_idx = int(rel["head"])
@@ -364,6 +387,21 @@ def _document_texts(chunks: list[ChunkRecord]) -> dict[str, str]:
             buf[start : start + len(chunk.content)] = chunk.content
         texts[doc_id] = "".join(buf)
     return texts
+
+
+def _document_induced_labels(chunks: list[ChunkRecord]) -> dict[str, InducedLabels | None]:
+    """The induced-label schema per document (first chunk carrying one wins; else None).
+
+    The schema_induction Stage broadcasts one document's induced labels onto ALL its chunks, so the
+    first chunk with a populated ``induced_labels`` carries the whole document's schema. A document
+    whose chunks all have ``induced_labels is None`` (no schema_induction Stage, or an induction
+    that    failed open) maps to ``None`` — the effective labels then equal the config labels.
+    """
+    labels: dict[str, InducedLabels | None] = {}
+    for chunk in chunks:
+        if chunk.document_record_id not in labels and chunk.induced_labels is not None:
+            labels[chunk.document_record_id] = chunk.induced_labels
+    return labels
 
 
 def _document_page_maps(chunks: list[ChunkRecord]) -> dict[str, PageMap | None]:

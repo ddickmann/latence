@@ -56,7 +56,12 @@ class CapabilityKind(StrEnum):
     exports its text unchanged, so any vector DB can still ingest it (the ADR-0017 AC). The
     ``EMBEDDING`` kind names the seam so a Provider can register + be discovered under it; the
     in-core reference is the deterministic ``embedding.hashing`` (the learned e5-small is a
-    pluggable package).
+    pluggable package). W4-schema-induction adds the OPTIONAL ``SCHEMA_INDUCTION`` Capability
+    (ADR-0038): a chunk→chunk Stage inserted after Content Screening and before the extraction
+    Stages that uses a small OpenAI-compatible LLM to induce a document's own entity/relation/PII
+    label schema and annotate its chunks (:class:`~latence_core.contracts.InducedLabels`), which the
+    extraction Stages UNION onto their config labels. It is genuinely optional — a stack without a
+    ``schema_induction`` Stage is byte-identical to today (the induced-labels field defaults None).
     """
 
     SOURCE = "source"
@@ -64,6 +69,7 @@ class CapabilityKind(StrEnum):
     PARSE = "parse"
     CHUNK = "chunk"
     CONTENT_SCREENING = "content_screening"
+    SCHEMA_INDUCTION = "schema_induction"
     ENTITY_EXTRACTION = "entity_extraction"
     RELATION_EXTRACTION = "relation_extraction"
     FUSED_ENTITY_RELATION = "fused_entity_relation"
@@ -102,6 +108,15 @@ class Pipeline(BaseModel):
     # gold set simply reports no gold-set section (ADR-0008).
     gold_set_uri: str | None = Field(
         default=None, description="Optional gold-set annotation file (JSON/YAML) on Storage."
+    )
+    # W4 (ADR-0038): a documentation/intent flag a stack sets to declare that unsupervised
+    # schema-induction is ON (the ``schema_induction`` Stage is present and every extractor reads
+    # its induced labels). It is an OPT-IN marker for readers + tooling, NOT a behaviour switch —
+    # the actual wiring is the presence of the ``schema_induction`` Stage and the extractors'
+    # additive induced∪config seam. Defaults False, so every existing stack is byte-identical.
+    auto_generate_labels: bool = Field(
+        default=False,
+        description="Opt-in marker that this stack runs unsupervised schema induction (W4).",
     )
 
     @model_validator(mode="after")

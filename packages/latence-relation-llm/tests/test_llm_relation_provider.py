@@ -20,6 +20,7 @@ from latence_core.contracts import (
     ChunkRecord,
     Classification,
     EntityMention,
+    InducedLabels,
     PageMap,
     Provenance,
     RelationMention,
@@ -93,9 +94,11 @@ class _FakeCompletions:
     error: Exception | None = None
     _fail_times: int = 0
     calls: int = 0
+    last_messages: list[dict[str, Any]] = []
 
     def create(self, **kwargs: Any) -> Any:
         type(self).calls += 1
+        type(self).last_messages = list(kwargs.get("messages", []))
         err = type(self).error
         if err is not None and type(self).calls <= type(self)._fail_times:
             raise err
@@ -126,7 +129,12 @@ def fake_openai(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOpenAI]:
     _FakeCompletions.error = None
     _FakeCompletions._fail_times = 0
     _FakeCompletions.calls = 0
+    _FakeCompletions.last_messages = []
     return _FakeOpenAI
+
+
+def _induced_chunk(text: str, induced: InducedLabels) -> ChunkRecord:
+    return _chunk(text).model_copy(update={"induced_labels": induced})
 
 
 def test_requires_labels_config() -> None:
@@ -159,6 +167,45 @@ def test_extracts_relation_and_resolves_indices(fake_openai: type[_FakeOpenAI]) 
     assert r.provenance.char_end == 25
     assert r.provenance.page_start == 1
     assert r.classification.sensitivity == "internal"
+
+
+def _relation_labels_from_prompt(messages: list[dict[str, Any]]) -> list[str]:
+    """Pull the 'Relation labels: a, b, c' line the provider embeds in the user prompt."""
+    for message in messages:
+        content = str(message.get("content", ""))
+        for line in content.splitlines():
+            if line.startswith("Relation labels:"):
+                return [x.strip() for x in line.removeprefix("Relation labels:").split(",") if x.strip()]
+    raise AssertionError("no 'Relation labels:' line found in the prompt")
+
+
+def test_induced_relation_types_union_onto_relation_slot(fake_openai: type[_FakeOpenAI]) -> None:
+    # W4 seam (TESTS lens): the LLM relation extractor asks the model for the UNION of the config
+    # relation labels + the induced relation_types (the RELATION slot only — NOT entity_types), read
+    # off the chunk's induced_labels. A regression that mis-slotted or dropped this FAILS here.
+    _FakeCompletions.reply = json.dumps({"relations": []})
+    induced = InducedLabels(
+        model_id="test-model",
+        entity_types=["location"],  # must NOT leak into the relation-label prompt
+        relation_types=["located_in"],  # NOT in the config relation floor
+        pii_types=[],
+    )
+    chunk = _induced_chunk("Alice works for Acme Corp in Berlin.", induced)
+    mentions = [_mention(0, "PERSON", "Alice", 0, 5), _mention(1, "ORG", "Acme Corp", 16, 25)]
+    list(LLMRelationExtractor({"labels": ["works_for"]}).relate([chunk], mentions))
+    asked = _relation_labels_from_prompt(_FakeCompletions.last_messages)
+    # config floor first, then the induced relation type — and the induced entity type is absent.
+    assert asked == ["works_for", "located_in"]
+    assert "location" not in asked
+
+
+def test_no_induced_labels_asks_for_config_relation_floor(fake_openai: type[_FakeOpenAI]) -> None:
+    # Byte-identical backward-compat: no induced labels ⇒ exactly the config relation labels.
+    _FakeCompletions.reply = json.dumps({"relations": []})
+    chunk = _chunk("Alice works for Acme Corp.")
+    mentions = [_mention(0, "PERSON", "Alice", 0, 5), _mention(1, "ORG", "Acme Corp", 16, 25)]
+    list(LLMRelationExtractor({"labels": ["works_for"]}).relate([chunk], mentions))
+    assert _relation_labels_from_prompt(_FakeCompletions.last_messages) == ["works_for"]
 
 
 def test_base_url_and_key_passed_to_client(fake_openai: type[_FakeOpenAI]) -> None:

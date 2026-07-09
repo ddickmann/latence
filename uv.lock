@@ -42,6 +42,7 @@ members = [
     "latence-relation-gliner",
     "latence-relation-llm",
     "latence-runner-airflow",
+    "latence-schema-inducer",
 ]
 
 [[package]]
@@ -2084,6 +2085,21 @@ requires-dist = [
     { name = "latence-core", editable = "packages/latence-core" },
 ]
 provides-extras = ["airflow"]
+
+[[package]]
+name = "latence-schema-inducer"
+version = "0.1.0"
+source = { editable = "packages/latence-schema-inducer" }
+dependencies = [
+    { name = "latence-core" },
+    { name = "openai" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latence-core", editable = "packages/latence-core" },
+    { name = "openai", specifier = ">=1.0,<3" },
+]
 
 [[package]]
 name = "lazy-object-proxy"

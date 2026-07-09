@@ -1,0 +1,143 @@
+# stacks/schema-induction.yaml — the OPT-IN unsupervised schema-induction stack (W4, ADR-0038).
+#
+# The "point it at a folder and it discovers its own schema" stack: the OPTIONAL `schema_induction`
+# Stage (a small OpenAI-compatible LLM, `label_inducer.llm`) sits between Content Screening and the
+# extraction Stages and induces, per document, the entity/relation/PII TYPES actually evidenced in
+# the data. The extraction Stages then UNION those induced types onto their config-label FLOOR
+# (`config ∪ induced`, ADR-0038) — so with EMPTY config labels the extractors are fully
+# unsupervised, and with config labels they are supervised-plus-augmented.
+#
+#   Source -> Intake -> Parse -> Chunk -> Content Screening
+#     -> Schema Induction   (label_inducer.llm: LLM induces {entity,relation,pii} types per doc)
+#     -> Entity + Relation  (ONE fused entity.gliner + relation via relation.gliner_relex — the
+#                            fused NER+RE Provider, ADR-0013 — reading induced ∪ config labels)
+#     -> Redaction          (redaction.gliner_pii: learned PII over induced ∪ config pii_types)
+#     -> Disambiguation -> Graph Assembly -> Export (KG)
+#     -> Export (RAG corpus)
+#
+# `auto_generate_labels: true` documents intent (the whole feature is ON): the Stage is present and
+# every extractor reads the induced labels. Remove the `schema_induction` Stage (or set this false)
+# and the stack is BYTE-IDENTICAL to a plain supervised stack — the induced-labels field defaults
+# None and every extractor uses its config labels exactly as before (the backward-compat invariant).
+#
+# DEVICE HONESTY (P3-F1 / the G1 skip-with-flag posture): the LLM inducer + the learned extraction
+# Stages each pin `device: cuda` and ship in SEPARATE heavy packages (ADR-0016) absent from the
+# CPU-only dev/CI env, so `latence stack validate stacks/schema-induction.yaml` on a CPU-only host
+# reports them **skipped-with-flag** (needs a key / a rig — NEVER a fabricated number, #64) and
+# still validates the CPU-reachable spine (Source -> ... -> Content Screening) end-to-end. On a real
+# keyed host with the heavy packages installed, the inducer runs (`label_inducer.llm` against
+# OpenAI/OpenRouter/vLLM) and its induced labels flow into the learned extractors. Real gpt-4.1-mini
+# validation is the maintainer's keyed pod run — see scripts/validate-schema-induction-on-gpu.md.
+name: latence-schema-induction-stack
+auto_generate_labels: true
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152
+      max_zip_ratio: 50.0
+
+  - name: parse
+    capability: parse
+    provider: parser.pdfplumber
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  # --- The OPTIONAL schema-induction Stage (W4, ADR-0038) ---
+  # A small OpenAI-compatible LLM induces the document's own {entity,relation,pii} types with
+  # structured JSON output + every safety net (parse-repair, truncation retry, schema validation,
+  # label sanitization, fail-open-never-crash). base_url=None ⇒ OpenAI; set it for OpenRouter/vLLM.
+  # device: cuda is the honest "needs a key / a served model" intent → skip-with-flag on a CPU-only
+  # host (like the other endpoint Stages), so the CPU spine still validates offline.
+  - name: induce
+    capability: schema_induction
+    provider: label_inducer.llm          # latence-schema-inducer (openai client, heavy/keyed dep)
+    depends_on: [content_screen]
+    config:
+      model: openai/gpt-4.1-mini         # OpenRouter model id (openai/ prefix). Direct OpenAI: gpt-4.1-mini
+      base_url: https://openrouter.ai/api/v1   # null ⇒ OpenAI; http://<vllm-host>:8000/v1 ⇒ on-prem vLLM
+      # api_key from $OPENROUTER_API_KEY (env; never committed) — falls back to $OPENAI_API_KEY
+      granularity: chunk                 # per-chunk induction: labels track each chunk's actual content
+      max_tokens: 2048                    # generous budget; a truncated reply retries at double, then falls back
+      max_labels: 40
+      temperature: 0.0                    # deterministic
+      device: cuda                       # honest "needs a served LLM"; skip-with-flag where none
+
+  # --- ONE fused Entity+Relation Extraction Stage (ADR-0013), reading induced ∪ config labels ---
+  # `relation.gliner_relex` fulfils BOTH Capabilities in one pass. Its `labels`/`relation_labels`
+  # are the config FLOOR; the schema_induction Stage's induced entity_types/relation_types are
+  # UNIONed on per chunk (ADR-0038). Leaving the floor small (or empty) makes extraction lean on the
+  # induced schema — the unsupervised property.
+  - name: extract
+    capability: fused_entity_relation
+    provider: relation.gliner_relex
+    depends_on: [induce]
+    config:
+      labels: [person, organization]                 # entity FLOOR; induced entity_types union on
+      relation_labels: [works_for]                   # relation FLOOR; induced relation_types union on
+      device: cuda
+
+  - name: redact
+    capability: redaction
+    provider: redaction.gliner_pii       # learned PII over (config ∪ induced) pii_types
+    # depends_on Parse for the DocumentRecords (whole-doc markdown + page map the PII spans key to)
+    # AND the induce Stage for the chunk-carried induced schema: the runner projects each document's
+    # induced pii_types onto its DocumentRecord (chunk→document bridge, ADR-0038 §2) so the redactor
+    # UNIONs them onto the config floor. Drop `induce` here (or the whole Stage) ⇒ byte-identical.
+    depends_on: [parse, induce]
+    config:
+      pii_labels: [email, phone number]  # PII FLOOR; induced pii_types union on (ADR-0038)
+      device: cuda
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical
+    depends_on: [parse, extract]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [extract]
+    config:
+      kb:
+        - {kb_id: Q1, name: Acme, entity_type: organization}
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-schema-induction-stack}
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+    config: {basename: corpus}

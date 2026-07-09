@@ -33,13 +33,21 @@ from typing import Any
 
 
 class _StubCompletions:
-    """A fake ``chat.completions`` returning a canned reply set by the installer."""
+    """A fake ``chat.completions`` returning a canned reply set by the installer.
+
+    ``finish_reason`` is set on every returned choice so a Provider that DETECTS truncation (the W4
+    schema-inducer checks ``finish_reason == "length"``) sees a faithful field — a Provider that
+    ignores it (the pre-W4 endpoint Providers) is unaffected, since the real OpenAI response carries
+    it too. Default ``"stop"`` (a complete reply), matching the real API.
+    """
 
     reply: str = "{}"
+    finish_reason: str = "stop"
 
     def create(self, **_kwargs: Any) -> Any:
         message = types.SimpleNamespace(content=type(self).reply)
-        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+        choice = types.SimpleNamespace(message=message, finish_reason=type(self).finish_reason)
+        return types.SimpleNamespace(choices=[choice])
 
 
 class _StubChat:
@@ -70,9 +78,16 @@ class _StubOpenAI:
 
 
 @contextlib.contextmanager
-def install_openai(*, reply: str = "{}", dimension: int = 8) -> Iterator[None]:
-    """Install a fake ``openai`` module returning the given canned chat reply / embedding width."""
+def install_openai(
+    *, reply: str = "{}", dimension: int = 8, finish_reason: str = "stop"
+) -> Iterator[None]:
+    """Install a fake ``openai`` module returning the given canned chat reply / embedding width.
+
+    ``finish_reason`` (default ``"stop"``) is stamped on every returned chat choice so a Provider
+    that checks it for truncation (W4) is exercised faithfully.
+    """
     _StubCompletions.reply = reply
+    _StubCompletions.finish_reason = finish_reason
     _StubEmbeddings.dimension = dimension
     module = types.ModuleType("openai")
     module.OpenAI = _StubOpenAI  # type: ignore[attr-defined]
@@ -81,6 +96,7 @@ def install_openai(*, reply: str = "{}", dimension: int = 8) -> Iterator[None]:
     try:
         yield
     finally:
+        _StubCompletions.finish_reason = "stop"
         if saved is not None:
             sys.modules["openai"] = saved
         else:
@@ -418,6 +434,23 @@ def relation_chat_reply() -> str:
 def parse_chat_reply() -> str:
     """A canned Parse-endpoint reply: a clean markdown transcription (no page delimiter)."""
     return "Alice works for Acme Corp in Berlin."
+
+
+def schema_induction_reply() -> str:
+    """A canned schema-induction reply: the exact ``{entity,relation,pii}`` JSON shape (W4).
+
+    Keyed to the canonical fixture ("Alice works for Acme Corp in Berlin. Contact
+    alice@example.com about Acme Corp."): person/organization/location entities, a works_for/
+    located_in relation schema, and an email PII type — a realistic induced schema the conformance
+    case then confirms annotates the chunks.
+    """
+    return json.dumps(
+        {
+            "entity_types": ["person", "organization", "location"],
+            "relation_types": ["works_for", "located_in"],
+            "pii_types": ["email"],
+        }
+    )
 
 
 def gliner_entities() -> list[dict[str, Any]]:

@@ -28,6 +28,7 @@ from latence_core.contracts import (
     ChunkRecord,
     Classification,
     EntityMention,
+    InducedLabels,
     OffsetMap,
     OffsetSegment,
     PageMap,
@@ -332,6 +333,71 @@ def test_dict_parse_path_fails_against_tuple_api(fake_gliner: type[_FakeGLiNER])
     raw = model.predict_relations(chunk.content, ["person", "organization"], ["works_for"])
     with pytest.raises(AttributeError):
         _ = raw.get("entities")  # type: ignore[attr-defined]  # tuple has no .get
+
+
+class _CapturingGLiNER(_FakeGLiNER):
+    """Records the (entity_labels, relation_labels) each predict_relations call is asked for (W4)."""
+
+    captured: list[tuple[list[str], list[str]]] = []
+
+    def predict_relations(
+        self,
+        text: str,
+        labels: list[str],
+        relations: list[str],
+        threshold: float = 0.5,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        type(self).captured.append((list(labels), list(relations)))
+        return super().predict_relations(text, labels, relations, threshold, **kwargs)
+
+
+@pytest.fixture()
+def capturing_gliner(monkeypatch: pytest.MonkeyPatch) -> type[_CapturingGLiNER]:
+    module = types.ModuleType("gliner")
+    module.GLiNER = _CapturingGLiNER  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gliner", module)
+    _CapturingGLiNER.entities = []
+    _CapturingGLiNER.relations = []
+    _CapturingGLiNER.captured = []
+    return _CapturingGLiNER
+
+
+def test_induced_labels_union_onto_both_entity_and_relation_slots(
+    capturing_gliner: type[_CapturingGLiNER],
+) -> None:
+    # W4 seam (TESTS lens): the fused extractor must UNION the induced entity_types onto the config
+    # entity floor AND the induced relation_types onto the config relation floor — each on its OWN
+    # slot. A regression that mis-slotted them (e.g. passing ENTITY to the relation arg) FAILS here.
+    chunk = _chunk("Alice works for Acme Corp.")
+    chunk = chunk.model_copy(
+        update={
+            "induced_labels": InducedLabels(
+                model_id="test-model",
+                entity_types=["location"],  # NOT in the config entity floor
+                relation_types=["located_in"],  # NOT in the config relation floor
+                pii_types=[],
+            )
+        }
+    )
+    GlinerRelexExtractor(_config()).extract_fused([chunk])
+    assert capturing_gliner.captured, "the model was never asked to predict"
+    entity_labels, relation_labels = capturing_gliner.captured[0]
+    # entity slot: config floor first, then the induced entity type (order-stable union).
+    assert entity_labels == ["person", "organization", "location"]
+    # relation slot: config floor first, then the induced relation type — NOT the entity type.
+    assert relation_labels == ["works_for", "located_in"]
+
+
+def test_no_induced_labels_asks_for_config_floor_only(
+    capturing_gliner: type[_CapturingGLiNER],
+) -> None:
+    # Byte-identical backward-compat: a chunk with no induced labels ⇒ exactly the config floors.
+    GlinerRelexExtractor(_config()).extract_fused([_chunk("Alice works for Acme Corp.")])
+    assert capturing_gliner.captured
+    entity_labels, relation_labels = capturing_gliner.captured[0]
+    assert entity_labels == ["person", "organization"]
+    assert relation_labels == ["works_for"]
 
 
 def test_emitted_relations_have_real_endpoints(fake_gliner: type[_FakeGLiNER]) -> None:

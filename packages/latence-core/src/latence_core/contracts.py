@@ -121,7 +121,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # redaction control run NO detectors (skip / empty types / empty detector set), so an
 # empty ``pii_spans`` there means "control OFF", never "clean". Additive and defaulted
 # False, so a v12 RedactionRecord JSON still validates (ADR-0024 amended).
-SCHEMA_VERSION = 13
+#
+# v14 (W4 schema induction): the new OPTIONAL ``schema_induction`` Stage (a small
+# OpenAI-compatible LLM with structured JSON output) induces, per document, the entity /
+# relation / PII types actually evidenced in the data and annotates each record with an
+# :class:`InducedLabels` carrier so the extraction Stages can UNION those induced types onto
+# their config label floor (the "point it at a folder and it discovers its own schema"
+# property). ChunkRecord AND DocumentRecord each gain an optional ``induced_labels:
+# InducedLabels | None`` (additive field, mirrors the ``risk_markers`` annotation precedent —
+# a downstream Stage reads it off the record, not out-of-band). Default ``None`` ⇒ every
+# existing stack + record is byte-identical (a run with no ``schema_induction`` Stage never
+# populates it, and an extractor with a ``None`` induced field uses its config labels exactly
+# as before). See ADR-0038.
+SCHEMA_VERSION = 14
 
 
 class Provenance(BaseModel):
@@ -311,6 +323,14 @@ class DocumentRecord(Record):
     error: str | None = Field(
         default=None, description="Human-readable failure reason when disposition is PARSE_ERROR."
     )
+    induced_labels: InducedLabels | None = Field(
+        default=None,
+        description=(
+            "Per-document induced label schema (schema_induction Stage), so the per-document "
+            "Redaction Stage UNIONs the induced pii_types onto its config labels. None (default) "
+            "⇒ the document is unchanged and Redaction uses its config labels exactly as before."
+        ),
+    )
 
     @model_validator(mode="after")
     def _disposition_consistent(self) -> DocumentRecord:
@@ -413,6 +433,46 @@ class RiskMarker(BaseModel):
     detector: str = Field(..., min_length=1, description="Provider that raised the marker.")
     score: float = Field(..., ge=0.0, le=1.0, description="Detector confidence 0..1.")
     reason: str = Field(..., min_length=1, description="Human-readable justification.")
+
+
+class InducedLabels(BaseModel):
+    """Per-document label schema the ``schema_induction`` Stage induced (CONTEXT
+    ``Classification``).
+    W4 restores the "point it at a folder and it discovers its own schema" property: an OPTIONAL
+    :class:`~latence_core.capability.LabelInducer` Stage (a small OpenAI-compatible LLM with
+    structured JSON output) reads a document and induces the entity / relation / PII **types**
+    actually evidenced in it, then annotates every record it produced with this carrier so the
+    downstream extraction Stages can UNION these induced types onto their config label floor
+    (``config_labels ∪ induced``, deduped, order-stable). Like :class:`RiskMarker`, it is a
+    **field on the record contract** (not an out-of-band note), so it survives into the corpus and
+    a downstream Stage reads it off the record it already holds — the additive extractor seam.
+
+    Every list is already **sanitized** by the inducing Provider (control chars stripped, length
+    ≤ 64, count ≤ 40, deduped, normalized) — an :class:`InducedLabels` is trusted, bounded data a
+    zero-shot extractor prompt can consume, never executed. ``model_id`` records which LLM induced
+    it (audit); ``confidences`` maps a label to the model's 0..1 score for it (auditable, optional
+    — a label with no score is simply absent from the map). A slot the model evidenced no types for
+    is an empty list, not a fabricated one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    entity_types: list[str] = Field(
+        default_factory=list, description="Sanitized entity types induced for the document."
+    )
+    relation_types: list[str] = Field(
+        default_factory=list, description="Sanitized relation types induced for the document."
+    )
+    pii_types: list[str] = Field(
+        default_factory=list, description="Sanitized PII types induced for the document."
+    )
+    model_id: str = Field(
+        ..., min_length=1, description="The LLM that induced these labels (audit)."
+    )
+    confidences: dict[str, float] = Field(
+        default_factory=dict, description="Optional per-label 0..1 confidence (auditable)."
+    )
 
 
 class ScreeningFinding(BaseModel):
@@ -593,6 +653,14 @@ class ChunkRecord(Record):
     )
     risk_markers: list[RiskMarker] = Field(
         default_factory=list, description="Content-Screening flags that propagate into the corpus."
+    )
+    induced_labels: InducedLabels | None = Field(
+        default=None,
+        description=(
+            "Per-document induced label schema the OPTIONAL schema_induction Stage attached, so a "
+            "downstream extractor UNIONs these types onto its config labels (like risk_markers). "
+            "None (default) ⇒ the chunk is unchanged and every extractor uses its config labels."
+        ),
     )
 
     @property
