@@ -10,6 +10,7 @@ latence-ner-gliner = { workspace = true }
 latence-relation-llm = { workspace = true }
 latence-relation-gliner = { workspace = true }
 latence-pii-gliner = { workspace = true }
+latence-pii-gliner2 = { workspace = true }
 latence-pii-presidio = { workspace = true }
 latence-parser-endpoint = { workspace = true }
 latence-parser-lighton = { workspace = true }
@@ -27,7 +28,7 @@ version = "0.0.0"
 description = "Dev meta-project pinning the latence workspace for tooling (not published)."
 requires-python = ">=3.11"
 # latence-ner-gliner / latence-relation-gliner / latence-relation-llm /
-# latence-pii-gliner / latence-pii-presidio / latence-parser-endpoint / latence-ner-endpoint /
+# latence-pii-gliner / latence-pii-gliner2 / latence-pii-presidio / latence-parser-endpoint / latence-ner-endpoint /
 # latence-embedder-endpoint / latence-embedder-st / latence-runner-airflow are
 # intentionally NOT pinned here: the gliner packages pull the heavy GLiNER stack
 # (torch/transformers), the llm + the three -endpoint packages pull the openai client,
@@ -105,7 +106,7 @@ no_implicit_reexport = true
 # dynamically typed — the Providers monkeypatch them with fakes in tests.
 [[tool.mypy.overrides]]
 module = [
-    "pyarrow.*", "fsspec.*", "yaml", "gliner", "openai", "sentence_transformers",
+    "pyarrow.*", "fsspec.*", "yaml", "gliner", "gliner2", "openai", "sentence_transformers",
     "presidio_analyzer", "presidio_analyzer.*", "airflow.*",
     # LightOn-OCR heavy stack (latence-parser-lighton, GPU) — not in the CPU-first dev env
     # (ADR-0016); the Provider monkeypatches them with shape-matching fakes in tests.

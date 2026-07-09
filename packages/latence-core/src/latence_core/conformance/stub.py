@@ -151,6 +151,81 @@ def install_gliner(
 
 
 # ---------------------------------------------------------------------------
+# gliner2 stub (the fastino GLiNER2 PII Redaction Provider, redaction.gliner2)
+# ---------------------------------------------------------------------------
+
+
+class _StubGLiNER2:
+    """Stands in for ``gliner2.GLiNER2``: the REAL per-label-dict ``extract_entities`` shape.
+
+    Faithful to the fastino GLiNER2 framework's ``extract_entities(text, entity_types,
+    threshold, include_spans=True, include_confidence=True)`` →
+    ``{"entities": {label: [{text, confidence, start, end}], ...}}`` (a per-label dict of
+    dict-rows), the DIFFERENT shape from the ``gliner`` library's flat list. A provider that
+    mis-parses it as a flat list recovers ZERO spans — the false-green trap the anchor test
+    closes. ``entities`` is seeded as flat rows keyed to the canonical fixture; ``extract_entities``
+    filters by label + threshold and nests them per-label, as the real model does.
+    """
+
+    entities: list[dict[str, Any]] = []
+
+    @classmethod
+    def from_pretrained(cls, model_id: str) -> _StubGLiNER2:  # noqa: ARG003 - id unused offline
+        return cls()
+
+    def extract_entities(
+        self,
+        text: str,
+        entity_types: list[str],
+        threshold: float = 0.5,
+        include_spans: bool = False,  # noqa: ARG002 - accepted for API parity
+        include_confidence: bool = False,  # noqa: ARG002 - accepted for API parity
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        by_label: dict[str, list[dict[str, Any]]] = {}
+        for e in type(self).entities:
+            label = e["label"]
+            if label not in entity_types or e["confidence"] < threshold or e["end"] > len(text):
+                continue
+            by_label.setdefault(label, []).append(
+                {
+                    "text": text[e["start"] : e["end"]],
+                    "confidence": e["confidence"],
+                    "start": e["start"],
+                    "end": e["end"],
+                }
+            )
+        return {"entities": by_label}
+
+
+@contextlib.contextmanager
+def install_gliner2(*, entities: list[dict[str, Any]] | None = None) -> Iterator[None]:
+    """Install a fake ``gliner2`` module returning the canned per-label PII entity dict."""
+    _StubGLiNER2.entities = entities or []
+    module = types.ModuleType("gliner2")
+    module.GLiNER2 = _StubGLiNER2  # type: ignore[attr-defined]
+    saved = sys.modules.get("gliner2")
+    sys.modules["gliner2"] = module
+    try:
+        yield
+    finally:
+        if saved is not None:
+            sys.modules["gliner2"] = saved
+        else:
+            sys.modules.pop("gliner2", None)
+
+
+def gliner2_pii_entities() -> list[dict[str, Any]]:
+    """Canned document-offset PII rows the GLiNER2 stub returns for the canonical fixture.
+
+    The canonical document is ``"Alice works for Acme Corp in Berlin. Contact
+    alice@example.com about Acme Corp."`` — the email ``alice@example.com`` sits at offsets
+    [45, 62). Returning it as an ``email`` row (GLiNER2's lower-case zero-shot type) exercises the
+    Provider's per-label-dict flatten, offset round-trip, and masking end to end.
+    """
+    return [{"start": 45, "end": 62, "label": "email", "confidence": 0.95}]
+
+
+# ---------------------------------------------------------------------------
 # sentence-transformers stub (the learned in-process Embedder Provider)
 # ---------------------------------------------------------------------------
 

@@ -719,10 +719,12 @@ def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> Conformanc
     """Redaction: emit one RedactionRecord per doc; a PARSE_ERROR doc is skipped (graceful).
 
     ``backend`` selects the stub-scoped Provider's fake detection engine: ``"gliner"`` installs
-    the fake ``gliner`` module (the learned ``redaction.gliner_pii``), ``"presidio"`` installs the
-    fake ``presidio_analyzer`` module (the real Microsoft Presidio ``redaction.presidio``). Both
-    return canned document-offset PII spans keyed to the canonical fixture, so the same contract /
-    graceful-failure / license / no-PII-leak subset is checked without a live model.
+    the fake ``gliner`` module (the learned ``redaction.gliner_pii``), ``"gliner2"`` installs the
+    fake ``gliner2`` module (the fastino GLiNER2 ``redaction.gliner2`` — a per-label-dict API,
+    NOT the gliner flat list), and ``"presidio"`` installs the fake ``presidio_analyzer`` module
+    (the real Microsoft Presidio ``redaction.presidio``). All return canned document-offset PII
+    spans keyed to the canonical fixture, so the same contract / graceful-failure / license /
+    no-PII-leak subset is checked without a live model.
     """
     pii_labels = ["person", "email"]
 
@@ -750,6 +752,10 @@ def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> Conformanc
             if backend == "presidio":
                 spans = [] if empty else stubs.presidio_pii_spans()
                 with stubs.install_presidio(spans=spans):
+                    yield
+            elif backend == "gliner2":
+                rows = [] if empty else stubs.gliner2_pii_entities()
+                with stubs.install_gliner2(entities=rows):
                     yield
             else:
                 entities = [] if empty else stubs.gliner_pii_entities()
@@ -1115,6 +1121,7 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "relation.llm": _relation_case(stub_scoped=True, gliner=False),
     "relation.gliner_relex": _relation_case(stub_scoped=True, gliner=True),
     "redaction.gliner_pii": _redaction_case(stub_scoped=True, backend="gliner"),
+    "redaction.gliner2": _redaction_case(stub_scoped=True, backend="gliner2"),
     "redaction.presidio": _redaction_case(stub_scoped=True, backend="presidio"),
     "embedding.endpoint": _embedding_case(stub_scoped=True),
     "embedding.sentence_transformers": _embedding_case(

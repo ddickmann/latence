@@ -29,7 +29,7 @@ uv sync
 # Heavy/endpoint provider SOURCES only (no heavy deps) — their tests monkeypatch the heavy
 # dep; keeps the CPU-first offline env intact (ADR-0007/0016). Mirrors the CI step exactly.
 for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence-pii-gliner \
-         latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
+         latence-pii-gliner2 latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
          latence-parser-lighton latence-parser-glm latence-linkpred-ultra; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true

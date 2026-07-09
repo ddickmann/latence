@@ -87,6 +87,7 @@ jobs:
           uv pip install --no-deps -e packages/latence-relation-gliner
           uv pip install --no-deps -e packages/latence-relation-llm
           uv pip install --no-deps -e packages/latence-pii-gliner
+          uv pip install --no-deps -e packages/latence-pii-gliner2
           uv pip install --no-deps -e packages/latence-pii-presidio
           uv pip install --no-deps -e packages/latence-parser-endpoint
           uv pip install --no-deps -e packages/latence-ner-endpoint
@@ -173,6 +174,7 @@ jobs:
           uv build --package latence-relation-gliner
           uv build --package latence-relation-llm
           uv build --package latence-pii-gliner
+          uv build --package latence-pii-gliner2
           uv build --package latence-pii-presidio
           uv build --package latence-parser-endpoint
           uv build --package latence-ner-endpoint

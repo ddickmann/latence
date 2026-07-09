@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-pii-gliner2"
+version = "0.1.0"
+description = "Learned PII Redaction Provider over the fastino GLiNER2 framework (mdeberta-v3, CPU/GPU) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "pii", "redaction", "gliner", "gliner2"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER2 model stack
+# (gliner2 -> torch/transformers, mdeberta-v3 encoder) ships with THIS Provider package,
+# not the thin core. Both the gliner2 library AND the default
+# fastino/GLiNER2-Guardrails-PII-Multi checkpoint are Apache-2.0 (weights AND code verified
+# permissive — see provider.py header, 2026-07-09; the HF model card is Apache-2.0 and NOT
+# gated, the github.com/fastino-ai/GLiNER2 LICENSE is Apache-2.0). Nothing downloads unless a
+# Pipeline configures this Provider.
+# H-G1 dep cap: 'gliner2' is a released 1.x library (latest 1.3.2, verified 2026-07-09), so it
+# carries a major-boundary upper cap ('<2') so a downstream install can't silently pull an
+# API-breaking 2.x release.
+# NOTE (verified 2026-07-09 against pypi.org/pypi/gliner2/json): the BASE 'gliner2' dist does
+# NOT ship torch/transformers — those live only in the 'gliner2[local]' extra ("full local
+# inference"). This Provider does LOCAL inference (GLiNER2.from_pretrained(...).extract_entities),
+# so it MUST pull the [local] extra or GLiNER2.from_pretrained() fails at runtime on missing torch.
+dependencies = [
+    "latence-core",
+    "gliner2[local]>=1.0,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group. Installing this
+# package makes 'redaction.gliner2' available to any Pipeline with no core change
+# (ADR-0004) — a true drop-in behind Redaction alongside the in-core deterministic
+# 'redaction.hybrid_rule' and the twin 'redaction.gliner_pii'.
+[project.entry-points."latence.providers"]
+"redaction.gliner2" = "latence_pii_gliner2.provider:Gliner2PIIRedactor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_pii_gliner2"]
