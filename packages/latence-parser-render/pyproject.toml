@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-render"
+version = "0.1.0"
+description = "Universal document Parser (any file -> page-images/text -> markdown + page map) over AdapterBase, license-clean (NO fitz/PyMuPDF/AGPL), for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "ocr", "pdf", "docx", "pptx", "xlsx", "libreoffice", "adapter"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# LICENSE DISCIPLINE (the whole reason for this clean port — ADR-0012, research-diligence).
+# colsearch's converter renders PDF with PyMuPDF (`fitz`) — AGPL-3.0, copyleft. It is NEVER
+# vendored or depended on here (a test greps the package to enforce it). Every dependency below is
+# PERMISSIVE and evidence-verified (weights vs code do not apply — these are pure-code libs):
+#   * pypdfium2  — Apache-2.0 / BSD-3-Clause (wraps Google PDFium, BSD-3). The SAME renderer the
+#                  parser.lighton Provider already uses. https://github.com/pypdfium2-team/pypdfium2
+#   * pillow     — HPND (Historical Permission Notice and Disclaimer — permissive, BSD-like).
+#                  https://github.com/python-pillow/Pillow/blob/main/LICENSE
+#   * python-docx — MIT. https://github.com/python-openxml/python-docx/blob/master/LICENSE
+#   * openpyxl   — MIT. https://foss.heptapod.net/openpyxl/openpyxl
+#   * python-pptx — MIT. https://github.com/scanny/python-pptx/blob/master/LICENSE
+# LibreOffice (`soffice`) is an OPTIONAL, EXTERNAL tool (MPL-2.0) invoked as a subprocess — it is
+# NOT linked, imported, or vendored, so its copyleft does not reach this package; a host without it
+# degrades gracefully to python-docx/openpyxl/python-pptx text extraction (no crash). These deps
+# pull compiled/native code (pypdfium2/pillow) and the office readers, so — mirroring the other
+# heavy Provider packages (ADR-0016) — this package is installed --no-deps into the CPU-first
+# dev/CI env; its tests use a faithful in-memory fake renderer + a stub OCR, and the real
+# soffice/PDF/office run is validated on the pod (scripts/validate-universal-parser-on-gpu.md).
+dependencies = [
+    "latence-core",
+    "pypdfium2>=4.0",
+    "pillow>=10.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6.23",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group (ADR-0004). Installing this package
+# makes 'parser.render' available to any Pipeline with no core change — the universal any-file Parse
+# front-end that dispatches PDF/image/office and delegates page OCR to a configured OCR Provider.
+[project.entry-points."latence.providers"]
+"parser.render" = "latence_parser_render.provider:UniversalRenderParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_render"]

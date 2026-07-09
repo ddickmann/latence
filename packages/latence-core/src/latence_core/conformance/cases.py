@@ -463,6 +463,68 @@ def _parse_case(*, stub_scoped: bool) -> ConformanceCase:
     )
 
 
+def _render_case() -> ConformanceCase:
+    """Parse (parser.render, W5): render a fake PDF → OCR via a stub → PARSED with a page map.
+
+    ``parser.render`` (compute="either") RUNS through conformance on a CPU host (not
+    device-skipped). Its native rasterisers are faked offline via
+    :func:`stubs.install_render_offline` (a faithful fake ``pypdfium2``/``PIL`` so the REAL render
+    code path runs), and its OCR is delegated to a stub
+    (:class:`stubs.StubRenderOcr`) wired through the Provider's ``ocr_registry`` config seam. The
+    canonical fixture text is rendered as ONE page so the produced offsets match the canonical page
+    map — a genuine C1 offset check. C2's adversarial input is an unsupported ``.txt`` (a page with
+    no renderer path) → a graceful PARSE_ERROR (no PII leaked).
+    """
+    canonical_pdf = stubs.render_fake_pdf([fixtures.CANONICAL_TEXT])
+    config = {"ocr": {"provider": "parser.lighton"}, "ocr_registry": stubs.render_stub_registry()}
+
+    def _canonical_input() -> ParserInput:
+        prov = fixtures.canonical_provenance().model_copy(
+            update={"file_name": "canonical.pdf", "file_type": "pdf"}
+        )
+        return ParserInput(
+            provenance=prov,
+            classification=fixtures.canonical_classification(),
+            content=canonical_pdf,
+        )
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        with stubs.install_render_offline():
+            return list(provider.parse([_canonical_input()]))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        if not _records_contract_valid(records, empty_ok=False):
+            return False
+        return all(
+            isinstance(r, DocumentRecord)
+            and r.disposition is Disposition.PARSED
+            and r.page_map is not None
+            for r in records
+        )
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # An unsupported .txt file (no renderer path) → a graceful PARSE_ERROR record, not a crash.
+        bad = _adversarial_parser_input(fixtures.PII_ADVERSARIAL_TEXT.encode("utf-8"))
+        bad = bad.model_copy(
+            update={
+                "provenance": bad.provenance.model_copy(
+                    update={"file_name": "adversarial.txt", "file_type": "txt"}
+                )
+            }
+        )
+        with stubs.install_render_offline():
+            return _capture_raise(lambda: list(provider.parse([bad])))
+
+    return ConformanceCase(
+        capability=Capability.PARSE,
+        config=config,
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        stub_scoped=False,
+    )
+
+
 def _chunk_case() -> ConformanceCase:
     """Chunk: split the canonical documents; a PARSE_ERROR doc yields no chunks (graceful empty)."""
 
@@ -1171,6 +1233,9 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
 # invoke + the right config). Keyed by the exact Provider entry-point name.
 _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "parser.endpoint": _parse_case(stub_scoped=True),
+    # parser.render (W5) is compute="either": it RUNS on a CPU host against a faithful offline fake
+    # renderer (fake pypdfium2/PIL) + a stub OCR — not device-skipped, not endpoint-stub-scoped.
+    "parser.render": _render_case(),
     "entity.endpoint": _entity_case(stub_scoped=True, gliner=False),
     "entity.gliner": _entity_case(stub_scoped=True, gliner=True),
     "relation.llm": _relation_case(stub_scoped=True, gliner=False),

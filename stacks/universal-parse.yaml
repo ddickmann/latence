@@ -1,0 +1,83 @@
+# stacks/universal-parse.yaml — the any-file (universal-parser) stack (W5-universal-parser).
+#
+# The one Parser that ingests a MIXED corpus — PDFs, scans/photos, AND office documents (docx/pptx/
+# xlsx) — through a single Parse Stage. stacks/gpu-ocr.yaml parses with `parser.lighton` (image ->
+# markdown, PDF/image only); this stack swaps the Parse Stage for `parser.render` — the universal
+# any-file parser (W5): it renders each file to page images (pypdfium2 for PDF, Pillow for images,
+# LibreOffice-headless `soffice` for office when present else python-docx/openpyxl/python-pptx text)
+# and delegates the page OCR to a configured OCR provider (`ocr:` below). Everything downstream of
+# Parse is the deterministic in-core CPU spine (Chunk -> Content Screening -> RAG Export), so on a
+# GPU host with latence-parser-render + the OCR provider installed the WHOLE spine runs; the only
+# GPU-gated node is the OCR delegated by Parse.
+#
+# LICENSE-CLEAN (ADR-0012): `parser.render` renders PDF with pypdfium2 (Apache/BSD) — NEVER
+# PyMuPDF/`fitz` (AGPL). Pillow (HPND), python-docx/openpyxl/python-pptx (MIT); LibreOffice
+# (MPL-2.0) is an OPTIONAL external subprocess (not vendored) — a host without `soffice` degrades
+# office files to text extraction, never a crash.
+#
+# DEVICE HONESTY (P3-F1 / the G1 skip-with-flag posture, #64). `parser.render` is `compute="either"`
+# (its rendering is CPU); the page OCR routes to the OCR sub-provider's device. The Parse node pins
+# `device: cuda` (its OCR sub-provider is a GPU model) and its heavy render deps + the OCR package
+# ship SEPARATELY (ADR-0016), NOT in the CPU-only dev/CI env. On a CPU-only host
+# `latence stack validate stacks/universal-parse.yaml`:
+#   * reports Parse (and every stage that depends on it) as **skipped-with-flag** — not installed /
+#     no CUDA — NEVER faked, never a fabricated quality/throughput number;
+#   * still validates the CPU-reachable head (Source -> Intake Screening) end-to-end.
+# On a real GPU host with the heavy packages installed, Parse runs (device: cuda) and the full
+# Source -> Intake -> Parse -> Chunk -> Content Screening -> RAG-corpus Export spine validates over
+# the mixed corpus.
+#
+# stacks/<client>.yaml is the documented extension point: copy this stack and point `source.config.
+# path` at your mixed corpus (PDF, scans, docx/pptx/xlsx).
+name: latence-universal-parse-stack
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [pdf, png, jpg, jpeg, tiff, tif, webp, bmp, docx, pptx, xlsx]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 16777216          # office files + scans are larger than text PDFs (16 MiB)
+      max_zip_ratio: 50.0
+
+  # --- The universal any-file Parser: renders then delegates OCR; GPU-gated via its OCR provider ---
+  - name: parse
+    capability: parse
+    provider: parser.render        # universal any-file parser (latence-parser-render)
+    depends_on: [intake_screen]
+    config:
+      device: cuda                 # honest GPU intent (its OCR sub-provider is GPU); skip-with-flag on CPU
+      dpi: 200                     # PDF->image rasterisation DPI (higher = sharper, slower)
+      soffice_timeout_s: 120       # hard timeout on the LibreOffice subprocess (office render)
+      # The OCR provider each rasterised page is delegated to (reuses the pod-validated OCR model).
+      ocr:
+        provider: parser.lighton   # or parser.glm — the permissive GPU OCR models
+        config:
+          device: cuda
+          max_new_tokens: 4096
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [content_screen]
+    config:
+      basename: corpus

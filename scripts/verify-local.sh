@@ -32,7 +32,7 @@ for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence
          latence-pii-gliner2 latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
          latence-parser-lighton latence-parser-glm latence-linkpred-ultra \
-         latence-schema-inducer; do
+         latence-schema-inducer latence-parser-render; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
 done
 ok "workspace synced + heavy sources installed --no-deps"
@@ -59,6 +59,7 @@ uv run latence stack validate stacks/default.yaml
 uv run latence stack validate stacks/gpu-sota.yaml
 uv run latence stack validate stacks/gpu-sota-pod.yaml
 uv run latence stack validate stacks/gpu-ocr.yaml
+uv run latence stack validate stacks/universal-parse.yaml   # W5 any-file parser; Parse skip-with-flag on CPU
 uv run latence stack validate stacks/linkpred-base.yaml   # the reference completer RUNS on CPU
 uv run latence stack validate stacks/schema-induction.yaml  # induce+extract skip-with-flag; CPU spine validates (W4)
 ok "stack validate"

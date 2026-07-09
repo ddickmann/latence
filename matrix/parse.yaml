@@ -12,13 +12,20 @@
 #   parser.glm        — the real GPU GLM-OCR image->markdown parser (zai-org/GLM-OCR, MIT), the
 #                       second GPU OCR candidate; device: cuda — SKIPPED-WITH-FLAG on a CPU-only
 #                       host (needs a rig, #64); NEVER a fabricated number
+#   parser.render     — the universal any-file parser (W5): renders PDF/image/office to page images
+#                       (pypdfium2/Pillow/soffice) then delegates page OCR to a configured OCR
+#                       provider (`ocr: {provider: parser.lighton|parser.glm}`). Its render deps are
+#                       heavy (not in the CPU env) AND its OCR sub-provider is GPU, so it pins
+#                       `device: cuda` and is SKIPPED-WITH-FLAG on a CPU-only host (needs a rig,
+#                       #64); on a GPU host with latence-parser-render + an OCR provider installed it
+#                       runs and is measured for real. NEVER a fabricated number.
 #
 # Run it with `latence bake-off matrix/parse.yaml`. The three CPU parsers are offline, permissive,
 # pure-Python, so they run deterministically in CI (LATENCE_CUDA=0) with NO fabricated numbers. The
-# lighton candidate pins `device: cuda` (honest GPU intent); on a CPU-only host the harness resolves
-# that through the SAME `select_device` seam the Runner uses and records the row skipped-with-flag
-# with no measured columns; on a real GPU host with latence-parser-lighton installed it runs
-# (device: cuda) and is measured for real.
+# lighton/glm/render candidates pin `device: cuda` (honest GPU intent); on a CPU-only host the
+# harness resolves that through the SAME `select_device` seam the Runner uses and records the row
+# skipped-with-flag with no measured columns; on a real GPU host with the heavy package installed
+# it runs (device: cuda) and is measured for real.
 #
 # Quality here is the stage-specific Parse metric (chars-extracted + offset-drift-recovered), NOT a
 # gold-set P/R/F1 — Parse has no gold set. The bake-off reads it off the Quality Report's `parse`
@@ -32,3 +39,7 @@ candidates:
     config: { device: cuda }   # honest GPU intent; skipped-with-flag where no CUDA (device seam)
   - provider: parser.glm
     config: { device: cuda }   # the second GPU OCR candidate (GLM-OCR, MIT); skipped-with-flag on CPU
+  - provider: parser.render    # the universal any-file parser (W5); renders then delegates OCR
+    config:
+      device: cuda             # heavy render deps + GPU OCR sub-provider; skipped-with-flag on CPU
+      ocr: { provider: parser.lighton, config: { device: cuda } }

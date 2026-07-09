@@ -97,6 +97,8 @@ jobs:
           uv pip install --no-deps -e packages/latence-parser-glm
           uv pip install --no-deps -e packages/latence-runner-airflow
           uv pip install --no-deps -e packages/latence-linkpred-ultra
+          uv pip install --no-deps -e packages/latence-schema-inducer
+          uv pip install --no-deps -e packages/latence-parser-render
 
       - name: Ruff (lint)
         run: uv run ruff check packages
@@ -144,6 +146,7 @@ jobs:
           uv run latence stack validate stacks/gpu-sota.yaml
           uv run latence stack validate stacks/gpu-sota-pod.yaml
           uv run latence stack validate stacks/gpu-ocr.yaml
+          uv run latence stack validate stacks/universal-parse.yaml  # W5 any-file parser; Parse skip-with-flag on CPU
 
       # Goal B (P3-F5, ADR-0036 §4): the per-Stage bake-off. Runs the two shipped CPU matrices —
       # matrix/parse.yaml + matrix/chunk.yaml — end-to-end on the bundled corpus: each candidate
@@ -182,8 +185,10 @@ jobs:
           uv build --package latence-embedder-st
           uv build --package latence-parser-lighton
           uv build --package latence-parser-glm
+          uv build --package latence-parser-render
           uv build --package latence-runner-airflow
           uv build --package latence-linkpred-ultra
+          uv build --package latence-schema-inducer
           uv build --package latence-demo
           uv build --package latence-disambig-embedding
 

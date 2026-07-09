@@ -436,6 +436,219 @@ def parse_chat_reply() -> str:
     return "Alice works for Acme Corp in Berlin."
 
 
+# ---------------------------------------------------------------------------
+# Universal render Parser stub (parser.render, W5) — a faithful offline renderer + OCR
+# ---------------------------------------------------------------------------
+#
+# ``parser.render`` (compute="either") genuinely RUNS through conformance on a CPU host — it is not
+# device-skipped. Its native rasterisers (pypdfium2 / Pillow) are not installed in the CPU-first env
+# (ADR-0016), so this installs FAITHFUL fake ``pypdfium2`` + ``PIL`` modules so the REAL render code
+# path runs offline: a fake PDF page renders to a fake image whose ``.save(..., "PNG")`` emits
+# deterministic bytes carrying the page text, and a stub OCR (:class:`StubRenderOcr`) decodes those
+# bytes back to markdown — the exact renderer→PNG-bytes→OCR round-trip the Provider performs. The
+# canonical fixture text is rendered as one page so the produced offsets match the canonical page
+# map (a genuine C1 offset check, not a no-op). The single fabricated thing is the *pixels*; the
+# dispatch, security guards, OCR-delegation seam, and PageMap assembly all run for real — the
+# anti-false-green discipline the GPU OCR parsers carry.
+
+_RENDER_FAKE_PNG_MAGIC = b"RENDEROCR\x00"
+
+
+class _FakeRenderBitmap:
+    """A pypdfium2 bitmap stand-in: ``.to_pil()`` yields a fake page image carrying its text."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def to_pil(self) -> Any:
+        return _FakeRenderImage(self._text)
+
+
+class _FakeRenderPage:
+    """A pypdfium2 page stand-in: reports a normal page size and renders to a fake bitmap."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def get_size(self) -> tuple[float, float]:
+        return (595.0, 842.0)  # A4 points — well under the pixel-bomb budget
+
+    def render(self, scale: float = 1.0) -> _FakeRenderBitmap:
+        return _FakeRenderBitmap(self._text)
+
+
+class _FakeRenderPdfDocument:
+    """A pypdfium2 ``PdfDocument`` stand-in over the fake PDF framing (``%PDF-`` + ``|||``)."""
+
+    def __init__(self, stream: Any) -> None:
+        data = stream.read() if hasattr(stream, "read") else stream
+        body = bytes(data)[len(b"%PDF-") :].decode("utf-8")
+        self._pages = [_FakeRenderPage(seg) for seg in body.split("|||")]
+
+    def __iter__(self) -> Iterator[_FakeRenderPage]:
+        return iter(self._pages)
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeRenderImageModule:
+    """A Pillow ``Image`` module stand-in: ``open``/``MAX_IMAGE_PIXELS`` for the image path."""
+
+    MAX_IMAGE_PIXELS: int | None = None
+
+    @staticmethod
+    def open(stream: Any) -> Any:
+        data = stream.read() if hasattr(stream, "read") else stream
+        raw = bytes(data)
+        # Strip a leading image magic (the fake PNG magic) to recover the page text.
+        for magic in (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"BM"):
+            if raw.startswith(magic):
+                return _FakeRenderImage(raw[len(magic) :].decode("utf-8"))
+        return _FakeRenderImage(raw.decode("utf-8", errors="replace"))
+
+
+class _FakeRenderImage:
+    """A Pillow image stand-in: ``.load``/``.convert`` no-op; ``.save`` emits round-trip bytes."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def load(self) -> None:
+        return None
+
+    def convert(self, mode: str) -> _FakeRenderImage:
+        return self
+
+    def save(self, buffer: Any, format: str = "PNG") -> None:  # noqa: A002 - Pillow's kw name
+        payload = self._text.encode("utf-8")
+        buffer.write(_RENDER_FAKE_PNG_MAGIC + payload)
+
+
+class StubRenderOcr:
+    """A faithful offline OCR Provider for the render conformance case: decode a page's bytes.
+
+    A REAL Parser Provider (structural Capability) resolved through ``parser.render``'s registry
+    seam exactly as ``parser.lighton``/``parser.glm`` would be. It decodes the deterministic page
+    bytes the fake renderer emits back into that page's markdown — the faithful stand-in for a
+    pod-validated OCR model. Undecodable bytes → a graceful PARSE_ERROR (a real OCR degrade).
+    """
+
+    @classmethod
+    def profile(cls) -> Any:
+        from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+
+        return ProviderProfile(
+            compute="either",
+            memory_mb=16,
+            model_id="stub-render-ocr",
+            license="Apache-2.0",
+            license_verified=True,
+            license_code="Apache-2.0",
+            license_weights="Apache-2.0",
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-09",
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self._config = dict(config or {})
+
+    def parse(self, inputs: Any) -> Iterator[Any]:
+        from latence_core.contracts import Disposition, DocumentRecord, PageMap
+
+        for raw in inputs:
+            data = raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
+            if data.startswith(_RENDER_FAKE_PNG_MAGIC):
+                text = data[len(_RENDER_FAKE_PNG_MAGIC) :].decode("utf-8")
+                assembly = PageMap.from_page_texts([text])
+                yield DocumentRecord(
+                    record_id=raw.provenance.document_id,
+                    provenance=raw.provenance.model_copy(
+                        update={"char_start": 0, "char_end": assembly.page_map.total_chars}
+                    ),
+                    classification=raw.classification,
+                    content=assembly.text,
+                    media_type="text/markdown",
+                    page_map=assembly.page_map,
+                    disposition=Disposition.PARSED,
+                )
+            else:
+                yield DocumentRecord(
+                    record_id=raw.provenance.document_id,
+                    provenance=raw.provenance,
+                    classification=raw.classification,
+                    content="",
+                    media_type="text/markdown",
+                    page_map=None,
+                    disposition=Disposition.PARSE_ERROR,
+                    error="stub OCR could not decode the page image",
+                )
+
+
+def _stub_render_registry_cls() -> type:
+    """Build a ProviderRegistry subclass resolving the OCR name to :class:`StubRenderOcr`.
+
+    Built lazily (a factory, not a module-level class) so the stub module has no import-time
+    dependency on the capability module's ProviderRegistry — the render Provider's ``ocr_registry``
+    seam accepts a ``ProviderRegistry`` (or subclass), so this must subclass it to be honored.
+    """
+    from latence_core.capability import ProviderRegistry
+
+    class _StubRenderRegistry(ProviderRegistry):
+        def load(self, name: str) -> type:
+            return StubRenderOcr
+
+    return _StubRenderRegistry
+
+
+def render_fake_pdf(pages: list[str]) -> bytes:
+    """Build a spoof-guard-passing fake PDF the fake renderer splits into ``pages``."""
+    return b"%PDF-" + "|||".join(pages).encode("utf-8")
+
+
+def render_stub_registry() -> Any:
+    """The stub registry a render conformance case passes as ``config['ocr_registry']``."""
+    return _stub_render_registry_cls()()
+
+
+@contextlib.contextmanager
+def install_render_offline() -> Iterator[None]:
+    """Install faithful fake ``pypdfium2`` + ``PIL.Image`` so ``parser.render`` runs offline.
+
+    Injects a fake ``pypdfium2`` module (its ``PdfDocument`` renders the fake PDF framing to fake
+    page images) and a fake ``PIL`` package (its ``Image`` decodes the fake image framing), for the
+    duration of one Provider invocation, then removes them — so the REAL render code path runs
+    without the heavy native deps and never leaks the fakes across cases. The stub OCR is wired via
+    the Provider's ``ocr_registry`` config seam (see :func:`render_stub_registry`), not here.
+    """
+    fake_pdfium = types.ModuleType("pypdfium2")
+    fake_pdfium.PdfDocument = _FakeRenderPdfDocument  # type: ignore[attr-defined]
+    fake_pil = types.ModuleType("PIL")
+    fake_pil_image = types.ModuleType("PIL.Image")
+    fake_pil_image.MAX_IMAGE_PIXELS = None  # type: ignore[attr-defined]
+    fake_pil_image.open = _FakeRenderImageModule.open  # type: ignore[attr-defined]
+    fake_pil.Image = fake_pil_image  # type: ignore[attr-defined]
+    saved = {
+        "pypdfium2": sys.modules.get("pypdfium2"),
+        "PIL": sys.modules.get("PIL"),
+        "PIL.Image": sys.modules.get("PIL.Image"),
+    }
+    sys.modules["pypdfium2"] = fake_pdfium
+    sys.modules["PIL"] = fake_pil
+    sys.modules["PIL.Image"] = fake_pil_image
+    try:
+        yield
+    finally:
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+
+
 def schema_induction_reply() -> str:
     """A canned schema-induction reply: the exact ``{entity,relation,pii}`` JSON shape (W4).
 

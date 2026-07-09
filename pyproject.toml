@@ -14,6 +14,7 @@ latence-pii-gliner2 = { workspace = true }
 latence-pii-presidio = { workspace = true }
 latence-parser-endpoint = { workspace = true }
 latence-parser-lighton = { workspace = true }
+latence-parser-render = { workspace = true }
 latence-ner-endpoint = { workspace = true }
 latence-embedder-endpoint = { workspace = true }
 latence-embedder-st = { workspace = true }
@@ -111,6 +112,11 @@ module = [
     # LightOn-OCR heavy stack (latence-parser-lighton, GPU) — not in the CPU-first dev env
     # (ADR-0016); the Provider monkeypatches them with shape-matching fakes in tests.
     "pypdfium2", "transformers", "torch",
+    # Universal any-file Parser heavy stack (latence-parser-render, W5-universal-parser) — the
+    # office/image readers (python-docx/openpyxl/python-pptx MIT, Pillow HPND) are isolated in that
+    # package (ADR-0016), NOT in the CPU-first dev env; the Provider lazily imports them and its
+    # tests use a faithful in-memory fake renderer + a stub OCR, so they are dynamically typed here.
+    "PIL", "PIL.*", "docx", "openpyxl", "openpyxl.*", "pptx", "pptx.*",
     # Learned link-prediction heavy stack (latence-linkpred-ultra, GPU/heavy) — the ULTRA inference
     # deps (torch-geometric / torch-scatter / easydict) + the PyKEEN fallback are isolated in that
     # package (ADR-0016), NOT in the CPU-first dev env; the Provider lazily imports them and the
