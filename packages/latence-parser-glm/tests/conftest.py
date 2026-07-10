@@ -62,6 +62,12 @@ def _detokenise(tokens: list[int]) -> str:
     return "".join(chr(t) for t in tokens)
 
 
+# The left-pad token id the fake tokeniser uses to align a batch's prompts to a shared width. A
+# codepoint outside the FAKE_PROMPT_SCAFFOLD / markdown ranges so a pad token that ever leaked into a
+# decode would be visible; ``decode(skip_special_tokens=True)`` drops it (like real HF pads).
+_PAD_ID = 0
+
+
 class _FakeTokenRow:
     """A 1-D slice of token ids (the sliced continuation) that ``decode`` turns back into text."""
 
@@ -88,9 +94,15 @@ class _FakeTokenRows:
     deterministic, inspectable, and NEVER a real tensor (offline).
     """
 
-    def __init__(self, rows: list[list[int]], continuation: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[list[int]],
+        continuations: list[list[int]] | None = None,
+        true_lens: list[int] | None = None,
+    ) -> None:
         self._rows = rows
-        self.continuation = continuation or []
+        self.continuations = continuations or [[] for _ in rows]
+        self.true_lens = true_lens or [len(r) for r in rows]
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -98,51 +110,93 @@ class _FakeTokenRows:
         return (len(self._rows), cols)
 
     def __getitem__(self, key: Any) -> _FakeTokenRow:
-        # ``generated_ids[0]`` -> row 0 as a _FakeTokenRow the Provider then column-slices.
+        # ``generated_ids[i]`` -> row i as a _FakeTokenRow the Provider then column-slices.
         return _FakeTokenRow(list(self._rows[key]))
+
+
+class _FakeAttentionMask:
+    """A 2-D 0/1 attention mask stand-in: 0 on left-pad columns, 1 on an item's real prompt tokens."""
+
+    def __init__(self, mask: list[list[int]]) -> None:
+        self._mask = mask
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        cols = len(self._mask[0]) if self._mask else 0
+        return (len(self._mask), cols)
+
+    def __getitem__(self, row: int) -> list[int]:
+        return self._mask[row]
 
 
 class _FakeBatchEncoding:
     """The dict-like handle ``apply_chat_template(return_dict=True)`` returns; ``.to(device)`` no-op.
 
-    Exposes ``input_ids`` as a :class:`_FakeTokenRows` whose single row is the PROMPT tokens (the
-    ``<|prompt-scaffold|>`` stand-in) — so ``inputs["input_ids"].shape[1]`` is the true prompt length,
-    the exact slice offset the Provider must use. It also stashes the page-markdown continuation on
-    that row so ``model.generate(**inputs)`` can echo back prompt+continuation (the real HF shape).
-    ``**inputs`` unpacking works because it is a mapping; ``.to(device)`` returns self.
+    Faithful to the real batched contract: it holds ONE OR MORE prompt rows, LEFT-padded to a shared
+    width, plus the matching ``attention_mask`` (0 on pad, 1 on real tokens). ``input_ids.shape[1]``
+    is the padded width — the exact offset every item's continuation begins at under left-padding.
+    Each row stashes its own markdown continuation so ``generate`` echoes back each item's
+    prompt+continuation independently (variable-length faithful). ``**inputs`` unpacking works because
+    it is a mapping over ``input_ids`` + ``attention_mask``; ``.to(device)`` returns self.
     """
 
-    def __init__(self, payload: str) -> None:
-        # The page markdown the fake "OCR" produced from the marker image.
-        markdown = payload[len(FAKE_PAGE_MARKER) :] if payload.startswith(FAKE_PAGE_MARKER) else payload
-        prompt_tokens = _tokenise(FAKE_PROMPT_SCAFFOLD)
-        continuation_tokens = _tokenise(markdown)
-        # input_ids is JUST the prompt (what the model is conditioned on); generate() appends the
-        # continuation. shape[1] = prompt length — the slice offset the Provider must use.
-        self.input_ids = _FakeTokenRows([list(prompt_tokens)], continuation=continuation_tokens)
+    def __init__(self, payloads: list[str]) -> None:
+        prompt_scaffold = _tokenise(FAKE_PROMPT_SCAFFOLD)
+        # Give each item a DIFFERENT true prompt length so a variable-length batch is exercised: item
+        # r's real prompt is the scaffold repeated (r+1) times. A wrong (shared unpadded / first-item)
+        # slice would then bleed pad/prompt tokens into another item's markdown.
+        raw_prompts: list[list[int]] = []
+        continuations: list[list[int]] = []
+        for r, payload in enumerate(payloads):
+            markdown = payload[len(FAKE_PAGE_MARKER) :] if payload.startswith(FAKE_PAGE_MARKER) else payload
+            raw_prompts.append(list(prompt_scaffold) * (r + 1))
+            continuations.append(_tokenise(markdown))
+        width = max((len(p) for p in raw_prompts), default=0)
+        padded: list[list[int]] = []
+        mask: list[list[int]] = []
+        true_lens: list[int] = []
+        for prompt in raw_prompts:
+            pad = width - len(prompt)
+            padded.append([_PAD_ID] * pad + prompt)
+            mask.append([0] * pad + [1] * len(prompt))
+            true_lens.append(len(prompt))
+        self.input_ids = _FakeTokenRows(padded, continuations=continuations, true_lens=true_lens)
+        self.attention_mask = _FakeAttentionMask(mask)
         self.moved_to: str | None = None
 
     def to(self, device: str) -> _FakeBatchEncoding:
         self.moved_to = device
         return self
 
-    def keys(self) -> list[str]:  # so ``**inputs`` sees the input_ids key
-        return ["input_ids"]
+    def keys(self) -> list[str]:  # so ``**inputs`` sees both keys
+        return ["input_ids", "attention_mask"]
 
-    def __getitem__(self, key: str) -> _FakeTokenRows:
+    def __getitem__(self, key: str) -> Any:
         if key == "input_ids":
             return self.input_ids
+        if key == "attention_mask":
+            return self.attention_mask
         raise KeyError(key)
+
+
+def _extract_image(conversation: list[dict[str, Any]]) -> str:
+    """Pull the fake page-image marker (a str) out of a single GLM conversation's user message.
+
+    GLM's message carries BOTH an image and a text instruction — read the image part.
+    """
+    content = conversation[0]["content"]
+    return str(next(part["image"] for part in content if part.get("type") == "image"))
 
 
 class _FakeProcessor:
     """Faithful fake for GLM-OCR's ``AutoProcessor`` (apply_chat_template + decode).
 
-    ``apply_chat_template`` reads the image marker off the chat message and returns a
-    :class:`_FakeBatchEncoding` carrying prompt + continuation tokens; ``decode`` turns a
-    :class:`_FakeTokenRow` (the SLICED continuation) back into the page's markdown ``str`` — the exact
-    real ``processor.decode`` shape. If the caller forgot to slice and passed the full 2-D sequence,
-    decode would render the ``<|prompt-scaffold|>`` prefix too, breaking the round-trip.
+    ``apply_chat_template`` accepts EITHER a single conversation (a list of role-dicts) OR a list of
+    conversations (the W8 batched path) and returns a LEFT-padded :class:`_FakeBatchEncoding` carrying
+    prompt + continuation tokens + attention mask; ``decode`` turns a :class:`_FakeTokenRow` (the
+    SLICED continuation) back into the page's markdown ``str``. A missing slice would render the
+    ``<|prompt-scaffold|>`` prefix; a wrong (shared unpadded / first-item) batched slice would leak a
+    variable-length item's pad/prompt tokens — either way, FAIL.
     """
 
     def __init__(self, model_id: str) -> None:
@@ -152,34 +206,39 @@ class _FakeProcessor:
     def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _FakeProcessor:
         return cls(model_id)
 
-    def apply_chat_template(self, messages: list[dict[str, Any]], **_kwargs: Any) -> _FakeBatchEncoding:
-        # Extract the fake page image (a str marker) from the user message's image content. GLM's
-        # message carries BOTH an image and a text instruction — read the image part.
-        content = messages[0]["content"]
-        image = next(part["image"] for part in content if part.get("type") == "image")
-        return _FakeBatchEncoding(str(image))
+    def apply_chat_template(self, messages: Any, **_kwargs: Any) -> _FakeBatchEncoding:
+        # A batch is a list whose first element is itself a conversation (a list); a single
+        # conversation is a list whose first element is a role-dict. Normalise to a list of
+        # conversations so both the single-item and batched Provider paths are faithful.
+        is_batch = bool(messages) and isinstance(messages[0], list)
+        conversations = messages if is_batch else [messages]
+        payloads = [_extract_image(conv) for conv in conversations]
+        return _FakeBatchEncoding(payloads)
 
     def decode(self, token_row: Any, **_kwargs: Any) -> str:
         # REAL SHAPE: decode(continuation) -> str. continuation is the SLICED row the Provider
-        # produced via generated_ids[0][prompt_len:]; render its tokens back to markdown.
+        # produced via generated_ids[i][prompt_width:]; render its tokens back to markdown.
+        # skip_special_tokens=True drops any leaked pad id (0) — but a correct slice leaks none.
         if isinstance(token_row, _FakeTokenRow):
-            return _detokenise(token_row.tokens)
+            return _detokenise([t for t in token_row.tokens if t != _PAD_ID])
         # Tolerate a bare list of token ids (defensive; not the Provider's path).
-        return _detokenise(list(token_row))
+        return _detokenise([t for t in token_row if t != _PAD_ID])
 
 
 class _FakeModel:
     """Faithful fake for ``GlmOcrForConditionalGeneration`` (from_pretrained/to/generate).
 
-    ``generate(**inputs, ...)`` returns the **full** 2-D token sequence (prompt + continuation) —
-    exactly like HF ``generate`` — so the Provider MUST slice ``generated_ids[0][input_ids.shape[1]:]``
-    before decoding. The continuation is the page markdown; the prompt columns are the
-    ``<|prompt-scaffold|>`` tokens the real chat template contributes.
+    ``generate(**inputs, ...)`` returns the **full** 2-D token sequence (prompt + continuation) for
+    EACH item — exactly like HF ``generate`` under left-padding, where every item's continuation
+    begins at the shared padded prompt width. So the Provider MUST slice
+    ``generated_ids[i][input_ids.shape[1]:]`` before decoding. Records ``generate_calls`` so a test
+    can assert ``ceil(n_pages / batch_size)`` calls.
     """
 
     def __init__(self, model_id: str) -> None:
         self.model_id = model_id
         self.device: str | None = None
+        self.generate_calls = 0
 
     @classmethod
     def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _FakeModel:
@@ -190,15 +249,44 @@ class _FakeModel:
         return self
 
     def generate(self, input_ids: _FakeTokenRows, **_kwargs: Any) -> _FakeTokenRows:
-        # ``**inputs`` unpacks input_ids (the prompt tokens) into this call. The real HF generate()
-        # returns prompt + continuation: echo the prompt row, then append the continuation tokens the
-        # encoding stashed. The Provider must slice the prompt columns back off before decoding.
-        prompt_row = list(input_ids._rows[0])
-        full = [prompt_row + list(input_ids.continuation)]
+        # ``**inputs`` unpacks input_ids (the left-padded prompt rows); attention_mask arrives as a
+        # kwarg (accepted). Echo each padded prompt row, then append THAT row's continuation — the
+        # real HF per-item prompt+continuation shape. The Provider slices each row back at width L.
+        self.generate_calls += 1
+        full = [list(row) + list(cont) for row, cont in zip(input_ids._rows, input_ids.continuations, strict=True)]
         return _FakeTokenRows(full)
 
 
 # --- fake pypdfium2 (with a per-page point size so the pixel cap is exercised) ---------------
+
+
+# The default fake page/image PIXEL size — UNDER the 1540 longest-side cap so existing fixtures are
+# NOT downscaled (their OCR text stays byte-identical); the W8 downscale test drives an oversized one.
+_FAKE_IMG_W = 800
+_FAKE_IMG_H = 1000
+
+
+class _FakeImage:
+    """A minimal fake Pillow image: carries the OCR marker + a ``.size``, supports ``.resize``.
+
+    ``str(image)`` yields the marker so ``apply_chat_template`` reads the intended page markdown off
+    it exactly as before. ``.size`` + ``.resize`` let the Provider's W8 longest-side downscale run
+    for real offline; the marker is carried through the resize unchanged (the fake proves the resize
+    MATH + that batching holds at fixed size — real resolution changes tokens only on the real model).
+    """
+
+    def __init__(self, marker: str, size: tuple[int, int] = (_FAKE_IMG_W, _FAKE_IMG_H)) -> None:
+        self._marker = marker
+        self.size = size
+        self.resized_to: tuple[int, int] | None = None
+
+    def resize(self, size: tuple[int, int], _resample: Any = None) -> _FakeImage:
+        out = _FakeImage(self._marker, size=size)
+        out.resized_to = size
+        return out
+
+    def __str__(self) -> str:
+        return self._marker
 
 
 class _FakePage:
@@ -221,8 +309,8 @@ class _FakePage:
         self.rendered_scale = scale
         return self
 
-    def to_pil(self) -> str:
-        return self._marker
+    def to_pil(self) -> _FakeImage:
+        return _FakeImage(self._marker)
 
 
 class _FakePdfDocument:
@@ -286,10 +374,17 @@ class _FakePilImage:
     "allocating" — so the Provider's decompression-bomb guard is genuinely exercised offline.
     """
 
-    def __init__(self, marker: str, pixels: int, image_module: Any) -> None:
+    def __init__(
+        self,
+        marker: str,
+        pixels: int,
+        image_module: Any,
+        size: tuple[int, int] = (_FAKE_IMG_W, _FAKE_IMG_H),
+    ) -> None:
         self._marker = marker
         self._pixels = pixels
         self._image_module = image_module
+        self._size = size
 
     def load(self) -> None:
         cap = self._image_module.MAX_IMAGE_PIXELS
@@ -297,8 +392,16 @@ class _FakePilImage:
             msg = f"Image size ({self._pixels} pixels) exceeds limit of {cap} pixels"
             raise _FakeDecompressionBombError(msg)
 
-    def convert(self, _mode: str) -> str:
-        return self._marker
+    def convert(self, _mode: str) -> _FakeImage:
+        # Return a _FakeImage carrying the marker + declared pixel size so the Provider's W8
+        # longest-side downscale runs against a real ``.size``/``.resize``.
+        return _FakeImage(self._marker, size=self._size)
+
+
+class _FakeResampling:
+    """Stand-in for ``PIL.Image.Resampling`` — only ``LANCZOS`` is referenced by the Provider."""
+
+    LANCZOS = "LANCZOS"
 
 
 def _install_pil(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -306,20 +409,27 @@ def _install_pil(monkeypatch: pytest.MonkeyPatch) -> None:
     image_mod = types.ModuleType("PIL.Image")
     image_mod.MAX_IMAGE_PIXELS = 89478485  # type: ignore[attr-defined]  # Pillow's real default
     image_mod.DecompressionBombError = _FakeDecompressionBombError  # type: ignore[attr-defined]
+    image_mod.Resampling = _FakeResampling  # type: ignore[attr-defined]
 
     def _open(buffer: Any) -> _FakePilImage:
         data = buffer.read() if hasattr(buffer, "read") else buffer
         text = bytes(data).decode("utf-8", errors="replace")
-        # A single-image fixture carries an optional "PIXELS:<n>|" segment (the bomb fixture) before
-        # "IMG:<md>", after the PNG magic bytes. Default to a small in-budget pixel count. Use
-        # ``partition`` (not ``startswith``) so the leading magic bytes do not defeat the parse.
+        # A single-image fixture carries an optional "PIXELS:<n>|" (bomb) and "DIMS:<w>x<h>|" (W8
+        # downscale) segment before "IMG:<md>", after the PNG magic. ``partition`` so the leading
+        # magic bytes do not defeat the parse.
         pixels = 1024
+        size = (_FAKE_IMG_W, _FAKE_IMG_H)
         if "PIXELS:" in text:
             _, _, after = text.partition("PIXELS:")
             count_str, _, text = after.partition("|")
             pixels = int(count_str)
+        if "DIMS:" in text:
+            _, _, after = text.partition("DIMS:")
+            dims, _, text = after.partition("|")
+            w_str, _, h_str = dims.partition("x")
+            size = (int(w_str), int(h_str))
         _, _, md = text.partition("IMG:")
-        return _FakePilImage(FAKE_PAGE_MARKER + md, pixels=pixels, image_module=image_mod)
+        return _FakePilImage(FAKE_PAGE_MARKER + md, pixels=pixels, image_module=image_mod, size=size)
 
     image_mod.open = _open  # type: ignore[attr-defined]
     pil.Image = image_mod  # type: ignore[attr-defined]
@@ -366,14 +476,21 @@ def make_glm_pdf() -> Any:
 def make_glm_image() -> Any:
     """A builder emitting fixture PNG bytes (valid PNG magic) carrying one page's markdown.
 
-    An optional ``pixels`` count declares the image's pixel size; when it exceeds the Provider's
-    tightened ``MAX_IMAGE_PIXELS`` budget the fake Pillow raises a decompression-bomb error on load —
-    the image pixel-bomb fixture.
+    An optional ``pixels`` count declares the image's total pixel size (the bomb fixture); an optional
+    ``dims`` ``(w, h)`` declares the decoded image's width×height so the Provider's W8 longest-side
+    downscale runs against a real ``.size`` (the downscale fixture).
     """
 
-    def _build(markdown: str, *, pixels: int | None = None) -> bytes:
+    def _build(
+        markdown: str,
+        *,
+        pixels: int | None = None,
+        dims: tuple[int, int] | None = None,
+    ) -> bytes:
         head = b"\x89PNG\r\n\x1a\n"
         prefix = f"PIXELS:{pixels}|".encode() if pixels is not None else b""
+        if dims is not None:
+            prefix += f"DIMS:{dims[0]}x{dims[1]}|".encode()
         return head + prefix + b"IMG:" + markdown.encode("utf-8")
 
     return _build

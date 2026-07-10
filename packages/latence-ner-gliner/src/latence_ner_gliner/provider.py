@@ -48,6 +48,7 @@ from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
+from latence_core.providers.perf import load_then_cast, maybe_compile
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -142,6 +143,7 @@ class GlinerEntityExtractor:
             deterministic=False,
             batch=True,
             cost_per_1k=None,
+            perf_note="bf16 via .to() on GPU / fp32 on CPU (gliner 0.2.27: no FA2/FlashDeBERTa)",
         )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -161,6 +163,8 @@ class GlinerEntityExtractor:
             config.get("batch_size", _DEFAULT_BATCH_SIZE),
             provider_name="entity.gliner",
         )
+        # The perf-seam config knobs (dtype / attn_implementation / compile), read at load (W8).
+        self._config: dict[str, Any] = dict(config)
         self._model: Any = None
 
     # -- lazy model load ----------------------------------------------------
@@ -182,7 +186,14 @@ class GlinerEntityExtractor:
                 "Install it with: pip install latence-ner-gliner"
             )
             raise ImportError(msg) from exc
-        self._model = GLiNER.from_pretrained(self._model_id)
+        # W8 perf seam (pod-corrected): the plain ``gliner`` library (0.2.27) REJECTS
+        # ``torch_dtype``/``attn_implementation`` in ``from_pretrained`` and its encoder does NOT
+        # on cuda (measured 1.36× faster, byte-identical entities). ``device=None`` reads the
+        # (measured 1.36× faster, byte-identical entities). ``device=None`` lets the seam read the
+        # / fp32. The model is then optionally compiled (guarded, off by default).
+        # / fp32. The model is then optionally compiled (guarded, off by default).
+        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, None)
+        self._model = maybe_compile(model, self._config, provider_name="entity.gliner")
         return self._model
 
     # -- extraction ---------------------------------------------------------

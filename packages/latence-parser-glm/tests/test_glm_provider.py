@@ -461,3 +461,77 @@ def test_empty_pdf_yields_empty_page_not_crash(
     assert record.disposition is Disposition.PARSED
     assert record.page_map is not None
     assert isinstance(record.content, str)
+
+
+# --- W8: OCR page-batching equivalence (batched == per-page, ceil(N/batch) calls) --------
+
+
+# A VARIABLE-LENGTH page fixture: pages differ in markdown length so a WRONG shared-length /
+# first-item prompt-slice assumption bleeds prompt/pad tokens into another page and FAILS the
+# record-for-record equality; distinct content per page also catches a mis-mapped batch.
+_VARLEN_PAGES = [
+    "# short",
+    "## a considerably longer second page with much more markdown text than the first",
+    "third",
+    "## fourth page — medium length body with a few more words here",
+    "5",
+]
+
+
+def test_ocr_page_batching_equals_per_page_record_for_record(fake_glm: None) -> None:
+    """Batched OCR over N variable-length pages == per-page decode, record-for-record."""
+    markers = [f"FAKE_PAGE::{md}" for md in _VARLEN_PAGES]
+    per_page = GlmOcrParser({"ocr_batch_size": 1})._ocr_pages(list(markers))
+    batched = GlmOcrParser({"ocr_batch_size": 4})._ocr_pages(list(markers))
+    assert per_page == _VARLEN_PAGES
+    assert batched == per_page
+    for page in batched:
+        assert "prompt-scaffold" not in page
+
+
+def test_ocr_generate_called_ceil_n_over_batch_size_times(fake_glm: None) -> None:
+    """The model's ``generate`` is called exactly ``ceil(n_pages / ocr_batch_size)`` times."""
+    markers = [f"FAKE_PAGE::{md}" for md in _VARLEN_PAGES]  # 5 pages
+    provider = GlmOcrParser({"ocr_batch_size": 2})
+    provider._ocr_pages(list(markers))
+    assert provider._model.generate_calls == 3  # ceil(5/2)
+    provider2 = GlmOcrParser({"ocr_batch_size": 8})
+    provider2._ocr_pages(list(markers))
+    assert provider2._model.generate_calls == 1
+
+
+def test_ocr_batch_size_config_validated() -> None:
+    """``ocr_batch_size`` must be >= 1."""
+    with pytest.raises(ProviderError, match="ocr_batch_size"):
+        GlmOcrParser({"ocr_batch_size": 0})
+
+
+# --- W8: longest-side (1540px) downscale --------
+
+
+def test_oversized_image_downscaled_to_longest_side_1540_aspect_preserved(
+    fake_glm: None, make_glm_image: Callable[..., bytes]
+) -> None:
+    """A 1200×2339 image downscales so its longest side == 1540, aspect ratio preserved (default)."""
+    img_bytes = make_glm_image("scanned page text\n", dims=(1200, 2339))
+    image = GlmOcrParser({})._image_from_bytes(img_bytes)
+    w, h = image.size
+    assert max(w, h) == 1540
+    assert w == round(1200 * (1540 / 2339))
+    assert h == 1540
+
+
+def test_image_untouched_when_cap_disabled_or_within_cap(
+    fake_glm: None, make_glm_image: Callable[..., bytes]
+) -> None:
+    """max_longest_dim=0 disables the cap; an already-small image is not resampled."""
+    big = GlmOcrParser({"max_longest_dim": 0})._image_from_bytes(
+        make_glm_image("t\n", dims=(1200, 2339))
+    )
+    assert big.size == (1200, 2339)
+    assert big.resized_to is None
+    small = GlmOcrParser({"max_longest_dim": 1540})._image_from_bytes(
+        make_glm_image("t\n", dims=(800, 1000))
+    )
+    assert small.size == (800, 1000)
+    assert small.resized_to is None

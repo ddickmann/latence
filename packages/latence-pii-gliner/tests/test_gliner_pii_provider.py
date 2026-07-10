@@ -70,12 +70,22 @@ class _FakeGLiNER:
 
     def __init__(self) -> None:
         self.batch_calls = 0
+        self.cast_dtype: Any = None  # W8: dtype applied via .to(), None until cast
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _FakeGLiNER:
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
+        # FAITHFUL to real gliner 0.2.27: from_pretrained REJECTS torch_dtype/attn_implementation.
+        for bad in ("torch_dtype", "attn_implementation"):
+            if bad in kwargs:
+                msg = f"UniEncoderSpanModel.__init__() got an unexpected keyword argument '{bad}'"
+                raise TypeError(msg)
         inst = cls()
         inst.model_id = model_id
         return inst
+
+    def to(self, dtype: Any) -> _FakeGLiNER:
+        self.cast_dtype = dtype  # W8: the plain-gliner dtype path is .to(bf16) on cuda
+        return self
 
     def _for_text(self, text: str, labels: list[str], threshold: float) -> list[dict[str, Any]]:
         per_text = type(self).per_text

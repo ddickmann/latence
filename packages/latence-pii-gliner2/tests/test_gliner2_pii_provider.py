@@ -79,7 +79,7 @@ class _FakeGLiNER2:
         self.batch_calls = 0
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _FakeGLiNER2:
+    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _FakeGLiNER2:
         inst = cls()
         inst.model_id = model_id
         return inst
@@ -441,7 +441,7 @@ class _NoBatchGLiNER2:
     """
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _NoBatchGLiNER2:  # noqa: ARG003
+    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _NoBatchGLiNER2:  # noqa: ARG003
         return cls()
 
     def extract_entities(

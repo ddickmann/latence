@@ -131,6 +131,14 @@ class ProviderProfile(BaseModel):
         ge=0,
         description="Per-1k cost for an endpoint/API provider; None for a local provider.",
     )
+    perf_note: str | None = Field(
+        default=None,
+        description=(
+            "An honest, declared note about the provider's load-time performance posture (W8): "
+            "the dtype/attn defaults it loads with (e.g. bf16-on-GPU + sdpa/FA2), or None for a "
+            "provider with no accelerated model load. Descriptor-only, like memory_mb."
+        ),
+    )
 
     @model_validator(mode="after")
     def _unverified_is_never_verified(self) -> ProviderProfile:

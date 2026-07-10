@@ -79,12 +79,30 @@ class _FakeGLiNER:
 
     def __init__(self) -> None:
         self.batch_calls = 0
+        #: the dtype the provider applied via ``.to(dtype)`` (W8) — None until cast. FAITHFUL: the
+        #: plain ``gliner`` library casts via ``.to()``, NOT via ``from_pretrained`` perf kwargs.
+        self.cast_dtype: Any = None
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _FakeGLiNER:
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
+        # FAITHFUL to the REAL ``gliner`` 0.2.27 API (pod-proven): ``GLiNER.from_pretrained``
+        # REJECTS ``torch_dtype`` / ``attn_implementation`` with a TypeError. A provider that
+        # wrongly spreads the perf kwargs here CRASHES offline exactly as it does on real weights —
+        # closing the false-green that shipped in the first W8 cut.
+        for bad in ("torch_dtype", "attn_implementation"):
+            if bad in kwargs:
+                msg = f"UniEncoderSpanModel.__init__() got an unexpected keyword argument '{bad}'"
+                raise TypeError(msg)
         inst = cls()
         inst.model_id = model_id
         return inst
+
+    def to(self, dtype: Any) -> _FakeGLiNER:
+        # The plain-gliner dtype path (W8): the provider casts the loaded model with ``.to(bf16)`` on
+        # cuda. Record the applied dtype so a test can assert bf16 was applied (and NO perf kwargs
+        # went to from_pretrained). Returns self, like a real torch module's ``.to``.
+        self.cast_dtype = dtype
+        return self
 
     def _for_text(self, text: str, labels: list[str], threshold: float) -> list[dict[str, Any]]:
         per_text = type(self).per_text
@@ -127,6 +145,60 @@ def test_default_model_is_permissive_apache() -> None:
     extractor = GlinerEntityExtractor({"labels": ["person"]})
     # The default checkpoint is the Apache-2.0 v2.1 (never a CC-BY-NC one).
     assert extractor._model_id == "urchade/gliner_multi-v2.1"
+
+
+# --- W8: plain-gliner dtype path — bf16 via .to() on cuda, NO perf kwargs to from_pretrained ------
+
+
+def test_gliner_applies_bf16_via_to_on_cuda_no_perf_kwargs_to_from_pretrained(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On cuda, the provider casts the model with ``.to(bf16)`` — and passes NO perf kwargs to
+    ``from_pretrained`` (the plain ``gliner`` 0.2.27 API rejects them; the fake would raise if it did).
+    """
+    # gliner 0.2.27 rejects torch_dtype/attn_implementation in from_pretrained, so the ONLY correct
+    # dtype path is model.to(dtype). Inject a fake torch (torch isn't installed offline) so the perf
+    # seam resolves a REAL bf16 dtype object to cast to, and pin a cuda host.
+    fake_torch = types.ModuleType("torch")
+    bf16 = object()
+    fake_torch.bfloat16 = bf16  # type: ignore[attr-defined]
+    fake_torch.float32 = object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+
+    extractor = GlinerEntityExtractor({"labels": ["person"]})
+    list(extractor.extract([_chunk("Alice spoke.")]))  # triggers the lazy load + cast
+    # The provider loaded bare (no TypeError from the faithful from_pretrained) AND cast to bf16.
+    assert extractor._model.cast_dtype is bf16
+
+
+def test_gliner_no_cast_on_cpu(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a CPU host the dtype default is fp32 — no ``.to()`` cast is applied (bf16 CPU is not a win)."""
+    fake_torch = types.ModuleType("torch")
+    fake_torch.bfloat16 = object()  # type: ignore[attr-defined]
+    fake_torch.float32 = object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+
+    extractor = GlinerEntityExtractor({"labels": ["person"]})
+    list(extractor.extract([_chunk("Alice spoke.")]))
+    assert extractor._model.cast_dtype is None  # fp32 on CPU → no cast
+
+
+def test_gliner_load_never_crashes_without_torch(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With torch NOT importable (the real offline env), a cuda host still loads — cast gracefully
+    skipped (no real dtype to cast to), never a crash. This is the seam's torch-free contract.
+    """
+    monkeypatch.setitem(sys.modules, "torch", None)  # torch import fails
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    extractor = GlinerEntityExtractor({"labels": ["person"]})
+    mentions = list(extractor.extract([_chunk("Alice spoke.")]))
+    assert extractor._model.cast_dtype is None  # no torch → no dtype object → cast skipped
+    assert isinstance(mentions, list)  # loaded + ran, no crash
 
 
 def test_extracts_and_offsets_to_document_span(fake_gliner: type[_FakeGLiNER]) -> None:

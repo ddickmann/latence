@@ -85,6 +85,7 @@ from latence_core.contracts import (
 from latence_core.errors import LatenceError, ProviderError
 from latence_core.language import detect_language
 from latence_core.providers.adapter import AdapterBase
+from latence_core.providers.perf import load_with_fa2_fallback
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -95,9 +96,26 @@ if TYPE_CHECKING:
 # The license-verified checkpoint (MIT weights AND code — see :meth:`profile`).
 _DEFAULT_MODEL = "zai-org/GLM-OCR"
 
-# The model card's recommended decode ceiling per page. Bounded so a pathological page cannot
-# generate unboundedly; overridable via config.
-_DEFAULT_MAX_NEW_TOKENS = 8192
+# The per-page decode ceiling — the CONTENT-SAFE default (W8, pod-corrected). 4096 is the
+# natural-EOS budget: on dense real German banking pages max_new_tokens=1024 TRUNCATED ~25% of the
+# OCR text (silently dropping document content — worse than slow for enterprise). LightOn's 1024
+# example is fine for typical pages but truncates dense multi-column docs — tune it DOWN for
+# known-light corpora (speed), never below your pages' real token length. Fully configurable;
+# bounded so a pathological page cannot generate unboundedly.
+_DEFAULT_MAX_NEW_TOKENS = 4096
+
+# The target LONGEST image dimension (px) a rasterised page / decoded image is downscaled to before
+# OCR, aspect ratio preserved (W8). Mirrors the LightOn sibling's official-recipe 1540px cap:
+# cap: an A4 at 200 DPI is ~2339px tall — fed full size that is ~2.3× the vision tokens vs a 1540px
+# target. NOT a byte-identical no-op (OCR output changes with resolution); a config knob defaulting
+# to 1540, ``0`` (or ``None``) disables the cap.
+_DEFAULT_MAX_LONGEST_DIM = 1540
+
+# How many page images share one ``generate()`` call (W8 OCR page-batching). Today's one-page-per-
+# generate is the throughput bottleneck; batching N pages left-pads them into one forward pass. A
+# small default (memory-shaping only — batched OCR is record-for-record identical to per-page under
+# greedy decoding + correct left-padding + per-item prompt-slice). Overridable via ocr_batch_size.
+_DEFAULT_OCR_BATCH_SIZE = 4
 
 # The text-recognition instruction GLM-OCR expects alongside the page image (unlike LightOn-OCR,
 # which is image-only, GLM-OCR is prompted with an OCR instruction). From the model card.
@@ -153,7 +171,12 @@ class GlmOcrParser(AdapterBase):
         category: str | None — content category stamped onto Classification (else inherited).
         sensitivity: str | None — sensitivity stamped onto Classification (else inherited).
         page_separator: str — markdown joined between pages (default ``"\\n\\n"``).
-        max_new_tokens: int — the per-page decode ceiling (default 8192).
+        max_new_tokens: int — the per-page decode ceiling (default 4096, content-safe on dense
+            pages; tune down for known-light corpora, never below a page's real token length).
+        ocr_batch_size: int — how many page images share one ``generate()`` call (default 4; W8
+            page-batching, memory-shaping — batched OCR is record-for-record identical to per-page).
+        max_longest_dim: int — the target longest image side in px, aspect preserved (default 1540;
+           ``0`` disables). Downscale only, LANCZOS. NOT byte-identical — resolution for throughput.
         prompt: str — the OCR instruction paired with the page image (default
             ``"Text Recognition:"``).
         dpi: int — the PDF→image rasterisation DPI (default 200; higher = sharper, slower). The
@@ -220,6 +243,8 @@ class GlmOcrParser(AdapterBase):
             deterministic=False,
             batch=True,
             cost_per_1k=None,
+            # W8: honest declared load-time perf posture (descriptor-only, P3-F1; not measured).
+            perf_note="bf16-GPU/fp32-CPU, sdpa (FA2 when flash_attn present), OCR page-batched",
         )
 
     @property
@@ -241,9 +266,25 @@ class GlmOcrParser(AdapterBase):
         if self._max_new_tokens < 1:
             msg = f"{self.provider_name}: max_new_tokens must be >= 1, got {self._max_new_tokens}."
             raise ProviderError(msg)
+        # W8 OCR page-batching: how many page images share one generate() call (>=1). Distinct from
+        # the document-level ``batch_size`` (AdapterBase, over input docs) — this batches PAGES
+        # a document. Default 4; a positive int (a batch of zero would never make progress).
+        self._ocr_batch_size = int(cfg.get("ocr_batch_size", _DEFAULT_OCR_BATCH_SIZE))
+        if self._ocr_batch_size < 1:
+            msg = f"{self.provider_name}: ocr_batch_size must be >= 1, got {self._ocr_batch_size}."
+            raise ProviderError(msg)
         self._dpi = int(cfg.get("dpi", 200))
         if self._dpi < 1:
             msg = f"{self.provider_name}: dpi must be >= 1, got {self._dpi}."
+            raise ProviderError(msg)
+        # W8: longest-side downscale target (px), aspect preserved. Default 1540; 0/None disables.
+        raw_longest = cfg.get("max_longest_dim", _DEFAULT_MAX_LONGEST_DIM)
+        self._max_longest_dim = int(raw_longest) if raw_longest else 0
+        if self._max_longest_dim < 0:
+            msg = (
+                f"{self.provider_name}: max_longest_dim must be >= 0 (0 disables), "
+                f"got {self._max_longest_dim}."
+            )
             raise ProviderError(msg)
         # Lazily loaded on first parse (cached); constructing the Provider never imports torch.
         self._model: Any = None
@@ -412,7 +453,7 @@ class GlmOcrParser(AdapterBase):
                     width_pt, height_pt = page.get_size()
                     scale = self._clamp_scale(width_pt, height_pt, requested_scale)
                     bitmap = page.render(scale=scale)
-                    images.append(bitmap.to_pil())
+                    images.append(self._downscale_longest(bitmap.to_pil()))
             finally:
                 pdf.close()
         return images or []
@@ -439,9 +480,34 @@ class GlmOcrParser(AdapterBase):
             with self.guard("decode_image"):
                 image = Image.open(io.BytesIO(data))
                 image.load()  # a decompression-bomb image raises here (bounded, no huge alloc)
-                return image.convert("RGB")
+                return self._downscale_longest(image.convert("RGB"))
         finally:
             Image.MAX_IMAGE_PIXELS = previous_cap
+
+    def _downscale_longest(self, image: Any) -> Any:
+        """Downscale a page image so its LONGEST side == ``max_longest_dim`` px (aspect preserved).
+
+        The W8 longest-side cap (mirrors the LightOn sibling's official-recipe 1540px). Applied to
+        BOTH rasterised PDF pages and bare-image inputs, AFTER the megapixel bomb-clamp. Disabled
+        (``max_longest_dim == 0``) or an already-in-budget image is returned untouched — no
+        upscaling, no resample cost. A downscale uses LANCZOS so text stays legible. NOT byte-
+        identical to the un-capped path (OCR output changes with resolution) — it is the throughput
+        knob, defaulting to 1540.
+        """
+        cap = self._max_longest_dim
+        if cap <= 0:
+            return image
+        width, height = image.size
+        longest = max(width, height)
+        if longest <= cap:
+            return image
+        from PIL import (
+            Image,  # noqa: PLC0415 - deferred heavy dep (ADR-0016); already imported above
+        )
+
+        ratio = cap / float(longest)
+        new_size = (max(1, round(width * ratio)), max(1, round(height * ratio)))
+        return image.resize(new_size, Image.Resampling.LANCZOS)
 
     # -- GLM-OCR inference: page image(s) → markdown per page ---------------
 
@@ -471,31 +537,59 @@ class GlmOcrParser(AdapterBase):
         model, processor = self._load_model()
         page_texts: list[str] = []
         with self.guard("parse"):
-            for image in images:
-                messages = self._build_messages(image)
-                inputs = processor.apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                )
-                device = self.device.device
-                if device is not None:
-                    inputs = inputs.to(device)
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=self._max_new_tokens,
-                    do_sample=False,
-                )
-                # generate() returns the FULL sequence (prompt + continuation). Slice the prompt
-                # tokens off before decoding — decoding the full sequence would prepend the chat/
-                # prompt scaffolding to the OCR markdown (the false-green trap). This is the exact
-                # real model-card contract: generated_ids[0][inputs["input_ids"].shape[1]:].
-                prompt_len = inputs["input_ids"].shape[1]
-                continuation = generated_ids[0][prompt_len:]
-                page_texts.append(processor.decode(continuation, skip_special_tokens=True))
+            for start in range(0, len(images), self._ocr_batch_size):
+                chunk = images[start : start + self._ocr_batch_size]
+                page_texts.extend(self._ocr_one_batch(model, processor, chunk))
         return page_texts
+
+    def _ocr_one_batch(self, model: Any, processor: Any, chunk: list[Any]) -> list[str]:
+        """OCR one batch of page images in a SINGLE ``generate()`` call → markdown per page (W8).
+
+        The whole W8 page-batching contract, built to be **record-for-record identical to the
+        per-page path** under greedy decoding:
+
+        * one chat message (image + the OCR instruction) per page → a *list* of message-lists;
+        * ``apply_chat_template(..., padding=True)`` LEFT-pads them into one batch with a shared
+         ``input_ids`` width ``L`` and a per-item ``attention_mask`` — left-padding is mandatory for
+          a decoder-only ``generate`` so every item's continuation begins at the SAME column ``L``;
+        * ONE ``model.generate(**inputs, do_sample=False)`` (greedy) over the whole batch;
+       * per item, the continuation is ``generated_ids[i][L:]`` — sliced by the shared padded prompt
+          width ``L`` (``input_ids.shape[1]``), which is exactly where each item's generation starts
+          under left-padding. The per-item real prompt length (``attention_mask[i].sum()``) is
+          honoured by the mask so batching a variable-length page next to a short one does NOT bleed
+          one page's prompt/pad tokens into another's markdown. Decoding without the ``L`` slice
+          prepend the chat/prompt/instruction scaffolding to every page (the false-green trap).
+
+        Greedy (``do_sample=False``) + correct left-padding/attention-mask ⇒ the batched markdown is
+        byte-identical to running each page alone (validated offline by the fake VLM + on the pod).
+        """
+        messages_batch = [self._build_messages(image) for image in chunk]
+        inputs = processor.apply_chat_template(
+            messages_batch,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding=True,  # LEFT-pad the batch (decoder-only generate needs aligned continuations)
+        )
+        device = self.device.device
+        if device is not None:
+            inputs = inputs.to(device)
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=self._max_new_tokens,
+            do_sample=False,
+        )
+        # generate() returns the FULL sequence (prompt + continuation) for each item. Under
+        # left-padding every item's continuation starts at the shared padded prompt width L =
+        # input_ids.shape[1]; slice each item there (generated_ids[i][L:]) so only the page's
+        # markdown continuation is decoded. Per-item, not a single shared decode.
+        prompt_width = inputs["input_ids"].shape[1]
+        texts: list[str] = []
+        for i in range(len(chunk)):
+            continuation = generated_ids[i][prompt_width:]
+            texts.append(processor.decode(continuation, skip_special_tokens=True))
+        return texts
 
     def _build_messages(self, image: Any) -> list[dict[str, Any]]:
         """The single-image OCR chat message GLM-OCR expects (image + the OCR instruction text).
@@ -537,11 +631,18 @@ class GlmOcrParser(AdapterBase):
             )
             raise ImportError(msg) from exc
         device = self.device.device
+        # W8 perf seam: bf16-on-GPU + sdpa/FA2 (graceful FA2→sdpa) into the VLM load, instead of the
+        # fp32/eager default (the ~2× miss). The processor takes no perf kwargs. After placement the
+        # model is optionally compiled (guarded, off by default).
+        perf = self.load_perf_kwargs()
         with self.guard("load_model"):
-            model = GlmOcrForConditionalGeneration.from_pretrained(self._model_id)
+            model = load_with_fa2_fallback(
+                GlmOcrForConditionalGeneration.from_pretrained, self._model_id, perf
+            )
             if device is not None:
                 model = model.to(device)
             processor = AutoProcessor.from_pretrained(self._model_id)
+        model = self.maybe_compile(model)
         self._model = model
         self._processor = processor
         return model, processor

@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ProviderError
 from latence_core.providers.adapter import AdapterBase
+from latence_core.providers.perf import load_with_fa2_fallback as _load_with_fa2_fallback
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -135,6 +136,8 @@ class SentenceTransformersEmbedder(AdapterBase):
             deterministic=False,
             batch=True,
             cost_per_1k=None,
+            # W8: honest declared load-time perf posture (descriptor-only, P3-F1; not measured).
+            perf_note="bf16-GPU/fp32-CPU, sdpa (FA2 when flash_attn present), via ST model_kwargs",
         )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -185,8 +188,16 @@ class SentenceTransformersEmbedder(AdapterBase):
         # Map the resolved device seam to ST's device= (None ⇒ ST auto-selects; the seam never
         # hands a fabricated device — a GPU-only host would have been skipped upstream).
         st_device = self.device.device
+        # W8 perf seam: thread the resolved dtype + attn implementation into the underlying
+        # transformer via ST's ``model_kwargs`` (its documented pass-through to from_pretrained),
+        # so the checkpoint loads bf16-on-GPU + sdpa/FA2 instead of the fp32/eager default. A FA2
+        # load that a model does not support degrades gracefully to sdpa (never a crash), then the
+        # model is optionally compiled (guarded, off by default).
+        perf = self.load_perf_kwargs()
         with self.guard("load_model"):
-            model = SentenceTransformer(self._model_id, device=st_device)
+            model = self._load_st(SentenceTransformer, self._model_id, st_device, perf)
+        # Read the real embedding width from the loaded (uncompiled) model before any compile wrap —
+        # ``get_sentence_embedding_dimension`` is a container method, read it off the eager module.
         real_dim = int(model.get_sentence_embedding_dimension())
         if self._declared_dimension is not None and real_dim != self._declared_dimension:
             msg = (
@@ -195,8 +206,27 @@ class SentenceTransformersEmbedder(AdapterBase):
             )
             raise ProviderError(msg)
         self._dimension = real_dim
-        self._model = model
-        return model
+        # Optional guarded compile (off by default) — after the width is read, so a compile wrap can
+        # never hide the container's introspection methods.
+        self._model = self.maybe_compile(model)
+        return self._model
+
+    @staticmethod
+    def _load_st(st_cls: Any, model_id: str, device: str | None, perf: dict[str, Any]) -> Any:
+        """Construct the ``SentenceTransformer``, threading perf kwargs, FA2→sdpa on FA2 failure.
+
+        The W8 perf kwargs (``torch_dtype`` + ``attn_implementation``) go through ST's documented
+        ``model_kwargs`` pass-through to the backbone's ``from_pretrained``. A ``flash_attention_2``
+        load can raise on a backbone that does not support it (e.g. no FA2 kernel for the arch); the
+        shared :func:`~latence_core.providers.perf.load_with_fa2_fallback` catches that and retries
+        once on ``sdpa`` so the embedder still loads — graceful degradation, never a crash. Any
+        non-FA2 load error propagates (mapped by the guard).
+        """
+        return _load_with_fa2_fallback(
+            lambda mid, **mk: st_cls(mid, device=device, model_kwargs=mk),
+            model_id,
+            perf,
+        )
 
     # -- embedding ----------------------------------------------------------
 

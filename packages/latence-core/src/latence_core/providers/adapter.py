@@ -48,12 +48,14 @@ The four reusable pieces (compose them; the base does not force a god-class shap
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, cast, runtime_checkable
 
 from latence_core.errors import ConfigError, LatenceError, ProviderError
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.device import DeviceDecision, select_device
+from latence_core.providers.perf import load_perf_kwargs as _resolve_perf_kwargs
+from latence_core.providers.perf import maybe_compile as _maybe_compile
 from latence_core.providers.profile import ProviderProfile, profile_of
 
 if TYPE_CHECKING:
@@ -221,6 +223,41 @@ class AdapterBase:
         resolves the decision.
         """
         return self._device_decision
+
+    # -- 1b. performance seam (W8) -----------------------------------------
+
+    def load_perf_kwargs(self) -> dict[str, Any]:
+        """The load-time perf kwargs (dtype + attn) to spread into ``from_pretrained`` (W8).
+
+        Resolves the load **dtype** (bf16 on GPU / fp32 on CPU by default, or ``config["dtype"]``
+        override) and the **attention implementation** (``sdpa`` default, ``flash_attention_2`` only
+        when the ``flash_attn`` package is importable and the config permits it) against this
+        adapter's resolved device (:attr:`device`), returning the two kwargs HF ``from_pretrained``
+        reads::
+
+            model = Model.from_pretrained(model_id, **self.load_perf_kwargs())
+
+        Applied once per load so a learned Provider never loads bare fp32 (the ~2× miss). An invalid
+       ``dtype`` config is an operator :class:`~latence_core.errors.ConfigError` naming the provider
+        never a silent wrong dtype. The FA2 *load* can still raise on a model that does not support
+        it — the adapter wraps the load so that surfaces as a graceful sdpa retry, never a crash.
+        """
+        try:
+            return _resolve_perf_kwargs(self.device.device, self._config)
+        except ValueError as exc:
+            msg = f"{self.provider_name}: {exc}"
+            raise ConfigError(msg) from exc
+
+    def maybe_compile(self, model: _Out) -> _Out:
+        """``torch.compile`` the model when ``config["compile"]`` is truthy — guarded (W8).
+
+        Off by default (returns the model unchanged); on, wraps the forward with
+        ``torch.compile(mode="reduce-overhead")`` behind a broad guard so any compile/warmup failure
+        logs and returns the **uncompiled** model — a bad compile costs only throughput, never
+        correctness or a crash. The compiled module is a drop-in for the eager one (same outputs).
+        """
+        compiled = _maybe_compile(model, self._config, provider_name=self.provider_name)
+        return cast("_Out", compiled)
 
     # -- 2. batching -------------------------------------------------------
 

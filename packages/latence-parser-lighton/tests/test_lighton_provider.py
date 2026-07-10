@@ -436,3 +436,97 @@ def test_empty_pdf_yields_empty_page_not_crash(
     assert record.disposition is Disposition.PARSED
     assert record.page_map is not None
     assert isinstance(record.content, str)
+
+
+# --- W8: OCR page-batching equivalence (batched == per-page, ceil(N/batch) calls) --------
+
+
+def _ocr_texts(provider: LightOnOcrParser, images: list[str]) -> list[str]:
+    """Run the provider's OCR seam over a list of fake page-image markers → markdown per page."""
+    return provider._ocr_pages(list(images))
+
+
+# A VARIABLE-LENGTH page fixture: the pages differ in markdown length so a WRONG shared-length /
+# first-item prompt-slice assumption bleeds one page's prompt/pad tokens into another's markdown and
+# FAILS the record-for-record equality below. Distinct content per page also catches a mis-mapped
+# batch (off-by-one / wrong order).
+_VARLEN_PAGES = [
+    "# short",
+    "## a considerably longer second page with much more markdown text than the first",
+    "third",
+    "## fourth page — medium length body with a few more words here",
+    "5",
+]
+
+
+def test_ocr_page_batching_equals_per_page_record_for_record(fake_lighton: None) -> None:
+    """Batched OCR over N variable-length pages == per-page decode, record-for-record."""
+    markers = [f"FAKE_PAGE::{md}" for md in _VARLEN_PAGES]
+
+    # Per-page baseline: force ocr_batch_size=1 (one page per generate call).
+    per_page = _ocr_texts(LightOnOcrParser({"ocr_batch_size": 1}), markers)
+    # Batched: several pages share one generate call.
+    batched = _ocr_texts(LightOnOcrParser({"ocr_batch_size": 4}), markers)
+
+    assert per_page == _VARLEN_PAGES  # the fake decodes each marker back to its markdown
+    assert batched == per_page  # record-for-record identical, variable lengths and all
+    for page in batched:
+        assert "prompt-scaffold" not in page  # no leaked prompt tokens (a wrong slice would leak)
+
+
+def test_ocr_generate_called_ceil_n_over_batch_size_times(fake_lighton: None) -> None:
+    """The model's ``generate`` is called exactly ``ceil(n_pages / ocr_batch_size)`` times."""
+    markers = [f"FAKE_PAGE::{md}" for md in _VARLEN_PAGES]  # 5 pages
+
+    provider = LightOnOcrParser({"ocr_batch_size": 2})
+    provider._ocr_pages(list(markers))
+    model = provider._model  # the fake, loaded on first OCR
+    # 5 pages, batch 2 → ceil(5/2) = 3 generate calls (2 + 2 + 1), NOT 5.
+    assert model.generate_calls == 3
+
+    provider2 = LightOnOcrParser({"ocr_batch_size": 8})  # one batch covers all 5
+    provider2._ocr_pages(list(markers))
+    assert provider2._model.generate_calls == 1
+
+
+def test_ocr_batch_size_config_validated() -> None:
+    """``ocr_batch_size`` must be >= 1 (a batch of zero would never make progress)."""
+    with pytest.raises(ProviderError, match="ocr_batch_size"):
+        LightOnOcrParser({"ocr_batch_size": 0})
+
+
+# --- W8: longest-side (1540px) downscale — LightOn's official preprocessing recipe --------
+
+
+def test_oversized_image_downscaled_to_longest_side_1540_aspect_preserved(
+    fake_lighton: None, make_lighton_image: Callable[..., bytes]
+) -> None:
+    """A 1200×2339 image downscales so its longest side == 1540, aspect ratio preserved (default)."""
+    img_bytes = make_lighton_image("scanned page text\n", dims=(1200, 2339))
+    provider = LightOnOcrParser({})  # default max_longest_dim = 1540
+    image = provider._image_from_bytes(img_bytes)
+    w, h = image.size
+    assert max(w, h) == 1540  # longest side capped to LightOn's target
+    # Aspect ratio preserved: 1200/2339 ≈ 0.513 → width ≈ 1540 * 0.513 ≈ 790.
+    assert w == round(1200 * (1540 / 2339))
+    assert h == 1540
+
+
+def test_image_untouched_when_cap_disabled(
+    fake_lighton: None, make_lighton_image: Callable[..., bytes]
+) -> None:
+    """max_longest_dim=0 disables the cap — an oversized image is passed through untouched."""
+    img_bytes = make_lighton_image("text\n", dims=(1200, 2339))
+    image = LightOnOcrParser({"max_longest_dim": 0})._image_from_bytes(img_bytes)
+    assert image.size == (1200, 2339)
+    assert image.resized_to is None  # never resized
+
+
+def test_image_untouched_when_already_within_cap(
+    fake_lighton: None, make_lighton_image: Callable[..., bytes]
+) -> None:
+    """An image already within the cap is not upscaled or resampled."""
+    img_bytes = make_lighton_image("text\n", dims=(800, 1000))
+    image = LightOnOcrParser({"max_longest_dim": 1540})._image_from_bytes(img_bytes)
+    assert image.size == (800, 1000)
+    assert image.resized_to is None

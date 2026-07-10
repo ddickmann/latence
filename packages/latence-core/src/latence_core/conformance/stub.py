@@ -149,8 +149,17 @@ class _StubGLiNER:
     relations: list[dict[str, Any]] = []
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _StubGLiNER:  # noqa: ARG003 - model id unused offline
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _StubGLiNER:  # noqa: ARG003 - id unused
+        # FAITHFUL to real gliner 0.2.27: from_pretrained REJECTS torch_dtype/attn_implementation
+        # (the plain-gliner providers cast via ``.to(dtype)`` instead — W8 pod fix).
+        for bad in ("torch_dtype", "attn_implementation"):
+            if bad in kwargs:
+                msg = f"UniEncoderSpanModel.__init__() got an unexpected keyword argument '{bad}'"
+                raise TypeError(msg)
         return cls()
+
+    def to(self, _dtype: Any) -> _StubGLiNER:
+        return self  # W8: the plain-gliner dtype path is .to(bf16) on cuda
 
     def predict_entities(
         self, text: str, labels: list[str], threshold: float = 0.5
@@ -244,7 +253,7 @@ class _StubGLiNER2:
     entities: list[dict[str, Any]] = []
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _StubGLiNER2:  # noqa: ARG003 - id unused offline
+    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubGLiNER2:  # noqa: ARG003 - id unused offline
         return cls()
 
     def extract_entities(
@@ -337,9 +346,15 @@ class _StubSentenceTransformer:
 
     dimension: int = 8
 
-    def __init__(self, model_id: str, device: str | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        device: str | None = None,
+        model_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         self.model_id = model_id
         self.device = device
+        self.model_kwargs = dict(model_kwargs or {})  # W8 perf seam pass-through
 
     def get_sentence_embedding_dimension(self) -> int:
         return type(self).dimension

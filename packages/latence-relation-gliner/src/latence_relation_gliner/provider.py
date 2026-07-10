@@ -51,6 +51,7 @@ from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
+from latence_core.providers.perf import load_then_cast, maybe_compile
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ class GlinerRelexExtractor:
             deterministic=False,
             batch=True,
             cost_per_1k=None,
+            perf_note="bf16 via .to() on GPU / fp32 on CPU (gliner 0.2.27: no FA2/FlashDeBERTa)",
         )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -171,6 +173,8 @@ class GlinerRelexExtractor:
             config.get("batch_size", _DEFAULT_BATCH_SIZE),
             provider_name="relation.gliner_relex",
         )
+        # The perf-seam config knobs (dtype / attn_implementation / compile), read at load (W8).
+        self._config: dict[str, Any] = dict(config)
         self._model: Any = None
 
     # -- lazy model load ----------------------------------------------------
@@ -186,7 +190,12 @@ class GlinerRelexExtractor:
                 "Install it with: pip install latence-relation-gliner"
             )
             raise ImportError(msg) from exc
-        self._model = GLiNER.from_pretrained(self._model_id)
+        # W8 perf seam (pod-corrected): plain ``gliner`` 0.2.27 REJECTS torch_dtype/attn_impl in
+        # in from_pretrained and its encoder has no FA2/FlashDeBERTa — so load PLAIN, then .to(bf16)
+        # on cuda (measured 1.36× faster, byte-identical). device=None reads the torch-free probe
+        # (GLiNER auto-places on cuda); the cast is a no-op on CPU / fp32. Then optionally compile.
+        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, None)
+        self._model = maybe_compile(model, self._config, provider_name="relation.gliner_relex")
         return self._model
 
     # -- fused extraction ---------------------------------------------------

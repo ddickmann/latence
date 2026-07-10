@@ -35,12 +35,22 @@ class _FakeSentenceTransformer:
     load_error: Exception | None = None
     last_inputs: list[str] = []
     last_kwargs: dict[str, Any] = {}
+    last_model_kwargs: dict[str, Any] = {}
     instances: int = 0
 
-    def __init__(self, model_id: str, device: str | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        device: str | None = None,
+        model_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         type(self).instances += 1
         self.model_id = model_id
         self.device = device
+        # W8: the perf seam threads ``model_kwargs={"torch_dtype":…, "attn_implementation":…}``
+        # through ST's documented pass-through — record it so a test can assert it was applied.
+        self.model_kwargs = dict(model_kwargs or {})
+        type(self).last_model_kwargs = dict(self.model_kwargs)
         load_error = type(self).load_error
         if load_error is not None:
             raise load_error
@@ -124,6 +134,26 @@ def test_custom_prefix_is_applied(fake_st: type[_FakeSentenceTransformer]) -> No
     embedder = SentenceTransformersEmbedder({"dimension": 4, "prefix": ""})
     list(embedder.embed(["x"]))
     assert fake_st.last_inputs == ["x"]  # no prefix (e.g. MiniLM)
+
+
+def test_perf_kwargs_threaded_into_model_kwargs_fp32_on_cpu(
+    fake_st: type[_FakeSentenceTransformer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W8: the perf seam threads torch_dtype + attn_implementation via ST's ``model_kwargs`` (CPU)."""
+    monkeypatch.setenv("LATENCE_CUDA", "0")  # CPU host → fp32 default
+    list(SentenceTransformersEmbedder({"dimension": 4}).embed(["a"]))
+    mk = fake_st.last_model_kwargs
+    assert mk.get("torch_dtype") == "float32"  # torch-free env → dtype name string
+    assert mk.get("attn_implementation") == "sdpa"
+
+
+def test_perf_kwargs_bf16_on_cuda_host(
+    fake_st: type[_FakeSentenceTransformer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W8: on a (pinned) CUDA host the ST backbone loads bf16 — the ~2× win, threaded via model_kwargs."""
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    list(SentenceTransformersEmbedder({"dimension": 4, "device": "cuda"}).embed(["a"]))
+    assert fake_st.last_model_kwargs.get("torch_dtype") == "bfloat16"
 
 
 def test_batches_bound_requests_and_preserve_order(

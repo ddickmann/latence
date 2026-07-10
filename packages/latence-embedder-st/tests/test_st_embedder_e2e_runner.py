@@ -41,9 +41,15 @@ _DIMENSION = 6
 class _FakeSentenceTransformer:
     """Deterministic offline fake for sentence_transformers.SentenceTransformer."""
 
-    def __init__(self, model_id: str, device: str | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        device: str | None = None,
+        model_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         self.model_id = model_id
         self.device = device
+        self.model_kwargs = dict(model_kwargs or {})  # W8 perf seam pass-through
 
     def get_sentence_embedding_dimension(self) -> int:
         return _DIMENSION

@@ -43,8 +43,16 @@ class _CapturingGLiNER:
     """A gliner.GLiNER fake that records the labels it is asked to predict and returns none."""
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> _CapturingGLiNER:  # noqa: ARG003
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _CapturingGLiNER:  # noqa: ARG003
+        # FAITHFUL to real gliner 0.2.27: from_pretrained REJECTS torch_dtype/attn_implementation.
+        for bad in ("torch_dtype", "attn_implementation"):
+            if bad in kwargs:
+                msg = f"UniEncoderSpanModel.__init__() got an unexpected keyword argument '{bad}'"
+                raise TypeError(msg)
         return cls()
+
+    def to(self, _dtype: Any) -> _CapturingGLiNER:
+        return self  # W8: the plain-gliner dtype path is .to(bf16) on cuda
 
     def predict_entities(
         self, text: str, labels: list[str], threshold: float = 0.5  # noqa: ARG002

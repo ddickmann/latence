@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import AdapterBase
+from latence_core.providers.perf import load_with_fa2_fallback as _load_gliner_with_perf
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
@@ -172,6 +173,7 @@ class Gliner2PIIRedactor(AdapterBase):
             deterministic=False,
             batch=True,
             cost_per_1k=None,
+            perf_note="bf16 on GPU / fp32 on CPU (mdeberta: bf16 is the win; attn where accepted)",
         )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -217,8 +219,16 @@ class Gliner2PIIRedactor(AdapterBase):
                 "Install it with: pip install latence-pii-gliner2"
             )
             raise ImportError(msg) from exc
+        # W8 perf seam: the ``gliner2`` library (unlike plain ``gliner`` 0.2.27) ACCEPTS
+        # torch_dtype + attn_implementation in from_pretrained — pod-validated to load fine — so the
+        # perf dict is threaded here. The honest win is **bf16** (mdeberta uses disentangled
+        # attention, so FA2 does not accelerate it — attn_implementation is passed only where the
+        # lib accepts it, not claimed as a speedup). A FA2 load that raises degrades to sdpa; the
+        # then optionally compiled (guarded, off by default).
+        perf = self.load_perf_kwargs()
         with self.guard("load_model"):
-            self._model = GLiNER2.from_pretrained(self._model_id)
+            model = _load_gliner_with_perf(GLiNER2.from_pretrained, self._model_id, perf)
+        self._model = self.maybe_compile(model)
         return self._model
 
     # -- redaction ----------------------------------------------------------
