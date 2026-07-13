@@ -118,8 +118,9 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule    # in-core hybrid PII redactor (S6): the PII-handling Stage
-    depends_on: [parse]                # scans the parsed document's ORIGINAL markdown coordinate
-    config:                            # system (where PII spans + pages live), NOT the chunk stream
+    depends_on: [chunk]                # W16 (ADR-0042): chunk→chunk PII masking — each chunk (≤ the
+    config:                            # model window) masked in full, no truncation; masked_content
+    #                                    feeds the corpus Export as PII-safe RAG text
       # No `detectors` key ⇒ ALL built-in recognisers (email, phone, ssn, credit_card,
       # ip, iban, aws_key, api_key, jwt, secret): comprehensive PII+secret coverage by
       # default, so the shipped RAG corpus is genuinely PII-handled (#61; #66 added the

@@ -108,11 +108,11 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.gliner_pii       # learned PII over (config ∪ induced) pii_types
-    # depends_on Parse for the DocumentRecords (whole-doc markdown + page map the PII spans key to)
-    # AND the induce Stage for the chunk-carried induced schema: the runner projects each document's
-    # induced pii_types onto its DocumentRecord (chunk→document bridge, ADR-0038 §2) so the redactor
-    # UNIONs them onto the config floor. Drop `induce` here (or the whole Stage) ⇒ byte-identical.
-    depends_on: [parse, induce]
+    # W16 (ADR-0042): chunk→chunk PII masking. depends_on the `induce` Stage's chunk stream — the
+    # redactor reads each chunk's `induced_labels` DIRECTLY (no document bridge needed) and UNIONs
+    # the induced pii_types onto its config floor per chunk. Each chunk ≤ the mdeberta window, so no
+    # PII is truncated. Point it at `content_screen` instead (or drop induction) ⇒ config labels only.
+    depends_on: [induce]
     config:
       pii_labels: [email, phone number]  # PII FLOOR; induced pii_types union on (ADR-0038)
       device: cuda

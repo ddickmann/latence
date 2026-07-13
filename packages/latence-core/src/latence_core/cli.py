@@ -15,20 +15,33 @@
   per Provider, and write a device-fingerprinted ``tuned/<device>.yaml`` + an honest report
   (winners AND rejected knobs). ``latence run --tuned tuned/<device>.yaml`` overlays it ONLY on
   a matching device_fingerprint, else warns + uses stack defaults (ADR-0036, W11-autotune).
+* ``latence delta <stack.yaml>`` / ``retract`` / ``purge`` — incremental corpus updates over the
+  EXISTING :class:`~latence_core.delta_runner.DeltaRunner` (S11, ADR-0029): ``delta`` adds/updates
+  from the current source and commits the next Corpus Version; ``retract`` soft-deletes documents
+  (auditable, rollback-able); ``purge`` is the hard GDPR erasure (guarded by ``--yes``). HONEST
+  boundary (issue #42): the *committed* corpus is affected-set-scoped, but a delta still
+  re-extracts the WHOLE current source today — the compute is O(corpus), not yet incremental.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from latence_core.errors import LatenceError, error_category
 from latence_core.pipeline import Pipeline
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
+
+if TYPE_CHECKING:
+    from latence_core.quality import QualityReport
 
 app = typer.Typer(add_completion=False, help="Latence — AI-ready data pipelines.")
 
@@ -54,6 +67,116 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
+# A content-addressed document id (the sha256-of-bytes id the Source stamps + `retract`/`purge`
+# take). Kept lenient-but-shaped: a `sha256:` prefix over 64 lowercase hex chars.
+_DOC_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _load_pipeline(pipeline_path: Path) -> Pipeline:
+    """Load a Pipeline from a stack/pipeline YAML (the exact loader ``run`` uses).
+
+    The YAML itself is read from local disk; its declared ``storage_uri`` can point anywhere
+    fsspec supports. Exits 2 (a usage error) when the file is missing.
+    """
+    if not pipeline_path.exists():
+        typer.echo(f"Pipeline file not found: {pipeline_path}", err=True)
+        raise typer.Exit(code=2)
+    text = pipeline_path.read_text(encoding="utf-8")
+    pipeline = Pipeline.from_yaml_text(text)
+    logger.info("loaded pipeline %r with %d stages", pipeline.name, len(pipeline.stages))
+    return pipeline
+
+
+def _default_run_id(prefix: str) -> str:
+    """A fresh UTC-timestamped run id (a delta needs a new run id each time)."""
+    return datetime.now(UTC).strftime(f"{prefix}-%Y%m%dT%H%M%SZ")
+
+
+def _collect_document_ids(doc: list[str] | None, docs_file: Path | None) -> list[str]:
+    """Gather + validate the document ids from ``--doc`` (repeatable) and ``--docs-file``.
+
+    De-duplicates preserving order, skips blank / ``#`` comment lines in the file, and rejects
+    anything that is not shaped like a content-addressed document id. Exits 2 (a usage error) when
+    no ids are given or any id is malformed, with a message pointing at where to find one.
+    """
+    ids: list[str] = list(doc or [])
+    if docs_file is not None:
+        if not docs_file.exists():
+            typer.echo(f"--docs-file not found: {docs_file}", err=True)
+            raise typer.Exit(code=2)
+        for line in docs_file.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                ids.append(stripped)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for doc_id in ids:
+        if doc_id not in seen:
+            seen.add(doc_id)
+            unique.append(doc_id)
+    if not unique:
+        typer.echo(
+            "No document ids given. Pass --doc <sha256:id> (repeatable) and/or "
+            "--docs-file <path> (one id per line).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    bad = [i for i in unique if not _DOC_ID_RE.match(i)]
+    if bad:
+        typer.echo(
+            "These do not look like document ids (expected sha256:<64 hex chars>): "
+            + ", ".join(bad),
+            err=True,
+        )
+        typer.echo(
+            "Find a document_id in the export's records.jsonl (the provenance.document_id "
+            "field), or hash the file: printf 'sha256:%s\\n' \"$(shasum -a 256 FILE | "
+            "cut -d' ' -f1)\".",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return unique
+
+
+def _emit_delta_report(pipeline: Pipeline, run_id: str, report: QualityReport) -> None:
+    """Print the delta churn concisely and persist the human-readable rendering (mirrors ``run``).
+
+    The DeltaRunner already persisted ``quality-report.json`` (with the churn); this writes the
+    ``quality-report.md`` rendering alongside it — the same human/machine pair ``run`` writes — and
+    prints the churn: documents ±, entities/edges churn, records retracted/purged, and the
+    affected-set size vs the whole corpus-level set (the perf witness), plus the new Corpus Version.
+    """
+    storage = Storage.for_uri(pipeline.storage_uri)
+    run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
+    storage.write_atomic(f"{run_dir}/quality-report.md", report.render().encode("utf-8"))
+    dc = report.delta
+    if dc is None:  # pragma: no cover - defensive; a delta run always attaches its churn
+        typer.echo("warning: the delta run produced no churn", err=True)
+        return
+    recon = "reconciled" if dc.reconciliation_triggered else "incremental"
+    frm = "none" if dc.from_version is None else f"v{dc.from_version}"
+    typer.echo(f"Corpus Version {frm} -> v{dc.to_version} ({recon})")
+    typer.echo(
+        f"  documents: +{dc.documents_added} ~{dc.documents_updated} "
+        f"-{dc.documents_deleted} (={dc.documents_unchanged} unchanged)"
+    )
+    typer.echo(
+        f"  entities:  +{dc.entities_created} created, {dc.entities_merged} merged, "
+        f"{dc.entities_split} split"
+    )
+    typer.echo(f"  edges:     +{dc.edges_added} -{dc.edges_retracted}")
+    typer.echo(
+        f"  records:   {dc.records_retracted} retracted, {dc.records_purged} purged "
+        f"({dc.deletion_mode.value})"
+    )
+    typer.echo(
+        f"  affected set: {dc.affected_set_size}/{dc.corpus_record_count} corpus-level records "
+        "recomputed (extraction still re-runs the whole source — issue #42)"
+    )
+    typer.echo(f"  drift: {dc.drift:.3f}")
+    typer.echo(f"report: {run_dir}/quality-report.json", err=True)
+
+
 @app.command()
 def run(
     pipeline_path: Annotated[Path, typer.Argument(help="Path to the pipeline YAML.")],
@@ -72,15 +195,20 @@ def run(
 ) -> None:
     """Execute a Pipeline declared in ``pipeline_path`` on the local Runner."""
     _configure_logging(verbose)
-    if not pipeline_path.exists():
-        typer.echo(f"Pipeline file not found: {pipeline_path}", err=True)
-        raise typer.Exit(code=2)
+    _execute_pipeline_file(pipeline_path, run_id=run_id, tuned=tuned)
 
-    # The pipeline YAML itself is read from local disk; its declared storage_uri
-    # can point anywhere fsspec supports.
-    text = pipeline_path.read_text(encoding="utf-8")
-    pipeline = Pipeline.from_yaml_text(text)
-    logger.info("loaded pipeline %r with %d stages", pipeline.name, len(pipeline.stages))
+
+def _execute_pipeline_file(
+    pipeline_path: Path, *, run_id: str, tuned: Path | None = None
+) -> None:
+    """Load a stack/pipeline YAML from disk and run it on the local Runner (shared by run+process).
+
+    The single execution path both ``latence run`` and ``latence process`` delegate to: load the
+    YAML (via ``_load_pipeline`` — the SAME loader ``delta``/``retract``/``purge`` use), optionally
+    overlay a tuned config, run, persist + echo the Quality Report. Logging is configured by the
+    caller so each command owns its ``--verbose`` flag.
+    """
+    pipeline = _load_pipeline(pipeline_path)
 
     # W11: a tuned config's per-Provider knobs are overlaid ONLY on a device_fingerprint match
     # (else warn + stack defaults) — the overlay is config-only, no contract/offset change.
@@ -318,6 +446,374 @@ def tune(
 
     typer.echo(report.render())  # type: ignore[attr-defined]
     typer.echo(f"tuned config written to: {destination}", err=True)
+
+
+@app.command()
+def setup(
+    source: Annotated[
+        str | None,
+        typer.Option("--source", help="Folder (Storage URI or path) holding the files to process."),
+    ] = None,
+    storage: Annotated[
+        str | None,
+        typer.Option("--storage", help="Output/state Storage URI. Default: file://<cwd>/latence-out."),
+    ] = None,
+    parser: Annotated[
+        str | None,
+        typer.Option(
+            "--parser",
+            help="Parser Provider: parser.render (universal), parser.pdfplumber (PDF text), or "
+            "parser.lighton (OCR). Default: recommended from the detected file types.",
+        ),
+    ] = None,
+    device: Annotated[
+        str | None, typer.Option("--device", help="auto | cpu | cuda for the learned Stages.")
+    ] = None,
+    llm_base_url: Annotated[
+        str | None,
+        typer.Option("--llm-base-url", help="Schema-induction LLM base URL (OpenAI-compatible)."),
+    ] = None,
+    llm_model: Annotated[
+        str | None, typer.Option("--llm-model", help="Schema-induction LLM model id.")
+    ] = None,
+    pii: Annotated[
+        bool | None,
+        typer.Option(
+            "--pii/--no-pii",
+            help="Include (default) or omit the PII redaction + guardrail screening stages.",
+        ),
+    ] = None,
+    domain: Annotated[
+        str | None, typer.Option("--domain", help="Optional free-text domain hint (a header note).")
+    ] = None,
+    output: Annotated[
+        Path, typer.Option("--output", "-o", help="Where to save the generated stack config.")
+    ] = Path("latence.stack.yaml"),
+    non_interactive: Annotated[
+        bool,
+        typer.Option(
+            "--non-interactive",
+            help="Take every answer from flags (no prompts). Same inputs → byte-identical config.",
+        ),
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Guided, deterministic setup → a clean, validated, quality-baked stack config (W15, ADR-0041).
+
+    Interactive by default: each prompt carries a sensible default + why it matters. With
+    ``--non-interactive`` every answer comes from the flags (unset flags fall back to the SAME
+    defaults), so identical inputs produce a **byte-identical** config for CI/repro. The generated
+    stack is DRY-VALIDATED (structural + DAG + capability wiring — reusing the ``stack validate``
+    machinery, no pipeline run) before it is saved.
+    """
+    _configure_logging(verbose)
+    from latence_core.setup import (
+        SetupAnswers,
+        SetupConfigError,
+        build_stack_config,
+        detect_extensions,
+        llm_key_env_var,
+        recommend_parser,
+        validate_config_text,
+    )
+    from latence_core.setup.wizard import (
+        _KNOWN_PARSERS,
+        DEFAULT_LLM_BASE_URL,
+        DEFAULT_LLM_MODEL,
+    )
+
+    interactive = not non_interactive
+
+    def ask_text(flag: str | None, prompt: str, why: str, default: str) -> str:
+        if flag is not None:
+            return flag
+        if not interactive:
+            return default
+        typer.echo(f"  ({why})", err=True)
+        return str(typer.prompt(prompt, default=default))
+
+    # a. Source folder — required, must exist. Detect the extensions present.
+    default_cwd = Path.cwd()
+    src = ask_text(
+        source,
+        "Source folder (where your files live)",
+        "the folder Latence reads; validated to exist, its file types auto-detected",
+        f"file://{default_cwd}/corpus",
+    )
+    src_path = Path(src.removeprefix("file://"))
+    if not src_path.exists() or not src_path.is_dir():
+        typer.echo(
+            f"Source folder does not exist (or is not a directory): {src}", err=True
+        )
+        raise typer.Exit(code=2)
+    extensions = detect_extensions(src)
+    typer.echo(f"Detected file types under the source folder: {', '.join(extensions)}", err=True)
+
+    # b. Output / storage URI.
+    store = ask_text(
+        storage,
+        "Output / storage URI",
+        "where state + the exported RAG corpus and KG are written",
+        f"file://{default_cwd}/latence-out",
+    )
+
+    # c. Parser — recommend from detected types, confirm/override.
+    recommended = recommend_parser(extensions)
+    chosen_parser = ask_text(
+        parser,
+        "Parser (parser.render | parser.pdfplumber | parser.lighton)",
+        f"recommended '{recommended}' from your file types; render=universal, "
+        f"pdfplumber=born-digital PDF, lighton=OCR for scans",
+        recommended,
+    )
+    if chosen_parser not in _KNOWN_PARSERS:
+        typer.echo(
+            f"Unknown parser {chosen_parser!r}; expected one of {sorted(_KNOWN_PARSERS)}.", err=True
+        )
+        raise typer.Exit(code=2)
+
+    # d. Device.
+    dev = ask_text(
+        device,
+        "Device (auto | cpu | cuda)",
+        "learned Stages run here; 'auto' picks CUDA when present, else CPU (skip-with-flag)",
+        "auto",
+    )
+
+    # e. Schema induction LLM (mandatory for quality) — endpoint + model; key from env at run.
+    base_url = ask_text(
+        llm_base_url,
+        "Schema-induction LLM base URL",
+        "the OpenAI-compatible endpoint that discovers your corpus's own schema (quality lever)",
+        DEFAULT_LLM_BASE_URL,
+    )
+    model = ask_text(
+        llm_model,
+        "Schema-induction LLM model id",
+        "a small, cheap, capable model is plenty (it induces label TYPES, not content)",
+        DEFAULT_LLM_MODEL,
+    )
+
+    # f. The ONE optional toggle — PII redaction + guardrail screening.
+    if pii is not None:
+        pii_on = pii
+    elif interactive:
+        typer.echo(
+            "  (adds content-screening + learned financial-PII detection/redaction; "
+            "default ON)",
+            err=True,
+        )
+        pii_on = typer.confirm("Enable PII redaction + guardrail screening?", default=True)
+    else:
+        pii_on = True
+
+    # g. Optional domain hint.
+    domain_hint = domain if domain is not None else (
+        str(typer.prompt("Domain / description hint (optional)", default=""))
+        if interactive
+        else ""
+    )
+
+    answers = SetupAnswers(
+        source=src,
+        storage=store,
+        parser=chosen_parser,
+        device=dev,
+        llm_base_url=base_url,
+        llm_model=model,
+        pii=pii_on,
+        domain=domain_hint,
+        extensions=extensions,
+    )
+
+    # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.
+    key_var = llm_key_env_var(base_url)
+    if not os.environ.get(key_var):
+        typer.echo(
+            f"WARNING: ${key_var} is not set. Schema induction needs it at run time "
+            f"(`latence process`). Export it before running, e.g. `export {key_var}=...`.",
+            err=True,
+        )
+
+    # Generate → dry-validate → save. Fail loudly (no broken config saved) on a validation error.
+    config_text = build_stack_config(answers)
+    try:
+        validate_config_text(config_text)
+    except SetupConfigError as exc:
+        typer.echo(f"Generated config failed validation: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    output.write_text(config_text, encoding="utf-8")
+
+    # Clean summary: stages, toggles, where saved.
+    from latence_core.pipeline import Pipeline
+
+    pipeline = Pipeline.from_yaml_text(config_text)
+    typer.echo("")
+    typer.echo(f"Saved quality-baked stack to: {output}")
+    stage_flow = " -> ".join(s.name for s in pipeline.stages)
+    typer.echo(f"  stages ({len(pipeline.stages)}): {stage_flow}")
+    typer.echo(f"  parser: {chosen_parser}   device: {dev}")
+    typer.echo(f"  schema induction: {model} @ {base_url}  (key from ${key_var})")
+    typer.echo(
+        "  PII redaction + guardrail screening: "
+        + ("ON (financial-PII; chunk-level masking + report)" if pii_on else "OFF")
+    )
+    if pii_on:
+        typer.echo(
+            "  NOTE: the exported RAG chunks are masked AND context-enriched (W16, ADR-0042): "
+            "redact sets each chunk's masked_content, enrich reads that redacted stream, and "
+            "export_corpus materializes it — a genuinely PII-safe, context-enriched corpus."
+        )
+    typer.echo("")
+    typer.echo("Run `latence process` to start.")
+
+
+@app.command()
+def process(
+    config: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="The saved stack config to run."),
+    ] = Path("latence.stack.yaml"),
+    run_id: Annotated[str, typer.Option("--run-id", help="Run id (state/checkpoint namespace).")]
+    = "run-0001",
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Run a stack config saved by ``latence setup`` — one line to kick off the pipeline (W15).
+
+    Loads ``--config`` (default ``./latence.stack.yaml``) and runs it on the local Runner, the SAME
+    execution path as ``latence run``.
+    """
+    _configure_logging(verbose)
+    if not config.exists():
+        typer.echo(
+            f"Config not found: {config}. Run `latence setup` first (or pass --config).", err=True
+        )
+        raise typer.Exit(code=2)
+    _execute_pipeline_file(config, run_id=run_id)
+
+
+# -- incremental corpus updates (S11, ADR-0029) --------------------------------
+#
+# These three commands expose the EXISTING DeltaRunner. They reuse ``run``'s pipeline loader
+# (``_load_pipeline``) and its report-printing discipline (``_emit_delta_report`` persists the
+# same human/machine report pair). HONEST boundary (issue #42): the committed corpus is
+# affected-set-scoped, but a delta re-extracts the WHOLE current source today — O(corpus) compute.
+
+_RUN_ID_HELP = (
+    "Run id for this operation (state/checkpoint namespace). A delta needs a FRESH run id every "
+    "time; defaults to a UTC-timestamped id (e.g. delta-20260713T101500Z). Override to pin one."
+)
+_STACK_ARG_HELP = "Path to the stack/pipeline YAML (same file `latence run` takes)."
+
+
+@app.command()
+def delta(
+    pipeline_path: Annotated[Path, typer.Argument(help=_STACK_ARG_HELP)],
+    run_id: Annotated[str | None, typer.Option("--run-id", help=_RUN_ID_HELP)] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Add/update the corpus from the current source and commit the next Corpus Version.
+
+    The user added, changed, or removed files in the source folder; this detects them by
+    content-hash against the last committed Corpus Version and commits Version N+1 with the
+    affected-set recompute. HONEST boundary (issue #42): the *committed* corpus is
+    affected-set-scoped (untouched clusters carried forward verbatim), but a delta still
+    re-extracts the WHOLE current source today — the compute is O(corpus), not yet incremental.
+    """
+    _configure_logging(verbose)
+    pipeline = _load_pipeline(pipeline_path)
+    rid = run_id or _default_run_id("delta")
+    from latence_core.delta_runner import DeltaRunner
+
+    try:
+        report = DeltaRunner().apply_delta(pipeline, rid)
+    except (LatenceError, ValueError) as exc:
+        typer.echo(f"delta failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _emit_delta_report(pipeline, rid, report)
+
+
+@app.command()
+def retract(
+    pipeline_path: Annotated[Path, typer.Argument(help=_STACK_ARG_HELP)],
+    doc: Annotated[
+        list[str] | None,
+        typer.Option("--doc", help="A document id to act on (sha256:...). Repeatable."),
+    ] = None,
+    docs_file: Annotated[
+        Path | None,
+        typer.Option("--docs-file", help="A file of document ids, one per line (# comments ok)."),
+    ] = None,
+    run_id: Annotated[str | None, typer.Option("--run-id", help=_RUN_ID_HELP)] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Soft-delete documents (Retraction — the auditable, rollback-able default).
+
+    The documents' derived records are excluded from the live corpus but RETAINED in the prior
+    Corpus Version for audit and rollback, and any cluster whose merge was justified solely by a
+    retracted document is split. Commits the next Corpus Version. Give ids via ``--doc``
+    (repeatable) and/or ``--docs-file``.
+    """
+    _configure_logging(verbose)
+    document_ids = _collect_document_ids(doc, docs_file)
+    pipeline = _load_pipeline(pipeline_path)
+    rid = run_id or _default_run_id("retract")
+    from latence_core.delta_runner import DeltaRunner
+
+    try:
+        report = DeltaRunner().retract(pipeline, rid, document_ids)
+    except (LatenceError, ValueError) as exc:
+        typer.echo(f"retract failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _emit_delta_report(pipeline, rid, report)
+
+
+@app.command()
+def purge(
+    pipeline_path: Annotated[Path, typer.Argument(help=_STACK_ARG_HELP)],
+    doc: Annotated[
+        list[str] | None,
+        typer.Option("--doc", help="A document id to act on (sha256:...). Repeatable."),
+    ] = None,
+    docs_file: Annotated[
+        Path | None,
+        typer.Option("--docs-file", help="A file of document ids, one per line (# comments ok)."),
+    ] = None,
+    run_id: Annotated[str | None, typer.Option("--run-id", help=_RUN_ID_HELP)] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip the confirmation prompt (erasure is permanent)."),
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Hard-delete documents (Purge — GDPR / right-to-be-forgotten erasure).
+
+    DESTRUCTIVE and NON-RECOVERABLE: unlike a Retraction, NOTHING is retained — the on-disk source
+    file(s), every derived record across ALL Corpus Versions, and the run artifacts are physically
+    erased. Guarded by a confirmation prompt; pass ``--yes`` to skip it. Give ids via ``--doc``
+    (repeatable) and/or ``--docs-file``.
+    """
+    _configure_logging(verbose)
+    document_ids = _collect_document_ids(doc, docs_file)
+    if not yes:
+        # Destructive + non-recoverable: confirm first. `abort=True` exits non-zero on "no".
+        typer.confirm(
+            f"Purge PHYSICALLY and PERMANENTLY erases {len(document_ids)} document(s) — the source "
+            "file(s), every derived record across every Corpus Version, and the run artifacts. "
+            "This cannot be undone. Continue?",
+            abort=True,
+        )
+    pipeline = _load_pipeline(pipeline_path)
+    rid = run_id or _default_run_id("purge")
+    from latence_core.delta_runner import DeltaRunner
+
+    try:
+        report = DeltaRunner().purge(pipeline, rid, document_ids)
+    except (LatenceError, ValueError) as exc:
+        typer.echo(f"purge failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _emit_delta_report(pipeline, rid, report)
 
 
 def main() -> None:  # pragma: no cover - console entry shim

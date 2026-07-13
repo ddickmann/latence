@@ -84,7 +84,9 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule   # comprehensive-by-default PII handling (H-C1)
-    depends_on: [parse]               # Redaction consumes DocumentRecords (the parsed doc)
+    depends_on: [content_screen]      # W16: chunk→chunk PII masking (each chunk ≤ the model window,
+    #                                   so no PII is truncated); masks chunk.content into
+    #                                   masked_content, which the corpus Export materializes (ADR-0042)
 
   - name: profiling
     capability: profiling

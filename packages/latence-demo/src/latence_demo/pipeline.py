@@ -143,7 +143,10 @@ def build_pipeline(
             name="redact",
             capability=CapabilityKind.REDACTION,
             provider="redaction.hybrid_rule",
-            depends_on=["parse"],
+            # W16 (ADR-0042): Redaction is a chunk→chunk transform — it masks each chunk
+            # (≤ the model window, no truncation) and the corpus Export materializes
+            # masked_content. Wired to the chunk stream, not Parse.
+            depends_on=["content_screen"],
         ),
         Stage(
             name="disambiguate",

@@ -32,7 +32,6 @@ if TYPE_CHECKING:
         ParserInput,
         QuarantineRecord,
         Record,
-        RedactionRecord,
         RelationMention,
         ScreeningFinding,
     )
@@ -245,39 +244,50 @@ class FusedEntityRelationExtractor(Protocol):
 
 @runtime_checkable
 class PIIDetector(Protocol):
-    """Detects PII and produces masked/replaced text variants (CONTEXT ``Redaction``).
+    """Detects PII per chunk and produces a masked variant (CONTEXT ``Redaction``; W16, ADR-0042).
 
-    The S6 Redaction Capability. Given the run's parsed
-    :class:`~latence_core.contracts.DocumentRecord`s — each carrying the whole
-    document's assembled markdown at its exact document offsets plus the page map — a
-    Provider detects PII per document and returns one
-    :class:`~latence_core.contracts.RedactionRecord` per document: the masked/replaced
-    text variant and the structured list of detected
-    :class:`~latence_core.contracts.PIISpan`s (type, document offset, action,
-    placeholder), so the redaction is auditable and the corpus gets a PII-handled
-    variant. Redaction is metadata-aware: the Provider keys its policy off the
-    document's ``Classification.sensitivity`` (S6 AC). The PII type set is
-    Provider/config-supplied — the Capability names no PII types. A document with no
-    detected PII yields a RedactionRecord whose masked text equals the source and whose
-    span list is empty (never an error).
+    The S6 Redaction Capability, made **chunk-level** in W16 to fix the document-level truncation
+    leak. Before W16 a Provider scanned the WHOLE parsed
+    :class:`~latence_core.contracts.DocumentRecord`, feeding it into a fixed PII model window (768
+    tokens for the gliner-family) — so any PII past that window was SILENTLY truncated and leaked
+    unmasked into the corpus. Redaction is now a **chunk→chunk transform** (the Content-Screening /
+    Context-Enrichment shape): a Provider consumes the run's
+    :class:`~latence_core.contracts.ChunkRecord`s and yields the SAME chunks with
+    :attr:`~latence_core.contracts.ChunkRecord.masked_content` +
+    :attr:`~latence_core.contracts.ChunkRecord.pii_spans` populated. Each chunk's text (≤ the model
+    window) is PII-scanned + masked in full — nothing is truncated, so PII past the old 768-token
+    document-truncation point is now caught (the ADR-0042 fix).
 
-    Redaction scans the **parsed document text** (not the markup-stripped chunk text),
-    because the masked variant, every PIISpan offset, and the page resolution all live
-    in the document's original-markdown coordinate system — the one the parent page map
-    and the S6 round-trip use. Chunk text is markup-stripped with offsets remapped to
-    the original, so its content length no longer equals its span width: scanning it
-    would fabricate a broken coordinate system (offsets and pages would point at the
-    wrong location). Redaction therefore depends on the Parse Stage.
+    The chunk's ``content`` stays UNMASKED (so a later re-read / audit sees the full entities); the
+    additive ``masked_content`` is the PII-safe variant the Export materializes for the RAG corpus,
+    and ``pii_spans`` are the chunk-local, counts-only detected spans (offsets into the chunk
+    ``content``, source pages resolved through the chunk's offset_map+page_map — never the raw
+    value, S6 AC). Redaction is metadata-aware: the Provider keys its policy off each chunk's
+    ``Classification.sensitivity`` (S6 AC). The PII type set is Provider/config-supplied — the
+    Capability names no PII types. A chunk with no detected PII yields a chunk whose
+    ``masked_content`` equals its ``content`` and whose ``pii_spans`` is empty (never an error).
+
+    The shared policy/masking/no-op-floor/page-resolution machinery lives in
+    :mod:`latence_core.redaction_policy` (``plan_chunk_redaction`` + ``finalize_redacted_chunk``),
+    so a Provider owns ONLY detection. Because Redaction reads the chunk's markup-stripped
+    ``content``, a span's chunk-local offset resolves to its ORIGINAL source page through the
+    chunk's offset_map + page_map — the coordinate-correctness ADR-0031/0042 guarantee. Redaction
+    therefore depends on the Chunk Stage (not Parse).
+
+    The document-level :meth:`redact` shape (``Iterable[DocumentRecord] ->
+    Iterator[RedactionRecord]``) is DEPRECATED; a Provider MAY retain it as a secondary
+    ``redact_documents`` method for the superseded path, but the blessed Capability is the chunk
+    seam below.
     """
 
-    def redact(self, documents: Iterable[DocumentRecord]) -> Iterator[RedactionRecord]:
-        """Consume the run's parsed :class:`DocumentRecord`s; yield one RedactionRecord each.
+    def redact(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """Consume the run's :class:`ChunkRecord`s; yield the SAME chunks with PII masked.
 
-        Each :class:`DocumentRecord` carries the whole document's assembled markdown
-        (at original-document offsets) and its page map — exactly the text and
-        coordinate system a text-based Provider scans. Records are emitted in first-seen
-        document order for determinism. A ``PARSE_ERROR`` document (no usable content) is
-        skipped, mirroring the Chunk Stage.
+        The chunk stream is threaded 1:1 and order-stable (never dropped or reordered): each yielded
+        chunk carries ``masked_content`` (its text with every non-``TAG`` PII span replaced) +
+        ``pii_spans`` (the chunk-local detected spans) + ``redaction_disabled_for_sensitive`` (the
+        H-C1 §4 no-op floor). ``content`` is byte-UNCHANGED. Chunks are emitted in first-seen order
+        for determinism; a seeded run is byte-reproducible (Baseline bar).
         """
         ...
 

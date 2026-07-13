@@ -84,7 +84,7 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.gliner_pii
-    depends_on: [parse]
+    depends_on: [content_screen]   # W16 (ADR-0042): chunk→chunk PII masking, no doc truncation
     config:
       device: cuda
       pii_labels: [person, email, phone number, address, credit card number, social security number]

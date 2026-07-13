@@ -1,14 +1,20 @@
-"""PresidioRedactor: real Microsoft Presidio PII Redaction (W1-pii, #95).
+"""PresidioRedactor: real Microsoft Presidio PII Redaction (W1-pii, #95; W16/ADR-0042 chunk-level).
 
 The real Presidio stack (presidio-analyzer -> spaCy + a spaCy model) is intentionally NOT
 installed in the dev/test env (ADR-0007/0016: CPU-first, offline, deterministic). These tests
 inject a tiny fake ``presidio_analyzer`` module (+ its ``nlp_engine`` submodule) whose
-``AnalyzerEngine`` returns fixed document-offset PII spans, so the Provider's redaction output,
-span stamping, offset→page math, Presidio-type→pii_type mapping, sensitivity-keyed policy, the
+``AnalyzerEngine`` returns fixed CHUNK-offset PII spans, so the Provider's redaction output,
+span stamping, offset->page math, Presidio-type->pii_type mapping, sensitivity-keyed policy, the
 H-C1 sensitive-doc no-op floor, the drop-in contract, and the "raw PII never stored / never
-leaked into an error" invariants are exercised deterministically and offline. Failure-mode tests
-cover the missing-dependency error, the config validation, and the native-failure → typed
-ProviderError mapping (no raw text / PII in the message).
+leaked into an error" invariants are exercised deterministically and offline.
+
+W16 (ADR-0042): Redaction is a **chunk->chunk transform** — the Provider consumes ChunkRecords and
+yields the SAME chunks with ``masked_content`` + ``pii_spans`` + ``redaction_disabled_for_sensitive``
+populated (the clean ``content`` stays UNMASKED). Since each test chunk's ``content`` == the analysed
+text, the analyzer's offsets ARE chunk-content offsets and a span slice still round-trips to the raw
+value; an identity ``offset_map`` (+ optional ``page_map``) lets a chunk-local span still resolve to
+its source page. Failure-mode tests cover the missing-dependency error, the config validation, and
+the native-failure -> typed ProviderError mapping (no raw text / PII in the message).
 """
 
 from __future__ import annotations
@@ -20,25 +26,30 @@ from typing import Any
 
 import pytest
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
-    DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     Provenance,
     RedactionAction,
-    RedactionRecord,
 )
 from latence_core.errors import ConfigError, ProviderError
 from latence_pii_presidio import PresidioRedactor
 from latence_pii_presidio.provider import _DEFAULT_MODEL
 
 
-def _doc(
+def _chunk(
     content: str,
     *,
     sensitivity: str = "public",
     page_map: PageMap | None = None,
-) -> DocumentRecord:
-    """A parsed DocumentRecord — Redaction scans this (original markdown), not chunks."""
+) -> ChunkRecord:
+    """A ChunkRecord — Redaction scans this chunk's ``content`` (W16, ADR-0042).
+
+    Spans are chunk-local (offsets into ``content``); an identity ``offset_map`` + optional
+    ``page_map`` let a span still resolve to its source page (the shared chunk page-resolution seam).
+    """
     prov = Provenance(
         source_uri="file:///c/a.txt",
         file_name="a.txt",
@@ -50,12 +61,18 @@ def _doc(
         page_start=1,
         page_end=1,
     )
-    return DocumentRecord(
-        record_id="doc1",
+    return ChunkRecord(
+        record_id="doc1#chunk:0",
+        document_record_id="doc1",
+        index=0,
         provenance=prov,
         classification=Classification(language="en", sensitivity=sensitivity),
         content=content,
+        token_count=max(len(content.split()), 0),
         page_map=page_map,
+        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(content))
+        if content
+        else None,
     )
 
 
@@ -184,8 +201,11 @@ def test_masks_detected_pii(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
         {"entity_type": "PERSON", "start": a_start, "end": a_start + 5, "score": 0.95},
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9},
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(_TEXT)])))
-    assert isinstance(rec, RedactionRecord)
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(_TEXT)])))
+    assert isinstance(rec, ChunkRecord)
+    # The clean content is UNCHANGED (extraction still sees the entities).
+    assert rec.content == _TEXT
+    assert rec.masked_content is not None
     assert "Alice" not in rec.masked_content
     assert _EMAIL not in rec.masked_content
     assert "[PERSON]" in rec.masked_content
@@ -195,35 +215,36 @@ def test_masks_detected_pii(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
     assert all(s.detector == "presidio" for s in rec.pii_spans)
 
 
-def test_span_offsets_land_on_document_coordinate_system(
+def test_span_offsets_land_on_chunk_coordinate_system(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
-    # The Provider runs the analyzer over the whole parsed-document markdown, so Presidio's offsets
-    # ARE document offsets: the stamped span offset matches, and the slice round-trips to the raw
-    # value (the coordinate system the spans use).
+    # The Provider runs the analyzer over the chunk ``content``, so Presidio's offsets ARE
+    # chunk-content offsets: the stamped span offset matches, and the slice round-trips to the raw
+    # value (the coordinate system the spans + masked_content use).
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9}
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(_TEXT)])))
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(_TEXT)])))
     span = rec.pii_spans[0]
     assert span.char_start == _EMAIL_START
     assert span.char_end == _EMAIL_END
     assert _TEXT[span.char_start : span.char_end] == _EMAIL
 
 
-def test_record_page_range_cleared_for_hybrid_rule_parity(
+def test_chunk_carrier_preserved_content_unmasked(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
-    # A RedactionRecord covers the WHOLE document, so its own page range is undefined — hybrid_rule
-    # sets page_start/page_end=None, and a true drop-in must too (per-span pages live on each PIISpan).
-    # Regression: carry_provenance(page_start=None) is a silent no-op (it only applies non-None
-    # updates), so without the explicit clear the record would keep the source doc's stale (1,1).
+    # W16 (ADR-0042) the chunk carrier is preserved: the SAME chunk is re-emitted with its own
+    # provenance intact (the chunk keeps its page range — per-span pages live on each PIISpan) and
+    # ``content`` byte-UNCHANGED, while only ``masked_content`` carries the redaction.
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9}
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(_TEXT)])))  # _doc has page_start=1
-    assert rec.provenance.page_start is None
-    assert rec.provenance.page_end is None
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(_TEXT)])))  # _chunk has page_start=1
+    assert rec.record_id == "doc1#chunk:0"
+    assert rec.provenance.page_start == 1  # the chunk keeps its own page range
+    assert rec.content == _TEXT  # content unmasked
+    assert rec.masked_content is not None and rec.masked_content != _TEXT  # only masked_content masked
 
 
 def test_out_of_bounds_span_is_dropped(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
@@ -232,8 +253,8 @@ def test_out_of_bounds_span_is_dropped(fake_presidio: type[_FakeAnalyzerEngine])
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": 5, "end": len(_TEXT) + 50, "score": 0.9}
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(_TEXT)])))
-    assert rec.pii_count == 0
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(_TEXT)])))
+    assert len(rec.pii_spans) == 0
     assert rec.masked_content == _TEXT
 
 
@@ -242,21 +263,21 @@ def test_threshold_drops_low_scoring_spans(fake_presidio: type[_FakeAnalyzerEngi
         {"entity_type": "PERSON", "start": 0, "end": 5, "score": 0.2}
     ]
     cfg = {"entities": ["PERSON"], "threshold": 0.5}
-    rec = next(iter(PresidioRedactor(cfg).redact([_doc(_TEXT)])))
-    assert rec.pii_count == 0
+    rec = next(iter(PresidioRedactor(cfg).redact([_chunk(_TEXT)])))
+    assert len(rec.pii_spans) == 0
 
 
 def test_overlapping_spans_resolved_non_overlapping(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
     # Two overlapping analyzer results (a longer PERSON containing a shorter one) resolve to a
-    # single, non-overlapping span — the RedactionRecord invariant (earlier start, longer span).
+    # single, non-overlapping span — the record invariant (earlier start, longer span).
     fake_presidio.spans = [
         {"entity_type": "PERSON", "start": 0, "end": 5, "score": 0.9},
         {"entity_type": "PERSON", "start": 0, "end": 3, "score": 0.9},
     ]
-    rec = next(iter(PresidioRedactor({"entities": ["PERSON"]}).redact([_doc(_TEXT)])))
-    assert rec.pii_count == 1
+    rec = next(iter(PresidioRedactor({"entities": ["PERSON"]}).redact([_chunk(_TEXT)])))
+    assert len(rec.pii_spans) == 1
     assert rec.pii_spans[0].char_start == 0
     assert rec.pii_spans[0].char_end == 5
 
@@ -269,7 +290,7 @@ def test_types_narrowing_via_policy(fake_presidio: type[_FakeAnalyzerEngine]) ->
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9},
     ]
     cfg = {"entities": ["EMAIL_ADDRESS", "PERSON"], "policies": {"public": {"types": ["email"]}}}
-    rec = next(iter(PresidioRedactor(cfg).redact([_doc(_TEXT)])))
+    rec = next(iter(PresidioRedactor(cfg).redact([_chunk(_TEXT)])))
     assert {s.pii_type for s in rec.pii_spans} == {"email"}
 
 
@@ -286,62 +307,61 @@ def test_policy_keys_off_sensitivity(fake_presidio: type[_FakeAnalyzerEngine]) -
         "policies": {"public": {"action": "mask"}, "internal": {"action": "tag"}},
     }
     provider = PresidioRedactor(cfg)
-    public = next(iter(provider.redact([_doc(_TEXT, sensitivity="public")])))
-    internal = next(iter(provider.redact([_doc(_TEXT, sensitivity="internal")])))
-    assert public.policy == "public"
-    assert "[PERSON]" in public.masked_content
-    assert internal.policy == "internal"
+    public = next(iter(provider.redact([_chunk(_TEXT, sensitivity="public")])))
+    internal = next(iter(provider.redact([_chunk(_TEXT, sensitivity="internal")])))
+    # Same text, different disposition driven purely by Classification.sensitivity.
+    assert public.masked_content is not None and "[PERSON]" in public.masked_content
     assert internal.masked_content == _TEXT  # tagged, not masked
     assert internal.pii_spans[0].action is RedactionAction.TAG
 
 
 def test_span_page_resolves_through_page_map(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
-    # The ADR-0031 PageOffsetIndex seam resolves a span's own source page from the document's page
-    # map — a span on page 2 cites page 2, not the inherited parent range.
+    # The ADR-0031/0042 page-resolution seam resolves a span's own source page from the chunk's
+    # offset_map + page_map — a span on page 2 cites page 2, not the inherited parent range.
     assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@example.com."])
     text = assembly.text
     e_start = text.index(_EMAIL)
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": e_start, "end": e_start + len(_EMAIL), "score": 0.9}
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(text, page_map=assembly.page_map)])))
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(text, page_map=assembly.page_map)])))
     assert rec.pii_spans[0].page_start == 2
 
 
 # -- H-C1 sensitive-doc no-op floor (must not regress on the drop-in) ----------
 
 
-def test_no_op_floor_fires_on_sensitive_doc_with_no_detectors(
+def test_no_op_floor_fires_on_sensitive_chunk_with_no_detectors(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
-    # A confidential document whose policy skips redaction runs NO detectors: the record's
+    # A confidential chunk whose policy skips redaction runs NO detectors: the chunk's
     # redaction_disabled_for_sensitive flag is set (control OFF, not "clean"). The analyzer is
     # never even invoked (skip short-circuits before load).
     cfg = {"entities": ["EMAIL_ADDRESS"], "policies": {"confidential": {"skip": True}}}
-    rec = next(iter(PresidioRedactor(cfg).redact([_doc(_TEXT, sensitivity="confidential")])))
-    assert rec.pii_count == 0
+    rec = next(iter(PresidioRedactor(cfg).redact([_chunk(_TEXT, sensitivity="confidential")])))
+    assert len(rec.pii_spans) == 0
     assert rec.redaction_disabled_for_sensitive is True
-    assert fake_presidio.instances == 0  # skipped doc never loads the analyzer
+    assert fake_presidio.instances == 0  # skipped chunk never loads the analyzer
 
 
-def test_no_op_floor_does_not_fire_on_public_doc(
+def test_no_op_floor_does_not_fire_on_public_chunk(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
     cfg = {"entities": ["EMAIL_ADDRESS"], "policies": {"public": {"skip": True}}}
-    rec = next(iter(PresidioRedactor(cfg).redact([_doc(_TEXT, sensitivity="public")])))
+    rec = next(iter(PresidioRedactor(cfg).redact([_chunk(_TEXT, sensitivity="public")])))
     assert rec.redaction_disabled_for_sensitive is False  # public is not in the sensitive set
 
 
 def test_no_op_floor_fires_when_types_intersect_nothing(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
-    # A restricted doc whose policy allows only a type NONE of the enabled entities can produce:
-    # the control runs no detectors → the floor fires (empty pii_spans means OFF, not clean).
+    # A restricted chunk whose policy allows only a type NONE of the enabled entities can produce:
+    # the control runs no detectors -> the floor fires (empty pii_spans means OFF, not clean).
     cfg = {
         "entities": ["EMAIL_ADDRESS"],
         "policies": {"restricted": {"types": ["ssn"]}},  # no enabled entity maps to 'ssn'
     }
-    rec = next(iter(PresidioRedactor(cfg).redact([_doc(_TEXT, sensitivity="restricted")])))
+    rec = next(iter(PresidioRedactor(cfg).redact([_chunk(_TEXT, sensitivity="restricted")])))
     assert rec.redaction_disabled_for_sensitive is True
 
 
@@ -352,25 +372,25 @@ def test_raw_pii_never_stored_on_span(fake_presidio: type[_FakeAnalyzerEngine]) 
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9}
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(_TEXT)])))
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(_TEXT)])))
     assert _EMAIL not in rec.pii_spans[0].model_dump_json()
 
 
-def test_clean_document_is_no_op_not_error(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
+def test_clean_chunk_is_no_op_not_error(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
     fake_presidio.spans = []
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc(_TEXT)])))
-    assert rec.pii_count == 0
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(_TEXT)])))
+    assert len(rec.pii_spans) == 0
     assert rec.masked_content == _TEXT  # no PII → masked == source, empty spans (the clean case)
 
 
-def test_empty_document_skipped_without_analyzer_call(
+def test_empty_chunk_skipped_without_analyzer_call(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9}
     ]
-    rec = next(iter(PresidioRedactor(_config()).redact([_doc("")])))
-    assert rec.pii_count == 0
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk("")])))
+    assert len(rec.pii_spans) == 0
     assert rec.masked_content == ""
     assert fake_presidio.instances == 0  # short text below min_chars never loads the analyzer
 
@@ -387,7 +407,7 @@ def test_native_analyze_failure_becomes_typed_provider_error_without_pii(
     fake_presidio.error = RuntimeError(f"spaCy blew up on {_TEXT} with {_EMAIL}")
     provider = PresidioRedactor(_config())
     with pytest.raises(ProviderError) as exc_info:
-        list(provider.redact([_doc(_TEXT)]))
+        list(provider.redact([_chunk(_TEXT)]))
     message = str(exc_info.value)
     assert "provider failure in 'analyze'" in message
     assert "RuntimeError" in message  # the native type name is safe to surface
@@ -404,14 +424,14 @@ def test_missing_spacy_model_maps_to_config_error(
     fake_presidio.load_error = OSError("[E050] Can't find model 'en_core_web_sm'")
     provider = PresidioRedactor(_config())
     with pytest.raises(ConfigError, match="config error in 'load_model'"):
-        list(provider.redact([_doc(_TEXT)]))
+        list(provider.redact([_chunk(_TEXT)]))
 
 
 def test_missing_dependency_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "presidio_analyzer", None)
     provider = PresidioRedactor(_config())
     with pytest.raises(ImportError, match="pip install latence-pii-presidio"):
-        list(provider.redact([_doc(_TEXT)]))
+        list(provider.redact([_chunk(_TEXT)]))
 
 
 # -- real-weights test (gated on the dep; skipped offline) --------------------
@@ -430,11 +450,11 @@ def test_real_presidio_detects_email() -> None:  # pragma: no cover - runs only 
     The honest real-weights boundary (same discipline as the gliner trio + the ST embedder): it
     runs only where ``presidio-analyzer`` and a spaCy model are actually installed (a rig), and is
     skipped in the offline CPU-first CI env. It asserts the REAL analyzer masks the email and the
-    span round-trips to the raw value on the document coordinate system.
+    span round-trips to the raw value on the chunk coordinate system.
     """
     provider = PresidioRedactor({"entities": ["EMAIL_ADDRESS"]})
-    rec = next(iter(provider.redact([_doc(_TEXT)])))
-    assert _EMAIL not in rec.masked_content
+    rec = next(iter(provider.redact([_chunk(_TEXT)])))
+    assert rec.masked_content is not None and _EMAIL not in rec.masked_content
     assert any(s.pii_type == "email" for s in rec.pii_spans)
     span = next(s for s in rec.pii_spans if s.pii_type == "email")
     assert _TEXT[span.char_start : span.char_end] == _EMAIL

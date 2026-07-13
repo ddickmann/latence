@@ -93,7 +93,9 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.gliner_pii   # learned PII (latence-pii-gliner)
-    depends_on: [parse]              # Redaction consumes DocumentRecords (the parsed doc)
+    depends_on: [content_screen]     # W16: chunk→chunk PII masking — each chunk ≤ the 768 mdeberta
+    #                                  window, so no PII is truncated (the ADR-0042 fix); masked
+    #                                  chunk text feeds the corpus Export via masked_content
     config:
       device: cuda
       # REQUIRED non-empty zero-shot PII types (a missing/empty list is a ValueError at load —

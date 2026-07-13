@@ -147,7 +147,24 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # streams; the optional LLM situating-sentence mode is a documented follow-on
 # (``situating_sentence``
 # stays a defaulted-None field). See ADR-0039.
-SCHEMA_VERSION = 15
+#
+# v16 (W16 chunk-level redaction): Redaction becomes a **chunk→chunk transform** — the fix for the
+# document-level truncation leak (ADR-0042). Before W16, Redaction scanned the WHOLE parsed
+# document, feeding it into a 768-token PII model window, so any PII past token 768 was SILENTLY
+# truncated and leaked unmasked into the corpus. Redaction now runs per chunk (each ≤ the model
+# window), so nothing is truncated. ChunkRecord gains three additive, defaulted fields the Redaction
+# Stage populates: ``masked_content: str | None`` (the PII-handled variant of the chunk text — the
+# clean chunk ``content`` stays UNMASKED so extraction still sees full entities, while the Export
+# materializes ``masked_content`` for the PII-safe RAG corpus), ``pii_spans: list[PIISpan]`` (the
+# chunk-local, counts-only detected spans — offsets into the chunk ``content``, source pages
+# resolved through the chunk's offset_map+page_map, never the raw value), and
+# ``redaction_disabled_for_sensitive: bool`` (the H-C1 §4 no-op floor carried per chunk). Default
+# ``None`` / ``[]`` / ``False`` ⇒ every existing stack + record is byte-identical for its corpus
+# text (a run with no Redaction Stage never populates them, the Export falls back to ``content``),
+# mirroring the risk_markers/induced_labels/context_header annotation precedent. The document-level
+# :class:`RedactionRecord` contract is RETAINED but DEPRECATED (the superseded doc-level path). See
+# ADR-0042.
+SCHEMA_VERSION = 16
 
 
 class Provenance(BaseModel):
@@ -769,6 +786,39 @@ class ChunkRecord(Record):
             "a run without the Stage), mirroring the risk_markers/induced_labels precedent."
         ),
     )
+    masked_content: str | None = Field(
+        default=None,
+        description=(
+            "The PII-handled variant of this chunk's text the OPTIONAL Redaction Stage produced "
+            "(W16, ADR-0042): the chunk text with every non-TAG PII span replaced by its "
+            "placeholder. The clean ``content`` stays UNMASKED (so extraction still sees full "
+            "entities); the Export materializes ``masked_content`` for the PII-safe RAG corpus. "
+            "None (default) ⇒ no Redaction Stage ran, and the Export falls back to ``content`` "
+            "(byte-identical to a run without the Stage), mirroring the context_header precedent. "
+            "Redaction runs per CHUNK (each ≤ the model window) so no PII is truncated — the fix "
+            "for the document-level 768-token truncation leak (ADR-0042)."
+        ),
+    )
+    pii_spans: list[PIISpan] = Field(
+        default_factory=list,
+        description=(
+            "The chunk-local PII spans the Redaction Stage detected (W16, ADR-0042): each span's "
+            "``char_start``/``char_end`` are offsets into THIS chunk's ``content`` (the coordinate "
+            "system ``masked_content`` is masked in), while ``page_start``/``page_end`` resolve to "
+            "the original source page through the chunk's offset_map+page_map. Counts-only: a span "
+            "never stores the raw PII value (S6 AC). Empty (default) ⇒ no Redaction Stage ran, "
+            "or a clean chunk."
+        ),
+    )
+    redaction_disabled_for_sensitive: bool = Field(
+        default=False,
+        description=(
+            "True when this chunk's Classification.sensitivity is in the Redactor's sensitive set "
+            "(confidential/restricted/…) yet the applied policy ran NO detectors (skip / empty "
+            "types / empty detector set) — so an empty ``pii_spans`` here means 'the control was "
+            "OFF', NOT 'no PII found' (the H-C1 §4 no-op floor carried per chunk, W16/ADR-0042)."
+        ),
+    )
 
     @property
     def flagged(self) -> bool:
@@ -929,10 +979,18 @@ class RedactionAction(StrEnum):
 class PIISpan(BaseModel):
     """One detected PII span in a document, with the action taken (CONTEXT ``Redaction``).
 
+    Since W16 (ADR-0042) a PIISpan is carried on the :class:`ChunkRecord` the chunk-level
+    Redactor produced: ``char_start``/``char_end`` are then offsets into that chunk's
+    ``content`` (the coordinate system its ``masked_content`` is masked in — chunk-LOCAL, not
+    document-global), while ``page_start``/``page_end`` still resolve to the ORIGINAL source
+    page through the chunk's offset_map+page_map. On the DEPRECATED document-level
+    :class:`RedactionRecord` path the offsets are document-global (the historical shape below).
+
     The structured, auditable record of a single redaction: *what* type of PII was
     found (``pii_type``, from the Provider's configured type set — the Capability
-    names none), *where* it sat in the parent document's assembled markdown
-    (``char_start``/``char_end``, the same document-offset coordinate system every
+    names none), *where* it sat in the parent text
+    (``char_start``/``char_end`` — chunk-local content offsets on a ChunkRecord, or the
+    document-offset coordinate system on the deprecated RedactionRecord — the coordinate every
     other Stage uses, so the span resolves back through the parent's page map to its
     source page), *what was done* (``action``), and the ``placeholder`` that replaced
     it in the masked variant (empty for a ``TAG`` action, which leaves the text
@@ -981,8 +1039,29 @@ class PIISpan(BaseModel):
         return self.char_end - self.char_start
 
 
+# W16 (ADR-0042): ``ChunkRecord.pii_spans`` forward-references :class:`PIISpan`, which is defined
+# here (after ChunkRecord). Rebuild the model now that PIISpan exists so pydantic resolves the
+# annotation — the idiomatic v2 deferred-forward-ref resolution (``from __future__ import
+# annotations`` keeps the field a string reference until this call).
+ChunkRecord.model_rebuild()
+
+
 class RedactionRecord(Record):
-    """A per-document Redaction result: the masked text variant + the PII spans (S6).
+    """A per-document Redaction result — DEPRECATED, superseded by chunk-level redaction (W16).
+
+    .. deprecated:: W16 (ADR-0042)
+        Document-level Redaction fed the WHOLE parsed document into a fixed PII model window
+        (768 tokens for the gliner-family), so any PII past that point was SILENTLY truncated
+        and leaked unmasked into the corpus. Redaction is now a **chunk→chunk transform** — the
+        :class:`~latence_core.capability.PIIDetector` seam consumes :class:`ChunkRecord`s and
+        yields the same chunks with :attr:`ChunkRecord.masked_content` +
+        :attr:`ChunkRecord.pii_spans` populated (each chunk ≤ the model window, so nothing is
+        truncated). This RedactionRecord
+        contract is RETAINED for the deprecated doc-level path (the provider ``redact_documents``
+        secondary method) and for prior-version JSON compatibility, but the blessed stacks and the
+        Runner's ``redaction`` Stage now flow chunks.
+
+    A per-document Redaction result: the masked text variant + the PII spans (S6).
 
     Redaction detects PII and produces masked/replaced variants of the text (CONTEXT
     ``Redaction``). Like every inter-Stage carrier it is a :class:`Record`, so it

@@ -59,9 +59,9 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule    # swap to redaction.gliner_pii for learned PII NER
-    depends_on: [parse]                # scans the parsed document's ORIGINAL markdown —
-                                       # the coordinate system PII spans + pages use —
-                                       # NOT the markup-stripped chunk stream
+    depends_on: [chunk]                # W16 (ADR-0042): chunk→chunk PII masking — each chunk (≤ the
+                                       # model window) is masked in full, so PII is never truncated;
+                                       # masks chunk.content into masked_content for the corpus Export
     config:
       # The built-in rule library to enable, by NAME. DEFAULT (omit this key) = ALL:
       # email / ssn / ssn_nodash / credit_card / phone / ip / iban / aws_key /

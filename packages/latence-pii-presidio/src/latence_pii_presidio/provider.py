@@ -52,18 +52,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
+    finalize_redacted_chunk,
     parse_action,
+    plan_chunk_redaction,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import DocumentRecord
+    from latence_core.contracts import ChunkRecord
 
 # MIT weights (verified 2026-07-08). The light default spaCy model; en_core_web_lg (~500MB, also
 # MIT) is a documented config-selectable alternative for higher NER recall.
@@ -295,104 +296,68 @@ class PresidioRedactor(AdapterBase):
 
     # -- redaction ----------------------------------------------------------
 
-    def redact(self, documents: Iterable[DocumentRecord]) -> Iterator[RedactionRecord]:
-        """Detect PII per document with Presidio; emit one RedactionRecord per document.
+    def redact(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """Detect PII per chunk with Presidio; yield the SAME chunks with PII masked (W16/ADR-0042).
 
-        Each :class:`DocumentRecord` carries the whole document's assembled markdown at its
-        original-document offsets plus the page map — the coordinate system the masked variant and
-        every :class:`PIISpan` use. A ``PARSE_ERROR`` document (no usable content) is skipped,
-        mirroring Chunk. Documents flow through the AdapterBase :meth:`batched` helper (profile
+        Each chunk's ``content`` (≤ the model window) is analysed in full — no truncation — and
+        the chunk is re-emitted with ``masked_content`` + ``pii_spans`` populated (``content``
+        UNCHANGED). Chunks flow through the AdapterBase :meth:`batched` helper (profile
         ``batch=True``) so the corpus is consumed one bounded batch at a time (memory O(batch_size),
         never the whole corpus) and emitted in first-seen order. The analyzer is loaded once on the
-        first document that needs it (a batch of only clean/skipped docs never loads spaCy).
+        first chunk that needs it (a batch of only clean/skipped chunks never loads spaCy). A
+        chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map +
+        page_map (ADR-0031/0042).
         """
         analyzer_state: dict[str, Any] = {"engine": None}
 
-        def run_batch(batch: list[DocumentRecord]) -> list[RedactionRecord]:
-            out: list[RedactionRecord] = []
-            for document in batch:
-                if document.disposition is Disposition.PARSE_ERROR:
-                    continue
-                out.append(self._redact_one(document, analyzer_state))
-            return out
+        def run_batch(batch: list[ChunkRecord]) -> list[ChunkRecord]:
+            return [self._redact_chunk(chunk, analyzer_state) for chunk in batch]
 
-        yield from self.batched(documents, run_batch)
+        yield from self.batched(chunks, run_batch)
 
-    def _redact_one(
-        self, document: DocumentRecord, analyzer_state: dict[str, Any]
-    ) -> RedactionRecord:
-        doc_id = document.record_id
-        text = document.content
-        classification = document.classification
-        action, allowed, skip, policy_name = self._policy.resolve(classification.sensitivity)
-
-        # §4 no-op floor (H-C1): would the applied policy run ANY detector on this document? No, if
-        # the policy skips, or restricts to a type set that intersects none of the enabled entity
-        # types (including an empty ``types: []``), or the Provider has no entities at all. When the
-        # document is also classified sensitive, an empty pii_spans there is "control OFF", not
-        # "clean" — a loud, first-class signal. Reuses the core policy/flag machinery; does not
-        # reinvent it.
-        would_run = (not skip) and bool(
-            self._detector_types if allowed is None else self._detector_types & allowed
+    def _redact_chunk(
+        self, chunk: ChunkRecord, analyzer_state: dict[str, Any]
+    ) -> ChunkRecord:
+        # The shared plan owns policy resolution + the §4 no-op floor (the Provider's own
+        # _detector_types + _sensitive_set feed it) + the chunk offset/page maps.
+        plan = plan_chunk_redaction(
+            chunk,
+            self._policy,
+            detector_types=self._detector_types,
+            sensitive_set=self._sensitive_set,
+            min_chars=self._min_chars,
         )
-        disabled_for_sensitive = (
-            not would_run and classification.sensitivity in self._sensitive_set
-        )
-
-        spans: list[PIISpan] = []
-        masked = text
-        if not skip and len(text.strip()) >= self._min_chars:
+        accepted: list[tuple[int, int, str, str, str, float]] = []
+        if plan.needs_detection:
             if analyzer_state["engine"] is None:
                 analyzer_state["engine"] = self._load_analyzer()
-            spans = self._detect(analyzer_state["engine"], document, action, allowed)
-            masked = _apply_masking(text, spans)
+            accepted = self._accepted_from_analyzer(
+                analyzer_state["engine"], chunk.content, plan.allowed
+            )
+        return finalize_redacted_chunk(chunk, plan, accepted, self._salt)
 
-        # Carry the source Provenance/Classification via the AdapterBase seam (H-A1): the source
-        # lineage (source_uri/document_id/file_*) intact, the offset span narrowed to the document
-        # extent [0, len). A RedactionRecord covers the WHOLE document, so its own page range is
-        # undefined (per-span pages are resolved on each PIISpan) — hybrid_rule sets it None, so a
-        # true drop-in must too. NOTE: carry_provenance only applies non-None updates (it cannot
-        # *clear* a field), so passing page_start=None there is a silent no-op that would leave the
-        # source doc's stale page range on the record; clear it explicitly for hybrid_rule parity.
-        # (AdapterBase gap in the seam-report: carry_provenance can set but not null a field.)
-        provenance, carried_classification = self.carry_provenance(
-            document, char_start=0, char_end=len(text)
-        )
-        provenance = provenance.model_copy(update={"page_start": None, "page_end": None})
-        return RedactionRecord(
-            record_id=f"{doc_id}#redaction",
-            document_record_id=doc_id,
-            masked_content=masked,
-            media_type="text/markdown",
-            policy=policy_name,
-            pii_spans=spans,
-            redaction_disabled_for_sensitive=disabled_for_sensitive,
-            provenance=provenance,
-            classification=carried_classification,
-        )
-
-    def _detect(
+    def _accepted_from_analyzer(
         self,
         analyzer: Any,
-        document: DocumentRecord,
-        action: RedactionAction,
+        text: str,
         allowed: set[str] | None,
-    ) -> list[PIISpan]:
-        """Run Presidio over the whole document text and build non-overlapping PIISpans.
+    ) -> list[tuple[int, int, str, str, str, float]]:
+        """Run Presidio over the chunk text and build an ordered, non-overlapping candidate list.
 
-        ``AnalyzerEngine.analyze`` returns ``RecognizerResult`` objects with document-offset
-        ``start``/``end``, an ``entity_type`` (UPPER_SNAKE), and a ``score``. Because Redaction
-        scans the parsed document markdown directly, the analyzed text IS the document text and
-        Presidio's offsets ARE document offsets. Each Presidio type is mapped to the framework's
-        lower-case ``pii_type``; a type not in a policy's allow-list is dropped; overlaps are
-        resolved (earlier start, longer span, type) so a stable, non-overlapping span set results —
-        the invariant the RedactionRecord contract enforces and the masking relies on. Each span's
-        page is resolved through the AdapterBase ADR-0031 page seam (never a weaker mapper).
+        ``AnalyzerEngine.analyze`` returns ``RecognizerResult`` objects with chunk-offset
+        ``start``/``end`` (relative to the ``text`` analysed — the chunk ``content``), an
+        ``entity_type`` (UPPER_SNAKE), and a ``score``. Each Presidio type is mapped to the
+        framework's lower-case ``pii_type``; a type not in a policy's allow-list is dropped;
+        overlaps are resolved (earlier start, longer span, type) so a stable non-overlapping set
+        results.
+        Returns ``(local_start, local_end, pii_type, value, detector, confidence)`` tuples
+        (chunk-content offsets); :func:`~latence_core.redaction_policy.finalize_redacted_chunk`
+        derives the spans + ORIGINAL-resolved pages + placeholders + masking (the ADR-0031/0042 page
+        seam, via the chunk's offset_map+page_map, never a weaker mapper).
 
         The whole Presidio call is inside :meth:`guard`, so a native spaCy/Presidio failure becomes
         a typed :class:`~latence_core.errors.ProviderError` carrying **no source text / PII**.
         """
-        text = document.content
         with self.guard("analyze"):
             results: list[Any] = analyzer.analyze(
                 text=text,
@@ -417,87 +382,11 @@ class PresidioRedactor(AdapterBase):
         # non-overlapping set results regardless of Presidio's internal recognizer order.
         candidates.sort(key=lambda c: (c[0], -(c[1] - c[0]), c[2]))
 
-        page_map = document.page_map
-        base_prov = document.provenance
-        spans: list[PIISpan] = []
+        accepted: list[tuple[int, int, str, str, str, float]] = []
         last_end = -1
         for start, end, pii_type, value, score in candidates:
             if start < last_end:
                 continue  # overlaps an accepted span; skip for a clean, ordered set
-            # Resolve the source page(s) through the ADR-0031 seam (PageOffsetIndex) — never a
-            # weaker hand-rolled mapper. When the document carries no page map, fall back to the
-            # parent's page range (the same fallback the in-core path uses).
-            page_start, page_end = self.resolve_pages(
-                start,
-                end,
-                page_map=page_map,
-                fallback_page_start=base_prov.page_start,
-                fallback_page_end=base_prov.page_end,
-            )
-            spans.append(
-                _build_span_with_pages(
-                    pii_type=pii_type,
-                    detector="presidio",
-                    start=start,
-                    end=end,
-                    value=value,
-                    action=action,
-                    salt=self._salt,
-                    confidence=score,
-                    page_start=page_start,
-                    page_end=page_end,
-                )
-            )
+            accepted.append((start, end, pii_type, value, "presidio", score))
             last_end = end
-        return spans
-
-
-def _apply_masking(text: str, spans: list[PIISpan]) -> str:
-    """Rewrite ``text`` replacing each non-TAG span with its placeholder (right-to-left).
-
-    Thin wrapper over :func:`latence_core.redaction_policy.apply_masking` — imported here so the
-    module reads as one masking call site; the shared implementation is the single source of truth
-    (no divergence from the in-core Provider's masking).
-    """
-    from latence_core.redaction_policy import apply_masking
-
-    return apply_masking(text, spans)
-
-
-def _build_span_with_pages(
-    *,
-    pii_type: str,
-    detector: str,
-    start: int,
-    end: int,
-    value: str,
-    action: RedactionAction,
-    salt: str,
-    confidence: float,
-    page_start: int | None,
-    page_end: int | None,
-) -> PIISpan:
-    """Build one PIISpan reusing the shared placeholder derivation + the ADR-0031-resolved pages.
-
-    :func:`latence_core.redaction_policy.build_span` derives the deterministic placeholder from the
-    value (which it never persists) but resolves pages from a ``PageOffsetIndex`` it is handed. This
-    Provider already resolved the span's page(s) through the AdapterBase
-    :meth:`~latence_core.providers.adapter.AdapterBase.resolve_pages` seam (so the mapping matches
-    every other adapter), so it derives the placeholder via the shared helper and stamps the
-    already-resolved pages, rather than re-resolving. The raw ``value`` is used only to derive the
-    surrogate and is never stored on the span (S6 AC).
-    """
-    from latence_core.redaction_policy import placeholder_for
-
-    placeholder = placeholder_for(pii_type, value, action, salt)
-    return PIISpan(
-        pii_type=pii_type,
-        detector=detector,
-        char_start=start,
-        char_end=end,
-        action=action,
-        placeholder=placeholder,
-        page_start=page_start,
-        page_end=page_end,
-        confidence=confidence,
-    )
+        return accepted

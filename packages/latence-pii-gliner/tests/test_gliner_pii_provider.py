@@ -1,12 +1,13 @@
 """GlinerPIIRedactor: learned zero-shot PII Redaction (S6, ADR-0024).
 
-The real ``gliner`` stack (torch/transformers) is intentionally NOT installed in the
-dev/test env (ADR-0007/0016). These tests inject a tiny fake ``gliner`` module whose
-model returns fixed document-offset PII spans, so the Provider's redaction output,
-span stamping, offset→page math, sensitivity-keyed policy, and "raw PII never stored"
-invariant are exercised deterministically and offline. One test covers the
-missing-dependency error path and the zero-shot config validation (pii_labels
-required).
+W16 (ADR-0042): Redaction is a **chunk→chunk transform** — the Provider consumes ChunkRecords
+and yields the SAME chunks with ``masked_content`` + ``pii_spans`` populated (the clean ``content``
+stays UNMASKED, offsets are chunk-local). The real ``gliner`` stack (torch/transformers) is
+intentionally NOT installed in the dev/test env (ADR-0007/0016). These tests inject a tiny fake
+``gliner`` module whose model returns fixed chunk-offset PII spans, so the Provider's redaction
+output, span stamping, offset→page math, sensitivity-keyed policy, and "raw PII never stored"
+invariant are exercised deterministically and offline. One test covers the missing-dependency error
+path and the zero-shot config validation (pii_labels required).
 """
 
 from __future__ import annotations
@@ -17,23 +18,31 @@ from typing import Any
 
 import pytest
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
-    DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     Provenance,
     RedactionAction,
-    RedactionRecord,
 )
 from latence_pii_gliner import GlinerPIIRedactor
 
 
-def _doc(
-    content: str,
+def _chunk(
+    text: str,
     *,
     sensitivity: str = "public",
     page_map: PageMap | None = None,
-) -> DocumentRecord:
-    """A parsed DocumentRecord — Redaction scans this (original markdown), not chunks."""
+    record_id: str = "doc1#chunk:0",
+    document_record_id: str = "doc1",
+    index: int = 0,
+) -> ChunkRecord:
+    """A ChunkRecord — Redaction scans this chunk's ``content`` (W16, ADR-0042).
+
+    Spans are chunk-local (offsets into ``content``); an identity ``offset_map`` + optional
+    ``page_map`` let a span still resolve to its source page (the shared chunk page-resolution seam).
+    """
     prov = Provenance(
         source_uri="file:///c/a.txt",
         file_name="a.txt",
@@ -41,16 +50,22 @@ def _doc(
         file_size=1000,
         document_id="sha256:doc1",
         char_start=0,
-        char_end=len(content),
+        char_end=len(text),
         page_start=1,
         page_end=1,
     )
-    return DocumentRecord(
-        record_id="doc1",
+    return ChunkRecord(
+        record_id=record_id,
+        document_record_id=document_record_id,
+        index=index,
         provenance=prov,
         classification=Classification(language="en", sensitivity=sensitivity),
-        content=content,
+        content=text,
+        token_count=max(len(text.split()), 0),
         page_map=page_map,
+        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text))
+        if text
+        else None,
     )
 
 
@@ -60,7 +75,7 @@ class _FakeGLiNER:
     The real batched API is ``batch_predict_entities(texts, labels, threshold=…) ->
     list[list[dict]]`` (result ``i`` for ``texts[i]``). The W7 provider calls the batched form;
     the fake keeps a per-instance ``batch_calls`` counter so a test asserts ``ceil(N/batch_size)``
-    calls, not N. An optional ``per_text`` map gives DISTINCT results per document text so a
+    calls, not N. An optional ``per_text`` map gives DISTINCT results per chunk text so a
     mis-mapped batch (off-by-one / wrong order) is caught by the equivalence test.
     """
 
@@ -135,15 +150,15 @@ def test_default_model_is_permissive_apache() -> None:
 
 def test_pii_bounds_model_window_default_768(fake_gliner: type[_FakeGLiNER]) -> None:
     # W12 model-boundary guard: the provider sets model.config.max_len (the gliner truncation lever)
-    # so a long document is not SILENTLY truncated past the mdeberta window. Default 768.
+    # so a long chunk is not SILENTLY truncated past the mdeberta window. Default 768.
     provider = GlinerPIIRedactor(_config())
-    list(provider.redact([_doc(_TEXT)]))  # triggers the lazy load + window bound
+    list(provider.redact([_chunk(_TEXT)]))  # triggers the lazy load + window bound
     assert provider._model.config.max_len == 768
 
 
 def test_pii_model_window_config_override(fake_gliner: type[_FakeGLiNER]) -> None:
     provider = GlinerPIIRedactor({**_config(), "max_len": 640})
-    list(provider.redact([_doc(_TEXT)]))
+    list(provider.redact([_chunk(_TEXT)]))
     assert provider._model.config.max_len == 640
 
 
@@ -154,8 +169,11 @@ def test_masks_detected_pii(fake_gliner: type[_FakeGLiNER]) -> None:
         {"start": a_start, "end": a_start + 5, "label": "person", "score": 0.95},
         {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9},
     ]
-    rec = list(GlinerPIIRedactor(_config()).redact([_doc(_TEXT)]))[0]
-    assert isinstance(rec, RedactionRecord)
+    rec = list(GlinerPIIRedactor(_config()).redact([_chunk(_TEXT)]))[0]
+    assert isinstance(rec, ChunkRecord)
+    # The clean content stays UNMASKED (detection still sees the entities); masked_content carries it.
+    assert rec.content == _TEXT
+    assert rec.masked_content is not None
     assert "Alice" not in rec.masked_content
     assert "alice@acme.com" not in rec.masked_content
     assert "[PERSON]" in rec.masked_content
@@ -164,15 +182,15 @@ def test_masks_detected_pii(fake_gliner: type[_FakeGLiNER]) -> None:
     assert all(s.detector == "gliner-pii" for s in rec.pii_spans)
 
 
-def test_span_offsets_are_document_level(fake_gliner: type[_FakeGLiNER]) -> None:
-    # The Provider runs the model over the whole parsed-document markdown, so the
-    # model's offsets ARE document offsets: the stamped span offset matches, and the
-    # slice round-trips to the raw value (the coordinate system the spans use).
+def test_span_offsets_are_chunk_local(fake_gliner: type[_FakeGLiNER]) -> None:
+    # The Provider runs the model over the chunk's ``content``, so the model's offsets ARE
+    # chunk-local offsets: the stamped span offset matches, and the slice round-trips to the raw
+    # value (the coordinate system the spans use).
     doc_e_start = _TEXT.index("alice@acme.com")
     fake_gliner.entities = [
         {"start": doc_e_start, "end": doc_e_start + 14, "label": "email", "score": 0.9}
     ]
-    rec = list(GlinerPIIRedactor(_config()).redact([_doc(_TEXT)]))[0]
+    rec = list(GlinerPIIRedactor(_config()).redact([_chunk(_TEXT)]))[0]
     span = rec.pii_spans[0]
     assert span.char_start == doc_e_start
     assert _TEXT[span.char_start : span.char_end] == "alice@acme.com"
@@ -181,8 +199,8 @@ def test_span_offsets_are_document_level(fake_gliner: type[_FakeGLiNER]) -> None
 def test_threshold_drops_low_scoring_spans(fake_gliner: type[_FakeGLiNER]) -> None:
     fake_gliner.entities = [{"start": 0, "end": 5, "label": "person", "score": 0.2}]
     cfg = {"pii_labels": ["person"], "threshold": 0.5}
-    rec = list(GlinerPIIRedactor(cfg).redact([_doc("Alice waved at the crowd.")]))[0]
-    assert rec.pii_count == 0
+    rec = list(GlinerPIIRedactor(cfg).redact([_chunk("Alice waved at the crowd.")]))[0]
+    assert len(rec.pii_spans) == 0
 
 
 def test_policy_keys_off_sensitivity(fake_gliner: type[_FakeGLiNER]) -> None:
@@ -195,11 +213,10 @@ def test_policy_keys_off_sensitivity(fake_gliner: type[_FakeGLiNER]) -> None:
         "policies": {"public": {"action": "mask"}, "internal": {"action": "tag"}},
     }
     provider = GlinerPIIRedactor(cfg)
-    public = list(provider.redact([_doc(_TEXT, sensitivity="public")]))[0]
-    internal = list(provider.redact([_doc(_TEXT, sensitivity="internal")]))[0]
-    assert public.policy == "public"
-    assert "[PERSON]" in public.masked_content
-    assert internal.policy == "internal"
+    public = list(provider.redact([_chunk(_TEXT, sensitivity="public")]))[0]
+    internal = list(provider.redact([_chunk(_TEXT, sensitivity="internal")]))[0]
+    # Same text, different disposition driven purely by Classification.sensitivity.
+    assert public.masked_content is not None and "[PERSON]" in public.masked_content
     assert internal.masked_content == _TEXT  # tagged, not masked
     assert internal.pii_spans[0].action is RedactionAction.TAG
 
@@ -211,7 +228,7 @@ def test_span_page_resolves_through_page_map(fake_gliner: type[_FakeGLiNER]) -> 
     fake_gliner.entities = [
         {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9}
     ]
-    rec = list(GlinerPIIRedactor(_config()).redact([_doc(text, page_map=assembly.page_map)]))[0]
+    rec = list(GlinerPIIRedactor(_config()).redact([_chunk(text, page_map=assembly.page_map)]))[0]
     assert rec.pii_spans[0].page_start == 2
 
 
@@ -220,14 +237,14 @@ def test_raw_pii_never_stored(fake_gliner: type[_FakeGLiNER]) -> None:
     fake_gliner.entities = [
         {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9}
     ]
-    rec = list(GlinerPIIRedactor(_config()).redact([_doc(_TEXT)]))[0]
+    rec = list(GlinerPIIRedactor(_config()).redact([_chunk(_TEXT)]))[0]
     assert "alice@acme.com" not in rec.pii_spans[0].model_dump_json()
 
 
 def test_empty_chunk_skipped_without_model_call(fake_gliner: type[_FakeGLiNER]) -> None:
     fake_gliner.entities = [{"start": 0, "end": 5, "label": "person", "score": 0.9}]
-    rec = list(GlinerPIIRedactor(_config()).redact([_doc("")]))[0]
-    assert rec.pii_count == 0
+    rec = list(GlinerPIIRedactor(_config()).redact([_chunk("")]))[0]
+    assert len(rec.pii_spans) == 0
     assert rec.masked_content == ""
 
 
@@ -235,63 +252,50 @@ def test_missing_gliner_dependency_raises_clear_error(monkeypatch: pytest.Monkey
     monkeypatch.setitem(sys.modules, "gliner", None)
     provider = GlinerPIIRedactor(_config())
     with pytest.raises(ImportError, match="pip install latence-pii-gliner"):
-        list(provider.redact([_doc(_TEXT)]))
+        list(provider.redact([_chunk(_TEXT)]))
 
 
 # --- W7 encoder batching (ADR-0036 §1 / ADR-0033) --------------------------------------------
 
 
-def _distinct_docs(n: int) -> list[DocumentRecord]:
-    # N docs each with a DISTINCT person name AND a DISTINCT span (doc i is prefixed with i filler
-    # chars so its name sits at offset i, span [i, i+9)). Distinct spans give the equivalence test
-    # teeth: a mis-mapped batch hands doc i another doc's raw PII dict (start=j != i), so doc i
-    # masks the WRONG offsets and its masked_content diverges from the single-item path — the
-    # assertions FAIL. (A shared [0,9) span would let a reversed map slip through, since every
+def _distinct_chunks(n: int) -> list[ChunkRecord]:
+    # N chunks each with a DISTINCT person name AND a DISTINCT span (chunk i is prefixed with i
+    # filler chars so its name sits at offset i, span [i, i+9)). Distinct spans give the equivalence
+    # test teeth: a mis-mapped batch hands chunk i another chunk's raw PII dict (start=j != i), so
+    # chunk i masks the WRONG offsets and its masked_content diverges from the single-item path —
+    # the assertions FAIL. (A shared [0,9) span would let a reversed map slip through, since every
     # record still masks its OWN content at [0,9); H-E1/E2 PII false-green hardening.)
-    docs: list[DocumentRecord] = []
-    for i in range(n):
-        content = ("." * i) + f"Person{i:03d} was here."
-        prov = Provenance(
-            source_uri=f"file:///c/{i}.txt",
-            file_name=f"{i}.txt",
-            file_type="txt",
-            file_size=100,
-            document_id=f"sha256:doc{i}",
-            char_start=0,
-            char_end=len(content),
-            page_start=1,
-            page_end=1,
+    return [
+        _chunk(
+            ("." * i) + f"Person{i:03d} was here.",
+            record_id=f"doc{i}#chunk:0",
+            document_record_id=f"doc{i}",
+            index=0,
         )
-        docs.append(
-            DocumentRecord(
-                record_id=f"doc{i}",
-                provenance=prov,
-                classification=Classification(language="en", sensitivity="public"),
-                content=content,
-            )
-        )
-    return docs
+        for i in range(n)
+    ]
 
 
-def _per_text_person_map(docs: list[DocumentRecord]) -> dict[str, list[dict[str, Any]]]:
-    # Each doc "<i dots>PersonNNN was here." -> a person entity spanning the name at its OWN doc
-    # offset i (span [i, i+9)). Keyed by index so doc i carries start=i; a batch that maps results
-    # back out of order gives a doc a DIFFERENT start than i — caught by the record-for-record test.
+def _per_text_person_map(chunks: list[ChunkRecord]) -> dict[str, list[dict[str, Any]]]:
+    # Each chunk "<i dots>PersonNNN was here." -> a person entity spanning the name at its OWN chunk
+    # offset i (span [i, i+9)). Keyed by index so chunk i carries start=i; a batch that maps results
+    # back out of order gives a chunk a DIFFERENT start than i — caught by the record-for-record
+    # test.
     return {
-        d.content: [{"start": i, "end": i + 9, "label": "person", "score": 0.9}]
-        for i, d in enumerate(docs)
+        c.content: [{"start": i, "end": i + 9, "label": "person", "score": 0.9}]
+        for i, c in enumerate(chunks)
     }
 
 
 def test_batched_equals_unbatched_record_for_record(fake_gliner: type[_FakeGLiNER]) -> None:
-    docs = _distinct_docs(7)
-    fake_gliner.per_text = _per_text_person_map(docs)
+    chunks = _distinct_chunks(7)
+    fake_gliner.per_text = _per_text_person_map(chunks)
     cfg = {"pii_labels": ["person"]}
 
     unbatched = [
-        r for d in docs for r in GlinerPIIRedactor({**cfg, "batch_size": 1}).redact([d])
+        r for c in chunks for r in GlinerPIIRedactor({**cfg, "batch_size": 1}).redact([c])
     ]
-    batched = list(GlinerPIIRedactor({**cfg, "batch_size": 4}).redact(docs))
+    batched = list(GlinerPIIRedactor({**cfg, "batch_size": 4}).redact(chunks))
 
     assert len(batched) == len(unbatched) == 7
     for b, u in zip(batched, unbatched, strict=True):
@@ -300,43 +304,39 @@ def test_batched_equals_unbatched_record_for_record(fake_gliner: type[_FakeGLiNE
         assert [(s.char_start, s.char_end, s.pii_type) for s in b.pii_spans] == [
             (s.char_start, s.char_end, s.pii_type) for s in u.pii_spans
         ]
-    # Each doc masked its OWN name (a wrong-order batch would mask a different doc's name).
+    # Each chunk masked its OWN name (a wrong-order batch would mask a different chunk's name).
     for i, rec in enumerate(batched):
+        assert rec.masked_content is not None
         assert f"Person{i:03d}" not in rec.masked_content
         assert "[PERSON]" in rec.masked_content
 
 
 def test_model_called_ceil_n_over_batch_size_times(fake_gliner: type[_FakeGLiNER]) -> None:
-    docs = _distinct_docs(7)
-    fake_gliner.per_text = _per_text_person_map(docs)
+    chunks = _distinct_chunks(7)
+    fake_gliner.per_text = _per_text_person_map(chunks)
     provider = GlinerPIIRedactor({"pii_labels": ["person"], "batch_size": 3})
-    list(provider.redact(docs))
-    # 7 docs at batch_size=3 => ceil(7/3)=3 forward passes, not 7.
+    list(provider.redact(chunks))
+    # 7 chunks at batch_size=3 => ceil(7/3)=3 forward passes, not 7.
     assert provider._model.batch_calls == 3
 
 
-def test_skipped_docs_need_no_model_call(fake_gliner: type[_FakeGLiNER]) -> None:
-    # A skip-policy doc + a near-empty doc need no model call; a real doc still batches once.
-    docs = _distinct_docs(1)
-    fake_gliner.per_text = _per_text_person_map(docs)
+def test_skipped_chunks_need_no_model_call(fake_gliner: type[_FakeGLiNER]) -> None:
+    # A skip-policy chunk + an empty chunk need no model call; a real chunk still batches once.
+    chunks = _distinct_chunks(1)
+    fake_gliner.per_text = _per_text_person_map(chunks)
     cfg = {
         "pii_labels": ["person"],
         "batch_size": 8,
         "policies": {"secret": {"skip": True}},
     }
-    empty = DocumentRecord(
-        record_id="empty",
-        provenance=docs[0].provenance.model_copy(update={"char_end": 0}),
-        classification=Classification(language="en", sensitivity="public"),
-        content="",
-    )
-    secret = docs[0].model_copy(
+    empty = _chunk("", record_id="empty#chunk:0", document_record_id="empty")
+    secret = chunks[0].model_copy(
         update={"classification": Classification(language="en", sensitivity="secret")}
     )
     provider = GlinerPIIRedactor(cfg)
-    out = list(provider.redact([empty, secret, docs[0]]))
+    out = list(provider.redact([empty, secret, chunks[0]]))
     assert len(out) == 3
-    # Only the one real doc triggered detection — a single batched forward pass.
+    # Only the one real chunk triggered detection — a single batched forward pass.
     assert provider._model.batch_calls == 1
 
 

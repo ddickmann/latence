@@ -104,9 +104,9 @@ variable only — never in a file** (an inlined `api_key` would be scrubbed from
 don't rely on that; keep keys out of YAML):
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."     # OpenRouter (default in the stack below)
+export OPENROUTER_API_KEY="sk-or-..."     # OpenRouter (default in the stack below)  # pragma: allowlist secret
 # or, for direct OpenAI:
-# export OPENAI_API_KEY="sk-..."
+# export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
 ```
 
 Model default is `openai/gpt-4.1-mini` reached via `base_url: https://openrouter.ai/api/v1`. Set the
@@ -136,6 +136,63 @@ PY
 
 > `ProviderRegistry().names()` lists every discovered provider; equivalently
 > `python -c "from importlib.metadata import entry_points; print([e.name for e in entry_points(group='latence.providers')])"`.
+
+---
+
+## Guided setup: `latence setup` → `latence process`
+
+The rest of this tutorial (§2–§5) hand-authors the GOOD stack so you understand every knob. If you
+just want the **same quality-baked stack generated for you**, two commands do it — a guided,
+deterministic wizard that converges to a clean, validated config, then one command to run it:
+
+```bash
+# Interactive: each prompt has a sensible default + a one-line "why it matters".
+latence setup
+# → writes ./latence.stack.yaml (validated), then prints "Run `latence process` to start."
+latence process
+```
+
+**What the wizard asks** (each with a default; press Enter to accept):
+
+| Prompt | Default | Why it matters |
+|---|---|---|
+| **Source folder** | `file://$PWD/corpus` | The folder Latence reads. Validated to exist; its file types are **auto-detected** and reported. |
+| **Output / storage URI** | `file://$PWD/latence-out` | Where state + the exported RAG corpus and KG are written. |
+| **Parser** | recommended from the detected types | `parser.render` (universal / mixed), `parser.pdfplumber` (born-digital PDF text), or `parser.lighton` (OCR for scans/images). Confirm or override. |
+| **Device** | `auto` | `auto` picks CUDA when present, else CPU (skip-with-flag). |
+| **Schema-induction LLM** | OpenRouter + `openai/gpt-4.1-mini` | The quality lever — a small LLM discovers your corpus's own `{entity, relation, pii}` schema. The **API key is read from the environment at run** (`$OPENROUTER_API_KEY`, or `$OPENAI_API_KEY` for a direct-OpenAI base URL) — **never stored** in the file. The wizard warns if it is unset. |
+| **PII redaction + guardrail screening** | ON | **The one optional toggle.** ON adds the `content_screen` + `redact` stages (learned **financial-PII** detection). OFF omits exactly those two stages. |
+| **Domain / description hint** | (empty) | Free text, recorded as a header comment for readers. |
+
+The wizard then **generates the quality-baked spine**, **dry-validates it** (structural + DAG +
+capability wiring — the SAME machinery `latence stack validate` builds on, no pipeline run), and
+**saves** `./latence.stack.yaml`. The generated stack is exactly the GOOD stack of §3
+(`chunk[640]` → `induce[corpus]` → `extract[gliner2, thr 0.5]` → optional `redact[gliner2,
+financial-PII]` → `disambiguate` → `graph` → `enrich(context)` → `export_corpus[context_columns]` +
+`export_kg`).
+
+**Deterministic + scriptable (CI/repro).** `--non-interactive` takes every answer from flags, and
+the **same inputs produce a byte-identical config**:
+
+```bash
+latence setup --non-interactive \
+  --source file:///workspace/corpus \
+  --storage file:///workspace/latence-out \
+  --parser parser.render --device cuda \
+  --llm-base-url https://openrouter.ai/api/v1 --llm-model openai/gpt-4.1-mini \
+  --pii --domain "retail banking contracts" \
+  --output ./latence.stack.yaml
+latence process --config ./latence.stack.yaml --run-id run-0001
+```
+
+> **PII note (W16, ADR-0042).** With **PII ON**, `redact` is a **chunk-level transform**: it
+> consumes the induced **chunk** stream and sets each chunk's `masked_content` (each chunk ≤ the
+> model window, so no PII is truncated), and `enrich` reads THAT redacted chunk stream
+> (`redact → enrich → export_corpus`). The corpus Export materializes `masked_content`, so the
+> exported RAG corpus is **both masked (PII-safe) AND context-enriched** — the per-chunk
+> `context_header`/`induced_labels` and the masking compose, with no trade-off. `latence setup --pii`
+> now produces a genuinely PII-safe, context-enriched corpus. (This closes the pre-W16 gap where the
+> RAG chunks were enriched but un-masked and a doc-level redactor could truncate PII past the window.)
 
 ---
 
@@ -270,11 +327,14 @@ stages:
       max_len: 768                            # mdeberta window guard (hard backstop)
 
   # 8) Learned PII redaction (GLiNER2) with FINANCIAL PII, not just person/email/phone.
-  #    depends_on parse (whole-doc text the spans key to) AND induce (induced pii_types union on).
+  #    W16 (ADR-0042): redact is a CHUNK→CHUNK transform — it consumes the induced CHUNK stream and
+  #    sets each chunk's masked_content (each chunk ≤ the model window, so no PII is truncated). It
+  #    depends_on induce so the induced pii_types UNION onto this floor; enrich then reads THIS
+  #    redacted chunk stream, so export_corpus is masked AND enriched.
   - name: redact
     capability: redaction
     provider: redaction.gliner2
-    depends_on: [parse, induce]
+    depends_on: [induce]
     config:
       device: cuda
       pii_labels: [person, email, phone number, address, iban, credit card number, tax id]
@@ -313,11 +373,13 @@ stages:
 
   # 12) W13 context enrichment: project the assembled KG back onto each chunk as a compact,
   #     capped, confidence-gated context_header (its canonical entities + top-k neighbor triples).
-  #     Its chunk input is the INDUCED stream, so the enriched chunks also carry induced_labels.
+  #     W16 (ADR-0042): its chunk input is the REDACTED induced stream (redact set masked_content),
+  #     so the enriched chunks carry induced_labels + context_header AND masked_content — the corpus
+  #     row is masked (PII-safe) AND enriched. (With no redact stage, wire this back to `induce`.)
   - name: enrich
     capability: context_enrichment
     provider: context.kg_header
-    depends_on: [induce, graph]
+    depends_on: [redact, graph]
     config:
       max_neighbors_per_entity: 4     # hub-entity guard: per entity keep only its top-k relations
       max_triples: 6                  # overall cap on the header's triples
@@ -331,9 +393,10 @@ stages:
     depends_on: [graph]
     config: {basename: graph}
 
-  # 13b) RAG-corpus export from the ENRICHED chunk stream: content + provenance + classification +
-  #      induced_labels + context_header + a dense embedding.
-  #      context_columns: true → the two W13 Parquet columns (context_header, neighbor_entity_ids).
+  # 13b) RAG-corpus export from the REDACTED+ENRICHED chunk stream: masked_content (materialized as
+  #      the corpus text, W16) + provenance + classification + induced_labels + context_header + a
+  #      dense embedding. context_columns: true → the two W13 Parquet columns (context_header,
+  #      neighbor_entity_ids).
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
@@ -346,17 +409,16 @@ stages:
         config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
 ```
 
-> **Redaction vs. context headers — an honest wiring note.** The RAG corpus above is exported from the
-> **enriched chunk stream** (`export_corpus → enrich`) so it carries `induced_labels` + `context_header`
-> + `embedding`. In this architecture the **`content` field is the parsed/chunked text, not the
-> PII-masked variant** — the masked text (`masked_content`) and the structured PII spans live on the
-> separate **`RedactionRecord`** stream that the `redact` Stage produces (a different carrier than
-> `ChunkRecord`; one Export Stage consumes one carrier). The `redact` Stage still runs — inspect its
-> masked document + PII spans in the `redact` checkpoint (§4), and the redacted-corpus variant is
-> available by pointing an Export at `redact` instead. If your RAG corpus must ship **masked** text,
-> wire `export_corpus → redact` (you then forgo the per-chunk headers/induced-labels); chunk-level
-> redaction that yields both in one file is a documented follow-on, not wired today. Pick per your
-> compliance needs.
+> **Redaction AND context headers — masked and enriched in one file (W16, ADR-0042).** With W16,
+> `redact` is a **chunk→chunk transform**: it consumes the induced **chunk** stream and sets each
+> chunk's `masked_content` (each chunk ≤ the model window, so no PII is truncated), and `enrich`
+> reads THAT redacted chunk stream (`redact → enrich → export_corpus`). The corpus Export
+> materializes `masked_content` as the row's text, so the exported RAG corpus carries **masked
+> (PII-safe) content AND** `induced_labels` + `context_header` + `embedding` — the masking and the
+> per-chunk headers **compose in one file**, with no trade-off. The structured `pii_spans` ride the
+> same `ChunkRecord` (the raw PII value is never stored). This closes the pre-W16 gap where the RAG
+> chunks were enriched but un-masked (and a doc-level redactor could truncate PII past the model
+> window). With PII OFF there is no `redact` Stage, so wire `enrich` back to `induce`.
 
 ### 3.1 Fill the placeholders
 
@@ -511,7 +573,7 @@ PY
 # relations that actually read true (head → label → tail). Noise here ⇒ revisit threshold/induce.
 ```
 
-### 4.7 `redact` → `redact.jsonl` (`RedactionRecord`s — PII spans + masked variant)
+### 4.7 `redact` → `redact.jsonl` (`ChunkRecord`s — `masked_content` + `pii_spans`, W16)
 ```bash
 python - <<PY
 import json
@@ -521,8 +583,9 @@ for l in open("$CK/redact.jsonl"):
     print(d["provenance"]["file_name"], "→", len(spans), "PII spans:",
           sorted({s["pii_type"] for s in spans}))
 PY
-# look for: financial types firing (iban, credit card number, tax id) — not just person/email/phone;
-# masked_content has the spans replaced. The raw PII value is NEVER stored on a span (by design).
+# W16 (ADR-0042): redact is chunk→chunk — each ChunkRecord gains masked_content (the spans replaced)
+# + pii_spans, so enrich/export carry the masked text forward. look for: financial types firing
+# (iban, credit card number, tax id) — not just person/email/phone. The raw PII value is NEVER stored.
 ```
 
 ### 4.8 `disambiguate` → `disambiguate.jsonl` (canonical entities)
@@ -576,7 +639,7 @@ One command runs the whole DAG (skipping any Stage whose checkpoint already exis
 
 ```bash
 export PYTORCH_JIT=0
-export OPENROUTER_API_KEY="sk-or-..."     # (already set from §1.3)
+export OPENROUTER_API_KEY="sk-or-..."     # (already set from §1.3)  # pragma: allowlist secret
 latence run /workspace/pipeline.yaml --run-id run-0001 --verbose
 ```
 
@@ -629,9 +692,10 @@ peek $EX/records.jsonl 1
 Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
 `docs/RETRIEVAL-ENGINE-INPUT-SPEC.md` §2.1):
 
-- **`content`** — the retrieval text (markup-stripped). Byte-unchanged by W13 (the header is added to
-  the *embedding input only*, never the stored text). *(This is the parsed chunk text; see the §3
-  redaction note on masked vs. enriched wiring.)*
+- **`content`** — the retrieval text (markup-stripped). Byte-unchanged by W13 (the context header is
+  added to the *embedding input only*, never the stored text). W16 (ADR-0042): with the `redact`
+  Stage on, the Export materializes each chunk's **`masked_content`** here, so `content` is the
+  **PII-safe (masked)** text — never the raw variant (see the §3 redaction note).
 - **`provenance`** — `source_uri`, `file_name`, `file_type`, `file_size`, `document_id`, and the
   offsets `page_start/page_end` + `char_start/char_end` locating the chunk in its source. Your audit
   trail back to the exact page/character.
@@ -642,8 +706,8 @@ Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
   `neighbor_triples` (`A —label→ B`, capped), `kg_node_ids` (the chunk's own entities) and
   `neighbor_node_ids` (query-time KG-expansion join keys). `null` for a chunk with no gated entity.
 - **`embedding`** — the dense e5-small vector (dimension 384). It was computed over
-  `rendered_context_header + "\n" + content`, so the vector carries the KG coherence while the stored
-  `content` stays clean.
+  `rendered_context_header + "\n" + content`, so the vector carries the KG coherence — and, under W16,
+  over the **PII-safe (masked)** corpus text, consistent with the stored `content`.
 - **`record_id`** (primary key), `document_record_id` (join key), `index`, `token_count`,
   `page_map`/`offset_map`, `risk_markers`.
 
@@ -693,7 +757,108 @@ python -c "import networkx as nx; g=nx.read_graphml('$EX/graph.graphml'); print(
 
 ---
 
-## 7. Troubleshooting
+## 7. Incremental updates: add / update / retract / purge
+
+Your source folder changes after the first run — new files arrive, some get edited, some must be
+deleted (a customer exercises their right-to-be-forgotten). You do **not** re-run everything and you
+do **not** write a Python script. Three CLI commands drive the corpus forward, each committing the
+next **Corpus Version** (immutable, inspectable, rollback-able). They take the **same stack YAML**
+`latence run` takes.
+
+> **Honest boundary (issue #42).** The *committed* result of a delta is **surgical**: only the
+> records in the blocking neighborhoods your change touched are re-resolved and re-committed; every
+> untouched cluster is carried forward byte-identical, and the churn prints the affected-set size as
+> the witness. What is **not** yet incremental is the **extraction pass** — a delta re-parses /
+> re-chunks / re-extracts the **whole current source** from scratch (there is no cross-run doc-level
+> checkpoint reuse yet). So the *stored corpus* honours "recompute only the affected set", but the
+> *compute cost* of a delta is still O(corpus). Don't expect a 1-file delta to run in 1-file time.
+
+### 7.1 `latence delta` — add / update (the source folder changed)
+
+Drop new or edited files into the source folder, then:
+
+```bash
+# Each delta needs a FRESH run id; omit --run-id and it auto-generates a UTC-timestamped one
+# (delta-YYYYMMDDTHHMMSSZ). Pin one with --run-id if you want a stable name.
+latence delta stacks/my-corpus.yaml
+# or, explicit:
+latence delta stacks/my-corpus.yaml --run-id delta-2026-07-13
+```
+
+It content-hashes the current folder against the last committed Version, detects added / changed /
+removed files, and commits Version N+1. The churn it prints:
+
+```text
+Corpus Version v3 -> v4 (incremental)
+  documents: +2 ~0 -1 (=118 unchanged)
+  entities:  +5 created, 1 merged, 0 split
+  edges:     +7 -1
+  records:   0 retracted, 0 purged (retraction)
+  affected set: 6/431 corpus-level records recomputed (extraction still re-runs the whole source — issue #42)
+  drift: 0.024
+```
+
+`affected set: 6/431` is the payoff signal — only 6 of the 431 corpus-level records were re-resolved;
+the other 425 were carried forward verbatim. (An edit under the content-addressed local-folder Source
+shows up as `+1 ~1`-style *add + delete*, not `~updated`: editing a file mints a new content-id and
+retires the old one. That's expected — see ADR-0029 §4.)
+
+Re-running a delta over an **unchanged** folder is a **no-op** — the fingerprint matches head, so no
+new Version is minted (idempotent). Deltas are **deterministic**: the same source + config reproduces
+the same Corpus Version fingerprint.
+
+### 7.2 Where to get a `document_id`
+
+`retract` and `purge` take content-addressed document ids (`sha256:<64 hex>`). Two ways to get one:
+
+```bash
+# (a) From the export — every record carries its source document id:
+python -c "import json; print({json.loads(l)['provenance']['document_id'] for l in open('$EX/records.jsonl')})"
+
+# (b) Hash the file directly (the id IS the sha256 of the file bytes):
+printf 'sha256:%s\n' "$(shasum -a 256 /workspace/corpus/contract-4471.pdf | cut -d' ' -f1)"
+```
+
+### 7.3 `latence retract` — soft delete (auditable, rollback-able — the default)
+
+Exclude a document's derived records from the **live** corpus, but **retain** them in the prior
+Corpus Version for audit and rollback. Any entity cluster that was merged *solely* because of the
+retracted document splits back apart.
+
+```bash
+# One id, or several (--doc is repeatable); or a file of ids, one per line.
+latence retract stacks/my-corpus.yaml --doc sha256:1a2b...ef
+latence retract stacks/my-corpus.yaml --doc sha256:1a2b...ef --doc sha256:9c8d...01
+latence retract stacks/my-corpus.yaml --docs-file to-remove.txt
+```
+
+The retracted records still live in the version that preceded the retraction — inspect it any time
+(`CorpusStore.read_records(<version>)`), or roll forward by re-adding the file with `latence delta`.
+
+### 7.4 `latence purge` — hard delete (GDPR / right-to-be-forgotten)
+
+The irreversible one. Unlike a retraction, **nothing is retained**: the on-disk source file, every
+derived record across **all** Corpus Versions (and any abandoned WAL residue), and the run artifacts
+are physically erased. Because it is destructive and non-recoverable, `purge` prompts for
+confirmation; pass `--yes` to skip it in a script.
+
+```bash
+# Prompts "This cannot be undone. Continue?" unless --yes is given.
+latence purge stacks/my-corpus.yaml --doc sha256:1a2b...ef
+latence purge stacks/my-corpus.yaml --docs-file gdpr-erasures.txt --yes
+```
+
+**Retraction vs Purge in one line:** *Retraction* is a soft, auditable, rollback-able tombstone — the
+records survive in prior Versions for compliance; *Purge* is a hard GDPR erasure — the records are
+physically removed everywhere and cannot be recovered. Reach for retraction by default; reserve purge
+for a genuine right-to-be-forgotten request.
+
+Every command re-persists the run's `quality-report.json` + `quality-report.md` with the delta churn
+under `_latence/runs/<run-id>/`, exactly like `latence run`.
+
+---
+
+## 8. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -708,3 +873,7 @@ python -c "import networkx as nx; g=nx.read_graphml('$EX/graph.graphml'); print(
 | A file didn't make it into the corpus | not in `source.local_folder extensions`, or quarantined at intake, or a `PARSE_ERROR` | check the `extensions` list, the `quarantine/` and `screening/` sidecars, and the parse checkpoint (§4.2, §4.3). |
 | `context_header` / `neighbor_entity_ids` absent from `records.parquet` | `context_columns` not set on `export_corpus`, or the corpus was exported from `redact` not `enrich` | set `context_columns: true` and wire `export_corpus → enrich` (§3). |
 | A re-run didn't pick up a config change to an early Stage | resume is keyed by **stage name**; an existing checkpoint under the same name is skipped | delete that Stage's checkpoint (`rm $CK/<stage>.jsonl`) or use a fresh `--run-id`. |
+| `latence delta` committed no new Version / printed the same version number | the source folder is unchanged — a delta over an identical corpus is an idempotent no-op (the fingerprint matches head) | change the folder (add/edit/remove a file) before the delta; nothing to commit is correct behaviour (§7.1). |
+| `retract`/`purge` fails with `[unknown]: Cannot delete from an empty corpus` | you deleted before any `latence run`/`delta` committed a Corpus Version | run the pipeline once first so there is a Version to delete from (§7.3). |
+| `retract`/`purge` says the id `does not look like a document id` | the id isn't `sha256:<64 hex>` (e.g. you passed a file path or a truncated id) | get a real `document_id` from `records.jsonl` (`provenance.document_id`) or by hashing the file (§7.2). |
+| A `latence delta` ran far slower than the size of the change | expected — extraction is not yet cross-run incremental; a delta re-extracts the whole source (issue #42) | the *committed* corpus is still surgical (see the `affected set: N/total` line); the compute caveat is documented, not a bug (§7). |

@@ -1,10 +1,12 @@
 """HybridPIIRedactor: deterministic hybrid-rule PII Redaction (S6, in-core reference).
 
-Unit tests for the in-core reference Provider: happy-path masked variant + structured
-PII spans (type/offset/action/placeholder) that resolve to the correct source page,
-each RedactionAction (mask/replace/hash/tag), the sensitivity-keyed policy (the
-metadata-aware core of S6), the config gazetteer + custom patterns, determinism, the
-"raw PII never persisted" invariant, config validation, and the clean / skip / empty
+W16 (ADR-0042): Redaction is a **chunk→chunk transform** — the Redactor consumes ChunkRecords and
+yields the SAME chunks with ``masked_content`` + ``pii_spans`` populated (the clean ``content`` stays
+UNMASKED). Each chunk is ≤ the model window, so PII is masked in full with NO truncation. Unit tests
+for the in-core reference Provider: the masked variant + structured chunk-local PII spans
+(type/offset/action/placeholder) that resolve to the correct source page, each RedactionAction
+(mask/replace/hash/tag), the sensitivity-keyed policy, the config gazetteer + custom patterns,
+determinism, the "raw PII never persisted" invariant, config validation, and the clean/skip/empty
 degradations.
 """
 
@@ -12,24 +14,32 @@ from __future__ import annotations
 
 import pytest
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
-    Disposition,
-    DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
     PageMap,
     Provenance,
     RedactionAction,
 )
+from latence_core.stages.chunk import MarkdownChunker
 from latence_core.stages.redaction import HybridPIIRedactor
 
 
-def _doc(
+def _chunk(
     text: str,
     *,
     sensitivity: str = "public",
     page_map: PageMap | None = None,
-    record_id: str = "d1",
-) -> DocumentRecord:
-    """A parsed DocumentRecord — Redaction scans this (original markdown), not chunks."""
+    record_id: str = "d1#chunk:0",
+    document_record_id: str = "d1",
+    index: int = 0,
+) -> ChunkRecord:
+    """A ChunkRecord — Redaction scans this chunk's ``content`` (W16, ADR-0042).
+
+    Spans are chunk-local (offsets into ``content``); an identity ``offset_map`` + optional
+    ``page_map`` let a span still resolve to its source page (the shared chunk page-resolution seam).
+    """
     prov = Provenance(
         source_uri="file:///c/a.txt",
         file_name="a.txt",
@@ -41,12 +51,18 @@ def _doc(
         page_start=1,
         page_end=1,
     )
-    return DocumentRecord(
+    return ChunkRecord(
         record_id=record_id,
+        document_record_id=document_record_id,
+        index=index,
         provenance=prov,
         classification=Classification(language="en", sensitivity=sensitivity),
         content=text,
+        token_count=max(len(text.split()), 0),
         page_map=page_map,
+        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text))
+        if text
+        else None,
     )
 
 
@@ -57,16 +73,19 @@ _TEXT = "Contact alice@acme.com or call 555-123-4567 today."
 
 
 def test_detects_and_masks_builtin_pii() -> None:
-    doc = _doc(_TEXT)
-    rec = list(HybridPIIRedactor({"detectors": ["email", "phone"]}).redact([doc]))[0]
-    # Both the email and the phone are masked in the text variant.
+    chunk = _chunk(_TEXT)
+    rec = next(iter(HybridPIIRedactor({"detectors": ["email", "phone"]}).redact([chunk])))
+    # The clean content is UNCHANGED (extraction still sees the entities).
+    assert rec.content == _TEXT
+    # Both the email and the phone are masked in masked_content.
+    assert rec.masked_content is not None
     assert "alice@acme.com" not in rec.masked_content
     assert "555-123-4567" not in rec.masked_content
     assert "[EMAIL]" in rec.masked_content
     assert "[PHONE]" in rec.masked_content
     types = {s.pii_type for s in rec.pii_spans}
     assert types == {"email", "phone"}
-    # Structured span: type, document offset, action, placeholder, detector.
+    # Structured span: type, CHUNK-LOCAL offset, action, placeholder, detector.
     email = next(s for s in rec.pii_spans if s.pii_type == "email")
     assert email.detector == "regex:email"
     assert email.action is RedactionAction.MASK
@@ -74,28 +93,29 @@ def test_detects_and_masks_builtin_pii() -> None:
     assert _TEXT[email.char_start : email.char_end] == "alice@acme.com"
 
 
-def test_span_offsets_are_document_coordinates() -> None:
-    # PII deep in the document: the span offset is the exact original-document offset,
-    # so the slice round-trips back to the raw value (the coordinate system spans use).
+def test_span_offsets_are_chunk_content_coordinates() -> None:
+    # PII deep in the chunk: the span offset is the exact chunk-content offset,
+    # so the slice round-trips back to the raw value (the coordinate masked_content uses).
     prefix = "# Heading\n\nSome intro paragraph before the sensitive line.\n\n"
-    doc = _doc(prefix + _TEXT)
-    rec = list(HybridPIIRedactor({"detectors": ["email"]}).redact([doc]))[0]
+    chunk = _chunk(prefix + _TEXT)
+    rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
     email = rec.pii_spans[0]
     assert email.char_start == len(prefix) + _TEXT.index("alice@acme.com")
     assert (prefix + _TEXT)[email.char_start : email.char_end] == "alice@acme.com"
 
 
-def test_clean_document_yields_empty_spans_and_identical_text() -> None:
-    doc = _doc("Nothing sensitive in this line at all.")
-    rec = list(HybridPIIRedactor({"detectors": ["email", "phone", "ssn"]}).redact([doc]))[0]
-    assert rec.pii_count == 0
+def test_clean_chunk_yields_empty_spans_and_identical_text() -> None:
+    chunk = _chunk("Nothing sensitive in this line at all.")
+    rec = next(iter(HybridPIIRedactor({"detectors": ["email", "phone", "ssn"]}).redact([chunk])))
+    assert rec.pii_spans == []
     assert rec.masked_content == "Nothing sensitive in this line at all."
+    assert rec.content == "Nothing sensitive in this line at all."
 
 
-def test_empty_document_is_not_an_error() -> None:
-    doc = _doc("")
-    rec = list(HybridPIIRedactor({"detectors": ["email"]}).redact([doc]))[0]
-    assert rec.pii_count == 0
+def test_empty_chunk_is_not_an_error() -> None:
+    chunk = _chunk("")
+    rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
+    assert rec.pii_spans == []
     assert rec.masked_content == ""
 
 
@@ -103,20 +123,21 @@ def test_empty_document_is_not_an_error() -> None:
 
 
 def test_replace_action_pseudonymises_deterministically() -> None:
-    doc = _doc(_TEXT)
+    chunk = _chunk(_TEXT)
     cfg = {"detectors": ["email"], "default_action": "replace"}
-    rec = list(HybridPIIRedactor(cfg).redact([doc]))[0]
+    rec = next(iter(HybridPIIRedactor(cfg).redact([chunk])))
     span = rec.pii_spans[0]
     assert span.action is RedactionAction.REPLACE
     assert span.placeholder.startswith("EMAIL_")
+    assert rec.masked_content is not None
     assert "alice@acme.com" not in rec.masked_content
     assert span.placeholder in rec.masked_content
 
 
 def test_hash_action_is_stable_and_hides_value() -> None:
-    doc = _doc(_TEXT)
+    chunk = _chunk(_TEXT)
     cfg = {"detectors": ["email"], "default_action": "hash", "salt": "s1"}
-    rec = list(HybridPIIRedactor(cfg).redact([doc]))[0]
+    rec = next(iter(HybridPIIRedactor(cfg).redact([chunk])))
     span = rec.pii_spans[0]
     assert span.action is RedactionAction.HASH
     assert span.placeholder.startswith("<EMAIL:")
@@ -124,12 +145,12 @@ def test_hash_action_is_stable_and_hides_value() -> None:
 
 
 def test_tag_action_leaves_text_intact_but_records_span() -> None:
-    doc = _doc(_TEXT)
+    chunk = _chunk(_TEXT)
     cfg = {"detectors": ["email"], "default_action": "tag"}
-    rec = list(HybridPIIRedactor(cfg).redact([doc]))[0]
+    rec = next(iter(HybridPIIRedactor(cfg).redact([chunk])))
     # Detect-only: the surface text is unchanged, but the span is recorded.
     assert rec.masked_content == _TEXT
-    assert rec.pii_count == 1
+    assert len(rec.pii_spans) == 1
     assert rec.pii_spans[0].action is RedactionAction.TAG
     assert rec.pii_spans[0].placeholder == ""
 
@@ -146,19 +167,17 @@ def test_policy_keys_off_sensitivity() -> None:
         },
     }
     provider = HybridPIIRedactor(cfg)
-    public = list(provider.redact([_doc(_TEXT, sensitivity="public")]))[0]
-    internal = list(provider.redact([_doc(_TEXT, sensitivity="internal")]))[0]
+    public = next(iter(provider.redact([_chunk(_TEXT, sensitivity="public")])))
+    internal = next(iter(provider.redact([_chunk(_TEXT, sensitivity="internal")])))
     # Same text, different disposition driven purely by Classification.sensitivity.
-    assert public.policy == "public"
-    assert "[EMAIL]" in public.masked_content
-    assert internal.policy == "internal"
+    assert public.masked_content is not None and "[EMAIL]" in public.masked_content
     assert internal.masked_content == _TEXT  # tagged, not masked
 
 
 def test_policy_skip_disables_redaction_for_a_class() -> None:
     cfg = {"detectors": ["email"], "policies": {"confidential": {"skip": True}}}
-    rec = list(HybridPIIRedactor(cfg).redact([_doc(_TEXT, sensitivity="confidential")]))[0]
-    assert rec.pii_count == 0
+    rec = next(iter(HybridPIIRedactor(cfg).redact([_chunk(_TEXT, sensitivity="confidential")])))
+    assert rec.pii_spans == []
     assert rec.masked_content == _TEXT
 
 
@@ -168,16 +187,15 @@ def test_policy_types_allowlist_restricts_detection() -> None:
         "detectors": ["email", "phone"],
         "policies": {"public": {"action": "mask", "types": ["email"]}},
     }
-    rec = list(HybridPIIRedactor(cfg).redact([_doc(_TEXT, sensitivity="public")]))[0]
+    rec = next(iter(HybridPIIRedactor(cfg).redact([_chunk(_TEXT, sensitivity="public")])))
     assert {s.pii_type for s in rec.pii_spans} == {"email"}
-    assert "555-123-4567" in rec.masked_content  # phone left intact
+    assert rec.masked_content is not None and "555-123-4567" in rec.masked_content  # phone intact
 
 
 def test_default_policy_fallback() -> None:
-    # A document whose sensitivity has no explicit policy uses the 'default' entry.
+    # A chunk whose sensitivity has no explicit policy uses the 'default' entry.
     cfg = {"detectors": ["email"], "policies": {"default": {"action": "hash"}}}
-    rec = list(HybridPIIRedactor(cfg).redact([_doc(_TEXT, sensitivity="weird")]))[0]
-    assert rec.policy == "default"
+    rec = next(iter(HybridPIIRedactor(cfg).redact([_chunk(_TEXT, sensitivity="weird")])))
     assert rec.pii_spans[0].action is RedactionAction.HASH
 
 
@@ -186,103 +204,104 @@ def test_default_policy_fallback() -> None:
 
 def test_gazetteer_and_custom_patterns() -> None:
     text = "Employee Alice, ref A-99, emailed the team."
-    doc = _doc(text)
+    chunk = _chunk(text)
     cfg = {
         "detectors": [],  # no built-ins
         "gazetteer": {"name": ["Alice"]},
         "patterns": {"ref": [r"A-\d+"]},
     }
-    rec = list(HybridPIIRedactor(cfg).redact([doc]))[0]
+    rec = next(iter(HybridPIIRedactor(cfg).redact([chunk])))
     types = {s.pii_type for s in rec.pii_spans}
     assert types == {"name", "ref"}
     name = next(s for s in rec.pii_spans if s.pii_type == "name")
     assert name.detector == "gazetteer:name"
+    assert rec.masked_content is not None
     assert "[NAME]" in rec.masked_content
     assert "[REF]" in rec.masked_content
 
 
-# -- page resolution (round-trip) --------------------------------------------
+# -- page resolution (round-trip through offset_map + page_map) ----------------
 
 
 def test_span_page_resolves_through_page_map() -> None:
-    # Two-page document; the PII sits on page 2. The span must cite page 2.
+    # Two-page document; the PII sits on page 2. Chunk the whole document so the chunk carries the
+    # real offset_map + page_map; the chunk-local span must still resolve to page 2.
     assembly = PageMap.from_page_texts(["First page has nothing.", "Reach alice@acme.com here."])
-    text = assembly.text
-    doc = _doc(text, page_map=assembly.page_map)
-    rec = list(HybridPIIRedactor({"detectors": ["email"]}).redact([doc]))[0]
+    chunk = _chunk(assembly.text, page_map=assembly.page_map)
+    rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
     span = rec.pii_spans[0]
     assert span.page_start == 2
     assert span.page_end == 2
 
 
-def test_markup_document_offsets_and_page_are_faithful() -> None:
-    # REGRESSION: Redaction must scan the ORIGINAL parsed markdown, not a
-    # reconstruction from markup-stripped chunks. A document whose text carries
-    # markdown markup (headings, bold, a link) before the PII, split across two
-    # pages, must still record the email's EXACT original offset and page. (The
-    # earlier chunk-reconstruction placed stripped content at original offsets,
-    # yielding a fabricated coordinate system: wrong char span and wrong page.)
+def test_markup_stripped_chunk_offsets_and_page_are_faithful() -> None:
+    # W16 (ADR-0042) the chunk-level analogue of the old ORIGINAL-markdown regression: a REAL chunk
+    # (markup-stripped ``content`` + its offset_map) whose PII sits on page 2. The chunk-local span
+    # offset round-trips to the value in ``content``; the page resolves through offset_map→page_map
+    # to the ORIGINAL page 2 (never the naive page 1).
+    from latence_core.contracts import DocumentRecord
+
     page1 = "# Confidential Report Heading\n\n**Overview** of the [system](http://ex.com)."
     page2 = "Reach the admin at bob@corp.com immediately."
     assembly = PageMap.from_page_texts([page1, page2])
-    text = assembly.text
-    doc = _doc(text, page_map=assembly.page_map)
-    rec = list(HybridPIIRedactor({"detectors": ["email"]}).redact([doc]))[0]
-    assert len(rec.pii_spans) == 1
-    span = rec.pii_spans[0]
-    # The offset is the true original-markdown offset (round-trips to the value).
-    assert text[span.char_start : span.char_end] == "bob@corp.com"
-    assert span.char_start == text.index("bob@corp.com")
+    doc = DocumentRecord(
+        record_id="d1",
+        provenance=Provenance(
+            source_uri="file:///c/a.md",
+            file_name="a.md",
+            file_type="md",
+            file_size=len(assembly.text),
+            document_id="sha256:d1",
+            char_start=0,
+            char_end=len(assembly.text),
+        ),
+        classification=Classification(language="en", sensitivity="public"),
+        content=assembly.text,
+        page_map=assembly.page_map,
+    )
+    chunks = list(MarkdownChunker({}).chunk([doc]))
+    out = list(HybridPIIRedactor({"detectors": ["email"]}).redact(chunks))
+    spans = [(c, s) for c in out for s in c.pii_spans]
+    assert len(spans) == 1
+    chunk, span = spans[0]
+    # The offset is chunk-local into the (markup-stripped) content and round-trips to the value.
+    assert chunk.content[span.char_start : span.char_end] == "bob@corp.com"
     # The email lives on page 2 — it must resolve there, not to page 1.
     assert span.page_start == 2
     assert span.page_end == 2
-    # The masked variant is the faithful full document with only the email replaced.
-    assert rec.masked_content == text.replace("bob@corp.com", "[EMAIL]")
+    # The masked variant is the faithful chunk content with only the email replaced.
+    assert chunk.masked_content == chunk.content.replace("bob@corp.com", "[EMAIL]")
 
 
 # -- determinism --------------------------------------------------------------
 
 
 def test_deterministic_output() -> None:
-    doc = _doc(_TEXT)
+    chunk = _chunk(_TEXT)
     cfg = {"detectors": ["email", "phone"], "default_action": "replace", "salt": "x"}
-    a = list(HybridPIIRedactor(cfg).redact([doc]))[0].model_dump_json()
-    b = list(HybridPIIRedactor(cfg).redact([doc]))[0].model_dump_json()
+    a = next(iter(HybridPIIRedactor(cfg).redact([chunk]))).model_dump_json()
+    b = next(iter(HybridPIIRedactor(cfg).redact([chunk]))).model_dump_json()
     assert a == b
 
 
 def test_raw_pii_never_stored_on_span() -> None:
-    doc = _doc(_TEXT)
-    rec = list(HybridPIIRedactor({"detectors": ["email"]}).redact([doc]))[0]
+    chunk = _chunk(_TEXT)
+    rec = next(iter(HybridPIIRedactor({"detectors": ["email"]}).redact([chunk])))
     dumped = rec.pii_spans[0].model_dump_json()
     assert "alice@acme.com" not in dumped
 
 
-# -- multi-document ordering --------------------------------------------------
+# -- multi-chunk ordering -----------------------------------------------------
 
 
-def test_one_record_per_document_in_first_seen_order() -> None:
-    d1 = _doc("mail a@b.com", record_id="d1")
-    d2 = _doc("mail c@d.com", record_id="d2")
-    recs = list(HybridPIIRedactor({"detectors": ["email"]}).redact([d1, d2]))
-    assert [r.document_record_id for r in recs] == ["d1", "d2"]
-    assert all(r.pii_count == 1 for r in recs)
-
-
-def test_parse_error_document_is_skipped() -> None:
-    # A PARSE_ERROR document has no usable content; Redaction skips it (mirrors Chunk),
-    # emitting no RedactionRecord for it, while a healthy sibling is still redacted.
-    broken = DocumentRecord(
-        record_id="bad",
-        provenance=_doc("").provenance,
-        classification=Classification(language="en", sensitivity="public"),
-        content="",
-        disposition=Disposition.PARSE_ERROR,
-        error="corrupt file",
-    )
-    good = _doc("mail a@b.com", record_id="good")
-    recs = list(HybridPIIRedactor({"detectors": ["email"]}).redact([broken, good]))
-    assert [r.document_record_id for r in recs] == ["good"]
+def test_chunks_threaded_one_to_one_in_first_seen_order() -> None:
+    c1 = _chunk("mail a@b.com", record_id="d1#chunk:0", document_record_id="d1", index=0)
+    c2 = _chunk("mail c@d.com", record_id="d2#chunk:0", document_record_id="d2", index=0)
+    recs = list(HybridPIIRedactor({"detectors": ["email"]}).redact([c1, c2]))
+    assert [r.record_id for r in recs] == ["d1#chunk:0", "d2#chunk:0"]
+    assert all(len(r.pii_spans) == 1 for r in recs)
+    # Content is unchanged; only masked_content carries the redaction.
+    assert [r.content for r in recs] == ["mail a@b.com", "mail c@d.com"]
 
 
 # -- config validation --------------------------------------------------------

@@ -28,10 +28,11 @@ from pathlib import Path
 from typing import Any
 
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
-    DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
     Provenance,
-    RedactionRecord,
 )
 from latence_core.pipeline import Pipeline
 from latence_core.quality import QualityReport
@@ -40,7 +41,7 @@ from latence_core.stages.redaction import HybridPIIRedactor
 from latence_core.storage import Storage
 
 
-def _doc(text: str, record_id: str, sensitivity: str) -> DocumentRecord:
+def _chunk(text: str, record_id: str, sensitivity: str) -> ChunkRecord:
     prov = Provenance(
         source_uri=f"file:///c/{record_id}.txt",
         file_name=f"{record_id}.txt",
@@ -52,19 +53,23 @@ def _doc(text: str, record_id: str, sensitivity: str) -> DocumentRecord:
         page_start=1,
         page_end=1,
     )
-    return DocumentRecord(
-        record_id=record_id,
+    return ChunkRecord(
+        record_id=f"{record_id}#chunk:0",
+        document_record_id=record_id,
+        index=0,
         provenance=prov,
         classification=Classification(language="en", sensitivity=sensitivity),
         content=text,
+        token_count=len(text.split()),
+        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)),
     )
 
 
 _SECRET_DOC = "Leaked key ghp_ABCdef1234567890ABCdef1234567890abcd in the ticket."
 
 
-def _redact(config: dict[str, Any], text: str, sensitivity: str) -> RedactionRecord:
-    return list(HybridPIIRedactor(config).redact([_doc(text, "d", sensitivity)]))[0]
+def _redact(config: dict[str, Any], text: str, sensitivity: str) -> ChunkRecord:
+    return next(iter(HybridPIIRedactor(config).redact([_chunk(text, "d", sensitivity)])))
 
 
 # -- the flag fires when the control ran no detectors on a sensitive doc --------
@@ -118,6 +123,7 @@ def test_active_control_on_confidential_finding_pii_is_not_flagged() -> None:
     config = {"policies": {"confidential": {"action": "mask"}}}
     rec = _redact(config, _SECRET_DOC, "confidential")
     assert rec.pii_spans  # the secret was detected
+    assert rec.masked_content is not None
     assert "ghp_ABCdef1234567890ABCdef1234567890abcd" not in rec.masked_content
     assert rec.redaction_disabled_for_sensitive is False
 
@@ -174,10 +180,14 @@ stages:
     capability: parse
     provider: parser.plaintext
     depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule
-    depends_on: [parse]
+    depends_on: [chunk]
     config:{_YAML}
   - name: export
     capability: export
@@ -219,17 +229,20 @@ def test_disabled_control_is_loud_in_quality_report_end_to_end(tmp_path: Path) -
     assert report.redaction is not None
     assert report.redaction.redaction_disabled_for_sensitive == 2
 
-    # Every persisted RedactionRecord carries the per-record flag.
+    # Every persisted redacted ChunkRecord carries the per-record flag (W16, ADR-0042).
     rows = [
         json.loads(line)
         for line in s.read_text(f"{base}/export/records.jsonl").splitlines()
         if line.strip()
     ]
-    records = [RedactionRecord.model_validate(r) for r in rows]
+    records = [ChunkRecord.model_validate(r) for r in rows]
     assert records
     assert all(r.redaction_disabled_for_sensitive for r in records)
     # The control was genuinely off — the secret is still present (the floor makes this
-    # AUDITABLE; it does not force redaction on).
+    # AUDITABLE; it does not force redaction on). With the control off, masked_content == content,
+    # so the Export materializes the un-redacted text (the secret) as the corpus text.
     assert any(
-        "ghp_ABCdef1234567890ABCdef1234567890abcd" in r.masked_content for r in records
+        r.masked_content is not None
+        and "ghp_ABCdef1234567890ABCdef1234567890abcd" in r.masked_content
+        for r in records
     )

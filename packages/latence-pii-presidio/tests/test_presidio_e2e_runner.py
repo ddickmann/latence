@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from latence_core.capability import ProviderRegistry
 from latence_core.conformance import run_conformance
-from latence_core.contracts import RedactionRecord
+from latence_core.contracts import ChunkRecord
 from latence_core.pipeline import Pipeline
 from latence_core.quality import QualityReport
 from latence_core.runner import LocalRunner
@@ -129,7 +129,7 @@ stages:
   - name: redact
     capability: redaction
     provider: {provider}
-    depends_on: [parse]
+    depends_on: [chunk]
     config:
       entities: [EMAIL_ADDRESS]
       default_action: mask
@@ -162,18 +162,19 @@ def test_presidio_redacts_through_runner(fake_presidio: None, tmp_path: Path) ->
     jsonl_uri = f"{base}/export/records.jsonl"
     assert s.exists(jsonl_uri)
     rows = [json.loads(line) for line in s.read_text(jsonl_uri).splitlines() if line.strip()]
-    records = [RedactionRecord.model_validate(r) for r in rows]
+    records = [ChunkRecord.model_validate(r) for r in rows]  # W16: redaction is chunk→chunk
     assert records
-    memo = next(r for r in records if "[EMAIL]" in r.masked_content)
+    memo = next(r for r in records if r.masked_content is not None and "[EMAIL]" in r.masked_content)
 
-    # The PII is masked, the span lands on the document coordinate system + round-trips.
+    # The PII is masked, the chunk-local span round-trips and resolves to its source page.
+    assert memo.masked_content is not None
     assert _EMAIL not in memo.masked_content
     assert memo.pii_spans[0].pii_type == "email"
     assert memo.pii_spans[0].detector == "presidio"
-    # No named policy entry for 'internal' in this config, so the applied policy is 'default'
-    # (the default_action=mask still applies); the document's sensitivity is carried unchanged.
-    assert memo.policy == "default"
+    # The chunk's sensitivity is carried unchanged (default_action=mask applied, no named policy).
     assert memo.classification.sensitivity == "internal"
+    # The exported corpus TEXT is the masked variant (Export materializes masked_content as content).
+    assert memo.content is not None and _EMAIL not in memo.content
 
     # The Quality Report carries the redaction counts.
     persisted = QualityReport.model_validate_json(s.read_text(f"{base}/quality-report.json"))
@@ -203,12 +204,12 @@ def test_presidio_is_a_true_drop_in_for_hybrid_rule(fake_presidio: None, tmp_pat
     s = Storage.for_uri(store)
     jsonl_uri = f"{store}/_latence/runs/hybrid-dropin/export/records.jsonl"
     rows = [json.loads(line) for line in s.read_text(jsonl_uri).splitlines() if line.strip()]
-    records = [RedactionRecord.model_validate(r) for r in rows]
+    records = [ChunkRecord.model_validate(r) for r in rows]
     assert records
-    # hybrid_rule's built-in email recogniser masks the same email — same contract, same policy.
-    memo = next(r for r in records if "[EMAIL]" in r.masked_content)
+    # hybrid_rule's built-in email recogniser masks the same email — same contract, same chunk carrier.
+    memo = next(r for r in records if r.masked_content is not None and "[EMAIL]" in r.masked_content)
+    assert memo.masked_content is not None
     assert _EMAIL not in memo.masked_content
-    assert memo.policy == "default"  # no named 'internal' entry ⇒ default policy (mask), same as presidio
     assert memo.classification.sensitivity == "internal"
 
 
@@ -246,7 +247,7 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.presidio
-    depends_on: [parse]
+    depends_on: [chunk]
     config:
       entities: [EMAIL_ADDRESS]
       policies:
@@ -261,7 +262,7 @@ stages:
     s = Storage.for_uri(store)
     jsonl_uri = f"{store}/_latence/runs/presidio-noop/export/records.jsonl"
     rows = [json.loads(line) for line in s.read_text(jsonl_uri).splitlines() if line.strip()]
-    records = [RedactionRecord.model_validate(r) for r in rows]
+    records = [ChunkRecord.model_validate(r) for r in rows]
     assert records
     assert all(r.redaction_disabled_for_sensitive for r in records)
     # And the Quality Report's loud count reflects the disabled control.

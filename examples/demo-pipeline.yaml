@@ -74,7 +74,7 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule   # PII-handled corpus variant
-    depends_on: [parse]
+    depends_on: [content_screen]      # W16 (ADR-0042): chunk→chunk PII masking, no doc truncation
 
   - name: disambiguate
     capability: disambiguation

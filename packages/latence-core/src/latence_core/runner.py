@@ -55,7 +55,6 @@ from latence_core.contracts import (
     ScreeningFinding,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
-from latence_core.induced import project_induced_onto_documents
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.profile import ProviderProfile, profile_of
@@ -95,8 +94,9 @@ if TYPE_CHECKING:
 # RelationMention in one output list (mixed carrier), routed to both downstream
 # consumers without a separate Entity-Extraction Stage. The Runner keeps outputs in
 # one per-Stage dict and lets each Stage's capability decide how to (de)serialize its
-# checkpoint. Redaction→RedactionRecord (one PII-handled variant per document).
-# Profiling→FeatureRecord (per-document + one corpus-scope record). Screening ALSO
+# checkpoint. Redaction→ChunkRecord (chunk→chunk transform: the SAME chunks with
+# ``masked_content`` + ``pii_spans`` populated, W16/ADR-0042 — the deprecated doc-level path emits
+# RedactionRecord). Profiling→FeatureRecord (per-document + one corpus-scope record). Screening ALSO
 # produces QuarantineRecords, but those never flow downstream — they are persisted to a
 # sidecar and reported, not threaded through the DAG.
 StageOutput = (
@@ -477,17 +477,17 @@ class LocalRunner:
             CapabilityKind.CONTENT_SCREENING,
             CapabilityKind.SCHEMA_INDUCTION,
             CapabilityKind.CONTEXT_ENRICHMENT,
+            CapabilityKind.REDACTION,
         ):
-            # Schema Induction and Context Enrichment are chunk→chunk transforms (they emit the SAME
-            # ChunkRecords with ``induced_labels`` / ``context_header`` populated), so they
-            # checkpoint + thread ChunkRecords exactly like Chunk / Content Screening.
+            # Schema Induction, Context Enrichment AND Redaction are chunk→chunk transforms (they
+            # emit the SAME ChunkRecords with ``induced_labels`` / ``context_header`` /
+            # ``masked_content``+``pii_spans`` populated, W16/ADR-0042), so they checkpoint + thread
+            # ChunkRecords exactly like Chunk / Content Screening.
             return ChunkRecord
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             return EntityMention
         if stage.capability is CapabilityKind.RELATION_EXTRACTION:
             return RelationMention
-        if stage.capability is CapabilityKind.REDACTION:
-            return RedactionRecord
         if stage.capability is CapabilityKind.PROFILING:
             return FeatureRecord
         if stage.capability is CapabilityKind.DISAMBIGUATION:
@@ -535,8 +535,6 @@ class LocalRunner:
                 continue
             if parent.capability is CapabilityKind.FUSED_ENTITY_RELATION:
                 return Record
-            if parent.capability is CapabilityKind.REDACTION:
-                return RedactionRecord
             if parent.capability is CapabilityKind.PROFILING:
                 return FeatureRecord
             if parent.capability is CapabilityKind.DISAMBIGUATION:
@@ -555,6 +553,10 @@ class LocalRunner:
                 CapabilityKind.CONTENT_SCREENING,
                 CapabilityKind.SCHEMA_INDUCTION,
                 CapabilityKind.CONTEXT_ENRICHMENT,
+                # W16 (ADR-0042): Redaction is a chunk→chunk transform, so an Export wired to the
+                # ``redact`` Stage re-emits ChunkRecords (carrying ``masked_content``) — the
+                # PII-safe RAG corpus (the Export materializes ``masked_content`` as corpus text).
+                CapabilityKind.REDACTION,
             ):
                 return ChunkRecord
             if parent.capability is CapabilityKind.PARSE:
@@ -1234,32 +1236,22 @@ class LocalRunner:
                     f"the PIIDetector capability."
                 )
                 raise ContractError(msg)
-            # Redaction consumes the run's parsed DocumentRecords (the whole
-            # document's assembled markdown + page map, at original-document offsets)
-            # and emits one PII-handled RedactionRecord per document, keyed off
-            # Classification sensitivity — threaded downstream to Export as the
-            # corpus's PII variant. It depends on Parse (not Chunk): the chunk stream
-            # is markup-stripped with remapped offsets, so scanning it would fabricate
-            # a broken coordinate system for the spans and page resolution.
+            # W16 (ADR-0042): Redaction is a chunk→chunk transform (the fix for the document-level
+            # 768-token truncation leak). It consumes the run's ChunkRecords (each ≤ the model
+            # window) and yields the SAME chunks with ``masked_content`` + ``pii_spans`` populated
+            # — the clean ``content`` stays UNMASKED, the Export materializes ``masked_content`` for
+            # the PII-safe RAG corpus. It depends on Chunk (or Content Screening / Schema
+            # Induction), NOT Parse: scanning each chunk in full masks PII anywhere in it, and a
+            # chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map +
+            # page_map (the ADR-0031/0042 coordinate-correctness guarantee).
             #
-            # W4 (ADR-0038 §2): the induced PII schema lives on the CHUNKs the
-            # schema_induction Stage annotated, but Redaction reads a DocumentRecord.
-            # When a stack ALSO wires the induced chunk stream (``redact depends_on:
-            # [parse, induce]``), project each document's chunk-carried induced labels
-            # onto its DocumentRecord (chunk→document bridge) so redaction.gliner_pii's
-            # ``document.induced_labels`` UNIONs the induced pii_types onto its config
-            # floor. A ChunkRecord side is OPTIONAL: with no induced chunks wired (every
-            # existing stack) the documents pass through unchanged (induced_labels stays
-            # None ⇒ config PII labels, byte-identical). A non-DocumentRecord, non-Chunk
-            # carrier is still rejected by ``_as_type``.
-            redaction_docs = [r for r in incoming if isinstance(r, DocumentRecord)]
-            redaction_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
-            self._require_redaction_inputs(stage, incoming, redaction_docs)
-            if redaction_chunks:
-                redaction_docs = project_induced_onto_documents(
-                    redaction_docs, redaction_chunks
-                )
-            return list(provider.redact(redaction_docs))
+            # The induced PII schema (W4/ADR-0038) is read directly off each chunk's
+            # ``induced_labels`` — no document bridge needed (chunks already carry it when a
+            # schema_induction Stage is upstream), so a Provider UNIONs the induced pii_types onto
+            # its config floor per chunk.
+            redaction_chunks = self._as_type(stage, incoming, ChunkRecord)
+            self._require_redaction_inputs(stage, incoming, redaction_chunks)
+            return list(provider.redact(redaction_chunks))
 
         if stage.capability is CapabilityKind.PROFILING:
             if not isinstance(provider, Profiler):
@@ -1774,26 +1766,25 @@ class LocalRunner:
 
     @staticmethod
     def _require_redaction_inputs(
-        stage: Stage, incoming: list[StageOutput], documents: list[DocumentRecord]
+        stage: Stage, incoming: list[StageOutput], chunks: list[ChunkRecord]
     ) -> None:
-        """A Redaction Stage must be wired to a Parse parent (the documents it redacts).
+        """A Redaction Stage must be wired to a Chunk parent (the chunks it redacts) — W16/ADR-0042.
 
-        Redaction depends on a Parse parent for the DocumentRecords (the whole-document markdown +
-        page map its PII spans are keyed to). It MAY additionally depend on the schema_induction
-        Stage's ChunkRecord stream (W4) — the runner projects those chunks' induced pii_types onto
-        the DocumentRecords so Redaction unions them onto its config floor. So a ChunkRecord side is
-        optional (and any leftover carrier is rejected by ``_as_type`` on the doc side already), but
-        a non-empty input that carries NO DocumentRecord means the Pipeline wired Redaction to the
-        wrong parent — surface it as a clear typed error. An empty run is legitimately empty.
+        Redaction is a chunk→chunk transform: it depends on a Chunk (or Content Screening / Schema
+        Induction) parent for the ChunkRecords it PII-scans + masks. A non-empty input that carries
+        NO ChunkRecord means the Pipeline wired Redaction to the wrong parent (e.g. the old
+        ``depends_on: [parse]`` doc-level wiring) — surface it as a clear typed error. An empty run
+        is legitimately empty.
         """
         if not incoming:
             return
-        if not documents:
+        if not chunks:
             got = sorted({type(r).__name__ for r in incoming})
             msg = (
-                f"Stage {stage.name!r} (redaction) received no DocumentRecords "
-                f"(got: {', '.join(got)}). A Redaction Stage must depend on the Parse "
-                f"Stage (the documents it redacts). Check the Pipeline's depends_on wiring."
+                f"Stage {stage.name!r} (redaction) received no ChunkRecords "
+                f"(got: {', '.join(got)}). Since W16 (ADR-0042) Redaction is a chunk→chunk "
+                f"transform and must depend on the Chunk (or Content Screening / Schema Induction) "
+                f"Stage — the chunks it redacts, not Parse. Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)
 

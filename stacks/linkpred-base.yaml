@@ -65,7 +65,7 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule
-    depends_on: [parse]
+    depends_on: [content_screen]   # W16 (ADR-0042): chunk→chunk PII masking, no doc truncation
 
   - name: profiling
     capability: profiling

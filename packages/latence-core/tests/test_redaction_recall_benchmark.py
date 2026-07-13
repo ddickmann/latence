@@ -1,5 +1,11 @@
 """Redaction recall/precision benchmark — the Hardening-bar metric for #61 + H-C1.
 
+W16 (ADR-0042): Redaction is a **chunk→chunk transform** — the Redactor consumes ChunkRecords and
+yields the SAME chunks with ``masked_content`` + ``pii_spans`` populated (the clean ``content`` stays
+UNMASKED). PIISpan offsets are chunk-local; here each gold case is a single chunk whose ``content``
+IS the case text, so a chunk-local offset equals the old document offset and the slice/round-trip
+assertions hold unchanged.
+
 The G1 E2E found the hybrid-rule redactor masked email + phone but MISSED planted
 SSN, credit-card, and secret/API-key values (partial recall). Root cause: the built-in
 library had no ``aws_key``/``api_key``/``secret`` recogniser, and shipped configs
@@ -27,10 +33,11 @@ controls) rather than printing a number, so CI enforces it.
 from __future__ import annotations
 
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
-    DocumentRecord,
+    OffsetMap,
+    OffsetSegment,
     Provenance,
-    RedactionRecord,
 )
 from latence_core.stages.redaction import HybridPIIRedactor
 
@@ -141,7 +148,13 @@ _CLEAN_CONTROLS: tuple[str, ...] = (
 )
 
 
-def _doc(text: str, record_id: str) -> DocumentRecord:
+def _chunk(text: str, record_id: str) -> ChunkRecord:
+    """A single ChunkRecord whose ``content`` IS the case text (W16, ADR-0042).
+
+    The chunk spans the whole case text (char_start=0, char_end=len), with an identity
+    ``offset_map``, so a chunk-local PII span offset equals the old document offset and the
+    gold slice/round-trip assertions are unchanged.
+    """
     prov = Provenance(
         source_uri=f"file:///c/{record_id}.txt",
         file_name=f"{record_id}.txt",
@@ -153,18 +166,24 @@ def _doc(text: str, record_id: str) -> DocumentRecord:
         page_start=1,
         page_end=1,
     )
-    return DocumentRecord(
-        record_id=record_id,
+    return ChunkRecord(
+        record_id=f"{record_id}#chunk:0",
+        document_record_id=record_id,
+        index=0,
         provenance=prov,
         classification=Classification(language="en", sensitivity="public"),
         content=text,
+        token_count=max(len(text.split()), 0),
+        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text))
+        if text
+        else None,
     )
 
 
-def _redact_all(docs: list[DocumentRecord]) -> list[RedactionRecord]:
+def _redact_all(chunks: list[ChunkRecord]) -> list[ChunkRecord]:
     # DEFAULT config on purpose: no ``detectors`` key ⇒ comprehensive coverage. If a
     # future change narrows the default, this benchmark's recall drops and fails.
-    return list(HybridPIIRedactor().redact(docs))
+    return list(HybridPIIRedactor().redact(chunks))
 
 
 def test_per_type_recall_is_perfect_on_the_gold_set() -> None:
@@ -175,8 +194,8 @@ def test_per_type_recall_is_perfect_on_the_gold_set() -> None:
     built-in type — the fix's guarantee. Reverting any recogniser (or mislabelling SSN
     as phone) drops that type's recall below 1.0 and fails here.
     """
-    docs = [_doc(text, f"gold-{i}") for i, (_, text, _) in enumerate(_GOLD)]
-    records = _redact_all(docs)
+    chunks = [_chunk(text, f"gold-{i}") for i, (_, text, _) in enumerate(_GOLD)]
+    records = _redact_all(chunks)
     by_id = {r.document_record_id: r for r in records}
 
     misses: list[str] = []
@@ -230,7 +249,7 @@ def test_named_families_win_their_own_gold_span_provenance() -> None:
     )
     misses: list[str] = []
     for i, (text, value, want_detector) in enumerate(pinned):
-        rec = _redact_all([_doc(text, f"provenance-{i}")])[0]
+        rec = _redact_all([_chunk(text, f"provenance-{i}")])[0]
         start, end = text.index(value), text.index(value) + len(value)
         owning = [
             s for s in rec.pii_spans if s.char_start == start and s.char_end == end
@@ -253,8 +272,8 @@ def test_no_false_positive_types_on_clean_controls() -> None:
     A comprehensive default must not turn ordinary prose into a false-positive storm.
     Any span on a clean control is a precision failure and fails the benchmark.
     """
-    docs = [_doc(text, f"clean-{i}") for i, text in enumerate(_CLEAN_CONTROLS)]
-    records = _redact_all(docs)
+    chunks = [_chunk(text, f"clean-{i}") for i, text in enumerate(_CLEAN_CONTROLS)]
+    records = _redact_all(chunks)
     false_positives = [
         (r.document_record_id, s.pii_type, r.masked_content)
         for r in records
@@ -270,8 +289,8 @@ def test_aggregate_recall_meets_hardening_bar() -> None:
     Pinned at 1.0 so any recall regression across the full comprehensive set is a hard
     CI failure, not a silently-degraded number.
     """
-    docs = [_doc(text, f"gold-{i}") for i, (_, text, _) in enumerate(_GOLD)]
-    records = _redact_all(docs)
+    chunks = [_chunk(text, f"gold-{i}") for i, (_, text, _) in enumerate(_GOLD)]
+    records = _redact_all(chunks)
     by_id = {r.document_record_id: r for r in records}
 
     hits = 0
@@ -296,7 +315,8 @@ def test_secret_value_masked_but_label_not_leaked() -> None:
     and the raw secret never appears in the masked output.
     """
     text = "The dump had Password: hunter2 and api_key=sk-DEADbeef01234567890 exposed."
-    rec = _redact_all([_doc(text, "secret-doc")])[0]
+    rec = _redact_all([_chunk(text, "secret-doc")])[0]
+    assert rec.masked_content is not None
     assert "hunter2" not in rec.masked_content
     assert "sk-DEADbeef01234567890" not in rec.masked_content
     # The labels are preserved (only the value is redacted).
@@ -321,7 +341,8 @@ def test_compound_secret_key_is_redacted() -> None:
         ("client_secret = s3cr3t-Value-01234567", "s3cr3t-Value-01234567"),
     )
     for i, (text, secret_value) in enumerate(cases):
-        rec = _redact_all([_doc(text, f"compound-secret-{i}")])[0]
+        rec = _redact_all([_chunk(text, f"compound-secret-{i}")])[0]
+        assert rec.masked_content is not None
         assert secret_value not in rec.masked_content, f"leaked secret in {text!r}: {rec.masked_content!r}"
         # The label component is preserved; only the value is masked.
         assert "secret" in rec.masked_content.lower()
@@ -343,7 +364,8 @@ def test_bare_token_jwt_is_redacted() -> None:
     )
     # Bare label, and no label at all (JWT alone on a line) — both must be caught.
     for i, text in enumerate((f"token: {jwt}", f"The captured value was {jwt} in the log.")):
-        rec = _redact_all([_doc(text, f"jwt-{i}")])[0]
+        rec = _redact_all([_chunk(text, f"jwt-{i}")])[0]
+        assert rec.masked_content is not None
         assert jwt not in rec.masked_content, f"leaked JWT: {rec.masked_content!r}"
         assert any(s.pii_type == "jwt" for s in rec.pii_spans), rec.pii_spans
 
@@ -381,9 +403,9 @@ def test_extended_recognisers_are_linear_time_on_pathological_input() -> None:
         assert elapsed < 2.0, f"{name!r} took {elapsed:.2f}s on pathological input (possible ReDoS)"
 
     # And end-to-end through the redactor on the same input stays well-bounded.
-    doc = _doc(pathological, "extended-redos")
+    chunk = _chunk(pathological, "extended-redos")
     start = time.perf_counter()
-    _redact_all([doc])
+    _redact_all([chunk])
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"extended recognisers took {elapsed:.2f}s end-to-end (possible ReDoS)"
 
@@ -418,9 +440,9 @@ def test_email_recogniser_is_linear_time_on_pathological_input() -> None:
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"email took {elapsed:.2f}s on post-@ run (possible ReDoS)"
 
-    doc = _doc(pathological, "email-redos")
+    chunk = _chunk(pathological, "email-redos")
     start = time.perf_counter()
-    _redact_all([doc])
+    _redact_all([chunk])
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"email recogniser took {elapsed:.2f}s end-to-end (possible ReDoS)"
 
@@ -441,9 +463,9 @@ def test_recognisers_are_linear_time_on_pathological_input() -> None:
         + "4" * 40000 + " "
         + "9" * 40000
     )
-    doc = _doc(pathological, "redos")
+    chunk = _chunk(pathological, "redos")
     start = time.perf_counter()
-    _redact_all([doc])
+    _redact_all([chunk])
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"redaction took {elapsed:.2f}s on pathological input (possible ReDoS)"
 
@@ -467,7 +489,8 @@ def test_compound_identifier_token_labels_are_redacted() -> None:
         "MY_API_KEY=abcdefghij0123456789ABCDEF",
     )
     for i, text in enumerate(cases):
-        rec = _redact_all([_doc(text, f"compound-token-{i}")])[0]
+        rec = _redact_all([_chunk(text, f"compound-token-{i}")])[0]
+        assert rec.masked_content is not None
         value = text.split("=" if "=" in text else ":", 1)[1].strip()
         assert value not in rec.masked_content, f"leaked token in {text!r}: {rec.masked_content!r}"
         assert any(
@@ -489,7 +512,8 @@ def test_github_token_type_policy_covers_modern_secrets() -> None:
         "pem -----BEGIN OPENSSH PRIVATE KEY-----"
     )
     config = {"policies": {"public": {"types": ["secret"], "action": "mask"}}}
-    rec = list(HybridPIIRedactor(config).redact([_doc(text, "secret-only")]))[0]
+    rec = list(HybridPIIRedactor(config).redact([_chunk(text, "secret-only")]))[0]
+    assert rec.masked_content is not None
     assert "ghp_ABCdef1234567890ABCdef1234567890abcd" not in rec.masked_content
     assert "sk_live_ABCdef1234567890abcdef" not in rec.masked_content
     assert "-----BEGIN OPENSSH PRIVATE KEY-----" not in rec.masked_content
@@ -507,7 +531,8 @@ def test_private_key_masks_the_whole_block_including_the_body() -> None:
     body = "\n".join("MIIEowIBAAKCAQEA" + "b64Key0123456789" * 3 for _ in range(6))
     pem = f"-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----"
     text = f"Customer pasted their key:\n{pem}\nplease rotate it."
-    rec = list(HybridPIIRedactor().redact([_doc(text, "pem-block")]))[0]
+    rec = list(HybridPIIRedactor().redact([_chunk(text, "pem-block")]))[0]
+    assert rec.masked_content is not None
     # No fragment of the key body or the anchors survives.
     assert "-----BEGIN RSA PRIVATE KEY-----" not in rec.masked_content
     assert "-----END RSA PRIVATE KEY-----" not in rec.masked_content
@@ -530,7 +555,7 @@ def test_ssn_nodash_is_labelled_ssn_not_phone() -> None:
     for i, (text, value) in enumerate(
         (("SSN 123456789 recorded.", "123456789"), ("SSN 123 45 6789 filed.", "123 45 6789"))
     ):
-        rec = _redact_all([_doc(text, f"ssn-nodash-{i}")])[0]
+        rec = _redact_all([_chunk(text, f"ssn-nodash-{i}")])[0]
         start, end = text.index(value), text.index(value) + len(value)
         matched = [s for s in rec.pii_spans if s.char_start == start and s.char_end == end]
         assert matched, f"SSN {value!r} not masked in {text!r}: {rec.pii_spans}"
@@ -545,7 +570,8 @@ def test_ssn_nodash_types_policy_covers_it() -> None:
     """
     text = "Dashed 123-45-6789 and bare 123456789 both here."
     config = {"policies": {"public": {"types": ["ssn"], "action": "mask"}}}
-    rec = list(HybridPIIRedactor(config).redact([_doc(text, "ssn-typed")]))[0]
+    rec = list(HybridPIIRedactor(config).redact([_chunk(text, "ssn-typed")]))[0]
+    assert rec.masked_content is not None
     assert "123-45-6789" not in rec.masked_content
     assert "123456789" not in rec.masked_content
     assert all(s.pii_type == "ssn" for s in rec.pii_spans), rec.pii_spans
@@ -561,7 +587,7 @@ def test_ssn_nodash_plausible_guard_rejects_invalid_ranges() -> None:
     invalid = ("000112222", "666445555", "900445555", "123005555", "123450000")
     for i, digits in enumerate(invalid):
         text = f"Reference number {digits} in the ledger."
-        rec = _redact_all([_doc(text, f"ssn-invalid-{i}")])[0]
+        rec = _redact_all([_chunk(text, f"ssn-invalid-{i}")])[0]
         assert not any(
             s.pii_type == "ssn" for s in rec.pii_spans
         ), f"{digits} wrongly masked as SSN: {rec.pii_spans}"

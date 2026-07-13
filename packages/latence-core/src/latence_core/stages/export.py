@@ -74,24 +74,38 @@ def _context_header_text(header: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
-def _corpus_text(row: dict[str, Any]) -> str:
-    """The corpus text an Embedder embeds for a row.
+def _corpus_content(row: dict[str, Any]) -> str:
+    """The PII-safe corpus text materialized for a row (``content`` column + JSONL).
 
-    A RedactionRecord carries the PII-handled variant in ``masked_content``; a
-    Chunk/Document carries its text in ``content``. Embedding ``masked_content`` when
-    present keeps the vector consistent with the exported PII-handled text (never the
-    raw, un-redacted text).
+    A redacted :class:`~latence_core.contracts.ChunkRecord` (W16, ADR-0042) carries the un-redacted
+    text in ``content`` and the PII-handled variant in ``masked_content``; a deprecated
+    :class:`~latence_core.contracts.RedactionRecord` carries only ``masked_content``. When
+    ``masked_content`` is present and non-``None``, it IS the exported corpus text — so the RAG
+    corpus never materializes the raw, un-redacted ``content`` (the PII-safety guarantee: the
+    stack-validate rag-scan reads every exported cell). A row with no ``masked_content`` (no
+    Redaction Stage, or a non-chunk carrier) exports its own ``content`` unchanged — byte-identical
+    to a run without Redaction (the additive-field guarantee).
+    """
+    masked = row.get("masked_content")
+    if masked is not None:
+        return str(masked)
+    return str(row.get("content") or "")
+
+
+def _corpus_text(row: dict[str, Any]) -> str:
+    """The corpus text an Embedder embeds for a row (the PII-safe text + optional W13 header).
+
+    The base is the PII-safe :func:`_corpus_content` (``masked_content`` when present, else
+    ``content``), so the vector is consistent with the exported PII-handled text (never the raw,
+    un-redacted text).
 
     W13 (ADR-0039): when the row carries a :class:`~latence_core.contracts.ContextHeader`
     (``context_enrichment`` Stage upstream), its compact rendering is PREPENDED to the embedding
     input ONLY — ``header_text + "\\n" + text`` — so the KG coherence goes into the VECTOR while the
-    stored ``content``/``masked_content`` stays byte-unchanged (the LLM window never grows). A row
-    with no header (or an empty one) embeds exactly its own text, byte-identical to today.
+    stored corpus text stays byte-unchanged (the LLM window never grows). A row with no header (or
+    an empty one) embeds exactly its own corpus text, byte-identical to today.
     """
-    if "masked_content" in row:
-        base = str(row.get("masked_content") or "")
-    else:
-        base = str(row.get("content") or "")
+    base = _corpus_content(row)
     header = row.get("context_header")
     if isinstance(header, dict):
         header_text = _context_header_text(header)
@@ -373,7 +387,15 @@ class JsonlParquetExport:
         """
         batch: list[dict[str, Any]] = []
         for record in records:
-            batch.append(record.model_dump(mode="json"))
+            row = record.model_dump(mode="json")
+            # W16 (ADR-0042): materialize the PII-safe corpus text as the exported ``content``, so a
+            # redacted chunk's raw ``content`` never reaches the corpus (neither the JSONL row nor
+            # Parquet ``content`` column — the rag-scan reads every exported cell). Only substitutes
+            # when the Redaction Stage set ``masked_content``; a chunk with no Redaction Stage
+            # (``masked_content`` None) exports its ``content`` unchanged (byte-identical to today).
+            if "content" in row and row.get("masked_content") is not None:
+                row["content"] = row["masked_content"]
+            batch.append(row)
             if len(batch) >= size:
                 yield batch
                 batch = []

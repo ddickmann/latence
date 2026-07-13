@@ -30,6 +30,7 @@ from typing import Any, Protocol
 from latence_core.conformance import fixtures
 from latence_core.conformance import stub as stubs
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
     Disposition,
     DocumentRecord,
@@ -318,7 +319,7 @@ def _adversarial_parser_input(content: bytes | str) -> ParserInput:
 
 
 def _pii_document() -> DocumentRecord:
-    """A DocumentRecord whose content is the PII-bearing adversarial payload (for Redaction/RE)."""
+    """A DocumentRecord whose content is the PII-bearing adversarial payload (for RE)."""
     from latence_core.contracts import PageMap
 
     text = fixtures.PII_ADVERSARIAL_TEXT
@@ -331,6 +332,35 @@ def _pii_document() -> DocumentRecord:
         content=assembly.text,
         page_map=assembly.page_map,
         disposition=Disposition.PARSED,
+    )
+
+
+def _pii_chunk() -> ChunkRecord:
+    """A ChunkRecord whose content is the PII-bearing adversarial payload (chunk-level Redaction).
+
+    W16 (ADR-0042): Redaction is a chunk→chunk transform, so its adversarial input is a chunk
+    carrying the PII payload. A Redactor must handle it gracefully (mask + return the chunk, never
+    a crash, never PII in any raised error). Built with a single-page page_map + identity
+    offset_map so a chunk-local span still resolves to a page (the shared chunk page-resolution
+    seam).
+    """
+    from latence_core.contracts import OffsetMap, OffsetSegment, PageMap
+
+    text = fixtures.PII_ADVERSARIAL_TEXT
+    assembly = PageMap.from_page_texts([text])
+    prov = _ADVERSARIAL_PROVENANCE.model_copy(update={"char_start": 0, "char_end": len(text)})
+    return ChunkRecord(
+        record_id="sha256:conformance-adversarial:chunk:0",
+        document_record_id="sha256:conformance-adversarial:doc",
+        index=0,
+        provenance=prov,
+        classification=_ADVERSARIAL_CLASSIFICATION,
+        content=text,
+        token_count=len(text.split()),
+        page_map=assembly.page_map,
+        offset_map=OffsetMap(
+            segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)
+        ),
     )
 
 
@@ -934,15 +964,15 @@ def _relation_case(*, stub_scoped: bool, gliner: bool, backend: str = "gliner") 
 
 
 def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> ConformanceCase:
-    """Redaction: emit one RedactionRecord per doc; a PARSE_ERROR doc is skipped (graceful).
+    """Redaction (W16, ADR-0042): a chunk→chunk transform — mask PII per chunk, never truncate.
 
     ``backend`` selects the stub-scoped Provider's fake detection engine: ``"gliner"`` installs
     the fake ``gliner`` module (the learned ``redaction.gliner_pii``), ``"gliner2"`` installs the
     fake ``gliner2`` module (the fastino GLiNER2 ``redaction.gliner2`` — a per-label-dict API,
     NOT the gliner flat list), and ``"presidio"`` installs the fake ``presidio_analyzer`` module
-    (the real Microsoft Presidio ``redaction.presidio``). All return canned document-offset PII
-    spans keyed to the canonical fixture, so the same contract / graceful-failure / license /
-    no-PII-leak subset is checked without a live model.
+    (the real Microsoft Presidio ``redaction.presidio``). All return canned PII spans keyed to the
+    canonical fixture chunk, so the same contract / graceful-failure / license / no-PII-leak subset
+    is checked without a live model.
     """
     pii_labels = ["person", "email"]
 
@@ -950,19 +980,12 @@ def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> Conformanc
         return _records_contract_valid(records, empty_ok=True)
 
     def _run_valid(provider: Any) -> Sequence[Record]:
-        return list(provider.redact(fixtures.canonical_corpus().documents))
+        return list(provider.redact(fixtures.canonical_corpus().chunks))
 
     def _run_adversarial(provider: Any) -> AdversarialOutcome:
-        # A PARSE_ERROR document is skipped (mirroring Chunk) — graceful empty, never a crash.
-        err_doc = DocumentRecord(
-            record_id="err:doc",
-            provenance=_ADVERSARIAL_PROVENANCE.model_copy(update={"char_start": 0, "char_end": 0}),
-            classification=_ADVERSARIAL_CLASSIFICATION,
-            content="",
-            disposition=Disposition.PARSE_ERROR,
-            error="unparseable",
-        )
-        return _capture_raise(lambda: list(provider.redact([err_doc])))
+        # The PII-bearing adversarial chunk: the Redactor masks it and returns it gracefully (never
+        # a crash, never PII in any raised error).
+        return _capture_raise(lambda: list(provider.redact([_pii_chunk()])))
 
     if stub_scoped:
         @contextlib.contextmanager

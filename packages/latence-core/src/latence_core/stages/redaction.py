@@ -5,6 +5,12 @@ Chunker/Screeners, the S4 gazetteer and the S5 trigger extractor so the demo run
 end to end, ADR-0007 CPU-first, ADR-0016 no extra deps). It is the **rule half** of
 the "hybrid rule+model" reference the issue calls for.
 
+W16 (ADR-0042): Redaction is a **chunk→chunk transform** — :meth:`~HybridPIIRedactor.redact`
+consumes :class:`~latence_core.contracts.ChunkRecord`s and yields the SAME chunks with
+``masked_content`` + ``pii_spans`` populated (each chunk ≤ the model window, so no PII is
+truncated). The deprecated document-level path (one :class:`~latence_core.contracts.RedactionRecord`
+per document, described below) survives as :meth:`~HybridPIIRedactor.redact_documents`.
+
 **Coverage (accurate, not "comprehensive" — H-C1).** The rule library recognises,
 enabled by default:
 
@@ -78,13 +84,15 @@ from latence_core.redaction_policy import (
     RedactionPolicy,
     apply_masking,
     build_span,
+    finalize_redacted_chunk,
     parse_action,
+    plan_chunk_redaction,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import DocumentRecord
+    from latence_core.contracts import ChunkRecord, DocumentRecord
 
 # The built-in rule library: well-known PII/secret types with conservative,
 # whole-value recognisers. Selectable by name via config ``detectors`` (default:
@@ -471,14 +479,43 @@ class HybridPIIRedactor:
 
     # -- detection ----------------------------------------------------------
 
-    def redact(self, documents: Iterable[DocumentRecord]) -> Iterator[RedactionRecord]:
-        """Detect PII per document; each :class:`DocumentRecord` supplies text + page map.
+    def redact(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """Detect PII per chunk; yield the SAME chunks with ``masked_content`` + ``pii_spans`` set.
 
-        A detector scans the document's assembled markdown (``record.content``) at its
-        original-document offsets — the coordinate system the masked variant and every
-        :class:`PIISpan` use — and resolves each span's page through ``record.page_map``.
-        A ``PARSE_ERROR`` document (no usable content) is skipped, mirroring Chunk.
-        Records are emitted in first-seen document order for determinism.
+        W16 (ADR-0042): the chunk-level Redactor. Each chunk's ``content`` (≤ the model window) is
+        scanned in full — no truncation — so PII anywhere in the chunk is masked. The clean
+        ``content`` is UNCHANGED; ``masked_content`` is the PII-safe variant and ``pii_spans`` the
+        chunk-local, counts-only spans (source pages resolved through the chunk's offset_map +
+        page_map). The shared :func:`plan_chunk_redaction` / :func:`finalize_redacted_chunk`
+        machinery
+        owns policy + no-op-floor + masking; this Provider owns only detection. Chunks are threaded
+        1:1 in first-seen order for determinism.
+        """
+        for chunk in chunks:
+            plan = plan_chunk_redaction(
+                chunk,
+                self._policy,
+                detector_types=self._detector_types,
+                sensitive_set=self._sensitive_set,
+                min_chars=self._min_chars,
+            )
+            accepted: list[tuple[int, int, str, str, str, float]] = []
+            if plan.needs_detection:
+                accepted = [
+                    (start, end, pii_type, value, detector, confidence)
+                    for pii_type, start, end, value, detector, confidence in self._find_matches(
+                        chunk.content, plan.allowed
+                    )
+                ]
+            yield finalize_redacted_chunk(chunk, plan, accepted, self._salt)
+
+    def redact_documents(self, documents: Iterable[DocumentRecord]) -> Iterator[RedactionRecord]:
+        """DEPRECATED (W16, ADR-0042): the document-level path. Prefer chunk-level :meth:`redact`.
+
+        Scans the whole document's assembled markdown (``record.content``) and emits one
+        :class:`RedactionRecord` per document. Retained for the superseded doc-level path; the
+        blessed Capability truncates nothing because it runs per chunk (:meth:`redact`). A
+        ``PARSE_ERROR`` document (no usable content) is skipped, mirroring Chunk.
         """
         for document in documents:
             if document.disposition is Disposition.PARSE_ERROR:

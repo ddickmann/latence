@@ -70,7 +70,7 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule
-    depends_on: [parse]
+    depends_on: [chunk]
     config:
       salt: hf1-secret-salt
   - name: profile

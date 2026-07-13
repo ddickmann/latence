@@ -1,12 +1,12 @@
 """End-to-end: schema_induction feeds induced pii_types to the Redaction Stage through the Runner (W4).
 
-The redaction quarter of the "four extractor seams" the slice claims. The subtle part is the carrier
-mismatch: schema_induction is a chunk→chunk transform (it populates ``ChunkRecord.induced_labels``),
-but Redaction reads a per-document ``DocumentRecord.induced_labels``. The Runner bridges the two — when
-the ``redact`` Stage ``depends_on`` BOTH ``parse`` (the DocumentRecords) AND ``induce`` (the induced
-chunk stream), the Runner projects each document's chunk-carried induced pii_types onto its
-DocumentRecord (``latence_core.induced.project_induced_onto_documents``) so ``redaction.gliner_pii``
-UNIONs the induced pii_types onto its config PII floor.
+The redaction quarter of the "four extractor seams" the slice claims. W16 (ADR-0042) both stages are
+now chunk→chunk transforms that share ONE carrier: schema_induction populates
+``ChunkRecord.induced_labels`` and Redaction consumes those SAME chunks, so ``redaction.gliner_pii``
+reads each chunk's induced pii_types off ``chunk.induced_labels`` DIRECTLY (``effective_labels`` /
+``latence_core.induced``) and UNIONs them onto its config PII floor — no document bridge, no
+projection. Wiring the ``redact`` Stage ``depends_on: [induce]`` gives it the induced chunk stream;
+``depends_on: [content_screen]`` (the chunk-producing stage BEFORE induce) gives it un-induced chunks.
 
 Two invariants proven here (mirroring the entity e2e), both on the real ``LocalRunner`` through
 checkpoints, with the offline fakes (a scripted ``openai`` mock for the inducer + a label-capturing
@@ -15,8 +15,8 @@ checkpoints, with the offline fakes (a scripted ``openai`` mock for the inducer 
 1. **Induced pii_types reach the redactor.** The inducer returns a ``pii_type`` the ``redact`` Stage
    is NOT configured with (``iban``); the (faked) GLiNER-PII model is asked for the UNION of the
    config PII floor + the induced pii_types — the seam actually altering redaction, end to end.
-2. **Off/undwired is byte-identical.** The SAME pipeline with ``redact depends_on: [parse]`` only (no
-   induced chunk stream) asks the PII detector for EXACTLY the config PII floor — the backward-compat
+2. **Off/unwired is byte-identical.** The SAME pipeline with ``redact depends_on: [content_screen]``
+   (un-induced chunks) asks the PII detector for EXACTLY the config PII floor — the backward-compat
    proof that dropping the ``induce`` edge (or the whole Stage) leaves Redaction unchanged.
 """
 
@@ -95,9 +95,11 @@ def _induced_reply() -> str:
 
 
 def _pipeline(store: str, docs: Path, *, wire_induced_pii: bool) -> Pipeline:
-    # When wire_induced_pii, redact depends on BOTH parse and the induce chunk stream (the runner
-    # projects induced pii_types onto the DocumentRecords). Otherwise it depends on parse alone.
-    redact_deps = "[parse, induce]" if wire_induced_pii else "[parse]"
+    # W16 (ADR-0042): redaction is chunk→chunk and reads induced pii_types off chunk.induced_labels
+    # directly. When wire_induced_pii, redact depends on the ``induce`` chunk stream (chunks carry
+    # induced_labels). Otherwise it depends on ``content_screen`` — the chunk-producing stage BEFORE
+    # induce, whose chunks carry no induced pii_types — the byte-identical config-floor-only path.
+    redact_deps = "[induce]" if wire_induced_pii else "[content_screen]"
     return Pipeline.from_yaml_text(
         f"""
 name: schema-induction-redaction-e2e
@@ -170,9 +172,9 @@ def test_without_induced_edge_redactor_gets_config_pii_floor(
         "Wire the payment to DE89370400440532013000 before Friday.\n", encoding="utf-8"
     )
     store = f"file://{tmp_path}/state"
-    # redact depends on parse ONLY: even though the induce Stage still runs (and annotates chunks),
-    # the induced pii_types are NOT projected onto the DocumentRecords, so the redactor gets exactly
-    # the config PII floor — the byte-identical backward-compat path.
+    # redact depends on content_screen (un-induced chunks): even though the induce Stage still runs
+    # (and annotates its own chunk stream), the redactor consumes the pre-induce chunks whose
+    # induced_labels are empty, so it gets exactly the config PII floor — the backward-compat path.
     pipeline = _pipeline(store, docs, wire_induced_pii=False)
 
     with fake.install([fake.reply(_induced_reply())]):

@@ -9,13 +9,13 @@
 # dedicated stack has the seam present so stack-validate runs it end-to-end (contracts + determinism +
 # resume) on the bundled corpus.
 #
-# NOTE the RAG corpus Export stays wired to `redact` (the PII-handled RedactionRecords), NOT the
-# enriched chunk stream: the bundled validate corpus plants raw PII in the source text, and chunk
-# `content` is the un-redacted markup-stripped text — exporting it would leak PII (the stack-validate
-# rag-scan would FAIL, correctly). W13's export-column wiring (context_header + neighbor_entity_ids +
-# embedding-input prepend) is exercised by the unit + e2e tests over PII-free records; here the Stage
-# is exercised as a real, deterministic, contract-preserving DAG node. Every other Stage is
-# byte-identical to default.yaml.
+# NOTE (W16, ADR-0042): the RAG corpus Export now wires to `enrich`, which reads the REDACTED chunk
+# stream (`redact` → `enrich` → `export_corpus`). Since W16 Redaction is a chunk→chunk transform that
+# sets each chunk's `masked_content` (the clean `content` stays un-redacted), and the Export
+# materializes `masked_content` as the corpus text, the exported corpus is BOTH masked (PII-safe —
+# the stack-validate rag-scan passes) AND enriched (the context_header prepends to the EMBEDDING input
+# only). This resolves the pre-W16 constraint where the RAG export had to bypass enrichment to avoid
+# leaking the un-redacted chunk `content`. Every other Stage is byte-identical to default.yaml.
 name: latence-context-enrichment-stack
 storage_uri: "{STORAGE_URI}"
 stages:
@@ -75,7 +75,7 @@ stages:
   - name: redact
     capability: redaction
     provider: redaction.hybrid_rule
-    depends_on: [parse]
+    depends_on: [content_screen]   # W16 (ADR-0042): chunk→chunk PII masking (no doc truncation)
 
   - name: profiling
     capability: profiling
@@ -100,10 +100,13 @@ stages:
 
   # The OPTIONAL W13 Stage under validation: project the assembled KG back onto each chunk as a
   # compact, capped, confidence-gated context_header (canonical entities + top-k neighbor triples).
+  # W16 (ADR-0042): enrich reads the REDACTED chunk stream (masked_content set) so the corpus row is
+  # masked AND enriched. The context_header prepends to the EMBEDDING input only; the stored corpus
+  # text is masked_content (PII-safe). This is what lets export_corpus wire to `enrich` (see NOTE).
   - name: enrich
     capability: context_enrichment
     provider: context.kg_header
-    depends_on: [content_screen, graph]
+    depends_on: [redact, graph]
     config:
       max_neighbors_per_entity: 4
       max_triples: 6
@@ -119,5 +122,5 @@ stages:
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
-    depends_on: [redact]
+    depends_on: [enrich]   # W16: the redacted+enriched chunk stream — masked (PII-safe) AND enriched
     config: {basename: corpus}

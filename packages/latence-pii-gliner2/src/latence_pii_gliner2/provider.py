@@ -55,10 +55,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
-from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.perf import (
     is_compile_backend_failure,
@@ -68,10 +66,11 @@ from latence_core.providers.perf import (
 )
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
+    ChunkRedactionPlan,
     RedactionPolicy,
-    apply_masking,
-    build_span,
+    finalize_redacted_chunk,
     parse_action,
+    plan_chunk_redaction,
 )
 
 _log = logging.getLogger("latence.provider.gliner2_pii")
@@ -79,28 +78,25 @@ _log = logging.getLogger("latence.provider.gliner2_pii")
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import DocumentRecord
+    from latence_core.contracts import ChunkRecord
 
 
 @dataclass(frozen=True)
-class _PendingDoc:
-    """A document's per-document, model-independent context, resolved before the batched call (W7).
+class _PendingChunk:
+    """A chunk's model-independent redaction context, resolved before the batched call (W7/W16).
 
-    Policy action/allow-list, the skip/near-empty decision, the page index, and the effective PII
-    label set (``config ∪ induced``, W12) are per-document and model-independent, so they are
-    computed once up front; a flush then groups the detect-needing docs by their ``labels`` and
-    issues one ``batch_extract_entities`` call per label group, mapping each per-text result back to
-    its document by identity, keeping emission in input-document order and the output
-    record-for-record identical to the per-document path.
+    The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy action/allow-list, the
+    skip/near-empty decision, the chunk offset/page maps) and the effective PII label set (``config
+    ∪ induced``, W12) are per-chunk and model-independent, so they are computed once up front; a
+    flush then groups the detect-needing chunks by their ``labels`` and issues one
+    ``batch_extract_entities`` call per label group, mapping each per-text result back to its chunk
+    by identity, keeping emission in input-chunk order and the output record-for-record identical to
+    the per-chunk path.
     """
 
-    document: DocumentRecord
+    chunk: ChunkRecord
     text: str
-    action: RedactionAction
-    allowed: set[str] | None
-    page_index: PageOffsetIndex | None
-    policy_name: str
-    needs_model: bool
+    plan: ChunkRedactionPlan
     labels: tuple[str, ...]
 
 # Apache-2.0 weights (verified 2026-07-09, HF model card, not gated). Multilingual PII NER over
@@ -384,77 +380,67 @@ class Gliner2PIIRedactor(AdapterBase):
 
     # -- redaction ----------------------------------------------------------
 
-    def redact(self, documents: Iterable[DocumentRecord]) -> Iterator[RedactionRecord]:
-        """Detect PII per document with the model; emit one RedactionRecord per document.
+    def redact(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """Detect PII per chunk with the model; yield the SAME chunks with PII masked (W16).
 
-        Each :class:`DocumentRecord` carries the whole document's assembled markdown at its
-        original-document offsets plus the page map — the coordinate system the masked variant
-        and every :class:`PIISpan` use. A ``PARSE_ERROR`` document (no usable content) is
-        skipped. Documents are emitted in first-seen order.
+        Each chunk's ``content`` (≤ the model window) is scanned in full — no truncation — and the
+        chunk is re-emitted with ``masked_content`` + ``pii_spans`` set (``content`` UNCHANGED).
+        Chunks are threaded 1:1 in first-seen order; a chunk-local span resolves to its ORIGINAL
+        source page through the chunk's offset_map + page_map (ADR-0031/0042).
         """
-        buffer: list[_PendingDoc] = []
+        buffer: list[_PendingChunk] = []
 
-        def flush() -> Iterator[RedactionRecord]:
+        def flush() -> Iterator[ChunkRecord]:
             yield from self._flush_buffer(buffer)
             buffer.clear()
 
-        for document in documents:
-            if document.disposition is Disposition.PARSE_ERROR:
-                continue
-            buffer.append(self._prepare(document))
+        for chunk in chunks:
+            buffer.append(self._prepare(chunk))
             if len(buffer) >= self.batch_size():
                 yield from flush()
         yield from flush()
 
-    def _prepare(self, document: DocumentRecord) -> _PendingDoc:
-        """Resolve everything a document needs BEFORE the (possibly batched) model call (W7).
+    def _prepare(self, chunk: ChunkRecord) -> _PendingChunk:
+        """Resolve everything a chunk needs BEFORE the (possibly batched) model call (W7/W16).
 
-        Policy resolution, the near-empty/skip decision, the page index, and the effective PII label
-        set are per-document and model-independent, so they are computed here up front; the flush
-        then issues one batched model call per label group over the detect-needing docs.
+        The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy resolution, the
+        near-empty/skip decision, the chunk offset/page maps) and the effective PII label set are
+        per-chunk and model-independent, so they are computed here up front; the flush then issues
+        one batched model call per label group over the detect-needing chunks.
         """
-        classification = document.classification
-        text = document.content
-        action, allowed, skip, policy_name = self._policy.resolve(classification.sensitivity)
-        needs_model = not skip and len(text.strip()) >= self._min_chars
-        page_index = (
-            PageOffsetIndex(document.page_map) if document.page_map is not None else None
+        plan = plan_chunk_redaction(
+            chunk,
+            self._policy,
+            detector_types=set(self._labels),
+            sensitive_set=set(),
+            min_chars=self._min_chars,
         )
         # W12 label-source seam (ADR-0038): UNION the config PII floor with any pii_types the
-        # OPTIONAL schema_induction Stage induced for this document (``induced_labels``), deduped +
+        # OPTIONAL schema_induction Stage induced for this chunk (``induced_labels``), deduped +
         # order-stable — the SAME seam the twin ``redaction.gliner_pii`` and the extractors use, so
         # a corpus-induced IBAN/tax-id label is actually redacted. Absent (the default, every
         # existing stack) these are exactly the config labels — byte-identical. The config floor
         # stays mandatory (``pii_labels`` is validated non-empty in __init__); induction only
         # EXTENDS it.
-        pii_labels = effective_labels(self._labels, document.induced_labels, LabelSlot.PII)
-        return _PendingDoc(
-            document=document,
-            text=text,
-            action=action,
-            allowed=allowed,
-            page_index=page_index,
-            policy_name=policy_name,
-            needs_model=needs_model,
-            labels=tuple(pii_labels),
-        )
+        pii_labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.PII)
+        return _PendingChunk(chunk=chunk, text=chunk.content, plan=plan, labels=tuple(pii_labels))
 
-    def _flush_buffer(self, buffer: list[_PendingDoc]) -> Iterator[RedactionRecord]:
-        """Batch the detect-needing docs (grouped by label set), then emit in input order (W7/W12).
+    def _flush_buffer(self, buffer: list[_PendingChunk]) -> Iterator[ChunkRecord]:
+        """Batch the detect-needing chunks (grouped by label set), then emit in input order (W16).
 
-        ``batch_extract_entities`` takes ONE label set per call, so the detect-needing docs are
+        ``batch_extract_entities`` takes ONE label set per call, so the detect-needing chunks are
         grouped by their effective ``labels`` (``config ∪ induced``, W12) and each group goes
-        through one forward pass — ``ceil`` per group, not one-per-doc; each per-text result maps
-        back to its document by identity. Absent induction every doc shares the config label set → a
-        single group → byte-identical to the pre-W12 single-call path. Docs that skip / are
-        near-empty need no
-        model call. Emission is in the buffer's (input) order regardless of grouping, so the output
-        is record-for-record identical to the per-document path (the equivalence invariant).
+        through one forward pass — ``ceil`` per group, not one-per-chunk; each per-text result maps
+        back to its chunk by identity. Absent induction every chunk shares the config label set → a
+        single group → byte-identical to the pre-W12 single-call path. Chunks that skip / are
+        near-empty need no model call. Emission is in the buffer's (input) order regardless of
+        grouping, so the output is record-for-record identical to the per-chunk path (the
+        equivalence invariant).
         """
         if not buffer:
             return
-        raw_by_doc: dict[int, Any] = {}
-        detect = [p for p in buffer if p.needs_model]
+        raw_by_chunk: dict[int, Any] = {}
+        detect = [p for p in buffer if p.plan.needs_detection]
         if detect:
             # The batched entry point is offline-unverifiable (the fake mirrors it); guard against
             # a renamed/missing method with a clear, actionable error rather than a bare
@@ -471,7 +457,7 @@ class Gliner2PIIRedactor(AdapterBase):
             # Group by effective label set (one label set per batched call). Order-stable: a dict
             # preserves first-seen group order, and emission below re-walks the buffer in input
             # order.
-            groups: dict[tuple[str, ...], list[_PendingDoc]] = {}
+            groups: dict[tuple[str, ...], list[_PendingChunk]] = {}
             for pending in detect:
                 groups.setdefault(pending.labels, []).append(pending)
             for labels, pendings in groups.items():
@@ -490,57 +476,35 @@ class Gliner2PIIRedactor(AdapterBase):
                     )
                     raise ValueError(msg)
                 for pending, raw in zip(pendings, results_list, strict=True):
-                    raw_by_doc[id(pending)] = raw
+                    raw_by_chunk[id(pending)] = raw
         for pending in buffer:
-            spans: list[PIISpan] = []
-            if pending.needs_model:
-                spans = self._spans_from_raw(
+            accepted: list[tuple[int, int, str, str, str, float]] = []
+            if pending.plan.needs_detection:
+                accepted = self._accepted_from_raw(
                     pending.text,
-                    raw_by_doc[id(pending)],
-                    pending.action,
-                    pending.allowed,
-                    pending.page_index,
+                    raw_by_chunk[id(pending)],
+                    pending.plan.allowed,
                 )
-            masked = apply_masking(pending.text, spans) if spans else pending.text
-            doc_id = pending.document.record_id
-            provenance = pending.document.provenance.model_copy(
-                update={
-                    "char_start": 0,
-                    "char_end": len(pending.text),
-                    "page_start": None,
-                    "page_end": None,
-                }
-            )
-            yield RedactionRecord(
-                record_id=f"{doc_id}#redaction",
-                document_record_id=doc_id,
-                masked_content=masked,
-                media_type="text/markdown",
-                policy=pending.policy_name,
-                pii_spans=spans,
-                provenance=provenance,
-                classification=pending.document.classification,
-            )
+            yield finalize_redacted_chunk(pending.chunk, pending.plan, accepted, self._salt)
 
-    def _spans_from_raw(
-        self,
+    @staticmethod
+    def _accepted_from_raw(
         text: str,
         raw: Any,
-        action: RedactionAction,
         allowed: set[str] | None,
-        page_index: PageOffsetIndex | None,
-    ) -> list[PIISpan]:
-        """Build non-overlapping PIISpans from THIS document's raw GLiNER2 output (mapped by index).
+    ) -> list[tuple[int, int, str, str, str, float]]:
+        """Build an ordered, non-overlapping candidate list from THIS chunk's raw GLiNER2 output.
 
         ``gliner2``'s ``extract_entities`` / ``batch_extract_entities`` return a **per-label dict**
         of dict-rows: ``{"entities": {"<label>": [{"text", "confidence", "start", "end"}, ...],
-        ...}}`` — a DIFFERENT shape from the ``gliner`` library's flat list. ``raw`` is this
-        document's result (mapped back by index from the batched call, W7). This flattens that
-        per-label dict → one candidate per row (``pii_type=<label>``, ``char_start=start``,
-        ``char_end=end``, ``confidence=confidence``), then reuses the twin's span-building shape: a
-        type not in a policy's allow-list is dropped; overlaps are resolved (earlier start, longer
-        span, type) so a stable, deterministic, non-overlapping span set results — the invariant the
-        RedactionRecord contract enforces and the masking relies on. This logic is UNCHANGED.
+        ...}}`` — a DIFFERENT shape from the ``gliner`` library's flat list. ``raw`` is this chunk's
+        result (mapped back by index from the batched call, W7). The ``start``/``end`` are
+        chunk-offset (relative to the chunk ``content`` passed in). This flattens the per-label dict
+        → one candidate per row, then a type not in a policy's allow-list is dropped and overlaps
+        resolved (earlier start, longer span, type) so a stable, deterministic, non-overlapping set
+        results. Returns ``(local_start, local_end, pii_type, value, detector, confidence)`` tuples
+        (chunk-content offsets); :func:`~latence_core.redaction_policy.finalize_redacted_chunk`
+        derives spans + pages + placeholders + masking.
         """
         # Faithful parse of the REAL gliner2 shape: a top-level {"entities": {label: [rows]}}
         # dict. A flat-list mis-parse (the gliner-library shape) would find no per-label rows
@@ -572,23 +536,11 @@ class Gliner2PIIRedactor(AdapterBase):
         # Deterministic order: by start, then longest span, then label (matches the twin).
         candidates.sort(key=lambda c: (c[0], -(c[1] - c[0]), c[2]))
 
-        spans: list[PIISpan] = []
+        accepted: list[tuple[int, int, str, str, str, float]] = []
         last_end = -1
         for start, end, pii_type, value, score in candidates:
             if start < last_end:
                 continue  # overlaps an accepted span; skip for a clean, ordered set
-            spans.append(
-                build_span(
-                    pii_type=pii_type,
-                    detector=f"gliner2:{pii_type}",
-                    start=start,
-                    end=end,
-                    value=value,
-                    action=action,
-                    salt=self._salt,
-                    page_index=page_index,
-                    confidence=score,
-                )
-            )
+            accepted.append((start, end, pii_type, value, f"gliner2:{pii_type}", score))
             last_end = end
-        return spans
+        return accepted

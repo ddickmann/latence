@@ -181,13 +181,14 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 15 by W13 context enrichment (ContextHeader contract + ChunkRecord gains the additive
-    # ``context_header`` field); 14 was W4 schema induction (InducedLabels contract +
-    # ChunkRecord/DocumentRecord gain the additive ``induced_labels`` field); 13 the H-C1 §4 redaction
-    # no-op floor (RedactionRecord gains ``redaction_disabled_for_sensitive``); 12 the DeltaChurn
-    # affected-set-witness fields (issue #42); 11 the S4 offset-map coordinate fix; 10 the S11
-    # incremental-delta contracts.
-    assert SCHEMA_VERSION == 15
+    # Bumped to 16 by W16 chunk-level redaction (ChunkRecord gains the additive ``masked_content`` +
+    # ``pii_spans`` + ``redaction_disabled_for_sensitive`` fields; Redaction becomes a chunk→chunk
+    # transform, ADR-0042); 15 was W13 context enrichment (ContextHeader + ChunkRecord's additive
+    # ``context_header``); 14 the W4 schema induction (InducedLabels + additive ``induced_labels``);
+    # 13 the H-C1 §4 redaction no-op floor (RedactionRecord gains
+    # ``redaction_disabled_for_sensitive``); 12 the DeltaChurn affected-set-witness fields (issue
+    # #42); 11 the S4 offset-map coordinate fix; 10 the S11 incremental-delta contracts.
+    assert SCHEMA_VERSION == 16
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

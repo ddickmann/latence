@@ -817,34 +817,60 @@ class QualityReportBuilder:
     def _redaction_quality(
         pipeline: Pipeline, records: list[StageOutput]
     ) -> RedactionQuality | None:
-        """Aggregate Redaction quality: per-PII-type + per-action detection counts (S6).
+        """Aggregate Redaction quality: per-PII-type + per-action detection counts (S6/W16).
 
-        Only computed when the Pipeline has a Redaction Stage. ``records`` is the set
-        of one :class:`~latence_core.contracts.RedactionRecord` per document, from
-        which the per-type and per-action span counts, the documents-redacted, and the
-        documents-with-PII are measured — the S6 acceptance criterion ("PII detection
-        counts by type land in the Quality Report"). Only counts and type/action names
-        cross into the report; **no raw PII value** ever does (a PIISpan never stores
-        the surface string, so this rollup cannot leak one).
+        Only computed when the Pipeline has a Redaction Stage. Since W16 (ADR-0042) Redaction is a
+        chunk→chunk transform, so ``records`` is the set of redacted
+        :class:`~latence_core.contracts.ChunkRecord`s (each carrying ``masked_content`` +
+        ``pii_spans``). The per-type/per-action span counts are summed across chunks; the
+        documents-redacted and documents-with-PII counts are rolled up to the DOCUMENT level
+        (distinct
+        ``document_record_id``s) so the report reads the same as the old one-record-per-document
+        shape — the S6 acceptance criterion ("PII detection counts by type land in the Quality
+        Report"). Only counts and type/action names cross into the report; **no raw PII value** ever
+        does (a PIISpan never stores the surface string, so this rollup cannot leak one). The
+        deprecated doc-level :class:`~latence_core.contracts.RedactionRecord` path is still tallied
+        for backward compatibility.
         """
         if not any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages):
             return None
         quality = RedactionQuality()
+        redacted_docs: set[str] = set()
+        docs_with_pii: set[str] = set()
+        disabled_docs: set[str] = set()
         for record in records:
-            if not isinstance(record, RedactionRecord):
+            if isinstance(record, ChunkRecord):
+                # Chunk-level (W16): masked_content is set on every chunk the Redaction Stage
+                # produced. Roll spans up per type/action; document-level counts dedupe by parent.
+                if record.masked_content is None:
+                    continue
+                doc_id = record.document_record_id
+                redacted_docs.add(doc_id)
+                if record.pii_spans:
+                    docs_with_pii.add(doc_id)
+                if record.redaction_disabled_for_sensitive:
+                    disabled_docs.add(doc_id)
+                spans = record.pii_spans
+            elif isinstance(record, RedactionRecord):
+                # Deprecated doc-level path: one record per document.
+                redacted_docs.add(record.document_record_id)
+                if record.pii_spans:
+                    docs_with_pii.add(record.document_record_id)
+                if record.redaction_disabled_for_sensitive:
+                    disabled_docs.add(record.document_record_id)
+                spans = record.pii_spans
+            else:
                 continue
-            quality.documents_redacted += 1
-            if record.pii_spans:
-                quality.documents_with_pii += 1
-            if record.redaction_disabled_for_sensitive:
-                # §4 no-op floor: a sensitive doc whose control ran no detectors. LOUD,
-                # first-class — while this is > 0, documents_with_pii:0 is NOT a clean bill.
-                quality.redaction_disabled_for_sensitive += 1
-            for span in record.pii_spans:
+            for span in spans:
                 quality.pii_total += 1
                 quality.per_type[span.pii_type] = quality.per_type.get(span.pii_type, 0) + 1
                 action = span.action.value
                 quality.per_action[action] = quality.per_action.get(action, 0) + 1
+        quality.documents_redacted = len(redacted_docs)
+        quality.documents_with_pii = len(docs_with_pii)
+        # §4 no-op floor: a sensitive doc whose control ran no detectors. LOUD, first-class —
+        # while this is > 0, documents_with_pii:0 is NOT a clean bill.
+        quality.redaction_disabled_for_sensitive = len(disabled_docs)
         quality.per_type = dict(sorted(quality.per_type.items()))
         quality.per_action = dict(sorted(quality.per_action.items()))
         return quality
