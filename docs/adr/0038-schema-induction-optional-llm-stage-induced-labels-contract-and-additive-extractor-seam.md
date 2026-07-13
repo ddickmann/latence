@@ -133,3 +133,56 @@ operator's own prompt engineering (or the superpod prompts, when provided) drops
 - Open follow-ups: a second inducer Provider (a different LLM/prompt) drops in as a second bake-off
   row with no harness change; the induced `confidences` map is carried but not yet consumed
   downstream; the superpod prompts swap into the default when provided.
+
+## Status note — canonical induced labels + corpus schema + redaction.gliner2 wiring (W12-label-canon)
+
+Real-GPU-E2E found induced labels **fragmenting** corpus-wide (case + format + synonym), plus two
+smaller gaps. Wave-12 closes all four, additive and backward-compatible:
+
+1. **Canonical-form induced labels (the case/format fragmentation fix).** `sanitize_label`
+   (`latence_schema_inducer.sanitize`) now emits ONE **canonical normal form** per label: strip
+   controls, treat `_`/`-`/whitespace as equivalent separators collapsing to a single space, then
+   `casefold()`. So `Date`==`date`, `Website`==`website`, `payment_product`==`payment-product`==
+   `payment product` — every variant maps to the same string. It is a PURE per-string transform (no
+   cross-call state), so it holds identically under per-doc / streaming / corpus induction. Dedup is
+   on that canonical form. Defense-in-depth: `latence_core.induced.effective_labels` now dedupes the
+   config∪induced union **case-insensitively** (config surface form kept, since config comes first),
+   and its previously-misleading docstring (which claimed the inducer already case-normalized) is
+   corrected.
+2. **`granularity: "corpus"` (the synonym fragmentation fix — the structural one).** `LLMLabelInducer`
+   gains a third granularity beside `doc`/`chunk`: a clean **collect→broadcast** two-phase over the
+   existing async fan-out — induce per document (all W4 safety-nets intact: fail-open per doc,
+   temperature-0, index-keyed reassembly), MERGE every document's induced entity/relation/pii sets
+   into ONE canonical, **sorted**, deduped, count-capped schema, then STAMP that single shared schema
+   on **every** chunk (including chunks of a document whose own induction failed open). One coherent
+   vocabulary for the whole corpus → entity types stay consistent across the KG, no per-chunk/per-doc
+   drift. The sort makes the corpus schema a byte-stable function of the label SET (seed-stable). It
+   needs a full-corpus pass (documented; acceptable for the small-LLM-call induction Stage).
+3. **`redaction.gliner2` honors induced `pii_types`.** The GLiNER2 Redactor resolved detection labels
+   from the config `pii_labels` floor only, ignoring induced `pii_types` — unlike its twin
+   `redaction.gliner_pii`. It now routes through the SAME `effective_labels(config, induced, PII)`
+   seam (per-document, resolved in `_prepare`), and the batched flush **groups detect-needing docs by
+   their effective label set** (one label set per `batch_extract_entities` call). The config floor
+   stays mandatory (`pii_labels` validated non-empty); induction only EXTENDS it; masking / offsets /
+   counts-only are unchanged. Absent induction every doc shares the config set → one group →
+   byte-identical to before.
+
+Tests: `sanitize` canonical-collapse (`Date`/`date`/`payment_product`/`payment product`→2);
+`effective_labels` case-insensitive union (config `Bank` + induced `bank`→one); corpus granularity
+(two docs' differing sets → one shared sorted-canonical schema on all chunks; a failed-LLM doc still
+gets the corpus schema; byte-stable two runs); `redaction.gliner2` induced `pii_types` reach the
+effective set (offline-fake equivalence + a no-induction control that proves the seam is load-
+bearing). `induced_labels` `SCHEMA_VERSION` is unchanged (a pure per-string normal form + a new
+granularity mode, no record-shape change). The clean-corpus KG-vocabulary numbers are the pod
+maintainer's re-run (`granularity: corpus`), never fabricated here.
+
+### Tokenizer-mismatch caveat (W12-gliner-window)
+
+The `schema-induction.yaml` stack feeds the gliner-family extractors, which run on mdeberta-v3 (a
+768-token window). `chunk.markdown`'s `max_tokens` is counted by the CHUNKER's tokenizer, which
+differs from mdeberta by **~1.2×** — a chunk that fits the chunker cap can still overflow the model
+window and be SILENTLY truncated (tail entities/relations/PII lost, offsets past the window
+unreliable). Keep the chunk cap ≤ ~640 chunker-tokens (≈ ≤768 mdeberta-tokens); the per-Provider
+`max_len` guard (default 768, ADR-0036 W12-gliner-window note) is the hard backstop. The induced
+label schema itself is unaffected (it is derived by the LLM inducer, not the mdeberta extractors),
+but the CONSUMERS of the induced labels honor the same window as their config-label path.

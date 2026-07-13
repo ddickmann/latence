@@ -18,8 +18,10 @@ This is a pure function over the two lists — no import of a Provider, no model
 Provider package leans on the SAME seam (never a forked, weaker per-package union) and a record with
 no induced labels yields *exactly* its config labels back (the backward-compat proof). The union is
 **order-stable**: config labels first (in their given order), then any induced label not already
-present (in its given order), deduped case-sensitively on the exact string the extractor prompts
-with (the inducing Provider already case-normalized + deduped its labels, so no re-guessing here).
+present (in its given order). Dedup is **case-insensitive** (on ``casefold()``, W12 defense-in-
+depth): the inducing Provider emits its labels in a canonical casefolded normal form, but config
+labels keep their given surface form, so a config ``Bank`` and an induced ``bank`` collapse to one
+(``Bank``, the config surface form kept) rather than prompting the extractor with both.
 """
 
 from __future__ import annotations
@@ -65,19 +67,24 @@ def effective_labels(
     """``config_labels ∪ induced[slot]`` — config floor first, then new induced, deduped, ordered.
 
     The order-stable union an extractor prompts with: every config label in its given order, then
-    each induced label of ``slot`` not already present, in its given order. A record with no induced
-    labels (``induced is None`` or an empty slot) returns the config labels **unchanged** (same list
-    contents + order) — so an existing stack with no ``schema_induction`` Stage is byte-identical.
+    each induced label of ``slot`` not already present, in its given order. Dedup is
+    CASE-INSENSITIVE (on ``casefold()``, W12): a config ``Bank`` and an induced ``bank`` collapse to
+    one entry (the config surface form is kept, since config labels come first). A record with no
+    induced labels (``induced is None`` or an empty slot) returns the config labels **unchanged**
+    (same list contents + order) — so an existing stack with no ``schema_induction`` Stage is
+    byte-identical (a config list is only ever deduped against itself, case-insensitively).
     """
     seen: set[str] = set()
     out: list[str] = []
     for label in config_labels:
-        if label not in seen:
-            seen.add(label)
+        key = label.casefold()
+        if key not in seen:
+            seen.add(key)
             out.append(label)
     for label in induced_for_slot(induced, slot):
-        if label not in seen:
-            seen.add(label)
+        key = label.casefold()
+        if key not in seen:
+            seen.add(key)
             out.append(label)
     return out
 

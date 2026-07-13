@@ -62,6 +62,7 @@ from latence_core.pipeline import CapabilityKind
 from latence_core.quality import (
     ChunkQuality,
     CompletenessCheck,
+    ContextEnrichmentQuality,
     DisambiguationQuality,
     DriftDiagnostics,
     EntityQuality,
@@ -332,6 +333,17 @@ class QualityReportBuilder:
             storage=storage,
             run_id=run_id,
         )
+        # W13: the OPTIONAL Context Enrichment Stage's enriched ChunkRecords (each carrying a
+        # ContextHeader), for the counts-only enrichment roll-up. Empty when the stack declares no
+        # context_enrichment Stage (the section is then None — byte-identical to today).
+        context_records = self._records_of_kind(
+            pipeline,
+            ordered,
+            outputs,
+            CapabilityKind.CONTEXT_ENRICHMENT,
+            storage=storage,
+            run_id=run_id,
+        )
         # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
         # the Stage consumed — the count it resolved from.
         disambig_mentions_in = self._records_of_kinds(
@@ -361,6 +373,9 @@ class QualityReportBuilder:
                 pipeline, disambiguations, disambig_mentions_in
             ),
             graph=self._graph_quality(pipeline, graph_records, inferred_records),
+            context_enrichment=self._context_enrichment_quality(
+                pipeline, context_records, graph_records
+            ),
             drift=self._drift_diagnostics(chunked),
             goldset=self._goldset_evaluation(pipeline, storage, mentions, relations),
         )
@@ -1061,6 +1076,66 @@ class QualityReportBuilder:
                 quality.inferred_edges_by_scorer.get(scorer, 0) + 1
             )
         quality.inferred_edges_by_scorer = dict(sorted(quality.inferred_edges_by_scorer.items()))
+        return quality
+
+    @staticmethod
+    def _context_enrichment_quality(
+        pipeline: Pipeline,
+        context_records: list[StageOutput],
+        graph_records: list[StageOutput],
+    ) -> ContextEnrichmentQuality | None:
+        """Aggregate the OPTIONAL Context Enrichment Stage's coherence roll-up (W13, ADR-0039).
+
+        Only computed when the Pipeline has a ``context_enrichment`` Stage (else None —
+        byte-identical
+        to today). Counts-only (no content). ``chunks_enriched`` + ``avg_neighbors_per_chunk`` are
+        read off the enriched :class:`~latence_core.contracts.ChunkRecord`s directly (a chunk with a
+        non-empty :class:`~latence_core.contracts.ContextHeader` counts; its ``neighbor_node_ids``
+        are
+        the query-time KG-expansion keys averaged). ``hub_entities_capped`` is the anti-bloat
+        witness:
+        the number of KG entities whose gated neighbor DEGREE exceeds the Stage's
+        ``max_neighbors_per_entity`` cap — those entities contribute only their TOP-k relations
+        wherever they appear (the hub-entity guard), computed from the assembled graph + the Stage's
+        config so it is honest and reproducible.
+        """
+        stage = next(
+            (s for s in pipeline.stages if s.capability is CapabilityKind.CONTEXT_ENRICHMENT),
+            None,
+        )
+        if stage is None:
+            return None
+        quality = ContextEnrichmentQuality()
+        headers = [
+            r.context_header
+            for r in context_records
+            if isinstance(r, ChunkRecord) and r.context_header is not None
+        ]
+        quality.chunks_enriched = len(headers)
+        if headers:
+            total_neighbors = sum(len(h.neighbor_node_ids) for h in headers)
+            quality.avg_neighbors_per_chunk = round(total_neighbors / len(headers), 6)
+
+        # Hub-entity guard witness: a node whose gated neighbor degree exceeds the per-entity cap is
+        # capped wherever it appears. Degree = distinct gated edges touching the node (each edge is
+        # a neighbor from both endpoints). Mirror the Provider's edge-confidence gate + cap.
+        max_neighbors = int(stage.config.get("max_neighbors_per_entity", 4))
+        min_edge_confidence = float(stage.config.get("min_edge_confidence", 0.0))
+        if max_neighbors > 0:
+            degree: dict[str, int] = {}
+            for r in graph_records:
+                if (
+                    not isinstance(r, GraphRecord)
+                    or r.scope is not GraphScope.EDGE
+                    or r.edge is None
+                ):
+                    continue
+                edge = r.edge
+                if edge.confidence < min_edge_confidence:
+                    continue
+                degree[edge.source_node_id] = degree.get(edge.source_node_id, 0) + 1
+                degree[edge.target_node_id] = degree.get(edge.target_node_id, 0) + 1
+            quality.hub_entities_capped = sum(1 for d in degree.values() if d > max_neighbors)
         return quality
 
     @staticmethod

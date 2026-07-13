@@ -17,16 +17,50 @@ import pytest
 from latence_core.providers.perf import (
     ATTN_FA2,
     ATTN_SDPA,
+    DEFAULT_GLINER_MAX_LEN,
     DTYPE_BF16,
     DTYPE_FP32,
+    apply_gliner_max_len,
     flash_attn_available,
+    is_compile_backend_failure,
+    load_gliner2_optimized,
     load_perf_kwargs,
     load_then_cast,
     load_with_fa2_fallback,
     maybe_compile,
     resolve_attn_impl,
     resolve_dtype_name,
+    resolve_gliner2_knob,
+    resolve_max_len,
 )
+
+# --- W12 model token-window bound ----------------------------------------------------------------
+
+
+def test_resolve_max_len_default_is_768() -> None:
+    assert resolve_max_len({}) == DEFAULT_GLINER_MAX_LEN == 768
+
+
+def test_resolve_max_len_config_override_and_clamp() -> None:
+    assert resolve_max_len({"max_len": 640}) == 640
+    assert resolve_max_len({"max_len": 0}) == 1  # clamped to a >= 1 window, never empty/negative
+    assert resolve_max_len({"max_len": -5}) == 1
+
+
+def test_apply_gliner_max_len_sets_config_max_len() -> None:
+    model = types.SimpleNamespace(config=types.SimpleNamespace(max_len=384))
+    apply_gliner_max_len(model, 768)
+    assert model.config.max_len == 768
+
+
+def test_apply_gliner_max_len_is_a_guarded_noop_without_config() -> None:
+    # The guard must never crash on a model/config that has no settable max_len (a fake, a future
+    # arch): it is best-effort. No config at all, and a config lacking max_len, both no-op cleanly.
+    apply_gliner_max_len(types.SimpleNamespace(), 768)  # no .config → no-op, no raise
+    frozen = types.SimpleNamespace(config=types.SimpleNamespace())  # config, but no max_len
+    apply_gliner_max_len(frozen, 768)
+    assert not hasattr(frozen.config, "max_len")  # left unchanged, no crash
+
 
 # --- dtype resolution: bf16 on cuda, fp32 on cpu, config override --------------------------------
 
@@ -267,3 +301,106 @@ def test_load_then_cast_never_passes_perf_kwargs_to_loader(monkeypatch: pytest.M
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     # A rejecting loader would raise TypeError if perf kwargs were passed — assert it does NOT raise.
     load_then_cast(_rejecting_loader, "urchade/gliner", {"dtype": "bfloat16"}, "cuda")
+
+
+# --- W9 gliner2 native quantize/compile seam ---------------------------------------------------
+
+
+def test_resolve_gliner2_knob_auto_follows_device() -> None:
+    # 'auto' (the default) → True on cuda, False on cpu.
+    assert resolve_gliner2_knob("quantize", "cuda", {}) is True
+    assert resolve_gliner2_knob("compile", "cpu", {}) is False
+
+
+def test_resolve_gliner2_knob_bool_and_string_overrides() -> None:
+    assert resolve_gliner2_knob("quantize", "cpu", {"quantize": True}) is True
+    assert resolve_gliner2_knob("compile", "cuda", {"compile": False}) is False
+    assert resolve_gliner2_knob("quantize", "cpu", {"quantize": "yes"}) is True
+    assert resolve_gliner2_knob("compile", "cuda", {"compile": "0"}) is False
+
+
+def test_resolve_gliner2_knob_invalid_raises() -> None:
+    with pytest.raises(ValueError, match="invalid quantize"):
+        resolve_gliner2_knob("quantize", "cpu", {"quantize": "sometimes"})
+
+
+def test_load_gliner2_optimized_cpu_default_loads_plain() -> None:
+    # On cpu both knobs resolve False → the loader is called PLAIN (no quantize/compile kwargs).
+    seen: dict[str, Any] = {}
+
+    def loader(model_id: str, **kwargs: Any) -> str:
+        seen.update(kwargs)
+        return f"model:{model_id}"
+
+    out = load_gliner2_optimized(loader, "m", "cpu", {})
+    assert out == "model:m"
+    assert seen == {}
+
+
+def test_load_gliner2_optimized_cuda_passes_native_kwargs() -> None:
+    seen: dict[str, Any] = {}
+
+    def loader(model_id: str, **kwargs: Any) -> str:  # noqa: ARG001
+        seen.update(kwargs)
+        return "ok"
+
+    load_gliner2_optimized(loader, "m", "cuda", {})
+    assert seen == {"quantize": True, "compile": True}
+
+
+def test_load_gliner2_optimized_fault_degrades_to_plain() -> None:
+    # An optimized load that raises degrades to a PLAIN load (never a crash).
+    calls: list[dict[str, Any]] = []
+
+    def loader(model_id: str, **kwargs: Any) -> str:  # noqa: ARG001
+        calls.append(kwargs)
+        if kwargs:  # the optimized attempt (quantize/compile) fails
+            msg = "torch/CUDA rejects fp16"
+            raise RuntimeError(msg)
+        return "plain"
+
+    out = load_gliner2_optimized(loader, "m", "cuda", {})
+    assert out == "plain"
+    assert calls[0] == {"quantize": True, "compile": True}  # optimized attempt
+    assert calls[1] == {}  # plain fallback
+
+
+class _FakeBackendCompilerFailed(RuntimeError):
+    """A stand-in for torch._dynamo.exc.BackendCompilerFailed (matched by class name).
+
+    The predicate matches on the concrete class NAME, so the ``__name__`` is set to torch's exact
+    class name (the leading-underscore module-private test alias is only for the local reference).
+    """
+
+
+_FakeBackendCompilerFailed.__name__ = "BackendCompilerFailed"
+
+
+def test_is_compile_backend_failure_matches_by_name() -> None:
+    assert is_compile_backend_failure(_FakeBackendCompilerFailed("boom")) is True
+
+
+def test_is_compile_backend_failure_matches_wrapped_cause() -> None:
+    # A compile fault re-raised under a generic error (e.g. via the adapter guard) is still caught.
+    try:
+        try:
+            raise _FakeBackendCompilerFailed("inner")
+        except _FakeBackendCompilerFailed as inner:
+            raise RuntimeError("wrapped by guard") from inner
+    except RuntimeError as outer:
+        assert is_compile_backend_failure(outer) is True
+
+
+def test_is_compile_backend_failure_matches_by_module_prefix() -> None:
+    # A concrete class defined in torch's compile stack is caught even if its name is not listed.
+    class _InductorThing(RuntimeError):
+        pass
+
+    _InductorThing.__module__ = "torch._inductor.compile_fx"
+    assert is_compile_backend_failure(_InductorThing("y")) is True
+
+
+def test_is_compile_backend_failure_false_for_ordinary_error() -> None:
+    # A genuine (non-compile) runtime fault is NOT swallowed by the guard.
+    assert is_compile_backend_failure(RuntimeError("cuda oom")) is False
+    assert is_compile_backend_failure(ValueError("bad shape")) is False

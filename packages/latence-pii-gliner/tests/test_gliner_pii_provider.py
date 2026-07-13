@@ -71,6 +71,9 @@ class _FakeGLiNER:
     def __init__(self) -> None:
         self.batch_calls = 0
         self.cast_dtype: Any = None  # W8: dtype applied via .to(), None until cast
+        #: FAITHFUL to the real GLiNER model: a ``config`` with a ``max_len`` the library truncates
+        #: to. The provider's W12 model-boundary guard sets this so a test can assert the bound.
+        self.config = types.SimpleNamespace(max_len=384)
 
     @classmethod
     def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
@@ -128,6 +131,20 @@ def test_requires_pii_labels() -> None:
 
 def test_default_model_is_permissive_apache() -> None:
     assert GlinerPIIRedactor(_config())._model_id == "urchade/gliner_multi_pii-v1"
+
+
+def test_pii_bounds_model_window_default_768(fake_gliner: type[_FakeGLiNER]) -> None:
+    # W12 model-boundary guard: the provider sets model.config.max_len (the gliner truncation lever)
+    # so a long document is not SILENTLY truncated past the mdeberta window. Default 768.
+    provider = GlinerPIIRedactor(_config())
+    list(provider.redact([_doc(_TEXT)]))  # triggers the lazy load + window bound
+    assert provider._model.config.max_len == 768
+
+
+def test_pii_model_window_config_override(fake_gliner: type[_FakeGLiNER]) -> None:
+    provider = GlinerPIIRedactor({**_config(), "max_len": 640})
+    list(provider.redact([_doc(_TEXT)]))
+    assert provider._model.config.max_len == 640
 
 
 def test_masks_detected_pii(fake_gliner: type[_FakeGLiNER]) -> None:

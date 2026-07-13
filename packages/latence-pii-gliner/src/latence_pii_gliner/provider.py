@@ -41,7 +41,12 @@ from latence_core.contracts import Disposition, PIISpan, RedactionAction, Redact
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
-from latence_core.providers.perf import load_then_cast, maybe_compile
+from latence_core.providers.perf import (
+    apply_gliner_max_len,
+    load_then_cast,
+    maybe_compile,
+    resolve_max_len,
+)
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
@@ -105,6 +110,12 @@ class GlinerPIIRedactor:
         salt: str  — salt mixed into ``replace``/``hash`` surrogates (default 'latence').
         min_chars: int  — a document whose assembled text is shorter is emitted clean
             (default 1).
+        max_len: int  — the mdeberta-v3 model token window (default 768), set as
+            ``model.config.max_len`` at load (W12). A document that tokenizes past it is SILENTLY
+            truncated by gliner (tail PII spans lost / offsets past the window unreliable); this
+            bounds the window explicitly. CAVEAT: the chunker counts in a DIFFERENT tokenizer, ~1.2×
+            fewer tokens than mdeberta — keep the chunk cap ≤ ~640 for this 768 window; this guard
+            is the hard backstop.
         batch_size: int  — how many documents share ONE ``batch_predict_entities`` forward pass
             (default 16; the P8 autotuner overrides per-device). Purely memory-shaping: the
             emitted RedactionRecords (PIISpans/masking/order) are record-for-record identical for
@@ -175,6 +186,9 @@ class GlinerPIIRedactor:
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
+        # W12 model-boundary guard: bound the mdeberta token window (default 768) so a chunk that
+        # tokenizes past it is not SILENTLY truncated by gliner (tail PII spans lost / offsets bad).
+        self._max_len = resolve_max_len(config)
         self._batch_size = validate_batch_size(
             config.get("batch_size", _DEFAULT_BATCH_SIZE),
             provider_name="redaction.gliner_pii",
@@ -206,6 +220,9 @@ class GlinerPIIRedactor:
         # on cuda (measured 1.36× faster, byte-identical). device=None reads the torch-free probe
         # (GLiNER auto-places on cuda); the cast is a no-op on CPU / fp32. Then optionally compile.
         model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, None)
+        # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
+        # guard) so gliner never silently truncates a long document past config.max_len.
+        apply_gliner_max_len(model, self._max_len)
         self._model = maybe_compile(model, self._config, provider_name="redaction.gliner_pii")
         return self._model
 

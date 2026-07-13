@@ -89,12 +89,15 @@ def _model_profile(
     )
 
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 40 Providers across 16 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
+# 43 Providers across 17 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
 # learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii + the real
-# GPU LightOn-OCR Parser W1-lighton + its MIT twin the GPU GLM-OCR Parser W1-glm + the OPTIONAL
-# reference GraphCompleter W2-linkpred Slice 1 + the learned ULTRA/PyKEEN GraphCompleter W2-linkpred
-# Slice 2 + the fastino GLiNER2 Redactor W3-pii-gliner2 + the OPTIONAL LLM schema-induction
-# LabelInducer W4-schema-induction + the universal license-clean parser.render W5-universal-parser).
+# GPU LightOn-OCR Parser W1-lighton + its served-vLLM twin parser.lighton_vllm W10 + its MIT twin
+# the GPU GLM-OCR Parser W1-glm + the OPTIONAL reference GraphCompleter W2-linkpred Slice 1 + the
+# learned ULTRA/PyKEEN GraphCompleter W2-linkpred Slice 2 + the fastino GLiNER2 Redactor
+# W3-pii-gliner2 + the OPTIONAL LLM schema-induction LabelInducer W4-schema-induction + the universal
+# license-clean parser.render W5-universal-parser + the unified fused Entity+Relation gliner2
+# extractor W9-gliner2-unified, the relex drop-in + the OPTIONAL reference ContextEnricher
+# context.kg_header W13-context-enrichment).
 # If a Provider is added/removed, this list is updated deliberately, so the count check catches an
 # accidental un-covered Provider.
 _EXPECTED_PROVIDERS = frozenset(
@@ -104,6 +107,7 @@ _EXPECTED_PROVIDERS = frozenset(
         "parser.document",
         "parser.pdfplumber",
         "parser.lighton",
+        "parser.lighton_vllm",
         "parser.glm",
         "parser.render",
         "parser.endpoint",
@@ -119,6 +123,7 @@ _EXPECTED_PROVIDERS = frozenset(
         "relation.pattern",
         "relation.llm",
         "relation.gliner_relex",
+        "fused_entity_relation.gliner2",
         "redaction.hybrid_rule",
         "redaction.gliner_pii",
         "redaction.gliner2",
@@ -132,6 +137,7 @@ _EXPECTED_PROVIDERS = frozenset(
         "graph.weighted",
         "graph_completion.reference",
         "graph_completion.ultra",
+        "context.kg_header",
         "export.jsonl_parquet",
         "export.knowledge_graph",
         "export.demo_site",
@@ -163,12 +169,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 40 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 43 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 40
+    assert len(names) == 43
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -206,18 +212,20 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     """The rolled-up report: all pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 40
+    assert report.providers_total == 43
     assert report.providers_failed == 0
     assert report.all_passed
-    # The eleven endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
+    # The twelve endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
     stub_scoped = {r.provider for r in report.results if r.stub_scoped}
     assert stub_scoped == {
         "parser.endpoint",
+        "parser.lighton_vllm",
         "entity.endpoint",
         "entity.gliner",
         "label_inducer.llm",
         "relation.llm",
         "relation.gliner_relex",
+        "fused_entity_relation.gliner2",
         "redaction.gliner_pii",
         "redaction.gliner2",
         "redaction.presidio",

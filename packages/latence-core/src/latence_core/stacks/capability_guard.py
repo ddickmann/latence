@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from latence_core.capability import (
     Chunker,
     ContentScreener,
+    ContextEnricher,
     Disambiguator,
     Embedder,
     EntityExtractor,
@@ -73,6 +74,7 @@ _CAPABILITY_PROTOCOL: dict[CapabilityKind, type] = {
     CapabilityKind.DISAMBIGUATION: Disambiguator,
     CapabilityKind.GRAPH_ASSEMBLY: GraphAssembler,
     CapabilityKind.GRAPH_COMPLETION: GraphCompleter,
+    CapabilityKind.CONTEXT_ENRICHMENT: ContextEnricher,
     CapabilityKind.EXPORT: Export,
 }
 

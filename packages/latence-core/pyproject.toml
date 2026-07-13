@@ -98,6 +98,12 @@ latence = "latence_core.cli:app"
 # properties.inferred=True (honest model-derived Evidence, never merged into asserted edges). Pure
 # Python, no torch (ADR-0037). The learned ULTRA/PyKEEN scorer is Slice 2, behind the same seam.
 "graph_completion.reference" = "latence_core.stages.graph_completion:ReferenceGraphCompleter"
+# W13 context enrichment: the OPTIONAL post-Assembly ContextEnricher reference Provider — a
+# deterministic, capped, zero-dep projection of the assembled KG back onto each chunk as a compact
+# context_header (canonical entities + top-k neighbor triples) the Export prepends to the EMBEDDING
+# input only (ADR-0039). Pure Python, no model, no key. The LLM situating-sentence mode is a
+# documented follow-on, not a default Provider.
+"context.kg_header" = "latence_core.stages.context_enrichment:ContextHeaderEnricher"
 "export.knowledge_graph" = "latence_core.stages.graph_export:KnowledgeGraphExport"
 "embedding.hashing" = "latence_core.embedding:HashingEmbedder"
 # S11 built-in: the affected-set DeltaProcessor (retract-by-Evidence-provenance graph patcher +

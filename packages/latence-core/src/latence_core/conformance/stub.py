@@ -251,9 +251,13 @@ class _StubGLiNER2:
     """
 
     entities: list[dict[str, Any]] = []
+    #: relation rows (flat, seeded by the fused case) reshaped into the real
+    #: ``{"relation_extraction": {rel: [{"head": {...}, "tail": {...}}]}}`` dict by
+    #: :meth:`extract_relations` — the W9 fused-extraction gliner2 path.
+    relations: list[dict[str, Any]] = []
 
     @classmethod
-    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubGLiNER2:  # noqa: ARG003 - id unused offline
+    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubGLiNER2:  # noqa: ARG003 - id/quantize/compile unused offline
         return cls()
 
     def extract_entities(
@@ -263,6 +267,7 @@ class _StubGLiNER2:
         threshold: float = 0.5,
         include_spans: bool = False,  # noqa: ARG002 - accepted for API parity
         include_confidence: bool = False,  # noqa: ARG002 - accepted for API parity
+        max_len: int = 768,  # noqa: ARG002 - W12 model-window bound; accepted for API parity
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
         by_label: dict[str, list[dict[str, Any]]] = {}
         for e in type(self).entities:
@@ -286,6 +291,7 @@ class _StubGLiNER2:
         threshold: float = 0.5,
         include_spans: bool = False,
         include_confidence: bool = False,
+        max_len: int = 768,  # W12 model-window bound; accepted for API parity
     ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
         # The REAL batched GLiNER2 API (W7): one forward pass over all texts; result[i] is the
         # per-label dict for texts[i] — the exact single-text ``extract_entities`` shape per input.
@@ -296,15 +302,48 @@ class _StubGLiNER2:
                 threshold=threshold,
                 include_spans=include_spans,
                 include_confidence=include_confidence,
+                max_len=max_len,
             )
             for text in texts
         ]
 
+    def extract_relations(
+        self,
+        text: str,
+        relation_types: list[str],
+        threshold: float = 0.5,  # noqa: ARG002 - the seeded rows are already above threshold
+        include_spans: bool = False,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        max_len: int = 768,  # noqa: ARG002 - W12 model-window bound; accepted for API parity
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        # The REAL fused-extraction relation shape (W9): a per-relation-type dict of head/tail
+        # sub-dict rows, NOT a flat list or a tuple — ``{"relation_extraction": {rel: [{"head":
+        # {text,confidence,start,end}, "tail": {...}}]}}``. A provider mis-parsing it recovers none.
+        by_rel: dict[str, list[dict[str, Any]]] = {}
+        for r in type(self).relations:
+            rel_type = r["relation"]
+            if rel_type not in relation_types or r["head"]["end"] > len(text):
+                continue
+            by_rel.setdefault(rel_type, []).append(
+                {"head": dict(r["head"]), "tail": dict(r["tail"])}
+            )
+        return {"relation_extraction": by_rel}
+
 
 @contextlib.contextmanager
-def install_gliner2(*, entities: list[dict[str, Any]] | None = None) -> Iterator[None]:
-    """Install a fake ``gliner2`` module returning the canned per-label PII entity dict."""
+def install_gliner2(
+    *,
+    entities: list[dict[str, Any]] | None = None,
+    relations: list[dict[str, Any]] | None = None,
+) -> Iterator[None]:
+    """Install a fake ``gliner2`` module returning the canned per-label / per-relation dicts.
+
+    ``entities`` seeds the per-label ``extract_entities`` dict (PII + NER); ``relations`` seeds the
+    per-relation-type ``extract_relations`` dict (the W9 fused-extraction path). Both are the REAL
+    nested gliner2 shapes so a mis-parsing provider recovers nothing (the anti-false-green trap).
+    """
     _StubGLiNER2.entities = entities or []
+    _StubGLiNER2.relations = relations or []
     module = types.ModuleType("gliner2")
     module.GLiNER2 = _StubGLiNER2  # type: ignore[attr-defined]
     saved = sys.modules.get("gliner2")
@@ -327,6 +366,35 @@ def gliner2_pii_entities() -> list[dict[str, Any]]:
     Provider's per-label-dict flatten, offset round-trip, and masking end to end.
     """
     return [{"start": 45, "end": 62, "label": "email", "confidence": 0.95}]
+
+
+def gliner2_entities() -> list[dict[str, Any]]:
+    """Canned chunk-local NER entity rows the GLiNER2 fused stub returns for the canonical chunk.
+
+    person "Alice" [0,5), org "Acme Corp" [16,25) — the SAME coordinates :func:`gliner_entities`
+    uses, so the fused-gliner2 conformance case matches the relex case record-for-record. Reshaped
+    into the real per-label ``{"entities": {label: [rows]}}`` dict by the stub's extract_entities.
+    """
+    return [
+        {"start": 0, "end": 5, "label": "person", "confidence": 0.9},
+        {"start": 16, "end": 25, "label": "org", "confidence": 0.9},
+    ]
+
+
+def gliner2_relations() -> list[dict[str, Any]]:
+    """Canned relation the GLiNER2 fused stub returns, referencing the two canned entities.
+
+    The REAL fused-extraction relation shape (W9): ``head``/``tail`` sub-dicts carrying chunk-local
+    ``start``/``end`` char offsets (the coordinates the provider resolves endpoints by), NOT bare
+    indices and NOT a tuple. person [0,5) works_for org [16,25), matching :func:`gliner2_entities`.
+    """
+    return [
+        {
+            "head": {"start": 0, "end": 5, "text": "Alice", "confidence": 0.9},
+            "tail": {"start": 16, "end": 25, "text": "Acme Corp", "confidence": 0.9},
+            "relation": "works_for",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +792,140 @@ def install_render_offline() -> Iterator[None]:
     fake_pil_image = types.ModuleType("PIL.Image")
     fake_pil_image.MAX_IMAGE_PIXELS = None  # type: ignore[attr-defined]
     fake_pil_image.open = _FakeRenderImageModule.open  # type: ignore[attr-defined]
+    fake_pil.Image = fake_pil_image  # type: ignore[attr-defined]
+    saved = {
+        "pypdfium2": sys.modules.get("pypdfium2"),
+        "PIL": sys.modules.get("PIL"),
+        "PIL.Image": sys.modules.get("PIL.Image"),
+    }
+    sys.modules["pypdfium2"] = fake_pdfium
+    sys.modules["PIL"] = fake_pil
+    sys.modules["PIL.Image"] = fake_pil_image
+    try:
+        yield
+    finally:
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+
+
+# ---------------------------------------------------------------------------
+# Served-vLLM OCR Parser stub (parser.lighton_vllm, W10) — a faithful offline rasteriser
+# ---------------------------------------------------------------------------
+#
+# ``parser.lighton_vllm`` (compute="either") is infra-gated the same way ``parser.endpoint`` is: it
+# needs a running vLLM server, so its conformance case is ``stub_scoped`` — the async
+# ``AsyncOpenAI`` stub (:func:`install_openai`) stands in for the served endpoint. But it ALSO
+# rasterises its input (unlike the raw-bytes ``parser.endpoint``), so its REAL rasteriser path runs
+# offline against a faithful fake ``pypdfium2`` + ``PIL`` (below): a fake PDF page renders to a
+# fake image with a real ``.size``/``.resize``/``.save`` (so the shared 1540px downscale + the
+# base64 data-URL encode run for real), and Pillow's ``MAX_IMAGE_PIXELS`` bomb cap is honoured. The
+# single fabricated thing is
+# the served OCR reply; the rasterise → data-URL → POST → PageMap path all runs for real. Distinct
+# from ``install_render_offline``: that fake image is for ``parser.render``'s renderer→save→OCR
+# round-trip (no ``.size``); this one exposes the ``.size``/``.mode`` the shared
+# ``PageRasteriser._downscale_longest`` + the vLLM provider's ``image_to_data_url`` read.
+
+
+class _FakeVllmImage:
+    """A Pillow image stand-in for the vLLM parser: real ``.size``/``.mode``/``.resize``/save."""
+
+    def __init__(self, text: str, size: tuple[int, int] = (800, 1000)) -> None:
+        self._text = text
+        self.size = size
+        self.mode = "RGB"
+
+    def resize(self, size: tuple[int, int], _resample: Any = None) -> _FakeVllmImage:
+        return _FakeVllmImage(self._text, size=size)
+
+    def convert(self, _mode: str) -> _FakeVllmImage:
+        return self
+
+    def save(self, buffer: Any, format: str = "PNG") -> None:  # noqa: A002 - Pillow's kw name
+        buffer.write(self._text.encode("utf-8"))
+
+
+class _FakeVllmBitmap:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def to_pil(self) -> _FakeVllmImage:
+        return _FakeVllmImage(self._text)
+
+
+class _FakeVllmPage:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def get_size(self) -> tuple[float, float]:
+        return (595.0, 842.0)  # A4 points — well under the pixel-bomb budget
+
+    def render(self, scale: float = 1.0, **_kwargs: Any) -> _FakeVllmBitmap:
+        return _FakeVllmBitmap(self._text)
+
+
+class _FakeVllmPdfDocument:
+    """A pypdfium2 ``PdfDocument`` stand-in over the fake PDF framing (``%PDF-`` + ``|||``)."""
+
+    def __init__(self, stream: Any) -> None:
+        data = stream.read() if hasattr(stream, "read") else stream
+        body = bytes(data)[len(b"%PDF-") :].decode("utf-8")
+        self._pages = [_FakeVllmPage(seg) for seg in body.split("|||")]
+
+    def __iter__(self) -> Iterator[_FakeVllmPage]:
+        return iter(self._pages)
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeVllmResampling:
+    LANCZOS = "LANCZOS"
+
+
+class _FakeVllmImageModule:
+    MAX_IMAGE_PIXELS: int | None = None
+    Resampling = _FakeVllmResampling
+
+    class DecompressionBombError(Exception):
+        """Stand-in for ``PIL.Image.DecompressionBombError``."""
+
+    @staticmethod
+    def open(stream: Any) -> _FakeVllmImage:
+        data = stream.read() if hasattr(stream, "read") else stream
+        raw = bytes(data)
+        for magic in (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"BM"):
+            if raw.startswith(magic):
+                return _FakeVllmImage(raw[len(magic) :].decode("utf-8"))
+        return _FakeVllmImage(raw.decode("utf-8", errors="replace"))
+
+
+def lighton_vllm_fake_pdf(pages: list[str]) -> bytes:
+    """Build a spoof-guard-passing fake PDF the vLLM parser's rasteriser splits into pages."""
+    return b"%PDF-" + "|||".join(pages).encode("utf-8")
+
+
+@contextlib.contextmanager
+def install_lighton_vllm_offline() -> Iterator[None]:
+    """Install faithful fake ``pypdfium2`` + ``PIL`` so ``parser.lighton_vllm`` rasterises offline.
+
+    Injects a fake ``pypdfium2`` (its ``PdfDocument`` renders the fake PDF framing to fake page
+    images with a real ``.size``) and a fake ``PIL`` (its ``Image`` exposes ``.size``/``.mode``/
+    ``.resize``/``.save`` + ``MAX_IMAGE_PIXELS``/``Resampling``), for one Provider invocation, then
+    removes them — so the shared rasteriser's REAL code path (render-scale clamp, 1540px downscale,
+    base64 PNG data-URL encode) runs without the heavy native deps. The served OCR reply comes from
+    the async ``AsyncOpenAI`` stub (:func:`install_openai`), installed alongside by the case.
+    """
+    fake_pdfium = types.ModuleType("pypdfium2")
+    fake_pdfium.PdfDocument = _FakeVllmPdfDocument  # type: ignore[attr-defined]
+    fake_pil = types.ModuleType("PIL")
+    fake_pil_image = types.ModuleType("PIL.Image")
+    fake_pil_image.MAX_IMAGE_PIXELS = _FakeVllmImageModule.MAX_IMAGE_PIXELS  # type: ignore[attr-defined]
+    fake_pil_image.open = _FakeVllmImageModule.open  # type: ignore[attr-defined]
+    fake_pil_image.Resampling = _FakeVllmResampling  # type: ignore[attr-defined]
+    fake_pil_image.DecompressionBombError = _FakeVllmImageModule.DecompressionBombError  # type: ignore[attr-defined]
     fake_pil.Image = fake_pil_image  # type: ignore[attr-defined]
     saved = {
         "pypdfium2": sys.modules.get("pypdfium2"),

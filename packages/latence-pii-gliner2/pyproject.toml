@@ -38,9 +38,14 @@ classifiers = [
 # NOT ship torch/transformers — those live only in the 'gliner2[local]' extra ("full local
 # inference"). This Provider does LOCAL inference (GLiNER2.from_pretrained(...).extract_entities),
 # so it MUST pull the [local] extra or GLiNER2.from_pretrained() fails at runtime on missing torch.
+# 'peft' is a REQUIRED runtime dep (pod-found, 2026-07-10): gliner2's inference engine
+# (gliner2.inference.engine -> gliner2.training.trainer) imports peft, which the 'gliner2[local]'
+# extra does NOT declare — the load path fails with ModuleNotFoundError: No module named 'peft'
+# without it. peft is Apache-2.0 (github.com/huggingface/peft, verified 2026-07-10).
 dependencies = [
     "latence-core",
     "gliner2[local]>=1.0,<2",
+    "peft>=0.10",
 ]
 
 [project.urls]

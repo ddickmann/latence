@@ -43,10 +43,27 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 |---|---|---|---|
 | pypdf | 6.14.2 | BSD-3-Clause | latence-parser-document |
 | gliner | ≥0.2.5 | Apache-2.0 **(upstream)** | latence-ner-gliner, latence-relation-gliner, latence-pii-gliner |
+| gliner2[local] | ≥1.0,<2 | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 |
+| peft | ≥0.10 | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 (gliner2 inference-engine dep, not declared by `gliner2[local]`) |
 | openai | ≥1.0 | Apache-2.0 **(upstream)** | latence-*-endpoint, latence-relation-llm |
 | presidio-analyzer | ≥2.2 | MIT **(upstream)** | latence-pii-presidio |
 | spacy (+ en_core_web_sm model) | (Presidio dep) | MIT **(upstream)** | latence-pii-presidio |
 | apache-airflow | ≥2.7 | Apache-2.0 **(upstream)** | latence-runner-airflow (`airflow` extra only) |
+| torch | ≥2.1 | BSD-3-Clause **(upstream)** | latence-parser-glm, latence-parser-lighton; latence-linkpred-ultra (`ultra`/`pykeen` extras) |
+| torch-geometric | (PyG wheel) | MIT **(upstream)** | latence-linkpred-ultra (`ultra` extra; PyG wheel index, not a plain PyPI pin) |
+| torch-scatter | (PyG wheel) | MIT **(upstream)** | latence-linkpred-ultra (`ultra` extra; PyG wheel index, not a plain PyPI pin) |
+| pykeen | ≥1.10,<2 | MIT **(upstream)** | latence-linkpred-ultra (`pykeen` extra) |
+| easydict | ≥1.10,<2 | ⚠️ **LGPL-3.0 (upstream)** — see flag below | latence-linkpred-ultra (`ultra` extra only) |
+
+> **⚠️ License flag — `easydict` is LGPL-3.0, not permissive.** Pulled only by the opt-in
+> `latence-linkpred-ultra[ultra]` extra (used by the vendored MIT ULTRA inference subset), and
+> off the default install path. LGPL-3.0 is weak copyleft: the framework *dynamically imports*
+> easydict, unmodified, from Apache-2.0 code — that use is permitted without relicensing the
+> framework, and the copyleft reaches only modifications to easydict itself. Surfaced here per
+> ADR-0012 / research-diligence so the choice is conscious (options: keep behind the opt-in extra
+> with this note, or replace easydict's trivial dotted-dict usage in the vendored ULTRA config
+> with a permissive shim to drop the dep). Verified LGPL-3.0 on PyPI 2026-07-10. All other
+> ULTRA/PyKEEN extras are permissive (torch BSD-3-Clause; torch-geometric/torch-scatter/pykeen MIT).
 
 `gliner`, `openai`, `presidio-analyzer`/`spacy`, and `apache-airflow` are heavy/optional
 dependencies kept out of the CPU-first dev environment by design (ADR-0016); their licenses
@@ -66,9 +83,11 @@ the installed `dist-info` when installing that Provider.
 | pathspec | 1.1.1 | MPL-2.0 (mypy dep; file-level copyleft, not linked into framework code) |
 | detect-secrets | (CI secret scan) | Apache-2.0 **(upstream)** |
 
-**All runtime dependencies are permissive. No GPL/AGPL/LGPL or otherwise
-non-permissive runtime dependency is present.** The single MPL-2.0 item
-(`pathspec`, a mypy transitive dependency) is dev-only and never shipped.
+**All runtime dependencies on the default install path are permissive. No GPL/AGPL
+runtime dependency is present.** Two exceptions are called out explicitly and neither
+is on a default install path: `easydict` (**LGPL-3.0**, opt-in `latence-linkpred-ultra[ultra]`
+extra only — see the flag above), and the MPL-2.0 `pathspec` (a mypy transitive, dev-only,
+never shipped in any wheel).
 
 ## Default reference-model weights
 
@@ -80,7 +99,9 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 |---|---|---|
 | lightonai/LightOnOCR-1B-1025 | Parse (OCR, `parser.lighton`) | Apache-2.0 |
 | urchade/gliner_multi-v2.1 | Entity Extraction | Apache-2.0 |
-| knowledgator/gliner-relex-multi-v1.0 | Relation Extraction | Apache-2.0 |
+| knowledgator/gliner-relex-multi-v1.0 | Relation Extraction (`relation.gliner_relex`, superseded by gliner2) | Apache-2.0 |
+| fastino/gliner2-multi-v1 | Fused Entity+Relation Extraction (`fused_entity_relation.gliner2`, W9 unified default) | Apache-2.0 |
+| fastino/GLiNER2-Guardrails-PII-Multi | Redaction (`redaction.gliner2`) | Apache-2.0 |
 | urchade/gliner_multi_pii-v1 | Redaction | Apache-2.0 |
 | knowledgator/gliner-linker-large | Disambiguation | Apache-2.0 |
 | intfloat/multilingual-e5-small | Embedding (default) | MIT |

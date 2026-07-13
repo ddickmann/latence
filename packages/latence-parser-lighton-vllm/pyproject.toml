@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-parser-lighton-vllm"
+version = "0.1.0"
+description = "Served-vLLM LightOn-OCR Parser Provider (scanned-PDF/image -> markdown + page map) over an OpenAI-compatible endpoint, for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "ocr", "lighton", "vllm", "vision-language", "endpoint", "gpu"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# The PRODUCTION OCR path (W10): a warm vLLM server, not in-process transformers. This Provider is a
+# thin async HTTP client that POSTs each rasterised page to a running vLLM OpenAI-compatible
+# endpoint — so it ships the LIGHT deps, not torch/transformers. It reuses ``parser.lighton``'s
+# rasteriser (identical dpi / megapixel bomb-cap / 1540px LANCZOS preprocessing) via a dependency on
+# ``latence-parser-lighton`` (whose heavy transformers/torch deps are NOT installed in the CPU-first
+# env — only the pure-Python ``rasterize`` module is imported, and its pypdfium2/pillow deps are
+# themselves rasterisation-only, lazy-imported). ``openai`` (Apache-2.0 code) is the async client
+# (:class:`openai.AsyncOpenAI`). The real OCR run needs a live vLLM server (infra-gated, ADR-0007):
+# its tests use a faithful async mock of the vLLM chat-completions response; the real run is
+# pod-validated (scripts/validate-lighton-vllm-on-gpu.md).
+dependencies = [
+    "latence-core",
+    "latence-parser-lighton",
+    "openai>=1.0,<3",
+    "pypdfium2>=4.0",
+    "pillow>=10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group. Installing this package makes
+# 'parser.lighton_vllm' available to any Pipeline with no core change (ADR-0004), alongside
+# 'parser.lighton' (in-process, single-box/simple) / 'parser.endpoint' / 'parser.render'. It is the
+# PRODUCTION OCR path: a served vLLM endpoint at concurrency (~2.7x faster than optimised
+# transformers per LightOn's recommended path), same drop-in Parser Capability as parser.lighton.
+[project.entry-points."latence.providers"]
+"parser.lighton_vllm" = "latence_parser_lighton_vllm.provider:LightOnVllmParser"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_parser_lighton_vllm"]

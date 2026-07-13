@@ -57,7 +57,13 @@ stages:
     capability: chunk
     provider: chunk.markdown
     depends_on: [parse]
-    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+    # NOTE (W12 gliner window): the downstream gliner-family extractors (fused_entity_relation.gliner2,
+    # redaction.gliner_pii) run on mdeberta-v3, whose token window is 768. chunk.markdown's max_tokens
+    # is counted by the CHUNKER's tokenizer, which differs from mdeberta by ~1.2× (pod-measured: a
+    # 768-chunker-token cap hit mdeberta median 666 / MAX 921). Bigger chunks = better relation/RAG
+    # context, so maximize chunk size subject to the window: 640 chunker-tokens ≈ ≤768 mdeberta-tokens
+    # (the calibrated safe near-max). The provider `max_len` guard (default 768) is the hard backstop.
+    config: {max_tokens: 640, overlap_tokens: 80, min_tokens: 8}
 
   - name: content_screen
     capability: content_screening
@@ -85,13 +91,14 @@ stages:
       device: cuda                       # honest "needs a served LLM"; skip-with-flag where none
 
   # --- ONE fused Entity+Relation Extraction Stage (ADR-0013), reading induced ∪ config labels ---
-  # `relation.gliner_relex` fulfils BOTH Capabilities in one pass. Its `labels`/`relation_labels`
-  # are the config FLOOR; the schema_induction Stage's induced entity_types/relation_types are
-  # UNIONed on per chunk (ADR-0038). Leaving the floor small (or empty) makes extraction lean on the
-  # induced schema — the unsupervised property.
+  # `fused_entity_relation.gliner2` fulfils BOTH Capabilities in one pass (the W9 unified default;
+  # native quantize+compile; drop-in for the superseded relation.gliner_relex, ADR-0036). Its
+  # `labels`/`relation_labels` are the config FLOOR; the schema_induction Stage's induced
+  # entity_types/relation_types are UNIONed on per chunk (ADR-0038). Leaving the floor small (or
+  # empty) makes extraction lean on the induced schema — the unsupervised property.
   - name: extract
     capability: fused_entity_relation
-    provider: relation.gliner_relex
+    provider: fused_entity_relation.gliner2
     depends_on: [induce]
     config:
       labels: [person, organization]                 # entity FLOOR; induced entity_types union on

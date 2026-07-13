@@ -67,6 +67,42 @@ def test_committed_stacks_are_valid_pipelines(tmp_path: Path) -> None:
         assert all("{CORPUS_DIR}" not in str(s.config) for s in pipeline.stages)
 
 
+# The gliner-family extractors run on mdeberta-v3 (768-token window). A stack feeding one must cap
+# chunk.markdown at <= 640 chunker-tokens (~768 mdeberta-tokens, ~1.2× chunker→model) so the model
+# never silently truncates. The provider `max_len` guard (default 768) is the hard backstop (W12).
+_GLINER_FAMILY_PROVIDERS = frozenset(
+    {
+        "entity.gliner",
+        "fused_entity_relation.gliner2",
+        "relation.gliner_relex",
+        "redaction.gliner_pii",
+        "redaction.gliner2",
+    }
+)
+_GLINER_SAFE_CHUNK_MAX_TOKENS = 640
+
+
+def test_gliner_stacks_keep_chunk_within_the_mdeberta_window() -> None:
+    """W12 stack-lint: every shipped stack that feeds a gliner-family extractor caps ``chunk.markdown``
+    ``max_tokens`` at <= 640 (chunker tokens), keeping mdeberta-v3's 768 window un-truncated.
+    """
+    gliner_stacks_seen = 0
+    for stack in sorted(_STACKS.glob("*.yaml")):
+        pipeline = load_stack(stack, storage_uri="file:///tmp/x", corpus_dir="file:///tmp/c")
+        providers = {s.provider for s in pipeline.stages}
+        if not providers & _GLINER_FAMILY_PROVIDERS:
+            continue
+        gliner_stacks_seen += 1
+        for chunk_stage in (s for s in pipeline.stages if s.provider == "chunk.markdown"):
+            max_tokens = int(chunk_stage.config.get("max_tokens", 512))
+            assert max_tokens <= _GLINER_SAFE_CHUNK_MAX_TOKENS, (
+                f"{stack.name}: chunk.markdown max_tokens={max_tokens} exceeds the gliner-safe cap "
+                f"({_GLINER_SAFE_CHUNK_MAX_TOKENS} chunker-tokens ~ 768 mdeberta-tokens); a longer "
+                "chunk is silently truncated by the mdeberta window."
+            )
+    assert gliner_stacks_seen >= 1, "expected at least one shipped stack feeding a gliner extractor"
+
+
 def test_default_stack_uses_only_offline_permissive_providers() -> None:
     """``default.yaml`` sneaks in NO learned/endpoint Provider (fully offline + deterministic)."""
     pipeline = load_stack(_DEFAULT, storage_uri="file:///tmp/x", corpus_dir="file:///tmp/c")

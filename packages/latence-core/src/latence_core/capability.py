@@ -436,6 +436,56 @@ class GraphCompleter(Protocol):
         ...
 
 
+@runtime_checkable
+class ContextEnricher(Protocol):
+    """Projects the assembled KG back onto each chunk as a compact header (W13 context enrichment).
+
+    The W13 **context-enrichment** Capability (ADR-0039): an OPTIONAL Stage placed AFTER Graph
+    Assembly that stamps each :class:`~latence_core.contracts.ChunkRecord` with a compact
+    :class:`~latence_core.contracts.ContextHeader` — its canonical entities + top-k KG-neighbor
+    triples — which the Export prepends to the EMBEDDING input ONLY. The connections a chunk needs
+    for retrieval relevance are ALREADY computed as the KG; this surfaces them into the vector + a
+    metadata column, without inflating the stored chunk text (the LLM window stays the clean chunk).
+
+    Shaped like :class:`LabelInducer` (a chunk→chunk transform that yields the SAME chunks with an
+    additive field populated via ``chunk.model_copy(update=...)``) but corpus-level and multi-input,
+    like :class:`Disambiguator`: it consumes the run's :class:`~latence_core.contracts.ChunkRecord`s
+    (what it enriches + passes through), :class:`~latence_core.contracts.EntityMention`s (a chunk's
+    canonical entities, via ``EntityMention.chunk_record_id``) AND the assembled
+    :class:`~latence_core.contracts.GraphRecord`s (NODE + EDGE — the entities' KG neighbors). It
+    yields the SAME chunks, 1:1 and order-stable, with ``context_header`` populated (or left
+    ``None``
+    for a chunk with no gated canonical entity — nothing to add). Genuinely optional +
+    contract-preserving: offsets/provenance/content are untouched, so a stack without the Stage is
+    byte-identical (the field stays ``None`` and the Export prepends nothing).
+
+    Deterministic + seeded (the CPU reference ``context.kg_header`` is pure-Python, no model, no
+    key)
+    → byte-identical: every collection in the header is sorted, and the neighbor triples are
+    confidence-sorted then CAPPED (``max_neighbors_per_entity`` top-k per entity + an overall
+    ``max_triples``) so a corpus-wide hub entity contributes only its TOP relations — the mandatory
+    anti-bloat + hub-entity guard (ADR-0039). The optional LLM situating-sentence mode is a
+    documented follow-on (deterministic=False), not the default.
+    """
+
+    def enrich(
+        self,
+        chunks: Iterable[ChunkRecord],
+        mentions: Iterable[EntityMention],
+        graph_records: Iterable[GraphRecord],
+    ) -> Iterator[ChunkRecord]:
+        """Consume the run's chunks + mentions + assembled graph; yield the SAME chunks enriched.
+
+        The chunk stream is threaded 1:1 and order-stable (never dropped or reordered): a chunk with
+        at least one confidence-gated canonical entity carries a populated
+        :class:`~latence_core.contracts.ContextHeader`; a chunk with none flows through with
+        ``context_header`` still ``None`` (byte-identical to no-stage for that chunk). Deterministic
+        +
+        seeded → byte-reproducible (sorted + capped + content-addressed, the Baseline bar).
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class DeltaOutcome:
     """The result of applying a :class:`Delta` to the parent corpus (S11 affected-set recompute).

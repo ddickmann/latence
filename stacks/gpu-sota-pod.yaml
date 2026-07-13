@@ -53,20 +53,27 @@ stages:
     capability: chunk
     provider: chunk.markdown
     depends_on: [parse]
-    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+    # NOTE (W12 gliner window): the downstream gliner-family extractors (fused_entity_relation.gliner2,
+    # redaction.gliner_pii) run on mdeberta-v3, whose token window is 768. chunk.markdown's max_tokens
+    # is counted by the CHUNKER's tokenizer, which differs from mdeberta by ~1.2× (pod-measured: a
+    # 768-chunker-token cap hit mdeberta median 666 / MAX 921). Bigger chunks = better relation/RAG
+    # context, so maximize chunk size subject to the window: 640 chunker-tokens ≈ ≤768 mdeberta-tokens
+    # (the calibrated safe near-max). The provider `max_len` guard (default 768) is the hard backstop.
+    config: {max_tokens: 640, overlap_tokens: 80, min_tokens: 8}
 
   - name: content_screen
     capability: content_screening
     provider: screening.content_keyword
     depends_on: [chunk]
 
-  # --- ONE fused Entity+Relation Stage (ADR-0013): `relation.gliner_relex` does joint NER+RE in
-  # one pass via `extract_fused`, satisfying `FusedEntityRelationExtractor`. The Runner routes its
-  # FusedExtraction (mentions + relations) to BOTH downstream consumers with no separate Entity
-  # Stage (no double-NER, no RelationExtractor-seam ContractError). Skipped-with-flag on a CPU host.
+  # --- ONE fused Entity+Relation Stage (ADR-0013): `fused_entity_relation.gliner2` does joint
+  # NER+RE in one pass via `extract_fused`, satisfying `FusedEntityRelationExtractor` — the W9
+  # unified default (native quantize+compile; drop-in for the superseded relation.gliner_relex,
+  # ADR-0036). The Runner routes its FusedExtraction (mentions + relations) to BOTH downstream
+  # consumers with no separate Entity Stage (no double-NER). Skipped-with-flag on a CPU host.
   - name: extract
     capability: fused_entity_relation
-    provider: relation.gliner_relex
+    provider: fused_entity_relation.gliner2
     depends_on: [content_screen]
     config:
       device: cuda

@@ -82,6 +82,9 @@ class _FakeGLiNER:
         #: the dtype the provider applied via ``.to(dtype)`` (W8) — None until cast. FAITHFUL: the
         #: plain ``gliner`` library casts via ``.to()``, NOT via ``from_pretrained`` perf kwargs.
         self.cast_dtype: Any = None
+        #: FAITHFUL to the real GLiNER model: a ``config`` with a ``max_len`` the library truncates
+        #: to. The provider's W12 model-boundary guard sets this so a test can assert the bound.
+        self.config = types.SimpleNamespace(max_len=384)
 
     @classmethod
     def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
@@ -170,6 +173,20 @@ def test_gliner_applies_bf16_via_to_on_cuda_no_perf_kwargs_to_from_pretrained(
     list(extractor.extract([_chunk("Alice spoke.")]))  # triggers the lazy load + cast
     # The provider loaded bare (no TypeError from the faithful from_pretrained) AND cast to bf16.
     assert extractor._model.cast_dtype is bf16
+
+
+def test_gliner_bounds_model_window_default_768(fake_gliner: type[_FakeGLiNER]) -> None:
+    # W12 model-boundary guard: the provider sets model.config.max_len (the gliner truncation lever)
+    # so a chunk longer than the window is not SILENTLY truncated. Default 768 (mdeberta-v3 window).
+    extractor = GlinerEntityExtractor({"labels": ["person"]})
+    list(extractor.extract([_chunk("Alice spoke.")]))  # triggers the lazy load + window bound
+    assert extractor._model.config.max_len == 768
+
+
+def test_gliner_model_window_config_override(fake_gliner: type[_FakeGLiNER]) -> None:
+    extractor = GlinerEntityExtractor({"labels": ["person"], "max_len": 640})
+    list(extractor.extract([_chunk("Alice spoke.")]))
+    assert extractor._model.config.max_len == 640
 
 
 def test_gliner_no_cast_on_cpu(

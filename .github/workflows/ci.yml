@@ -88,12 +88,14 @@ jobs:
           uv pip install --no-deps -e packages/latence-relation-llm
           uv pip install --no-deps -e packages/latence-pii-gliner
           uv pip install --no-deps -e packages/latence-pii-gliner2
+          uv pip install --no-deps -e packages/latence-extract-gliner2
           uv pip install --no-deps -e packages/latence-pii-presidio
           uv pip install --no-deps -e packages/latence-parser-endpoint
           uv pip install --no-deps -e packages/latence-ner-endpoint
           uv pip install --no-deps -e packages/latence-embedder-endpoint
           uv pip install --no-deps -e packages/latence-embedder-st
           uv pip install --no-deps -e packages/latence-parser-lighton
+          uv pip install --no-deps -e packages/latence-parser-lighton-vllm
           uv pip install --no-deps -e packages/latence-parser-glm
           uv pip install --no-deps -e packages/latence-runner-airflow
           uv pip install --no-deps -e packages/latence-linkpred-ultra
@@ -184,6 +186,7 @@ jobs:
           uv build --package latence-embedder-endpoint
           uv build --package latence-embedder-st
           uv build --package latence-parser-lighton
+          uv build --package latence-parser-lighton-vllm
           uv build --package latence-parser-glm
           uv build --package latence-parser-render
           uv build --package latence-runner-airflow

@@ -105,7 +105,8 @@ def test_shuffled_completion_order_is_byte_identical() -> None:
     # be mis-assigned; index-keyed reassembly keeps each doc's own labels.
     n = 4
     chunks = [_chunk(f"d{i}") for i in range(n)]
-    # doc i gets label "type_i"; doc i completes after (n-i)*0.02s so d3 finishes before d0.
+    # doc i gets label "type_i" (canonicalized to "type i"); doc i completes after (n-i)*0.02s so
+    # d3 finishes before d0.
     steps = [fake.reply_after(_good_reply([f"type_{i}"]), delay=(n - i) * 0.02) for i in range(n)]
     provider = _provider(max_concurrency=n)
     with fake.install(steps):
@@ -113,7 +114,7 @@ def test_shuffled_completion_order_is_byte_identical() -> None:
     # Each document kept its OWN labels despite the reversed completion order.
     for i, c in enumerate(out):
         assert c.induced_labels is not None
-        assert c.induced_labels.entity_types == [f"type_{i}"], f"doc {i} got wrong labels"
+        assert c.induced_labels.entity_types == [f"type {i}"], f"doc {i} got wrong labels"
 
 
 def test_two_concurrent_runs_byte_identical() -> None:

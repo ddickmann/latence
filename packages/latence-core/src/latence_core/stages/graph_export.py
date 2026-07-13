@@ -8,7 +8,9 @@ Stage) it writes, deterministically, three representations of the same graph:
 
 * **Parquet** (``nodes.parquet`` + ``edges.parquet``) — loads as an Arrow / Delta table into
   a lakehouse or graph-RAG engine. Nested contract fields are JSON-encoded strings so the
-  schema stays flat (ADR-0006), mirroring the S1 exporter.
+  schema stays flat (ADR-0006), mirroring the S1 exporter. The node entity-type column is named
+  ``type`` (W12) so it matches GraphML (``type``) and TTL (``lg:entityType``) — the same entity
+  type under the same name in all three formats.
 * **TTL** (``graph.ttl``) — well-formed RDF Turtle: each node is a subject with an
   ``rdfs:label``, each edge a triple ``:node_src :label :node_tgt`` plus a reified statement
   carrying its confidence and Evidence. Hand-emitted with strict IRI/literal escaping (no
@@ -141,7 +143,11 @@ class KnowledgeGraphExport:
             {
                 "node_id": n.node_id,
                 "entity_id": n.entity_id,
-                "label": n.label,
+                # W12: the entity-type column is named ``type`` (not ``label``) so the Parquet
+                # export names it consistently with GraphML (``<data key="type">``) and TTL
+                # (``lg:entityType``); a consumer reading ``type`` gets the entity type in all three
+                # formats. (Export-schema note only — the GraphNode record contract is unchanged.)
+                "type": n.label,
                 "canonical_name": n.canonical_name,
                 "kb_id": n.kb_id or "",
                 "confidence": n.confidence,
@@ -156,7 +162,7 @@ class KnowledgeGraphExport:
             [
                 ("node_id", pa.string()),
                 ("entity_id", pa.string()),
-                ("label", pa.string()),
+                ("type", pa.string()),
                 ("canonical_name", pa.string()),
                 ("kb_id", pa.string()),
                 ("confidence", pa.float64()),

@@ -33,12 +33,30 @@ def test_length_capped() -> None:
 
 def test_non_str_coerced() -> None:
     assert sanitize_label(123) == "123"
-    assert sanitize_label(None) == "None"  # str(None) is a non-empty label; upstream schema rejects
+    # str(None) is a non-empty label; upstream schema rejects it. Canonicalized (casefolded).
+    assert sanitize_label(None) == "none"
 
 
-def test_list_dedupes_case_insensitively_first_seen_casing_wins() -> None:
+def test_canonical_normal_form_casefold_and_separator_collapse() -> None:
+    # W12: casefold + treat '_'/'-'/whitespace as space-equivalent → ONE normal form per label.
+    assert sanitize_label("Date") == "date"
+    assert sanitize_label("date") == "date"
+    assert sanitize_label("payment_product") == "payment product"
+    assert sanitize_label("payment product") == "payment product"
+    assert sanitize_label("payment-product") == "payment product"
+    assert sanitize_label("Website") == "website"
+
+
+def test_canonical_form_collapses_case_and_format_variants_to_two() -> None:
+    # The spec's headline case: Date/date + payment_product/payment product → 2 canonical labels.
+    result = sanitize_labels(["Date", "date", "payment_product", "payment product"])
+    assert result.labels == ["date", "payment product"]
+    assert result.dropped_for_count == 0
+
+
+def test_list_dedupes_case_and_format_insensitively() -> None:
     result = sanitize_labels(["Person", "person", "PERSON", "Org"])
-    assert result.labels == ["Person", "Org"]
+    assert result.labels == ["person", "org"]
     assert result.dropped_for_count == 0
 
 
@@ -60,5 +78,6 @@ def test_non_list_yields_empty() -> None:
 
 
 def test_mixed_junk_and_valid() -> None:
+    # 'also_valid' canonicalizes to 'also valid' ('_' is space-equivalent); 'valid' dedupes.
     result = sanitize_labels(["  valid ", "", "\x00", "also_valid", "valid"])
-    assert result.labels == ["valid", "also_valid"]
+    assert result.labels == ["valid", "also valid"]

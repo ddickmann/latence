@@ -28,12 +28,13 @@ from latence_core.quality import (
 from latence_core.runner import LocalRunner
 
 
-def test_schema_version_is_v18() -> None:
-    # v18 (H-C1 §4): RedactionQuality gained ``redaction_disabled_for_sensitive`` — the loud
-    # count of sensitive docs whose redaction control ran no detectors. v17 (P3-F3) added the
-    # optional ``conformance`` roll-up; v16 (P3-F1) the StageMetrics profile/device columns.
-    assert QUALITY_SCHEMA_VERSION == 18
-    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 18
+def test_schema_version_is_v19() -> None:
+    # v19 (W13, ADR-0039): the report gained an optional ``context_enrichment`` roll-up
+    # (chunks_enriched / avg_neighbors_per_chunk / hub_entities_capped). v18 (H-C1 §4):
+    # RedactionQuality gained ``redaction_disabled_for_sensitive``. v17 (P3-F3) added the optional
+    # ``conformance`` roll-up; v16 (P3-F1) the StageMetrics profile/device columns.
+    assert QUALITY_SCHEMA_VERSION == 19
+    assert QualityReport(pipeline_name="p", run_id="r").schema_version == 19
 
 
 def test_completeness_passes_only_when_provenance_classification_and_offsets_align() -> None:

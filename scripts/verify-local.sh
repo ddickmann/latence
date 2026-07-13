@@ -29,10 +29,11 @@ uv sync
 # Heavy/endpoint provider SOURCES only (no heavy deps) — their tests monkeypatch the heavy
 # dep; keeps the CPU-first offline env intact (ADR-0007/0016). Mirrors the CI step exactly.
 for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence-pii-gliner \
-         latence-pii-gliner2 latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
+         latence-pii-gliner2 latence-extract-gliner2 latence-pii-presidio latence-parser-endpoint \
+         latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
-         latence-parser-lighton latence-parser-glm latence-linkpred-ultra \
-         latence-schema-inducer latence-parser-render; do
+         latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \
+         latence-linkpred-ultra latence-schema-inducer latence-parser-render; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
 done
 ok "workspace synced + heavy sources installed --no-deps"
@@ -62,6 +63,7 @@ uv run latence stack validate stacks/gpu-ocr.yaml
 uv run latence stack validate stacks/universal-parse.yaml   # W5 any-file parser; Parse skip-with-flag on CPU
 uv run latence stack validate stacks/linkpred-base.yaml   # the reference completer RUNS on CPU
 uv run latence stack validate stacks/schema-induction.yaml  # induce+extract skip-with-flag; CPU spine validates (W4)
+uv run latence stack validate stacks/context-enrichment.yaml  # the KG→chunk enrich Stage RUNS on CPU (W13)
 ok "stack validate"
 
 step "bake-off matrices (Goal B — the shipped CPU matrices)"

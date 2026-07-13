@@ -7,6 +7,7 @@ from latence_core.contracts import (
     SCHEMA_VERSION,
     ChunkRecord,
     Classification,
+    ContextHeader,
     Disposition,
     DocumentRecord,
     OffsetMap,
@@ -180,12 +181,13 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 14 by W4 schema induction (InducedLabels contract + ChunkRecord/DocumentRecord gain
-    # the additive ``induced_labels`` field); 13 was the H-C1 §4 redaction no-op floor
-    # (RedactionRecord gains ``redaction_disabled_for_sensitive``); 12 the DeltaChurn
+    # Bumped to 15 by W13 context enrichment (ContextHeader contract + ChunkRecord gains the additive
+    # ``context_header`` field); 14 was W4 schema induction (InducedLabels contract +
+    # ChunkRecord/DocumentRecord gain the additive ``induced_labels`` field); 13 the H-C1 §4 redaction
+    # no-op floor (RedactionRecord gains ``redaction_disabled_for_sensitive``); 12 the DeltaChurn
     # affected-set-witness fields (issue #42); 11 the S4 offset-map coordinate fix; 10 the S11
     # incremental-delta contracts.
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:
@@ -280,6 +282,52 @@ def test_chunk_record_carries_offset_map_and_roundtrips() -> None:
         ).offset_map
         is None
     )
+
+
+def test_context_header_is_additive_and_prior_version_json_validates() -> None:
+    """W13: ChunkRecord.context_header is additive + defaulted None; a v14 chunk JSON still validates."""
+    # Default None (a chunk with no context_enrichment Stage).
+    plain = ChunkRecord(
+        record_id="d1#chunk-0",
+        document_record_id="d1",
+        index=0,
+        provenance=_chunk_provenance(),
+        classification=_classification(),
+        content="Alice works for Acme.",
+        token_count=4,
+    )
+    assert plain.context_header is None
+
+    # A prior-version (v14) ChunkRecord JSON — one that predates the field entirely — still validates
+    # (the additive-field guarantee): drop context_header AND pin schema_version to 14.
+    prior = plain.model_dump(mode="json")
+    prior.pop("context_header")
+    prior["schema_version"] = 14
+    restored_prior = ChunkRecord.model_validate(prior)
+    assert restored_prior.context_header is None
+
+    # A populated header round-trips byte-for-byte.
+    enriched = plain.model_copy(
+        update={
+            "context_header": ContextHeader(
+                entities=["Acme", "Alice"],
+                entity_types=["ORG", "PERSON"],
+                neighbor_triples=["Alice —works_for→ Acme"],
+                kg_node_ids=["n-acme", "n-alice"],
+                neighbor_node_ids=["n-berlin"],
+            )
+        }
+    )
+    restored = ChunkRecord.model_validate_json(enriched.model_dump_json())
+    assert restored == enriched
+    assert restored.context_header is not None
+    assert restored.context_header.entities == ["Acme", "Alice"]
+
+
+def test_context_header_entities_and_types_must_align() -> None:
+    """A ContextHeader with mismatched entities/entity_types lengths fails validation."""
+    with pytest.raises(ValidationError):
+        ContextHeader(entities=["Acme", "Alice"], entity_types=["ORG"])
 
 
 def test_chunk_record_flagged_when_it_has_markers() -> None:

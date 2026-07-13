@@ -63,6 +63,15 @@ def test_union_dedupes_config_and_induced_order_stable() -> None:
     assert effective_labels(config, induced, LabelSlot.ENTITY) == ["person", "org", "gene"]
 
 
+def test_union_dedupes_case_insensitively_config_surface_form_wins() -> None:
+    # W12: a config 'Bank' and an induced 'bank' collapse to ONE entry — the config surface form is
+    # kept (config comes first), the induced case-variant is dropped, defense-in-depth against any
+    # residual case drift between the config floor and the canonicalized induced labels.
+    config = ["Bank"]
+    induced = _induced(entity_types=["bank", "account"])
+    assert effective_labels(config, induced, LabelSlot.ENTITY) == ["Bank", "account"]
+
+
 def test_slots_are_independent() -> None:
     induced = _induced(
         entity_types=["person"], relation_types=["works_for"], pii_types=["email"]

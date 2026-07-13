@@ -26,6 +26,7 @@ members = [
     "latence-disambig-embedding",
     "latence-embedder-endpoint",
     "latence-embedder-st",
+    "latence-extract-gliner2",
     "latence-framework-dev",
     "latence-linkpred-ultra",
     "latence-ner-endpoint",
@@ -34,6 +35,7 @@ members = [
     "latence-parser-endpoint",
     "latence-parser-glm",
     "latence-parser-lighton",
+    "latence-parser-lighton-vllm",
     "latence-parser-pdfplumber",
     "latence-parser-plaintext",
     "latence-parser-render",
@@ -1807,6 +1809,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "latence-extract-gliner2"
+version = "0.1.0"
+source = { editable = "packages/latence-extract-gliner2" }
+dependencies = [
+    { name = "gliner2", extra = ["local"] },
+    { name = "latence-core" },
+    { name = "peft" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gliner2", extras = ["local"], specifier = ">=1.0,<2" },
+    { name = "latence-core", editable = "packages/latence-core" },
+    { name = "peft", specifier = ">=0.10" },
+]
+
+[[package]]
 name = "latence-framework-dev"
 version = "0.0.0"
 source = { virtual = "." }
@@ -1976,6 +1995,27 @@ requires-dist = [
 ]
 
 [[package]]
+name = "latence-parser-lighton-vllm"
+version = "0.1.0"
+source = { editable = "packages/latence-parser-lighton-vllm" }
+dependencies = [
+    { name = "latence-core" },
+    { name = "latence-parser-lighton" },
+    { name = "openai" },
+    { name = "pillow" },
+    { name = "pypdfium2" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latence-core", editable = "packages/latence-core" },
+    { name = "latence-parser-lighton", editable = "packages/latence-parser-lighton" },
+    { name = "openai", specifier = ">=1.0,<3" },
+    { name = "pillow", specifier = ">=10.0" },
+    { name = "pypdfium2", specifier = ">=4.0" },
+]
+
+[[package]]
 name = "latence-parser-pdfplumber"
 version = "0.1.0"
 source = { editable = "packages/latence-parser-pdfplumber" }
@@ -2046,12 +2086,14 @@ source = { editable = "packages/latence-pii-gliner2" }
 dependencies = [
     { name = "gliner2", extra = ["local"] },
     { name = "latence-core" },
+    { name = "peft" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "gliner2", extras = ["local"], specifier = ">=1.0,<2" },
     { name = "latence-core", editable = "packages/latence-core" },
+    { name = "peft", specifier = ">=0.10" },
 ]
 
 [[package]]

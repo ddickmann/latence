@@ -46,6 +46,34 @@ if TYPE_CHECKING:
 _EXPORT_BATCH_ROWS = 1024
 
 
+def _context_header_text(header: dict[str, Any]) -> str:
+    """Render a chunk's :class:`~latence_core.contracts.ContextHeader` into a compact embedding
+    prefix.
+
+    W13 (ADR-0039): the OPTIONAL ``context_enrichment`` Stage stamps a chunk with a compact header
+    (its canonical entities + top-k KG-neighbor triples); the Export prepends THIS rendered text to
+    the EMBEDDING input only, so the coherence inflates the vector, never the stored chunk. Rendered
+    deterministically (the header's collections are already sorted + capped): an ``Entities:``
+    clause
+    (``name (type)``) and a ``Relations:`` clause (the rendered ``A —label→ B`` triples). An empty
+    header (no entities and no triples) renders ``""`` so a chunk with nothing to add embeds exactly
+    its own text (byte-identical to no header).
+    """
+    entities = header.get("entities") or []
+    entity_types = header.get("entity_types") or []
+    triples = header.get("neighbor_triples") or []
+    parts: list[str] = []
+    if entities:
+        rendered = ", ".join(
+            f"{name} ({etype})" if etype else str(name)
+            for name, etype in zip(entities, entity_types, strict=False)
+        )
+        parts.append(f"Entities: {rendered}")
+    if triples:
+        parts.append("Relations: " + "; ".join(str(t) for t in triples))
+    return " | ".join(parts)
+
+
 def _corpus_text(row: dict[str, Any]) -> str:
     """The corpus text an Embedder embeds for a row.
 
@@ -53,10 +81,42 @@ def _corpus_text(row: dict[str, Any]) -> str:
     Chunk/Document carries its text in ``content``. Embedding ``masked_content`` when
     present keeps the vector consistent with the exported PII-handled text (never the
     raw, un-redacted text).
+
+    W13 (ADR-0039): when the row carries a :class:`~latence_core.contracts.ContextHeader`
+    (``context_enrichment`` Stage upstream), its compact rendering is PREPENDED to the embedding
+    input ONLY — ``header_text + "\\n" + text`` — so the KG coherence goes into the VECTOR while the
+    stored ``content``/``masked_content`` stays byte-unchanged (the LLM window never grows). A row
+    with no header (or an empty one) embeds exactly its own text, byte-identical to today.
     """
     if "masked_content" in row:
-        return str(row.get("masked_content") or "")
-    return str(row.get("content") or "")
+        base = str(row.get("masked_content") or "")
+    else:
+        base = str(row.get("content") or "")
+    header = row.get("context_header")
+    if isinstance(header, dict):
+        header_text = _context_header_text(header)
+        if header_text:
+            return f"{header_text}\n{base}"
+    return base
+
+
+def _context_columns_for_row(row: dict[str, Any]) -> dict[str, Any]:
+    """The two W13 Parquet context columns for a dumped row (ADR-0039).
+
+    ``context_header`` is the chunk's :class:`~latence_core.contracts.ContextHeader` as a sorted-key
+    JSON string (``""`` when the row has no header — a redaction/document row, or a chunk the
+    ``context_enrichment`` Stage left unenriched), and ``neighbor_entity_ids`` its
+    ``neighbor_node_ids`` as a native ``list<string>`` (``[]`` when absent) — the query-time
+    KG-expansion join keys a retriever filters/reranks on (query-time expansion is the retriever's
+    job — ADR-0017; W13 only emits the keys).
+    """
+    header = row.get("context_header")
+    if isinstance(header, dict):
+        return {
+            "context_header": json.dumps(header, sort_keys=True),
+            "neighbor_entity_ids": list(header.get("neighbor_node_ids") or []),
+        }
+    return {"context_header": "", "neighbor_entity_ids": []}
 
 
 class JsonlParquetExport:
@@ -72,6 +132,19 @@ class JsonlParquetExport:
             Embedder's fixed ``dimension``. Absent ⇒ no embeddings (the corpus text is
             still exported with full Provenance/Classification, so any vector DB can
             ingest it and embed later).
+        context_columns: bool  — OPTIONAL opt-in W13 projection (ADR-0039). When True, two extra
+            Parquet columns are written so a downstream retriever/vector-DB can filter/hybrid-BM25/
+            rerank on the KG projection: ``context_header`` (the chunk's
+            :class:`~latence_core.contracts.ContextHeader` as a JSON string, ``""`` when absent) and
+            ``neighbor_entity_ids`` (the header's ``neighbor_node_ids`` as a native
+            ``list<string>``,
+            the query-time KG-expansion join keys). Absent/False ⇒ the columns are NOT written and
+            the
+            Parquet schema is byte-identical to today (the genuinely-optional guarantee — a stack
+            without the ``context_enrichment`` Stage never sets it). The JSONL always carries the
+            full
+            ``context_header`` (or ``null``) via the record dump, exactly like every other additive
+            field, so no flag is needed there.
     """
 
     @classmethod
@@ -106,6 +179,9 @@ class JsonlParquetExport:
         config = config or {}
         self._basename = str(config.get("basename", "records"))
         self._embedder = self._build_embedder(config.get("embedder"), registry)
+        # W13 (ADR-0039): opt-in Parquet projection of the ContextHeader (byte-identical schema when
+        # absent — the genuinely-optional guarantee).
+        self._context_columns = bool(config.get("context_columns", False))
 
     @staticmethod
     def _build_embedder(
@@ -165,7 +241,7 @@ class JsonlParquetExport:
         sorted-key JSONL line order + trailing-newline rule, same flat Parquet schema + values.
         """
         embed = self._embedder is not None
-        schema = self._parquet_schema(embed)
+        schema = self._parquet_schema(embed, self._context_columns)
 
         out_dir = out_dir.rstrip("/")
         # Streaming opens bypass write_bytes' implicit parent-makedirs, so ensure the export
@@ -195,7 +271,9 @@ class JsonlParquetExport:
                     for row in batch_rows:
                         line = json.dumps(row, sort_keys=True, ensure_ascii=False)
                         jsonl_fh.write((line + "\n").encode("utf-8"))
-                    record_batch = self._record_batch(batch_rows, schema, embed)
+                    record_batch = self._record_batch(
+                        batch_rows, schema, embed, self._context_columns
+                    )
                     writer.write_table(pa.Table.from_batches([record_batch], schema))  # type: ignore[no-untyped-call]
                     wrote_any = True
                 if not wrote_any:
@@ -229,12 +307,15 @@ class JsonlParquetExport:
             row["embedding"] = vector
 
     @staticmethod
-    def _parquet_schema(embed: bool) -> pa.Schema:
+    def _parquet_schema(embed: bool, context_columns: bool = False) -> pa.Schema:
         """The flat Parquet schema (ADR-0006): nested contract fields as JSON strings.
 
         Fixing the schema up front lets the ``ParquetWriter`` stream row-group batches into one
         file (and lets an all-empty corpus still write the column set). The optional embedding
-        is a native ``list<double>`` column so a vector DB reads it directly.
+        is a native ``list<double>`` column so a vector DB reads it directly. The W13 context
+        columns (``context_header`` JSON + ``neighbor_entity_ids`` native ``list<string>``) are
+        added
+        ONLY when opted in, so the default schema is byte-identical to today (ADR-0039).
         """
         fields = [
             pa.field("record_id", pa.string()),
@@ -246,16 +327,26 @@ class JsonlParquetExport:
         ]
         if embed:
             fields.append(pa.field("embedding", pa.list_(pa.float64())))
+        if context_columns:
+            fields.append(pa.field("context_header", pa.string()))
+            fields.append(pa.field("neighbor_entity_ids", pa.list_(pa.string())))
         return pa.schema(fields)
 
     @staticmethod
     def _record_batch(
-        rows: list[dict[str, Any]], schema: pa.Schema, embed: bool
+        rows: list[dict[str, Any]],
+        schema: pa.Schema,
+        embed: bool,
+        context_columns: bool = False,
     ) -> pa.RecordBatch:
         """One Arrow RecordBatch (a Parquet row group) for a batch of dumped rows.
 
         Same flat projection as the buffered path: nested Provenance/Classification serialized
-        as sorted-key JSON strings, content/media_type verbatim, optional embedding native.
+        as sorted-key JSON strings, content/media_type verbatim, optional embedding native. When
+        the W13 context columns are opted in, ``context_header`` is the chunk's ContextHeader as a
+        sorted-key JSON string (``""`` when absent) and ``neighbor_entity_ids`` its neighbor node
+        ids
+        (the query-time KG-expansion join keys) as a native ``list<string>`` (``[]`` when absent).
         """
         flat = [
             {
@@ -266,6 +357,7 @@ class JsonlParquetExport:
                 "content": row.get("content", ""),
                 "media_type": row.get("media_type", ""),
                 **({"embedding": row["embedding"]} if embed else {}),
+                **(_context_columns_for_row(row) if context_columns else {}),
             }
             for row in rows
         ]

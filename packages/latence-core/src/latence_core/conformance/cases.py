@@ -62,6 +62,7 @@ class Capability(StrEnum):
     DISAMBIGUATION = "disambiguation"
     GRAPH = "graph"
     GRAPH_COMPLETION = "graph_completion"
+    CONTEXT_ENRICHMENT = "context_enrichment"
     EXPORT = "export"
     EMBEDDING = "embedding"
     DELTA = "delta"
@@ -80,11 +81,16 @@ _PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     "label_inducer": Capability.SCHEMA_INDUCTION,
     "entity": Capability.ENTITY,
     "relation": Capability.RELATION,
+    # A FUSED Entity+Relation provider (extract_fused) is checked against the RELATION case (the
+    # fused branch drives extract_fused). ``relation.gliner_relex`` uses the ``relation`` prefix for
+    # back-compat; ``fused_entity_relation.gliner2`` (W9) names the fused Capability explicitly.
+    "fused_entity_relation": Capability.RELATION,
     "redaction": Capability.REDACTION,
     "profiling": Capability.PROFILING,
     "disambiguation": Capability.DISAMBIGUATION,
     "graph": Capability.GRAPH,
     "graph_completion": Capability.GRAPH_COMPLETION,
+    "context": Capability.CONTEXT_ENRICHMENT,
     "export": Capability.EXPORT,
     "embedding": Capability.EMBEDDING,
     "delta": Capability.DELTA,
@@ -525,6 +531,80 @@ def _render_case() -> ConformanceCase:
     )
 
 
+def _lighton_vllm_case() -> ConformanceCase:
+    """Parse (parser.lighton_vllm, W10): rasterise a fake PDF → served vLLM OCR (stub) → PARSED.
+
+    ``parser.lighton_vllm`` (compute="either") is **infra-gated** like ``parser.endpoint`` — it
+    needs a running vLLM server — so this case is ``stub_scoped``: the async ``AsyncOpenAI`` stub
+    (:func:`stubs.install_openai`) stands in for the served endpoint. But it also **rasterises** its
+    input (unlike the raw-bytes ``parser.endpoint``), so its REAL shared-rasteriser code path runs
+    offline against a faithful fake ``pypdfium2``/``PIL``
+    (:func:`stubs.install_lighton_vllm_offline`): the fake PDF renders to a fake page image whose
+    ``.size``/``.save`` drive the real 1540px downscale + the base64 data-URL encode, and the stub
+    vLLM transcribes it — the exact rasterise → POST → PageMap round-trip the Provider performs. A
+    single fake page → one PARSED record with a page map (a genuine C1 offset check). C2's
+    adversarial input is a type-spoofed ``.pdf`` (bytes are not a PDF) → a graceful PARSE_ERROR
+    before any endpoint call.
+    """
+    canonical_pdf = stubs.lighton_vllm_fake_pdf([fixtures.CANONICAL_TEXT])
+    config = {"base_url": "http://stub-vllm/v1"}
+
+    def _canonical_input() -> ParserInput:
+        prov = fixtures.canonical_provenance().model_copy(
+            update={"file_name": "canonical.pdf", "file_type": "pdf"}
+        )
+        return ParserInput(
+            provenance=prov,
+            classification=fixtures.canonical_classification(),
+            content=canonical_pdf,
+        )
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        # The stub vLLM transcribes each page image back to the canonical text so the produced
+        # offsets match the canonical page map — a genuine C1 offset check, not a no-op.
+        with (
+            stubs.install_lighton_vllm_offline(),
+            stubs.install_openai(reply=fixtures.CANONICAL_TEXT),
+        ):
+            return list(provider.parse([_canonical_input()]))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        if not _records_contract_valid(records, empty_ok=False):
+            return False
+        return all(
+            isinstance(r, DocumentRecord)
+            and r.disposition is Disposition.PARSED
+            and r.page_map is not None
+            for r in records
+        )
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # A type-spoofed .pdf (bytes are not a PDF) → a graceful PARSE_ERROR before any endpoint
+        # call (the shared rasteriser's offset-0 spoof guard), no PII leaked.
+        spoof = _adversarial_parser_input(fixtures.PII_ADVERSARIAL_TEXT.encode("utf-8"))
+        spoof = spoof.model_copy(
+            update={
+                "provenance": spoof.provenance.model_copy(
+                    update={"file_name": "adversarial.pdf", "file_type": "pdf"}
+                )
+            }
+        )
+        with (
+            stubs.install_lighton_vllm_offline(),
+            stubs.install_openai(reply=fixtures.CANONICAL_TEXT),
+        ):
+            return _capture_raise(lambda: list(provider.parse([spoof])))
+
+    return ConformanceCase(
+        capability=Capability.PARSE,
+        config=config,
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        stub_scoped=True,
+    )
+
+
 def _chunk_case() -> ConformanceCase:
     """Chunk: split the canonical documents; a PARSE_ERROR doc yields no chunks (graceful empty)."""
 
@@ -746,8 +826,15 @@ def _entity_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
     )
 
 
-def _relation_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
-    """Relation/Fused Extraction: relate mentions; <2 mentions yields none (graceful empty)."""
+def _relation_case(*, stub_scoped: bool, gliner: bool, backend: str = "gliner") -> ConformanceCase:
+    """Relation/Fused Extraction: relate mentions; <2 mentions yields none (graceful empty).
+
+    ``backend`` selects the stub-scoped FUSED provider's fake engine when ``gliner=True``:
+    ``"gliner"`` installs the fake ``gliner`` module (the relex ``inference`` tuple —
+    ``relation.gliner_relex``); ``"gliner2"`` installs the fake ``gliner2`` module (the fastino
+    GLiNER2 nested ``extract_entities`` + ``extract_relations`` dicts — the W9 unified fused
+    ``fused_entity_relation.gliner2``). Both drive the SAME ``extract_fused`` contract offline.
+    """
     labels = ["works_for"]
     entity_labels = ["person", "org"]
 
@@ -788,7 +875,22 @@ def _relation_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
         one = c.mentions[:1]
         return _capture_raise(lambda: list(provider.relate(c.chunks, one)))
 
-    if stub_scoped and gliner:
+    if stub_scoped and gliner and backend == "gliner2":
+        # fused_entity_relation.gliner2 is a FUSED provider (extract_fused) over the fastino GLiNER2
+        # framework: extract_entities + extract_relations, the REAL nested per-label/per-relation
+        # dict shapes (NOT the relex tuple) — the W9 unified default. Same extract_fused contract.
+        def invoke(provider: Any) -> Sequence[Record]:
+            with stubs.install_gliner2(
+                entities=stubs.gliner2_entities(), relations=stubs.gliner2_relations()
+            ):
+                return _run_valid_fused(provider)
+
+        def adversarial(provider: Any) -> AdversarialOutcome:
+            with stubs.install_gliner2(entities=[], relations=[]):
+                return _run_adversarial(provider, fused=True)
+
+        config: dict[str, Any] = {"labels": entity_labels, "relation_labels": labels}
+    elif stub_scoped and gliner:
         # gliner-relex is a FUSED provider (extract_fused).
         def invoke(provider: Any) -> Sequence[Record]:
             with stubs.install_gliner(
@@ -800,7 +902,7 @@ def _relation_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
             with stubs.install_gliner(entities=[], relations=[]):
                 return _run_adversarial(provider, fused=True)
 
-        config: dict[str, Any] = {"labels": entity_labels, "relation_labels": labels}
+        config = {"labels": entity_labels, "relation_labels": labels}
     elif stub_scoped:
         # relation.llm is an LLM RelationExtractor (relate).
         def invoke(provider: Any) -> Sequence[Record]:
@@ -1043,6 +1145,52 @@ def _graph_completion_ultra_case() -> ConformanceCase:
     )
 
 
+def _context_enrichment_case() -> ConformanceCase:
+    """Context Enrichment (W13): project the assembled KG back onto each chunk as a context_header.
+
+    Invokes the enricher on the canonical corpus's chunks + mentions + reference-assembled graph.
+    The
+    output is the SAME chunks (1:1, order-stable) — a chunk with a confidence-gated canonical entity
+    carries a populated :class:`~latence_core.contracts.ContextHeader`. ``empty_ok=False``: the
+    canonical corpus has entities, so at least one chunk must be enriched (a genuine annotation
+    check,
+    not a no-op). An empty input yields no chunks, never a crash (the defined graceful empty, C2).
+    """
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        corpus = fixtures.canonical_corpus()
+        return list(
+            provider.enrich(corpus.chunks, corpus.mentions, fixtures.assembled_graph())
+        )
+
+    def valid_output(records: Sequence[object]) -> bool:
+        # C1 boundary contract (Provenance/Classification/offsets) — a chunk→chunk transform.
+        if not _records_contract_valid(records, empty_ok=False):
+            return False
+        from latence_core.contracts import ChunkRecord, ContextHeader
+
+        chunks = [r for r in records if isinstance(r, ChunkRecord)]
+        if not chunks:
+            return False
+        # At least one chunk carries a well-formed header whose entities are populated (the
+        # canonical corpus evidences entities) — the genuine annotation check, not a no-op.
+        headers = [c.context_header for c in chunks if isinstance(c.context_header, ContextHeader)]
+        return bool(headers) and all(bool(h.entities) for h in headers)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # Empty inputs: the enricher yields no chunks (nothing to enrich) — a graceful, non-crashing
+        # empty, not a raise.
+        return _capture_raise(lambda: list(provider.enrich([], [], [])))
+
+    return ConformanceCase(
+        capability=Capability.CONTEXT_ENRICHMENT,
+        config={},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+    )
+
+
 def _export_case() -> ConformanceCase:
     """Export: write records to Storage and return URIs; a disallowed URI is a graceful failure."""
 
@@ -1223,6 +1371,7 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
     Capability.DISAMBIGUATION: _disambiguation_case(),
     Capability.GRAPH: _graph_case(),
     Capability.GRAPH_COMPLETION: _graph_completion_case(),
+    Capability.CONTEXT_ENRICHMENT: _context_enrichment_case(),
     Capability.EXPORT: _export_case(),
     Capability.EMBEDDING: _embedding_case(stub_scoped=False),
     Capability.DELTA: _delta_case(),
@@ -1236,10 +1385,17 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     # parser.render (W5) is compute="either": it RUNS on a CPU host against a faithful offline fake
     # renderer (fake pypdfium2/PIL) + a stub OCR — not device-skipped, not endpoint-stub-scoped.
     "parser.render": _render_case(),
+    # parser.lighton_vllm (W10) is compute="either" + infra-gated (needs a running vLLM server):
+    # stub-scoped (async AsyncOpenAI stub for the served endpoint) but its REAL shared rasteriser
+    # runs offline (fake pypdfium2/PIL) — the served OCR is the only stubbed thing.
+    "parser.lighton_vllm": _lighton_vllm_case(),
     "entity.endpoint": _entity_case(stub_scoped=True, gliner=False),
     "entity.gliner": _entity_case(stub_scoped=True, gliner=True),
     "relation.llm": _relation_case(stub_scoped=True, gliner=False),
     "relation.gliner_relex": _relation_case(stub_scoped=True, gliner=True),
+    "fused_entity_relation.gliner2": _relation_case(
+        stub_scoped=True, gliner=True, backend="gliner2"
+    ),
     "redaction.gliner_pii": _redaction_case(stub_scoped=True, backend="gliner"),
     "redaction.gliner2": _redaction_case(stub_scoped=True, backend="gliner2"),
     "redaction.presidio": _redaction_case(stub_scoped=True, backend="presidio"),

@@ -229,6 +229,80 @@ def load_then_cast(
     return model.to(dtype)
 
 
+# The class names + module prefixes that mark a torch.compile / TorchDynamo / Inductor backend
+# failure. Detected **torch-free** by name (never importing torch) so the autotuner's correctness
+# gate can recognise the W9 lesson — an inference-time ``BackendCompilerFailed`` / dynamo error —
+# on a host without torch installed. The real lesson (gliner2-multi-v1 + torch 2.4.1) is that a
+# ``compile: true`` setting can load fine and only blow up at the FIRST forward pass; the gate must
+# reject those, so this walks the exception's ``__cause__``/``__context__`` chain and matches any
+# link by class name or the module the exception type is defined in.
+_COMPILE_FAULT_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        "BackendCompilerFailed",
+        "InductorError",
+        "CompilationError",
+        "Unsupported",  # torch._dynamo.exc.Unsupported
+        "TorchRuntimeError",
+        "BackendError",
+    }
+)
+# Module prefixes of the torch compile/dynamo/inductor stack. A fault whose exception type is
+# DEFINED in one of these modules is a compile-backend failure even if its class name is generic.
+_COMPILE_FAULT_MODULE_PREFIXES: tuple[str, ...] = (
+    "torch._dynamo",
+    "torch._inductor",
+    "torch.fx",
+    "torch._functorch",
+)
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """The exception + its ``__cause__``/``__context__`` chain (dedup, cycle-safe).
+
+    A compile-backend failure often surfaces WRAPPED (a provider ``guard`` maps a native fault to a
+    typed ``ProviderError`` with the real dynamo error as ``__cause__``); the gate must see through
+    that, so it inspects every link of the chain, not just the outermost type.
+    """
+    seen: set[int] = set()
+    chain: list[BaseException] = []
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return chain
+
+
+def is_compile_backend_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` (or anything in its cause chain) is a torch.compile / dynamo backend fault.
+
+    **Torch-free** — matches by exception class name (:data:`_COMPILE_FAULT_CLASS_NAMES`) or by the
+    module the exception type is defined in (:data:`_COMPILE_FAULT_MODULE_PREFIXES`), never
+    importing
+    torch. This is the single "is this a compile-backend failure" reasoning the W8 seam and the P8
+    autotuner's correctness gate share: the whole point of the gate is that a box which cannot
+    compile (an inference-time ``BackendCompilerFailed`` on the first forward — the W9 lesson)
+    simply
+    never gets ``compile: true``. A fault that is NOT a compile failure (a real bug, an OOM that is
+    not compile-related) is still a rejection by the gate — but recognising the compile class lets
+    the honest report name it precisely ("compile: rejected (BackendCompilerFailed)").
+    """
+    for link in _exception_chain(exc):
+        cls = type(link)
+        if cls.__name__ in _COMPILE_FAULT_CLASS_NAMES:
+            return True
+        module = getattr(cls, "__module__", "") or ""
+        if any(module.startswith(prefix) for prefix in _COMPILE_FAULT_MODULE_PREFIXES):
+            return True
+        # A dynamo error sometimes only names itself in its message (e.g. a bare RuntimeError whose
+        # text is "BackendCompilerFailed: ..."); match that conservatively so the gate is not fooled
+        # by a fault the backend raised as a generic type with a telltale message.
+        text = str(link)
+        if "BackendCompilerFailed" in text or "torch._dynamo" in text or "torch._inductor" in text:
+            return True
+    return False
+
+
 def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str = "provider") -> Any:
     """``torch.compile`` the model when ``config["compile"]`` is truthy — guarded, never crashes.
 
@@ -253,3 +327,127 @@ def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str =
             exc_info=True,
         )
         return model
+
+
+# The valid explicit gliner2 quantize/compile config values (an operator may pin one). ``auto``
+# (the default) resolves by device: True on cuda, False on cpu.
+_VALID_GLINER2_KNOB = frozenset({"auto", "true", "false", "1", "0", "yes", "no"})
+_TRUTHY_GLINER2_KNOB = frozenset({"true", "1", "yes"})
+
+
+def resolve_gliner2_knob(name: str, device: str | None, config: Mapping[str, Any]) -> bool:
+    """Resolve a gliner2 ``quantize``/``compile`` config knob to a bool — torch-free (W9).
+
+    ``config[name]`` may pin the knob (a bool, or a string ``"true"``/``"false"``/…), or be unset /
+    ``"auto"`` (the default) to resolve by device: **True on cuda, False on cpu**. Unlike the plain
+    ``gliner`` library, the ``gliner2`` framework's ``from_pretrained`` accepts native ``quantize``
+    (fp16) and ``compile`` (``torch.compile``, fused GPU kernels) kwargs — pod-measured 2.83× (PII)
+    at byte-identical output — so W9 threads them through this dep-light resolver (no torch import;
+    reuses the same override-driven CUDA probe the dtype default uses). Both knobs are a **GPU** win
+    and off on cpu by default, so ``auto`` on a CPU-only host resolves to ``False`` (never a wasted
+    fp16/compile attempt off-GPU). An unrecognised value is a hard error the caller surfaces as a
+    ConfigError — never a silent wrong knob.
+    """
+    raw = config.get(name, "auto")
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text not in _VALID_GLINER2_KNOB:
+        valid = ", ".join(sorted(_VALID_GLINER2_KNOB))
+        msg = f"invalid {name} {raw!r}: must be a bool or one of {valid}"
+        raise ValueError(msg)
+    if text == "auto":
+        return _effective_is_cuda(device)
+    return text in _TRUTHY_GLINER2_KNOB
+
+
+def load_gliner2_optimized(
+    loader: Any,
+    model_id: str,
+    device: str | None,
+    config: Mapping[str, Any],
+    *,
+    provider_name: str = "provider",
+) -> Any:
+    """Load a ``gliner2`` model with native ``quantize``/``compile`` — guarded, never crashes (W9).
+
+    The pod-validated optimized load path for the ``gliner2`` framework (``gliner2`` 1.3.2): its
+    ``GLiNER2.from_pretrained(model_id, quantize=…, compile=…)`` accepts native ``quantize`` (fp16)
+    and ``compile`` (``torch.compile`` + fused GPU kernels, "no extra dependencies required")
+    kwargs — pod-measured **2.83× (PII) / 1.74× (combined NER+RE) at byte-identical output**. Both
+    resolve via :func:`resolve_gliner2_knob` (default True on cuda / False on cpu, or the config
+    override).
+
+    **Guarded (never crashes):** an optimized load can fail (a torch/CUDA/compile fault, an older
+    ``gliner2`` that does not accept the kwargs); ANY such failure is **logged** and the loader is
+    retried **plain** (``loader(model_id)``) so the model still loads — a bad quantize/compile can
+    only ever cost throughput, never correctness or a crash. When both knobs resolve ``False`` (the
+    cpu default) the loader is called plain directly (no kwargs to pass, no fallback needed). The
+    ``quantize``/``compile`` config values are resolved *before* the load so an invalid value is a
+    ConfigError the adapter surfaces, not a silent fallback.
+    """
+    quantize = resolve_gliner2_knob("quantize", device, config)
+    compile_ = resolve_gliner2_knob("compile", device, config)
+    if not quantize and not compile_:
+        return loader(model_id)
+    try:
+        return loader(model_id, quantize=quantize, compile=compile_)
+    except Exception:  # noqa: BLE001 - deliberate: an optimized load must degrade to plain, never crash
+        _log.warning(
+            "%s: gliner2 optimized load (quantize=%s, compile=%s) failed; loading plain "
+            "(throughput only)",
+            provider_name,
+            quantize,
+            compile_,
+            exc_info=True,
+        )
+        return loader(model_id)
+
+
+# ---------------------------------------------------------------------------
+# Model token-window bound (W12-gliner-window) — the hard model-boundary guard.
+# ---------------------------------------------------------------------------
+
+#: The default gliner-family model token window. The gliner / gliner2 encoders are mdeberta-v3,
+#: whose tokenizer processes at most this many tokens; a longer input is SILENTLY truncated (tail
+#: entities/relations lost, offsets past the window unreliable). Pod-measured: with a chunk cap of
+#: 768 *chunker* tokens, the mdeberta token length hit median 666 / MAX 921 — 2 of 7 chunks exceed
+#: 768 — because the chunker counts in its OWN tokenizer, ~1.2× fewer tokens than mdeberta. So every
+#: gliner-family extractor bounds its window EXPLICITLY + CONFIGURABLY at this default; content past
+#: it is a *documented* boundary (not extracted), never a silent surprise.
+DEFAULT_GLINER_MAX_LEN = 768
+
+
+def resolve_max_len(config: dict[str, Any], default: int = DEFAULT_GLINER_MAX_LEN) -> int:
+    """The configured model token-window bound (``max_len``), clamped ``>= 1`` (default 768).
+
+    A per-Provider knob so an operator can raise/lower the window for a different checkpoint; the
+    clamp means a configured 0/negative degrades to ``1`` (a one-token window) rather than an empty
+    or negative bound. Pure config read — no torch, no model.
+    """
+    return max(1, int(config.get("max_len", default)))
+
+
+def apply_gliner_max_len(model: Any, max_len: int) -> None:
+    """Bound a GLiNER-library model's token window to ``max_len`` (``config.max_len``), guarded.
+
+    The ``gliner`` library truncates every input to ``model.config.max_len`` (mdeberta-v3's window);
+    the truncation is SILENT, so a chunk that tokenizes past it loses its tail entities/relations
+    and any offset past the window is unreliable. Setting it here makes the window an EXPLICIT,
+    configurable, documented boundary (the hard model-boundary guard) instead of a silent surprise.
+
+    **Guarded (never crashes):** a model / config object that exposes no settable ``max_len`` (a
+    test double, a future architecture, a frozen config) is left unchanged — bounding the window is
+    best-effort and must never fault a run. Applied to the raw model *before* any ``torch.compile``
+    wrap so it takes effect on the underlying module.
+    """
+    cfg = getattr(model, "config", None)
+    if cfg is None or not hasattr(cfg, "max_len"):
+        return
+    try:
+        cfg.max_len = max_len
+    except Exception:  # noqa: BLE001 - best-effort window bound; a rejecting config never crashes
+        _log.warning(
+            "could not set model.config.max_len=%d (window bound skipped); model default applies",
+            max_len,
+        )

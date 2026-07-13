@@ -80,7 +80,7 @@ def test_valid_json_annotates_every_chunk_of_the_document() -> None:
     for c in out:
         assert isinstance(c.induced_labels, InducedLabels)
         assert c.induced_labels.entity_types == ["person", "organization"]
-        assert c.induced_labels.relation_types == ["works_for"]
+        assert c.induced_labels.relation_types == ["works for"]  # 'works_for' → canonical form
         assert c.induced_labels.pii_types == ["email"]
         assert c.induced_labels.model_id == "gpt-4.1-mini"
     # Doc granularity: ONE call for the two-chunk document.
@@ -222,12 +222,13 @@ def test_oversized_label_capped_at_length_limit() -> None:
 
 def test_label_count_capped_and_deduped() -> None:
     provider = _provider()
-    many = [f"type_{i}" for i in range(200)] + ["Type_0", "TYPE_0"]  # dupes (case-insensitive)
+    # Case + format variants of type_0 all canonicalize to 'type 0' (W12): casefold + '_'→space.
+    many = [f"type_{i}" for i in range(200)] + ["Type_0", "TYPE_0", "type-0"]  # dupes
     with fake.install([fake.reply(_good_reply(entity=many))]):
         out = list(provider.induce([_chunk()]))
     labels = out[0].induced_labels.entity_types  # type: ignore[union-attr]
     assert len(labels) == MAX_LABELS  # anti-bloat count cap
-    assert labels[0] == "type_0"  # first-seen casing wins, deduped
+    assert labels[0] == "type 0"  # canonical normal form, deduped across case/format variants
 
 
 def test_injection_label_is_data_not_executed() -> None:
@@ -322,6 +323,93 @@ def test_chunk_granularity_one_call_per_chunk() -> None:
     assert len(script.calls) == 2
     assert out[0].induced_labels.entity_types == ["person", "organization"]  # type: ignore[union-attr]
     assert out[1].induced_labels.entity_types == ["gene"]  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# W12 — corpus granularity: ONE canonical shared schema on every chunk.
+# ---------------------------------------------------------------------------
+
+
+def test_corpus_granularity_merges_all_docs_into_one_shared_schema() -> None:
+    provider = _provider(granularity="corpus")
+    chunks = [
+        _chunk(doc_id="d1", index=0),
+        _chunk(doc_id="d1", index=1),
+        _chunk(doc_id="d2", index=0),
+    ]
+    # Two docs induce different, case/format-varied entity sets; the corpus schema is their
+    # canonical dedup union (sorted), identical on EVERY chunk of BOTH documents.
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=["Bank", "payment_product"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["bank", "account type"], relation=[], pii=[])),
+        ]
+    ) as script:
+        out = list(provider.induce(chunks))
+    assert len(script.calls) == 2  # one induction call per document
+    expected = ["account type", "bank", "payment product"]  # canonical + sorted union
+    for c in out:
+        assert c.induced_labels is not None
+        assert c.induced_labels.entity_types == expected
+        assert c.induced_labels.model_id == "gpt-4.1-mini"
+
+
+def test_corpus_granularity_failed_doc_still_gets_corpus_schema() -> None:
+    provider = _provider(granularity="corpus")
+    chunks = [
+        _chunk(doc_id="d1", index=0),
+        _chunk(doc_id="d2", index=0),
+        _chunk(doc_id="d3", index=0),
+    ]
+    # d1 + d2 induce; d3's LLM fails (malformed twice → fail-open, contributes nothing to the
+    # merge) — but d3's chunk STILL receives the shared corpus schema (broadcast to every chunk).
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=["person"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["organization"], relation=[], pii=[])),
+            fake.reply("garbage"),
+            fake.reply("still garbage"),
+        ]
+    ):
+        out = list(provider.induce(chunks))
+    expected = ["organization", "person"]  # sorted union of the two successful docs
+    for c in out:
+        assert c.induced_labels is not None
+        assert c.induced_labels.entity_types == expected
+    assert provider.induction_fallbacks == 1  # only d3 fell open
+
+
+def test_corpus_granularity_all_failed_leaves_chunks_unchanged() -> None:
+    provider = _provider(granularity="corpus")
+    chunks = [_chunk(doc_id="d1", index=0), _chunk(doc_id="d2", index=0)]
+    with fake.install([fake.reply("garbage"), fake.reply("garbage")]):
+        out = list(provider.induce(chunks))
+    # No document induced anything usable → the corpus schema is empty → config-floor fall-back.
+    assert all(c.induced_labels is None for c in out)
+
+
+def test_corpus_granularity_is_byte_identical_two_runs() -> None:
+    chunks = [
+        _chunk(doc_id="d1", index=0),
+        _chunk(doc_id="d2", index=0),
+    ]
+    dumps = []
+    for _ in range(2):
+        provider = _provider(granularity="corpus")
+        with fake.install(
+            [
+                fake.reply(_good_reply(entity=["Bank", "invoice"], relation=[], pii=[])),
+                fake.reply(_good_reply(entity=["bank", "customer"], relation=[], pii=[])),
+            ]
+        ):
+            out = list(provider.induce(chunks))
+        dumps.append([c.model_dump_json() for c in out])
+    assert dumps[0] == dumps[1]  # sorted-canonical union → byte-stable
+
+
+def test_corpus_granularity_rejected_bad_value() -> None:
+    with pytest.raises(ValueError, match="'doc', 'chunk' or 'corpus'"):
+        _provider(granularity="paragraph")
 
 
 def test_empty_run_makes_no_call() -> None:

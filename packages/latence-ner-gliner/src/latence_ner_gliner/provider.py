@@ -48,7 +48,12 @@ from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
-from latence_core.providers.perf import load_then_cast, maybe_compile
+from latence_core.providers.perf import (
+    apply_gliner_max_len,
+    load_then_cast,
+    maybe_compile,
+    resolve_max_len,
+)
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -80,6 +85,12 @@ class GlinerEntityExtractor:
             (default 0.5).
         min_chars: int  — a chunk whose stripped length is below this is treated as
             near-empty and skipped without invoking the model (default 1).
+        max_len: int  — the mdeberta-v3 model token window (default 768), set as
+            ``model.config.max_len`` at load (W12). A chunk that tokenizes past it is SILENTLY
+            truncated by gliner (tail entities lost); this bounds the window explicitly. CAVEAT: the
+            chunker (``chunk.markdown`` ``max_tokens``) counts in a DIFFERENT tokenizer, ~1.2× fewer
+            tokens than mdeberta — keep the chunk cap ≤ ~640 for this 768 window; this guard is the
+            hard backstop.
         batch_size: int  — how many chunks share ONE ``batch_predict_entities`` forward
             pass (default 16; the P8 autotuner overrides per-device). Purely memory-shaping:
             the emitted mentions (offsets/labels/order) are record-for-record identical for
@@ -159,6 +170,9 @@ class GlinerEntityExtractor:
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
+        # W12 model-boundary guard: bound the mdeberta token window (default 768). A chunk that
+        # tokenizes past it would otherwise be SILENTLY truncated by gliner (tail entities lost).
+        self._max_len = resolve_max_len(config)
         self._batch_size = validate_batch_size(
             config.get("batch_size", _DEFAULT_BATCH_SIZE),
             provider_name="entity.gliner",
@@ -193,6 +207,9 @@ class GlinerEntityExtractor:
         # / fp32. The model is then optionally compiled (guarded, off by default).
         # / fp32. The model is then optionally compiled (guarded, off by default).
         model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, None)
+        # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
+        # guard). gliner silently truncates past config.max_len — set it explicitly + configurably.
+        apply_gliner_max_len(model, self._max_len)
         self._model = maybe_compile(model, self._config, provider_name="entity.gliner")
         return self._model
 

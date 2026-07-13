@@ -133,7 +133,21 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # existing stack + record is byte-identical (a run with no ``schema_induction`` Stage never
 # populates it, and an extractor with a ``None`` induced field uses its config labels exactly
 # as before). See ADR-0038.
-SCHEMA_VERSION = 14
+#
+# v15 (W13 context enrichment): the new OPTIONAL ``context_enrichment`` Stage projects the
+# already-computed knowledge graph back onto each chunk as a compact :class:`ContextHeader` (its
+# canonical entities + top-k KG-neighbor triples), which the Export prepends to the EMBEDDING input
+# ONLY — coherence goes into the vector + a metadata column, the stored chunk text stays the clean,
+# byte-unchanged chunk (ADR-0039). ChunkRecord gains an optional ``context_header: ContextHeader |
+# None`` (additive field, mirrors the ``induced_labels`` / ``risk_markers`` annotation precedent — a
+# downstream consumer reads it off the record, not out-of-band). Default ``None`` ⇒ every existing
+# stack + record is byte-identical (a run with no ``context_enrichment`` Stage never populates it,
+# and the Export prepends nothing when it is absent). The ContextHeader is built deterministically
+# (sorted, capped, content-addressed ids) from the run's existing EntityMention + GraphRecord
+# streams; the optional LLM situating-sentence mode is a documented follow-on
+# (``situating_sentence``
+# stays a defaulted-None field). See ADR-0039.
+SCHEMA_VERSION = 15
 
 
 class Provenance(BaseModel):
@@ -598,6 +612,89 @@ class OffsetMap(BaseModel):
         return self
 
 
+class ContextHeader(BaseModel):
+    """The KG projected back onto a chunk for retrieval coherence (CONTEXT ``Context Enrichment``).
+
+    W13 (ADR-0039) restores the connections a chunk needs for retrieval relevance — its canonical
+    entities and their top-k knowledge-graph neighbor triples — that the RAG export otherwise
+    discards by embedding each chunk in isolation. The OPTIONAL ``context_enrichment`` Stage builds
+    this compact header per chunk from the run's already-computed :class:`EntityMention` +
+    :class:`GraphRecord` streams and the Export prepends it to the **EMBEDDING input only**: the
+    coherence inflates the vector + a metadata column, never the stored chunk text (the LLM window
+    stays the clean chunk, ``masked_content``/``content`` byte-unchanged).
+
+    Like :class:`RiskMarker` / :class:`InducedLabels` it is a **field on the record contract** (not
+    an out-of-band note), so it survives into the corpus and a downstream retriever reads it off the
+    chunk it already holds. It is deliberately COMPACT (the bloat discipline, ADR-0039): compact
+    rendered triples not neighbor prose, a top-k neighbor + confidence cap (the hub-entity guard),
+    and
+    join keys not raw KG text (query-time KG expansion is the retriever's job — ADR-0017, files not
+    a
+    live DB; W13 only emits the keys).
+
+    * ``entities`` — the chunk's canonical entity names (sorted, deduped), and ``entity_types`` the
+      aligned entity type per name (same length + order as ``entities``).
+    * ``neighbor_triples`` — the chunk's top KG-neighbor relations rendered ``A —label→ B``,
+      confidence-sorted and CAPPED (``max_neighbors_per_entity`` per entity, ``max_triples``
+      overall)
+      — the anti-bloat + hub-entity guard: a corpus-wide hub entity contributes only its TOP
+      relations, never all of them.
+    * ``kg_node_ids`` — the deterministic content-addressed node ids of the chunk's own entities
+    (the
+      join keys a downstream retriever hybridises/reranks on).
+    * ``neighbor_node_ids`` — the node ids of the neighbor entities the triples reach (the
+    query-time
+      KG-expansion keys), sorted + deduped.
+    * ``situating_sentence`` — OPTIONAL LLM-generated Contextual-Retrieval-style sentence
+      (deterministic=False, a documented follow-on, ADR-0039); ``None`` in the deterministic default
+      reference build. ``model_id`` records the LLM when that mode is used (audit), ``None`` for the
+      deterministic build.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    entities: list[str] = Field(
+        default_factory=list, description="The chunk's canonical entity names (sorted, deduped)."
+    )
+    entity_types: list[str] = Field(
+        default_factory=list, description="Entity type per name (aligned with ``entities``)."
+    )
+    neighbor_triples: list[str] = Field(
+        default_factory=list,
+        description="Top-k KG-neighbor relations 'A —label→ B' (confidence-sorted, capped).",
+    )
+    kg_node_ids: list[str] = Field(
+        default_factory=list, description="Node ids of the chunk's own entities (join keys)."
+    )
+    neighbor_node_ids: list[str] = Field(
+        default_factory=list,
+        description="Node ids the triples reach (query-time KG-expansion keys; sorted, deduped).",
+    )
+    situating_sentence: str | None = Field(
+        default=None,
+        description="OPTIONAL LLM situating sentence (deterministic=False follow-on); None here.",
+    )
+    model_id: str | None = Field(
+        default=None, description="The LLM that wrote the situating sentence (audit); None if none."
+    )
+
+    @model_validator(mode="after")
+    def _entities_aligned(self) -> ContextHeader:
+        if len(self.entities) != len(self.entity_types):
+            msg = (
+                "A ContextHeader's entities and entity_types must be the same length "
+                f"(got {len(self.entities)} names, {len(self.entity_types)} types)."
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def is_empty(self) -> bool:
+        """True if the header carries no entities and no triples (nothing to prepend)."""
+        return not self.entities and not self.neighbor_triples
+
+
 class ChunkRecord(Record):
     """One retrieval-sized piece of a parsed document (CONTEXT ``Chunk``).
 
@@ -660,6 +757,16 @@ class ChunkRecord(Record):
             "Per-document induced label schema the OPTIONAL schema_induction Stage attached, so a "
             "downstream extractor UNIONs these types onto its config labels (like risk_markers). "
             "None (default) ⇒ the chunk is unchanged and every extractor uses its config labels."
+        ),
+    )
+    context_header: ContextHeader | None = Field(
+        default=None,
+        description=(
+            "The KG projected back onto this chunk (canonical entities + top-k neighbor triples) "
+            "the OPTIONAL context_enrichment Stage attached, which the Export prepends to the "
+            "EMBEDDING input ONLY — the stored content is byte-unchanged (W13, ADR-0039). None "
+            "(default) ⇒ the chunk is unchanged and the Export prepends nothing (byte-identical to "
+            "a run without the Stage), mirroring the risk_markers/induced_labels precedent."
         ),
     )
 

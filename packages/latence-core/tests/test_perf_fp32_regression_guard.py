@@ -36,6 +36,7 @@ _LEARNED_PROVIDER_SOURCES = (
     "latence-relation-gliner/src/latence_relation_gliner/provider.py",
     "latence-pii-gliner/src/latence_pii_gliner/provider.py",
     "latence-pii-gliner2/src/latence_pii_gliner2/provider.py",
+    "latence-extract-gliner2/src/latence_extract_gliner2/provider.py",
     "latence-parser-lighton/src/latence_parser_lighton/provider.py",
     "latence-parser-glm/src/latence_parser_glm/provider.py",
     "latence-embedder-st/src/latence_embedder_st/provider.py",
@@ -45,13 +46,16 @@ _LEARNED_PROVIDER_SOURCES = (
 # seam. Processors/tokenizers/feature-extractors are deliberately NOT here (they load bare, no perf).
 _MODEL_CALLEE_HINTS = ("GLiNER", "ForConditionalGeneration", "AutoModel")
 
-# The TWO valid perf-seam load helpers a model ``from_pretrained`` may be handed to as its first arg:
+# The valid perf-seam load helpers a model ``from_pretrained`` may be handed to as its first arg:
 #   * ``load_with_fa2_fallback`` — spreads the perf kwargs (torch_dtype + attn_implementation) into
-#     from_pretrained; for libs that ACCEPT them (gliner2, the OCR VLMs, ST via model_kwargs).
+#     from_pretrained; for libs that ACCEPT them (the OCR VLMs, ST via model_kwargs).
 #   * ``load_then_cast`` — loads PLAIN then ``model.to(dtype)``; for libs that REJECT the perf kwargs
 #     (the plain ``gliner`` 0.2.27 library — pod-proven to TypeError on torch_dtype). This is the
 #     W8-corrected path for the 3 gliner-library providers.
-_PERF_SEAM_FUNCS = ("load_with_fa2_fallback", "load_then_cast")
+#   * ``load_gliner2_optimized`` — passes the gliner2 NATIVE ``quantize``/``compile`` kwargs (W9),
+#     guarded so a fault degrades to a plain load; for the two gliner2-framework providers
+#     (``redaction.gliner2`` + ``fused_entity_relation.gliner2``) whose from_pretrained accepts them.
+_PERF_SEAM_FUNCS = ("load_with_fa2_fallback", "load_then_cast", "load_gliner2_optimized")
 
 # ...or the call itself passes one of these kwargs directly.
 _PERF_KWARGS = ("torch_dtype", "attn_implementation")
@@ -214,10 +218,11 @@ def test_guard_would_catch_a_bare_model_load() -> None:
 
 
 def test_guard_accepts_both_seam_routed_loads() -> None:
-    """Meta-test: the AST scan does NOT flag EITHER perf-seam helper (fa2-fallback OR load_then_cast)."""
+    """Meta-test: the AST scan does NOT flag any perf-seam helper (fa2-fallback / then_cast / W9)."""
     for good in (
         "m = load_with_fa2_fallback(GLiNER.from_pretrained, model_id, perf)\n",
         "m = load_then_cast(GLiNER.from_pretrained, model_id, config, None)\n",
+        "m = load_gliner2_optimized(GLiNER2.from_pretrained, model_id, dev, cfg)\n",
     ):
         tree = ast.parse(good)
         seam_routed = _model_from_pretrained_passed_to_perf_seam(tree)

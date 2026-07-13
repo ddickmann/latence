@@ -90,7 +90,11 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # (skip / empty types / empty detector set). While it is > 0, ``documents_with_pii: 0`` is
 # NOT a clean bill of health — a control was disabled on a sensitive doc. Additive and
 # defaulted 0, so a v17 report still validates.
-QUALITY_SCHEMA_VERSION = 18
+# v19 (W13 context enrichment, ADR-0039): the report gains an optional ``context_enrichment`` —
+# a :class:`ContextEnrichmentQuality` roll-up (``chunks_enriched`` / ``avg_neighbors_per_chunk`` /
+# ``hub_entities_capped``), counts-only (no content), present only when the run had a
+# ``context_enrichment`` Stage. Additive and defaulted None, so a v18 report still validates.
+QUALITY_SCHEMA_VERSION = 19
 
 
 class StageMetrics(BaseModel):
@@ -525,6 +529,30 @@ class GraphQuality(BaseModel):
     inferred_edges_by_scorer: dict[str, int] = Field(default_factory=dict)
 
 
+class ContextEnrichmentQuality(BaseModel):
+    """Context-enrichment roll-up: how much KG coherence the OPTIONAL W13 Stage projected
+    (ADR-0039).
+
+    Emitted when a run had a ``context_enrichment`` Stage. Counts-only (no content), so it is safe
+    to
+    persist/share. ``chunks_enriched`` is how many chunks got a non-empty
+    :class:`~latence_core.contracts.ContextHeader` (a chunk with no confidence-gated canonical
+    entity
+    is left ``None`` and not counted). ``avg_neighbors_per_chunk`` is the mean number of query-time
+    KG-neighbor keys per enriched chunk — the coherence density surfaced into the vector + metadata.
+    ``hub_entities_capped`` is the anti-bloat witness: the number of KG entities whose neighbor set
+    exceeds the Stage's ``max_neighbors_per_entity`` cap, so wherever they appear only their TOP-k
+    relations are projected — the hub-entity guard that keeps a corpus-wide hub from swamping its
+    chunks (the crux of the W13 bloat discipline). A run with no Stage reports this section as None.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunks_enriched: int = 0
+    avg_neighbors_per_chunk: float = 0.0
+    hub_entities_capped: int = 0
+
+
 class DriftDiagnostics(BaseModel):
     """Corpus-level Provenance-integrity drift roll-up (S10 drift-diagnostics AC).
 
@@ -654,6 +682,9 @@ class QualityReport(BaseModel):
     disambiguation: DisambiguationQuality | None = None
     # Present when the run had a Graph Assembly Stage.
     graph: GraphQuality | None = None
+    # W13 (ADR-0039): present when the run had a context_enrichment Stage — how much KG coherence it
+    # projected onto chunks (chunks enriched, avg neighbors, hub entities capped). None otherwise.
+    context_enrichment: ContextEnrichmentQuality | None = None
     # S10: corpus-level Provenance-integrity drift roll-up (present when the run parsed
     # documents with page maps), and the gold-set harness result (present only when a
     # gold set was supplied — an adopter dropped in annotated documents).
@@ -723,11 +754,21 @@ class QualityReport(BaseModel):
             ("Profiling", self.profiling),
             ("Disambiguation", self.disambiguation),
             ("Graph", self.graph),
+            ("ContextEnrichment", self.context_enrichment),
         )
         present = [name for name, section in section_map if section is not None]
         if present:
             lines.append("")
             lines.append(f"## Stage metrics present: {', '.join(present)}")
+        if self.context_enrichment is not None:
+            ce = self.context_enrichment
+            lines.append("")
+            lines.append("## Context enrichment")
+            lines.append(
+                f"- chunks enriched: {ce.chunks_enriched}, "
+                f"avg neighbors/chunk: {ce.avg_neighbors_per_chunk:.3f}, "
+                f"hub entities capped: {ce.hub_entities_capped}"
+            )
         if self.goldset is not None:
             g = self.goldset
             lines.append("")

@@ -103,6 +103,15 @@ from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.perf import load_with_fa2_fallback
 from latence_core.providers.profile import ProviderProfile
 
+from latence_parser_lighton.rasterize import (
+    DEFAULT_DPI,
+    DEFAULT_MAX_LONGEST_DIM,
+    MAX_RENDER_MEGAPIXELS,
+    MAX_RENDER_PIXELS,
+    PageRasteriser,
+    RasterFailure,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
@@ -125,8 +134,9 @@ _DEFAULT_MAX_NEW_TOKENS = 4096
 # 200 DPI to a target longest dimension of 1540px". An A4 at 200 DPI is ~2339px tall — fed at full
 # size that is ~2.3× the vision tokens (compute) vs LightOn's target, the single biggest throughput
 # lever. NOT a byte-identical no-op (OCR output changes with resolution), so it is a config knob
-# defaulting to LightOn's 1540; ``0`` (or ``None``) disables the cap.
-_DEFAULT_MAX_LONGEST_DIM = 1540
+# defaulting to LightOn's 1540; ``0`` (or ``None``) disables the cap. Sourced from the SHARED
+# rasteriser so ``parser.lighton`` and ``parser.lighton_vllm`` cannot diverge (W10).
+_DEFAULT_MAX_LONGEST_DIM = DEFAULT_MAX_LONGEST_DIM
 
 # How many page images share one ``generate()`` call (W8 OCR page-batching). Today's one-page-per-
 # generate is the throughput bottleneck; batching N pages left-pads them into one forward pass. A
@@ -135,39 +145,10 @@ _DEFAULT_MAX_LONGEST_DIM = 1540
 _DEFAULT_OCR_BATCH_SIZE = 4
 
 # --- Pixel-bomb DoS cap (the Hardening-bar item; this Parser rasterises untrusted input) ------
-# The maximum megapixels a rasterised page / decoded image may occupy. A PDF page's render scale is
-# clamped so its bitmap stays under this budget (a giant page cannot force a gigapixel bitmap), and
-# Pillow's ``Image.MAX_IMAGE_PIXELS`` is set to this budget so a decompression-bomb image RAISES
-# rather than allocating multi-GB. ~25 MP is generous for a legible document scan (≈ an A4 page at
-# 600 DPI) while bounding a single page's raster to well under a gigabyte. The intake max_bytes cap
-# does NOT bound this — page dimensions / declared pixel counts are independent of file byte size.
-_MAX_RENDER_MEGAPIXELS = 25.0
-_MAX_RENDER_PIXELS = int(_MAX_RENDER_MEGAPIXELS * 1_000_000)
-
-# File types this Provider rasterises to page images then OCRs. A PDF is rendered page-by-page
-# (pypdfium2) so the page map is real (one OCR pass per page); a bare image is a single page.
-_PDF_EXTENSIONS = frozenset({"pdf"})
-_IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"})
-
-# %PDF- magic at offset 0 (a bounded leading BOM/whitespace window only) — the offset-0 type-spoof
-# guard mirroring ``parser.pdfplumber`` / the intake Screener (#62): a ``.pdf`` whose bytes are not
-# a PDF is rejected as a parse failure before the rasteriser, defense-in-depth.
-_PDF_MAGIC = b"%PDF-"
-_PDF_LEADING_SLACK = 8
-_PDF_LEADING_SKIP = b"\x00\r\n\t \xef\xbb\xbf\xff\xfe"
-
-# Magic-byte prefixes for the image formats this Provider accepts — the offset-0 spoof guard for a
-# declared image whose bytes are not that image (defense-in-depth, mirroring the PDF guard). A
-# format not in this table is not spoof-checked (accepted and handed to Pillow, which fails
-# gracefully through the guard) — the table covers the common raster formats.
-_IMAGE_MAGIC: tuple[bytes, ...] = (
-    b"\x89PNG\r\n\x1a\n",  # PNG
-    b"\xff\xd8\xff",  # JPEG
-    b"RIFF",  # WEBP (RIFF container; "WEBP" follows at offset 8)
-    b"II*\x00",  # TIFF little-endian
-    b"MM\x00*",  # TIFF big-endian
-    b"BM",  # BMP
-)
+# The megapixel budget + pixel count live in the SHARED rasteriser (W10) so both OCR back-ends bound
+# the raster identically. Re-exported here under the module-private names existing tests reference.
+_MAX_RENDER_MEGAPIXELS = MAX_RENDER_MEGAPIXELS
+_MAX_RENDER_PIXELS = MAX_RENDER_PIXELS
 
 
 class LightOnOcrParser(AdapterBase):
@@ -283,7 +264,7 @@ class LightOnOcrParser(AdapterBase):
         if self._ocr_batch_size < 1:
             msg = f"{self.provider_name}: ocr_batch_size must be >= 1, got {self._ocr_batch_size}."
             raise ProviderError(msg)
-        self._dpi = int(cfg.get("dpi", 200))
+        self._dpi = int(cfg.get("dpi", DEFAULT_DPI))
         if self._dpi < 1:
             msg = f"{self.provider_name}: dpi must be >= 1, got {self._dpi}."
             raise ProviderError(msg)
@@ -297,6 +278,13 @@ class LightOnOcrParser(AdapterBase):
                 f"got {self._max_longest_dim}."
             )
             raise ProviderError(msg)
+        # The SHARED rasteriser (W10): the SAME preprocessing (dpi / megapixel bomb-cap / 1540px
+        # LANCZOS longest-side / spoof guards) both this in-process Parser and
+        # ``parser.lighton_vllm`` run — so the two OCR back-ends cannot silently diverge at the
+        # pixel boundary. The Provider's ``guard`` maps a native rasteriser fault to a typed error.
+        self._rasteriser = PageRasteriser(
+            dpi=self._dpi, max_longest_dim=self._max_longest_dim, guard=self.guard
+        )
         # Lazily loaded on first parse (cached); constructing the Provider never imports torch.
         self._model: Any = None
         self._processor: Any = None
@@ -375,153 +363,27 @@ class LightOnOcrParser(AdapterBase):
             error=reason,
         )
 
-    # -- rasterise raw bytes → page images (spoof-guarded, pixel-capped) ----
+    # -- rasterise raw bytes → page images (delegated to the SHARED rasteriser, W10) --------------
 
     def _rasterise(self, raw: ParserInput, file_type: str) -> list[Any]:
-        """Turn the raw source bytes into one Pillow image per page (spoof-guarded, pixel-capped).
+        """Turn the raw source bytes into one Pillow image per page via the SHARED rasteriser.
 
-        A PDF is rendered page-by-page via ``pypdfium2`` (the per-page split is what makes the page
-        map real — one OCR pass per page); a bare image is a single page. An unsupported type or a
-        type-spoofed file (bytes not matching the declared type) is a graceful parse failure
-        (``_ParseFailure`` → PARSE_ERROR), not a crash — mirroring ``parser.pdfplumber`` / #62. The
-        rasteriser clamps the render scale / decode by the max-megapixel budget so an oversized page
-        or a decompression-bomb image degrades gracefully rather than allocating multi-GB.
+        Delegates to :class:`~latence_parser_lighton.rasterize.PageRasteriser` (the single source of
+        truth for the preprocessing recipe — dpi / megapixel bomb-cap / 1540px LANCZOS / spoof
+        guards) so this in-process Parser and ``parser.lighton_vllm`` cannot silently diverge. The
+        rasteriser raises a :class:`~latence_parser_lighton.rasterize.RasterFailure` (a
+        ``LatenceError``) on an unsupported/spoofed/undecodable input, caught by :meth:`_parse_one`.
         """
         data = raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
-        if file_type in _PDF_EXTENSIONS:
-            self._guard_pdf_signature(data)
-            return self._pdf_to_images(data)
-        if file_type in _IMAGE_EXTENSIONS:
-            self._guard_image_signature(data)
-            return [self._image_from_bytes(data)]
-        msg = f"Unsupported file type {file_type!r} for the LightOn-OCR Parser."
-        raise _ParseFailure(msg)
-
-    def _guard_pdf_signature(self, data: bytes) -> None:
-        """Reject a ``.pdf`` whose bytes are not a PDF (offset-0 spoof guard, like pdfplumber)."""
-        offset = 0
-        limit = min(len(data), _PDF_LEADING_SLACK)
-        while offset < limit and data[offset] in _PDF_LEADING_SKIP:
-            offset += 1
-        if data[offset : offset + len(_PDF_MAGIC)] != _PDF_MAGIC:
-            msg = (
-                "File declared as PDF but the %PDF- signature is not at the start of the file "
-                "(type spoof?)."
-            )
-            raise _ParseFailure(msg)
-
-    def _guard_image_signature(self, data: bytes) -> None:
-        """Reject a declared image whose bytes match no known image magic (offset-0 spoof guard)."""
-        if not any(data.startswith(magic) for magic in _IMAGE_MAGIC):
-            msg = (
-                "File declared as an image but its bytes match no known image signature "
-                "(type spoof?)."
-            )
-            raise _ParseFailure(msg)
+        return self._rasteriser.rasterise(data, file_type)
 
     def _clamp_scale(self, width_pt: float, height_pt: float, scale: float) -> float:
-        """Reduce a PDF render scale so the rasterised bitmap stays under the megapixel budget.
-
-        pypdfium2 renders a page of ``width_pt × height_pt`` points at ``scale`` px/pt, so the
-        bitmap is ``(width_pt*scale) × (height_pt*scale)`` pixels. If that exceeds
-        :data:`_MAX_RENDER_PIXELS` (the pixel-bomb budget) the scale is reduced by ``sqrt(budget /
-        pixels)`` so the area lands exactly at the budget — a 10 000×10 000-pt page can never
-        rasterise to a gigapixel bitmap (the Hardening-bar finding). A degenerate (zero-area) page
-        keeps the requested scale (nothing to clamp).
-        """
-        area_pt = max(width_pt, 0.0) * max(height_pt, 0.0)
-        if area_pt <= 0.0 or scale <= 0.0:
-            return scale
-        pixels = area_pt * scale * scale
-        if pixels <= _MAX_RENDER_PIXELS:
-            return scale
-        return float(scale * (_MAX_RENDER_PIXELS / pixels) ** 0.5)
-
-    def _pdf_to_images(self, data: bytes) -> list[Any]:
-        """Rasterise every PDF page to a Pillow image via ``pypdfium2`` (ordered, pixel-capped).
-
-        Imported inside the method so a missing/malformed dependency never breaks Provider
-        discovery, and so ``latence-core`` stays free of the heavy dep (ADR-0016). A missing dep is
-        a graceful parse failure. Each page's render scale is clamped by :meth:`_clamp_scale` so an
-        oversized page cannot force a gigapixel bitmap (the pixel-bomb cap). The native pypdfium2
-        fault a corrupt PDF raises is mapped by :meth:`AdapterBase.guard` to a typed ProviderError
-        (no content), then degraded to a PARSE_ERROR record by :meth:`_parse_one`.
-        """
-        try:
-            import io
-
-            import pypdfium2 as pdfium
-        except ImportError as exc:  # pragma: no cover - the dep is declared for this package
-            msg = "pypdfium2 is required to rasterise PDFs for OCR."
-            raise _ParseFailure(msg) from exc
-
-        requested_scale = self._dpi / 72.0  # pypdfium2 renders at 72 DPI * scale
-        images: list[Any] = []
-        with self.guard("rasterise"):
-            pdf = pdfium.PdfDocument(io.BytesIO(data))
-            try:
-                for page in pdf:
-                    width_pt, height_pt = page.get_size()
-                    scale = self._clamp_scale(width_pt, height_pt, requested_scale)
-                    bitmap = page.render(scale=scale)
-                    images.append(self._downscale_longest(bitmap.to_pil()))
-            finally:
-                pdf.close()
-        return images or []
+        """Compat passthrough to the shared rasteriser's render-scale clamp (existing W8 tests)."""
+        return self._rasteriser._clamp_scale(width_pt, height_pt, scale)
 
     def _image_from_bytes(self, data: bytes) -> Any:
-        """Decode a single raster image from bytes via Pillow (dep-isolated; guarded; bomb-capped).
-
-        ``Image.MAX_IMAGE_PIXELS`` is tightened to the megapixel budget so a decompression-bomb
-        image (declared pixel count above the budget) makes Pillow **raise**
-        ``DecompressionBombError`` during ``.load()`` rather than allocating multi-GB — that native
-        fault maps through :meth:`guard` to a typed ProviderError and degrades to a PARSE_ERROR
-        record. The prior value is restored in a ``finally`` so we never leave global Pillow state
-        mutated for other users of the process.
-        """
-        try:
-            import io
-
-            from PIL import Image
-        except ImportError as exc:  # pragma: no cover - the dep is declared for this package
-            msg = "pillow is required to decode images for OCR."
-            raise _ParseFailure(msg) from exc
-        previous_cap = Image.MAX_IMAGE_PIXELS
-        Image.MAX_IMAGE_PIXELS = _MAX_RENDER_PIXELS
-        try:
-            with self.guard("decode_image"):
-                image = Image.open(io.BytesIO(data))
-                image.load()  # a decompression-bomb image raises here (bounded, no huge alloc)
-                return self._downscale_longest(image.convert("RGB"))
-        finally:
-            Image.MAX_IMAGE_PIXELS = previous_cap
-
-    def _downscale_longest(self, image: Any) -> Any:
-        """Downscale a page image so its LONGEST side == ``max_longest_dim`` px (aspect preserved).
-
-        LightOn's OFFICIAL preprocessing (W8): "Render PDFs at 200 DPI to a target longest dimension
-        of 1540px, maintaining aspect ratio." Applied to BOTH rasterised PDF pages and bare-image
-        inputs, AFTER the megapixel bomb-clamp (so a bomb still degrades gracefully first). When the
-        cap is disabled (``max_longest_dim == 0``) or the image is already within it, the image is
-        returned untouched — no upscaling, no resample cost. A downscale uses LANCZOS (Pillow's
-        high-quality resampling) so text stays legible. This is NOT byte-identical to the un-capped
-        path (OCR output changes with resolution) — it is the throughput knob, defaulting to
-        LightOn's 1540.
-        """
-        cap = self._max_longest_dim
-        if cap <= 0:
-            return image
-        width, height = image.size
-        longest = max(width, height)
-        if longest <= cap:
-            return image
-        from PIL import (
-            Image,  # noqa: PLC0415 - deferred heavy dep (ADR-0016); already imported above
-        )
-
-        ratio = cap / float(longest)
-        new_size = (max(1, round(width * ratio)), max(1, round(height * ratio)))
-        return image.resize(new_size, Image.Resampling.LANCZOS)
+        """Compat passthrough to the shared rasteriser's single-image decode (existing W8 tests)."""
+        return self._rasteriser._image_from_bytes(data)
 
     # -- LightOn-OCR inference: page image(s) → markdown per page -----------
 
@@ -682,13 +544,8 @@ def size_after_parse(record: DocumentRecord) -> int:
     return len(record.content.encode("utf-8"))
 
 
-class _ParseFailure(LatenceError):
-    """A recoverable, framework-typed parse failure → a PARSE_ERROR record (ADR-0020).
-
-    A :class:`~latence_core.errors.LatenceError` subclass so it flows through the same typed-error
-    boundary the guarded native fault does: :meth:`LightOnOcrParser._parse_one` catches
-    ``LatenceError`` and turns either into a graceful PARSE_ERROR record. It carries only a static
-    reason (unsupported type, spoofed signature, missing dep) — never input content / OCR text.
-    """
-
-    category = "provider"
+# The recoverable rasterisation failure now lives in the shared rasteriser (:class:`RasterFailure`).
+# Kept as a module-level alias so any external reference to the historical name still resolves; it
+# is a :class:`~latence_core.errors.LatenceError`, so :meth:`LightOnOcrParser._parse_one` still
+# catches it and degrades to a graceful PARSE_ERROR record (ADR-0020).
+_ParseFailure = RasterFailure

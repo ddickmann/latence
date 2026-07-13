@@ -123,6 +123,35 @@ def test_nodes_parquet_loads_as_arrow(tmp_path: Path) -> None:
     assert names == {"Alice", "Acme"}
 
 
+def test_nodes_parquet_entity_type_column_named_type(tmp_path: Path) -> None:
+    # W12: the node entity-type column is named `type` (not `label`), carrying the entity type, so
+    # Parquet names it consistently with GraphML (`type`) and TTL (`lg:entityType`).
+    store = f"file://{tmp_path}"
+    s = Storage.for_uri(store)
+    KnowledgeGraphExport().export(_records(), s, f"{store}/kg")
+    with s.open(f"{store}/kg/graph-nodes.parquet", "rb") as fh:
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
+    assert "type" in table.column_names
+    assert "label" not in table.column_names  # the old node-type column name is gone
+    assert set(table.column("type").to_pylist()) == {"ORG"}
+
+
+def test_node_type_matches_across_parquet_graphml_ttl(tmp_path: Path) -> None:
+    # The entity type is named+carried consistently in all THREE export formats (W12).
+    store = f"file://{tmp_path}"
+    s = Storage.for_uri(store)
+    KnowledgeGraphExport().export(_records(), s, f"{store}/kg")
+    with s.open(f"{store}/kg/graph-nodes.parquet", "rb") as fh:
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
+    assert set(table.column("type").to_pylist()) == {"ORG"}
+    # GraphML: <data key="type">ORG</data>
+    graphml = s.read_text(f"{store}/kg/graph.graphml")
+    assert '<data key="type">ORG</data>' in graphml
+    # TTL: lg:entityType "ORG"
+    ttl = s.read_text(f"{store}/kg/graph.ttl")
+    assert 'lg:entityType "ORG"' in ttl
+
+
 def test_edges_parquet_loads_as_arrow(tmp_path: Path) -> None:
     store = f"file://{tmp_path}"
     s = Storage.for_uri(store)

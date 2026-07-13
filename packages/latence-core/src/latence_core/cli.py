@@ -9,6 +9,12 @@
   Stage at ``stacks/default.yaml`` and run the SAME bundled corpus through each candidate for
   ONE Stage, writing a signed-style ``MATRIX-RESULTS-<stage>.md`` + a JSON companion with
   per-candidate quality/latency/memory/cost/license/determinism/error-rate (ADR-0036 §4, P3-F5).
+* ``latence tune <stack.yaml>`` — profile the device, sweep each heavy Provider's perf knobs
+  over a small real sample under a HARD correctness gate (reject any setting that crashes —
+  incl. inference-time ``BackendCompilerFailed`` — or changes output), pick the fastest eligible
+  per Provider, and write a device-fingerprinted ``tuned/<device>.yaml`` + an honest report
+  (winners AND rejected knobs). ``latence run --tuned tuned/<device>.yaml`` overlays it ONLY on
+  a matching device_fingerprint, else warns + uses stack defaults (ADR-0036, W11-autotune).
 """
 
 from __future__ import annotations
@@ -52,6 +58,16 @@ def _configure_logging(verbose: bool) -> None:
 def run(
     pipeline_path: Annotated[Path, typer.Argument(help="Path to the pipeline YAML.")],
     run_id: Annotated[str, typer.Option(help="Run id (state/checkpoint namespace).")] = "run-0001",
+    tuned: Annotated[
+        Path | None,
+        typer.Option(
+            "--tuned",
+            help="A tuned/<device>.yaml (from `latence tune`). Its per-Provider knobs are overlaid "
+            "onto the stages ONLY when its device_fingerprint matches this host; a mismatch "
+            "warns + "
+            "uses stack defaults (never silently applied).",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
 ) -> None:
     """Execute a Pipeline declared in ``pipeline_path`` on the local Runner."""
@@ -65,6 +81,20 @@ def run(
     text = pipeline_path.read_text(encoding="utf-8")
     pipeline = Pipeline.from_yaml_text(text)
     logger.info("loaded pipeline %r with %d stages", pipeline.name, len(pipeline.stages))
+
+    # W11: a tuned config's per-Provider knobs are overlaid ONLY on a device_fingerprint match
+    # (else warn + stack defaults) — the overlay is config-only, no contract/offset change.
+    if tuned is not None:
+        if not tuned.exists():
+            typer.echo(f"Tuned config not found: {tuned}", err=True)
+            raise typer.Exit(code=2)
+        from latence_core.tune.overlay import overlay_tuned_config
+        from latence_core.tune.report import TuneReport
+
+        tune_report = TuneReport.from_yaml_text(tuned.read_text(encoding="utf-8"))
+        overlay = overlay_tuned_config(pipeline, tune_report)
+        typer.echo(overlay.reason, err=True)
+        pipeline = overlay.pipeline
 
     report = LocalRunner().run(pipeline, run_id=run_id)
 
@@ -209,6 +239,85 @@ def bake_off(
     typer.echo(result.render())
     typer.echo(f"results written to: {md_path}", err=True)
     typer.echo(f"machine-readable companion: {json_path}", err=True)
+
+
+@app.command()
+def tune(
+    stack_path: Annotated[
+        Path, typer.Argument(help="Path to the stack YAML to tune (e.g. stacks/gpu-sota.yaml).")
+    ],
+    sample: Annotated[
+        int, typer.Option("--sample", help="Records to time each candidate on (the small sample).")
+    ] = 8,
+    repeats: Annotated[
+        int, typer.Option("--repeats", help="Timed runs per candidate after warmup (median → r/s).")
+    ] = 3,
+    seed: Annotated[int, typer.Option("--seed", help="Sweep seed (determinism).")] = 0,
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out",
+            help="Where to write the tuned config. Defaults to tuned/<device>.yaml at the stack's "
+            "repo root (the device slug is derived from the fingerprint).",
+        ),
+    ] = None,
+    storage_root: Annotated[
+        str | None,
+        typer.Option(
+            "--storage-root",
+            help="Storage URI the sweep owns (state/checkpoints/corpus). Defaults to a fresh temp "
+            "dir so a tune never collides with a real run.",
+        ),
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Profile the device, sweep each heavy Provider's perf knobs correctness-gated, write a tune.
+
+    For each GPU/heavy Provider in the stack it sweeps dtype/quantize/compile/batch_size/
+    ocr_batch_size/max_concurrency over the small real sample, REJECTS any setting that crashes
+    (including an inference-time ``BackendCompilerFailed`` — the W9 lesson) or changes output vs the
+    fp32/plain baseline, picks the fastest ELIGIBLE per Provider, and writes a device-fingerprinted
+    ``tuned/<device>.yaml`` + an honest report (winners AND rejected knobs). Never fabricates a
+    number — every throughput is the median of the seeded timed runs on THIS device.
+    """
+    _configure_logging(verbose)
+    if not stack_path.exists():
+        typer.echo(f"Stack file not found: {stack_path}", err=True)
+        raise typer.Exit(code=2)
+
+    # Lazy import so a bare ``latence run`` does not pull the sweep's runner/stage graph.
+    from latence_core.tune.fingerprint import probe_device_fingerprint
+    from latence_core.tune.realprobe import RegistrySampleProbe
+    from latence_core.tune.tuner import tune_stack
+
+    fingerprint = probe_device_fingerprint()
+
+    def _run_tune(root: str) -> object:
+        probe = RegistrySampleProbe(stack_path, storage_root=root)
+        return tune_stack(
+            str(stack_path),
+            probe=probe,
+            sample_size=sample,
+            repeats=repeats,
+            seed=seed,
+            fingerprint=fingerprint,
+        )
+
+    if storage_root is not None:
+        report = _run_tune(storage_root)
+    else:
+        with tempfile.TemporaryDirectory(prefix="latence-tune-") as tmp:
+            report = _run_tune(f"file://{tmp}")
+
+    # Default output: tuned/<device>.yaml at the stack's repo root (matrix/<stage>.yaml → repo-
+    # root).
+    repo_root = stack_path.resolve().parent.parent
+    destination = out or (repo_root / "tuned" / f"{fingerprint.slug()}.yaml")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(report.to_yaml(), encoding="utf-8")  # type: ignore[attr-defined]
+
+    typer.echo(report.render())  # type: ignore[attr-defined]
+    typer.echo(f"tuned config written to: {destination}", err=True)
 
 
 def main() -> None:  # pragma: no cover - console entry shim

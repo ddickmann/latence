@@ -135,7 +135,7 @@ def test_quality_slice_end_to_end(tmp_path: Path) -> None:
     base = f"{store}/_latence/runs/s10e2e"
 
     persisted = QualityReport.model_validate_json(s.read_text(f"{base}/quality-report.json"))
-    assert persisted.schema_version == 18
+    assert persisted.schema_version == 19
 
     # 1. Gold-set evaluation present with the two annotated documents matched.
     assert persisted.goldset is not None

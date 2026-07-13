@@ -44,7 +44,11 @@ _GPU_SOTA_POD = _STACKS / "gpu-sota-pod.yaml"
 _DEFAULT = _STACKS / "default.yaml"
 _GPU_OCR = _STACKS / "gpu-ocr.yaml"
 
-_HEAVY_PROVIDERS = {"relation.gliner_relex", "redaction.gliner_pii", "embedding.sentence_transformers"}
+_HEAVY_PROVIDERS = {
+    "fused_entity_relation.gliner2",
+    "redaction.gliner_pii",
+    "embedding.sentence_transformers",
+}
 
 
 def _load(stack: Path) -> Pipeline:
@@ -64,9 +68,9 @@ def test_committed_stack_has_no_capability_findings(stack: Path) -> None:
     """Every Provider a committed stack names satisfies the Capability its Stage declares.
 
     This is the check that would have caught the pod bug in CI: the fused Stage's
-    ``relation.gliner_relex`` satisfies ``FusedEntityRelationExtractor`` (its declared
-    ``fused_entity_relation`` capability), and no Provider is mis-declared. Runs on a CPU host —
-    class inspection only, no GPU, no instantiation.
+    ``fused_entity_relation.gliner2`` (W9, superseding ``relation.gliner_relex``) satisfies
+    ``FusedEntityRelationExtractor`` (its declared ``fused_entity_relation`` capability), and no
+    Provider is mis-declared. Runs on a CPU host — class inspection only, no GPU, no instantiation.
     """
     findings = check_stack_capabilities(_load(stack))
     assert findings == [], "\n".join(f.describe() for f in findings)
@@ -82,7 +86,8 @@ def test_gpu_sota_declares_the_fused_stage_not_separate_entity_relation() -> Non
     pipeline = _load(_GPU_SOTA)
     fused = [s for s in pipeline.stages if s.capability is CapabilityKind.FUSED_ENTITY_RELATION]
     assert len(fused) == 1
-    assert fused[0].provider == "relation.gliner_relex"
+    # W9: the unified default is fused_entity_relation.gliner2 (relation.gliner_relex superseded).
+    assert fused[0].provider == "fused_entity_relation.gliner2"
     # No separate Entity Extraction / Relation Extraction Stage in the SOTA path (no double-NER).
     assert not any(
         s.capability in (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.RELATION_EXTRACTION)

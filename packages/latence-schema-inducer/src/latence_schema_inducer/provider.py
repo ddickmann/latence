@@ -127,8 +127,16 @@ class LLMLabelInducer:
             / air-gapped) to swap substrate with no code change.
         api_key: str | None  — the key; falls back to ``$OPENAI_API_KEY``. A local vLLM accepts any
             placeholder.
-        granularity: "doc" | "chunk"  — one LLM call per document (default, cheaper, plenty
-            data-aware; the doc's induced labels broadcast to all its chunks) or one call per chunk.
+        granularity: "doc" | "chunk" | "corpus"  — ``doc`` (default): one LLM call per document,
+            its induced labels broadcast to all its chunks. ``chunk``: one call per chunk.
+            ``corpus`` (W12): induce per-document (the same concurrent fan-out), then MERGE every
+            document's induced entity/relation/pii label sets into ONE canonical, sorted, deduped
+            schema and
+            stamp that SINGLE shared schema onto EVERY chunk — one coherent vocabulary for the whole
+            corpus, so entity types stay consistent across the KG with no per-chunk/per-doc drift.
+            Requires a full-corpus pass (the whole chunk stream is held to build the merged schema);
+            acceptable for the induction Stage (small LLM calls) and the same shape a two-phase
+            collect→broadcast would take.
         max_tokens: int  — the completion budget (default 2048); a truncated reply retries at
         double.        max_labels: int  — the per-type label-count cap forwarded to the prompt +
         sanitizer (default            40).
@@ -179,9 +187,10 @@ class LLMLabelInducer:
         self._base_url = config.get("base_url")
         self._api_key = config.get("api_key")
         granularity = str(config.get("granularity", "doc")).lower()
-        if granularity not in ("doc", "chunk"):
+        if granularity not in ("doc", "chunk", "corpus"):
             msg = (
-                f"LLMLabelInducer 'granularity' must be 'doc' or 'chunk', got {granularity!r}."
+                "LLMLabelInducer 'granularity' must be 'doc', 'chunk' or 'corpus', "
+                f"got {granularity!r}."
             )
             raise ValueError(msg)
         self._granularity = granularity
@@ -260,15 +269,21 @@ class LLMLabelInducer:
 
         Doc granularity (default): group chunks by ``document_record_id`` in first-seen order, make
         ONE LLM call per document, and broadcast the induced labels to every chunk of that document.
-        Chunk granularity: one call per chunk. Every chunk is yielded exactly once in input order;
-        a chunk whose document induction failed (fail-open) or which was too small flows through
-        unchanged (``induced_labels`` stays ``None``), so a downstream extractor uses its config
-        labels and the run never crashes. The client is built lazily on the first chunk that needs
-        it — a fully-empty / too-small run makes no network call at all.
+        Chunk granularity: one call per chunk. Corpus granularity (W12): induce per document, MERGE
+        every document's induced labels into ONE canonical shared schema, and stamp it on EVERY
+        chunk. Every chunk is yielded exactly once in input order; a chunk whose document induction
+        failed (fail-open) or which was too small flows through unchanged (``induced_labels`` stays
+        ``None`` in doc/chunk mode; in corpus mode it still receives the shared corpus schema), so a
+        downstream extractor uses its config labels and the run never crashes. The client is built
+        lazily on the first chunk that needs it — a fully-empty / too-small run makes no network
+        call.
         """
         chunk_list = list(chunks)
         if self._granularity == "chunk":
             yield from self._induce_per_chunk(chunk_list)
+            return
+        if self._granularity == "corpus":
+            yield from self._induce_corpus(chunk_list)
             return
         yield from self._induce_per_document(chunk_list)
 
@@ -295,6 +310,82 @@ class LLMLabelInducer:
         for chunk in chunk_list:
             induced = induced_by_doc.get(chunk.document_record_id)
             yield chunk if induced is None else chunk.model_copy(update={"induced_labels": induced})
+
+    def _induce_corpus(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """Induce per document, MERGE all docs into ONE canonical schema, stamp it on EVERY chunk.
+
+        The W12 corpus mode, a clean collect→broadcast two-phase over the same async fan-out:
+
+          1. **Collect**: assemble each document's text (chunk order) and induce a schema per
+             document CONCURRENTLY (the identical ``_induce_all`` fan-out doc mode uses — same
+             per-doc fail-open, temperature-0 determinism, index-keyed reassembly).
+          2. **Merge**: union every successfully-induced document's entity/relation/pii label sets
+             into ONE schema — canonical normal form (already applied per label by the sanitizer),
+             deduped, SORTED, count-capped. The sort makes the corpus schema a byte-stable function
+             of the label SET, independent of document/completion order.
+          3. **Broadcast**: stamp that single shared schema onto EVERY chunk — including the chunks
+             of a document whose own induction failed open, so the whole corpus shares one coherent
+             vocabulary and entity types stay consistent across the KG.
+
+        Requires the whole chunk stream in one pass (to build the merged schema before
+        broadcasting); acceptable for the small-LLM-call induction Stage. When NO document induced
+        anything usable
+        the corpus schema is empty → every chunk flows through with ``induced_labels`` unchanged
+        (``None``), the byte-identical fall-back-to-config path.
+        """
+        by_doc: dict[str, list[ChunkRecord]] = {}
+        order: list[str] = []
+        for chunk in chunk_list:
+            if chunk.document_record_id not in by_doc:
+                by_doc[chunk.document_record_id] = []
+                order.append(chunk.document_record_id)
+            by_doc[chunk.document_record_id].append(chunk)
+
+        jobs: list[tuple[str, str]] = []
+        for doc_id in order:
+            text = "\n".join(c.content for c in by_doc[doc_id]).strip()
+            if len(text) >= self._min_chars:
+                jobs.append((doc_id, text))
+
+        induced_by_doc = self._induce_all(jobs)
+        corpus_schema = self._merge_corpus_schema(induced_by_doc.values())
+        for chunk in chunk_list:
+            yield chunk if corpus_schema is None else chunk.model_copy(
+                update={"induced_labels": corpus_schema}
+            )
+
+    def _merge_corpus_schema(
+        self, induced_items: Iterable[InducedLabels | None]
+    ) -> InducedLabels | None:
+        """Merge every document's induced labels into ONE canonical, sorted, capped corpus schema.
+
+        Each input :class:`InducedLabels` already carries canonical-normal-form, per-doc-deduped
+        labels (the sanitizer ran per document), so the merge is a set-union per slot; a failed-open
+        document (``None``) contributes nothing. Each slot is then SORTED (byte-stable regardless of
+        document order) and capped at ``max_labels``. A wholly-empty merge (no document induced
+        anything) returns ``None`` so corpus mode falls back to config labels rather than stamping
+        an empty schema — the byte-identical backward-compat path.
+        """
+        entity: set[str] = set()
+        relation: set[str] = set()
+        pii: set[str] = set()
+        for induced in induced_items:
+            if induced is None:
+                continue
+            entity.update(induced.entity_types)
+            relation.update(induced.relation_types)
+            pii.update(induced.pii_types)
+        merged_entity = sorted(entity)[: self._max_labels]
+        merged_relation = sorted(relation)[: self._max_labels]
+        merged_pii = sorted(pii)[: self._max_labels]
+        if not merged_entity and not merged_relation and not merged_pii:
+            return None
+        return InducedLabels(
+            entity_types=merged_entity,
+            relation_types=merged_relation,
+            pii_types=merged_pii,
+            model_id=self._model,
+        )
 
     def _induce_per_chunk(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
         # One job per big-enough chunk, index-keyed by the chunk record_id (unique). Results are

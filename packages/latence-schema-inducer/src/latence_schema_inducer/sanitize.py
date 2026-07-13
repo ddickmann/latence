@@ -11,11 +11,16 @@ an :class:`~latence_core.contracts.InducedLabels`:
     dropped if empty);
   * strip surrounding whitespace and remove control characters (C0/C1 + DEL) — the anti-injection
     + anti-control-char rule (a newline-laden label can't reshape the extractor prompt);
-  * collapse internal runs of whitespace to a single space (a label is a type name, not a passage);
+  * emit ONE **canonical normal form** per label (W12): ``_`` and ``-`` are treated as
+    whitespace-equivalent separators (a run of any of them collapses to a single space) and the
+    result is ``casefold()``-ed, so ``payment_product`` / ``payment-product`` / ``payment product``
+    and ``Date`` / ``date`` all become the SAME string — the fix for corpus-wide label fragmentation
+    (case + format variants splitting one type into many). This is a PURE per-string transform (no
+    cross-call state), so every variant maps to the same normal form regardless of streaming order;
   * drop empty / whitespace-only labels;
   * cap each label's length at :data:`MAX_LABEL_LEN` (64) characters — the anti-smuggle bound;
-  * de-duplicate **case-insensitively** while preserving first-seen order (``Person`` and ``person``
-    collapse to the first);
+  * de-duplicate on the canonical form while preserving first-seen order (``Person``, ``person`` and
+    ``PERSON`` all collapse to one ``person``);
   * cap the COUNT per type at :data:`MAX_LABELS` (40) — the anti-bloat bound; the overflow is
     reported (not silently truncated) so the drop is auditable.
 
@@ -39,7 +44,10 @@ MAX_LABELS = 40
 # bidi-override formatting chars ("Cf") a prompt-injection payload can hide in. A label is a plain
 # type name, so any of these is noise to remove, not preserve.
 _CONTROL_CATEGORIES = frozenset({"Cc", "Cf"})
-_WHITESPACE_RUN = re.compile(r"\s+")
+# A run of separators — Unicode whitespace OR ``_`` / ``-`` — collapses to a single space in the
+# canonical normal form (W12). Treating ``_``/``-`` as space-equivalent is what makes
+# ``payment_product`` and ``payment product`` (and ``payment-product``) the SAME label corpus-wide.
+_SEPARATOR_RUN = re.compile(r"[\s_-]+")
 
 
 @dataclass(frozen=True)
@@ -72,20 +80,29 @@ def _strip_controls(text: str) -> str:
 
 
 def sanitize_label(raw: object) -> str | None:
-    """Sanitize ONE candidate label; return the cleaned string, or ``None`` if it is not usable.
+    """Sanitize ONE candidate label into its canonical normal form, or ``None`` if not usable (W12).
 
-    Coerces to ``str``, strips control chars + surrounding whitespace, collapses internal whitespace
-    runs, and caps the length at :data:`MAX_LABEL_LEN`. Returns ``None`` for an empty / whitespace-
-    only / non-coercible candidate so the caller drops it (never a fabricated placeholder).
+    Coerces to ``str``, strips control chars, collapses every separator run (whitespace / ``_`` /
+    ``-``) to a single space, ``casefold()``-s the result, and caps the length at
+    :data:`MAX_LABEL_LEN`. The casefold + separator collapse is the canonical normal form: ``Date``,
+    ``date``, ``payment_product`` and ``payment product`` all map to one string, so case/format
+    variants no longer fragment a type corpus-wide. Returns ``None`` for an empty / whitespace-only
+    / non-coercible candidate so the caller drops it (never a fabricated placeholder). A pure
+    function of ``raw`` alone — no cross-call state — so it holds under per-doc / streaming
+    induction.
     """
     try:
         text = raw if isinstance(raw, str) else str(raw)
     except Exception:  # noqa: BLE001 - a pathological __str__ never crashes sanitization
         return None
     text = _strip_controls(text)
-    text = _WHITESPACE_RUN.sub(" ", text).strip()
+    # Collapse every separator run (whitespace + ``_``/``-``) to one space BEFORE casefolding, so a
+    # trailing/leading separator is trimmed and internal ones become a single space.
+    text = _SEPARATOR_RUN.sub(" ", text).strip()
     if not text:
         return None
+    # Casefold LAST — once separators are spaces — for a single case-insensitive normal form.
+    text = text.casefold()
     if len(text) > MAX_LABEL_LEN:
         text = text[:MAX_LABEL_LEN].strip()
     return text or None
@@ -96,27 +113,28 @@ def sanitize_labels(raw_labels: object) -> SanitizeResult:
 
     A non-list ``raw_labels`` (the model returned a string / dict / null for a slot) yields an empty
     result — the schema-validation safety net rejects that shape upstream, but sanitizing defends in
-    depth. Each item is cleaned by :func:`sanitize_label`; usable items are de-duplicated
-    case-insensitively (first-seen casing wins) and the count is capped at :data:`MAX_LABELS`, with
-    the overflow reported in :attr:`SanitizeResult.dropped_for_count`.
+    depth. Each item is cleaned by :func:`sanitize_label` into its canonical normal form; usable
+    items are de-duplicated on that form (so ``Person`` / ``person`` / ``PERSON`` collapse to one
+    ``person``) preserving first-seen order, and the count is capped at :data:`MAX_LABELS`, with the
+    overflow reported in :attr:`SanitizeResult.dropped_for_count`.
     """
     if not isinstance(raw_labels, list):
         return SanitizeResult(labels=[], dropped_for_count=0)
-    seen_lower: set[str] = set()
+    seen: set[str] = set()
     kept: list[str] = []
     dropped_for_count = 0
     for raw in raw_labels:
         cleaned = sanitize_label(raw)
         if cleaned is None:
             continue
-        key = cleaned.casefold()
-        if key in seen_lower:
+        # ``cleaned`` is already the canonical normal form, so it IS the dedup key.
+        if cleaned in seen:
             continue
         if len(kept) >= MAX_LABELS:
             # Anti-bloat: cap the count, but count the drop (no silent truncation) so the Provider
             # can log + surface how many labels the cap removed.
             dropped_for_count += 1
             continue
-        seen_lower.add(key)
+        seen.add(cleaned)
         kept.append(cleaned)
     return SanitizeResult(labels=kept, dropped_for_count=dropped_for_count)

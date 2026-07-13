@@ -22,6 +22,7 @@ import pytest
 from latence_core.contracts import (
     Classification,
     DocumentRecord,
+    InducedLabels,
     PageMap,
     Provenance,
     RedactionAction,
@@ -58,6 +59,15 @@ def _doc(
     )
 
 
+class BackendCompilerFailed(RuntimeError):
+    """A stand-in for ``torch._dynamo.exc.BackendCompilerFailed`` — matched by class NAME.
+
+    ``torch.compile`` raises this LAZILY on the first forward when its backend cannot compile the
+    model. The provider's torch-free ``is_compile_backend_failure`` matches on the class name /
+    module chain, so a same-named local class exercises the exact guard without importing torch.
+    """
+
+
 class _FakeGLiNER2:
     """Stands in for ``gliner2.GLiNER2`` with the REAL per-label-dict ``extract_entities``.
 
@@ -74,14 +84,32 @@ class _FakeGLiNER2:
     per_text: dict[str, list[dict[str, Any]]] | None = None
     model_id: str = ""
     raise_on_extract: bool = False
+    #: capture the from_pretrained kwargs (W9: assert quantize/compile threaded on cuda).
+    last_kwargs: dict[str, Any] = {}
+    #: capture the last ``max_len`` threaded into the extract call (W12 model-boundary guard).
+    last_max_len: int | None = None
+    #: force from_pretrained(quantize=…/compile=…) to raise, to exercise the guarded plain fallback.
+    raise_on_optimized_load: bool = False
+    #: when True, a model loaded with compile=True raises BackendCompilerFailed on its FIRST forward
+    #: (torch.compile compiles lazily at inference) — the W9 inference-time fault the guard degrades.
+    compiled_forward_raises: bool = False
 
     def __init__(self) -> None:
         self.batch_calls = 0
+        self._compile_on = False
 
     @classmethod
-    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _FakeGLiNER2:
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER2:
+        # FAITHFUL to gliner2 1.3.2: from_pretrained ACCEPTS native quantize/compile kwargs.
+        if cls.raise_on_optimized_load and ("quantize" in kwargs or "compile" in kwargs):
+            msg = "simulated fp16/compile fault (torch/CUDA)"
+            raise RuntimeError(msg)
+        cls.last_kwargs = dict(kwargs)
         inst = cls()
         inst.model_id = model_id
+        # torch.compile compiles LAZILY on the first forward: a compile=True load succeeds, then the
+        # first batch_extract_entities raises. A reload with compile=False does not (the fallback).
+        inst._compile_on = bool(kwargs.get("compile"))
         return inst
 
     def _rows_for(self, text: str) -> list[dict[str, Any]]:
@@ -125,10 +153,15 @@ class _FakeGLiNER2:
         threshold: float = 0.5,
         include_spans: bool = False,
         include_confidence: bool = False,
+        max_len: int = 768,
     ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
         # The real batched API: one forward pass over all texts; result[i] is texts[i]'s per-label
         # dict — the exact single-text shape, one per input.
         self.batch_calls += 1
+        type(self).last_max_len = max_len  # W12: record the threaded model-window bound
+        if type(self).compiled_forward_raises and self._compile_on:
+            # Mimic torch._dynamo.exc.BackendCompilerFailed on the FIRST (compiled) forward.
+            raise BackendCompilerFailed("inductor backend cannot compile this model")
         return [
             self.extract_entities(
                 text,
@@ -149,6 +182,10 @@ def fake_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER2]:
     _FakeGLiNER2.entities = []
     _FakeGLiNER2.per_text = None
     _FakeGLiNER2.raise_on_extract = False
+    _FakeGLiNER2.last_kwargs = {}
+    _FakeGLiNER2.last_max_len = None
+    _FakeGLiNER2.raise_on_optimized_load = False
+    _FakeGLiNER2.compiled_forward_raises = False
     return _FakeGLiNER2
 
 
@@ -348,6 +385,90 @@ def test_missing_gliner2_dependency_raises_clear_error(monkeypatch: pytest.Monke
         list(provider.redact([_doc(_TEXT)]))
 
 
+# --- W12 model-boundary guard: max_len threaded into the extract call -------------------------
+
+
+def test_max_len_default_768_threaded_into_extract(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    # The hard model-boundary guard: the provider threads a max_len (default 768) into the native
+    # batch_extract_entities call so the mdeberta window is bounded, never a silent truncation.
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    list(Gliner2PIIRedactor(_config()).redact([_doc("Alice waved at the crowd.")]))
+    assert fake_gliner2.last_max_len == 768
+
+
+def test_max_len_config_override_threaded(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    list(Gliner2PIIRedactor({**_config(), "max_len": 512}).redact([_doc("Alice waved.")]))
+    assert fake_gliner2.last_max_len == 512
+
+
+def test_long_document_past_max_len_handled_no_crash(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    # A document whose text is far longer than the (small, configured) window is handled without a
+    # crash; the provider bounds the model window (documented truncation) rather than faulting.
+    long_text = "Alice. " + ("filler word " * 500)
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    rec = next(iter(Gliner2PIIRedactor({**_config(), "max_len": 64}).redact([_doc(long_text)])))
+    assert isinstance(rec, RedactionRecord)
+    assert fake_gliner2.last_max_len == 64  # the bound the model was asked to honor
+
+
+# --- W12 induced pii_types honored via the effective_labels seam (ADR-0038) ------------------
+
+
+_IBAN = "DE89370400440532013000"
+_IBAN_TEXT = f"Alice holds account {_IBAN} today."
+
+
+def _induced_iban_doc() -> DocumentRecord:
+    induced = InducedLabels(model_id="test-model", pii_types=["iban"])
+    return _doc(_IBAN_TEXT).model_copy(update={"induced_labels": induced})
+
+
+def _iban_and_person_entities() -> list[dict[str, Any]]:
+    a_start = _IBAN_TEXT.index("Alice")
+    i_start = _IBAN_TEXT.index(_IBAN)
+    return [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95},
+        {"start": i_start, "end": i_start + len(_IBAN), "label": "iban", "confidence": 0.9},
+    ]
+
+
+def test_induced_pii_types_reach_the_effective_label_set(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    # THE W12 wiring: a corpus-induced 'iban' pii_type (on the DocumentRecord) is UNIONed onto the
+    # config floor via effective_labels(config ∪ induced), so it is actually detected + redacted.
+    fake_gliner2.entities = _iban_and_person_entities()
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_induced_iban_doc()])))
+    # config floor ['person','email'] ∪ induced ['iban'] → both the config 'person' AND the induced
+    # 'iban' are in the effective label set, so both are masked.
+    assert {s.pii_type for s in rec.pii_spans} == {"person", "iban"}
+    assert "Alice" not in rec.masked_content
+    assert _IBAN not in rec.masked_content
+
+
+def test_without_induction_iban_is_not_in_the_label_set(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    # The control that gives the wiring test teeth: with NO induced labels, 'iban' is outside the
+    # config floor, so the fake model filters it out — only the config 'person' is redacted. This
+    # proves the induced union (not some incidental match) is what surfaces 'iban' above.
+    fake_gliner2.entities = _iban_and_person_entities()
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_doc(_IBAN_TEXT)])))
+    assert {s.pii_type for s in rec.pii_spans} == {"person"}
+    assert _IBAN in rec.masked_content  # not detected → not masked (config floor only)
+
+
+def test_config_floor_stays_mandatory_with_induction(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    # Induction EXTENDS but never replaces the config floor: the config 'person' is still detected
+    # alongside the induced 'iban' (both present in the effective set).
+    fake_gliner2.entities = _iban_and_person_entities()
+    rec = next(iter(Gliner2PIIRedactor({"pii_labels": ["person"]}).redact([_induced_iban_doc()])))
+    assert {s.pii_type for s in rec.pii_spans} == {"person", "iban"}
+
+
 # --- W7 encoder batching (ADR-0036 §1 / ADR-0033) --------------------------------------------
 
 
@@ -466,3 +587,68 @@ def test_missing_batch_extract_entities_raises_clear_error(
     monkeypatch.setitem(sys.modules, "gliner2", module)
     with pytest.raises(AttributeError, match="batch_extract_entities"):
         list(Gliner2PIIRedactor(_config()).redact([_doc(_TEXT)]))
+
+
+# --- W9 quantize/compile guarded optimized load (the redact 2.83× fix) ------------------------
+
+
+def test_invalid_quantize_compile_knob_is_config_error() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="invalid quantize"):
+        Gliner2PIIRedactor({**_config(), "quantize": "sometimes"})
+    with pytest.raises(ConfigError, match="invalid compile"):
+        Gliner2PIIRedactor({**_config(), "compile": "maybe"})
+
+
+def test_cpu_default_loads_plain_no_optimized_kwargs(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    # On the CPU-only test host (LATENCE_CUDA=0 in CI) quantize/compile 'auto' resolve to False, so
+    # from_pretrained is called PLAIN (no quantize/compile kwargs) — the determinism-safe default.
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    list(Gliner2PIIRedactor(_config()).redact([_doc("Alice waved.")]))
+    assert "quantize" not in fake_gliner2.last_kwargs
+    assert "compile" not in fake_gliner2.last_kwargs
+
+
+def test_optimized_load_fault_degrades_to_plain_load(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    # A quantize/compile fault degrades to a plain load (never a crash) at identical PII. Force the
+    # knobs on (config override) AND make the optimized load raise — the guard must retry plain.
+    fake_gliner2.raise_on_optimized_load = True
+    a_start = _TEXT.index("Alice")
+    fake_gliner2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95}
+    ]
+    cfg = {**_config(), "quantize": True, "compile": True}
+    rec = next(iter(Gliner2PIIRedactor(cfg).redact([_doc(_TEXT)])))
+    # The plain fallback loaded and masked the identical span (no crash).
+    assert "Alice" not in rec.masked_content
+    assert "[PERSON]" in rec.masked_content
+
+
+def test_inference_time_compile_fault_degrades_to_uncompiled(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """THE inference-time compile guard (pod-found): torch.compile compiles LAZILY on the first
+    forward, so a backend that cannot compile the model raises ``BackendCompilerFailed`` INSIDE
+    ``batch_extract_entities`` — NOT at load. The provider must catch it ONCE (unwrapping the
+    guard's ProviderError to inspect the cause), re-load the UNCOMPILED model (quantize kept), and
+    still mask the PII correctly — never a ProviderError crash.
+    """
+    fake_gliner2.compiled_forward_raises = True   # compile=True load's first forward raises
+    a_start = _TEXT.index("Alice")
+    e_start = _TEXT.index("alice@acme.com")
+    fake_gliner2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95},
+        {"start": e_start, "end": e_start + 14, "label": "email", "confidence": 0.9},
+    ]
+    cfg = {**_config(), "quantize": True, "compile": True}   # force compile on (cuda-style)
+    provider = Gliner2PIIRedactor(cfg)
+    rec = next(iter(provider.redact([_doc(_TEXT)])))
+    # Degraded to the uncompiled model + still masked the PII (no crash).
+    assert "Alice" not in rec.masked_content
+    assert "alice@acme.com" not in rec.masked_content
+    assert {s.pii_type for s in rec.pii_spans} == {"person", "email"}
+    # The fallback ran (latched once) and re-loaded with compile=False, quantize kept.
+    assert provider._compile_disabled is True
+    assert fake_gliner2.last_kwargs.get("compile") is False
+    assert fake_gliner2.last_kwargs.get("quantize") is True

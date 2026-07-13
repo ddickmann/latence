@@ -245,3 +245,170 @@ Phase-3 **Wave-8** adds a shared **performance seam** so every learned Provider 
 - **The false-green that pod validation caught (and how the tests now bite).** The first W8 cut spread the perf kwargs into `GLiNER.from_pretrained` for the 3 plain-gliner providers and passed verify-local — but ONLY because the offline fake `GLiNER.from_pretrained` **swallowed** the kwargs while the REAL `gliner` 0.2.27 API **rejects** them (`TypeError`), crashing all three on real weights (the classic fake-mirrors-a-nonexistent-API trap). Fix: the offline fake `GLiNER.from_pretrained` now **faithfully raises `TypeError`** on `torch_dtype`/`attn_implementation` (like the real lib) and the fake model exposes a `.to(dtype)` that records the applied dtype — so a provider that wrongly passes perf kwargs to gliner **FAILS offline**. New tests assert the 3 gliner providers apply bf16 via `.to()` on cuda and issue **no** perf kwargs to `from_pretrained` (and gracefully skip the cast on cpu / when torch is absent, never crashing).
 - **Anti-false-green tests.** Offline **perf-seam unit tests** (`test_perf_seam.py`): dtype bf16-on-cuda / fp32-on-cpu / config-override / invalid-raises; attn sdpa default, FA2 only when `flash_attn` importable (monkeypatched present/absent); `load_perf_kwargs` shape + real-`torch.dtype`-when-present; **`load_then_cast` loads-plain-then-`.to(bf16)`-on-cuda / no-cast-on-cpu / skips-cast-without-torch / never-passes-perf-kwargs-to-loader**; `maybe_compile` no-op-off / uncompiled-on-failure / uncompiled-when-torch-missing / wraps-on-success; FA2→sdpa retry + non-FA2 propagate. An **AST regression guard** (`test_perf_fp32_regression_guard.py`) scans every learned provider source and FAILS if a MODEL `from_pretrained` bypasses the perf seam (either helper), with a per-gliner-provider check that it routes through **`load_then_cast`** (the `.to()` path) and uses **NO** perf kwargs / `load_with_fa2_fallback` (which would re-introduce the crash), plus meta-tests proving it catches a bare load and accepts both seam helpers. **OCR page-batching equivalence** (`test_ocr_page_batching_equals_per_page_record_for_record`) proves batched(N variable-length pages) == per-page decode record-for-record, with a variable-length fixture so a wrong shared-length slice FAILS; `test_ocr_generate_called_ceil_n_over_batch_size_times` asserts `ceil(N/ocr_batch_size)` generate calls. A downscale unit test proves a 1200×2339 image → longest-side 1540 aspect-preserved, untouched at `0`/`None` or when already smaller.
 - **No roster change; CI green; pod-measured.** W8 adds NO Provider (it accelerates existing ones), so the registry roster is unchanged and no stack/matrix wiring changes. `ruff` + `mypy --strict` (src + tests) + `pytest` green; `scripts/verify-local.sh` green. **The real numbers are recorded in `PERF-RESULTS.md`.** OCR accel ladder (LightOnOCR-2 on RTX 2000 Ada, 6 real LBBW German PDF pages, content-safe path byte-identical across rungs): fp32 44.5 s/page → bf16 **1.49×** (the biggest win, and mandatory — fp16 → garbage per LightOn) → +1540px cap 1.50× (~nil on this decode-bound corpus, kept) → +page-batch 4 **1.77×** → +FA2 1.87× (+6%) → +compile 1.85× (no gain — validates the compile-off default). Encoder (gliner): bf16 via `.to()` = **1.36×, byte-identical entities** — and gliner 0.2.27 has **no FA2/FlashDeBERTa** (not claimed). `max_new_tokens=1024` truncated ~25% of dense-page text → default kept at **4096**. **vLLM head-to-head is NOT measured** — this pod's driver (CUDA 12.4) is too old for the torch (cu126+) a LightOnOCR-2-supporting vLLM needs; a documented infra constraint (needs driver ≥12.6), no vLLM numbers fabricated.
+
+## Status note — gliner2 as the unified, optimized extraction+PII engine; relex superseded (W9-gliner2-unified)
+
+Phase-3 **Wave-9** consolidates extraction onto the fastino **GLiNER2** framework (`gliner2` 1.3.2): one backbone does entities AND relations AND PII, with **native** `quantize`+`compile` on `from_pretrained` — pod-measured **2.83× (PII) / 1.74× (combined NER+RE) at byte-identical output** (Dennis's call, pod-validated). This retires the separate `relation.gliner_relex` architecture (`knowledgator/gliner-relex`) as the DEFAULT: one fewer model family, more throughput, less handling.
+
+- **`redaction.gliner2` optimized deployment (the redact fix).** New `quantize` (default True on cuda) + `compile` (default True on cuda) config knobs → `GLiNER2.from_pretrained(id, quantize=…, compile=…)` (the gliner2 framework's NATIVE fp16 + torch.compile + fused GPU kernels, "no extra dependencies required"). This **SUPERSEDES the W7 batching that REGRESSED redact** (60→95s, padding waste): the honest win is the native quantize+compile, not a batch dimension. The W9 load routes through the new dep-light `load_gliner2_optimized` seam (in `latence_core/providers/perf.py`): both knobs resolve **True on cuda / False on cpu** (or the config override) via `resolve_gliner2_knob`, and the optimized load is **guarded** — ANY quantize/compile fault (torch/CUDA/compile) degrades to a plain `from_pretrained(id)` load (throughput only, never a crash). An invalid `quantize`/`compile` value is a `ConfigError` surfaced at construction (fail-fast, like `batch_size`). Output/offset contract is byte-identical (pod-verify PII spans unchanged under quantize+compile).
+
+- **New fused extraction Provider `fused_entity_relation.gliner2` (`latence-extract-gliner2`, `fastino/gliner2-multi-v1`).** A **drop-in swap for `relation.gliner_relex`**: the SAME `FusedEntityRelationExtractor` seam (`extract_fused`), the SAME config shape (`labels` + `relation_labels`), the SAME mentions+relations+evidence+provenance+offset contract, reading **induced ∪ config labels** (the W4 seam, per slot) exactly like relex. It uses the pod-validated gliner2 API: `extract_entities(..., include_spans=True, include_confidence=True)` → `{"entities": {label: [{text,confidence,start,end}]}}` and `extract_relations(..., include_spans=True, include_confidence=True)` → `{"relation_extraction": {rel: [{"head": {text,confidence,start,end}, "tail": {...}}]}}`. **Offsets (the recurring ADR-0031 coordinate trap):** entity char offsets are resolved to true original-markdown offsets through the chunk's stripped→original `offset_map` (`OffsetIndex`); a relation is resolved to the two mentions it links by matching the head/tail chunk-local `(start,end)` spans, and its covering span is the min/max of the corrected endpoints, so it inherits the correction. `quantize`/`compile` knobs (default on cuda) via the same guarded `load_gliner2_optimized` seam. It also exposes `extract` (the NER half) for a plain Entity Stage.
+
+- **Default swap; relex kept-but-superseded.** `fused_entity_relation.gliner2` is now the DEFAULT extraction Provider in the blessed stacks (`gpu-sota.yaml`, `gpu-sota-pod.yaml`, `schema-induction.yaml`). `relation.gliner_relex` (`latence-relation-gliner`) is **kept in the roster** (existing stacks unbroken — the package still installs, loads, and passes conformance) but is **superseded** by the unified gliner2 default: a stack that pins it still runs; the blessed path no longer does. The fused-provider stage rule (a Fused Provider belongs under a `fused_entity_relation` Stage, never `relation_extraction`) is unchanged and now satisfied by the gliner2 Provider.
+
+- **Anti-false-green (the paddle/relex lesson — honoured).** The offline fake `GLiNER2` mirrors the REAL gliner2 return shapes: the per-label `extract_entities` dict, the per-relation-type `extract_relations` dict (head/tail sub-dicts carrying `start`/`end`), spans when `include_spans=True`, and native `quantize`/`compile` kwargs on `from_pretrained`. Teeth: `test_flat_list_misparse_fails_anchor` (a provider mis-parsing either nested dict as a flat list — the `gliner`-library shape — recovers ZERO records), `test_offsets_round_trip_under_variable_offsets` (a **variable-offset** fixture — three names at three distinct chunk-local starts on a non-zero-based chunk — proves every mention slice + the relation covering span round-trip to the chunk EXACTLY, so an off-by-one / wrong-base coordinate bug FAILS), `test_optimized_load_fault_degrades_to_plain_load` (a forced quantize/compile fault still extracts identically via the plain fallback), and `test_native_fault_becomes_typed_error_no_pii_leak` (a native fault echoing the input becomes a typed `ProviderError` carrying no content). The stub-scoped conformance case (`_relation_case(gliner=True, backend="gliner2")`) drives the same `extract_fused` contract through the faithful `gliner2` stub (`install_gliner2` now seeds relations too).
+
+- **License (ADR-0012 / research-diligence, verified 2026-07-10 — weights AND code, separately).** `fastino/gliner2-multi-v1` checkpoint: **Apache-2.0** (weights, HF model card "License: apache-2.0", NOT gated / freely downloadable). `gliner2` library: **Apache-2.0** (code, github.com/fastino-ai/GLiNER2 LICENSE + PyPI classifier). Both permissive → `license_verified=True` in the profile; nothing downloads unless a Pipeline configures the Provider. (Not UNVERIFIED — both sources confirmed permissive.)
+
+- **Roster +1 (40 → 41); CI green.** W9 adds ONE Provider (`fused_entity_relation.gliner2`, the 12th stub-scoped) and swaps the blessed-stack default. `ruff` + `mypy --strict` (src + tests) + `pytest` + conformance (C1–C6 for the new Provider) + stack-validate + bake-off green; `scripts/verify-local.sh` green. **The pod validation is the maintainer's** (`scripts/validate-gliner2-unified-on-gpu.md`): real `fastino/gliner2-multi-v1` NER+RE offsets round-trip on real German chunks, and `redaction.gliner2` PII spans unchanged under quantize+compile with the 2.83× re-measured. **No GPU number is fabricated here** — offline CPU proves correctness + the coordinate round-trip + the guarded-degradation; the throughput number needs the rig.
+
+### W9 pod re-validation — two real-weights gaps fixed (2026-07-10)
+
+Pod validation on real `fastino/gliner2-multi-v1` weights confirmed the **offset round-trip PASSES** (all mentions + relations slice back to exact text — the `offset_map`/`OffsetIndex` mapping is validated-correct, untouched). Two real-weights gaps surfaced and were fixed on the branch before merge:
+
+- **Missing `peft` runtime dep.** gliner2's relation inference engine (`gliner2.inference.engine` → `gliner2.training.trainer`) imports `peft`, which the `gliner2[local]` extra does NOT declare — real load fails `ModuleNotFoundError: No module named 'peft'`. Added `peft>=0.10` to BOTH `latence-extract-gliner2` and `latence-pii-gliner2` dependencies (the engine import is on both providers' load path). `peft` is **Apache-2.0** (github.com/huggingface/peft, verified 2026-07-10); recorded in THIRD-PARTY-LICENSES + the pod script.
+
+- **`compile=True` crashes at INFERENCE, not load — the load-time guard missed it.** `torch.compile` compiles **lazily on the first forward**, so on an env whose inductor/dynamo backend cannot compile the model (pod: torch 2.4.1 + gliner2-multi-v1) the failure is a `torch._dynamo BackendCompilerFailed` raised INSIDE `extract_entities`/`extract_relations`/`batch_extract_entities` — which the provider was surfacing as a `ProviderError` (a CRASH, not the spec's graceful degradation). **Fix — the inference-time compile guard:** a new dep-light, **torch-free** predicate `is_compile_backend_failure(exc)` (matches the compile-fault class name / torch-compile-stack module path, walking the exception cause/context chain so a guard-wrapped fault is still caught — never imports torch) plus a per-provider `_reload_uncompiled()`: on the FIRST such fault at inference each provider re-loads ONCE with `compile` forced off (`quantize` kept — fp16 alone is fine), retries the forward on the uncompiled model, and uses it for the rest of the run (latched via `_compile_disabled`), so a bad compile costs only throughput, never a crash or a `ProviderError`. `quantize` (fp16) is unaffected and stays on. Tests: a fake model whose compiled forward raises `BackendCompilerFailed` on first call → both providers degrade to uncompiled and still return correct records (`test_inference_time_compile_fault_degrades_to_uncompiled` for each) + the once-across-many-chunks latch + the `is_compile_backend_failure` unit tests (name / module-prefix / wrapped-cause / non-compile-error-false). The W8 AST perf-guard covers the `load_gliner2_optimized` seam; `scripts/validate-gliner2-unified-on-gpu.md` §4b is the maintainer's turnkey re-validation of the compile degradation on the pod.
+## Status note — the PRODUCTION OCR path: LightOn-OCR served by vLLM at concurrency (W10-lighton-vllm)
+
+Phase-3 **Wave-10** adds the **production OCR path**: `parser.lighton_vllm`, a drop-in `Parser` that hits a **running vLLM OpenAI-compatible endpoint** instead of loading transformers in-process. The gap it closes was called out in W8 itself: **production OCR is a warm vLLM server, not in-process transformers** — pod-measured, vLLM at concurrency is ~**2.7x faster than optimised transformers** (LightOn's recommended path; their 5.71 pg/s H100 headline is the vLLM path), and the W8 note recorded that the vLLM head-to-head could NOT be measured on that pod (driver too old for the cu126+ torch a LightOnOCR-2 vLLM needs). W10 is the provider; its real throughput is the pod maintainer's to fold in. The in-process `parser.lighton` (W1/W8) stays for single-box / simple.
+- **Drop-in Parser, same Capability, one-config switch (ADR-0007).** `parser.lighton_vllm` satisfies the SAME `Parser` Capability as `parser.lighton` and emits the SAME output contract (markdown per page → the exact-offset `PageMap.from_page_texts` seam), so a Pipeline swaps the in-process OCR for the served one by pointing `base_url` at the endpoint — no code edit, no pipeline change. Per document: rasterise → POST each page → assemble the page map.
+- **The rasteriser is FACTORED and SHARED (the reviewer's #1 no-divergence check).** Both OCR back-ends now rasterise through ONE `latence_parser_lighton.rasterize.PageRasteriser` — the SAME `dpi` (200) + megapixel bomb-cap + **1540px LANCZOS longest-side** + offset-0 PDF/image spoof guards. It was extracted verbatim from `parser.lighton`'s W8 rasteriser; the in-process Provider now delegates to it and the served Provider reuses it, so the pixel preprocessing is byte-for-byte identical and **cannot silently diverge** between the two paths. `parser.lighton`'s existing W8 tests (clamp/downscale/spoof/bomb) stay green through the delegation. The Provider's own `guard` is injected so a native rasteriser fault maps to its typed taxonomy (no image bytes / content).
+- **The served POST — OpenAI multimodal, LightOn's official sampling.** Each rasterised page is encoded as a base64 PNG `data:` URL and POSTed to `{base_url}/v1/chat/completions` with `messages=[{role:user, content:[{type:image_url,...}, {type:text, text:prompt}]}]`, `max_tokens` **4096** (content-safe — NOT 1024, the pod-corrected default that avoids the ~25% dense-page truncation W8 found), `temperature` **0.2**, `top_p` **0.9** (LightOn's official OCR sampling, verified from the LightOnOCR-2-1B model card). The reply's `choices[0].message.content` is that page's markdown.
+- **Async concurrency + retry + per-page fail-open (the W6/superpod pattern, reused).** A document's page requests fan out concurrently under an `asyncio.Semaphore(max_concurrency)` (config, **default 8**; 1 = sequential) inside a single `asyncio.run` — the public `parse` stays SYNC (the Runner is sync). Each POST rides `latence_core.endpoint.call_with_retry_async` (the SAME ported exp-backoff+jitter, 429/5xx/timeout retryable, other-4xx terminal, retries tallied on `endpoint_retries`). A **per-page** endpoint failure **fails open** to an empty page marker for THAT page only (a 40-page scan keeps its 39 good pages); a document degrades to a per-document `PARSE_ERROR` only if EVERY page failed. Results are re-assembled in **input page order** (index-keyed), so a shuffled completion order never perturbs the byte-identical page map — the same determinism discipline `relation.llm` carries. The pixel-bomb / spoof / timeout guards are intact.
+- **Profile + license + conformance.** `compute="either"` (a thin HTTP client — rasterise on CPU, OCR behind the vLLM endpoint), so it is **infra-gated like `embedding.endpoint` / `parser.endpoint`**, NOT device-skipped: it is `stub_scoped` (conformance runs the contract/graceful-failure/license/determinism subset against a faithful async `AsyncOpenAI` stub, its real throughput needs a live rig #64 — flagged, never fabricated). `model_id="lightonai/LightOnOCR-2-1B"` — **evidence-bearing Apache-2.0 weights AND code** (verified 2026-07-09 from the model card, reusing the same permissive LightOn-OCR checkpoint family `parser.lighton` carries; weights SPDX recorded separately per ADR-0012). `deterministic=False`; `cost_per_1k=None` (self-hosted). Passes conformance C1–C6. A dedicated `_lighton_vllm_case` (`conformance/cases.py`) installs the async endpoint stub + a faithful offline fake `pypdfium2`/`PIL` (`install_lighton_vllm_offline` in `conformance/stub.py`) so the REAL shared rasteriser runs offline (render clamp → 1540px downscale → base64 data-URL encode → served OCR → PageMap) — the served OCR reply is the ONLY stubbed thing.
+- **The production vLLM serve recipe — CUDA GRAPHS ON (no `--enforce-eager` in prod).** Documented in the Provider docstring + `docs/serving-lighton-vllm.md` + the pod script `scripts/validate-lighton-vllm-on-gpu.md`: `vllm serve lightonai/LightOnOCR-2-1B --dtype bfloat16 --gpu-memory-utilization 0.90 --max-model-len 10000 --limit-mm-per-prompt '{"image": 1}' --mm-processor-cache-gb 0 --no-enable-prefix-caching --max-num-seqs 32`. cudagraphs give the extra speed the in-process transformers head-to-head's enforce-eager floor did NOT capture, so production keeps them ON. **Known caveat documented:** on bleeding-edge Blackwell (SM 12.x) vLLM 0.24's bundled FlashInfer can't JIT cudagraphs (`FlashInfer requires sm75+`) → add `--enforce-eager` there (a ~perf floor) OR upgrade flashinfer; mainstream GPUs (Hopper/Ada/Ampere, CUDA >= 12.6) run cudagraphs fine.
+- **Anti-false-green — the mock mirrors the REAL vLLM response shape.** The offline double is a faithful async `openai.AsyncOpenAI`: `chat.completions.create` is a **coroutine** returning `choices[0].message.content` (the exact real shape `relation.llm` / `embedding.endpoint` mock against — NOT a fictional API), and it decodes the base64 page image the Provider ACTUALLY POSTed back to that page's markdown, so the rasterise → data-URL → POST → decode path is genuinely exercised (a Provider that mangles the image or drops a page FAILS). It records `max_in_flight` (the semaphore bound) and honours a per-page `asyncio.sleep` so the concurrency is provably real. Tests: **`test_batched_pages_equal_per_page_record_for_record`** (concurrent == `max_concurrency=1`, record-for-record with offsets, over VARIABLE-LENGTH pages so a wrong/out-of-order assembly fails), **`test_wall_clock_is_ceil_n_over_c_not_n`** (timing: N pages at concurrency C take ~`ceil(N/C) x delay`, `max_in_flight <= C` AND `> 1`), **`test_max_concurrency_one_serializes`**, **`test_one_page_endpoint_failure_fails_open_document_keeps_good_pages`** (per-page fail-open), **`test_shuffled_completion_order_is_page_ordered`** + **`test_two_runs_byte_identical`** (determinism, index-ordered), **`test_request_uses_openai_multimodal_shape_and_official_sampling`** (max_tokens 4096 / temp 0.2 / top_p 0.9 on the request kwargs), plus the guards intact (spoof/bomb/unsupported → graceful PARSE_ERROR, no endpoint call). NO real server in CI (infra-gated, skip-with-flag).
+- **Roster +1 (40 -> 41); CI green.** The registry roster is now **41** (was 40) — the roster/count assertions (`test_conformance.py`, `test_e2e_conformance.py`) + the E2E conformance roll-up are updated (`parser.lighton_vllm` is stub-scoped, not device-skipped). `scripts/verify-local.sh` + `.github/workflows/ci.yml` install `latence-parser-lighton-vllm --no-deps` in the heavy-source step and build its wheel. `ruff` + `mypy --strict` (src + tests) + `pytest` green across `latence-core`, `latence-parser-lighton` (refactored to the shared rasteriser), and the new `latence-parser-lighton-vllm`. The heavy dep is isolated (this package ships only the light `openai`/`pypdfium2`/`pillow` client — no torch/transformers, ADR-0016); the real vLLM throughput (the ~2.7x claim) comes from the maintainer's pod run (stand up vLLM, OCR the LBBW pages through the provider, record pages/second at concurrency), folded into `PERF-RESULTS.md` — **never fabricated here** (offline proves correctness + the async concurrency shape; the throughput number needs the live server).
+## Status note — `latence tune`: the per-device optimal-settings profiler, correctness-gated (W11-autotune)
+
+Phase-3 **Wave-11** adds `latence tune` — **"deploys optimally on any box."** The W8 perf seam
+resolves the SAME knobs everywhere; W11 turns them **per device** under a HARD correctness gate,
+because a client's GPU decides which knobs win AND which even *work* (compile support is
+env-dependent: `gliner2-multi-v1` + torch 2.4.1 raised `BackendCompilerFailed` **at inference** on one
+pod). It profiles the device, sweeps each heavy Provider's knobs on a small real sample, keeps only
+settings that don't crash AND don't change output, picks the fastest, and writes a per-device tuned
+config the runner overlays only on a fingerprint match. Throughput-first; **correctness is the hard
+gate.** Design: this note; usage: `docs/tuning.md`; the real sweep: `scripts/tune-on-gpu.md`.
+
+- **The tune seam (`latence_core.tune`, split like the bake-off).** A **pure contract + torch-free
+  logic half** — `tune.report` (the `TuneReport`/`ProviderTuning`/`RejectedKnob`/`KnobSetting` models
+  + the signed-style Markdown renderer + the `tuned/<device>.yaml` load/dump), `tune.fingerprint`
+  (the `DeviceFingerprint`), `tune.sweep` (the per-Provider knob grid), `tune.overlay` (the
+  runner-side apply), and `tune.tuner` (the sweep + gate + pick) — with **no runner/stage imports**,
+  so a bare `import latence_core` stays thin (ADR-0016). The **measuring half** is the real
+  `RegistrySampleProbe` (`tune.realprobe`), reached only on a rig. The two are bridged by a narrow
+  one-method **`SampleProbe`** seam (`tune.probe`): `probe(provider, setting, sample_size, repeats) ->
+  ProbeOutcome` (either an `error`, or an output-fingerprint + timings). The real probe reuses the
+  **bake-off's timing/sample approach** — it stages the SAME bundled deterministic corpus, holds the
+  other stages at a base stack, swaps the candidate knobs onto the target stage, runs the
+  `LocalRunner`, times K repeats after a warmup, and fingerprints the target-stage **checkpoint
+  bytes** (labels/spans/offsets/text — the same G1 determinism subject the bake-off cross-checks). A
+  fake probe with a known knob→(speed, correctness, crash) profile drives the IDENTICAL gate offline.
+- **The CORRECTNESS GATE (the crux, reusing the W8/W9 compile-fault reasoning).** The baseline
+  candidate (fp32/plain, compile off, batch 1) is probed FIRST and defines the correctness
+  reference — its output fingerprint is what every accelerated candidate must MATCH. A candidate is
+  **REJECTED** if it (a) raised **any** error — crucially including an **inference-time**
+  `BackendCompilerFailed`/dynamo/OOM (the W9 lesson: the fault surfaces on the FIRST forward, not at
+  load), OR (b) produced a different output fingerprint (`output_changed`). Compile faults are
+  detected **torch-free** by the new shared `latence_core.providers.perf.is_compile_backend_failure`
+  (added to the W8 seam so W8/W9/W11 share ONE "is this a compile-backend failure" reasoning): it
+  walks the exception's `__cause__`/`__context__` chain and matches by class name
+  (`BackendCompilerFailed`, `InductorError`, dynamo `Unsupported`, …), defining-module prefix
+  (`torch._dynamo`/`torch._inductor`/`torch.fx`/`torch._functorch`), or a telltale message — so a
+  compile crash WRAPPED in a typed `ProviderError` is still caught, on a torch-free host. The report
+  names it precisely (`compile: rejected (compile_failure)`). **Slow-but-correct always beats
+  fast-but-crashing/wrong:** the baseline is eligible by construction, so a Provider on which every
+  acceleration is rejected still ships its safe baseline (a `compile: true` that crashes NEVER wins).
+- **The device fingerprint + the overlay guard (prevents cross-GPU misapplication).** Every
+  `tuned/<device>.yaml` records a `DeviceFingerprint` — CUDA present (`LATENCE_CUDA`-overridable), GPU
+  name + total VRAM (`nvidia-smi`, torch-free), logical CPU count, and the torch/CUDA version ONLY if
+  torch is already importable (else an honest `None`). Its `key` is a stable hash over those fields;
+  two fingerprints MATCH iff the key is equal. The runner overlay (`latence run --tuned tuned/x.yaml`)
+  applies the tuned per-Provider knobs **only on a match** — a **mismatch logs a warning and uses the
+  stack defaults**, NEVER silently applying a tune from a different GPU (where a winning `compile:
+  true` could crash). `LATENCE_DEVICE` pins the whole fingerprint for a seeded test, so the key is
+  reproducible on any host.
+- **Overlay is config-only (no contract/offset change).** The apply is the SAME shallow per-stage
+  merge the bake-off uses — `{**stage.config, **winning_knobs}` — so a tuned run is byte-for-byte the
+  stack it would be with those knobs hand-written into the YAML. A nested Export/Disambiguation
+  `config.embedder` whose provider is a tuned one is merged inside its own config block (the embedder
+  is an opt-in sub-config, ADR-0017, not a DAG node). No Provider contract, seam, or offset changes.
+- **Deterministic + honest report.** The knob grid is cartesian-but-pruned in a fixed order (baseline
+  first); the winner pick is a total order (throughput desc, then fewer knobs, then label); the
+  fingerprint is stable — so the same device+sample+seed yields a **byte-identical** `tuned/x.yaml`.
+  The report renders WINNERS (baseline→tuned r/s + speedup + winning knobs) AND every REJECTED knob
+  with its reason — winners AND rejections, never a fabricated number (each r/s is the median of the
+  seeded timed runs on THAT device).
+- **Anti-false-green tests (offline; the real sweep is a pod run).** `test_tune.py` drives the gate
+  with fake Providers: **pick-correct** (`test_picks_the_fastest_correct_setting`), **reject-crash**
+  (`test_rejects_inference_time_compile_crash_named_compile_failure` — a fake forward that returns a
+  `BackendCompilerFailed` in `ProbeOutcome.error`, exactly how the real probe surfaces an
+  inference-time fault, asserted rejected + named `compile_failure` + NOT the winner), **reject-wrong**
+  (`test_rejects_a_knob_that_changes_output`), **fingerprint-guard**
+  (`test_overlay_NOT_applied_on_fingerprint_mismatch_falls_back_to_defaults`), plus determinism
+  (`test_deterministic_same_device_sample_seed_identical_config`), the torch-free compile detection
+  through the cause chain / module-prefix / message, baseline-crash-is-untunable, tie-breaking, and
+  the CLI `run --tuned` match/mismatch/missing-file paths (`test_cli.py`). **No real GPU numbers are
+  fabricated.**
+- **No roster change; CI green; pod-measured.** W11 adds NO Provider (it tunes existing ones), so the
+  registry roster is unchanged and no stack/matrix wiring changes; the one W8-seam addition
+  (`is_compile_backend_failure`) is additive. `ruff` + `mypy --strict` (src + tests) + `pytest` green;
+  `scripts/verify-local.sh` green. `latence tune` and `latence run --tuned` are new CLI surfaces; the
+  real per-device winners + the real rejected-compile case are the maintainer's to fold into a signed
+  tune report from `scripts/tune-on-gpu.md` (a Blackwell/Ada sweep) — **never fabricated here**.
+
+## Status note — KG export node type-column consistency (W12-kg-consistency)
+
+Phase-3 **Wave-12** fixes a cross-format naming inconsistency in the S9 `export.knowledge_graph`
+Provider (`latence_core.stages.graph_export`): the entity **type** was written under the Parquet
+column `label`, while GraphML names it `type` (`<data key="type">`) and TTL names it
+`lg:entityType`. `_write_nodes_parquet` now names that column **`type`** (value `n.label`), so all
+three export formats name the entity type identically and a consumer reading `type` gets it in each.
+
+- **Export-schema note only, NOT a record-contract change.** `GraphNode.label` (the in-memory
+  contract field) is unchanged; only the *Parquet export column name* changed (`label`→`type`). The
+  `InducedLabels` record `SCHEMA_VERSION` is untouched. The nodes Parquet already carried a distinct
+  `canonical_name` column, and the edges Parquet `label` column (relation type) is unaffected.
+- **No consumer left broken.** No code or test read the *node* Parquet `label` column (the demo
+  viewer reads the in-memory `GraphNode.label`; `test_e2e_graph`/`test_graph_export` read
+  `canonical_name` for nodes and the edges `label`). New tests
+  (`test_nodes_parquet_entity_type_column_named_type`,
+  `test_node_type_matches_across_parquet_graphml_ttl`) assert the `type` column carries the entity
+  type and matches GraphML/TTL byte-for-byte; byte-stability is preserved.
+
+## Status note — gliner model-window guard + tokenizer-mismatch caveat (W12-gliner-window)
+
+Real-GPU-E2E found the gliner-family extractors **silently truncating** long chunks. The chunker
+(`chunk.markdown`) counts tokens in its OWN tokenizer, but the extractors run on **mdeberta-v3**
+(the gliner / gliner2 encoder), whose tokenizer produces **~1.2× more** tokens. Pod-measured: a
+768-*chunker*-token cap yielded mdeberta token lengths of **median 666 / MAX 921**, and 2 of 7
+chunks exceeded the 768 model window → gliner truncated them, losing tail entities/relations and
+making offsets past 768 unreliable. Wave-12 closes this two ways (additive, config-safe):
+
+1. **Hard model-boundary guard (primary).** Every gliner-family extraction Provider —
+   `entity.gliner`, `fused_entity_relation.gliner2`, `relation.gliner_relex`, `redaction.gliner_pii`,
+   `redaction.gliner2` — gains a `max_len` config (default **768**, the mdeberta window) resolved via
+   `latence_core.providers.perf.resolve_max_len`. The **gliner2** providers thread it as the native
+   `max_len` kwarg of `extract_entities` / `extract_relations` / `batch_extract_entities`. The
+   **gliner-library** providers apply it as `model.config.max_len` (the library's truncation lever)
+   at load, before any `torch.compile` wrap, via the guarded `apply_gliner_max_len` (a model/config
+   without a settable `max_len` is left unchanged — never a crash). So the model never processes past
+   its window; content past `max_len` is a **documented boundary** (not extracted), not a silent
+   surprise, and it is configurable per checkpoint.
+
+2. **Gliner-safe chunk caps + the tokenizer-mismatch caveat (documented).** `chunk.markdown`'s
+   `max_tokens` is counted by the CHUNKER's tokenizer, which differs from the extraction model's
+   (~1.2×). Bigger chunks give the extractors more relation/RAG context, so the chunk size is
+   **maximized subject to the window** (maintainer directive: "256 is too small — use 768 max and
+   come as close as possible"): the shipped stacks feeding a gliner extractor (`gpu-sota`,
+   `gpu-sota-pod`, `schema-induction`) set `chunk.markdown` `max_tokens: 640` / `overlap_tokens: 80`
+   — 640 chunker-tokens ≈ ≤768 mdeberta-tokens, the calibrated safe near-max — with a NOTE recording
+   the caveat and the rule. Non-gliner stacks are untouched. The provider `max_len` guard (default
+   768) is the hard backstop regardless.
+
+Tests: `resolve_max_len` default/override/clamp + `apply_gliner_max_len` set + guarded-no-op
+(`test_perf_seam`); each provider threads/sets its window (default 768 + config override) and a
+long input is handled without a crash; a stack-lint (`test_gliner_stacks_keep_chunk_within_the_
+mdeberta_window`) asserts every shipped gliner-feeding stack caps chunk `max_tokens` ≤ 640. The real
+truncation-avoidance numbers are the pod maintainer's to re-measure — never fabricated here.

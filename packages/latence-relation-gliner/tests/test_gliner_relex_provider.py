@@ -94,6 +94,9 @@ class _FakeGLiNER:
     def __init__(self) -> None:
         self.batch_calls = 0
         self.cast_dtype: Any = None  # W8: dtype applied via .to(), None until cast
+        #: FAITHFUL to the real GLiNER model: a ``config`` with a ``max_len`` the library truncates
+        #: to. The provider's W12 model-boundary guard sets this so a test can assert the bound.
+        self.config = types.SimpleNamespace(max_len=384)
 
     @classmethod
     def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
@@ -183,6 +186,20 @@ def test_requires_entity_and_relation_labels() -> None:
 def test_default_model_is_permissive_apache() -> None:
     extractor = GlinerRelexExtractor(_config())
     assert extractor._model_id == "knowledgator/gliner-relex-multi-v1.0"
+
+
+def test_relex_bounds_model_window_default_768(fake_gliner: type[_FakeGLiNER]) -> None:
+    # W12 model-boundary guard: the provider sets model.config.max_len (the gliner truncation lever)
+    # so a chunk longer than the mdeberta window is not SILENTLY truncated. Default 768.
+    extractor = GlinerRelexExtractor(_config())
+    extractor.extract_fused([_chunk("Alice works for Acme.")])  # triggers load + window bound
+    assert extractor._model.config.max_len == 768
+
+
+def test_relex_model_window_config_override(fake_gliner: type[_FakeGLiNER]) -> None:
+    extractor = GlinerRelexExtractor({**_config(), "max_len": 512})
+    extractor.extract_fused([_chunk("Alice works for Acme.")])
+    assert extractor._model.config.max_len == 512
 
 
 def test_fused_emits_mentions_and_relations(fake_gliner: type[_FakeGLiNER]) -> None:

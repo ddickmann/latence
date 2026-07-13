@@ -15,7 +15,9 @@ dicts the ``gliner`` library returns). The REAL API (introspected + run on the p
 .. code-block:: python
 
     from gliner2 import GLiNER2
-    model = GLiNER2.from_pretrained("fastino/GLiNER2-Guardrails-PII-Multi")
+    # W9: gliner2 accepts NATIVE quantize (fp16) + compile (torch.compile + fused kernels) kwargs.
+    model = GLiNER2.from_pretrained("fastino/GLiNER2-Guardrails-PII-Multi",
+                                    quantize=True, compile=True)  # 2.83× at byte-identical PII
     out = model.extract_entities(text, entity_types, threshold=0.5,
                                  include_spans=True, include_confidence=True)
     # -> {"entities": {"<label>": [{"text": str, "confidence": float,
@@ -49,13 +51,21 @@ device seam) and the typed-error guard — a native ``gliner2`` fault becomes a 
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, PIISpan, RedactionAction, RedactionRecord
+from latence_core.errors import ConfigError
+from latence_core.induced import LabelSlot, effective_labels
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.perf import load_with_fa2_fallback as _load_gliner_with_perf
+from latence_core.providers.perf import (
+    is_compile_backend_failure,
+    load_gliner2_optimized,
+    resolve_gliner2_knob,
+    resolve_max_len,
+)
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     RedactionPolicy,
@@ -63,6 +73,8 @@ from latence_core.redaction_policy import (
     build_span,
     parse_action,
 )
+
+_log = logging.getLogger("latence.provider.gliner2_pii")
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -74,10 +86,11 @@ if TYPE_CHECKING:
 class _PendingDoc:
     """A document's per-document, model-independent context, resolved before the batched call (W7).
 
-    Policy action/allow-list, the skip/near-empty decision, and the page index are per-document and
-    model-independent, so they are computed once up front; a flush then issues at most one
-    ``batch_extract_entities`` call over the detect-needing docs and maps each per-text result back
-    to its document by identity, keeping emission in input-document order and the output
+    Policy action/allow-list, the skip/near-empty decision, the page index, and the effective PII
+    label set (``config ∪ induced``, W12) are per-document and model-independent, so they are
+    computed once up front; a flush then groups the detect-needing docs by their ``labels`` and
+    issues one ``batch_extract_entities`` call per label group, mapping each per-text result back to
+    its document by identity, keeping emission in input-document order and the output
     record-for-record identical to the per-document path.
     """
 
@@ -88,6 +101,7 @@ class _PendingDoc:
     page_index: PageOffsetIndex | None
     policy_name: str
     needs_model: bool
+    labels: tuple[str, ...]
 
 # Apache-2.0 weights (verified 2026-07-09, HF model card, not gated). Multilingual PII NER over
 # an mdeberta-v3 encoder via the fastino GLiNER2 framework.
@@ -116,25 +130,46 @@ class Gliner2PIIRedactor(AdapterBase):
         salt: str  — salt mixed into ``replace``/``hash`` surrogates (default 'latence').
         min_chars: int  — a document whose assembled text is shorter is emitted clean
             (default 1).
+        max_len: int  — the mdeberta-v3 model token window (default 768), threaded as the native
+            ``max_len`` of ``batch_extract_entities`` (W12). A document that tokenizes past it is
+            SILENTLY truncated by the model (tail PII spans lost, offsets past the window
+            unreliable); this bounds the window explicitly. CAVEAT: the chunker counts in a
+            DIFFERENT tokenizer, ~1.2× fewer tokens than mdeberta — keep the chunk cap ≤ ~640 for
+            this 768 window; this guard is the hard backstop.
         batch_size: int  — how many documents share ONE ``batch_extract_entities`` forward pass
             (default from AdapterBase; the P8 autotuner overrides per-device). Purely
             memory-shaping: the emitted RedactionRecords (PIISpans/masking/order) are
             record-for-record identical for any positive batch size (W7). Must be ``>= 1``.
+        quantize: bool | 'auto'  — load fp16 via the gliner2 native ``quantize`` kwarg (W9,
+            default ``auto`` → True on cuda / False on cpu). Pod-measured 2.83× at byte-identical
+            PII. Guarded: a quantize fault degrades to a plain load, never a crash.
+        compile: bool | 'auto'  — ``torch.compile`` + fused GPU kernels via the gliner2 native
+            ``compile`` kwarg (W9, default ``auto`` → True on cuda / False on cpu). Guarded like
+            ``quantize``: a compile/warmup fault degrades to a plain load.
         device: str  — ``auto`` (default) / ``cpu`` / ``cuda``; routed by the device seam.
 
     The model is loaded lazily and cached on first use, so constructing the Provider never
     downloads weights.
 
+    Induced labels (W12, ADR-0038): the detection label set is ``effective_labels(config ∪
+    induced)`` per document — the SAME seam the twin ``redaction.gliner_pii`` and the extractors
+    use — so a ``pii_type`` an upstream ``schema_induction`` Stage induced (e.g. a corpus-wide
+    ``IBAN`` / ``tax id``) is actually redacted. The config ``pii_labels`` floor stays mandatory
+    (validated non-empty at construction); induction only EXTENDS it. Absent induction the effective
+    set is exactly the config labels, byte-identical to before.
+
     Batching (W7, ADR-0036 §1 / ADR-0033): GLiNER2 (mdeberta-v3) is an ENCODER, so a per-document
     ``extract_entities`` loop under-feeds the GPU. This Provider buffers up to ``batch_size``
-    documents and, on flush, runs ONE ``model.batch_extract_entities(texts, labels, threshold=…,
-    include_spans=True, include_confidence=True)`` forward pass over the detect-needing docs (the
+    documents and, on flush, GROUPS the detect-needing docs by their effective label set (one label
+    set per ``batch_extract_entities`` call) and runs ONE ``model.batch_extract_entities(texts,
+    labels, threshold=…, include_spans=True, include_confidence=True)`` forward pass per group (the
     batched entry point — ``hasattr``-guarded here and pod-Gate-0 asserted; offline-unverifiable so
-    not yet pod-confirmed) — ``ceil(N/batch_size)`` calls, not N — mapping each per-text
-    result back to its document **by index**. Documents that a policy SKIPS or that are near-empty
-    need no model call and are emitted clean, in input order. The per-document policy resolution,
-    span building, masking, and Provenance carry are UNCHANGED; the in-flight buffer is bounded to
-    ``batch_size`` (never the whole corpus, ADR-0033).
+    not yet pod-confirmed) — ``ceil(N/batch_size)`` calls when all docs share a label set, not N —
+    mapping each per-text result back to its document **by identity**. Documents that a policy SKIPS
+    or that are near-empty need no model call and are emitted clean, in input order. The
+    per-document policy resolution, span building, masking, and Provenance carry are UNCHANGED; the
+    in-flight
+    buffer is bounded to ``batch_size`` (never the whole corpus, ADR-0033).
     """
 
     @classmethod
@@ -173,7 +208,11 @@ class Gliner2PIIRedactor(AdapterBase):
             deterministic=False,
             batch=True,
             cost_per_1k=None,
-            perf_note="bf16 on GPU / fp32 on CPU (mdeberta: bf16 is the win; attn where accepted)",
+            perf_note=(
+                "gliner2 native quantize (fp16) + compile (torch.compile + fused GPU kernels) on "
+                "cuda, off on cpu (W9; pod-measured 2.83× PII at byte-identical output; guarded → "
+                "plain load on any fault)"
+            ),
         )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -191,26 +230,50 @@ class Gliner2PIIRedactor(AdapterBase):
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
+        # W12 model-boundary guard: bound the mdeberta token window (default 768). gliner2's
+        # batch_extract_entities takes a native ``max_len``; past it the model silently truncates
+        # (tail PII spans lost, offsets past the window unreliable). Explicit + configurable.
+        self._max_len = resolve_max_len(config)
         # Validate the batch_size knob eagerly (fail-fast at construction like the twin providers)
         # even though the batched call reads it lazily via AdapterBase.batch_size() (W7).
         self.batch_size()
+        # Validate the W9 quantize/compile knobs eagerly too (fail-fast): an invalid value is an
+        # operator ConfigError at construction, not a native fault buried in the lazy load.
+        self._validate_perf_knobs()
         self._salt = str(config.get("salt", "latence"))
         default_action = parse_action(config.get("default_action", "mask"))
         # The framework owns policy + masking (shared with the in-core rule Provider and the
         # twin gliner Provider); this Provider owns only detection — the PIIDetector seam.
         self._policy = RedactionPolicy(config.get("policies"), default_action)
         self._model: Any = None
+        # Set once the inference-time compile guard has re-loaded the uncompiled model (W9), so the
+        # fallback runs at most once per provider instance.
+        self._compile_disabled: bool = False
 
     @property
     def provider_name(self) -> str:
         """The registered entry-point name, used only to tag typed errors (never carries PII)."""
         return "redaction.gliner2"
 
+    def _validate_perf_knobs(self) -> None:
+        """Resolve the W9 ``quantize``/``compile`` knobs eagerly → ConfigError on a bad value.
+
+        Resolving them at construction (against the resolved device) turns an invalid
+        ``quantize``/``compile`` config into an operator :class:`ConfigError` up front, rather than
+        a native fault surfaced only at the lazy load — the same fail-fast discipline as
+        ``batch_size``. The resolved values are recomputed at load time (device-stable), so this is
+        purely validation.
+        """
+        try:
+            resolve_gliner2_knob("quantize", self.device.device, self._config)
+            resolve_gliner2_knob("compile", self.device.device, self._config)
+        except ValueError as exc:
+            msg = f"{self.provider_name}: {exc}"
+            raise ConfigError(msg) from exc
+
     # -- lazy model load ----------------------------------------------------
 
-    def _load_model(self) -> Any:
-        if self._model is not None:
-            return self._model
+    def _gliner2_cls(self) -> Any:
         try:
             from gliner2 import GLiNER2
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
@@ -219,17 +282,105 @@ class Gliner2PIIRedactor(AdapterBase):
                 "Install it with: pip install latence-pii-gliner2"
             )
             raise ImportError(msg) from exc
-        # W8 perf seam: the ``gliner2`` library (unlike plain ``gliner`` 0.2.27) ACCEPTS
-        # torch_dtype + attn_implementation in from_pretrained — pod-validated to load fine — so the
-        # perf dict is threaded here. The honest win is **bf16** (mdeberta uses disentangled
-        # attention, so FA2 does not accelerate it — attn_implementation is passed only where the
-        # lib accepts it, not claimed as a speedup). A FA2 load that raises degrades to sdpa; the
-        # then optionally compiled (guarded, off by default).
-        perf = self.load_perf_kwargs()
+        return GLiNER2
+
+    def _load_model(self) -> Any:
+        if self._model is not None:
+            return self._model
+        # W9 perf seam: the ``gliner2`` framework (unlike plain ``gliner`` 0.2.27, and superseding
+        # the W7 batching that REGRESSED redact via padding waste) exposes NATIVE ``quantize``
+        # (fp16) + ``compile`` (torch.compile + fused GPU kernels, "no extra dependencies required")
+        # kwargs on ``from_pretrained`` — pod-measured **2.83× at byte-identical PII**. Both default
+        # True on cuda / False on cpu (or the ``quantize``/``compile`` config override), resolved
+        # once here.
+        # The optimized load is GUARDED: any quantize/compile fault degrades to a plain load
+        # (throughput only, never a crash) — so a host whose torch/CUDA rejects fp16 or a compile
+        # warmup fails still loads the identical model. An invalid ``quantize``/``compile`` value is
+        # a ConfigError surfaced before the load (never a silent wrong knob).
+        # The import is resolved OUTSIDE the guard so a missing-dep ImportError surfaces as the
+        # clear "pip install latence-pii-gliner2" error, not a wrapped ProviderError.
+        gliner2_cls = self._gliner2_cls()
         with self.guard("load_model"):
-            model = _load_gliner_with_perf(GLiNER2.from_pretrained, self._model_id, perf)
-        self._model = self.maybe_compile(model)
+            self._model = load_gliner2_optimized(
+                gliner2_cls.from_pretrained,
+                self._model_id,
+                self.device.device,
+                self._config,
+                provider_name=self.provider_name,
+            )
         return self._model
+
+    def _reload_uncompiled(self) -> Any:
+        """Re-load the model with ``compile=False`` (quantize kept) after an inference-time compile
+        fault — the second half of the W9 compile guard (:func:`is_compile_backend_failure`).
+
+        ``torch.compile`` compiles lazily on the first forward, so a backend that cannot compile the
+        model fails INSIDE ``batch_extract_entities`` (a ``BackendCompilerFailed``), which the
+        load-time guard cannot catch. On the first such fault the provider re-loads ONCE with
+        ``compile`` forced off (``quantize`` unchanged — fp16 alone is fine) and uses the uncompiled
+        model for the rest of the run, so a bad compile costs only throughput, never a crash.
+        Idempotent: sets ``_compile_disabled`` so the fallback runs at most once.
+        """
+        self._compile_disabled = True
+        cfg = {**self._config, "compile": False}
+        _log.warning(
+            "redaction.gliner2: torch.compile failed at inference; re-loading the uncompiled "
+            "model (quantize kept) — throughput only, never a crash"
+        )
+        gliner2_cls = self._gliner2_cls()
+        with self.guard("load_model"):
+            self._model = load_gliner2_optimized(
+                gliner2_cls.from_pretrained,
+                self._model_id,
+                self.device.device,
+                cfg,
+                provider_name=self.provider_name,
+            )
+        return self._model
+
+    def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
+        """One batched forward (``batch_extract_entities``) with the W9 inference compile guard.
+
+        ``labels`` is this group's effective label set (``config ∪ induced``, W12). The forward runs
+        under :meth:`AdapterBase.guard` (native fault → typed
+        :class:`~latence_core.errors.ProviderError`, no PII leak). BUT ``torch.compile`` compiles
+        lazily on the first forward, so a backend that cannot compile the model raises a
+        ``BackendCompilerFailed`` (dynamo/inductor) HERE, not at load. This wrapper catches exactly
+        that class of fault (:func:`~latence_core.providers.perf.is_compile_backend_failure`) BEFORE
+        the guard maps it, re-loads the uncompiled model ONCE (:meth:`_reload_uncompiled`; quantize
+        kept), and retries the batch — so a bad compile costs only throughput, never a crash. Any
+        OTHER native fault is surfaced through the guard as before (typed, no PII).
+        """
+        try:
+            with self.guard("batch_extract_entities"):
+                # ONE forward pass over the group; results[i] is the per-label dict for texts[i].
+                return list(
+                    model.batch_extract_entities(
+                        texts,
+                        labels,
+                        threshold=self._threshold,
+                        include_spans=True,
+                        include_confidence=True,
+                        max_len=self._max_len,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - intercept a compile fault before surfacing
+            # ``guard`` wraps a compile fault as ProviderError; the predicate walks the cause chain
+            # to find the original BackendCompilerFailed underneath.
+            if not self._compile_disabled and is_compile_backend_failure(exc):
+                model = self._reload_uncompiled()
+                with self.guard("batch_extract_entities"):
+                    return list(
+                        model.batch_extract_entities(
+                            texts,
+                            labels,
+                            threshold=self._threshold,
+                            include_spans=True,
+                            include_confidence=True,
+                            max_len=self._max_len,
+                        )
+                    )
+            raise
 
     # -- redaction ----------------------------------------------------------
 
@@ -258,9 +409,9 @@ class Gliner2PIIRedactor(AdapterBase):
     def _prepare(self, document: DocumentRecord) -> _PendingDoc:
         """Resolve everything a document needs BEFORE the (possibly batched) model call (W7).
 
-        Policy resolution, the near-empty/skip decision, and the page index are per-document and
-        model-independent, so they are computed here up front; the flush then issues at most one
-        batched model call over the detect-needing docs.
+        Policy resolution, the near-empty/skip decision, the page index, and the effective PII label
+        set are per-document and model-independent, so they are computed here up front; the flush
+        then issues one batched model call per label group over the detect-needing docs.
         """
         classification = document.classification
         text = document.content
@@ -269,6 +420,14 @@ class Gliner2PIIRedactor(AdapterBase):
         page_index = (
             PageOffsetIndex(document.page_map) if document.page_map is not None else None
         )
+        # W12 label-source seam (ADR-0038): UNION the config PII floor with any pii_types the
+        # OPTIONAL schema_induction Stage induced for this document (``induced_labels``), deduped +
+        # order-stable — the SAME seam the twin ``redaction.gliner_pii`` and the extractors use, so
+        # a corpus-induced IBAN/tax-id label is actually redacted. Absent (the default, every
+        # existing stack) these are exactly the config labels — byte-identical. The config floor
+        # stays mandatory (``pii_labels`` is validated non-empty in __init__); induction only
+        # EXTENDS it.
+        pii_labels = effective_labels(self._labels, document.induced_labels, LabelSlot.PII)
         return _PendingDoc(
             document=document,
             text=text,
@@ -277,29 +436,31 @@ class Gliner2PIIRedactor(AdapterBase):
             page_index=page_index,
             policy_name=policy_name,
             needs_model=needs_model,
+            labels=tuple(pii_labels),
         )
 
     def _flush_buffer(self, buffer: list[_PendingDoc]) -> Iterator[RedactionRecord]:
-        """Batch the detect-needing docs through ONE call, then emit records in input order (W7).
+        """Batch the detect-needing docs (grouped by label set), then emit in input order (W7/W12).
 
-        GLiNER2 shares one label set (this Provider has no per-document induced-label seam), so all
-        detect-needing docs go through a single ``batch_extract_entities`` forward pass; each
-        per-text result maps back to its document by index. Docs that skip / are near-empty need no
-        model call. Emission is in the buffer's (input) order regardless, so the output is
-        record-for-record identical to the per-document path (the equivalence invariant).
+        ``batch_extract_entities`` takes ONE label set per call, so the detect-needing docs are
+        grouped by their effective ``labels`` (``config ∪ induced``, W12) and each group goes
+        through one forward pass — ``ceil`` per group, not one-per-doc; each per-text result maps
+        back to its document by identity. Absent induction every doc shares the config label set → a
+        single group → byte-identical to the pre-W12 single-call path. Docs that skip / are
+        near-empty need no
+        model call. Emission is in the buffer's (input) order regardless of grouping, so the output
+        is record-for-record identical to the per-document path (the equivalence invariant).
         """
         if not buffer:
             return
         raw_by_doc: dict[int, Any] = {}
         detect = [p for p in buffer if p.needs_model]
         if detect:
-            model = self._load_model()
-            texts = [p.text for p in detect]
             # The batched entry point is offline-unverifiable (the fake mirrors it); guard against
             # a renamed/missing method with a clear, actionable error rather than a bare
             # AttributeError (the guard would otherwise surface only the op label). The pod script's
             # Gate 0 asserts this method EXISTS on the real checkpoint before any throughput number.
-            if not hasattr(model, "batch_extract_entities"):
+            if not hasattr(self._load_model(), "batch_extract_entities"):
                 msg = (
                     "redaction.gliner2 batches via model.batch_extract_entities(texts, "
                     "entity_types, threshold=…), but the loaded GLiNER2 checkpoint exposes no "
@@ -307,24 +468,29 @@ class Gliner2PIIRedactor(AdapterBase):
                     "batched call. See scripts/validate-encoder-batching-on-gpu.md Gate 0."
                 )
                 raise AttributeError(msg)
-            with self.guard("batch_extract_entities"):
-                # ONE forward pass over the group; results[i] is the per-label dict for texts[i].
-                results: Any = model.batch_extract_entities(
-                    texts,
-                    self._labels,
-                    threshold=self._threshold,
-                    include_spans=True,
-                    include_confidence=True,
-                )
-            results_list = list(results)
-            if len(results_list) != len(detect):
-                msg = (
-                    "redaction.gliner2: batch_extract_entities returned "
-                    f"{len(results_list)} results for a batch of {len(detect)} texts."
-                )
-                raise ValueError(msg)
-            for pending, raw in zip(detect, results_list, strict=True):
-                raw_by_doc[id(pending)] = raw
+            # Group by effective label set (one label set per batched call). Order-stable: a dict
+            # preserves first-seen group order, and emission below re-walks the buffer in input
+            # order.
+            groups: dict[tuple[str, ...], list[_PendingDoc]] = {}
+            for pending in detect:
+                groups.setdefault(pending.labels, []).append(pending)
+            for labels, pendings in groups.items():
+                # Re-fetch per group so a prior group's W9 uncompiled reload (which updates
+                # self._model) is picked up here, not the stale compiled handle.
+                model = self._load_model()
+                texts = [p.text for p in pendings]
+                # ONE forward pass over the group (results[i] is the per-label dict for texts[i]),
+                # with the W9 inference-time compile guard: a lazy torch.compile fault degrades to
+                # the uncompiled model and retries, never a crash.
+                results_list = self._batch_extract(model, texts, list(labels))
+                if len(results_list) != len(pendings):
+                    msg = (
+                        "redaction.gliner2: batch_extract_entities returned "
+                        f"{len(results_list)} results for a batch of {len(pendings)} texts."
+                    )
+                    raise ValueError(msg)
+                for pending, raw in zip(pendings, results_list, strict=True):
+                    raw_by_doc[id(pending)] = raw
         for pending in buffer:
             spans: list[PIISpan] = []
             if pending.needs_model:

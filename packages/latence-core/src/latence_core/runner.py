@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, TypeVar
 from latence_core.capability import (
     Chunker,
     ContentScreener,
+    ContextEnricher,
     Disambiguator,
     EntityExtractor,
     Export,
@@ -475,10 +476,11 @@ class LocalRunner:
             CapabilityKind.CHUNK,
             CapabilityKind.CONTENT_SCREENING,
             CapabilityKind.SCHEMA_INDUCTION,
+            CapabilityKind.CONTEXT_ENRICHMENT,
         ):
-            # Schema Induction is a chunk→chunk transform (it emits the SAME ChunkRecords with
-            # ``induced_labels`` populated), so it checkpoints and threads ChunkRecords exactly
-            # like Chunk / Content Screening.
+            # Schema Induction and Context Enrichment are chunk→chunk transforms (they emit the SAME
+            # ChunkRecords with ``induced_labels`` / ``context_header`` populated), so they
+            # checkpoint + thread ChunkRecords exactly like Chunk / Content Screening.
             return ChunkRecord
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             return EntityMention
@@ -552,6 +554,7 @@ class LocalRunner:
                 CapabilityKind.CHUNK,
                 CapabilityKind.CONTENT_SCREENING,
                 CapabilityKind.SCHEMA_INDUCTION,
+                CapabilityKind.CONTEXT_ENRICHMENT,
             ):
                 return ChunkRecord
             if parent.capability is CapabilityKind.PARSE:
@@ -1387,6 +1390,36 @@ class LocalRunner:
             )
             return list(provider.complete(assembled))
 
+        if stage.capability is CapabilityKind.CONTEXT_ENRICHMENT:
+            if not isinstance(provider, ContextEnricher):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the ContextEnricher capability."
+                )
+                raise ContractError(msg)
+            # W13: Context Enrichment is the OPTIONAL post-Assembly Stage. It is a chunk→chunk
+            # transform (it yields the SAME ChunkRecords with ``context_header`` populated, like
+            # Schema Induction) but MULTI-INPUT: it depends_on the chunk stream (Chunk /
+            # Content-Screening / Schema-Induction) AND Graph Assembly, so ``incoming`` carries both
+            # the ChunkRecords it enriches (and passes through 1:1) and the assembled GraphRecords
+            # (NODE + EDGE) it reads the KG from. Partition gathered inputs by carrier; a missing
+            # side is a wiring error. The run's EntityMentions (a chunk's canonical entities) come
+            # from the WHOLE pipeline — Entity Extraction is a graph ancestor, not a direct parent,
+            # so this streams every Stage's output for them, exactly as Disambiguation streams the
+            # run's ChunkRecords (#94). A run with no Entity-Extraction Stage yields no mentions ⇒
+            # every chunk's ``context_header`` stays None (byte-identical to no-stage). The enriched
+            # chunk stream threads downstream to the corpus Export, which prepends the header to the
+            # EMBEDDING input only (the stored content stays byte-unchanged — ADR-0039).
+            enrich_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
+            enrich_graph = [r for r in incoming if isinstance(r, GraphRecord)]
+            self._require_context_enrichment_inputs(
+                stage, incoming, enrich_chunks, enrich_graph
+            )
+            enrich_mentions = self._stream_all_records_of_type(
+                outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            return list(provider.enrich(enrich_chunks, enrich_mentions, enrich_graph))
+
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
                 msg = f"Provider {stage.provider!r} does not satisfy the Export capability."
@@ -1694,6 +1727,48 @@ class LocalRunner:
                 f"Stage {stage.name!r} (relation_extraction) received no ChunkRecords. "
                 f"A Relation-Extraction Stage must also depend on the Chunk (or "
                 f"Content-Screening) Stage for the text + page map. Check depends_on."
+            )
+            raise ContractError(msg)
+
+    @staticmethod
+    def _require_context_enrichment_inputs(
+        stage: Stage,
+        incoming: list[StageOutput],
+        chunks: list[ChunkRecord],
+        graph_records: list[GraphRecord],
+    ) -> None:
+        """A Context-Enrichment Stage must be wired to BOTH the chunk stream and Graph Assembly
+        (W13).
+
+        It depends on a Chunk / Content-Screening / Schema-Induction parent (the ChunkRecords it
+        enriches + passes through) AND a Graph-Assembly parent (the assembled GraphRecords it reads
+        the KG from). A missing side means the Pipeline forgot a ``depends_on`` edge — surface it as
+        a
+        clear typed error, not a silently-empty header. An empty run (no documents ⇒ no chunks and
+        no
+        graph) is legitimately empty. (The run's EntityMentions are gathered corpus-wide, not from a
+        direct parent, so they are validated only by their own upstream Stages — a run with none
+        just
+        yields no headers.)
+        """
+        if not incoming:
+            return
+        if not chunks:
+            got = sorted({type(r).__name__ for r in incoming})
+            msg = (
+                f"Stage {stage.name!r} (context_enrichment) received no ChunkRecords "
+                f"(got: {', '.join(got)}). A Context-Enrichment Stage must depend on the Chunk "
+                f"(or Content-Screening / Schema-Induction) Stage — the chunks it enriches. "
+                f"Check the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+        if not graph_records:
+            got = sorted({type(r).__name__ for r in incoming})
+            msg = (
+                f"Stage {stage.name!r} (context_enrichment) received no GraphRecords "
+                f"(got: {', '.join(got)}). A Context-Enrichment Stage must also depend on the "
+                f"Graph Assembly Stage — the assembled KG it projects onto each chunk. "
+                f"Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)
 
