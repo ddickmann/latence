@@ -31,8 +31,9 @@ quality lift — follow the walkthrough:
 <div class="grid cards" markdown>
 
 - :material-flask: **[Fresh-pod walkthrough](../TUTORIAL-fresh-pod-walkthrough.md)**
-  From a bare RunPod pod to AI-ready data over a mixed-file corpus — every Stage in
-  isolation, then the full end-to-end run.
+  From a bare GPU pod to AI-ready data over a mixed-file corpus with the **enterprise-SOTA**
+  pipeline (served-vLLM OCR, GLiNER2 extraction, the GLinker entity-linker, Granite r2
+  embeddings) — every Stage in isolation, then the full end-to-end run.
 
 - :material-expansion-card: **[GPU testing guide](../GPU-TESTING-GUIDE.md)**
   Run the whole *learned* system yourself: the GPU Providers, validated on a CUDA pod.

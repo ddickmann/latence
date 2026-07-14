@@ -1,17 +1,33 @@
-# Tutorial — fresh RunPod pod → AI-ready data (mixed-file corpus, stage by stage, then end-to-end)
+# Tutorial — fresh GPU pod → AI-ready data (enterprise-SOTA, stage by stage, then end-to-end)
 
-**Branch:** `w13-context-enrichment` (the only branch that carries the full stack — schema induction,
-GLiNER2 fused extraction, GLiNER2 PII redaction, KG assembly **and** the W13 `context_enrichment`
-Stage). Worktree used while writing this: `/Users/dennisdickmann/Developer/latence-framework-w13`.
+This walkthrough takes you from a **bare GPU pod with a folder of mixed file types** to AI-ready
+data, using the **enterprise-SOTA pipeline** — served-vLLM OCR, LLM schema induction, fused GLiNER2
+entity+relation extraction, learned financial-PII redaction, the neural **GLinker** entity-linker +
+audited resolver, IBM Granite r2 embeddings, and ULTRA graph completion. It follows the same spine
+as before:
 
-This walkthrough takes you from a **bare GPU pod with a folder of mixed file types** to:
-
-1. a working install,
+1. a working install (+ a running vLLM OCR endpoint, the one real prereq),
 2. running and **inspecting each Stage in isolation**,
 3. running the **whole pipeline end-to-end**, and
 4. **discovering and understanding the final output**.
 
 Every command is copy-pasteable. Where a claim comes from a real pod run it is stated as a warning.
+
+> **Honest expectations — read this first.**
+>
+> - **The SOTA pipeline needs a GPU** (the OCR VLM, GLiNER2, GLinker, and Granite embedder are all
+>   neural) **and a running vLLM OCR endpoint** the parser POSTs page-images to (§2). On a CPU-only
+>   host the learned Stages are honestly **skip-with-flag** at `latence stack validate` (device
+>   honesty) — the config still validates, but a real run needs CUDA. Deployment topologies
+>   (Docker Compose, K8s/Helm, air-gapped, the Blackwell note) live in
+>   [`docs/deployment.md`](deployment.md).
+> - **This is the ingest/AI-ready-data product, not a query engine.** It emits a RAG corpus + a
+>   knowledge graph **as files** — the retrieval/query engine that consumes them is a separate
+>   product. The exact build contract for that consumer is
+>   [`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
+> - **Full-corpus GLiNER2 + GLinker is validated at small scale.** The composed enterprise stack is
+>   pod-validated end-to-end on a small corpus; it is the SOTA half of every seam, not a
+>   throughput-at-1M-docs benchmark.
 
 ---
 
@@ -23,73 +39,82 @@ any fsspec backend — never a live database (ADR-0017):
 
 - **A chunk-level RAG corpus** — `records.jsonl` + `records.parquet`: retrieval text + full
   `Provenance` (source + offsets) + `Classification` + per-chunk `induced_labels` + a KG
-  `context_header` + an optional dense `embedding` vector.
+  `context_header` + a dense Granite r2 `embedding` vector. With PII ON the text is the
+  **masked** (PII-safe) variant.
 - **An evidence-linked knowledge graph** — `graph-nodes.parquet`, `graph-edges.parquet`,
-  `graph.ttl`, `graph.graphml`: typed entities + relations, every edge citing the mentions/documents
-  that justify it.
+  `graph.ttl`, `graph.graphml`: typed entities + relations (asserted **and** ULTRA-completed),
+  every edge citing the mentions/documents that justify it.
 - **A Quality Report** — `quality-report.json` + `quality-report.md`: per-Stage counts, KG
-  statistics, contract-completeness, no-PII-leak check.
+  statistics, the disambiguation merge audit, contract-completeness, no-PII-leak check.
 
-The full field reference for consumers lives in [`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
+The full field reference for consumers lives in
+[`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
 
 ---
 
 ## 1. Set up the fresh pod
 
-### 1.1 Clone the framework (the `w13` branch)
+### 1.1 Clone the framework
 
 ```bash
 cd /workspace
 git clone <your-remote-url> latence-framework
 cd latence-framework
-git checkout w13-context-enrichment
 ```
 
-### 1.2 Install the packages you need — editable, **letting deps resolve**
+### 1.2 Install the packages the enterprise-SOTA stack uses — editable, **letting deps resolve**
 
 RunPod's system Python is **PEP-668 "externally managed"**, so every `pip install` needs
 `--break-system-packages` (or a venv — but the pod's global torch/CUDA is usually why you're on a
 pod, so we install globally here).
 
-> **Warning — do NOT use `--no-deps` for the editable installs.** `latence-pii-gliner2` /
-> `latence-extract-gliner2` declare `pdfplumber`, `pyarrow`, and — critically — **`peft`** (a real
-> hidden GLiNER2 dependency) transitively. A `--no-deps` editable install silently skips them and the
-> Stage then crashes at runtime. Install each package **normally** so its deps resolve:
+> **Warning — do NOT use `--no-deps` for the editable installs.** The learned providers declare real
+> hidden deps (`peft` for GLiNER2, `glinker` + `flashdeberta` for the GLinker disambiguator, `gliner`
+> for the PII redactor). A `--no-deps` editable install silently skips them and the Stage then
+> crashes at runtime. Install each package **normally** so its deps resolve:
 
 ```bash
 cd /workspace/latence-framework
 
-# core + the providers the GOOD stack uses (deps resolve normally)
+# core + the providers the enterprise-SOTA stack composes (deps resolve normally)
 pip install --break-system-packages \
   -e packages/latence-core \
-  -e packages/latence-parser-pdfplumber \
-  -e packages/latence-parser-render \
-  -e packages/latence-parser-lighton \
+  -e packages/latence-parser-lighton-vllm \
   -e packages/latence-schema-inducer \
   -e packages/latence-extract-gliner2 \
-  -e packages/latence-pii-gliner2 \
-  -e packages/latence-disambig-embedding \
+  -e packages/latence-pii-gliner \
+  -e packages/latence-disambig-glinker \
+  -e packages/latence-linkpred-ultra \
   -e packages/latence-embedder-st
 ```
 
-Then the runtime deps that the learned/parse/export Stages import lazily (some are declared, but a
-mixed corpus needs the whole set — install them explicitly so nothing is missing at run time):
+Then the runtime deps the learned/export Stages import (some are declared, but install them
+explicitly so nothing is missing at run time):
 
 ```bash
 pip install --break-system-packages \
-  gliner gliner2 sentence-transformers peft accelerate \
-  pdfplumber pypdfium2 python-docx openpyxl \
-  pyarrow fsspec networkx rdflib openai
+  gliner2 gliner glinker flashdeberta peft accelerate \
+  sentence-transformers openai \
+  pypdfium2 pillow \
+  pyarrow fsspec networkx rdflib
 ```
 
-- `gliner gliner2 peft accelerate` — the GLiNER2 fused extractor + PII redactor (mdeberta-v3 backbone).
-- `sentence-transformers` — the embedding disambiguator **and** the corpus-export embedder (Granite r2 311m, bf16+FA2).
-- `pdfplumber` — fast text-layer PDF parsing; `pypdfium2 python-docx openpyxl` — the universal
-  `parser.render` path (PDF→image, Office→text/render).
+- `gliner2 peft accelerate` — the GLiNER2 fused entity+relation extractor (mdeberta-v3 backbone).
+- `gliner` — the learned PII redactor (`redaction.gliner_pii`).
+- `glinker flashdeberta` — the neural GLinker entity-linker (`disambiguation.glinker`): the
+  `gliner-linker-large` biencoder + `gliner-linker-rerank` reranker + FlashDeBERTa.
+- `sentence-transformers` — the Granite r2 embedder (the GLinker resolver's opt-in STS rung **and**
+  the corpus-export vectors; ADR-0045).
+- `openai` — the OpenAI-compatible client used by **both** the vLLM OCR parser and the schema-
+  induction LLM.
+- `pypdfium2 pillow` — the vLLM OCR parser's page rasteriser (PDF→image, license-clean PDFium).
 - `pyarrow fsspec` — Parquet export + storage; `networkx rdflib` — the GraphML/TTL KG export.
-- `openai` — the schema-induction LLM client (OpenAI-compatible; used for OpenRouter/vLLM too).
 
-### 1.3 Required env — JIT off (Blackwell/torch-cu13 caveat) and the induction key
+`latence-linkpred-ultra` (`graph_completion.ultra`) has no extra runtime pip deps here — its ULTRA
+checkpoint is not vendored, so the Stage runs `skip_if_unavailable` (a graceful skip, never a failed
+run) unless you supply one.
+
+### 1.3 Required env — JIT off, the HF-Hub XET workaround, and the induction key
 
 > **Warning — `nvrtc: failed to open libnvrtc-builtins.so.13.0`.** On recent NVIDIA (SM 12.x /
 > Blackwell) with torch 2.11-cu13x, GLiNER2 / DeBERTa can crash inside a JIT-compiled kernel. Disable
@@ -99,12 +124,20 @@ pip install --break-system-packages \
 export PYTORCH_JIT=0
 ```
 
+> **Warning — Blackwell (SM 12.x) model downloads hang / error on the XET backend.** Getting the
+> GLiNER2 / GLinker / Granite weights down on a fresh Blackwell pod, the Hugging Face `hf_xet`
+> transfer backend was flaky in validation. Force the classic HTTP download path:
+
+```bash
+export HF_HUB_DISABLE_XET=1
+```
+
 The schema-induction Stage calls an OpenAI-compatible LLM. Provide the key **as an environment
 variable only — never in a file** (an inlined `api_key` would be scrubbed from `manifest.json`, but
 don't rely on that; keep keys out of YAML):
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."     # OpenRouter (default in the stack below)  # pragma: allowlist secret
+export OPENROUTER_API_KEY="sk-or-..."     # OpenRouter (the default endpoint)  # pragma: allowlist secret
 # or, for direct OpenAI:
 # export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
 ```
@@ -113,6 +146,12 @@ Model default is `openai/gpt-4.1-mini` reached via `base_url: https://openrouter
 base URL to `http://<vllm-host>:8000/v1` for an on-prem vLLM (any placeholder key), or leave it
 `null` for direct OpenAI with `$OPENAI_API_KEY`.
 
+> **Warning — GLiNER2 `compile` defaults OFF on GPU, and keep it off at scale.** The provider's
+> `torch.compile` knob is **off by default** (opt-in). gliner2 compiles with `dynamic=True`, which
+> **recompile-thrashes on varied-length production chunks** (pod-measured: the worker pinned ~290%
+> CPU, GPU 0%, no progress). Leave `compile: false` (the default) for a real mixed corpus; enable it
+> ONLY for a homogeneous / uniform-length workload.
+
 ### 1.4 Verify the install
 
 ```bash
@@ -120,184 +159,193 @@ base URL to `http://<vllm-host>:8000/v1` for an on-prem vLLM (any placeholder ke
 latence --help                       # or: python -m latence_core.cli --help
 
 # imports resolve (no output == good)
-python -c "import gliner2, sentence_transformers, peft, pdfplumber, pyarrow, networkx, rdflib, openai; print('deps OK')"
+python -c "import gliner2, gliner, sentence_transformers, peft, pyarrow, networkx, rdflib, openai; print('deps OK')"
 
-# every Stage provider is discoverable (should print all the names the stack uses)
+# every Stage provider the SOTA stack uses is discoverable
 python - <<'PY'
 from latence_core.capability import ProviderRegistry
 names = set(ProviderRegistry().names())
-for n in ("source.local_folder","parser.render","parser.pdfplumber","chunk.markdown",
-          "label_inducer.llm","fused_entity_relation.gliner2","redaction.gliner2",
-          "disambiguation.embedding","graph.canonical","context.kg_header",
-          "export.jsonl_parquet","export.knowledge_graph"):
+for n in ("source.local_folder","screening.intake_signature","parser.lighton_vllm",
+          "chunk.markdown","screening.content_keyword","label_inducer.llm",
+          "fused_entity_relation.gliner2","redaction.gliner_pii","profiling.statistical",
+          "disambiguation.glinker","graph.canonical","graph_completion.ultra",
+          "context.kg_header","export.knowledge_graph","export.jsonl_parquet"):
     print(("ok " if n in names else "MISSING "), n)
 PY
 ```
 
 > `ProviderRegistry().names()` lists every discovered provider; equivalently
 > `python -c "from importlib.metadata import entry_points; print([e.name for e in entry_points(group='latence.providers')])"`.
+> A provider printing `MISSING` means its package wasn't installed in §1.2 — `disambiguation.glinker`
+> ships in the **separate** `latence-disambig-glinker` heavy package (ADR-0016).
 
 ---
 
-## Guided setup: `latence setup` → `latence process`
+## 2. Serve the LightOn-OCR vLLM endpoint (the OCR prereq)
 
-The rest of this tutorial (§2–§5) hand-authors the GOOD stack so you understand every knob. If you
-just want the **same quality-baked stack generated for you**, two commands do it — a guided,
-deterministic wizard that converges to a clean, validated config, then one command to run it:
+The enterprise parse Stage is `parser.lighton_vllm` — it does **not** run OCR in-process; it POSTs
+each rasterised page to a **running vLLM server**. Pod-measured, vLLM at concurrency is
+~**2.7× faster than optimised in-process transformers**, which is why production OCR is a warm
+server (the full recipe + tuning is [`docs/serving-lighton-vllm.md`](serving-lighton-vllm.md)).
+
+Stand it up on the pod (LightOn's official, optimal-throughput config):
+
+```bash
+export HF_HUB_DISABLE_XET=1   # (from §1.3 — the Blackwell download workaround)
+vllm serve lightonai/LightOnOCR-2-1B \
+  --dtype bfloat16 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 10000 \
+  --limit-mm-per-prompt '{"image": 1}' \
+  --mm-processor-cache-gb 0 \
+  --no-enable-prefix-caching \
+  --max-num-seqs 32
+```
+
+The server exposes an OpenAI-compatible endpoint at `http://localhost:8000/v1`, serving the model id
+`lightonai/LightOnOCR-2-1B` (Apache-2.0 weights **and** code). Those two values — the `base_url` and
+the `model` — are exactly what the parser (and the `latence setup` wizard, §3) ask for. `api_key`
+is any placeholder (`EMPTY`); a local vLLM does not check it.
+
+> **Blackwell / FlashInfer caveat (KNOWN).** On bleeding-edge **Blackwell (SM 12.x)** GPUs, vLLM
+> 0.24's bundled FlashInfer cannot JIT the cudagraphs and fails with `FlashInfer requires sm75+`.
+> Either add `--enforce-eager` (you lose the cudagraph speedup; correctness is unaffected) **or**
+> upgrade `flashinfer` to an SM 12.x build and keep cudagraphs on. On mainstream GPUs (Hopper / Ada
+> / Ampere, CUDA ≥ 12.6) do **not** add `--enforce-eager` — it only floors your throughput.
+
+Sanity-check the server is up before running the pipeline:
+
+```bash
+curl -s http://localhost:8000/v1/models | python -c "import sys,json; print([m['id'] for m in json.load(sys.stdin)['data']])"
+# → ['lightonai/LightOnOCR-2-1B']   (the base_url + model to point the parser at)
+```
+
+GPU / driver requirements (a LightOnOCR-2-supporting vLLM needs torch cu126+, i.e. driver ≥ 12.6)
+and the container/K8s topologies are in [`docs/deployment.md`](deployment.md).
+
+---
+
+## 3. The guided path: `latence setup --profile enterprise-sota` → `latence process`
+
+**This is the fast path — start here.** A guided, deterministic wizard converges to a clean,
+validated enterprise-SOTA config, then one command runs it. §4 hand-authors the same stack so you
+understand every knob; you don't need it to get a run going.
 
 ```bash
 # Interactive: each prompt has a sensible default + a one-line "why it matters".
-latence setup
+latence setup --profile enterprise-sota
 # → writes ./latence.stack.yaml (validated), then prints "Run `latence process` to start."
 latence process
 ```
 
-**What the wizard asks** (each with a default; press Enter to accept):
+**What the enterprise-SOTA wizard asks** (each with a default; press Enter to accept):
 
 | Prompt | Default | Why it matters |
 |---|---|---|
 | **Source folder** | `file://$PWD/corpus` | The folder Latence reads. Validated to exist; its file types are **auto-detected** and reported. |
-| **Profile** | `lite` | **The tier.** `lite` (CPU-first, laptop-friendly — the stack in this table). `enterprise-sota` generates the pod-validated composed stack instead (see the box below). |
+| **Profile** | — (you passed `enterprise-sota`) | The tier. `enterprise-sota` emits the pod-validated composed stack; `lite` is the CPU-first laptop path. |
 | **Output / storage URI** | `file://$PWD/latence-out` | Where state + the exported RAG corpus and KG are written. |
-| **Parser** | recommended from the detected types | `parser.render` (universal / mixed), `parser.pdfplumber` (born-digital PDF text), or `parser.lighton` (OCR for scans/images). Confirm or override. *(enterprise-sota forces the served-vLLM `parser.lighton_vllm` and skips this prompt.)* |
-| **Device** | `auto` | `auto` picks CUDA when present, else CPU (skip-with-flag). *(enterprise-sota pins `cuda`.)* |
-| **Schema-induction LLM** | OpenRouter + `openai/gpt-4.1-mini` | The quality lever — a small LLM discovers your corpus's own `{entity, relation, pii}` schema. The **API key is read from the environment at run** (`$OPENROUTER_API_KEY`, or `$OPENAI_API_KEY` for a direct-OpenAI base URL) — **never stored** in the file. The wizard warns if it is unset. |
+| **OCR endpoint base URL** | `http://localhost:8000/v1` | The **served vLLM OCR endpoint** from §2 the parser POSTs page-images to. (enterprise-sota forces `parser.lighton_vllm` and **skips** the parser-choice prompt.) |
+| **OCR model id** | `lightonocr` | The model your vLLM server registers — for the §2 recipe that is `lightonai/LightOnOCR-2-1B`. |
+| **Schema-induction LLM base URL / model** | OpenRouter + `openai/gpt-4.1-mini` | The quality lever — a small LLM discovers your corpus's own `{entity, relation, pii}` schema. The **API key is read from the environment at run** (`$OPENROUTER_API_KEY`, or `$OPENAI_API_KEY` for a direct-OpenAI base URL) — **never stored** in the file. The wizard warns if it is unset. |
 | **PII redaction + guardrail screening** | ON | **The one optional toggle.** ON adds the `content_screen` + `redact` stages (learned **financial-PII** detection). OFF omits exactly those two stages. |
 | **Mask before extraction** (`--extract-on`) | `unmasked` | **Advanced (W18).** `unmasked` (default) — extraction reads the real text, the KG keeps entities. `masked` — extraction reads the REDACTED chunks so PII never reaches the KG (stricter posture; requires PII ON). |
 | **Domain / description hint** | (empty) | Free text, recorded as a header comment for readers. |
 
-The wizard then **generates the quality-baked spine**, **dry-validates it** (structural + DAG +
+Device is **pinned to `cuda`** for enterprise-sota (every learned Stage is neural); on a CPU-only
+host they validate as skip-with-flag.
+
+The wizard then **generates the enterprise-SOTA spine**, **dry-validates it** (structural + DAG +
 capability wiring — the SAME machinery `latence stack validate` builds on, no pipeline run), and
-**saves** `./latence.stack.yaml`. The generated stack is exactly the GOOD stack of §3
-(`chunk[640]` → `induce[corpus]` → `extract[gliner2, thr 0.5]` → optional `redact[gliner2,
-financial-PII]` → `disambiguate` → `graph` → `enrich(context)` → `export_corpus[context_columns]` +
-`export_kg`).
+**saves** `./latence.stack.yaml`. The generated stack is exactly the SOTA stack of §4:
+
+```text
+source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
+  → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner_pii, financial-PII]
+  → profiling → disambiguate[glinker] → graph → complete[ultra, skip_if_unavailable]
+  → enrich(context) → export_kg + export_corpus[Granite r2, context_columns]
+```
 
 **Deterministic + scriptable (CI/repro).** `--non-interactive` takes every answer from flags, and
 the **same inputs produce a byte-identical config**:
 
 ```bash
-latence setup --non-interactive \
-  --source file:///workspace/corpus \
-  --storage file:///workspace/latence-out \
-  --parser parser.render --device cuda \
+latence setup --non-interactive --profile enterprise-sota \
+  --source file:///workspace/corpus --storage file:///workspace/latence-out \
+  --ocr-base-url http://localhost:8000/v1 --ocr-model lightonai/LightOnOCR-2-1B \
   --llm-base-url https://openrouter.ai/api/v1 --llm-model openai/gpt-4.1-mini \
   --pii --domain "retail banking contracts" \
   --output ./latence.stack.yaml
 latence process --config ./latence.stack.yaml --run-id run-0001
 ```
 
-> **The `enterprise-sota` profile (ADR-0046, `stacks/gpu-sota-glinker.yaml`).** Pass
-> `--profile enterprise-sota` (or pick it at the profile prompt) and the wizard emits the
-> **pod-validated composed stack** instead of the lite path — the SOTA half of every seam, wired and
-> dry-validated for you:
+> **What the enterprise-sota profile wires for you (ADR-0046, `stacks/gpu-sota-glinker.yaml`).**
 >
-> - **parse → `parser.lighton_vllm`** — the served-vLLM LightOn OCR endpoint (the production OCR
->   path, ~2.7× the in-process parser). The wizard prompts for the endpoint **`base_url`**
->   (default `http://localhost:8000/v1`) and **`model`** (default `lightonocr`); `api_key` defaults
->   to `EMPTY` (a local vLLM accepts any placeholder) and `max_concurrency` to `8`.
+> - **parse → `parser.lighton_vllm`** — the served-vLLM LightOn OCR endpoint (§2). The wizard writes
+>   your `base_url` + `model`, with `api_key: EMPTY` and `max_concurrency: 8`.
 > - **induce → `label_inducer.llm`** at **corpus** granularity (`max_labels 40`, `temperature 0`) —
->   the same schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
+>   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
->   `[person, organization]`) and **redact → `redaction.gliner_pii`** (chunk-level, financial-PII
->   floor — the same W16 `redact → enrich → export_corpus` dataflow).
+>   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner_pii`**
+>   (chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus` dataflow).
 > - **disambiguate → `disambiguation.glinker`** — the neural GLinker entity-linker + audited resolver
 >   (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the **IBM Granite r2**
->   embedder. The precision-by-default knobs (embedding-merge OFF, fuzzy + distinguishing-token guard
->   ON) ride the provider defaults — the config stays minimal and the ER is precise out of the box.
+>   embedder. The precision-by-default knobs (embedding-merge OFF, fuzzy edit-distance rung +
+>   distinguishing-token guard ON) ride the provider defaults — the config stays minimal and the ER
+>   is precise out of the box.
 > - **graph → `graph.canonical` → complete → `graph_completion.ultra`** (`skip_if_unavailable: true`
 >   — no vendored checkpoint means a graceful skip, never a failed run) → **`export.knowledge_graph`**
 >   + **`export.jsonl_parquet`** with the Granite r2 corpus vectors.
->
-> Every learned Stage runs on **CUDA**; on a CPU-only host `latence stack validate` reports them
-> skip-with-flag (device honesty) and the generated config still validates. Fully scriptable:
->
-> ```bash
-> latence setup --non-interactive --profile enterprise-sota \
->   --source file:///workspace/corpus --storage file:///workspace/latence-out \
->   --ocr-base-url http://localhost:8000/v1 --ocr-model lightonocr \
->   --llm-base-url https://openrouter.ai/api/v1 --llm-model openai/gpt-4.1-mini \
->   --pii --output ./latence.stack.yaml
-> ```
 
-> **PII note (W16, ADR-0042).** With **PII ON**, `redact` is a **chunk-level transform**: it
-> consumes the induced **chunk** stream and sets each chunk's `masked_content` (each chunk ≤ the
-> model window, so no PII is truncated), and `enrich` reads THAT redacted chunk stream
+> **PII note (W16, ADR-0042).** With **PII ON**, `redact` is a **chunk-level transform**: it consumes
+> the induced **chunk** stream and sets each chunk's `masked_content` (each chunk ≤ the model window,
+> so no PII is truncated), and `enrich` reads THAT redacted chunk stream
 > (`redact → enrich → export_corpus`). The corpus Export materializes `masked_content`, so the
 > exported RAG corpus is **both masked (PII-safe) AND context-enriched** — the per-chunk
-> `context_header`/`induced_labels` and the masking compose, with no trade-off. `latence setup --pii`
-> now produces a genuinely PII-safe, context-enriched corpus. (This closes the pre-W16 gap where the
-> RAG chunks were enriched but un-masked and a doc-level redactor could truncate PII past the window.)
+> `context_header`/`induced_labels` and the masking compose, with no trade-off.
 
-> **Redaction floor + mask-before-extract (W18, ADR-0044).** Two safety improvements ride on top:
-> (1) a **universal financial-PII floor** — `credit_card` / `iban` / `ssn` are ALWAYS masked at the
-> shared redaction seam no matter which detector backend you configure, so a learned redactor that
-> *misses* one still cannot leak it (the floor is non-bypassable and can't be forgotten per-provider).
-> (2) An optional **`--extract-on masked`** mode: extraction reads the REDACTED chunk stream, so PII
-> never reaches entity/relation extraction or the KG at all — the stricter posture some enterprises
-> require. Default `unmasked` keeps the KG's real entities and is byte-identical to before. With
-> `masked`, the wizard wires `extract` to depend on `redact` for you.
+> **Redaction floor + mask-before-extract (W18, ADR-0044).** (1) A **universal financial-PII floor** —
+> `credit_card` / `iban` / `ssn` are ALWAYS masked at the shared redaction seam no matter which
+> detector backend you configure, so a learned redactor that *misses* one still cannot leak it (the
+> floor is non-bypassable). (2) An optional **`--extract-on masked`** mode: extraction reads the
+> REDACTED chunk stream, so PII never reaches entity/relation extraction or the KG at all. Default
+> `unmasked` keeps the KG's real entities; with `masked` the wizard wires `extract` to depend on
+> `redact` for you.
 
 ---
 
-## 2. Drop in your files + pick the parser
+## 4. Author the SOTA stack YAML by hand (understand every knob)
 
-Put your mixed corpus anywhere on the pod, e.g.:
-
-```bash
-mkdir -p /workspace/corpus
-# ... copy your PDFs, scans, .docx/.xlsx/.pptx, .txt, .md into /workspace/corpus ...
-ls -la /workspace/corpus
-```
-
-`source.local_folder` walks that folder and only admits the file types you list in `extensions`
-(anything else is ignored at source; malformed/oversized files are **quarantined** at intake, never
-crash the run). Match `extensions` to what your parser can read.
-
-**Which parser?** One Parse Stage = one parser Provider, so choose by what dominates your corpus:
-
-| Your files | Parser | Notes |
-|---|---|---|
-| Genuinely mixed (scans, images, Office, PDF) | **`parser.render`** + an `ocr:` sub-provider (`parser.lighton`) | Universal, license-clean (PDFium/Pillow/LibreOffice/python-docx — never AGPL PyMuPDF). PDF/image/soffice pages are rasterised then OCR'd (GPU). |
-| PDFs with a real text layer (born-digital) | **`parser.pdfplumber`** | Fast, CPU, no OCR. **PDF only.** |
-| Only scanned PDFs / photos | `parser.lighton` (OCR VLM) directly | GPU. |
-
-The GOOD stack below uses **`parser.render` + `parser.lighton`** because the scenario is "many
-different file types". If your corpus is born-digital PDFs + text + markdown only, swap the `parse`
-Stage to `parser.pdfplumber` (drop the `ocr:` block) for a much lighter, CPU-only, OCR-free run.
-
----
-
-## 3. Author the stack YAML — the full GOOD stack
-
-This is the whole quality story in one file. Save it as `stacks/my-corpus.yaml`.
+The wizard above generates this file for you. Author it by hand when you want to see — and tune —
+every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise-sota spine (the
+`stacks/gpu-sota-glinker.yaml` shape with the full induce → enrich → complete spine).
 
 > **Why this config matters more than the model.** With generic English labels, a low threshold, and
 > no schema induction, the output is noisy — pronouns/laws/products get mistyped as entities and the
 > relations are garbage. Turn schema induction **on** (the LLM discovers the domain's real labels per
 > corpus), use **`granularity: corpus`** (one shared canonical schema, so entity types stay
-> consistent across the whole KG instead of drifting per chunk), set the extraction **`threshold`
-> ~0.5**, give redaction real **financial-PII** labels (IBAN, credit card, tax id — not just
-> person/email/phone), and cap chunks at **`max_tokens: 640`**. Then entities are correctly typed
-> (bank / law / payment-product) and the relations are meaningful.
+> consistent across the whole KG), give redaction real **financial-PII** labels, cap chunks at
+> **`max_tokens: 640`**, and let the GLinker disambiguator's precision defaults ride. Then entities
+> are correctly typed and the relations are meaningful.
 >
 > **Why 640.** The GLiNER2 extractor/redactor run on mdeberta-v3, whose token window is **768**.
 > `chunk.markdown`'s `max_tokens` is counted by the *chunker's* tokenizer, which runs ~1.2× the
 > model's (pod-measured: a 768-chunker-token cap hit mdeberta median 666 / max 921). So 640
-> chunker-tokens ≈ ≤768 mdeberta-tokens — as big as is safe (bigger chunks = better relations + RAG
-> context). The providers also carry a `max_len: 768` guard as the hard backstop.
+> chunker-tokens ≈ ≤768 mdeberta-tokens — as big as is safe. The providers also carry a
+> `max_len: 768` guard as the hard backstop.
 
 ```yaml
-# stacks/my-corpus.yaml — the full GOOD stack:
-#   source → intake_screen → parse → chunk[640] → content_screen
-#     → induce[corpus] → extract[gliner2, thr 0.5] → redact[gliner2, financial-PII]
-#     → profiling → disambiguate → graph → enrich(context) → export_corpus + export_kg
+# stacks/my-corpus.yaml — the enterprise-SOTA stack:
+#   source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
+#     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner_pii, financial-PII]
+#     → profiling → disambiguate[glinker] → graph → complete[ultra] → enrich(context)
+#     → export_kg + export_corpus[Granite r2]
 #
-# {CORPUS_DIR} / {STORAGE_URI} are placeholders — fill them in §3.1 below before `latence run`.
+# {CORPUS_DIR} / {STORAGE_URI} are placeholders — fill them in §4.1 before `latence run`.
 name: my-corpus-stack
 storage_uri: "{STORAGE_URI}"
 stages:
-  # 1) Read the folder. Only these extensions are admitted; adjust to your corpus + parser.
+  # 1) Read the folder. Only these extensions are admitted; adjust to your corpus.
   - name: source
     capability: source
     provider: source.local_folder
@@ -313,20 +361,17 @@ stages:
     depends_on: [source]
     config: {max_bytes: 2097152, max_zip_ratio: 50.0}
 
-  # 3) Parse: the universal renderer + a GPU OCR sub-provider for pixel pages.
-  #    For a born-digital-PDF-only corpus, replace this whole Stage with:
-  #      provider: parser.pdfplumber   (and delete the config block)
+  # 3) Parse: the served-vLLM LightOn OCR endpoint (§2). base_url + model point at your vLLM box;
+  #    api_key is any placeholder; max_concurrency fans pages out (pair with --max-num-seqs).
   - name: parse
     capability: parse
-    provider: parser.render
+    provider: parser.lighton_vllm
     depends_on: [intake_screen]
     config:
-      device: cuda                   # OCR sub-provider is GPU; skip-with-flag on a CPU host
-      dpi: 200                       # PDF→image rasterisation DPI (higher = sharper, slower)
-      soffice_timeout_s: 120         # hard cap on the LibreOffice office-render subprocess
-      ocr:
-        provider: parser.lighton     # permissive GPU OCR VLM (or parser.glm)
-        config: {device: cuda, max_new_tokens: 4096}
+      base_url: http://localhost:8000/v1
+      model: lightonai/LightOnOCR-2-1B
+      api_key: EMPTY
+      max_concurrency: 8
 
   # 4) Chunk at 640 (the mdeberta-window-calibrated max — see the callout above).
   - name: chunk
@@ -358,30 +403,31 @@ stages:
       temperature: 0.0                        # deterministic
 
   # 7) Fused NER+RE in ONE pass (GLiNER2). config labels are a FLOOR; the induced entity/relation
-  #    types are UNIONed on per corpus (config ∪ induced). threshold ~0.5 = the quality sweet spot.
+  #    types are UNIONed on per corpus (config ∪ induced). threshold 0.3 = the SOTA recall floor.
+  #    `compile` is left OFF (the provider default — it recompile-thrashes on varied chunks; §1.3).
   - name: extract
     capability: fused_entity_relation
     provider: fused_entity_relation.gliner2
     depends_on: [induce]
     config:
       device: cuda
-      labels: [organization, person]         # entity floor; induced entity_types union on
+      labels: [person, organization]         # entity floor; induced entity_types union on
       relation_labels: [works for, partner of]  # relation floor; induced relation_types union on
-      threshold: 0.5
-      max_len: 768                            # mdeberta window guard (hard backstop)
+      threshold: 0.3
 
-  # 8) Learned PII redaction (GLiNER2) with FINANCIAL PII, not just person/email/phone.
+  # 8) Learned PII redaction (GLiNER-PII) with FINANCIAL PII, not just person/email/phone.
   #    W16 (ADR-0042): redact is a CHUNK→CHUNK transform — it consumes the induced CHUNK stream and
   #    sets each chunk's masked_content (each chunk ≤ the model window, so no PII is truncated). It
   #    depends_on induce so the induced pii_types UNION onto this floor; enrich then reads THIS
   #    redacted chunk stream, so export_corpus is masked AND enriched.
   - name: redact
     capability: redaction
-    provider: redaction.gliner2
+    provider: redaction.gliner_pii
     depends_on: [induce]
     config:
       device: cuda
-      pii_labels: [person, email, phone number, address, iban, credit card number, tax id]
+      pii_labels: [person, email, phone number, address, iban, credit card number, tax id, bank account number, social security number]
+      max_len: 768
       threshold: 0.5
 
   # 9) Corpus profiling (statistics + drift diagnostics) over docs + mentions.
@@ -390,23 +436,26 @@ stages:
     provider: profiling.statistical
     depends_on: [parse, extract]
 
-  # 10) Disambiguation: collapse surface mentions to canonical entities (learned surface+context).
+  # 10) Disambiguation: the enterprise GLinker entity-linker + audited resolver (ADR-0046).
+  #     Neural L2→L3→L4→L0 linking (gliner-linker biencoder + reranker + FlashDeBERTa) LINKS each
+  #     mention to its canonical entry, then the audited resolver FUSES by exact/alias/acronym/
+  #     substring/fuzzy with a no-silent-over-merge audit log. The precision defaults ride:
+  #     embedding-merge OFF (retrieval embedders over-merge short names), fuzzy edit-distance rung +
+  #     distinguishing-token guard ON. The Granite embedder is the opt-in STS rung (kept here as
+  #     wiring; it still powers export_corpus's vectors).
   - name: disambiguate
     capability: disambiguation
-    provider: disambiguation.embedding
+    provider: disambiguation.glinker
     depends_on: [extract]
     config:
-      threshold: 0.90
-      context_window: 160
+      device: cuda
+      context_window: 200          # ±chars of chunk context for the neural linker input
+      threshold: 0.3               # neural linking (L0) confidence threshold
+      use_reranker: true           # the L4 gliner-linker reranker
+      use_flash_deberta: true      # FlashDeBERTa when flash_attn present (graceful fallback)
       embedder:
         provider: embedding.sentence_transformers
         config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
-      kb:
-        # entity_type MUST match the lowercased mention labels — the KB linker's type filter is
-        # case-sensitive, so "ORG" would never match an "organization" mention.
-        - {kb_id: Q1, name: Acme, entity_type: organization}
-        - {kb_id: Q2, name: International Business Machines, entity_type: organization, aliases: [IBM]}
-      kb_threshold: 0.5
 
   # 11) Assemble the canonical, evidence-linked knowledge graph.
   - name: graph
@@ -415,8 +464,22 @@ stages:
     depends_on: [disambiguate]
     config: {corpus_id: my-corpus-stack}
 
-  # 12) W13 context enrichment: project the assembled KG back onto each chunk as a compact,
-  #     capped, confidence-gated context_header (its canonical entities + top-k neighbor triples).
+  # 12) ULTRA graph completion (zero-shot inductive link prediction). skip_if_unavailable: true —
+  #     the checkpoint is not vendored, so on a host without it the Stage skips-with-flag (no
+  #     inferred edges) rather than failing the run. Point `checkpoint:` at an ULTRA .pth to enable.
+  - name: complete
+    capability: graph_completion
+    provider: graph_completion.ultra
+    depends_on: [graph]
+    config:
+      corpus_id: my-corpus-stack
+      scorer: auto
+      device: cuda
+      target_precision: 0.9
+      skip_if_unavailable: true
+
+  # 13) W13 context enrichment: project the assembled KG back onto each chunk as a compact, capped,
+  #     confidence-gated context_header (its canonical entities + top-k neighbor triples).
   #     W16 (ADR-0042): its chunk input is the REDACTED induced stream (redact set masked_content),
   #     so the enriched chunks carry induced_labels + context_header AND masked_content — the corpus
   #     row is masked (PII-safe) AND enriched. (With no redact stage, wire this back to `induce`.)
@@ -430,17 +493,16 @@ stages:
       min_entity_confidence: 0.0
       min_edge_confidence: 0.0
 
-  # 13a) KG export (nodes/edges Parquet + TTL + GraphML). basename → graph-*.
+  # 14a) KG export (nodes/edges Parquet + TTL + GraphML), asserted + ULTRA-completed edges.
   - name: export_kg
     capability: export
     provider: export.knowledge_graph
-    depends_on: [graph]
+    depends_on: [graph, complete]
     config: {basename: graph}
 
-  # 13b) RAG-corpus export from the REDACTED+ENRICHED chunk stream: masked_content (materialized as
+  # 14b) RAG-corpus export from the REDACTED+ENRICHED chunk stream: masked_content (materialized as
   #      the corpus text, W16) + provenance + classification + induced_labels + context_header + a
-  #      dense embedding. context_columns: true → the two W13 Parquet columns (context_header,
-  #      neighbor_entity_ids).
+  #      dense Granite r2 embedding. context_columns: true → the two W13 Parquet columns.
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
@@ -453,18 +515,15 @@ stages:
         config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
 ```
 
-> **Redaction AND context headers — masked and enriched in one file (W16, ADR-0042).** With W16,
-> `redact` is a **chunk→chunk transform**: it consumes the induced **chunk** stream and sets each
-> chunk's `masked_content` (each chunk ≤ the model window, so no PII is truncated), and `enrich`
-> reads THAT redacted chunk stream (`redact → enrich → export_corpus`). The corpus Export
-> materializes `masked_content` as the row's text, so the exported RAG corpus carries **masked
-> (PII-safe) content AND** `induced_labels` + `context_header` + `embedding` — the masking and the
-> per-chunk headers **compose in one file**, with no trade-off. The structured `pii_spans` ride the
-> same `ChunkRecord` (the raw PII value is never stored). This closes the pre-W16 gap where the RAG
-> chunks were enriched but un-masked (and a doc-level redactor could truncate PII past the model
-> window). With PII OFF there is no `redact` Stage, so wire `enrich` back to `induce`.
+> **Masked and enriched in one file (W16, ADR-0042).** `redact` is a **chunk→chunk transform**: it
+> sets each chunk's `masked_content`, and `enrich` reads THAT redacted chunk stream
+> (`redact → enrich → export_corpus`). The corpus Export materializes `masked_content` as the row's
+> text, so the exported RAG corpus carries **masked (PII-safe) content AND** `induced_labels` +
+> `context_header` + `embedding` — masking and the per-chunk headers **compose in one file**. The
+> structured `pii_spans` ride the same `ChunkRecord` (the raw PII value is never stored). With PII
+> OFF there is no `redact` Stage, so wire `enrich` back to `induce`.
 
-### 3.1 Fill the placeholders
+### 4.1 Fill the placeholders
 
 `latence run` reads the YAML **verbatim** — it does **not** substitute `{CORPUS_DIR}` / `{STORAGE_URI}`.
 Materialise a concrete pipeline with `envsubst` (or just edit the two lines by hand):
@@ -484,9 +543,21 @@ grep -E 'path:|storage_uri:' /workspace/pipeline.yaml     # sanity-check they're
 (The placeholder-carrying `stacks/*.yaml` files are for `latence stack validate`, which fills them
 with a temp dir + the bundled corpus. This tutorial uses `latence run` on **your** corpus.)
 
+Put your mixed corpus in the source folder first:
+
+```bash
+mkdir -p /workspace/corpus
+# ... copy your PDFs, scans, .docx/.xlsx/.pptx, .txt, .md into /workspace/corpus ...
+ls -la /workspace/corpus
+```
+
+`source.local_folder` walks that folder and only admits the file types you list in `extensions`
+(anything else is ignored at source; malformed/oversized files are **quarantined** at intake, never
+crash the run).
+
 ---
 
-## 4. Run each Stage separately + inspect
+## 5. Run each Stage separately + inspect
 
 **There is no `--until` / `--from` / partial-run flag** on `latence run` (confirmed in
 `packages/latence-core/src/latence_core/cli.py` — the only options are `--run-id` and `--verbose`).
@@ -501,13 +572,12 @@ Stage isolation instead rides the runner's **checkpoint/resume**:
 That gives you two ways to work Stage-by-Stage:
 
 **Method A — progressive stacks (true isolation).** Run a stack that stops at the Stage you care
-about, inspect its checkpoint, then run a larger stack that reuses the earlier checkpoints and only
-executes the new Stages. Keep the **same `--run-id` and the same `storage_uri`**, and keep every
-earlier Stage's **name and config byte-identical** — resume is keyed by **stage name**, so a
-renamed-or-reconfigured Stage under an existing checkpoint is **not** re-run (you'd inspect stale
-output). Copy `my-corpus.yaml`, delete the trailing Stages you don't want yet, render, run.
+about, inspect its checkpoint, then run a larger stack that reuses the earlier checkpoints. Keep the
+**same `--run-id` and the same `storage_uri`**, and keep every earlier Stage's **name and config
+byte-identical** — resume is keyed by **stage name**, so a renamed-or-reconfigured Stage under an
+existing checkpoint is **not** re-run (you'd inspect stale output).
 
-**Method B — run once, inspect every checkpoint.** Run the full pipeline (§5) and then read each
+**Method B — run once, inspect every checkpoint.** Run the full pipeline (§6) and then read each
 Stage's checkpoint. Same files, less re-rendering. Use this unless you specifically want to gate a
 Stage before the next one runs.
 
@@ -542,14 +612,14 @@ latence run /workspace/upto-parse.yaml --run-id run-0001
 
 Then inspect and move on. Per-Stage: **what lands, and what to look for.**
 
-### 4.1 `source` → `source.jsonl` (raw `ParserInput`s)
+### 5.1 `source` → `source.jsonl` (raw `ParserInput`s)
 ```bash
 peek $CK/source.jsonl
 # look for: one record per admitted file; correct file_name / file_type; sensitivity=internal.
 python -c "print(sum(1 for _ in open('$CK/source.jsonl')),'files admitted')"
 ```
 
-### 4.2 `intake_screen` → `intake_screen.jsonl` (the PASSED files)
+### 5.2 `intake_screen` → `intake_screen.jsonl` (the PASSED files)
 Quarantined files are **not** here — they're in the sidecar. Check both:
 ```bash
 peek $CK/intake_screen.jsonl
@@ -557,10 +627,12 @@ ls  /workspace/out/_latence/runs/run-0001/quarantine/    # withheld files (overs
 ls  /workspace/out/_latence/runs/run-0001/screening/     # per-Stage screening findings
 ```
 
-### 4.3 `parse` → `parse.jsonl` (`DocumentRecord`s — clean text)
+### 5.3 `parse` → `parse.jsonl` (`DocumentRecord`s — OCR'd markdown)
+This is the served-vLLM OCR payoff — each page was POSTed to your vLLM endpoint and assembled onto
+an exact-offset page map. If this Stage is empty or errors, the endpoint is the first suspect (§9).
 ```bash
 peek $CK/parse.jsonl
-# look for: clean, markup-stripped `content`; a `page_map`; provenance file_name/type/size intact.
+# look for: clean, markup-stripped markdown `content`; a `page_map`; provenance file_name/type/size intact.
 python - <<PY
 import json
 for line in open("$CK/parse.jsonl"):
@@ -568,7 +640,7 @@ for line in open("$CK/parse.jsonl"):
 PY
 ```
 
-### 4.4 `chunk` → `chunk.jsonl` (`ChunkRecord`s — sizes)
+### 5.4 `chunk` → `chunk.jsonl` (`ChunkRecord`s — sizes)
 ```bash
 peek $CK/chunk.jsonl
 # look for: token_count clustered at/under 640; index runs 0..k per document; content is coherent.
@@ -579,7 +651,7 @@ print("chunks",len(tc),"| token_count min/median/max",min(tc),int(st.median(tc))
 PY
 ```
 
-### 4.5 `induce` → `induce.jsonl` (chunks stamped with the DISCOVERED schema)
+### 5.5 `induce` → `induce.jsonl` (chunks stamped with the DISCOVERED schema)
 This is the payoff of schema induction — the domain labels the LLM found for **your** corpus. In
 `granularity: corpus` every chunk carries the **same** merged `induced_labels`:
 ```bash
@@ -593,10 +665,19 @@ print("distinct induced schemas:", len(seen))          # corpus mode → 1
 for s in list(seen)[:1]: print(json.dumps(json.loads(s), indent=2))
 PY
 # look for: sensible domain types (e.g. bank, law, payment_product / owns, regulated_by / iban, tax_id),
-# NOT generic English. Empty/None everywhere ⇒ the key/endpoint failed — see Troubleshooting.
+# NOT generic English. Empty/None everywhere ⇒ the key/endpoint failed OR the model returned nothing
+# usable — the loud signal for the latter is induction_empty_after_sanitization in the Quality Report (§6).
 ```
 
-### 4.6 `extract` → `extract.jsonl` (typed entities + relations, one fused stream)
+> **Empty-recovery telemetry — a quality signal to check.** When the LLM answers but every induced
+> label sanitises away to nothing, the Stage does NOT silently pretend it induced a schema — it falls
+> back to config labels **loudly**, bumping `induction_empty_after_sanitization` (a WARNING in the
+> log, a counter in the Quality Report). A non-zero count means the induction call reached the model
+> but produced no usable labels for those documents (a prompt/model mismatch), distinct from a
+> dead-endpoint fallback. Watch it alongside `induction_fallbacks` — both non-zero and generic
+> `induced_labels` everywhere point straight at the LLM endpoint/model.
+
+### 5.6 `extract` → `extract.jsonl` (typed entities + relations, one fused stream)
 A **mixed** checkpoint: `EntityMention`s and `RelationMention`s interleaved (a relation line has a
 `head_mention_id`). Check the **types** and that relations are meaningful:
 ```bash
@@ -617,7 +698,7 @@ PY
 # relations that actually read true (head → label → tail). Noise here ⇒ revisit threshold/induce.
 ```
 
-### 4.7 `redact` → `redact.jsonl` (`ChunkRecord`s — `masked_content` + `pii_spans`, W16)
+### 5.7 `redact` → `redact.jsonl` (`ChunkRecord`s — `masked_content` + `pii_spans`, W16)
 ```bash
 python - <<PY
 import json
@@ -632,14 +713,46 @@ PY
 # (iban, credit card number, tax id) — not just person/email/phone. The raw PII value is NEVER stored.
 ```
 
-### 4.8 `disambiguate` → `disambiguate.jsonl` (canonical entities)
+### 5.8 `disambiguate` → `disambiguate.jsonl` (canonical entities + the merge audit)
+This is the GLinker payoff: `ENTITY`-scope records each carry a `CanonicalEntity` (`canonical_text`,
+`entity_type`, `member_mention_ids`, `kb_id`) **and** the `merge_decisions` audit trail that built
+it. Read the canonical entities and the audited merges:
 ```bash
-peek $CK/disambiguate.jsonl
-# look for: surface variants (IBM / International Business Machines) collapsed to one canonical id;
-# KB links (kb_id Q1/Q2) where the type + surface matched.
+python - <<PY
+import json
+ents=0
+for l in open("$CK/disambiguate.jsonl"):
+    d=json.loads(l)
+    if d.get("scope")!="entity": continue      # skip RELATION-scope records
+    e=d["entity"]; ents+=1
+    if ents<=12:
+        kb = f"  kb={e['kb_id']}" if e.get("kb_id") else ""
+        print(f"{e['canonical_text']!r} [{e['entity_type']}]  ×{len(e['member_mention_ids'])} mentions{kb}")
+        for m in e.get("merge_decisions", []):
+            print(f"    merged {m['source_name']!r}+{m['target_name']!r}  via {m['reason']}  ({m['confidence']:.2f})")
+print("---", ents, "canonical entities")
+PY
 ```
 
-### 4.9 `graph` → `graph.jsonl` (`GraphRecord`s — nodes + edges)
+**What "good" looks like** for the GLinker ER (the precision-first posture, ADR-0046):
+
+- **Distinct persons stay distinct.** Two different people with similar names are NOT collapsed —
+  the audited resolver's embedding-by-label rung is OFF by default precisely because retrieval
+  embedders over-merge short names (they put distinct names within 0.85–0.89 cosine).
+- **OCR / spelling variants merge.** The conservative fuzzy edit-distance rung folds same-label
+  variants the string cascade cannot — e.g. `Kai Kusch` ↔ `Kai Kölsch` (an OCR variant) merges,
+  audited as `fuzzy_edit_distance`.
+- **The distinguishing-token guard keeps look-alikes apart.** `§3 GwG` ≠ `§11 GwG` (a numeric-token
+  difference) and `K² Ventures UG` ≠ `D² Ventures UG` (a distinct leading short-code) are NOT
+  merged even though their char-similarity is high — the guard, not the threshold, vetoes them.
+- **Neural linking resolves mentions in context.** IBM-in-a-hardware-context vs a different org in a
+  similar context are linked to the right canonical entry by the gliner-linker biencoder + reranker,
+  not by surface string alone.
+
+Every merge is auditable (`merge_decisions` here; the corpus totals `merges_applied` /
+`merges_below_policy` / `merges_by_strategy` in the Quality Report, §6) — **no silent over-merge**.
+
+### 5.9 `graph` → `graph.jsonl` (`GraphRecord`s — nodes + edges)
 ```bash
 python - <<PY
 import json
@@ -656,7 +769,13 @@ print("---", nodes, "nodes,", edges, "edges")
 PY
 ```
 
-### 4.10 `enrich` → `enrich.jsonl` (chunks + `context_header`)
+### 5.10 `complete` → `complete.jsonl` (ULTRA-inferred edges — or a graceful skip)
+```bash
+# With no vendored ULTRA checkpoint the Stage skips-with-flag → this file is absent/empty (expected).
+[ -s $CK/complete.jsonl ] && peek $CK/complete.jsonl || echo "ULTRA skipped (skip_if_unavailable) — no inferred edges; check quality-report.md 'skipped'."
+```
+
+### 5.11 `enrich` → `enrich.jsonl` (chunks + `context_header`)
 ```bash
 python - <<PY
 import json
@@ -677,13 +796,15 @@ PY
 
 ---
 
-## 5. Run end-to-end
+## 6. Run end-to-end
 
-One command runs the whole DAG (skipping any Stage whose checkpoint already exists from §4):
+One command runs the whole DAG (skipping any Stage whose checkpoint already exists from §5):
 
 ```bash
 export PYTORCH_JIT=0
+export HF_HUB_DISABLE_XET=1
 export OPENROUTER_API_KEY="sk-or-..."     # (already set from §1.3)  # pragma: allowlist secret
+# vLLM OCR server from §2 must be up (curl http://localhost:8000/v1/models)
 latence run /workspace/pipeline.yaml --run-id run-0001 --verbose
 ```
 
@@ -701,19 +822,22 @@ What to check in the report:
 - **Per-Stage `records_in` / `records_out`** — counts flow sensibly (files → docs → chunks →
   mentions → nodes/edges); a Stage with `records_out: 0` that you expected to produce data is the
   first thing to investigate.
+- **Disambiguation merge audit** — `merges_applied` / `merges_below_policy` (folded vs recorded-but-
+  not-applied, the no-silent-over-merge audit), `merges_by_strategy` (which resolver rung), and
+  `entities_linked` / `entities_unlinked` (matched to the external KB vs graceful fallback).
 - **KG stats** — `nodes` / `edges` non-zero, `evidence_coverage` near 1.0 (every edge cites evidence).
-- **No-PII-leak** — the corpus RAG scan reports clean (see the redaction wiring note in §3 for what
-  "clean" means given your export choice).
+- **No-PII-leak** — the corpus RAG scan reports clean (with PII ON the exported text is masked).
+- **`induction_empty_after_sanitization` / `induction_fallbacks`** — both should be 0 on a healthy
+  run; non-zero means the LLM produced no usable labels / the endpoint misbehaved (§5.5, §9).
 - **`skipped` / `skip_reason`** — on a CPU-only host the `cuda` Stages are honestly
-  **skipped-with-flag** (never faked). On a real GPU pod they should run, not skip.
-- **`induction_fallbacks` / `induction_documents`** — how many docs fell back to config labels; a
-  high fallback count means the induction key/endpoint is misbehaving (Troubleshooting).
+  **skipped-with-flag** (never faked); `complete` (ULTRA) legitimately skips when no checkpoint is
+  vendored. On a real GPU pod the learned Stages should run, not skip.
 
 The machine-readable `quality-report.json` carries the same, per-Stage, for gating.
 
 ---
 
-## 6. Discover the final output
+## 7. Discover the final output
 
 Everything lands under `export/`:
 
@@ -725,7 +849,7 @@ ls -la /workspace/out/_latence/runs/run-0001/export/
 EX=/workspace/out/_latence/runs/run-0001/export
 ```
 
-### 6.1 The RAG corpus — `records.jsonl` (full record) / `records.parquet` (flat columns)
+### 7.1 The RAG corpus — `records.jsonl` (full record) / `records.parquet` (flat columns)
 
 The JSONL carries the **full** `ChunkRecord` dump (every field, nested objects intact). Walk one row:
 
@@ -736,10 +860,9 @@ peek $EX/records.jsonl 1
 Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
 `docs/RETRIEVAL-ENGINE-INPUT-SPEC.md` §2.1):
 
-- **`content`** — the retrieval text (markup-stripped). Byte-unchanged by W13 (the context header is
-  added to the *embedding input only*, never the stored text). W16 (ADR-0042): with the `redact`
-  Stage on, the Export materializes each chunk's **`masked_content`** here, so `content` is the
-  **PII-safe (masked)** text — never the raw variant (see the §3 redaction note).
+- **`content`** — the retrieval text (markup-stripped). W16 (ADR-0042): with the `redact` Stage on,
+  the Export materializes each chunk's **`masked_content`** here, so `content` is the **PII-safe
+  (masked)** text — never the raw variant.
 - **`provenance`** — `source_uri`, `file_name`, `file_type`, `file_size`, `document_id`, and the
   offsets `page_start/page_end` + `char_start/char_end` locating the chunk in its source. Your audit
   trail back to the exact page/character.
@@ -749,9 +872,9 @@ Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
 - **`context_header`** — the KG projected onto this chunk: `entities` + aligned `entity_types`,
   `neighbor_triples` (`A —label→ B`, capped), `kg_node_ids` (the chunk's own entities) and
   `neighbor_node_ids` (query-time KG-expansion join keys). `null` for a chunk with no gated entity.
-- **`embedding`** — the dense Granite r2 311m vector (dimension 768). It was computed over
-  `rendered_context_header + "\n" + content`, so the vector carries the KG coherence — and, under W16,
-  over the **PII-safe (masked)** corpus text, consistent with the stored `content`.
+- **`embedding`** — the dense **Granite r2 311m** vector (dimension 768, bf16 + FA2). It was computed
+  over `rendered_context_header + "\n" + content`, so the vector carries the KG coherence — and,
+  under W16, over the **PII-safe (masked)** corpus text, consistent with the stored `content`.
 - **`record_id`** (primary key), `document_record_id` (join key), `index`, `token_count`,
   `page_map`/`offset_map`, `risk_markers`.
 
@@ -775,7 +898,7 @@ PY
 > on `export_corpus` (the JSONL always carries `context_header` via the record dump; the two extra
 > **Parquet** columns are opt-in). If `embedding` is missing, no `embedder:` was wired.
 
-### 6.2 The knowledge graph
+### 7.2 The knowledge graph
 
 ```bash
 # nodes: node_id, type (entity type), canonical_name, confidence, source_document_ids
@@ -793,15 +916,15 @@ Load the graph in networkx if you want to explore it:
 python -c "import networkx as nx; g=nx.read_graphml('$EX/graph.graphml'); print(g.number_of_nodes(),'nodes',g.number_of_edges(),'edges')"
 ```
 
-### 6.3 The Quality Report
+### 7.3 The Quality Report
 
-`quality-report.md` (human) + `quality-report.json` (machine) — the per-run scorecard from §5.
+`quality-report.md` (human) + `quality-report.json` (machine) — the per-run scorecard from §6.
 
 **Full field reference for downstream consumers:** [`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md).
 
 ---
 
-## 7. Incremental updates: add / update / retract / purge
+## 8. Incremental updates: add / update / retract / purge
 
 Your source folder changes after the first run — new files arrive, some get edited, some must be
 deleted (a customer exercises their right-to-be-forgotten). You do **not** re-run everything and you
@@ -809,15 +932,17 @@ do **not** write a Python script. Three CLI commands drive the corpus forward, e
 next **Corpus Version** (immutable, inspectable, rollback-able). They take the **same stack YAML**
 `latence run` takes.
 
-> **Honest boundary (issue #42).** The *committed* result of a delta is **surgical**: only the
-> records in the blocking neighborhoods your change touched are re-resolved and re-committed; every
-> untouched cluster is carried forward byte-identical, and the churn prints the affected-set size as
-> the witness. What is **not** yet incremental is the **extraction pass** — a delta re-parses /
-> re-chunks / re-extracts the **whole current source** from scratch (there is no cross-run doc-level
-> checkpoint reuse yet). So the *stored corpus* honours "recompute only the affected set", but the
-> *compute cost* of a delta is still O(corpus). Don't expect a 1-file delta to run in 1-file time.
+> **Extraction is now incremental too (W17, ADR-0043).** Since W17 a delta's **extraction compute**
+> is O(changed), not O(corpus): the induced corpus schema is frozen in the Corpus Version, each
+> **unchanged** document (matched by content-addressed `document_id`) **skips its doc-level Stages**
+> (parse/chunk/extract/redact) and **reuses its committed records**, and only new/changed documents
+> are extracted. The corpus-level Stages (disambiguate/graph/…) then run over the UNION of reused +
+> freshly-extracted records. The churn's `extraction: N extracted, M reused` line is the witness.
+> The one escape hatch is `--reinduce`, which re-runs induction over the full current corpus and
+> re-extracts every document — the correct-by-construction O(corpus) fallback when you want the
+> induced vocabulary to move with the corpus.
 
-### 7.1 `latence delta` — add / update (the source folder changed)
+### 8.1 `latence delta` — add / update (the source folder changed)
 
 Drop new or edited files into the source folder, then:
 
@@ -827,6 +952,8 @@ Drop new or edited files into the source folder, then:
 latence delta stacks/my-corpus.yaml
 # or, explicit:
 latence delta stacks/my-corpus.yaml --run-id delta-2026-07-13
+# force the full O(corpus) re-induce + re-extract (move the induced vocabulary with the corpus):
+latence delta stacks/my-corpus.yaml --reinduce
 ```
 
 It content-hashes the current folder against the last committed Version, detects added / changed /
@@ -838,20 +965,22 @@ Corpus Version v3 -> v4 (incremental)
   entities:  +5 created, 1 merged, 0 split
   edges:     +7 -1
   records:   0 retracted, 0 purged (retraction)
-  affected set: 6/431 corpus-level records recomputed (extraction still re-runs the whole source — issue #42)
+  affected set: 6/431 corpus-level records recomputed
+  extraction: 2 extracted, 118 reused (unchanged documents' doc-level Stages skipped — issue #42 / ADR-0043)
   drift: 0.024
 ```
 
-`affected set: 6/431` is the payoff signal — only 6 of the 431 corpus-level records were re-resolved;
-the other 425 were carried forward verbatim. (An edit under the content-addressed local-folder Source
-shows up as `+1 ~1`-style *add + delete*, not `~updated`: editing a file mints a new content-id and
-retires the old one. That's expected — see ADR-0029 §4.)
+`affected set: 6/431` is the stored-corpus payoff (only 6 of 431 corpus-level records re-resolved);
+`extraction: 2 extracted, 118 reused` is the **compute** payoff (only the 2 changed documents were
+re-parsed/-chunked/-extracted, the other 118 reused verbatim). (An edit under the content-addressed
+local-folder Source shows up as `+1 ~1`-style *add + delete*, not `~updated`: editing a file mints a
+new content-id and retires the old one — see ADR-0029 §4.)
 
 Re-running a delta over an **unchanged** folder is a **no-op** — the fingerprint matches head, so no
 new Version is minted (idempotent). Deltas are **deterministic**: the same source + config reproduces
 the same Corpus Version fingerprint.
 
-### 7.2 Where to get a `document_id`
+### 8.2 Where to get a `document_id`
 
 `retract` and `purge` take content-addressed document ids (`sha256:<64 hex>`). Two ways to get one:
 
@@ -863,7 +992,7 @@ python -c "import json; print({json.loads(l)['provenance']['document_id'] for l 
 printf 'sha256:%s\n' "$(shasum -a 256 /workspace/corpus/contract-4471.pdf | cut -d' ' -f1)"
 ```
 
-### 7.3 `latence retract` — soft delete (auditable, rollback-able — the default)
+### 8.3 `latence retract` — soft delete (auditable, rollback-able — the default)
 
 Exclude a document's derived records from the **live** corpus, but **retain** them in the prior
 Corpus Version for audit and rollback. Any entity cluster that was merged *solely* because of the
@@ -879,7 +1008,7 @@ latence retract stacks/my-corpus.yaml --docs-file to-remove.txt
 The retracted records still live in the version that preceded the retraction — inspect it any time
 (`CorpusStore.read_records(<version>)`), or roll forward by re-adding the file with `latence delta`.
 
-### 7.4 `latence purge` — hard delete (GDPR / right-to-be-forgotten)
+### 8.4 `latence purge` — hard delete (GDPR / right-to-be-forgotten)
 
 The irreversible one. Unlike a retraction, **nothing is retained**: the on-disk source file, every
 derived record across **all** Corpus Versions (and any abandoned WAL residue), and the run artifacts
@@ -902,22 +1031,26 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `parse` produces 0 docs / `openai`-client connection errors | the vLLM OCR endpoint isn't up, or `base_url`/`model` don't match the server | stand up the server (§2); `curl http://localhost:8000/v1/models` and match `parse.config.base_url` + `model` to it; `api_key: EMPTY` is fine. |
+| `FlashInfer requires sm75+` when starting vLLM on Blackwell | vLLM 0.24's bundled FlashInfer can't JIT cudagraphs on SM 12.x | add `--enforce-eager` (loses the cudagraph speedup, correctness unaffected) **or** upgrade `flashinfer` to an SM 12.x build (§2). |
+| Model downloads hang / error on `hf_xet` (Blackwell pod) | the Hugging Face XET transfer backend is flaky on some SM 12.x pods | `export HF_HUB_DISABLE_XET=1` before downloading (§1.3). |
 | `nvrtc: failed to open libnvrtc-builtins.so.13.0` (GLiNER2/DeBERTa crash) | torch JIT on SM 12.x / cu13x | `export PYTORCH_JIT=0` before running (§1.3). |
+| Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompile-thrashes on varied-length chunks | leave `compile` at its **default OFF**; enable only for a homogeneous / uniform-length workload (§1.3). |
 | `error: externally-managed-environment` on `pip install` | RunPod PEP-668 system Python | add `--break-system-packages` (§1.2), or use a venv. |
-| `ModuleNotFoundError: peft` (or `pdfplumber`, `pyarrow`) at run time | a `--no-deps` editable install skipped a hidden GLiNER2 dep | reinstall the package **without** `--no-deps` and `pip install ... peft pdfplumber pyarrow` (§1.2). `peft` is a real, undeclared GLiNER2 dependency. |
-| Every chunk's `induced_labels` is `null`; `quality-report` shows high `induction_fallbacks` | no/invalid induction key, wrong `base_url`, or unreachable endpoint (the Stage **fails open** to config labels — never crashes) | set `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) as an env var; check `base_url` matches your provider; run `latence run ... --verbose` and read the `schema_induction fell back to config labels: ...` log lines. |
-| Tail entities/relations missing; offsets look off on long chunks | chunk tokenised past the mdeberta **768** window and was silently truncated | keep `chunk.markdown max_tokens ≤ 640` (~≤768 mdeberta-tokens); the provider `max_len: 768` guard is the backstop (§3 callout). |
-| Output is noisy — pronouns/laws/products mistyped, garbage relations | generic English labels + no schema induction + low threshold | turn `induce` **on** with `granularity: corpus`, raise extraction `threshold` to ~0.5, give redaction the financial-PII labels (§3). This matters more than the model choice. |
-| KB linking silently drops every candidate | `kb.entity_type` case mismatch with the (lowercased) mention labels — the linker's type filter is case-sensitive | make `entity_type` match the mention labels exactly (`organization`, not `ORG`). |
-| GPU Stages report `skipped` / `skip_reason` in the report | CPU-only host (device honesty — skipped-with-flag, never faked) | run on a real CUDA pod with the heavy packages installed; the CPU-reachable spine still validates. |
-| A file didn't make it into the corpus | not in `source.local_folder extensions`, or quarantined at intake, or a `PARSE_ERROR` | check the `extensions` list, the `quarantine/` and `screening/` sidecars, and the parse checkpoint (§4.2, §4.3). |
-| `context_header` / `neighbor_entity_ids` absent from `records.parquet` | `context_columns` not set on `export_corpus`, or the corpus was exported from `redact` not `enrich` | set `context_columns: true` and wire `export_corpus → enrich` (§3). |
+| `ModuleNotFoundError: peft` / `glinker` / `flashdeberta` / `gliner` at run time | a `--no-deps` editable install skipped a hidden dep | reinstall the package **without** `--no-deps` and `pip install ...` the runtime deps (§1.2). |
+| `disambiguation.glinker` prints `MISSING` at verify (§1.4) | the separate `latence-disambig-glinker` heavy package wasn't installed | `pip install -e packages/latence-disambig-glinker` + `pip install glinker flashdeberta` (ADR-0016). |
+| Every chunk's `induced_labels` is `null`; high `induction_fallbacks` | no/invalid induction key, wrong `base_url`, or unreachable endpoint (the Stage **fails open** to config labels — never crashes) | set `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`); check `base_url`; run `--verbose` and read the `schema_induction fell back to config labels: ...` log lines. |
+| `induction_empty_after_sanitization` non-zero | the LLM answered but every induced label sanitised away (prompt/model mismatch) | try a more capable induction model; the run still completes on config labels, but the discovered schema is empty (§5.5). |
+| GLinker over-merges distinct entities / two people collapse into one | the embedding-by-label rung was turned on with the retrieval embedder | keep `use_embedding_merge` at its **default OFF** — recall is carried by the neural linker + string cascade + the conservative fuzzy rung; re-enable ONLY with a discriminative STS embedder (§5.8). |
+| Look-alikes wrongly merged (`§3 GwG` with `§11 GwG`, `K²` with `D²`) | should not happen — the distinguishing-token guard vetoes these | if it does, you overrode the guard; leave the GLinker precision defaults to ride (ADR-0046, §5.8). |
+| `complete` (ULTRA) reports `skipped` | no ULTRA checkpoint is vendored; `skip_if_unavailable: true` skips gracefully | expected — supply an ULTRA `.pth` via `complete.config.checkpoint` to enable inferred edges. |
+| Tail entities/relations missing; offsets look off on long chunks | chunk tokenised past the mdeberta **768** window and was silently truncated | keep `chunk.markdown max_tokens ≤ 640` (~≤768 mdeberta-tokens); the provider `max_len: 768` guard is the backstop (§4 callout). |
+| GPU Stages report `skipped` / `skip_reason` in the report | CPU-only host (device honesty — skipped-with-flag, never faked) | run on a real CUDA pod with a vLLM OCR endpoint up; the CPU-reachable spine still validates. |
+| `context_header` / `neighbor_entity_ids` absent from `records.parquet` | `context_columns` not set on `export_corpus`, or the corpus was exported from `redact` not `enrich` | set `context_columns: true` and wire `export_corpus → enrich` (§4). |
 | A re-run didn't pick up a config change to an early Stage | resume is keyed by **stage name**; an existing checkpoint under the same name is skipped | delete that Stage's checkpoint (`rm $CK/<stage>.jsonl`) or use a fresh `--run-id`. |
-| `latence delta` committed no new Version / printed the same version number | the source folder is unchanged — a delta over an identical corpus is an idempotent no-op (the fingerprint matches head) | change the folder (add/edit/remove a file) before the delta; nothing to commit is correct behaviour (§7.1). |
-| `retract`/`purge` fails with `[unknown]: Cannot delete from an empty corpus` | you deleted before any `latence run`/`delta` committed a Corpus Version | run the pipeline once first so there is a Version to delete from (§7.3). |
-| `retract`/`purge` says the id `does not look like a document id` | the id isn't `sha256:<64 hex>` (e.g. you passed a file path or a truncated id) | get a real `document_id` from `records.jsonl` (`provenance.document_id`) or by hashing the file (§7.2). |
-| A `latence delta` ran far slower than the size of the change | expected — extraction is not yet cross-run incremental; a delta re-extracts the whole source (issue #42) | the *committed* corpus is still surgical (see the `affected set: N/total` line); the compute caveat is documented, not a bug (§7). |
+| `latence delta` committed no new Version | the source folder is unchanged — a delta over an identical corpus is an idempotent no-op | change the folder before the delta; nothing to commit is correct behaviour (§8.1). |
+| `retract`/`purge` says the id `does not look like a document id` | the id isn't `sha256:<64 hex>` | get a real `document_id` from `records.jsonl` (`provenance.document_id`) or by hashing the file (§8.2). |
