@@ -32,10 +32,10 @@ LATENCE_CUDA=1 latence stack validate stacks/gpu-sota-pod.yaml
 ```
 Expected (PASS): documents=3; **kg nodes=3 edges=18 evidence_coverage=1.00**; rag no-PII-leak;
 determinism + resume byte-identical; graceful_failure handles the dangerous fixtures. This exercises,
-on real weights: GLiNER **fused NER+RE** → GLiNER-**PII redaction** → e5 **context entity-resolution**
+on real weights: GLiNER **fused NER+RE** → GLiNER-**PII redaction** → Granite r2 **context entity-resolution**
 → graph assembly → KG + RAG export.
 
-- `stacks/gpu-sota-pod.yaml` is self-contained (in-process e5 embedder — no server needed).
+- `stacks/gpu-sota-pod.yaml` is self-contained (in-process Granite r2 embedder, bf16+FA2 — no server needed).
 - `stacks/gpu-sota.yaml` is the same but uses the *served* `embedding.endpoint` for RAG export (point
   its config at your embedding host).
 

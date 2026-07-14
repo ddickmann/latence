@@ -162,7 +162,9 @@ class _FakeRunner:
 
     calls: list[tuple[str, str, list[str] | None]] = []
 
-    def apply_delta(self, pipeline: Any, run_id: str) -> Any:  # noqa: ANN401
+    def apply_delta(  # noqa: ANN401
+        self, pipeline: Any, run_id: str, *, reinduce: bool = False
+    ) -> Any:
         _FakeRunner.calls.append(("apply_delta", run_id, None))
         return object()
 

@@ -468,17 +468,40 @@ def test_induced_pii_types_reach_the_effective_label_set(
     assert _IBAN not in rec.masked_content
 
 
-def test_without_induction_iban_is_not_in_the_label_set(
+def test_without_induction_iban_is_floored_not_model_detected(
     fake_gliner2: type[_FakeGLiNER2],
 ) -> None:
     # The control that gives the wiring test teeth: with NO induced labels, 'iban' is outside the
-    # config floor, so the fake model filters it out — only the config 'person' is redacted. This
-    # proves the induced union (not some incidental match) is what surfaces 'iban' above.
+    # config PII-label set, so the MODEL path filters it out — the model surfaces only the config
+    # 'person'. This proves the induced union (not the model) is what puts 'iban' in the model's
+    # effective set in `test_induced_pii_types_reach_the_effective_label_set`.
+    #
+    # W18 (ADR-0044): the UNIVERSAL FINANCIAL-PII FLOOR still masks the IBAN regardless — a floor type
+    # is never left leaking whichever backend is configured (the pre-W18 leak this fixes). So the
+    # 'iban' span is present but it comes from the deterministic floor (`detector == 'floor:iban'`),
+    # NOT from the gliner2 model (`gliner2:person`), and the IBAN is gone from masked_content.
     fake_gliner2.entities = _iban_and_person_entities()
     rec = next(iter(Gliner2PIIRedactor(_config()).redact([_chunk(_IBAN_TEXT)])))
-    assert {s.pii_type for s in rec.pii_spans} == {"person"}
+    by_type = {s.pii_type: s.detector for s in rec.pii_spans}
+    assert by_type == {"person": "gliner2:person", "iban": "floor:iban"}
     assert rec.masked_content is not None
-    assert _IBAN in rec.masked_content  # not detected → not masked (config floor only)
+    assert _IBAN not in rec.masked_content  # the floor guarantees the IBAN is masked
+
+
+def test_financial_floor_masks_when_model_detects_nothing(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """W18 (ADR-0044): the universal financial-PII floor is non-bypassable through the gliner2 path.
+
+    The fake model detects NOTHING (``entities == []``) and no induced labels widen the set, so
+    pre-W18 the IBAN leaked. The shared ``finalize_redacted_chunk`` floor masks it regardless
+    (``detector == 'floor:iban'``).
+    """
+    fake_gliner2.entities = []  # the model finds nothing
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_chunk(_IBAN_TEXT)])))
+    assert rec.masked_content is not None
+    assert _IBAN not in rec.masked_content
+    assert [(s.pii_type, s.detector) for s in rec.pii_spans] == [("iban", "floor:iban")]
 
 
 def test_config_floor_stays_mandatory_with_induction(

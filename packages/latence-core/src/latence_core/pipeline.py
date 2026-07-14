@@ -55,8 +55,8 @@ class CapabilityKind(StrEnum):
     and attaches a vector per exported row. It is optional — a corpus Export with no ``embedder``
     exports its text unchanged, so any vector DB can still ingest it (the ADR-0017 AC). The
     ``EMBEDDING`` kind names the seam so a Provider can register + be discovered under it; the
-    in-core reference is the deterministic ``embedding.hashing`` (the learned e5-small is a
-    pluggable package). W4-schema-induction adds the OPTIONAL ``SCHEMA_INDUCTION`` Capability
+    in-core reference is the deterministic ``embedding.hashing`` (the learned Granite r2 default
+    is a pluggable package). W4-schema-induction adds the OPTIONAL ``SCHEMA_INDUCTION`` Capability
     (ADR-0038): a chunk→chunk Stage inserted after Content Screening and before the extraction
     Stages that uses a small OpenAI-compatible LLM to induce a document's own entity/relation/PII
     label schema and annotate its chunks (:class:`~latence_core.contracts.InducedLabels`), which the
@@ -88,6 +88,34 @@ class CapabilityKind(StrEnum):
     CONTEXT_ENRICHMENT = "context_enrichment"
     EMBEDDING = "embedding"
     EXPORT = "export"
+
+
+# The Capability kinds that consume chunk text to extract mentions/relations — the Stages whose
+# input the ``extract_on: masked`` mode (W18, ADR-0044) redirects from the raw chunk stream to the
+# redacted one. They, and only they, read ``ChunkRecord.content`` to find entities/relations, so
+# masking THEIR input is what keeps PII out of the KG under the stricter posture.
+_EXTRACTION_KINDS: frozenset[CapabilityKind] = frozenset(
+    {
+        CapabilityKind.ENTITY_EXTRACTION,
+        CapabilityKind.RELATION_EXTRACTION,
+        CapabilityKind.FUSED_ENTITY_RELATION,
+    }
+)
+
+
+class ExtractOn(StrEnum):
+    """Which chunk-text variant the extraction Stages read (W18, ADR-0044).
+
+    * ``unmasked`` (default) — extraction reads the raw chunk ``content``, so the KG keeps the real
+      entities. Byte-identical to pre-W18: redaction masks only the exported RAG corpus text.
+    * ``masked`` — extraction reads the REDACTED chunk stream (``masked_content``), so PII never
+      reaches extraction / the KG at all (the stricter privacy posture some enterprises require).
+      The extraction Stages must depend (transitively) on a redaction Stage so ``masked_content``
+      is populated before they run — the Pipeline validator enforces this.
+    """
+
+    UNMASKED = "unmasked"
+    MASKED = "masked"
 
 
 class Stage(BaseModel):
@@ -126,6 +154,15 @@ class Pipeline(BaseModel):
         default=False,
         description="Opt-in marker that this stack runs unsupervised schema induction (W4).",
     )
+    # W18 (ADR-0044): which chunk-text variant the extraction Stages read. Default ``unmasked`` is
+    # byte-identical to pre-W18 (the KG keeps real entities; redaction masks only the exported
+    # corpus). ``masked`` feeds extraction the REDACTED chunk stream so PII never reaches the KG —
+    # the stricter posture. It is a genuine behaviour switch (unlike ``auto_generate_labels``); the
+    # validator below enforces that the extraction Stages depend on a redaction Stage when it is on.
+    extract_on: ExtractOn = Field(
+        default=ExtractOn.UNMASKED,
+        description="Extraction reads unmasked chunk text (default) or the redacted stream.",
+    )
 
     @model_validator(mode="after")
     def _validate_dag(self) -> Pipeline:
@@ -143,7 +180,52 @@ class Pipeline(BaseModel):
                 if dep == stage.name:
                     msg = f"Stage {stage.name!r} cannot depend on itself"
                     raise ValueError(msg)
+        self._validate_extract_on()
         return self
+
+    def _validate_extract_on(self) -> None:
+        """``extract_on: masked`` needs each extraction Stage to run AFTER a redaction Stage (W18).
+
+        The masked posture works by feeding extraction the redacted chunk stream, so the
+        ``masked_content`` must be populated before an extractor reads it. If an extraction Stage
+        does not transitively depend on a redaction Stage the mode would silently fall back to
+        unmasked text (a privacy hole), so this is a loud, structural error rather than a quiet
+        no-op. Default ``unmasked`` skips the check entirely — every existing stack is unaffected.
+        """
+        if self.extract_on is not ExtractOn.MASKED:
+            return
+        by_name = {s.name: s for s in self.stages}
+        redaction_stages = {
+            s.name for s in self.stages if s.capability is CapabilityKind.REDACTION
+        }
+        if not redaction_stages:
+            msg = (
+                "extract_on: masked requires a redaction Stage (the extraction Stages read its "
+                "masked_content), but the Pipeline declares none."
+            )
+            raise ValueError(msg)
+
+        def _reaches_redaction(start: str) -> bool:
+            seen: set[str] = set()
+            frontier = list(by_name[start].depends_on)
+            while frontier:
+                dep = frontier.pop()
+                if dep in redaction_stages:
+                    return True
+                if dep in seen:
+                    continue
+                seen.add(dep)
+                frontier.extend(by_name[dep].depends_on)
+            return False
+
+        for stage in self.stages:
+            if stage.capability in _EXTRACTION_KINDS and not _reaches_redaction(stage.name):
+                msg = (
+                    f"extract_on: masked requires extraction Stage {stage.name!r} to depend "
+                    "(transitively) on a redaction Stage so it reads masked_content; wire "
+                    "its depends_on through the redact Stage (or re-run `latence setup`)."
+                )
+                raise ValueError(msg)
 
     @classmethod
     def from_yaml_text(cls, text: str) -> Pipeline:

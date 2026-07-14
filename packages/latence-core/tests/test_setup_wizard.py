@@ -61,13 +61,20 @@ def _src_dir(tmp_path: Path) -> str:
     return f"file://{d}"
 
 
-def _answers(tmp_path: Path, *, pii: bool = True, parser: str = PARSER_UNIVERSAL) -> SetupAnswers:
+def _answers(
+    tmp_path: Path,
+    *,
+    pii: bool = True,
+    parser: str = PARSER_UNIVERSAL,
+    extract_on: str = "unmasked",
+) -> SetupAnswers:
     return SetupAnswers(
         source=_src_dir(tmp_path),
         storage=f"file://{tmp_path}/out",
         parser=parser,
         device="auto",
         pii=pii,
+        extract_on=extract_on,
         extensions=("pdf", "txt"),
     )
 
@@ -179,6 +186,37 @@ def test_pii_off_enrich_reads_induced_chunk_stream(tmp_path: Path) -> None:
     pipe = Pipeline.from_yaml_text(build_stack_config(_answers(tmp_path, pii=False)))
     enrich = next(s for s in pipe.stages if s.name == "enrich")
     assert enrich.depends_on == ["induce", "graph"]
+
+
+# -- W18 mask-before-extract advanced option ----------------------------------
+
+
+def test_default_is_unmasked_and_omits_the_switch(tmp_path: Path) -> None:
+    """The default advanced option is `unmasked`: no `extract_on` key, extract reads the induced
+    chunk stream — byte-identical to pre-W18."""
+    text = build_stack_config(_answers(tmp_path))
+    pipe = Pipeline.from_yaml_text(text)
+    assert pipe.extract_on.value == "unmasked"
+    assert "extract_on:" not in text  # the field is omitted when it matches the default
+    extract = next(s for s in pipe.stages if s.name == "extract")
+    assert extract.depends_on == ["induce"]
+
+
+def test_masked_mode_wires_extract_after_redact(tmp_path: Path) -> None:
+    """`extract_on: masked` sets the pipeline switch AND wires `extract` to depend on `redact`, so
+    extraction reads the redacted chunk stream and PII never reaches the KG."""
+    pipe = Pipeline.from_yaml_text(build_stack_config(_answers(tmp_path, extract_on="masked")))
+    assert pipe.extract_on.value == "masked"
+    extract = next(s for s in pipe.stages if s.name == "extract")
+    assert extract.depends_on == ["redact"]
+    # It still validates (structural + DAG + the masked-mode wiring check).
+    validate_config_text(build_stack_config(_answers(tmp_path, extract_on="masked")))
+
+
+def test_masked_requires_pii_on(tmp_path: Path) -> None:
+    """masked-before-extract is meaningless without a redact Stage — a clear error, not a bad config."""
+    with pytest.raises(ValueError, match="requires PII redaction ON"):
+        build_stack_config(_answers(tmp_path, pii=False, extract_on="masked"))
 
 
 # -- parser recommendation ----------------------------------------------------

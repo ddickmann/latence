@@ -549,10 +549,10 @@ class DeltaProcessor(Protocol):
 
     The DeltaProcessor owns the **corpus-level** recompute of the *committed* record set — the
     blocking-neighborhood affected set for Disambiguation and the graph patch by
-    ``source_document_ids`` (ports ``graph/patcher``). (Doc-level Stages, Parse … Redaction, are
-    re-run by the Runner; note the reference DeltaRunner currently re-runs them over the WHOLE
-    source per delta — extraction is not yet cross-run incremental, issue #42 — so only the
-    committed corpus-level set the processor emits is affected-set-scoped.) When the Delta signals
+    ``source_document_ids`` (ports ``graph/patcher``). (Doc-level Stages, Parse … Redaction, run
+    only on the NEW/CHANGED documents since W17/ADR-0043 — an unchanged document's records are
+    reused across runs and the processor consumes the union of reused + freshly-extracted
+    corpus-level records exactly as before, so the seam here is unchanged.) When the Delta signals
     a full Reconciliation (drift crossed the threshold), the processor re-resolves ALL blocks
     rather than only the affected set; the seam is identical, only the affected set differs. The
     reference Provider is pure-Python, deterministic and CPU-viable (the blocking-neighborhood
@@ -583,8 +583,9 @@ class Embedder(Protocol):
 
     The reference embedder in core is a deterministic, dependency-free hashing embedder (no
     model, no weights, no license to verify — ADR-0012/0016), so the seam is exercised end to
-    end offline; the default learned Embedder (``multilingual-e5-small``, MIT) is a pluggable
-    Provider package, not a core dependency. The Capability names no model — only the seam.
+    end offline; the default learned Embedder (IBM Granite Embedding r2, Apache-2.0; ADR-0045)
+    is a pluggable Provider package, not a core dependency. The Capability names no model — only
+    the seam.
     """
 
     @property

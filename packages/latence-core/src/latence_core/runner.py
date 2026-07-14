@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from latence_core.capability import (
     Chunker,
@@ -55,7 +55,7 @@ from latence_core.contracts import (
     ScreeningFinding,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
-from latence_core.pipeline import CapabilityKind, Pipeline, Stage
+from latence_core.pipeline import CapabilityKind, ExtractOn, Pipeline, Stage
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.profile import ProviderProfile, profile_of
 from latence_core.quality import (
@@ -252,6 +252,21 @@ class LocalRunner:
         # retained (the pre-#69 behavior) — a parity/debug knob; the on-disk output, resume, and
         # report are byte-identical either way, only peak memory differs.
         self._release_doc_level_outputs = True
+        # W17 (ADR-0043): the cross-run doc-level REUSE OVERLAY, keyed by carrier type. A delta
+        # excludes an unchanged document at Source (so its doc-level Stages never run) and hands
+        # the Runner that document's persisted doc-level records here; the Runner streams them into
+        # the CORPUS-LEVEL accumulators (Profiling/Disambiguation/Graph) and the post-assembly
+        # per-chunk transforms (Context Enrichment) / a doc-level Export ALONGSIDE the
+        # freshly-extracted records, so those Stages see the whole corpus (reused ∪ fresh) exactly
+        # as if every document had been re-extracted — while the doc-level Stages ran only on the
+        # changed documents. The overlay is NEVER fed to a doc-level Stage (parse→…→redact) — those
+        # gather via ``_gather_inputs``, which is overlay-blind — so a reused document is never
+        # re-parsed/-extracted. Empty by default (``run(reuse=None)``), so a non-delta run is
+        # byte-identical. Because Disambiguation folds mentions in sorted ``mention_id`` order and
+        # every record id is content-addressed, a reused record is byte-identical to its fresh
+        # re-extraction and the interleave order is irrelevant — the committed corpus is identical
+        # to a from-scratch run of the whole corpus (the ADR-0043 equivalence property).
+        self._reuse_overlay_by_type: dict[type, list[Record]] = {}
         # H-F1: the Quality Report half of the Runner, extracted into its own cohesive unit
         # (``quality_report_builder``). The engine composes it — passing itself as the
         # ``StageRecordReader`` (its public ``stage_records`` + ``read_findings``) and its live
@@ -712,6 +727,28 @@ class LocalRunner:
     # -- execution ---------------------------------------------------------
 
     def run(
+        self,
+        pipeline: Pipeline,
+        run_id: str = "run-0001",
+        *,
+        runner_name: str = "local",
+        reuse: list[Record] | None = None,
+    ) -> QualityReport:
+        # W17 (ADR-0043): ``reuse`` carries an unchanged document's persisted doc-level records
+        # (from the prior Corpus Version) that this run did NOT re-extract (the document is
+        # excluded at Source). They are indexed by carrier type and streamed into the corpus-level
+        # accumulators + post-assembly transforms so those Stages see the whole corpus. Set for the
+        # duration of the run and cleared in ``finally`` so the instance never leaks a delta's
+        # overlay into a later plain run. ``None`` ⇒ no overlay (byte-identical to a non-delta run).
+        self._reuse_overlay_by_type = {}
+        for record in reuse or []:
+            self._reuse_overlay_by_type.setdefault(type(record), []).append(record)
+        try:
+            return self._run(pipeline, run_id, runner_name=runner_name)
+        finally:
+            self._reuse_overlay_by_type = {}
+
+    def _run(
         self, pipeline: Pipeline, run_id: str = "run-0001", *, runner_name: str = "local"
     ) -> QualityReport:
         storage = Storage.for_uri(pipeline.storage_uri)
@@ -1195,7 +1232,9 @@ class LocalRunner:
                     f"the EntityExtractor capability."
                 )
                 raise ContractError(msg)
-            chunk_records = self._as_type(stage, incoming, ChunkRecord)
+            chunk_records = self._extract_input_chunks(
+                pipeline, self._as_type(stage, incoming, ChunkRecord)
+            )
             return list(provider.extract(chunk_records))
 
         if stage.capability is CapabilityKind.RELATION_EXTRACTION:
@@ -1212,6 +1251,7 @@ class LocalRunner:
             rel_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
             rel_mentions = [r for r in incoming if isinstance(r, EntityMention)]
             self._require_relation_inputs(stage, incoming, rel_chunks, rel_mentions)
+            rel_chunks = self._extract_input_chunks(pipeline, rel_chunks)
             return list(provider.relate(rel_chunks, rel_mentions))
 
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
@@ -1224,7 +1264,9 @@ class LocalRunner:
             # One pass over the chunks yields BOTH mentions and relations; the fused
             # Stage threads them together downstream (no separate Entity-Extraction
             # Stage — the S5 no-double-extract routing).
-            fused_chunks = self._as_type(stage, incoming, ChunkRecord)
+            fused_chunks = self._extract_input_chunks(
+                pipeline, self._as_type(stage, incoming, ChunkRecord)
+            )
             fused = provider.extract_fused(fused_chunks)
             out: list[StageOutput] = [*fused.mentions, *fused.relations]
             return out
@@ -1404,6 +1446,14 @@ class LocalRunner:
             # EMBEDDING input only (the stored content stays byte-unchanged — ADR-0039).
             enrich_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
             enrich_graph = [r for r in incoming if isinstance(r, GraphRecord)]
+            # W17 boundary: Context Enrichment is NOT a per-document transform — a chunk's
+            # ``context_header`` summarizes the mutable assembled graph, so a reused document's
+            # header can go stale when a delta changes the graph, AND its enriched chunks would
+            # then flow to Export, colliding with the doc-level Export overlay. Rather than hazard a
+            # fragile partial reuse, the DeltaRunner DISABLES cross-run reuse for a pipeline that
+            # contains a context_enrichment Stage (:meth:`DeltaRunner._reuse_supported`), so the
+            # overlay is always empty here and enrichment sees the full freshly-extracted corpus —
+            # correct by construction. Combining reuse with enrichment is deferred to a later wave.
             self._require_context_enrichment_inputs(
                 stage, incoming, enrich_chunks, enrich_graph
             )
@@ -1420,10 +1470,30 @@ class LocalRunner:
             # spine) or ChunkRecords (S3, when a Chunk Stage sits upstream). Only a
             # raw ParserInput (not a Record) is an invalid Export input.
             exportable = self._as_records(stage, incoming)
+            # W17: a DOC-LEVEL Export (its carrier is a per-document record — e.g. a chunk/redact
+            # RAG corpus) materializes the reused documents' records too, so the exported corpus
+            # is the whole corpus (fresh ∪ reused), not only the changed documents. A corpus-level
+            # Export (carrier DisambiguationRecord/GraphRecord) has no overlay of that carrier, so
+            # this is a no-op there — the union already arrived through the corpus-level Stages.
+            export_carrier = self._export_carrier(stage, pipeline)
+            overlay_flat = [
+                record
+                for records in self._reuse_overlay_by_type.values()
+                for record in records
+            ]
+            extra: list[Record]
+            if export_carrier is Record:
+                # A fused Entity+Relation ancestor: the pass-through carrier is the mixed
+                # mention/relation stream, so both reused mention carriers are materialized.
+                extra = [r for r in overlay_flat if type(r) in {EntityMention, RelationMention}]
+            else:
+                extra = [r for r in overlay_flat if isinstance(r, export_carrier)]
+            materialized: list[Record] = [*exportable, *extra]
             out_dir = self._export_dir(pipeline, run_id)
-            provider.export(exportable, storage, out_dir)
-            # Export is a sink: it passes its input records through unchanged.
-            return list(exportable)
+            provider.export(materialized, storage, out_dir)
+            # Export is a sink: it passes its input records through unchanged. (The overlay records
+            # are exportable Records, so the cast to the StageOutput carrier is exact.)
+            return cast("list[StageOutput]", materialized)
 
         if stage.capability is CapabilityKind.EMBEDDING:
             # Embedding is an opt-in *Export augmentation* (ADR-0017), not a standalone DAG node:
@@ -1559,6 +1629,18 @@ class LocalRunner:
             storage, ckpt_uri, self._output_type(stage, pipeline)
         )
 
+    def _overlay_of_type(self, expected: type[_T]) -> list[_T]:
+        """The W17 reuse overlay's records of one carrier type (empty when no delta reuse).
+
+        The reused doc-level records for the carrier ``expected`` — appended AFTER a corpus-level
+        Stage's checkpoint inputs so the Stage sees ``fresh ∪ reused``. In the overlay's stored
+        (id-sorted) order; because every corpus-level accumulator that consumes them folds in
+        sorted ``mention_id`` / ``record_id`` order, the append position does not perturb the output
+        (ADR-0043 determinism). Empty (no reuse) ⇒ a no-op and the stream is exactly the checkpoint
+        records — byte-identical to a non-delta run.
+        """
+        return self._reuse_overlay_by_type.get(expected, [])  # type: ignore[return-value]
+
     def _stream_inputs_of_type(
         self,
         stage: Stage,
@@ -1587,6 +1669,9 @@ class LocalRunner:
             ):
                 if isinstance(record, expected):
                     yield record
+        # W17: append the reused doc-level records of this carrier so the accumulator folds in the
+        # unchanged documents' Stage outputs alongside the freshly-extracted ones (fresh ∪ reused).
+        yield from self._overlay_of_type(expected)
 
     def _stream_all_records_of_type(
         self,
@@ -1616,6 +1701,9 @@ class LocalRunner:
             ):
                 if isinstance(record, expected):
                     yield record
+        # W17: the corpus-wide gather (e.g. Disambiguation's ChunkRecord stream, Context
+        # Enrichment's EntityMention stream) also spans the reused documents' records.
+        yield from self._overlay_of_type(expected)
 
     def _gathered_count(
         self,
@@ -1634,11 +1722,19 @@ class LocalRunner:
         the ADR requires for the accumulator input side.
         """
         total = 0
+        by_name = {s.name: s for s in pipeline.stages}
         for parent in stage.depends_on:
             for _ in self._stage_records(
                 parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
             ):
                 total += 1
+            # W17: the reused documents' records of this parent's carrier are folded in too, so
+            # ``records_in`` reports the whole corpus the accumulator actually consumed.
+            parent_stage = by_name.get(parent)
+            if parent_stage is not None:
+                total += len(self._reuse_overlay_by_type.get(
+                    self._output_type(parent_stage, pipeline), []
+                ))
         return total
 
     def _gather_inputs(
@@ -1667,6 +1763,28 @@ class LocalRunner:
                 )
             )
         return gathered
+
+    @staticmethod
+    def _extract_input_chunks(
+        pipeline: Pipeline, chunks: list[ChunkRecord]
+    ) -> list[ChunkRecord]:
+        """The chunk-text variant the extraction Stages read (W18, ADR-0044).
+
+        Default (``extract_on: unmasked``) returns the chunks UNCHANGED — byte-identical to pre-W18,
+        the KG keeps the real entities. In ``masked`` mode each chunk's ``content`` is replaced by
+        its ``masked_content`` (the redacted variant produced by the upstream redaction Stage the
+        mode's validator requires), so the extractor — which reads ``content`` — never sees PII and
+        it never reaches the KG. A chunk without ``masked_content`` (e.g. redaction skipped it)
+        falls back to its own ``content``, so masked mode never fabricates or drops text.
+        """
+        if pipeline.extract_on is not ExtractOn.MASKED:
+            return chunks
+        return [
+            c.model_copy(update={"content": c.masked_content})
+            if c.masked_content is not None
+            else c
+            for c in chunks
+        ]
 
     @staticmethod
     def _as_type(
@@ -1883,12 +2001,22 @@ class LocalRunner:
         """
         present: set[type[StageOutput]] = set()
         names: set[str] = set()
+        by_name = {s.name: s for s in pipeline.stages}
         for parent in stage.depends_on:
             for record in self._stage_records(
                 parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
             ):
                 present.add(type(record))
                 names.add(type(record).__name__)
+            # W17: a parent whose fresh output is empty because every one of its documents was
+            # reused still "produces" that carrier via the overlay — so the wiring check sees the
+            # carrier and an all-reused delta is not misread as a mis-wired empty parent.
+            parent_stage = by_name.get(parent)
+            if parent_stage is not None:
+                parent_type = self._output_type(parent_stage, pipeline)
+                if self._reuse_overlay_by_type.get(parent_type):
+                    present.add(parent_type)  # type: ignore[arg-type]
+                    names.add(parent_type.__name__)
         return present, names
 
     def _require_profiling_inputs_streamed(

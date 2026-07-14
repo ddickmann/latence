@@ -18,9 +18,10 @@
 * ``latence delta <stack.yaml>`` / ``retract`` / ``purge`` — incremental corpus updates over the
   EXISTING :class:`~latence_core.delta_runner.DeltaRunner` (S11, ADR-0029): ``delta`` adds/updates
   from the current source and commits the next Corpus Version; ``retract`` soft-deletes documents
-  (auditable, rollback-able); ``purge`` is the hard GDPR erasure (guarded by ``--yes``). HONEST
-  boundary (issue #42): the *committed* corpus is affected-set-scoped, but a delta still
-  re-extracts the WHOLE current source today — the compute is O(corpus), not yet incremental.
+  (auditable, rollback-able); ``purge`` is the hard GDPR erasure (guarded by ``--yes``). Since W17
+  (ADR-0043) ``delta`` extraction is INCREMENTAL: the induced schema is frozen and each unchanged
+  document's records are reused, so only new/changed documents are extracted (``--reinduce`` is the
+  O(corpus) escape hatch). The *committed* corpus stays affected-set-scoped (issue #42, ADR-0018).
 """
 
 from __future__ import annotations
@@ -171,7 +172,11 @@ def _emit_delta_report(pipeline: Pipeline, run_id: str, report: QualityReport) -
     )
     typer.echo(
         f"  affected set: {dc.affected_set_size}/{dc.corpus_record_count} corpus-level records "
-        "recomputed (extraction still re-runs the whole source — issue #42)"
+        "recomputed"
+    )
+    typer.echo(
+        f"  extraction: {dc.documents_extracted} extracted, {dc.documents_reused} reused "
+        "(unchanged documents' doc-level Stages skipped — issue #42 / ADR-0043)"
     )
     typer.echo(f"  drift: {dc.drift:.3f}")
     typer.echo(f"report: {run_dir}/quality-report.json", err=True)
@@ -483,6 +488,14 @@ def setup(
             help="Include (default) or omit the PII redaction + guardrail screening stages.",
         ),
     ] = None,
+    extract_on: Annotated[
+        str | None,
+        typer.Option(
+            "--extract-on",
+            help="Advanced (W18): 'unmasked' (default — the KG keeps real entities) or 'masked' "
+            "(extraction reads REDACTED chunks so PII never reaches the KG). 'masked' needs --pii.",
+        ),
+    ] = None,
     domain: Annotated[
         str | None, typer.Option("--domain", help="Optional free-text domain hint (a header note).")
     ] = None,
@@ -607,6 +620,38 @@ def setup(
     else:
         pii_on = True
 
+    # f2. Advanced (W18): mask-before-extract. Only meaningful with PII ON; default OFF (unmasked),
+    # which keeps the config byte-identical to pre-W18. 'masked' feeds extraction the redacted chunk
+    # stream so PII never reaches the KG (the stricter posture).
+    if extract_on is not None:
+        extract_mode = extract_on
+    elif interactive and pii_on:
+        typer.echo(
+            "  (advanced: 'masked' feeds extraction the REDACTED chunks so PII never reaches the "
+            "KG — stricter privacy; default 'unmasked' keeps the KG's real entities)",
+            err=True,
+        )
+        extract_mode = (
+            "masked"
+            if typer.confirm(
+                "Mask PII BEFORE extraction (keep it out of the knowledge graph)?", default=False
+            )
+            else "unmasked"
+        )
+    else:
+        extract_mode = "unmasked"
+    if extract_mode not in ("unmasked", "masked"):
+        typer.echo(
+            f"Unknown --extract-on {extract_mode!r}; expected 'unmasked' or 'masked'.", err=True
+        )
+        raise typer.Exit(code=2)
+    if extract_mode == "masked" and not pii_on:
+        typer.echo(
+            "--extract-on masked requires --pii (there is no redact Stage to mask from otherwise).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     # g. Optional domain hint.
     domain_hint = domain if domain is not None else (
         str(typer.prompt("Domain / description hint (optional)", default=""))
@@ -622,6 +667,7 @@ def setup(
         llm_base_url=base_url,
         llm_model=model,
         pii=pii_on,
+        extract_on=extract_mode,
         domain=domain_hint,
         extensions=extensions,
     )
@@ -697,8 +743,8 @@ def process(
 #
 # These three commands expose the EXISTING DeltaRunner. They reuse ``run``'s pipeline loader
 # (``_load_pipeline``) and its report-printing discipline (``_emit_delta_report`` persists the
-# same human/machine report pair). HONEST boundary (issue #42): the committed corpus is
-# affected-set-scoped, but a delta re-extracts the WHOLE current source today — O(corpus) compute.
+# same human/machine report pair). Since W17 (ADR-0043) a delta's extraction is incremental —
+# only new/changed documents are re-extracted (``--reinduce`` forces the full O(corpus) pass).
 
 _RUN_ID_HELP = (
     "Run id for this operation (state/checkpoint namespace). A delta needs a FRESH run id every "
@@ -711,15 +757,27 @@ _STACK_ARG_HELP = "Path to the stack/pipeline YAML (same file `latence run` take
 def delta(
     pipeline_path: Annotated[Path, typer.Argument(help=_STACK_ARG_HELP)],
     run_id: Annotated[str | None, typer.Option("--run-id", help=_RUN_ID_HELP)] = None,
+    reinduce: Annotated[
+        bool,
+        typer.Option(
+            "--reinduce",
+            help=(
+                "Re-run schema induction over the full current corpus and re-extract EVERY "
+                "document (the O(corpus) escape hatch). Default reuses the frozen induced schema "
+                "+ unchanged documents' records, so only new/changed documents are extracted."
+            ),
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
 ) -> None:
     """Add/update the corpus from the current source and commit the next Corpus Version.
 
     The user added, changed, or removed files in the source folder; this detects them by
     content-hash against the last committed Corpus Version and commits Version N+1 with the
-    affected-set recompute. HONEST boundary (issue #42): the *committed* corpus is
-    affected-set-scoped (untouched clusters carried forward verbatim), but a delta still
-    re-extracts the WHOLE current source today — the compute is O(corpus), not yet incremental.
+    affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: the induced schema
+    is frozen in the Corpus Version and each UNCHANGED document's doc-level records are reused, so
+    only NEW/CHANGED documents run parse/chunk/extract/redact — the compute is O(changed documents),
+    not O(corpus). ``--reinduce`` re-inducts over the whole corpus and re-extracts everything.
     """
     _configure_logging(verbose)
     pipeline = _load_pipeline(pipeline_path)
@@ -727,7 +785,7 @@ def delta(
     from latence_core.delta_runner import DeltaRunner
 
     try:
-        report = DeltaRunner().apply_delta(pipeline, rid)
+        report = DeltaRunner().apply_delta(pipeline, rid, reinduce=reinduce)
     except (LatenceError, ValueError) as exc:
         typer.echo(f"delta failed [{error_category(exc)}]: {exc}", err=True)
         raise typer.Exit(code=1) from exc

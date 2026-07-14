@@ -12,7 +12,7 @@ Providers fulfil it.
 | Provider | Package | What it is | License (code / weights) | Runs offline in CI |
 |---|---|---|---|---|
 | `embedding.hashing` | in-core | Deterministic, dependency-free token-hash bag-of-words (the CPU reference — **not** semantic) | Apache-2.0 / — | yes (real) |
-| `embedding.sentence_transformers` | `latence-embedder-st` | Learned in-process semantic embedder over `sentence-transformers`, default `intfloat/multilingual-e5-small` (384-dim) | Apache-2.0 / MIT | no (heavy dep; verified against a stub, real weights on a rig) |
+| `embedding.sentence_transformers` | `latence-embedder-st` | Learned in-process semantic embedder over `sentence-transformers`, default **IBM Granite Embedding r2** — GPU tier `granite-embedding-311m-multilingual-r2` (768-dim, bf16+FA2), CPU tier `granite-embedding-97m-multilingual-r2` (384-dim, fp32) | Apache-2.0 / Apache-2.0 | no (heavy dep; verified against a stub, real weights on a rig) |
 | `embedding.endpoint` | `latence-embedder-endpoint` | Any OpenAI-compatible / vLLM / Triton `/embeddings` endpoint (the served performance path) | Apache-2.0 / — (calls a user endpoint) | no (endpoint; verified against a stub) |
 
 Swapping is a **one-line** config change on the corpus Export (ADR-0007):
@@ -27,20 +27,27 @@ Swapping is a **one-line** config change on the corpus Export (ADR-0007):
       embedder:
         provider: embedding.sentence_transformers   # was: embedding.hashing
         config:
-          model: intfloat/multilingual-e5-small     # MIT, 384-dim
-          dimension: 384                            # validated against the loaded model
-          prefix: "passage: "                       # e5 document-side instruction prefix
-          device: auto                              # auto|cpu|cuda through the device seam
+          # GPU tier (default): Granite r2 311m, Apache-2.0, 768-dim, bf16 + flash_attention_2.
+          model: ibm-granite/granite-embedding-311m-multilingual-r2
+          dimension: 768                            # validated against the loaded model
+          device: cuda                              # bf16 auto on cuda (perf seam)
+          attn_implementation: flash_attention_2    # -> sdpa if flash_attn absent / load raises
+          # CPU tier: model: ibm-granite/granite-embedding-97m-multilingual-r2, dimension: 384, device: cpu
 ```
 
-## e5 model-card convention (`latence-embedder-st`)
+## Granite r2 model-card convention (`latence-embedder-st`)
 
-The default checkpoint `intfloat/multilingual-e5-small` (and the e5 family) is trained with an
-instruction **prefix** — `query: ` for a search query, `passage: ` for a document — and scores cosine
-similarity over **L2-normalised** vectors. The Provider embeds RAG-corpus text (the document side), so
-it prepends `passage: ` by default and passes `normalize_embeddings=True` so every exported vector is
-unit-length. Set `prefix: ""` for a model that needs no prefix (e.g. `sentence-transformers/all-MiniLM-L6-v2`,
-Apache-2.0). See <https://huggingface.co/intfloat/multilingual-e5-small>.
+The default is **IBM Granite Embedding r2** (Apache-2.0, ModernBERT-based, single-vector dense,
+32,768-token context, 200+ languages). It needs **NO instruction/query-document prefix** — text is
+encoded directly, unlike the e5 family's `query: `/`passage: `. So the default `prefix` is `""`. The
+Provider passes `normalize_embeddings=True` so every exported vector is unit-length (cosine
+convention, ADR-0017 uniform column). The GPU tier (`granite-embedding-311m-multilingual-r2`, 768-dim)
+loads bf16 + `flash_attention_2` with a graceful `sdpa` fallback (W8 perf seam); the CPU tier
+(`granite-embedding-97m-multilingual-r2`, 384-dim) loads fp32 + `sdpa`. `intfloat/multilingual-e5-small`
+(MIT, needs `prefix: "passage: "`) and `sentence-transformers/all-MiniLM-L6-v2` (Apache-2.0) remain
+documented tiny fallbacks — not the default. Cards:
+<https://huggingface.co/ibm-granite/granite-embedding-311m-multilingual-r2> and
+<https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2>. See ADR-0045.
 
 ## Bake-off
 

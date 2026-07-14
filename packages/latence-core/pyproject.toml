@@ -86,7 +86,7 @@ latence = "latence_core.cli:app"
 # S9 built-ins: the canonical Graph Assembler (deterministic content-addressed nodes/edges +
 # per-edge Evidence, ported graph builder) and the KG Export (Parquet + TTL + GraphML as
 # portable files, never a live DB — ADR-0017). Plus a deterministic reference Embedder (opt-in
-# RAG-corpus embeddings; the learned multilingual-e5-small is a pluggable package). Pure Python,
+# RAG-corpus embeddings; the learned Granite r2 default is a pluggable package). Pure Python,
 # no extra deps (ADR-0007/0016).
 "graph.canonical" = "latence_core.stages.graph_assembly:CanonicalGraphAssembler"
 # Second reference Graph Assembler (#77): edge-weight-aggregating assembler that folds

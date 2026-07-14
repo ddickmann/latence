@@ -182,6 +182,22 @@ def test_masks_detected_pii(fake_gliner: type[_FakeGLiNER]) -> None:
     assert all(s.detector == "gliner-pii" for s in rec.pii_spans)
 
 
+def test_financial_floor_masks_when_model_detects_nothing(fake_gliner: type[_FakeGLiNER]) -> None:
+    """W18 (ADR-0044): the universal financial-PII floor is non-bypassable through the gliner path.
+
+    The fake model detects NOTHING (``entities == []``), so pre-W18 the IBAN would have leaked into
+    the corpus. The shared ``finalize_redacted_chunk`` floor masks it regardless (``detector ==
+    'floor:iban'``), whichever backend is configured.
+    """
+    iban = "DE89370400440532013000"
+    text = f"Alice holds account {iban} today."
+    fake_gliner.entities = []  # the model finds nothing
+    rec = list(GlinerPIIRedactor(_config()).redact([_chunk(text)]))[0]
+    assert rec.masked_content is not None
+    assert iban not in rec.masked_content
+    assert [(s.pii_type, s.detector) for s in rec.pii_spans] == [("iban", "floor:iban")]
+
+
 def test_span_offsets_are_chunk_local(fake_gliner: type[_FakeGLiNER]) -> None:
     # The Provider runs the model over the chunk's ``content``, so the model's offsets ARE
     # chunk-local offsets: the stamped span offset matches, and the slice round-trips to the raw

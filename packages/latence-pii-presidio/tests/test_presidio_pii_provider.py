@@ -368,6 +368,23 @@ def test_no_op_floor_fires_when_types_intersect_nothing(
 # -- no-PII invariants (the load-bearing security checks) ---------------------
 
 
+def test_financial_floor_masks_when_analyzer_detects_nothing(
+    fake_presidio: type[_FakeAnalyzerEngine],
+) -> None:
+    """W18 (ADR-0044): the universal financial-PII floor is non-bypassable through the presidio path.
+
+    The fake analyzer returns NO spans, so pre-W18 the IBAN would have leaked. The shared
+    ``finalize_redacted_chunk`` floor masks it regardless (``detector == 'floor:iban'``).
+    """
+    iban = "DE89370400440532013000"
+    text = f"Alice holds account {iban} today."
+    fake_presidio.spans = []  # the analyzer finds nothing
+    rec = next(iter(PresidioRedactor(_config()).redact([_chunk(text)])))
+    assert rec.masked_content is not None
+    assert iban not in rec.masked_content
+    assert [(s.pii_type, s.detector) for s in rec.pii_spans] == [("iban", "floor:iban")]
+
+
 def test_raw_pii_never_stored_on_span(fake_presidio: type[_FakeAnalyzerEngine]) -> None:
     fake_presidio.spans = [
         {"entity_type": "EMAIL_ADDRESS", "start": _EMAIL_START, "end": _EMAIL_END, "score": 0.9}

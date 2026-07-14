@@ -83,7 +83,7 @@ pip install --break-system-packages \
 ```
 
 - `gliner gliner2 peft accelerate` — the GLiNER2 fused extractor + PII redactor (mdeberta-v3 backbone).
-- `sentence-transformers` — the embedding disambiguator **and** the corpus-export embedder (e5-small).
+- `sentence-transformers` — the embedding disambiguator **and** the corpus-export embedder (Granite r2 311m, bf16+FA2).
 - `pdfplumber` — fast text-layer PDF parsing; `pypdfium2 python-docx openpyxl` — the universal
   `parser.render` path (PDF→image, Office→text/render).
 - `pyarrow fsspec` — Parquet export + storage; `networkx rdflib` — the GraphML/TTL KG export.
@@ -162,6 +162,7 @@ latence process
 | **Device** | `auto` | `auto` picks CUDA when present, else CPU (skip-with-flag). |
 | **Schema-induction LLM** | OpenRouter + `openai/gpt-4.1-mini` | The quality lever — a small LLM discovers your corpus's own `{entity, relation, pii}` schema. The **API key is read from the environment at run** (`$OPENROUTER_API_KEY`, or `$OPENAI_API_KEY` for a direct-OpenAI base URL) — **never stored** in the file. The wizard warns if it is unset. |
 | **PII redaction + guardrail screening** | ON | **The one optional toggle.** ON adds the `content_screen` + `redact` stages (learned **financial-PII** detection). OFF omits exactly those two stages. |
+| **Mask before extraction** (`--extract-on`) | `unmasked` | **Advanced (W18).** `unmasked` (default) — extraction reads the real text, the KG keeps entities. `masked` — extraction reads the REDACTED chunks so PII never reaches the KG (stricter posture; requires PII ON). |
 | **Domain / description hint** | (empty) | Free text, recorded as a header comment for readers. |
 
 The wizard then **generates the quality-baked spine**, **dry-validates it** (structural + DAG +
@@ -193,6 +194,15 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 > `context_header`/`induced_labels` and the masking compose, with no trade-off. `latence setup --pii`
 > now produces a genuinely PII-safe, context-enriched corpus. (This closes the pre-W16 gap where the
 > RAG chunks were enriched but un-masked and a doc-level redactor could truncate PII past the window.)
+
+> **Redaction floor + mask-before-extract (W18, ADR-0044).** Two safety improvements ride on top:
+> (1) a **universal financial-PII floor** — `credit_card` / `iban` / `ssn` are ALWAYS masked at the
+> shared redaction seam no matter which detector backend you configure, so a learned redactor that
+> *misses* one still cannot leak it (the floor is non-bypassable and can't be forgotten per-provider).
+> (2) An optional **`--extract-on masked`** mode: extraction reads the REDACTED chunk stream, so PII
+> never reaches entity/relation extraction or the KG at all — the stricter posture some enterprises
+> require. Default `unmasked` keeps the KG's real entities and is byte-identical to before. With
+> `masked`, the wizard wires `extract` to depend on `redact` for you.
 
 ---
 
@@ -356,7 +366,7 @@ stages:
       context_window: 160
       embedder:
         provider: embedding.sentence_transformers
-        config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
       kb:
         # entity_type MUST match the lowercased mention labels — the KB linker's type filter is
         # case-sensitive, so "ORG" would never match an "organization" mention.
@@ -406,7 +416,7 @@ stages:
       context_columns: true
       embedder:
         provider: embedding.sentence_transformers
-        config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
 ```
 
 > **Redaction AND context headers — masked and enriched in one file (W16, ADR-0042).** With W16,
@@ -705,7 +715,7 @@ Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
 - **`context_header`** — the KG projected onto this chunk: `entities` + aligned `entity_types`,
   `neighbor_triples` (`A —label→ B`, capped), `kg_node_ids` (the chunk's own entities) and
   `neighbor_node_ids` (query-time KG-expansion join keys). `null` for a chunk with no gated entity.
-- **`embedding`** — the dense e5-small vector (dimension 384). It was computed over
+- **`embedding`** — the dense Granite r2 311m vector (dimension 768). It was computed over
   `rendered_context_header + "\n" + content`, so the vector carries the KG coherence — and, under W16,
   over the **PII-safe (masked)** corpus text, consistent with the stored `content`.
 - **`record_id`** (primary key), `document_record_id` (join key), `index`, `token_count`,

@@ -20,7 +20,9 @@ All are Apache-2.0 or MIT:
   - knowledgator/gliner-relex-multi-v1.0 (Rel)   — Apache-2.0
   - urchade/gliner_multi-v2.1 (Entity)           — Apache-2.0
   - urchade/gliner_multi_pii-v1 (Redaction)      — Apache-2.0
-  - intfloat/multilingual-e5-small (Embed)       — MIT
+  - ibm-granite/granite-embedding-311m-multilingual-r2 (Embed, GPU tier, default) — Apache-2.0
+  - ibm-granite/granite-embedding-97m-multilingual-r2 (Embed, CPU tier)           — Apache-2.0
+  - intfloat/multilingual-e5-small (Embed, fallback) — MIT
   - sentence-transformers/all-MiniLM-L6-v2       — Apache-2.0
   - microsoft/llmlingua-2                        — MIT
   - answerdotai/ModernBERT                       — Apache-2.0
@@ -33,8 +35,8 @@ OPT-IN, NON-DEFAULT model with license flow-down obligations:
     This is NOT a default. The `gemma` license is not OSI open-source: it
     permits commercial use but carries Google's Prohibited Use Policy and a
     flow-down obligation (every downstream recipient must be bound to the Gemma
-    use restrictions, with a Notice). The default Embedder is multilingual-e5-small
-    (MIT). POLICY: the Gemma family is non-default and no Gemma-backed Provider ships
+    use restrictions, with a Notice). The default Embedder is IBM Granite
+    Embedding r2 (Apache-2.0; multilingual-e5-small, MIT, remains a fallback). POLICY: the Gemma family is non-default and no Gemma-backed Provider ships
     in this repo; were one offered, it would be an explicitly opt-in Provider carrying
     the Gemma license and its flow-down obligations (not a default, not auto-installed).
 

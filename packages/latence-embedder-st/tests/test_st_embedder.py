@@ -3,8 +3,9 @@
 The real ``sentence-transformers`` stack (torch/transformers) is intentionally NOT installed in
 the dev/test environment (ADR-0007/0016: CPU-first, offline, deterministic). These tests inject a
 tiny fake ``sentence_transformers`` module so the Provider's batching, input-order preservation,
-e5-prefixing, L2-normalisation call, dimension validation, device-seam wiring, and typed-error
-mapping are exercised deterministically and offline — the model itself is ST's concern, not this
+prefix handling (empty by default for Granite r2), L2-normalisation call, dimension validation,
+device-seam wiring, and typed-error mapping are exercised deterministically and offline — the model
+itself is ST's concern, not this
 seam's. One test covers the missing-dependency error path, one the config validation, and one the
 native-failure → typed ProviderError mapping (no raw text in the message).
 """
@@ -85,11 +86,15 @@ def fake_st(monkeypatch: pytest.MonkeyPatch) -> type[_FakeSentenceTransformer]:
 # -- config / profile ---------------------------------------------------------
 
 
-def test_default_model_is_permissive_e5_small() -> None:
+def test_default_model_is_permissive_granite_r2() -> None:
     embedder = SentenceTransformersEmbedder({})
-    assert embedder._model_id == _DEFAULT_MODEL == "intfloat/multilingual-e5-small"  # noqa: SLF001
+    assert (  # noqa: SLF001
+        embedder._model_id
+        == _DEFAULT_MODEL
+        == "ibm-granite/granite-embedding-311m-multilingual-r2"
+    )
     # Answerable before the first embed (Export reads it to size its column): declared default.
-    assert embedder.dimension == 384
+    assert embedder.dimension == 768
 
 
 def test_rejects_non_positive_dimension() -> None:
@@ -97,18 +102,18 @@ def test_rejects_non_positive_dimension() -> None:
         SentenceTransformersEmbedder({"dimension": 0})
 
 
-def test_declares_profile_either_verified_mit_weights_apache_code() -> None:
+def test_declares_profile_either_verified_apache_weights_and_code() -> None:
     from latence_core.providers.profile import ProviderProfile, profile_of
 
     prof = profile_of(SentenceTransformersEmbedder)
     assert isinstance(prof, ProviderProfile)
     assert prof.compute == "either"
-    assert prof.model_id == "intfloat/multilingual-e5-small"
-    assert prof.license == "MIT"  # headline == weights SPDX
+    assert prof.model_id == "ibm-granite/granite-embedding-311m-multilingual-r2"
+    assert prof.license == "Apache-2.0"  # headline == weights SPDX
     assert prof.license_code == "Apache-2.0"  # the library
-    assert prof.license_weights == "MIT"  # the checkpoint
+    assert prof.license_weights == "Apache-2.0"  # the Granite r2 checkpoint
     assert prof.license_verified is True
-    assert prof.deterministic is False  # learned float inference — declared, not assumed
+    assert prof.deterministic is False  # learned float inference + bf16/FA2 GPU — declared honestly
     assert prof.batch is True
     assert prof.cost_per_1k is None
 
@@ -116,24 +121,25 @@ def test_declares_profile_either_verified_mit_weights_apache_code() -> None:
 # -- embedding happy path -----------------------------------------------------
 
 
-def test_embeds_in_input_order_with_e5_prefix_and_normalization(
+def test_embeds_in_input_order_no_prefix_by_default_with_normalization(
     fake_st: type[_FakeSentenceTransformer],
 ) -> None:
     embedder = SentenceTransformersEmbedder({"dimension": 4})
     out = list(embedder.embed(["a", "bb", "ccc"]))
-    # The fake keys the vector by the PREFIXED text length: "passage: " is 9 chars.
-    assert [v[0] for v in out] == [10.0, 11.0, 12.0]
+    # The fake keys the vector by text length; Granite r2 needs NO prefix, so lengths are raw.
+    assert [v[0] for v in out] == [1.0, 2.0, 3.0]
     assert all(len(v) == 4 for v in out)
-    # The e5 document prefix was prepended to every text.
-    assert fake_st.last_inputs == ["passage: a", "passage: bb", "passage: ccc"]
+    # No instruction/query-document prefix was prepended (Granite r2 convention).
+    assert fake_st.last_inputs == ["a", "bb", "ccc"]
     # L2-normalisation requested (the model-card cosine convention).
     assert fake_st.last_kwargs.get("normalize_embeddings") is True
 
 
 def test_custom_prefix_is_applied(fake_st: type[_FakeSentenceTransformer]) -> None:
-    embedder = SentenceTransformersEmbedder({"dimension": 4, "prefix": ""})
+    # A fallback model that DOES need a prefix (e.g. e5's "passage: ") sets it explicitly.
+    embedder = SentenceTransformersEmbedder({"dimension": 4, "prefix": "passage: "})
     list(embedder.embed(["x"]))
-    assert fake_st.last_inputs == ["x"]  # no prefix (e.g. MiniLM)
+    assert fake_st.last_inputs == ["passage: x"]  # the configured prefix is prepended
 
 
 def test_perf_kwargs_threaded_into_model_kwargs_fp32_on_cpu(
@@ -186,7 +192,7 @@ def test_empty_input_makes_no_call(fake_st: type[_FakeSentenceTransformer]) -> N
 
 
 def test_dimension_resolved_from_loaded_model(fake_st: type[_FakeSentenceTransformer]) -> None:
-    # No declared dimension: the width comes from the loaded model (384 for e5-small, 4 here).
+    # No declared dimension: the width comes from the loaded model (768 for Granite r2 311m, 7 here).
     fake_st.dimension = 7
     embedder = SentenceTransformersEmbedder({"dimension": None})
     out = list(embedder.embed(["a"]))
@@ -246,20 +252,20 @@ def test_missing_dependency_raises_clear_error(monkeypatch: pytest.MonkeyPatch) 
     reason="sentence-transformers not installed (real-weights path runs where the model exists)",
 )
 def test_real_weights_embeds_at_declared_width() -> None:  # pragma: no cover - runs only on a rig
-    """With the real dep + weights present, the Provider returns 384-dim unit vectors in order.
+    """With the real dep + weights present, the Provider returns 768-dim unit vectors in order.
 
     This is the honest real-weights boundary (same discipline as the gliner trio): it runs only
-    where ``sentence-transformers`` and the e5-small checkpoint are actually available (a rig),
-    and is skipped in the offline CPU-first CI env. It asserts the REAL model returns one
+    where ``sentence-transformers`` and the Granite r2 311m checkpoint are actually available (a
+    rig), and is skipped in the offline CPU-first CI env. It asserts the REAL model returns one
     correct-width, L2-normalised vector per input, in input order.
     """
     import math
 
-    embedder = SentenceTransformersEmbedder({})  # e5-small default
+    embedder = SentenceTransformersEmbedder({})  # Granite r2 311m default
     out = list(embedder.embed(["hello world", "a different sentence"]))
     assert len(out) == 2
-    assert embedder.dimension == 384
-    assert all(len(v) == 384 for v in out)
+    assert embedder.dimension == 768
+    assert all(len(v) == 768 for v in out)
     for v in out:
         norm = math.sqrt(sum(x * x for x in v))
         assert abs(norm - 1.0) < 1e-3  # normalize_embeddings=True ⇒ unit length

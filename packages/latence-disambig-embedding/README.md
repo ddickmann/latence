@@ -51,9 +51,15 @@ embedder in the Disambiguation Stage config:
     threshold: 0.90
     context_window: 160
     embedder:
-      provider: embedding.sentence_transformers   # ships its own torch/ST stack
+      provider: embedding.sentence_transformers   # ships its own torch/ST stack (default Granite r2)
       config: { device: cuda }
 ```
+
+> **ER-threshold caveat (ADR-0045).** The default `threshold: 0.90` was pod-calibrated on
+> `multilingual-e5-small` (same ≈0.96–0.99 / distinct ≈0.76–0.81). The framework default embedder is
+> now **IBM Granite Embedding r2**, whose cosine distribution differs — so **0.90 is not yet validated
+> for Granite** and needs pod re-validation (pod paused). Set `threshold` explicitly per your embedder
+> + corpus until then.
 
 ## License
 

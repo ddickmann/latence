@@ -11,15 +11,17 @@ the current run's freshly-extracted corpus-level records + a classified
 
 The scope boundary (issue #42): this processor makes the **committed corpus-level record set**
 affected-set-scoped — untouched clusters are carried forward byte-identical and only the affected
-neighborhood is re-resolved-and-spliced. It does NOT make the upstream *extraction* incremental:
-the caller (:class:`~latence_core.delta_runner.DeltaRunner`) still re-runs the whole pipeline over
-the current source to produce ``current_records`` (extraction cost is O(corpus) — see the
-DeltaRunner docstring). ``affected_set_size`` / ``corpus_record_count`` on the returned
-:class:`~latence_core.capability.DeltaOutcome` are the measurable witness of the committed-side
-scoping.
+neighborhood is re-resolved-and-spliced. Since W17/ADR-0043 the upstream *extraction* is also
+incremental: the caller (:class:`~latence_core.delta_runner.DeltaRunner`) re-extracts only the
+NEW/CHANGED documents and reuses the unchanged ones, then runs the corpus-level Stages over the
+UNION — so ``current_records`` handed here are still the correct fully-reconciled truth (identical
+to a from-scratch run), and this processor is unchanged. ``affected_set_size`` /
+``corpus_record_count`` on the returned :class:`~latence_core.capability.DeltaOutcome` are the
+measurable witness of the committed-side scoping.
 
-How the affected-set splice works. The current run re-extracts and re-disambiguates the WHOLE
-current corpus, so ``current_records`` are the correct fully-reconciled truth (a bridging doc's
+How the affected-set splice works. The current run yields ``current_records`` for the WHOLE current
+corpus (freshly-extracted new/changed documents disambiguated together with the reused ones), so
+``current_records`` are the correct fully-reconciled truth (a bridging doc's
 mentions were resolved together ⇒ merge-on-add; a deleted doc's mentions are absent ⇒
 split-on-delete). But blindly replacing the parent set with the current set discards the
 carry-forward and mis-reports the churn. Instead:

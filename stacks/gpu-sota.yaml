@@ -117,11 +117,14 @@ stages:
     # RelationMentions (normalised onto the canonical entities) come from the ONE `extract` Stage.
     depends_on: [extract]
     config:
-      threshold: 0.90        # context-safe default (pod margins); NOT the fragile bare-surface 0.83
+      threshold: 0.90        # context-safe default (pod margins for e5-small); NOT the fragile 0.83.
+                             # ADR-0045: calibrated on e5-small — Granite r2's cosine distribution
+                             # differs, so 0.90 needs pod re-validation under Granite (pod paused).
       context_window: 160
-      embedder:              # served/learned embeddings; skipped-with-flag where no CUDA (device seam)
+      embedder:              # learned embeddings; skipped-with-flag where no CUDA (device seam)
         provider: embedding.sentence_transformers
-        config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
+        # GPU tier: Granite r2 311m (Apache-2.0, 768-dim), bf16 + flash_attention_2 (sdpa fallback).
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
       kb:
         # entity_type MUST match the (lowercased) GLiNER mention labels above — the KB linker
         # type filter is case-sensitive (disambiguation.py: bare `!=`), so `ORG` would never

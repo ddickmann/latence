@@ -33,10 +33,15 @@ import time
 from typing import TYPE_CHECKING
 
 from latence_core.contracts import (
+    ChunkRecord,
     CorpusVersion,
     DisambiguationRecord,
+    DocumentRecord,
+    EntityMention,
     GraphRecord,
+    InducedLabels,
     Record,
+    RelationMention,
 )
 from latence_core.errors import StorageError
 from latence_core.state.write_ahead_log import WriteAheadLog
@@ -47,6 +52,16 @@ if TYPE_CHECKING:
 _RECORDS_NAME = "records.jsonl"
 _VERSION_NAME = "version.json"
 _HEAD_NAME = "HEAD"
+# W17 (ADR-0043): the cross-run doc-level reuse store + the frozen induced schema, staged
+# alongside the corpus-level records under the SAME WAL transaction (so a delta commits them
+# atomically with Version N+1). ``doclevel.jsonl`` holds every LIVE document's doc-level Stage
+# outputs (parse/chunk/extract/redact records) keyed by their content-addressed
+# ``provenance.document_id``, so a subsequent ``apply_delta`` can reuse an unchanged document's
+# records instead of re-parsing/-chunking/-extracting it. ``schema.json`` holds the induced
+# corpus schema (:class:`InducedLabels`) the run FROZE — reused by default so extraction labels
+# stay stable across a delta (the coupling ADR-0043 breaks); absent ⇒ no induction / no freeze.
+_DOCLEVEL_NAME = "doclevel.jsonl"
+_SCHEMA_NAME = "schema.json"
 
 # The record kinds a Corpus Version persists. Discriminated on read by a ``_kind`` tag so the
 # polymorphic derived set round-trips. Doc-level carriers (chunks/mentions/relations/redactions)
@@ -57,6 +72,20 @@ _RECORD_TYPES: dict[str, type[Record]] = {
     "graph": GraphRecord,
 }
 _KIND_BY_TYPE: dict[type[Record], str] = {v: k for k, v in _RECORD_TYPES.items()}
+
+# W17: the doc-level carrier kinds the reuse store persists — the per-document Stage outputs a
+# delta reuses for an unchanged document (parse→DocumentRecord, chunk/redact→ChunkRecord,
+# entity→EntityMention, relation→RelationMention). Discriminated on read by the SAME ``_kind``
+# tag convention as the corpus-level records. These carry raw text / masked content, so the
+# Purge sweep (:meth:`expunge_records`) neutralises them by ``document_id`` reach exactly like the
+# corpus-level log — nothing derived (or raw) from a purged document survives.
+_DOCLEVEL_TYPES: dict[str, type[Record]] = {
+    "document": DocumentRecord,
+    "chunk": ChunkRecord,
+    "entity_mention": EntityMention,
+    "relation_mention": RelationMention,
+}
+_DOCLEVEL_KIND_BY_TYPE: dict[type[Record], str] = {v: k for k, v in _DOCLEVEL_TYPES.items()}
 
 
 class CorpusStoreError(StorageError):
@@ -106,6 +135,50 @@ class CorpusStore:
             return []
         return self.read_records(head)
 
+    # -- doc-level reuse store + frozen schema (W17, ADR-0043) ---------------
+
+    def read_doclevel(self, version: int) -> list[Record]:
+        """Read a committed Version's doc-level reuse store (every live doc's Stage outputs).
+
+        The per-document parse/chunk/extract/redact records the delta persisted for reuse, keyed
+        (in each record's ``provenance.document_id``) by the content-addressed document id. Empty
+        for a Version committed before W17 (its ``doclevel.jsonl`` is absent) or a genuinely empty
+        corpus — either way there is simply nothing to reuse and the next delta re-extracts.
+        """
+        uri = self._wal.staged_uri(version, _DOCLEVEL_NAME)
+        if not self._wal.is_committed(version) or not self._storage.exists(uri):
+            return []
+        return self._decode_doclevel(self._storage.read_text(uri))
+
+    def head_doclevel(self) -> list[Record]:
+        """The head Version's doc-level reuse store (empty before the first commit / pre-W17)."""
+        head = self.head_version()
+        if head is None:
+            return []
+        return self.read_doclevel(head)
+
+    def read_schema(self, version: int) -> InducedLabels | None:
+        """Read a committed Version's frozen induced corpus schema, or ``None`` if it froze none.
+
+        ``None`` when the Version ran no schema induction (or predates W17), so the next delta has
+        no schema to reuse and either induces fresh or runs with static config labels — the
+        byte-identical backward-compatible path.
+        """
+        uri = self._wal.staged_uri(version, _SCHEMA_NAME)
+        if not self._wal.is_committed(version) or not self._storage.exists(uri):
+            return None
+        text = self._storage.read_text(uri).strip()
+        if not text:
+            return None
+        return InducedLabels.model_validate_json(text)
+
+    def head_schema(self) -> InducedLabels | None:
+        """The head Version's frozen induced corpus schema (``None`` before the first commit)."""
+        head = self.head_version()
+        if head is None:
+            return None
+        return self.read_schema(head)
+
     # -- transaction --------------------------------------------------------
 
     def commit(
@@ -116,6 +189,8 @@ class CorpusStore:
         delta_json: str,
         document_count: int,
         reconciled: bool,
+        doclevel_records: list[Record] | None = None,
+        induced_schema: InducedLabels | None = None,
     ) -> CorpusVersion:
         """Commit the next Corpus Version transactionally (read-N → write-N+1).
 
@@ -124,6 +199,14 @@ class CorpusStore:
         ``head + 1`` (0 on bootstrap). The records + version manifest are staged under the WAL,
         then the WAL manifest is written LAST (the atomic swap): a crash before that leaves the
         prior head intact. Returns the committed :class:`~latence_core.contracts.CorpusVersion`.
+
+        W17 (ADR-0043): ``doclevel_records`` (every live document's doc-level Stage outputs, for
+        cross-run reuse) and ``induced_schema`` (the frozen corpus schema) are staged in the SAME
+        WAL transaction, so a Version's reuse store + schema commit atomically with its
+        corpus-level records — a crash leaves the prior head (and its reuse store) intact. Both
+        are optional (``None`` ⇒ an empty doclevel / no frozen schema) so a caller that does not
+        yet persist them is unaffected. On the idempotent no-op re-run below the head is returned
+        as-is (its reuse store already stands), so nothing is re-staged.
         """
         head = self.head_version()
         version = 0 if head is None else head + 1
@@ -157,9 +240,25 @@ class CorpusStore:
         self._wal.begin(version)
         records_uri = self._wal.stage_text(version, _RECORDS_NAME, self._encode_records(records))
         version_uri = self._wal.stage_text(version, _VERSION_NAME, corpus_version.model_dump_json())
+        # W17: stage the doc-level reuse store + frozen schema under the same transaction. Always
+        # staged (an empty doclevel is the empty string) so every committed Version has a
+        # well-defined reuse store the next delta reads back without a presence heuristic.
+        doclevel_uri = self._wal.stage_text(
+            version, _DOCLEVEL_NAME, self._encode_doclevel(doclevel_records or [])
+        )
+        schema_uri = self._wal.stage_text(
+            version,
+            _SCHEMA_NAME,
+            "" if induced_schema is None else induced_schema.model_dump_json(),
+        )
         self._wal.commit(
             version,
-            files={"records": records_uri, "version": version_uri},
+            files={
+                "records": records_uri,
+                "version": version_uri,
+                "doclevel": doclevel_uri,
+                "schema": schema_uri,
+            },
             metadata={
                 "parent": "none" if parent_version is None else str(parent_version),
                 "fingerprint": fingerprint,
@@ -220,28 +319,37 @@ class CorpusStore:
         """
         from latence_core.state.graph_patcher import _record_reach
 
-        def _sweep(uri: str) -> int:
+        def _sweep(uri: str, *, doclevel: bool) -> int:
             if not self._storage.exists(uri):
                 return 0
-            records = self._decode_records(self._storage.read_text(uri))
+            decode = self._decode_doclevel if doclevel else self._decode_records
+            encode = self._encode_doclevel if doclevel else self._encode_records
+            records = decode(self._storage.read_text(uri))
             kept = [r for r in records if not (set(_record_reach(r)) & document_ids)]
             if len(kept) == len(records):
                 return 0
-            self._storage.write_atomic(uri, self._encode_records(kept).encode("utf-8"))
+            self._storage.write_atomic(uri, encode(kept).encode("utf-8"))
             return len(records) - len(kept)
 
         removed = 0
-        # 1. Committed Versions: expunge, then reconcile the manifest to the erased reality so the
-        #    idempotency fingerprint / audit record_count stop describing the pre-purge set.
+        # 1. Committed Versions: expunge the corpus-level log AND the W17 doc-level reuse store
+        #    (which holds the purged document's raw text / masked content — a GDPR erasure must
+        #    neutralise it too), then reconcile the manifest to the erased reality so the
+        #    idempotency fingerprint / audit record_count stop describing the pre-purge set. The
+        #    fingerprint is over the corpus-level records only, so the doc-level sweep does not
+        #    perturb it; reconciliation still runs whenever either log actually lost a record.
         for version in self._wal.committed_versions():
-            purged = _sweep(self._wal.staged_uri(version, _RECORDS_NAME))
+            purged = _sweep(self._wal.staged_uri(version, _RECORDS_NAME), doclevel=False)
+            purged += _sweep(self._wal.staged_uri(version, _DOCLEVEL_NAME), doclevel=True)
             if purged:
                 removed += purged
                 self._reconcile_manifest(version)
-        # 2. Abandoned staging dirs: neutralise the same reach-filtered way (no manifest exists to
-        #    reconcile; the rewrite is race-safe against a concurrent run's in-flight transaction).
+        # 2. Abandoned staging dirs: neutralise both logs the same reach-filtered way (no manifest
+        #    exists to reconcile; the rewrite is race-safe against a concurrent run's in-flight
+        #    transaction).
         for version in self._wal.abandoned_versions():
-            removed += _sweep(self._wal.staged_uri(version, _RECORDS_NAME))
+            removed += _sweep(self._wal.staged_uri(version, _RECORDS_NAME), doclevel=False)
+            removed += _sweep(self._wal.staged_uri(version, _DOCLEVEL_NAME), doclevel=True)
         return removed
 
     def _reconcile_manifest(self, version: int) -> None:
@@ -298,6 +406,43 @@ class CorpusStore:
             record_type = _RECORD_TYPES.get(kind) if isinstance(kind, str) else None
             if record_type is None:
                 msg = f"CorpusStore read a record with unknown _kind {kind!r}."
+                raise CorpusStoreError(msg)
+            records.append(record_type.model_validate(obj))
+        return records
+
+    @staticmethod
+    def _encode_doclevel(records: list[Record]) -> str:
+        """Serialise the doc-level reuse store: one tagged JSON object per line, id-sorted.
+
+        Sorted by ``record_id`` so the persisted store is byte-stable (determinism), and tagged
+        with the SAME ``_kind`` discriminator as the corpus-level log so the polymorphic doc-level
+        carriers (DocumentRecord/ChunkRecord/EntityMention/RelationMention) round-trip losslessly.
+        """
+        lines: list[str] = []
+        for record in sorted(records, key=lambda r: r.record_id):
+            kind = _DOCLEVEL_KIND_BY_TYPE.get(type(record))
+            if kind is None:
+                msg = (
+                    f"CorpusStore cannot persist a {type(record).__name__} in the doc-level reuse "
+                    f"store — only DocumentRecord/ChunkRecord/EntityMention/RelationMention."
+                )
+                raise CorpusStoreError(msg)
+            obj = record.model_dump(mode="json")
+            obj["_kind"] = kind
+            lines.append(json.dumps(obj, sort_keys=True, ensure_ascii=False))
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    @staticmethod
+    def _decode_doclevel(text: str) -> list[Record]:
+        records: list[Record] = []
+        for raw in text.splitlines():
+            if not raw.strip():
+                continue
+            obj = json.loads(raw)
+            kind = obj.pop("_kind", None)
+            record_type = _DOCLEVEL_TYPES.get(kind) if isinstance(kind, str) else None
+            if record_type is None:
+                msg = f"CorpusStore read a doc-level record with unknown _kind {kind!r}."
                 raise CorpusStoreError(msg)
             records.append(record_type.model_validate(obj))
         return records

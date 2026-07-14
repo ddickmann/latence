@@ -91,8 +91,8 @@ exports its text with full Provenance/Classification whether or not an embedder 
 any vector DB can ingest it. The `Embedder` Capability is a thin opt-in seam; the CPU
 reference in core is a deterministic, dependency-free **hashing embedder** (no model, no
 weights, no license to verify — ADR-0012/0016), so the seam is exercisable end to end offline.
-The default learned Embedder (`multilingual-e5-small`, MIT) is a **pluggable Provider
-package**, not a core dependency — the framework names the seam, not the model.
+The default learned Embedder (IBM Granite Embedding r2, Apache-2.0; ADR-0045) is a **pluggable
+Provider package**, not a core dependency — the framework names the seam, not the model.
 
 **How it is wired (the #37 seam completion).** Embedding is not a standalone DAG node — it is an
 augmentation of the corpus **Export** Stage. A corpus Export names its Embedder Provider in its
@@ -115,7 +115,7 @@ swapped in by pointing `config['embedder']['provider']` at it — one config lin
 * **`export.knowledge_graph`** ships in `latence-core`: the KG Export as Parquet + TTL +
   GraphML, hand-emitted with no RDF/graph library.
 * **`embedding.hashing`** ships in `latence-core`: the deterministic opt-in reference Embedder
-  (the learned e5-small is a pluggable package).
+  (the learned Granite r2 default is a pluggable package).
 
 The KG statistics land in the Quality Report as `GraphQuality`: node/edge counts, nodes by
 type, edges by label, KB-linked node count, and **evidence coverage** (the fraction of edges

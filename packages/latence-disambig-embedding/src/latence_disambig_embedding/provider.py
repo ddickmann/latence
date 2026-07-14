@@ -91,6 +91,14 @@ _DEFAULT_EMBEDDER = "embedding.hashing"
 # and distinct pairs at ≈0.76–0.81, so 0.90 cleanly separates them and is enterprise-safe out of the
 # box (no over-merge) yet useful (catches real cross-surface duplicates) — NOT the fragile
 # bare-surface 0.83 that the pod proved over-merges.
+#
+# CAVEAT (ADR-0045 — flag, don't guess): those margins (0.96–0.99 same / 0.76–0.81 distinct) were
+# pod-measured on ``multilingual-e5-small``. The framework default learned embedder is now IBM
+# Granite Embedding r2, whose cosine distribution WILL differ, so **0.90 is NOT yet validated for
+# Granite**. It is kept as a sensible documented default; it needs pod re-validation of the
+# same/distinct cosine margins under Granite before it can be claimed calibrated for it (the pod is
+# currently paused — a deferred follow-up, never faked). Set ``threshold`` explicitly per your
+# embedder + corpus until then.
 _DEFAULT_THRESHOLD = 0.90
 
 # The default context window (characters) taken around a mention inside its chunk. A sentence-ish

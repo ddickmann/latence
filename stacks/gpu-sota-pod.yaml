@@ -8,7 +8,7 @@
 # WHY A SEPARATE POD VARIANT. The blessed gpu-sota.yaml keeps `embedding.endpoint` for the corpus
 # export because the *served* embedding story (a running inference host the corpus export calls) is
 # the production narrative — but it needs that host to be up. This variant swaps it for the
-# in-process sentence-transformers embedder (`intfloat/multilingual-e5-small`, MIT), so the WHOLE
+# in-process sentence-transformers embedder (Granite r2 311m, Apache-2.0), so the WHOLE
 # stack runs out of the box on a single GPU pod with NO external service to stand up first. This is
 # the stack the maintainer runs on a GPU pod to validate the fused SOTA path end-to-end:
 #
@@ -99,11 +99,13 @@ stages:
     provider: disambiguation.embedding
     depends_on: [extract]
     config:
-      threshold: 0.90
+      threshold: 0.90   # NOTE (ADR-0045): 0.90 was calibrated on multilingual-e5-small; Granite r2's
+                        # cosine distribution differs and needs pod re-validation (pod paused).
       context_window: 160
       embedder:
         provider: embedding.sentence_transformers
-        config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
+        # GPU tier: Granite r2 311m (Apache-2.0, 768-dim), bf16 + flash_attention_2 (sdpa fallback).
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
       kb:
         - {kb_id: Q1, name: Acme, entity_type: organization}
         - {kb_id: Q2, name: International Business Machines, entity_type: organization, aliases: [IBM]}
@@ -135,7 +137,7 @@ stages:
 
   # The ONE difference from gpu-sota.yaml: the RAG-corpus embedder is the IN-PROCESS
   # sentence-transformers Provider (no served endpoint to stand up first) — the self-contained
-  # pod story. `intfloat/multilingual-e5-small` (MIT), dimension 384, device: cuda.
+  # pod story. GPU tier Granite r2 311m (Apache-2.0), dimension 768, bf16 + FA2 (sdpa fallback).
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
@@ -144,4 +146,4 @@ stages:
       basename: corpus
       embedder:
         provider: embedding.sentence_transformers
-        config: {model: intfloat/multilingual-e5-small, dimension: 384, device: cuda}
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}

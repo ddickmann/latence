@@ -109,7 +109,7 @@ Writer: `JsonlParquetExport._parquet_schema` / `_record_batch` (`export.py:309-3
 - **Reference Embedders / dims** (entry points, `latence.providers`):
   - `embedding.hashing` — in-core, deterministic, dependency-free; default `dimension` = **64** (`embedding.py:26`). The offline reference.
   - `embedding.endpoint` — served OpenAI-compatible model; dim by config (e.g. **768**).
-  - `embedding.st` — sentence-transformers; dim read from the model (e5-small = **384**, `latence-embedder-st/provider.py:22,52`).
+  - `embedding.st` — sentence-transformers; dim read from the model. Default IBM Granite Embedding r2 (ADR-0045): GPU tier 311m = **768** (declared default), CPU tier 97m = **384** (`latence-embedder-st/provider.py`).
 
 Absent an Embedder, the corpus still ships full text + Provenance/Classification, so any vector DB can embed later (ADR-0017).
 
@@ -384,5 +384,5 @@ Nothing in the output is engine-specific: Parquet/JSONL for the corpus, Parquet 
 ### Fields that could NOT be resolved from the code (flagged, not guessed)
 
 1. **`corpus.jsonl` / `corpus.parquet` naming.** The task brief names the corpus files `corpus.*`; the **on-disk default is `records.jsonl` / `records.parquet`** (`JsonlParquetExport` `basename` default = `"records"`). They become `corpus.*` only if the operator sets `basename: corpus`. Documented as the default with the override noted — no field guessed.
-2. **"DenseOn 768" default.** No single "DenseOn" preset sets a 768-dim default in core. The reference `embedding.hashing` default dim is **64**; 768 is the endpoint-model example, 384 is the sentence-transformers e5-small default. Stated all three explicitly rather than asserting a 768 default.
+2. **"DenseOn 768" default.** No single "DenseOn" preset sets a 768-dim default in core. The reference `embedding.hashing` default dim is **64**; the sentence-transformers default is now IBM Granite Embedding r2 — **768** (GPU tier 311m, the declared default) or **384** (CPU tier 97m), per ADR-0045. Stated explicitly rather than asserting a single default.
 3. **Whether `EntityMention`/`RelationMention` get their own export files in a shipped stack.** This is **pipeline-configuration-dependent** (the Export sink materializes whatever stream is wired to it); no fixed mentions/relations file name is guaranteed by core, so none is asserted. Flagged in §1 and §8.

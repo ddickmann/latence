@@ -104,6 +104,12 @@ class SetupAnswers:
     llm_base_url: str = DEFAULT_LLM_BASE_URL
     llm_model: str = DEFAULT_LLM_MODEL
     pii: bool = True  # The ONE optional toggle: PII redaction + guardrail screening.
+    # W18 (ADR-0044) advanced option: which chunk-text variant extraction reads.
+    #   "unmasked" (default) — extraction reads the raw chunk text; the KG keeps real entities
+    #                          (byte-identical to pre-W18).
+    #   "masked"   — extraction reads the REDACTED chunk stream so PII never reaches the KG at all
+    #                (the stricter posture; requires PII redaction ON).
+    extract_on: str = "unmasked"
     domain: str = ""  # Optional free-text domain hint (recorded as a header comment).
     extensions: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_EXTENSIONS)
 
@@ -178,15 +184,27 @@ def _parse_stage(answers: SetupAnswers) -> dict[str, object]:
 
 
 def _embedder_block(answers: SetupAnswers) -> dict[str, object]:
-    """The shared ST embedder block (disambiguation context + RAG-corpus vectors)."""
-    return {
-        "provider": "embedding.sentence_transformers",
-        "config": {
-            "model": "intfloat/multilingual-e5-small",
+    """The shared ST embedder block (disambiguation context + RAG-corpus vectors).
+
+    Defaults to IBM Granite Embedding r2 (Apache-2.0, ADR-0045) tiered by the chosen device: the
+    GPU tier ``granite-embedding-311m-multilingual-r2`` (768-dim, bf16 + flash_attention_2 with a
+    graceful sdpa fallback) on ``cuda``, else the lighter CPU tier
+    ``granite-embedding-97m-multilingual-r2`` (384-dim, fp32) for a laptop-CPU box.
+    """
+    if answers.device == "cuda":
+        config: dict[str, object] = {
+            "model": "ibm-granite/granite-embedding-311m-multilingual-r2",
+            "dimension": 768,
+            "device": answers.device,
+            "attn_implementation": "flash_attention_2",
+        }
+    else:
+        config = {
+            "model": "ibm-granite/granite-embedding-97m-multilingual-r2",
             "dimension": 384,
             "device": answers.device,
-        },
-    }
+        }
+    return {"provider": "embedding.sentence_transformers", "config": config}
 
 
 def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
@@ -194,7 +212,14 @@ def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
 
     Pure + deterministic: no env / clock / randomness. The ONE toggle (``answers.pii``) adds/omits
     exactly the ``content_screen`` + ``redact`` stages; every other Stage is the mandatory spine.
+    The W18 advanced option ``answers.extract_on`` (default ``unmasked``, byte-identical) can set
+    ``masked``, which wires the extraction Stage AFTER ``redact`` and feeds it the redacted chunk
+    stream so PII never reaches the KG.
     """
+    masked_extract = answers.extract_on == "masked"
+    if masked_extract and not answers.pii:
+        msg = "extract_on: masked requires PII redaction ON (there is no redact Stage otherwise)."
+        raise ValueError(msg)
     stages: list[dict[str, object]] = []
 
     # 1) source — the folder + detected extensions.
@@ -268,12 +293,16 @@ def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
     )
 
     # 7) fused NER+RE in ONE pass (GLiNER2); config labels are a FLOOR, induced types union on.
+    # W18: in `extract_on: masked` mode the extractor reads the REDACTED chunk stream (depends_on
+    # `redact`, which sets each chunk's masked_content) so PII never reaches the KG; default
+    # `unmasked` keeps the pre-W18 wiring (depends_on `induce`), so the KG keeps the real entities.
+    extract_input = "redact" if masked_extract else "induce"
     stages.append(
         {
             "name": "extract",
             "capability": "fused_entity_relation",
             "provider": "fused_entity_relation.gliner2",
-            "depends_on": ["induce"],
+            "depends_on": [extract_input],
             "config": {
                 "device": answers.device,
                 "labels": ["organization", "person"],
@@ -389,12 +418,17 @@ def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
         }
     )
 
-    return {
+    pipeline: dict[str, object] = {
         "name": STACK_NAME,
         "auto_generate_labels": True,
-        "storage_uri": answers.storage,
-        "stages": stages,
     }
+    # W18: only emit the switch when it deviates from the default, so an `unmasked` config stays
+    # byte-identical to pre-W18 (no new key).
+    if masked_extract:
+        pipeline["extract_on"] = "masked"
+    pipeline["storage_uri"] = answers.storage
+    pipeline["stages"] = stages
+    return pipeline
 
 
 def _render_header(answers: SetupAnswers) -> str:
@@ -421,6 +455,13 @@ def _render_header(answers: SetupAnswers) -> str:
             "#   export_corpus materializes `masked_content` — so the RAG corpus is BOTH masked",
             "#   (PII-safe) AND context-enriched (`redact -> enrich -> export_corpus`). No pre-W16",
             "#   doc-truncation leak, and no trade-off between masking and the per-chunk headers.",
+        ]
+    if answers.pii and answers.extract_on == "masked":
+        lines += [
+            "#",
+            "# extract_on: masked (W18, ADR-0044) — extraction reads the REDACTED chunk stream, so",
+            "#   PII never reaches entity/relation extraction or the KG (the stricter privacy",
+            "#   posture). `extract` depends_on `redact`. Default `unmasked` (KG keeps entities).",
         ]
     lines += [
         "#",

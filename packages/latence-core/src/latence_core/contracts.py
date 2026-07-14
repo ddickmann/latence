@@ -1939,6 +1939,16 @@ class DeltaChurn(BaseModel):
     documents_updated: int = 0
     documents_deleted: int = 0
     documents_unchanged: int = 0
+    # W17 (ADR-0043): the incremental-extraction perf witness. ``documents_extracted`` are the
+    # NEW/CHANGED documents that actually ran the doc-level Stages (parse/chunk/extract/redact)
+    # this delta; ``documents_reused`` are the UNCHANGED documents whose committed doc-level
+    # records were reused from the prior Corpus Version (their doc-level Stages skipped). When the
+    # induced schema is frozen, extraction is O(``documents_extracted``), not O(corpus) — so
+    # ``documents_reused`` growing while ``documents_extracted`` stays small IS the measurable
+    # boundary shift. A ``--reinduce`` delta (or the very first run) reuses nothing:
+    # ``documents_reused == 0`` and every document is extracted.
+    documents_reused: int = 0
+    documents_extracted: int = 0
     entities_created: int = 0
     entities_merged: int = 0
     entities_split: int = 0

@@ -104,8 +104,10 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | fastino/GLiNER2-Guardrails-PII-Multi | Redaction (`redaction.gliner2`) | Apache-2.0 |
 | urchade/gliner_multi_pii-v1 | Redaction | Apache-2.0 |
 | knowledgator/gliner-linker-large | Disambiguation | Apache-2.0 |
-| intfloat/multilingual-e5-small | Embedding (default) | MIT |
-| sentence-transformers/all-MiniLM-L6-v2 | Embedding | Apache-2.0 |
+| ibm-granite/granite-embedding-311m-multilingual-r2 | Embedding (default, GPU tier; `embedding.sentence_transformers`) | Apache-2.0 |
+| ibm-granite/granite-embedding-97m-multilingual-r2 | Embedding (CPU tier) | Apache-2.0 |
+| intfloat/multilingual-e5-small | Embedding (fallback) | MIT |
+| sentence-transformers/all-MiniLM-L6-v2 | Embedding (fallback) | Apache-2.0 |
 | microsoft/llmlingua-2 | Compression (post-v1) | MIT |
 | answerdotai/ModernBERT | encoder base | Apache-2.0 |
 | google/mt5 | seq2seq base | Apache-2.0 |
@@ -115,7 +117,7 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 
 | Model | Capability | License | Note |
 |---|---|---|---|
-| google/embeddinggemma-300m | Embedding | Gemma | **Not a default; no Gemma-backed Provider ships in this repo.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). POLICY: the Gemma family is non-default and, were a Gemma Provider offered, it would be an explicitly opt-in Provider carrying the license and its flow-down obligations. Default Embedder is multilingual-e5-small (MIT). |
+| google/embeddinggemma-300m | Embedding | Gemma | **Not a default; no Gemma-backed Provider ships in this repo.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). POLICY: the Gemma family is non-default and, were a Gemma Provider offered, it would be an explicitly opt-in Provider carrying the license and its flow-down obligations. Default Embedder is IBM Granite Embedding r2 (Apache-2.0). |
 
 Per the project's research-diligence directive, a GLiNER/HF checkpoint's license
 is per-weight and cannot be inferred from the library. Any model whose license

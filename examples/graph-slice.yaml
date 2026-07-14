@@ -35,7 +35,7 @@
 #
 # Embeddings are OPTIONAL (ADR-0017): the RAG corpus exports its text with full Provenance/
 # Classification whether or not an Embedder is wired. The in-core embedding.hashing is a
-# deterministic, dependency-free reference; the learned multilingual-e5-small (MIT) is a
+# deterministic, dependency-free reference; the learned Granite r2 embedder (Apache-2.0) is a
 # pluggable Provider package, not a core dependency.
 #
 # The reference Providers `graph.canonical` and `export.knowledge_graph` ship IN latence-core:

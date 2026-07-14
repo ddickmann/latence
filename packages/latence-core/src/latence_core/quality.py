@@ -811,5 +811,9 @@ class QualityReport(BaseModel):
                 f"- affected set: {dc.affected_set_size}/{dc.corpus_record_count} "
                 "corpus-level records recomputed"
             )
+            lines.append(
+                f"- extraction: {dc.documents_extracted} extracted, "
+                f"{dc.documents_reused} reused (doc-level Stages skipped)"
+            )
             lines.append(f"- drift: {dc.drift:.3f}")
         return "\n".join(lines) + "\n"

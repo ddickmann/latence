@@ -1,5 +1,14 @@
 # Validate `disambiguation.embedding` on a real GPU — turnkey pod steps (W1 rework, #94)
 
+> **ADR-0045 update (default embedder → IBM Granite Embedding r2).** The framework default learned
+> embedder is now **Granite r2** (GPU tier `granite-embedding-311m-multilingual-r2`, 768-dim, bf16+FA2).
+> The pod cosines and the **0.90 threshold below were calibrated on `multilingual-e5-small`**;
+> **Granite's cosine distribution WILL differ, so 0.90 is NOT yet validated for Granite** — re-run this
+> exact separation check with the Granite embedder (swap the `model` in §2 to
+> `ibm-granite/granite-embedding-311m-multilingual-r2`, `dimension: 768`) and re-fit the threshold to
+> Granite's same/distinct margins. Until that pod run lands, the Granite ER threshold is **"pending pod
+> validation"**, never fabricated (the e5 procedure below is retained as the validated reference).
+
 The offline slice is validated against the in-core **deterministic `embedding.hashing`** embedder and
 a **context-bearing pod-vector stub** (the unit tests assert that at the default threshold 0.90 the
 genuine duplicates merge while distinct entities — IBM vs Apple — stay SEPARATE, and that a

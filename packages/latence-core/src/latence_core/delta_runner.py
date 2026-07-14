@@ -13,17 +13,25 @@ delta machinery on top of it, without forking the Runner (ADR-0018 reuses the ex
   :class:`~latence_core.state.corpus_store.CorpusStore`. The delta churn — including the
   affected-set size vs the whole corpus — lands in the run's Quality Report.
 
-  **What is affected-set-scoped today, and what is not** (issue #42, honest boundary). The
-  DeltaProcessor's *committed corpus-level output* is genuinely affected-set-scoped: only the
-  records in the blocking neighborhoods the delta touched are re-resolved and spliced, every
+  **What is affected-set-scoped, and the extraction boundary** (issue #42 → resolved by W17,
+  ADR-0043). The DeltaProcessor's *committed corpus-level output* is affected-set-scoped: only
+  the records in the blocking neighborhoods the delta touched are re-resolved and spliced, every
   untouched cluster is carried forward verbatim (byte-identical), and the churn records the
-  affected-set size as the perf witness. What is NOT yet incremental is the **extraction pass**:
-  each delta uses a fresh ``run_id``, so the Runner re-parses / re-chunks / re-extracts the WHOLE
-  current source from scratch (there is no cross-run doc-level checkpoint reuse), then the
-  DeltaProcessor scopes the committed set. So the *stored* corpus honours ADR-0018's "recompute
-  only the affected set" property, but the *extraction cost* of a delta is still O(corpus).
-  Cross-run doc-level incremental execution (skipping unchanged documents' doc-level Stages) is a
-  Runner-core change tracked as follow-up work, not delivered here.
+  affected-set size as the perf witness. **Since W17 the extraction pass is incremental too.** A
+  delta FREEZES the induced corpus schema in the Corpus Version (so extraction labels are stable
+  across the delta) and REUSES each unchanged document's persisted doc-level records
+  (parse/chunk/extract/redact) from the prior Version, excluding those documents at Source so
+  only NEW/CHANGED documents run the doc-level Stages. The corpus-level Stages
+  (disambiguate/graph/…) then run over the UNION of reused + freshly-extracted records — via the
+  Runner's reuse overlay (:meth:`LocalRunner.run`'s ``reuse``) — so the committed corpus is
+  byte-identical to a from-scratch run of the whole source, while the *extraction cost* is
+  O(changed documents), not O(corpus). The churn's ``documents_reused`` / ``documents_extracted``
+  are the measurable witness. **The one caveat**: an explicit ``--reinduce`` (or a first run with
+  no frozen schema) re-runs induction over the full current corpus and re-extracts every document
+  — the correct-by-construction fallback to the old O(corpus) behavior, by design. Reuse also
+  falls back to full extraction for a pipeline whose stages are not purely per-document
+  reproducible (a ``context_enrichment`` Stage — its per-chunk output depends on the mutable
+  graph — see :meth:`DeltaRunner._reuse_supported`).
 * **Retraction** (:meth:`retract`) is the default soft deletion: the deleted documents' derived
   records are tombstoned (excluded from the live set, retained on Storage for audit and
   rollback), affected clusters re-resolved, a new Version committed.
@@ -37,10 +45,11 @@ Version N intact (the WAL), and any prior Version is inspectable.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from latence_core.capability import DeltaProcessor, ProviderRegistry
 from latence_core.contracts import (
+    ChunkRecord,
     DeletionMode,
     Delta,
     DeltaChurn,
@@ -50,10 +59,11 @@ from latence_core.contracts import (
     DocumentRecord,
     EntityMention,
     GraphRecord,
+    InducedLabels,
     RelationMention,
 )
 from latence_core.pipeline import CapabilityKind, Pipeline
-from latence_core.runner import LocalRunner, StageOutput
+from latence_core.runner import LocalRunner, StageOutput, topological_order
 from latence_core.state.corpus_store import CorpusStore
 from latence_core.state.delta_detector import DeltaDetector, ManifestEntry, content_hash
 from latence_core.state.incremental import compute_drift
@@ -68,6 +78,11 @@ DEFAULT_DELTA_PROVIDER = "delta.affected_set"
 
 # The corpus-level record kinds a Corpus Version persists (the delta operates over these).
 _CORPUS_LEVEL = (DisambiguationRecord, GraphRecord)
+
+# W17 (ADR-0043): the per-document doc-level carriers the reuse store persists + overlays. These
+# are reproducible from a document's own bytes + the frozen schema (parse/chunk/extract/redact),
+# so an unchanged document's records are reused across a delta instead of re-extracted.
+_DOC_LEVEL = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
 
 
 class DeltaRunner:
@@ -93,17 +108,28 @@ class DeltaRunner:
         run_id: str,
         *,
         deletion_mode: DeletionMode = DeletionMode.RETRACTION,
+        reinduce: bool = False,
     ) -> QualityReport:
         """Run the Pipeline on the current source and commit the resulting Corpus Version.
 
-        The Runner executes the whole DAG over the current source (extraction is not yet
-        cross-run incremental — see the module docstring); this method then computes the
-        :class:`~latence_core.contracts.Delta` of the current manifest against the last committed
-        Version, applies the blocking-neighborhood affected-set recompute + drift-triggered
-        Reconciliation to produce the *committed* corpus-level set (affected-set-scoped: untouched
-        clusters carried forward verbatim), commits Version N+1, and folds the
-        :class:`~latence_core.contracts.DeltaChurn` (with the affected-set size) into the Quality
-        Report. Returns that report.
+        The Runner executes the DAG over the current source with **incremental extraction** (W17,
+        ADR-0043): each UNCHANGED document (its content-addressed id matches a document committed in
+        the prior Version, and the induced schema is frozen) is excluded at Source and its
+        persisted doc-level records are REUSED, so only NEW/CHANGED documents run
+        parse/chunk/extract/redact; the corpus-level Stages then run over the UNION (reused ∪
+        freshly-extracted) via the Runner's reuse overlay. This method then computes the
+        :class:`~latence_core.contracts.Delta` of the current (union) manifest against the last
+        committed Version, applies the blocking-neighborhood affected-set recompute +
+        drift-triggered Reconciliation to produce the *committed* corpus-level set (untouched
+        clusters carried forward verbatim), commits Version N+1 with the refreshed doc-level reuse
+        store + frozen schema, and folds the :class:`~latence_core.contracts.DeltaChurn` (with the
+        ``documents_reused`` / ``documents_extracted`` witness) into the Quality Report. Returns
+        that report.
+
+        ``reinduce`` (the ``--reinduce`` escape hatch): re-run schema induction over the full
+        current corpus and re-extract every document — the correct-by-construction fallback to the
+        old O(corpus) behavior when the operator wants the induced vocabulary to move with the
+        data. It reuses nothing (``documents_reused == 0``).
         """
         store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
         parent_version = store.head_version()
@@ -111,16 +137,49 @@ class DeltaRunner:
         # at Source so a re-run over the still-present file does not silently resurrect it. (Adds
         # of NEW documents are unaffected — only the previously-deleted ids are excluded.)
         prior_deletions = self._prior_deletions(store, parent_version)
-        effective = self._with_source_exclusions(pipeline, sorted(prior_deletions))
-
-        report = self._runner.run(effective, run_id=run_id)
-        outputs = self._collect_outputs(effective, run_id)
-
         parent_records = store.head_records()
-        current_manifest = self._build_manifest(outputs)
         previous_manifest = self._manifest_of(parent_records, parent_version, store)
 
+        # W17: decide cross-run reuse. Reuse engages only from a committed parent, when not
+        # reinducing, and for a pipeline whose doc-level Stages are purely per-document reproducible
+        # (:meth:`_reuse_supported`). The frozen schema + the prior Version's doc-level store are
+        # read once; the reusable documents are those whose current content-addressed id matches a
+        # committed one (content-addressing ⇒ an id match is byte-identical ⇒ unchanged).
+        reuse_on = (
+            parent_version is not None and not reinduce and self._reuse_supported(pipeline)
+        )
+        frozen_schema = store.head_schema() if reuse_on else None
+        committed_doclevel = store.head_doclevel() if reuse_on else []
+        committed_doc_ids = {r.provenance.document_id for r in committed_doclevel}
+        current_doc_ids = self._current_document_ids(pipeline, sorted(prior_deletions))
+        reusable_ids = current_doc_ids & committed_doc_ids
+        reuse_records = [
+            r for r in committed_doclevel if r.provenance.document_id in reusable_ids
+        ]
+
+        # Run only the NEW/CHANGED documents through the doc-level Stages: exclude the reused
+        # documents (and the durable prior deletions) at Source, freeze the induced schema so the
+        # fresh documents extract under the SAME labels as the reused ones, and hand the Runner the
+        # reused doc-level records as the corpus-level overlay.
+        run_excluded = sorted(prior_deletions | reusable_ids)
+        effective = self._with_source_exclusions(pipeline, run_excluded)
+        effective = self._apply_frozen_schema(effective, frozen_schema)
+        report = self._runner.run(effective, run_id=run_id, reuse=reuse_records)
+        outputs = self._collect_outputs(effective, run_id)
+
+        # The union manifest: the freshly-extracted documents' records (from the run's checkpoints)
+        # plus the reused documents' records — content-hashed by the same detector, so a reused
+        # document lands UNCHANGED and only genuine adds/edits/deletes are classified.
+        current_manifest = self._build_manifest(
+            [*outputs, *cast("list[StageOutput]", reuse_records)]
+        )
+
         diff = DeltaDetector.diff(previous_manifest, current_manifest)
+        # The refreshed reuse store the next delta reads: every live document's doc-level records =
+        # the freshly-extracted ones ∪ the reused ones carried forward. The frozen schema is
+        # reused when present, else captured from this run's fresh chunks (first run / --reinduce).
+        new_doclevel = [*self._doc_level_records(effective, run_id), *reuse_records]
+        new_schema = frozen_schema or self._captured_schema(effective, run_id)
         churn = self._commit(
             store=store,
             parent_version=parent_version,
@@ -132,6 +191,10 @@ class DeltaRunner:
             diff_unchanged=diff.unchanged,
             current_manifest=current_manifest,
             deletion_mode=deletion_mode,
+            doclevel_records=new_doclevel,
+            induced_schema=new_schema,
+            documents_reused=len(reusable_ids),
+            documents_extracted=len(current_doc_ids) - len(reusable_ids),
         )
         return self._attach_churn(pipeline, run_id, report, churn)
 
@@ -203,6 +266,13 @@ class DeltaRunner:
         excluded_pipeline = self._with_source_exclusions(pipeline, all_deleted)
         report = self._runner.run(excluded_pipeline, run_id=run_id)
         current_records = self._corpus_level(self._collect_outputs(excluded_pipeline, run_id))
+        # W17: the deletion path re-extracts the survivors from scratch (it does not reuse — a
+        # split-on-delete must re-resolve the survivors through the real pipeline), so the refreshed
+        # reuse store is exactly the survivors' fresh doc-level records; the deleted documents'
+        # records never enter it (excluded at Source). The frozen schema is carried forward from
+        # the parent so a subsequent add can still reuse against a stable vocabulary. On a Purge the
+        # expunge below sweeps every prior Version's doc-level store too (nothing survives).
+        surviving_doclevel = self._doc_level_records(excluded_pipeline, run_id)
         churn = self._commit(
             store=store,
             parent_version=parent_version,
@@ -216,6 +286,9 @@ class DeltaRunner:
             deletion_mode=deletion_mode,
             document_count=parent_version_obj.document_count - len(deleted),
             intentional_deletion=True,
+            doclevel_records=surviving_doclevel,
+            induced_schema=store.read_schema(parent_version),
+            documents_extracted=len(current_manifest),
         )
         if deletion_mode is DeletionMode.PURGE and deleted:
             # Expunge the purged documents' derived records from EVERY records.jsonl under the
@@ -310,6 +383,10 @@ class DeltaRunner:
         deletion_mode: DeletionMode,
         document_count: int | None = None,
         intentional_deletion: bool = False,
+        doclevel_records: list[Record] | None = None,
+        induced_schema: InducedLabels | None = None,
+        documents_reused: int = 0,
+        documents_extracted: int = 0,
     ) -> DeltaChurn:
         """Compute drift, run the DeltaProcessor, and commit the next Corpus Version."""
         total_docs = len(current_manifest) if document_count is None else document_count
@@ -340,6 +417,8 @@ class DeltaRunner:
             delta_json=delta.model_dump_json(),
             document_count=total_docs,
             reconciled=drift.triggered,
+            doclevel_records=doclevel_records,
+            induced_schema=induced_schema,
         )
 
         records_purged = len(outcome.retracted) if deletion_mode is DeletionMode.PURGE else 0
@@ -353,6 +432,8 @@ class DeltaRunner:
             documents_updated=len(diff_updated),
             documents_deleted=len(diff_deleted),
             documents_unchanged=len(diff_unchanged),
+            documents_reused=documents_reused,
+            documents_extracted=documents_extracted,
             entities_created=outcome.entities_created,
             entities_merged=outcome.entities_merged,
             entities_split=outcome.entities_split,
@@ -421,6 +502,133 @@ class DeltaRunner:
     def _corpus_level(outputs: list[StageOutput]) -> list[Record]:
         """The corpus-level derived records (Disambiguation + Graph) a Version holds."""
         return [r for r in outputs if isinstance(r, _CORPUS_LEVEL)]
+
+    # -- W17 incremental extraction (frozen schema + doc-level reuse) --------
+
+    @staticmethod
+    def _reuse_supported(pipeline: Pipeline) -> bool:
+        """True if this pipeline's doc-level Stages are purely per-document reproducible (W17).
+
+        Cross-run doc-level reuse is sound when a document's reused records are byte-identical to
+        re-extracting it — which holds for the per-document Stages (parse/chunk/extract/redact)
+        under a frozen schema. A :class:`CapabilityKind.CONTEXT_ENRICHMENT` Stage is NOT
+        per-document — a chunk's ``context_header`` summarizes the mutable assembled graph — so a
+        reused document's enriched output could go stale across a delta. Rather than hazard a
+        fragile partial reuse (which could corrupt the exported corpus), reuse is disabled for such
+        a pipeline and it falls back to full extraction (correct by construction). Every other
+        reference pipeline (the KG spine, the RAG chunk/redact/export spine) is supported.
+        """
+        return not any(
+            stage.capability is CapabilityKind.CONTEXT_ENRICHMENT for stage in pipeline.stages
+        )
+
+    def _current_document_ids(self, pipeline: Pipeline, excluded: list[str]) -> set[str]:
+        """The content-addressed ids of the current live source documents (minus ``excluded``).
+
+        Enumerates each Source Stage (reading + hashing the source bytes, the cheap content-address
+        pass — NOT the expensive per-document extraction the reuse skips) and collects every
+        ``provenance.document_id`` the Source would emit, dropping the durably-deleted ids in
+        ``excluded``. Content-addressing makes an id match a byte-identical match, so intersecting
+        these with a prior Version's committed doc ids yields exactly the UNCHANGED (reusable)
+        documents; the rest are new/changed and get re-extracted.
+        """
+        storage = Storage.for_uri(pipeline.storage_uri)
+        excluded_set = set(excluded)
+        ids: set[str] = set()
+        for stage in pipeline.stages:
+            if stage.capability is not CapabilityKind.SOURCE:
+                continue
+            provider_cls = self._registry.load(stage.provider)
+            provider = provider_cls(stage.config or {})
+            produce = getattr(provider, "produce", None)
+            if produce is None:  # pragma: no cover - a Source always produces
+                continue
+            for parser_input in produce(storage):
+                doc_id = parser_input.provenance.document_id
+                if doc_id not in excluded_set:
+                    ids.add(doc_id)
+        return ids
+
+    @staticmethod
+    def _apply_frozen_schema(
+        pipeline: Pipeline, schema: InducedLabels | None
+    ) -> Pipeline:
+        """Return a Pipeline whose ``schema_induction`` Stage stamps the FROZEN schema (W17).
+
+        When a frozen corpus schema is being reused, every ``schema_induction`` Stage's config is
+        given ``frozen_induced_labels`` so its Provider stamps that single schema on every chunk
+        and makes NO LLM call (:meth:`LLMLabelInducer.induce`) — the freshly-extracted documents
+        then use the SAME labels as the reused ones, keeping the unchanged documents' extraction
+        valid (the coupling ADR-0043 breaks). ``schema is None`` (first run, ``--reinduce``, or a
+        pipeline with no induction) returns the Pipeline unchanged, so induction runs normally.
+        """
+        if schema is None:
+            return pipeline
+        data = pipeline.model_dump()
+        touched = False
+        for stage in data["stages"]:
+            if stage["capability"] == CapabilityKind.SCHEMA_INDUCTION.value:
+                config = dict(stage.get("config") or {})
+                config["frozen_induced_labels"] = schema.model_dump(mode="json")
+                stage["config"] = config
+                touched = True
+        return Pipeline.model_validate(data) if touched else pipeline
+
+    def _doc_level_records(self, pipeline: Pipeline, run_id: str) -> list[Record]:
+        """The run's per-document Stage outputs, for the next delta's reuse store (W17).
+
+        Reads each doc-level Stage's checkpoint and collects the per-document carriers
+        (parse→DocumentRecord, chunk/redact→ChunkRecord, entity→EntityMention,
+        relation→RelationMention). A ChunkRecord is de-duplicated **last-writer-wins in
+        topological order**, so a chunk→…→redact chain persists the FINAL (masked) chunk variant —
+        the one that flows to a doc-level Export — never the earlier raw one. DocumentRecords /
+        mentions / relations have unique ids across Stages, so the order is immaterial for them.
+        Export checkpoints are skipped (a sink re-emits its input verbatim — double-counting).
+        """
+        storage = Storage.for_uri(pipeline.storage_uri)
+        collected: dict[str, Record] = {}
+        for stage in topological_order(list(pipeline.stages)):
+            if stage.capability is CapabilityKind.EXPORT:
+                continue
+            ckpt = (
+                f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
+                f"/checkpoints/{stage.name}.jsonl"
+            )
+            if not storage.exists(ckpt):
+                continue
+            record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
+            for record in self._runner._read_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+                if not isinstance(record, _DOC_LEVEL):
+                    continue
+                collected[f"{type(record).__name__}:{record.record_id}"] = record
+        return list(collected.values())
+
+    def _captured_schema(self, pipeline: Pipeline, run_id: str) -> InducedLabels | None:
+        """The induced CORPUS schema this run produced, to freeze in the Corpus Version (W17).
+
+        For a ``schema_induction`` Stage running at ``granularity: corpus`` (the one shared
+        vocabulary for the whole corpus — the coupling), every chunk carries the SAME
+        :class:`InducedLabels`, so the first populated one IS the corpus schema. Returns it so the
+        commit freezes it and the next delta reuses it. A non-corpus granularity (per-doc/per-chunk
+        schema rides in each document's reused chunk records, no corpus-level freeze), a pipeline
+        with no induction, or an all-fail-open run yields ``None`` — no corpus schema to freeze.
+        """
+        storage = Storage.for_uri(pipeline.storage_uri)
+        for stage in pipeline.stages:
+            if stage.capability is not CapabilityKind.SCHEMA_INDUCTION:
+                continue
+            if str((stage.config or {}).get("granularity", "doc")).lower() != "corpus":
+                continue
+            ckpt = (
+                f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
+                f"/checkpoints/{stage.name}.jsonl"
+            )
+            if not storage.exists(ckpt):
+                continue
+            for record in self._runner._read_checkpoint(storage, ckpt, ChunkRecord):  # noqa: SLF001
+                if isinstance(record, ChunkRecord) and record.induced_labels is not None:
+                    return record.induced_labels
+        return None
 
     # -- manifest -----------------------------------------------------------
 

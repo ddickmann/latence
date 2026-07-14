@@ -314,8 +314,9 @@ def test_embed_matrix_hashing_runs_st_skipped_with_flag(tmp_path: Path) -> None:
     assert st.stage_seconds is None
     assert st.memory is None
     assert st.determinism.checked is False
-    # Its license column is still surfaced from the declared profile (MIT weights), never faked.
-    assert st.license is not None and st.license.spdx == "MIT"
+    # Its license column is still surfaced from the declared profile (Granite r2 Apache-2.0 weights),
+    # never faked.
+    assert st.license is not None and st.license.spdx == "Apache-2.0"
 
 
 # -- The determinism cross-check BITES: a lying declared=True is flagged ------

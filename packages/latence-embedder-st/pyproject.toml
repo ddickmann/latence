@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "latence-embedder-st"
 version = "0.1.0"
-description = "Learned sentence-transformers Embedder Provider (multilingual-e5-small, CPU/GPU) — the in-process semantic Embedder for the Latence framework."
+description = "Learned sentence-transformers Embedder Provider (IBM Granite Embedding r2, GPU 311m FA2+bf16 / CPU 97m) — the in-process semantic Embedder for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -27,8 +27,9 @@ classifiers = [
 # Heavy/optional deps stay OUT of latence-core (ADR-0016): the sentence-transformers
 # stack (sentence-transformers -> torch/transformers) ships with THIS Provider package,
 # not the thin core. The sentence-transformers library is Apache-2.0 (code); the default
-# checkpoint intfloat/multilingual-e5-small is MIT (weights) — both verified permissive
-# (ADR-0012, 2026-07-08); nothing downloads unless a Pipeline configures this Provider.
+# checkpoints ibm-granite/granite-embedding-{311m,97m}-multilingual-r2 are Apache-2.0 (weights)
+# — both verified permissive (ADR-0012/0045, 2026-07-14); nothing downloads unless a Pipeline
+# configures this Provider.
 # H-G1 dep cap: 'sentence-transformers' moves its API across MINORS (the effective majors
 # for a 3.x/4.x/5.x library), so it carries an upper cap so a downstream install can't
 # silently pull an API-breaking release. The current line is 5.x (verified 2026-07-08);

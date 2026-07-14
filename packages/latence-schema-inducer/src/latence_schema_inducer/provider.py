@@ -194,6 +194,17 @@ class LLMLabelInducer:
             )
             raise ValueError(msg)
         self._granularity = granularity
+        # W17 (ADR-0043): the FROZEN induced schema. When a delta reuses a prior Corpus Version's
+        # induced schema (the default, so extraction labels stay stable across the delta and an
+        # unchanged document's extraction remains valid), the DeltaRunner sets this to the persisted
+        # :class:`~latence_core.contracts.InducedLabels` dump; ``induce`` then STAMPS that single
+        # frozen schema onto every chunk and makes NO LLM call (induction is short-circuited).
+        # ``--reinduce`` omits it, so induction runs normally over the full current corpus. A
+        # ``None``/absent value is the ordinary (non-frozen) path — byte-identical to pre-W17.
+        frozen = config.get("frozen_induced_labels")
+        self._frozen_induced_labels = (
+            InducedLabels.model_validate(frozen) if isinstance(frozen, dict) else None
+        )
         self._max_tokens = max(1, int(config.get("max_tokens", _DEFAULT_MAX_TOKENS)))
         self._max_labels = max(1, min(int(config.get("max_labels", MAX_LABELS)), MAX_LABELS))
         self._temperature = float(config.get("temperature", 0.0))
@@ -279,6 +290,14 @@ class LLMLabelInducer:
         call.
         """
         chunk_list = list(chunks)
+        if self._frozen_induced_labels is not None:
+            # W17: reuse the frozen corpus schema — stamp it on every chunk, make NO LLM call, so
+            # the delta's freshly-extracted documents use the SAME labels as the reused documents
+            # (the coupling ADR-0043 breaks). Order-preserving, 1:1, exactly like the induce paths.
+            frozen = self._frozen_induced_labels
+            for chunk in chunk_list:
+                yield chunk.model_copy(update={"induced_labels": frozen})
+            return
         if self._granularity == "chunk":
             yield from self._induce_per_chunk(chunk_list)
             return

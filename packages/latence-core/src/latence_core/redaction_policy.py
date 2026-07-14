@@ -31,6 +31,7 @@ masking; a Provider owns "where is the PII".
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -302,6 +303,99 @@ def build_chunk_span(
     )
 
 
+# -- W18 universal financial-PII redaction floor (ADR-0044) -------------------
+#
+# A small, high-harm set of FINANCIAL / national-identity PII types that MUST be handled no matter
+# which detection backend a stack configures. These deterministic, zero-dep recognisers run at the
+# shared :func:`finalize_redacted_chunk` choke point — UNIONed with whatever the Provider detected —
+# so a learned Redactor whose model MISSES (or is misconfigured away from) a financial identifier
+# still cannot leak it into the exported corpus. Before W18, only the in-core
+# ``redaction.hybrid_rule`` recognised these; the three learned Providers
+# (``gliner_pii``/``gliner2``/``presidio``) inherited only their model's coverage, so a model that
+# missed an IBAN/SSN/card leaked it. Routing the floor through the single seam every Provider
+# already calls makes it NON-BYPASSABLE by model/backend choice, impossible to forget per-Provider.
+#
+# Scope of the guarantee (deliberately narrow + honest, H-C1): the floor guarantees DETECTION of the
+# financial subset regardless of backend; it does NOT override an operator's explicit policy
+# `action` or `skip`. A floor span is handled with the chunk's resolved policy action
+# (mask/replace/hash/tag), and the floor runs ONLY when redaction actually runs on the chunk
+# (``plan.needs_detection`` — an explicit ``skip:true`` or a near-empty chunk still skips). This
+# mirrors the H-C1 §4 sensitive-doc floor philosophy: the disposition is guaranteed-visible and
+# operator intent is preserved.
+#
+# The patterns are byte-identical to the ``redaction.hybrid_rule`` built-ins for these types (a
+# drift-guard test pins them equal), so the floor never disagrees with the in-core rule Redactor and
+# a hybrid_rule stack is byte-identical (every floor span exactly overlaps a Provider span and the
+# Provider wins the tie — see :func:`_merge_floor`). ``ssn_nodash`` reports as ``ssn`` so the
+# per-type count stays honest (the same remap ``redaction.hybrid_rule`` uses).
+FINANCIAL_FLOOR_PATTERNS: dict[str, tuple[str, str]] = {
+    # detector_name: (reported pii_type, regex) — byte-identical to the hybrid_rule built-ins.
+    "ssn": ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
+    "ssn_nodash": ("ssn", r"(?<!\d)(?!000|666|9\d\d)\d{3} ?(?!00)\d{2} ?(?!0000)\d{4}(?!\d)"),
+    "credit_card": ("credit_card", r"\b\d(?:[ -]?\d){12,15}\b"),
+    "iban": ("iban", r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b"),
+}
+
+# The reported pii_type set the floor GUARANTEES is handled (``ssn``/``credit_card``/``iban``).
+FINANCIAL_FLOOR_TYPES: frozenset[str] = frozenset(
+    pii_type for pii_type, _ in FINANCIAL_FLOOR_PATTERNS.values()
+)
+
+# Compiled once. IGNORECASE mirrors the hybrid_rule default (``case_sensitive: False``) so the
+# floor's IBAN recogniser matches a lower-cased prefix exactly as the in-core rule Redactor does.
+_FLOOR_DETECTORS: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
+    (pii_type, f"floor:{name}", re.compile(regex, re.IGNORECASE))
+    for name, (pii_type, regex) in FINANCIAL_FLOOR_PATTERNS.items()
+)
+# Rule-certain: the floor is a deterministic recogniser, not a probabilistic model.
+_FLOOR_CONFIDENCE = 1.0
+
+
+def floor_candidates(text: str) -> list[tuple[int, int, str, str, str, float]]:
+    """Every financial-floor match in ``text`` as ``(start, end, pii_type, value, detector, conf)``.
+
+    The always-on half of the universal floor: it scans a chunk's ``content`` for the fixed
+    FINANCIAL_PII set independently of any Provider or policy allow-list. Offsets are
+    chunk-``content`` coordinates (the system :func:`apply_masking` masks in). Empty when the chunk
+    carries no financial PII (the common case), so a chunk with no floor hit is byte-identical to
+    the pre-W18 path.
+    """
+    out: list[tuple[int, int, str, str, str, float]] = []
+    for pii_type, detector, pattern in _FLOOR_DETECTORS:
+        for match in pattern.finditer(text):
+            start, end = match.start(), match.end()
+            if end > start:
+                out.append((start, end, pii_type, match.group(0), detector, _FLOOR_CONFIDENCE))
+    return out
+
+
+def _merge_floor(
+    accepted: list[tuple[int, int, str, str, str, float]],
+    floor: list[tuple[int, int, str, str, str, float]],
+) -> list[tuple[int, int, str, str, str, float]]:
+    """Union a Provider's accepted spans with floor candidates → ordered, non-overlapping.
+
+    Deterministic resolution (matching the hybrid_rule overlap policy): a longer span wins first
+    (max masking coverage), and on an identical span the PROVIDER wins the tie (source rank 0 < 1)
+    so its richer detector/label provenance is kept — a floor span survives only where the Provider
+    left a gap, which is exactly the guarantee. When the two sets fully coincide (e.g. the in-core
+    ``redaction.hybrid_rule``, whose built-ins ARE these patterns) the Provider wins every span and
+    the output is byte-identical.
+    """
+    tagged: list[tuple[tuple[int, int, str, str, str, float], int]] = [
+        *((span, 0) for span in accepted),
+        *((span, 1) for span in floor),
+    ]
+    tagged.sort(key=lambda item: (item[0][0], -(item[0][1] - item[0][0]), item[1], item[0][2]))
+    result: list[tuple[int, int, str, str, str, float]] = []
+    last_end = -1
+    for span, _source in tagged:
+        if span[0] >= last_end:
+            result.append(span)
+            last_end = span[1]
+    return result
+
+
 def finalize_redacted_chunk(
     chunk: ChunkRecord,
     plan: ChunkRedactionPlan,
@@ -319,7 +413,20 @@ def finalize_redacted_chunk(
     (extraction still sees full entities). A chunk with no accepted spans gets ``masked_content ==
     content`` and
     an empty span list (never an error), so every redacted chunk carries a PII-handled variant.
+
+    W18 (ADR-0044): before building spans, the shared UNIVERSAL FINANCIAL-PII FLOOR is UNIONed in —
+    a deterministic zero-dep recogniser for the high-harm financial subset (``ssn``/``credit_card``/
+    ``iban``) that runs regardless of which detection backend produced ``accepted``. Because EVERY
+    Provider funnels through this one seam, the floor is non-bypassable by model/backend choice: a
+    learned Redactor that missed a card/IBAN/SSN still cannot leak it. The floor honours the chunk's
+    resolved policy action and only runs when redaction runs on the chunk
+    (``plan.needs_detection``), so an explicit ``skip`` / near-empty chunk is unchanged and a
+    hybrid_rule stack (whose built-ins ARE these patterns) is byte-identical.
     """
+    if plan.needs_detection:
+        floor = floor_candidates(chunk.content)
+        if floor:
+            accepted = _merge_floor(accepted, floor)
     spans = [
         build_chunk_span(
             pii_type=pii_type,

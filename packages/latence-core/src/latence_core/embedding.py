@@ -6,8 +6,8 @@ exercisable end to end offline (ADR-0007/0016) — with **no model, no weights, 
 to verify** (ADR-0012). This is that reference: a hashing embedder that maps text to a fixed
 ``dimension``-wide L2-normalised vector via a token-hash bag-of-words. It is deterministic
 (the same text always yields the same vector, so a seeded run is byte-identical) but it is
-**not** a semantic embedder — the default learned Embedder (``multilingual-e5-small``, MIT)
-is a pluggable Provider package, not a core dependency.
+**not** a semantic embedder — the default learned Embedder (IBM Granite Embedding r2,
+Apache-2.0; ADR-0045) is a pluggable Provider package, not a core dependency.
 """
 
 from __future__ import annotations

@@ -132,8 +132,8 @@ def test_provider_discovered_via_entry_point() -> None:
     assert cls is SentenceTransformersEmbedder
     profile = registry.profile("embedding.sentence_transformers")
     assert profile is not None
-    assert profile.license == "MIT"  # e5-small weights SPDX
-    assert profile.model_id == "intfloat/multilingual-e5-small"
+    assert profile.license == "Apache-2.0"  # Granite r2 weights SPDX
+    assert profile.model_id == "ibm-granite/granite-embedding-311m-multilingual-r2"
 
 
 def test_provider_passes_conformance_c1_to_c6(fake_st: None) -> None:

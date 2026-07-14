@@ -247,8 +247,8 @@ never a live database** (ADR-0017):
 
 Embeddings are **optional** (ADR-0017): the corpus exports its text whether or not an
 Embedder is wired. **`embedding.hashing`** ships in core as a deterministic, dependency-free
-reference `Embedder`; the learned `multilingual-e5-small` (MIT) is a pluggable Provider
-package, not a core dependency.
+reference `Embedder`; the learned default (IBM Granite Embedding r2, Apache-2.0) is a pluggable
+Provider package, not a core dependency.
 
 ```yaml
   - name: graph
