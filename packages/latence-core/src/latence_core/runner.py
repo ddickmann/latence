@@ -234,8 +234,9 @@ class LocalRunner:
         # StageMetrics. A LabelInducer Provider exposes ``induction_fallbacks`` /
         # ``induction_documents`` int attributes (how many documents fell back to config labels out
         # of how many attempted); the Runner reads them after the Stage runs and resets. A
-        # non-induction Provider → (0, 0).
-        self._last_stage_induction = (0, 0)
+        # non-induction Provider → (0, 0, 0). The third element is the loud empty-after-sanitization
+        # subset (documents that induced NOTHING usable even after the recovery re-prompt).
+        self._last_stage_induction = (0, 0, 0)
         # Per-Stage relation fan-out-guard tally, keyed by Stage name: (output-capped docs,
         # relations dropped [ADR-0033 / #63], input-capped docs, mentions dropped [#68]). A
         # RelationExtractor Provider exposes ``fanout_capped_documents``/
@@ -293,10 +294,14 @@ class LocalRunner:
         self._last_stage_retries = 0
         return count
 
-    def _drain_induction_tally(self) -> tuple[int, int]:
-        """Read + reset the schema-induction fail-open tally the just-run Stage reported (W4)."""
+    def _drain_induction_tally(self) -> tuple[int, int, int]:
+        """Read + reset the schema-induction fail-open tally the just-run Stage reported (W4).
+
+        Returns ``(fallbacks, documents, empty_after_sanitization)`` — the last being the loud
+        subset that induced nothing usable even after the recovery re-prompt.
+        """
         tally = self._last_stage_induction
-        self._last_stage_induction = (0, 0)
+        self._last_stage_induction = (0, 0, 0)
         return tally
 
     @staticmethod
@@ -336,21 +341,27 @@ class LocalRunner:
         return value if isinstance(value, int) else 0
 
     @staticmethod
-    def _provider_induction_tally(provider: object) -> tuple[int, int]:
+    def _provider_induction_tally(provider: object) -> tuple[int, int, int]:
         """The schema-induction fail-open tally a LabelInducer Provider exposes (W4, ADR-0038).
 
-        Returns ``(fallbacks, documents)``: how many documents fell back to config labels (a safety
-        net bit — malformed/truncated/schema-invalid/empty output, or an unreachable endpoint) out
-        of how many the Stage attempted. A Provider without the attributes (every non-induction
-        Provider) contributes ``(0, 0)`` — read defensively so the seam names no base class
-        (ADR-0004), the same discipline as ``_provider_retry_count`` / ``_provider_fanout``.
+        Returns ``(fallbacks, documents, empty_after_sanitization)``: how many documents fell back
+        to config labels (a safety net bit — malformed/truncated/schema-invalid/empty output, or an
+        unreachable endpoint) out of how many the Stage attempted, and the LOUD subset that induced
+        NOTHING usable even after the empty-recovery re-prompt (the quality-cliff signal). Any
+        without the attributes (every non-induction Provider) contributes ``(0, 0, 0)`` — read
+        defensively so the seam names no base class (ADR-0004), the same discipline as
+        ``_provider_retry_count`` / ``_provider_fanout``.
         """
 
         def _int_attr(name: str) -> int:
             value = getattr(provider, name, 0)
             return value if isinstance(value, int) else 0
 
-        return (_int_attr("induction_fallbacks"), _int_attr("induction_documents"))
+        return (
+            _int_attr("induction_fallbacks"),
+            _int_attr("induction_documents"),
+            _int_attr("induction_empty_after_sanitization"),
+        )
 
     # -- device routing (P3-F1, ADR-0036 §2) -------------------------------
 
@@ -1083,7 +1094,11 @@ class LocalRunner:
                 duration_ms=round(duration * 1000.0, 3),
             )
 
-            induction_fallbacks, induction_documents = self._drain_induction_tally()
+            (
+                induction_fallbacks,
+                induction_documents,
+                induction_empty_after_sanitization,
+            ) = self._drain_induction_tally()
             stage_metrics.append(
                 StageMetrics(
                     name=stage.name,
@@ -1096,6 +1111,7 @@ class LocalRunner:
                     endpoint_retries=self._drain_retry_count(),
                     induction_fallbacks=induction_fallbacks,
                     induction_documents=induction_documents,
+                    induction_empty_after_sanitization=induction_empty_after_sanitization,
                     **profile_fields,  # type: ignore[arg-type]
                 )
             )

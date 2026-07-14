@@ -1,6 +1,9 @@
 # Guided setup is a deterministic wizard that emits ONE opinionated, quality-baked stack config, run by `latence process`
 
-**Status: accepted** — W15-setup-wizard. Adds two CLI commands on the existing `latence` app —
+**Status: accepted** — W15-setup-wizard; **amended (profiles)** — the wizard now offers a
+`--profile` choice: `lite` (the original CPU-first stack, unchanged and default) or
+`enterprise-sota` (the pod-validated composed stack of ADR-0046 / `stacks/gpu-sota-glinker.yaml`),
+see §7. Adds two CLI commands on the existing `latence` app —
 `latence setup` (a guided, deterministic wizard that converges to a clean, validated, quality-baked
 stack config) and `latence process` (load + run a saved config) — plus a pure config generator
 (`latence_core.setup`). Builds on ADR-0015 (the declarative Pipeline contract this generates),
@@ -87,6 +90,38 @@ AND context-enriched** — the per-chunk context headers and the masking compose
 This closes the pre-W16 gap where the RAG chunks were enriched but un-masked (and the doc-level
 redactor could truncate PII past the model window). `latence setup --pii` now produces a genuinely
 PII-safe, context-enriched corpus; the file header and the CLI summary state this accurately.
+
+### 7. Profiles — `lite` (default) vs `enterprise-sota` (amendment)
+
+The generator branches **once** on `answers.profile`. `lite` is §2's stack, unchanged and
+byte-identical to before (the default when `--profile` is unset). `enterprise-sota` emits the
+pod-validated composed stack (ADR-0046, `stacks/gpu-sota-glinker.yaml`) so `latence setup` →
+`latence process` produces the SOTA stack out of the box rather than the lite path. Every seam swaps
+to its enterprise Provider while the spine shape, the ONE PII toggle, the W18 mask-before-extract
+option, determinism, and the dry-validation contract all carry over unchanged:
+
+* **parse → `parser.lighton_vllm`** (served-vLLM OCR). The wizard prompts for the endpoint
+  `base_url` (default `http://localhost:8000/v1`) and `model` (default `lightonocr`); `api_key`
+  defaults to `EMPTY`, `max_concurrency` to `8`. This is the one new per-deployment input the SOTA
+  profile adds (it replaces lite's parser-recommendation prompt).
+* **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
+  `[person, organization]`, `compile` left to the provider default `False`); **redact →
+  `redaction.gliner_pii`** (the same W16 chunk-level `redact → enrich → export_corpus` dataflow).
+* **disambiguate → `disambiguation.glinker`** — the neural GLinker linker + audited resolver
+  (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the IBM Granite r2
+  embedder (ADR-0045). `use_embedding_merge` / `min_similarity` are **not emitted** — the provider
+  defaults (embedding-merge OFF, fuzzy + distinguishing-token guard ON at 0.84) are precise by
+  default, so the config stays minimal and the ER is precise out of the box (ER-audit posture).
+* **complete → `graph_completion.ultra`** (`skip_if_unavailable: true` — a missing, un-vendored
+  checkpoint skips-with-flag, never fails the run), feeding `export.knowledge_graph`; the corpus
+  Export keeps the Granite r2 vectors.
+
+Every learned Stage runs on **CUDA** (the profile pins `device: cuda` — it is a GPU-pod stack); on a
+CPU-only host those Stages are skip-with-flag at `latence stack validate` (device honesty, P3-F1),
+and the generated config still passes the wizard's dry validation + `check_stack_capabilities`
+(un-installed heavy Providers are skipped, installed ones are class-vs-Protocol checked). The
+determinism contract holds per profile: `--non-interactive --profile enterprise-sota` with the same
+flags is byte-identical across runs.
 
 ## Consequences
 

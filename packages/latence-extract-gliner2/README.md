@@ -20,16 +20,28 @@ default extraction engine** (ADR-0036, W9), consolidating extraction onto GLiNER
     labels: [organization, person]
     relation_labels: [works for, partner of]
     threshold: 0.3
-    # quantize / compile default to true on cuda, false on cpu (W9 native gliner2 knobs)
+    # quantize defaults true on cuda / false on cpu (W9 native gliner2 fp16 knob)
+    # compile defaults OFF (opt-in) — W9-scaling recompile-thrash guard, see below
+    # intra_op_threads: 8   # W9-scaling many-core oversubscription cap (<=0 disables)
+    # batch_size: 16        # progress cadence, clamped to 64
 ```
 
-## Performance (W9)
+## Performance (W9) + scaling hardening (W9-scaling)
 
 The `gliner2` framework exposes **native** `quantize` (fp16) and `compile`
-(`torch.compile` + fused GPU kernels, no extra deps) load knobs — `GLiNER2.from_pretrained(id,
-quantize=True, compile=True)`. They default on for cuda, off for cpu, and are **guarded**: any
-quantize/compile fault degrades to a plain load, never a crash, at identical output. Speed
-numbers come from the maintainer's GPU pod run (never fabricated offline).
+(`torch.compile` + fused GPU kernels, no extra deps) load knobs. `quantize` defaults on for cuda,
+off for cpu, **guarded** (any fault degrades to a plain load, never a crash, at identical output).
+
+**`compile` defaults OFF (opt-in)** on this provider: gliner2 compiles with `dynamic=True`, which
+**recompiles per chunk-shape** and thrashes `torch._dynamo` past its recompile_limit on a real
+varied-length corpus (CPU-pinned, GPU idle, no progress). Enable `compile: true` ONLY for a
+homogeneous / uniform-length workload. Two further scaling guards for a many-core GPU host: torch
+**intra-op threads are capped** at load (`intra_op_threads`, default 8) so gliner2's internal
+batching can't oversubscribe to a CPU spin with the GPU idle; and the fp16 model is **explicitly
+moved to cuda and its device logged** (if a run is CPU-bound with the GPU idle despite this, set
+`quantize: false`). Extraction **streams in bounded batches with per-batch progress logging** so a
+large corpus never *appears* hung. Speed / GPU-placement numbers come from the maintainer's GPU pod
+run (never fabricated offline).
 
 ## Licensing (ADR-0012, verified 2026-07-10 — weights AND code)
 

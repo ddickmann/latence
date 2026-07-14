@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from latence_core.cli import app
-from latence_core.pipeline import Pipeline
+from latence_core.pipeline import Pipeline, Stage
 from latence_core.setup import (
     FINANCIAL_PII_LABELS,
     SetupAnswers,
@@ -28,8 +28,11 @@ from latence_core.setup import (
 )
 from latence_core.setup.wizard import (
     PARSER_OCR,
+    PARSER_OCR_VLLM,
     PARSER_PDF_TEXT,
     PARSER_UNIVERSAL,
+    PROFILE_LITE,
+    PROFILE_SOTA,
 )
 from typer.testing import CliRunner
 
@@ -67,6 +70,7 @@ def _answers(
     pii: bool = True,
     parser: str = PARSER_UNIVERSAL,
     extract_on: str = "unmasked",
+    profile: str = PROFILE_LITE,
 ) -> SetupAnswers:
     return SetupAnswers(
         source=_src_dir(tmp_path),
@@ -75,6 +79,7 @@ def _answers(
         device="auto",
         pii=pii,
         extract_on=extract_on,
+        profile=profile,
         extensions=("pdf", "txt"),
     )
 
@@ -115,6 +120,108 @@ def test_generated_config_validates(tmp_path: Path) -> None:
     """The dry validation (structural + DAG + capability wiring) accepts the generated config."""
     for pii in (True, False):
         validate_config_text(build_stack_config(_answers(tmp_path, pii=pii)))
+
+
+# -- the enterprise-sota profile ----------------------------------------------
+
+
+def _stage(text: str, name: str) -> Stage:
+    return next(s for s in Pipeline.from_yaml_text(text).stages if s.name == name)
+
+
+def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None:
+    """enterprise-sota: parse=lighton_vllm, disambiguate=glinker (Granite embedder), induce present
+    at corpus granularity — and the whole config passes the SAME dry validation."""
+    text = build_stack_config(_answers(tmp_path, profile=PROFILE_SOTA))
+    validate_config_text(text)  # raises on failure
+
+    parse = _stage(text, "parse")
+    assert parse.provider == PARSER_OCR_VLLM
+    assert parse.config["base_url"] == "http://localhost:8000/v1"
+    assert parse.config["model"] == "lightonocr"
+    assert parse.config["api_key"] == "EMPTY"  # pragma: allowlist secret  (vLLM placeholder)
+    assert parse.config["max_concurrency"] == 8
+
+    induce = _stage(text, "induce")
+    assert induce.provider == "label_inducer.llm"
+    assert induce.config["granularity"] == "corpus"
+    assert induce.config["max_labels"] == 40
+
+    extract = _stage(text, "extract")
+    assert extract.provider == "fused_entity_relation.gliner2"
+    assert extract.config["threshold"] == 0.3
+    assert extract.config["device"] == "cuda"
+
+    disambiguate = _stage(text, "disambiguate")
+    assert disambiguate.provider == "disambiguation.glinker"
+    assert disambiguate.config["device"] == "cuda"
+    assert disambiguate.config["context_window"] == 200
+    assert disambiguate.config["use_reranker"] is True
+    assert disambiguate.config["use_flash_deberta"] is True
+    # The Granite r2 embedder is the resolver's STS rung + the export vectors.
+    assert (
+        disambiguate.config["embedder"]["config"]["model"]
+        == "ibm-granite/granite-embedding-311m-multilingual-r2"
+    )
+    # The precision-by-default GLinker knobs are LEFT to the provider defaults (not emitted).
+    assert "use_embedding_merge" not in disambiguate.config
+    assert "min_similarity" not in disambiguate.config
+
+    # The enterprise redactor + ULTRA graph completion + Granite corpus vectors.
+    assert _stage(text, "redact").provider == "redaction.gliner_pii"
+    complete = _stage(text, "complete")
+    assert complete.provider == "graph_completion.ultra"
+    assert complete.config["skip_if_unavailable"] is True
+    export_corpus = _stage(text, "export_corpus")
+    assert (
+        export_corpus.config["embedder"]["config"]["model"]
+        == "ibm-granite/granite-embedding-311m-multilingual-r2"
+    )
+
+
+def test_sota_non_interactive_is_byte_identical(tmp_path: Path) -> None:
+    """`latence setup --non-interactive --profile enterprise-sota` is byte-identical across runs and
+    the saved config passes dry validation (the determinism/repro contract for the SOTA profile)."""
+    src = _src_dir(tmp_path)
+    out1 = tmp_path / "sota1.stack.yaml"
+    out2 = tmp_path / "sota2.stack.yaml"
+    args = [
+        "setup",
+        "--non-interactive",
+        "--profile",
+        PROFILE_SOTA,
+        "--source",
+        src,
+        "--storage",
+        f"file://{tmp_path}/out",
+        "--output",
+    ]
+    r1 = runner.invoke(app, [*args, str(out1)])
+    r2 = runner.invoke(app, [*args, str(out2)])
+    assert r1.exit_code == 0, r1.output
+    assert r2.exit_code == 0, r2.output
+    assert out1.read_bytes() == out2.read_bytes()  # determinism
+    validate_config_text(out1.read_text(encoding="utf-8"))
+    # The SOTA parse + disambiguate Providers actually landed in the saved file.
+    saved = out1.read_text(encoding="utf-8")
+    assert _stage(saved, "parse").provider == PARSER_OCR_VLLM
+    assert _stage(saved, "disambiguate").provider == "disambiguation.glinker"
+
+
+def test_lite_profile_is_unchanged_and_default(tmp_path: Path) -> None:
+    """Regression: the default profile is `lite`, and lite emits the prior (non-SOTA) stack — none of
+    the SOTA-only Providers leak into it, and the byte output equals an explicit-lite build."""
+    default_text = build_stack_config(_answers(tmp_path))  # no profile arg → default
+    lite_text = build_stack_config(_answers(tmp_path, profile=PROFILE_LITE))
+    assert default_text == lite_text
+    providers = {s.provider for s in Pipeline.from_yaml_text(lite_text).stages}
+    assert PARSER_OCR_VLLM not in providers
+    assert "disambiguation.glinker" not in providers
+    assert "graph_completion.ultra" not in providers
+    assert "redaction.gliner_pii" not in providers
+    # the prior lite disambiguator/redactor are intact
+    assert "disambiguation.embedding" in providers
+    assert "redaction.gliner2" in providers
 
 
 # -- the ONE PII toggle -------------------------------------------------------

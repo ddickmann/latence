@@ -99,18 +99,33 @@ mock (a provider skipping a net FAILS a test):
 - **Generous budget + truncation detection** — `max_tokens` default 2048; a `finish_reason ==
   "length"` reply retries ONCE at doubled budget, then falls back (never a truncated-JSON crash).
 - **Parse-and-repair** — `json.loads` in a guard; one corrective retry on malformed JSON, then fall
-  back. NEVER `eval`, NEVER execute model text.
+  back. The parser is also **wrapper-tolerant**: a JSON object the model buried in a Markdown fence
+  (```` ```json … ``` ````) or in surrounding prose is peeled out and re-parsed with the SAME strict
+  `json.loads` (it never loosens parsing — hallucinated noise still fails), so good labels wrapped in
+  chatter are recovered instead of silently discarded. NEVER `eval`, NEVER execute model text.
 - **Schema validation** — the parsed object must be `{entity_types,relation_types,pii_types}`, each a
   list of strings; anything else rejects → fall back. Extra keys ignored.
 - **Label sanitization** — per label: strip control/format chars, collapse whitespace, cap length ≤
   64, drop empties, dedupe case-insensitively; cap count per type ≤ 40, dropped items logged (no
-  silent truncation). A label is inert data for a downstream prompt, bounded so a malicious model
-  can't bloat it or smuggle megabytes.
+  silent truncation). Non-ASCII label text (German/Unicode, e.g. `Rechnungsnummer`) is PRESERVED —
+  only control/format chars are stripped — so a valid non-ASCII schema is never over-stripped to
+  empty. A label is inert data for a downstream prompt, bounded so a malicious model can't bloat it
+  or smuggle megabytes.
+- **Empty-induction recovery (robustness fix)** — a reply that parses + validates but sanitizes to an
+  EMPTY / below-`min_labels` label set is NOT silently accepted. That quiet degrade to the bare
+  config floor (`[person, organization]`) is precisely the quality cliff induce exists to fix — the
+  whole point of induce is the domain schema, so an empty induction is the noisy-output failure, not
+  a valid answer. The Provider **re-prompts ONCE** (the `EMPTY_RECOVERY_INSTRUCTION`, at a doubled
+  budget — the same "double the budget on retry" precedent as the truncation net) before falling
+  back, and only a still-empty result falls back — **LOUDLY**
+  (`StageMetrics.induction_empty_after_sanitization` + a WARNING), never a silent revert. `min_labels`
+  (default 1) is configurable: raise it to demand a richer schema before an induction is accepted.
 - **Fail-open, never crash (G1)** — ANY failure (network, auth, malformed, truncated-twice,
-  schema-invalid, empty, unreachable endpoint) leaves the record's `induced_labels` `None` so the
-  extractors use their config labels and the run continues; the failure is a typed, no-content log +
-  a Quality-Report note (`StageMetrics.induction_fallbacks` / `induction_documents`, folded via the
-  same defensive attribute seam as `endpoint_retries` — ADR-0004, no base class).
+  schema-invalid, empty-after-recovery, unreachable endpoint) leaves the record's `induced_labels`
+  `None` so the extractors use their config labels and the run continues; the failure is a typed,
+  no-content log + a Quality-Report note (`StageMetrics.induction_fallbacks` / `induction_documents`,
+  plus `induction_empty_after_sanitization` for the empty case, folded via the same defensive
+  attribute seam as `endpoint_retries` — ADR-0004, no base class).
 
 ### 6. Deterministic + overridable prompts
 
@@ -175,6 +190,44 @@ effective set (offline-fake equivalence + a no-induction control that proves the
 bearing). `induced_labels` `SCHEMA_VERSION` is unchanged (a pure per-string normal form + a new
 granularity mode, no record-shape change). The clean-corpus KG-vocabulary numbers are the pod
 maintainer's re-run (`granularity: corpus`), never fabricated here.
+
+## Status note — empty-after-sanitization robustness (induce-robustness)
+
+A live run on a real corpus logged `schema_induction fell back to config labels: empty after
+sanitization` — the LLM returned output that sanitized to an EMPTY label set, so induce **silently**
+reverted to the bare config floor (`[person, organization]`). On the same run's 2-document case
+induce produced a rich domain schema, so this is an **intermittent robustness gap**, not a total
+failure — but each silent revert is a quality cliff (a thin, generic KG — exactly the noisy-output
+problem induce exists to fix), hidden behind a single log line. **Root cause:** an all-empty (or
+below-`min_labels`) sanitized result was treated as a terminal outcome and quietly accepted as a
+fall-back. Three additive fixes, backward-compatible:
+
+1. **Empty-induction recovery, not silent accept.** When sanitization yields an empty / below-min
+   label set the Provider now **re-prompts once** (`EMPTY_RECOVERY_INSTRUCTION`, at a doubled budget
+   — the same precedent as the truncation retry) before falling back. A recovered induction is used;
+   only a still-empty result falls back. The re-prompt does not coerce the model into fabricating
+   types — a genuinely typeless document survives still-empty and falls back honestly.
+2. **Wrapper-tolerant parse.** The parser now recovers a JSON object the model wrapped in a Markdown
+   fence or in surrounding prose (peel the wrapper, re-parse with the SAME strict `json.loads`), so
+   valid labels buried in chatter are recovered instead of discarded. This never loosens parsing —
+   genuine garbage (single-quoted pseudo-JSON, prose with no braces) still fails. (Investigation also
+   confirmed the sanitizer does NOT over-strip valid non-ASCII/German labels — only control/format
+   chars are removed — so a German-only schema like `Rechnungsnummer` was never the cause; a
+   regression test now locks that in.)
+3. **Loud telemetry.** The empty case surfaces on its own Quality-Report field
+   (`StageMetrics.induction_empty_after_sanitization`, the loud subset of `induction_fallbacks`) plus
+   a WARNING, so an operator SEES "N documents induced no domain schema" directly rather than a
+   silent degrade.
+
+Tests (`test_label_inducer_provider.py`): `test_empty_induction_recovers_via_reprompt` (empty → real
+schema on the recovery re-prompt, no fallback); `test_empty_induction_persists_falls_back_loudly`
+(empty twice → fall back BUT with the telemetry flag, bounded to one re-prompt);
+`test_prose_wrapped_json_recovers_without_fallback` + `test_fenced_code_block_json_recovers_without_fallback`
+(wrapper-tolerant parse recovers on the first call); `test_german_unicode_labels_are_not_dropped_to_empty`
+(non-ASCII preserved); `test_below_min_labels_triggers_recovery` (`min_labels` bar);
+`test_empty_recovery_is_byte_identical_two_runs` (determinism preserved). `induced_labels`
+`SCHEMA_VERSION` is unchanged (no record-shape change — a new retry path, a new `StageMetrics` field,
+and a more tolerant parser).
 
 ### Tokenizer-mismatch caveat (W12-gliner-window)
 

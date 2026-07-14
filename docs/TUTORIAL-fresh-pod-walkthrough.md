@@ -157,9 +157,10 @@ latence process
 | Prompt | Default | Why it matters |
 |---|---|---|
 | **Source folder** | `file://$PWD/corpus` | The folder Latence reads. Validated to exist; its file types are **auto-detected** and reported. |
+| **Profile** | `lite` | **The tier.** `lite` (CPU-first, laptop-friendly — the stack in this table). `enterprise-sota` generates the pod-validated composed stack instead (see the box below). |
 | **Output / storage URI** | `file://$PWD/latence-out` | Where state + the exported RAG corpus and KG are written. |
-| **Parser** | recommended from the detected types | `parser.render` (universal / mixed), `parser.pdfplumber` (born-digital PDF text), or `parser.lighton` (OCR for scans/images). Confirm or override. |
-| **Device** | `auto` | `auto` picks CUDA when present, else CPU (skip-with-flag). |
+| **Parser** | recommended from the detected types | `parser.render` (universal / mixed), `parser.pdfplumber` (born-digital PDF text), or `parser.lighton` (OCR for scans/images). Confirm or override. *(enterprise-sota forces the served-vLLM `parser.lighton_vllm` and skips this prompt.)* |
+| **Device** | `auto` | `auto` picks CUDA when present, else CPU (skip-with-flag). *(enterprise-sota pins `cuda`.)* |
 | **Schema-induction LLM** | OpenRouter + `openai/gpt-4.1-mini` | The quality lever — a small LLM discovers your corpus's own `{entity, relation, pii}` schema. The **API key is read from the environment at run** (`$OPENROUTER_API_KEY`, or `$OPENAI_API_KEY` for a direct-OpenAI base URL) — **never stored** in the file. The wizard warns if it is unset. |
 | **PII redaction + guardrail screening** | ON | **The one optional toggle.** ON adds the `content_screen` + `redact` stages (learned **financial-PII** detection). OFF omits exactly those two stages. |
 | **Mask before extraction** (`--extract-on`) | `unmasked` | **Advanced (W18).** `unmasked` (default) — extraction reads the real text, the KG keeps entities. `masked` — extraction reads the REDACTED chunks so PII never reaches the KG (stricter posture; requires PII ON). |
@@ -185,6 +186,39 @@ latence setup --non-interactive \
   --output ./latence.stack.yaml
 latence process --config ./latence.stack.yaml --run-id run-0001
 ```
+
+> **The `enterprise-sota` profile (ADR-0046, `stacks/gpu-sota-glinker.yaml`).** Pass
+> `--profile enterprise-sota` (or pick it at the profile prompt) and the wizard emits the
+> **pod-validated composed stack** instead of the lite path — the SOTA half of every seam, wired and
+> dry-validated for you:
+>
+> - **parse → `parser.lighton_vllm`** — the served-vLLM LightOn OCR endpoint (the production OCR
+>   path, ~2.7× the in-process parser). The wizard prompts for the endpoint **`base_url`**
+>   (default `http://localhost:8000/v1`) and **`model`** (default `lightonocr`); `api_key` defaults
+>   to `EMPTY` (a local vLLM accepts any placeholder) and `max_concurrency` to `8`.
+> - **induce → `label_inducer.llm`** at **corpus** granularity (`max_labels 40`, `temperature 0`) —
+>   the same schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
+> - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
+>   `[person, organization]`) and **redact → `redaction.gliner_pii`** (chunk-level, financial-PII
+>   floor — the same W16 `redact → enrich → export_corpus` dataflow).
+> - **disambiguate → `disambiguation.glinker`** — the neural GLinker entity-linker + audited resolver
+>   (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the **IBM Granite r2**
+>   embedder. The precision-by-default knobs (embedding-merge OFF, fuzzy + distinguishing-token guard
+>   ON) ride the provider defaults — the config stays minimal and the ER is precise out of the box.
+> - **graph → `graph.canonical` → complete → `graph_completion.ultra`** (`skip_if_unavailable: true`
+>   — no vendored checkpoint means a graceful skip, never a failed run) → **`export.knowledge_graph`**
+>   + **`export.jsonl_parquet`** with the Granite r2 corpus vectors.
+>
+> Every learned Stage runs on **CUDA**; on a CPU-only host `latence stack validate` reports them
+> skip-with-flag (device honesty) and the generated config still validates. Fully scriptable:
+>
+> ```bash
+> latence setup --non-interactive --profile enterprise-sota \
+>   --source file:///workspace/corpus --storage file:///workspace/latence-out \
+>   --ocr-base-url http://localhost:8000/v1 --ocr-model lightonocr \
+>   --llm-base-url https://openrouter.ai/api/v1 --llm-model openai/gpt-4.1-mini \
+>   --pii --output ./latence.stack.yaml
+> ```
 
 > **PII note (W16, ADR-0042).** With **PII ON**, `redact` is a **chunk-level transform**: it
 > consumes the induced **chunk** stream and sets each chunk's `masked_content` (each chunk ≤ the

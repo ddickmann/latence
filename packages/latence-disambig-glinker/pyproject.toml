@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-disambig-glinker"
+version = "0.1.0"
+description = "Enterprise GLinker Disambiguation Provider — neural L2→L3→L4→L0 entity linking + audited 5-strategy resolver, ported from dataset-intelligence, for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "entity-resolution", "disambiguation", "entity-linking", "glinker", "nlp", "data-pipeline", "model-agnostic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLinker model stack ships with THIS
+# Provider package (a GPU package, NOT installed into the CPU-first dev/CI env). The neural glue
+# imports `from glinker import ProcessorFactory` — the `glinker` package (Knowledgator, PyPI 0.1.x,
+# Apache-2.0) that PROVIDES ProcessorFactory + the L2/L3/L4 stages; this is NOT the distinct `gliner`
+# extraction library (a different package, not imported here). The gliner-linker WEIGHTS
+# (knowledgator/gliner-linker-large-v1.0 + gliner-linker-rerank-v1.0) are Apache-2.0, the `glinker` +
+# `flashDeBERTa` LIBRARY code is Apache-2.0, and the OPTIONAL `faiss` (large-group embedding-merge
+# acceleration) is MIT — all verified permissive (2026-07-14; see THIRD-PARTY-LICENSES + ADR-0046).
+# Nothing downloads unless a Pipeline configures this Provider.
+# H-G1 dep caps: `glinker` is pre-1.0 (API moves across 0.x minors) and `flashdeberta` is <0.1, so
+# both carry an upper cap; `transformers`/`torch`/`huggingface-hub` carry a next-major cap so an API
+# break in a new major cannot silently enter the solved GPU env.
+# `faiss` is an OPTIONAL extra (the resolver falls back to brute-force when absent), so it is NOT a
+# hard dependency — install `latence-disambig-glinker[faiss]` on a GPU pod to accelerate large
+# label groups (>1000 entities/label).
+# The CPU-reachable path (KB build, neural linking glue, the 5-strategy resolver) is pure-Python +
+# numpy-free — numpy enters ONLY the OPTIONAL FAISS-GPU embedding-merge path (large label groups),
+# so it rides the `faiss` extra (faiss-cpu pulls numpy), NOT the base install.
+dependencies = [
+    "latence-core",
+    "glinker>=0.1,<0.2",
+    "flashdeberta>=0.0.5,<0.1",
+    "transformers>=4.40,<5",
+    "torch>=2.1,<3",
+    "huggingface-hub>=0.23,<1",
+]
+
+[project.optional-dependencies]
+# The FAISS-GPU acceleration path for the embedding-merge rung on large label groups (>1000). MIT.
+# NOTE (ADR-0046): the official GPU Faiss build ships via conda (`conda install -c pytorch
+# faiss-gpu`); the PyPI `faiss-gpu` wheel is a third-party-maintained build (declared MIT). Prefer
+# conda for GPU provenance; `faiss-cpu` (MIT, the actively-maintained PyPI wheel) also satisfies the
+# optional import + pulls numpy. The resolver falls back to brute-force when faiss/numpy is absent.
+faiss = ["faiss-cpu>=1.7", "numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+# Registers this Provider under the framework's discovery group (ADR-0004). Installing this package
+# makes 'disambiguation.glinker' available to any Pipeline with no core change, alongside the in-core
+# 'disambiguation.cascade' / 'disambiguation.exact_surface' and 'disambiguation.embedding' — a true
+# drop-in swap by one config line (ADR-0007), same DisambiguationRecord contract.
+[project.entry-points."latence.providers"]
+"disambiguation.glinker" = "latence_disambig_glinker.provider:GLinkerDisambiguator"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_disambig_glinker"]

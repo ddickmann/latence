@@ -55,7 +55,29 @@ FINANCIAL_PII_LABELS: tuple[str, ...] = (
 PARSER_UNIVERSAL = "parser.render"  # universal: mixed types (PDF/office/images), GPU-OCR sub
 PARSER_PDF_TEXT = "parser.pdfplumber"  # born-digital PDF text (CPU, no OCR)
 PARSER_OCR = "parser.lighton"  # OCR VLM for scans / images
+PARSER_OCR_VLLM = "parser.lighton_vllm"  # served-vLLM OCR endpoint (the enterprise-SOTA parse path)
 _KNOWN_PARSERS = frozenset({PARSER_UNIVERSAL, PARSER_PDF_TEXT, PARSER_OCR})
+
+# The two setup profiles (tiers). `lite` is the CPU-first, laptop-friendly default (unchanged); the
+# `enterprise-sota` profile emits the pod-VALIDATED composed stack (served-vLLM OCR + LLM schema
+# induction + fused GLiNER2 ER + the neural GLinker disambiguator + Granite r2 embeddings + ULTRA
+# graph completion — see stacks/gpu-sota-glinker.yaml). Both flow through the SAME pure generator.
+PROFILE_LITE = "lite"
+PROFILE_SOTA = "enterprise-sota"
+_KNOWN_PROFILES = frozenset({PROFILE_LITE, PROFILE_SOTA})
+
+# Enterprise-SOTA served-OCR endpoint defaults (the vLLM OpenAI-compatible LightOn-OCR server).
+# `base_url` + `model` are prompted (they are deployment-specific); `api_key` is a placeholder a
+# local vLLM accepts, and `max_concurrency` is the per-document page fan-out (the provider default).
+DEFAULT_OCR_BASE_URL = "http://localhost:8000/v1"
+DEFAULT_OCR_MODEL = "lightonocr"
+SOTA_OCR_API_KEY = "EMPTY"  # pragma: allowlist secret  (placeholder a local vLLM accepts; no key)
+SOTA_OCR_MAX_CONCURRENCY = 8
+
+# The enterprise-SOTA stack is a GPU-pod stack: every learned Stage runs on CUDA (its neural
+# biencoders/rerankers/OCR need a GPU). On a CPU-only host these Stages are skip-with-flag at
+# `latence stack validate` (device honesty, P3-F1) — the generated config still validates.
+SOTA_DEVICE = "cuda"
 
 # Extensions that read as scanned/image inputs (OCR territory) vs born-digital PDF.
 _IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"})
@@ -103,6 +125,13 @@ class SetupAnswers:
     device: str = "auto"  # auto | cpu | cuda — threaded onto every learned/GPU Stage.
     llm_base_url: str = DEFAULT_LLM_BASE_URL
     llm_model: str = DEFAULT_LLM_MODEL
+    # The profile/tier: `lite` (default, CPU-first, unchanged) or `enterprise-sota` (the
+    # pod-validated composed stack). The generator branches on this ONCE; other fields are shared.
+    profile: str = PROFILE_LITE
+    # Enterprise-SOTA served-OCR endpoint (only consumed by the SOTA profile's
+    # `parser.lighton_vllm` parse Stage; ignored by the lite profile).
+    ocr_base_url: str = DEFAULT_OCR_BASE_URL
+    ocr_model: str = DEFAULT_OCR_MODEL
     pii: bool = True  # The ONE optional toggle: PII redaction + guardrail screening.
     # W18 (ADR-0044) advanced option: which chunk-text variant extraction reads.
     #   "unmasked" (default) — extraction reads the raw chunk text; the KG keeps real entities
@@ -207,19 +236,66 @@ def _embedder_block(answers: SetupAnswers) -> dict[str, object]:
     return {"provider": "embedding.sentence_transformers", "config": config}
 
 
+def _sota_embedder_block() -> dict[str, object]:
+    """The enterprise-SOTA Granite r2 embedder block (disambiguation resolver + RAG-corpus vectors).
+
+    Always the GPU tier ``granite-embedding-311m-multilingual-r2`` (768-dim, bf16 +
+    ``flash_attention_2`` with a graceful sdpa fallback) on ``cuda`` — the SOTA stack is a GPU-pod
+    stack (ADR-0045). NOT EmbeddingGemma/vllm-factory. It powers the GLinker resolver's STS
+    embedding rung (kept as opt-in wiring even though embedding-merge rides OFF by default) AND the
+    ``export_corpus`` dense vectors.
+    """
+    return {
+        "provider": "embedding.sentence_transformers",
+        "config": {
+            "model": "ibm-granite/granite-embedding-311m-multilingual-r2",
+            "dimension": 768,
+            "device": SOTA_DEVICE,
+            "attn_implementation": "flash_attention_2",
+        },
+    }
+
+
 def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
     """Build the Pipeline mapping (the quality-baked GOOD stack) as an ordered dict.
 
-    Pure + deterministic: no env / clock / randomness. The ONE toggle (``answers.pii``) adds/omits
-    exactly the ``content_screen`` + ``redact`` stages; every other Stage is the mandatory spine.
-    The W18 advanced option ``answers.extract_on`` (default ``unmasked``, byte-identical) can set
-    ``masked``, which wires the extraction Stage AFTER ``redact`` and feeds it the redacted chunk
-    stream so PII never reaches the KG.
+    Pure + deterministic: no env / clock / randomness. Branches ONCE on ``answers.profile``:
+    ``lite`` (the CPU-first default) or ``enterprise-sota`` (the pod-validated composed stack). Both
+    share the pipeline-level wrapper (name, ``auto_generate_labels``, the W18 ``extract_on`` switch,
+    ``storage_uri``) and both honour the ONE PII toggle + the W18 mask-before-extract option; they
+    differ only in the per-Stage Providers/config the profile-specific stage builder emits.
     """
     masked_extract = answers.extract_on == "masked"
     if masked_extract and not answers.pii:
         msg = "extract_on: masked requires PII redaction ON (there is no redact Stage otherwise)."
         raise ValueError(msg)
+    if answers.profile == PROFILE_SOTA:
+        stages = _build_sota_stages(answers, masked_extract=masked_extract)
+    else:
+        stages = _build_lite_stages(answers, masked_extract=masked_extract)
+
+    pipeline: dict[str, object] = {
+        "name": STACK_NAME,
+        "auto_generate_labels": True,
+    }
+    # W18: only emit the switch when it deviates from the default, so an `unmasked` config stays
+    # byte-identical to pre-W18 (no new key).
+    if masked_extract:
+        pipeline["extract_on"] = "masked"
+    pipeline["storage_uri"] = answers.storage
+    pipeline["stages"] = stages
+    return pipeline
+
+
+def _build_lite_stages(
+    answers: SetupAnswers, *, masked_extract: bool
+) -> list[dict[str, object]]:
+    """The ``lite`` profile stages (CPU-first, unchanged from W15/W16/W18).
+
+    The ONE toggle (``answers.pii``) adds/omits exactly the ``content_screen`` + ``redact`` stages;
+    every other Stage is the mandatory spine. ``masked_extract`` wires ``extract`` AFTER ``redact``
+    so extraction reads the redacted chunk stream (W18) and PII never reaches the KG.
+    """
     stages: list[dict[str, object]] = []
 
     # 1) source — the folder + detected extensions.
@@ -418,17 +494,256 @@ def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
         }
     )
 
-    pipeline: dict[str, object] = {
-        "name": STACK_NAME,
-        "auto_generate_labels": True,
-    }
-    # W18: only emit the switch when it deviates from the default, so an `unmasked` config stays
-    # byte-identical to pre-W18 (no new key).
-    if masked_extract:
-        pipeline["extract_on"] = "masked"
-    pipeline["storage_uri"] = answers.storage
-    pipeline["stages"] = stages
-    return pipeline
+    return stages
+
+
+def _build_sota_stages(
+    answers: SetupAnswers, *, masked_extract: bool
+) -> list[dict[str, object]]:
+    """The ``enterprise-sota`` profile stages — the pod-VALIDATED composed stack.
+
+    Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: served
+    vLLM OCR (``parser.lighton_vllm``) → chunk[640] → LLM schema induction[corpus] → fused GLiNER2
+    entity+relation → learned PII redaction (``redaction.gliner_pii``) → profiling → the neural
+    **GLinker** disambiguator (``disambiguation.glinker`` + Granite r2 STS embedder) → canonical KG
+    → **ULTRA** graph completion (skip-with-flag when absent) → KG + context-enriched RAG-corpus
+    export (Granite r2 vectors). Every learned Stage runs on CUDA (``SOTA_DEVICE``).
+
+    The ONE PII toggle and the W18 mask-before-extract option ride exactly as in ``lite``: PII adds
+    ``content_screen`` + ``redact`` and wires ``redact → enrich → export_corpus`` (W16 chunk-level
+    masking); ``masked_extract`` moves ``extract`` after ``redact``. The GLinker/GLiNER2 provider
+    defaults (embedding-merge OFF, fuzzy+distinguishing-token-guard ON, ``compile=False``) are left
+    to ride — so the ER is precise by default and the config stays minimal.
+    """
+    stages: list[dict[str, object]] = []
+
+    # 1) source — the folder + detected extensions.
+    stages.append(
+        {
+            "name": "source",
+            "capability": "source",
+            "provider": "source.local_folder",
+            "config": {
+                "path": answers.source,
+                "sensitivity": "internal",
+                "extensions": list(answers.extensions),
+            },
+        }
+    )
+
+    # 2) intake screening (always) — reject oversized / malformed / zip-bomb files.
+    stages.append(
+        {
+            "name": "intake_screen",
+            "capability": "intake_screening",
+            "provider": "screening.intake_signature",
+            "depends_on": ["source"],
+            "config": {"max_bytes": 2097152, "max_zip_ratio": 50.0},
+        }
+    )
+
+    # 3) parse — the served-vLLM LightOn-OCR endpoint (the production OCR path, ~2.7x in-process).
+    stages.append(
+        {
+            "name": "parse",
+            "capability": "parse",
+            "provider": PARSER_OCR_VLLM,
+            "depends_on": ["intake_screen"],
+            "config": {
+                "base_url": answers.ocr_base_url,
+                "model": answers.ocr_model,
+                "api_key": SOTA_OCR_API_KEY,
+                "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
+            },
+        }
+    )
+
+    # 4) chunk at 640 (the mdeberta-window-calibrated near-max).
+    stages.append(
+        {
+            "name": "chunk",
+            "capability": "chunk",
+            "provider": "chunk.markdown",
+            "depends_on": ["parse"],
+            "config": {"max_tokens": 640, "overlap_tokens": 80, "min_tokens": 8},
+        }
+    )
+
+    # 5) content screening — the guardrail half of the ONE PII toggle.
+    induce_input = "chunk"
+    if answers.pii:
+        stages.append(
+            {
+                "name": "content_screen",
+                "capability": "content_screening",
+                "provider": "screening.content_keyword",
+                "depends_on": ["chunk"],
+            }
+        )
+        induce_input = "content_screen"
+
+    # 6) LLM schema induction (corpus granularity) — the one shared canonical schema.
+    stages.append(
+        {
+            "name": "induce",
+            "capability": "schema_induction",
+            "provider": "label_inducer.llm",
+            "depends_on": [induce_input],
+            "config": {
+                "model": answers.llm_model,
+                "base_url": answers.llm_base_url,
+                "granularity": "corpus",
+                "max_tokens": 2048,
+                "max_labels": 40,
+                "temperature": 0.0,
+            },
+        }
+    )
+
+    # 7) fused NER+RE in ONE pass (GLiNER2) — labels are a FLOOR, induced types union on. threshold
+    # 0.3 (the SOTA recall floor); compile defaults to False in the provider (left to ride).
+    extract_input = "redact" if masked_extract else "induce"
+    stages.append(
+        {
+            "name": "extract",
+            "capability": "fused_entity_relation",
+            "provider": "fused_entity_relation.gliner2",
+            "depends_on": [extract_input],
+            "config": {
+                "device": SOTA_DEVICE,
+                "labels": ["person", "organization"],
+                "relation_labels": ["works for", "partner of"],
+                "threshold": 0.3,
+            },
+        }
+    )
+
+    # 8) learned PII redaction (GLiNER-PII) — the PII half of the ONE toggle. W16 (ADR-0042): a
+    # chunk→chunk transform over the induced chunk stream that sets each chunk's masked_content, so
+    # `enrich` reads a masked stream and export_corpus is masked AND enriched.
+    if answers.pii:
+        stages.append(
+            {
+                "name": "redact",
+                "capability": "redaction",
+                "provider": "redaction.gliner_pii",
+                "depends_on": ["induce"],
+                "config": {
+                    "device": SOTA_DEVICE,
+                    "pii_labels": list(FINANCIAL_PII_LABELS),
+                    "max_len": 768,
+                    "threshold": 0.5,
+                },
+            }
+        )
+
+    # 9) corpus profiling.
+    stages.append(
+        {
+            "name": "profiling",
+            "capability": "profiling",
+            "provider": "profiling.statistical",
+            "depends_on": ["parse", "extract"],
+        }
+    )
+
+    # 10) the enterprise GLinker disambiguator (ADR-0046) — neural L2→L3→L4→L0 linking + the audited
+    # 5-strategy resolver. Granite r2 embedder attached (opt-in STS rung). use_embedding_merge /
+    # min_similarity are NOT set — the provider defaults (embedding-merge OFF, fuzzy + the
+    # distinguishing-token guard ON at 0.84) are precise by default and left to ride.
+    stages.append(
+        {
+            "name": "disambiguate",
+            "capability": "disambiguation",
+            "provider": "disambiguation.glinker",
+            "depends_on": ["extract"],
+            "config": {
+                "device": SOTA_DEVICE,
+                "context_window": 200,
+                "threshold": 0.3,
+                "use_reranker": True,
+                "use_flash_deberta": True,
+                "embedder": _sota_embedder_block(),
+            },
+        }
+    )
+
+    # 11) canonical, evidence-linked KG.
+    stages.append(
+        {
+            "name": "graph",
+            "capability": "graph_assembly",
+            "provider": "graph.canonical",
+            "depends_on": ["disambiguate"],
+            "config": {"corpus_id": STACK_NAME},
+        }
+    )
+
+    # 12) ULTRA graph completion (zero-shot inductive link prediction). skip_if_unavailable: the
+    # checkpoint is not vendored, so on a host without it the Stage skips-with-flag (no inferred
+    # edges) rather than failing the run.
+    stages.append(
+        {
+            "name": "complete",
+            "capability": "graph_completion",
+            "provider": "graph_completion.ultra",
+            "depends_on": ["graph"],
+            "config": {
+                "corpus_id": STACK_NAME,
+                "scorer": "auto",
+                "device": SOTA_DEVICE,
+                "target_precision": 0.9,
+                "skip_if_unavailable": True,
+            },
+        }
+    )
+
+    # 13) W13 context enrichment — project the KG back onto each (redacted, induced) chunk. With PII
+    # ON, enrich reads the REDACTED chunk stream (redact → enrich → export_corpus, W16); with PII
+    # OFF there is no redact stage, so enrich reads the induced chunk stream directly.
+    enrich_chunk_source = "redact" if answers.pii else "induce"
+    stages.append(
+        {
+            "name": "enrich",
+            "capability": "context_enrichment",
+            "provider": "context.kg_header",
+            "depends_on": [enrich_chunk_source, "graph"],
+            "config": {
+                "max_neighbors_per_entity": 4,
+                "max_triples": 6,
+                "min_entity_confidence": 0.0,
+                "min_edge_confidence": 0.0,
+            },
+        }
+    )
+
+    # 14a) KG export (asserted + ULTRA-completed edges).
+    stages.append(
+        {
+            "name": "export_kg",
+            "capability": "export",
+            "provider": "export.knowledge_graph",
+            "depends_on": ["graph", "complete"],
+            "config": {"basename": "graph"},
+        }
+    )
+
+    # 14b) RAG-corpus export from the ENRICHED chunk stream (context_columns + Granite r2 vectors).
+    stages.append(
+        {
+            "name": "export_corpus",
+            "capability": "export",
+            "provider": "export.jsonl_parquet",
+            "depends_on": ["enrich"],
+            "config": {
+                "basename": "records",
+                "context_columns": True,
+                "embedder": _sota_embedder_block(),
+            },
+        }
+    )
+
+    return stages
 
 
 def _render_header(answers: SetupAnswers) -> str:
@@ -444,6 +759,18 @@ def _render_header(answers: SetupAnswers) -> str:
         "#",
         "# A quality-baked, validated full-spine stack. Regenerate with `latence setup`; run with",
         "# `latence process`. Edit by hand freely — it is a plain, diffable stack config.",
+    ]
+    if answers.profile == PROFILE_SOTA:
+        lines += [
+            "#",
+            "# Profile: enterprise-sota — the pod-VALIDATED composed stack (ADR-0046,",
+            "#   stacks/gpu-sota-glinker.yaml): served-vLLM LightOn OCR (parser.lighton_vllm) +",
+            "#   LLM schema induction + fused GLiNER2 entity+relation + the neural GLinker",
+            "#   disambiguator + IBM Granite r2 embeddings + ULTRA graph completion. Every learned",
+            "#   Stage runs on CUDA; on a CPU-only host they skip-with-flag at `latence stack",
+            "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR box.",
+        ]
+    lines += [
         "#",
         f"# PII redaction + guardrail screening: {pii_line}",
     ]

@@ -49,3 +49,18 @@ REPAIR_INSTRUCTION = (
     '{"entity_types": ["..."], "relation_types": ["..."], "pii_types": ["..."]}. '
     "Each value MUST be a JSON array of short strings; use [] for an empty slot."
 )
+
+# The corrective retry prepended when the first reply parsed + validated but sanitized to an EMPTY
+# (or below-min) label set (the robustness fix — an all-empty induction is NOT a valid answer for a
+# real document, it is the noisy-output failure induce exists to fix). It re-prompts the model to
+# actually extract the salient types instead of returning empty arrays, before the Provider falls
+# back LOUDLY to config labels. Kept short + non-coercive: it re-states the task, it does not demand
+# the model fabricate types for a document that genuinely has none (a truly type-free document
+# survives the retry still-empty and falls back with the telemetried signal, not a hallucination).
+EMPTY_RECOVERY_INSTRUCTION = (
+    "Your previous response contained no types (all arrays were empty). Almost every real document "
+    "evidences at least one salient entity, relation, or PII type. Re-read the document and return "
+    "the types actually present. Respond with ONLY a single valid JSON object of EXACTLY this "
+    'shape: {"entity_types": ["..."], "relation_types": ["..."], "pii_types": ["..."]}. Only leave '
+    "a slot empty ([]) if that kind of type truly does not appear in the text."
+)

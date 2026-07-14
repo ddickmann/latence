@@ -463,13 +463,34 @@ def setup(
         str | None,
         typer.Option("--storage", help="Output/state Storage URI. Default: file://<cwd>/latence-out."),
     ] = None,
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            help="Setup tier: 'lite' (default — CPU-first, laptop-friendly) or 'enterprise-sota' "
+            "(the pod-validated composed stack: served-vLLM OCR + LLM induce + GLinker ER + "
+            "Granite + ULTRA). See stacks/gpu-sota-glinker.yaml.",
+        ),
+    ] = None,
     parser: Annotated[
         str | None,
         typer.Option(
             "--parser",
             help="Parser Provider: parser.render (universal), parser.pdfplumber (PDF text), or "
-            "parser.lighton (OCR). Default: recommended from the detected file types.",
+            "parser.lighton (OCR). Default: recommended from the detected file types. "
+            "Ignored by --profile enterprise-sota (which uses served-vLLM parser.lighton_vllm).",
         ),
+    ] = None,
+    ocr_base_url: Annotated[
+        str | None,
+        typer.Option(
+            "--ocr-base-url",
+            help="enterprise-sota only: the served-vLLM OCR endpoint (OpenAI-compatible).",
+        ),
+    ] = None,
+    ocr_model: Annotated[
+        str | None,
+        typer.Option("--ocr-model", help="enterprise-sota only: the served OCR model id."),
     ] = None,
     device: Annotated[
         str | None, typer.Option("--device", help="auto | cpu | cuda for the learned Stages.")
@@ -531,8 +552,15 @@ def setup(
     )
     from latence_core.setup.wizard import (
         _KNOWN_PARSERS,
+        _KNOWN_PROFILES,
         DEFAULT_LLM_BASE_URL,
         DEFAULT_LLM_MODEL,
+        DEFAULT_OCR_BASE_URL,
+        DEFAULT_OCR_MODEL,
+        PARSER_OCR_VLLM,
+        PROFILE_LITE,
+        PROFILE_SOTA,
+        SOTA_DEVICE,
     )
 
     interactive = not non_interactive
@@ -562,7 +590,23 @@ def setup(
     extensions = detect_extensions(src)
     typer.echo(f"Detected file types under the source folder: {', '.join(extensions)}", err=True)
 
-    # b. Output / storage URI.
+    # b. Profile / tier — 'lite' (default) or 'enterprise-sota' (the pod-validated composed stack).
+    chosen_profile = ask_text(
+        profile,
+        f"Profile ({PROFILE_LITE} | {PROFILE_SOTA})",
+        "lite = CPU-first, laptop-friendly; enterprise-sota = the validated GPU stack (served-vLLM "
+        "OCR + LLM induce + GLinker ER + Granite + ULTRA)",
+        PROFILE_LITE,
+    )
+    if chosen_profile not in _KNOWN_PROFILES:
+        typer.echo(
+            f"Unknown profile {chosen_profile!r}; expected one of {sorted(_KNOWN_PROFILES)}.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    is_sota = chosen_profile == PROFILE_SOTA
+
+    # c. Output / storage URI.
     store = ask_text(
         storage,
         "Output / storage URI",
@@ -570,28 +614,51 @@ def setup(
         f"file://{default_cwd}/latence-out",
     )
 
-    # c. Parser — recommend from detected types, confirm/override.
-    recommended = recommend_parser(extensions)
-    chosen_parser = ask_text(
-        parser,
-        "Parser (parser.render | parser.pdfplumber | parser.lighton)",
-        f"recommended '{recommended}' from your file types; render=universal, "
-        f"pdfplumber=born-digital PDF, lighton=OCR for scans",
-        recommended,
-    )
-    if chosen_parser not in _KNOWN_PARSERS:
-        typer.echo(
-            f"Unknown parser {chosen_parser!r}; expected one of {sorted(_KNOWN_PARSERS)}.", err=True
+    # d. Parser + OCR endpoint. enterprise-sota forces the served-vLLM OCR parser and prompts for
+    # the endpoint; lite recommends a parser from the detected file types (confirm/override).
+    ocr_base = DEFAULT_OCR_BASE_URL
+    ocr_mdl = DEFAULT_OCR_MODEL
+    if is_sota:
+        chosen_parser = PARSER_OCR_VLLM
+        ocr_base = ask_text(
+            ocr_base_url,
+            "OCR endpoint base URL (served vLLM, OpenAI-compatible)",
+            "the running vLLM OCR server the enterprise stack POSTs page-images to",
+            DEFAULT_OCR_BASE_URL,
         )
-        raise typer.Exit(code=2)
+        ocr_mdl = ask_text(
+            ocr_model,
+            "OCR model id",
+            "the model your vLLM server registers (the LightOn-OCR checkpoint id)",
+            DEFAULT_OCR_MODEL,
+        )
+    else:
+        recommended = recommend_parser(extensions)
+        chosen_parser = ask_text(
+            parser,
+            "Parser (parser.render | parser.pdfplumber | parser.lighton)",
+            f"recommended '{recommended}' from your file types; render=universal, "
+            f"pdfplumber=born-digital PDF, lighton=OCR for scans",
+            recommended,
+        )
+        if chosen_parser not in _KNOWN_PARSERS:
+            typer.echo(
+                f"Unknown parser {chosen_parser!r}; expected one of {sorted(_KNOWN_PARSERS)}.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
 
-    # d. Device.
-    dev = ask_text(
-        device,
-        "Device (auto | cpu | cuda)",
-        "learned Stages run here; 'auto' picks CUDA when present, else CPU (skip-with-flag)",
-        "auto",
-    )
+    # e. Device. enterprise-sota is a GPU-pod stack — every learned Stage runs on CUDA (skip-with-
+    # flag on a CPU host); lite lets the operator choose (default 'auto').
+    if is_sota:
+        dev = SOTA_DEVICE
+    else:
+        dev = ask_text(
+            device,
+            "Device (auto | cpu | cuda)",
+            "learned Stages run here; 'auto' picks CUDA when present, else CPU (skip-with-flag)",
+            "auto",
+        )
 
     # e. Schema induction LLM (mandatory for quality) — endpoint + model; key from env at run.
     base_url = ask_text(
@@ -666,6 +733,9 @@ def setup(
         device=dev,
         llm_base_url=base_url,
         llm_model=model,
+        profile=chosen_profile,
+        ocr_base_url=ocr_base,
+        ocr_model=ocr_mdl,
         pii=pii_on,
         extract_on=extract_mode,
         domain=domain_hint,
@@ -697,9 +767,12 @@ def setup(
     pipeline = Pipeline.from_yaml_text(config_text)
     typer.echo("")
     typer.echo(f"Saved quality-baked stack to: {output}")
+    typer.echo(f"  profile: {chosen_profile}")
     stage_flow = " -> ".join(s.name for s in pipeline.stages)
     typer.echo(f"  stages ({len(pipeline.stages)}): {stage_flow}")
     typer.echo(f"  parser: {chosen_parser}   device: {dev}")
+    if is_sota:
+        typer.echo(f"  OCR endpoint: {ocr_mdl} @ {ocr_base}")
     typer.echo(f"  schema induction: {model} @ {base_url}  (key from ${key_var})")
     typer.echo(
         "  PII redaction + guardrail screening: "

@@ -33,7 +33,8 @@ for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence
          latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
          latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \
-         latence-linkpred-ultra latence-schema-inducer latence-parser-render; do
+         latence-linkpred-ultra latence-schema-inducer latence-parser-render \
+         latence-disambig-glinker; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
 done
 ok "workspace synced + heavy sources installed --no-deps"
@@ -59,6 +60,7 @@ step "stack validate (Goal A — default + gpu-sota + gpu-sota-pod + gpu-ocr + l
 uv run latence stack validate stacks/default.yaml
 uv run latence stack validate stacks/gpu-sota.yaml
 uv run latence stack validate stacks/gpu-sota-pod.yaml
+uv run latence stack validate stacks/gpu-sota-glinker.yaml  # ADR-0046 enterprise GLinker; disambiguate skip-with-flag on CPU
 uv run latence stack validate stacks/gpu-ocr.yaml
 uv run latence stack validate stacks/universal-parse.yaml   # W5 any-file parser; Parse skip-with-flag on CPU
 uv run latence stack validate stacks/linkpred-base.yaml   # the reference completer RUNS on CPU

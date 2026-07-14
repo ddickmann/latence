@@ -143,6 +143,14 @@ class StageMetrics(BaseModel):
     # reads "N of M documents fell back to config labels".
     induction_fallbacks: int = Field(default=0)
     induction_documents: int = Field(default=0)
+    # Robustness fix (induce empty-after-sanitization): the LOUD subset of ``induction_fallbacks``
+    # where the induction PARSED + VALIDATED but sanitized to an empty / below-min label set and
+    # STILL did so after the empty-recovery re-prompt — i.e. the corpus induced nothing usable and
+    # the run degraded to the bare config-label floor (the quality cliff the old silent fallback
+    # hid). Surfaced on its own field so an operator sees "N documents induced no domain schema"
+    # directly rather than inferring it from a generic fallback count. 0 when every induction
+    # produced labels (or when a fallback was a different safety-net miss). A count only — no PII.
+    induction_empty_after_sanitization: int = Field(default=0)
     # P3-F1 (ADR-0036 §2): the provider-profile + device-routing columns for this Stage,
     # read from the Provider's declared ProviderProfile and the device seam's decision.
     # A Provider that declares no profile leaves ``compute``/``model_id``/``license`` None

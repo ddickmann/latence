@@ -671,3 +671,174 @@ def test_inference_time_compile_fault_runs_fallback_once_across_chunks(
     result = provider.extract_fused(chunks)
     assert len(result.mentions) == 4  # every chunk produced its mention
     assert provider._compile_disabled is True
+
+
+# --- W9-scaling: the Blackwell hang fixes (compile-off default, thread cap, batch progress, ------
+# --- fp16 cuda placement). CPU-testable via LATENCE_CUDA + a fake torch / a fake that records. ---
+
+
+def test_compile_defaults_off_even_on_cuda(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W9-scaling fix #1: compile is defaulted OFF (opt-in) EVEN on cuda (recompile-thrash guard).
+
+    Forces the cuda load path (LATENCE_CUDA=1): quantize 'auto' still resolves True, but compile is
+    forced False by the provider default — so from_pretrained gets compile=False, NOT True. This is
+    the whole fix for the compile=True recompile-thrash hang: the safe default, not the crash latch.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
+    assert fake_gliner2.last_kwargs.get("quantize") is True
+    assert fake_gliner2.last_kwargs.get("compile") is False
+
+
+def test_compile_opt_in_still_enables_on_cuda(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An operator who explicitly asks for compile still gets it (the knob is opt-in, not removed).
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor({**_config(), "compile": True}).extract_fused([_chunk("Alice waved.")])
+    assert fake_gliner2.last_kwargs.get("compile") is True
+
+
+def _fake_torch_recording(calls: list[int]) -> types.ModuleType:
+    module = types.ModuleType("torch")
+    module.set_num_threads = calls.append  # type: ignore[attr-defined]
+    return module
+
+
+def test_intra_op_threads_capped_at_load(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W9-scaling fix #2: torch intra-op threads are capped at load (default 8), clamped to cores.
+
+    Anti-false-green: a fake ``torch`` records the ``set_num_threads`` value, so a provider that
+    silently skipped the cap (the oversubscription hang) FAILS here.
+    """
+    import os
+
+    calls: list[int] = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_recording(calls))
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
+    assert calls == [min(8, os.cpu_count() or 8)]
+
+
+def test_intra_op_threads_config_override(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_recording(calls))
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor({**_config(), "intra_op_threads": 4}).extract_fused([_chunk("Alice waved.")])
+    assert calls == [4]
+
+
+def test_intra_op_threads_disabled_leaves_torch_default(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # intra_op_threads <= 0 is the explicit opt-out: no set_num_threads call (torch default kept).
+    calls: list[int] = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_recording(calls))
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor({**_config(), "intra_op_threads": 0}).extract_fused([_chunk("Alice waved.")])
+    assert calls == []
+
+
+def test_invalid_intra_op_threads_is_config_error() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="invalid intra_op_threads"):
+        Gliner2FusedExtractor({**_config(), "intra_op_threads": "lots"})
+
+
+def test_batch_size_clamped_to_max() -> None:
+    # W9-scaling fix #4: a large configured batch_size is CLAMPED so progress is always logged
+    # often enough that a big corpus never runs silently ("appears hung").
+    assert Gliner2FusedExtractor({**_config(), "batch_size": 1000})._batch_size == 64
+    assert Gliner2FusedExtractor({**_config(), "batch_size": 8})._batch_size == 8
+
+
+def test_incremental_batch_progress_recorded(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    """W9-scaling fix #4: extraction streams in bounded batches with per-batch progress.
+
+    5 chunks at batch_size=2 → 3 batches; the cumulative progress trail is (2, 4, 5) chunks, so a
+    provider that ran the whole corpus as one opaque pass (no incremental progress) FAILS here.
+    """
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    chunks = [_chunk("Alice waved.") for _ in range(5)]
+    provider = Gliner2FusedExtractor({**_config(), "batch_size": 2})
+    result = provider.extract_fused(chunks)
+    assert len(result.mentions) == 5
+    assert [p[0] for p in provider._progress] == [2, 4, 5]  # cumulative chunks per batch
+    assert [p[1] for p in provider._progress] == [2, 4, 5]  # cumulative mentions (1/chunk)
+
+
+def test_below_min_chars_chunks_not_counted_in_batches(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    # Empty/short chunks are skipped without a model call and do NOT count toward a batch — the
+    # progress cadence measures real extraction work, not skipped empties.
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    chunks = [_chunk("Alice waved."), _chunk("   "), _chunk("Bob ran now.")]
+    provider = Gliner2FusedExtractor({**_config(), "batch_size": 16})
+    provider.extract_fused(chunks)
+    assert len(provider._progress) == 1
+    assert provider._progress[0][0] == 2  # only the 2 non-empty chunks processed
+
+
+class _PlacingGLiNER2(_FakeGLiNER2):
+    """Records ``.to(target)`` calls + exposes a ``device`` so the fp16 cuda-placement fix is testable."""
+
+    to_calls: list[str] = []
+    device: str = "cpu"
+
+    def to(self, target: str) -> _PlacingGLiNER2:
+        type(self).to_calls.append(target)
+        type(self).device = target
+        return self
+
+
+@pytest.fixture()
+def placing_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_PlacingGLiNER2]:
+    module = types.ModuleType("gliner2")
+    module.GLiNER2 = _PlacingGLiNER2  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gliner2", module)
+    _PlacingGLiNER2.entities = []
+    _PlacingGLiNER2.relations = []
+    _PlacingGLiNER2.last_kwargs = {}
+    _PlacingGLiNER2.last_max_len = None
+    _PlacingGLiNER2.raise_on_optimized_load = False
+    _PlacingGLiNER2.raise_on_extract = False
+    _PlacingGLiNER2.compiled_forward_raises = False
+    _PlacingGLiNER2.to_calls = []
+    _PlacingGLiNER2.device = "cpu"
+    return _PlacingGLiNER2
+
+
+def test_fp16_model_moved_to_cuda_when_gpu_present(
+    placing_gliner2: type[_PlacingGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W9-scaling fix #3: when a GPU is present the (fp16) model is explicitly moved to cuda.
+
+    The defence against the fp16-eager GPU-idle hang (a fp16-converted model that silently stayed on
+    CPU → a CPU-bound spin). A provider that trusted from_pretrained to place it — and left it on
+    CPU — FAILS here.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    placing_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
+    assert placing_gliner2.to_calls == ["cuda"]
+    assert placing_gliner2.device == "cuda"
+
+
+def test_no_cuda_no_move(
+    placing_gliner2: type[_PlacingGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On a CPU-only host (no GPU) the model is NOT moved — placement is a cuda-only concern.
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    placing_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
+    assert placing_gliner2.to_calls == []

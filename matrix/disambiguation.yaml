@@ -30,6 +30,13 @@
 # entities_out / entities_merged / merges_below_policy / entities_linked. A real precision/recall
 # lands here automatically when a Disambiguation gold-set is declared on the base stack; until then
 # these honest counts are the comparison, never a fabricated P/R.
+# ENTERPRISE candidate (ADR-0046): `disambiguation.glinker` is the neural GLinker L2→L3→L4→L0
+# linking pipeline + the audited 5-strategy resolver ported from dataset-intelligence. compute="gpu"
+# (its gliner-linker biencoder needs a GPU), so on a CPU-only host it is a SKIPPED-with-flag row
+# (never a fabricated number, #64); the REAL measured row lands on a GPU pod
+# (LATENCE_CUDA=1 latence bake-off matrix/disambiguation.yaml). It is the genuinely-different
+# ENTERPRISE engine (neural context-linking + audited fusion) the cascade/embedding rows are
+# measured against — not another flavour of the same blocking.
 stage: disambiguation
 candidates:
   - provider: disambiguation.cascade
@@ -37,6 +44,15 @@ candidates:
     config:
       threshold: 0.90        # the context-safe default (pod margins); NOT the fragile bare-surface 0.83
       context_window: 160    # a sentence-ish window of the mention's chunk content
+  - provider: disambiguation.glinker
+    config:
+      device: cuda           # GPU/learned candidate — device-gated, skipped-with-flag on CPU
+      context_window: 200    # ±chars of chunk context for the neural linker input
+      # On a GPU pod the resolver's STS embedding-by-label merge uses Granite r2 (needs
+      # latence-embedder-st + a GPU); offline this row is skipped-with-flag, never fabricated:
+      # embedder:
+      #   provider: embedding.sentence_transformers
+      #   config: { model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2 }
       # Offline default: resolves the in-core deterministic `embedding.hashing`. For the real pod
       # separation, uncomment the learned Granite r2 embedder (needs latence-embedder-st + a GPU):
       # embedder:

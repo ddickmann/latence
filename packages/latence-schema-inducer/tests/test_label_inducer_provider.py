@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 
 import _fake_openai as fake
+import latence_schema_inducer.prompts as fake_prompts
 import pytest
 from latence_core.contracts import (
     ChunkRecord,
@@ -248,11 +249,143 @@ def test_injection_label_is_data_not_executed() -> None:
 
 
 def test_all_empty_slots_falls_back() -> None:
+    # A genuinely-typeless corpus: the model returns empty arrays, the recovery re-prompt (see
+    # below) ALSO returns empty (the exhausted-script default is empty), so it falls back — LOUDLY.
     provider = _provider()
     with fake.install([fake.reply(_good_reply(entity=[], relation=[], pii=[]))]):
         out = list(provider.induce([_chunk()]))
     assert out[0].induced_labels is None
     assert provider.induction_fallbacks == 1
+    assert provider.induction_empty_after_sanitization == 1  # the loud signal, not a silent revert
+
+
+# ---------------------------------------------------------------------------
+# Robustness fix — empty-after-sanitization: RECOVER via retry / tolerant parse,
+# and when it genuinely can't, fall back LOUDLY (never a silent degrade).
+# ---------------------------------------------------------------------------
+
+
+def test_empty_induction_recovers_via_reprompt() -> None:
+    # The live bug: the model returned schema-valid output that sanitized to an EMPTY label set, so
+    # induce silently reverted to the bare config floor. Now the empty first reply triggers ONE
+    # empty-recovery re-prompt; the model then returns a real domain schema → induce RECOVERS instead
+    # of falling back.
+    provider = _provider()
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=[], relation=[], pii=[])),  # sanitizes empty
+            fake.reply(_good_reply(entity=["borrower", "loan"], relation=["guarantees"], pii=[])),
+        ]
+    ) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is not None
+    assert out[0].induced_labels.entity_types == ["borrower", "loan"]
+    assert provider.induction_fallbacks == 0  # recovered — no degrade to config labels
+    assert provider.induction_empty_after_sanitization == 0
+    # Exactly one recovery re-prompt, carrying the empty-recovery instruction at a doubled budget.
+    assert len(script.calls) == 2
+    assert fake_prompts.EMPTY_RECOVERY_INSTRUCTION.split(".")[0] in script.calls[1]["messages"][1]["content"]
+    assert script.calls[1]["max_tokens"] == 4096  # doubled base budget on the recovery attempt
+
+
+def test_empty_induction_persists_falls_back_loudly() -> None:
+    # Genuine garbage / a truly typeless document: BOTH the first reply and the recovery re-prompt
+    # sanitize empty → it MUST still fall back, but LOUDLY (the telemetry flag), never silently.
+    provider = _provider()
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=[], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=[], relation=[], pii=[])),  # recovery also empty
+        ]
+    ) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is None
+    assert provider.induction_fallbacks == 1
+    assert provider.induction_empty_after_sanitization == 1  # loud Quality-Report signal
+    assert len(script.calls) == 2  # bounded: one recovery re-prompt, then give up
+
+
+def test_prose_wrapped_json_recovers_without_fallback() -> None:
+    # A model that (despite response_format=json_object) wraps its object in prose previously failed
+    # json.loads wholesale → repair → often still prose → silent fall-back, DISCARDING good labels.
+    # The hardened parser peels the prose and recovers the object on the first attempt.
+    provider = _provider()
+    body = _good_reply(entity=["patient", "medication"], relation=["prescribed"], pii=["mrn"])
+    wrapped = f"Sure! Here are the induced types:\n{body}\nLet me know if you need more."
+    with fake.install([fake.reply(wrapped)]) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is not None
+    assert out[0].induced_labels.entity_types == ["patient", "medication"]
+    assert provider.induction_fallbacks == 0
+    assert len(script.calls) == 1  # recovered on the first call — no repair/recovery round trip
+
+
+def test_fenced_code_block_json_recovers_without_fallback() -> None:
+    # A near-miss shape: the object inside a Markdown ```json fence. The hardened parser peels the
+    # fence and recovers it (strict json.loads on the body), no fall-back.
+    provider = _provider()
+    body = _good_reply(entity=["vendor"], relation=["supplies"], pii=["iban"])
+    fenced = f"```json\n{body}\n```"
+    with fake.install([fake.reply(fenced)]) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is not None
+    assert out[0].induced_labels.entity_types == ["vendor"]
+    assert out[0].induced_labels.pii_types == ["iban"]
+    assert provider.induction_fallbacks == 0
+    assert len(script.calls) == 1
+
+
+def test_german_unicode_labels_are_not_dropped_to_empty() -> None:
+    # A German corpus: non-ASCII label text must survive the sanitizer (only control/format chars
+    # are stripped) — it must NOT sanitize to empty and silently fall back to [person, organization].
+    provider = _provider()
+    reply = _good_reply(
+        entity=["Rechnungsnummer", "Geschäftsführer"],
+        relation=["gehört_zu"],
+        pii=["Personalausweisnummer"],
+    )
+    with fake.install([fake.reply(reply)]) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is not None
+    # Canonical form: casefold (ß→ss, umlauts preserved) + '_'→space; the German text is retained.
+    assert out[0].induced_labels.entity_types == ["rechnungsnummer", "geschäftsführer"]
+    assert out[0].induced_labels.relation_types == ["gehört zu"]
+    assert out[0].induced_labels.pii_types == ["personalausweisnummer"]
+    assert provider.induction_fallbacks == 0
+    assert len(script.calls) == 1  # no recovery needed — the sanitizer never dropped them
+
+
+def test_below_min_labels_triggers_recovery() -> None:
+    # min_labels raises the bar: an induction with fewer than min_labels total is "near-empty" →
+    # the same recovery re-prompt fires, and a richer second reply is accepted.
+    provider = _provider(min_labels=3)
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=["a"], relation=[], pii=[])),  # only 1 label < 3
+            fake.reply(_good_reply(entity=["a", "b"], relation=["r"], pii=[])),  # 3 labels
+        ]
+    ) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is not None
+    assert out[0].induced_labels.entity_types == ["a", "b"]
+    assert provider.induction_fallbacks == 0
+    assert len(script.calls) == 2
+
+
+def test_empty_recovery_is_byte_identical_two_runs() -> None:
+    # Determinism/idempotency preserved across the recovery path (temperature 0, stable order).
+    dumps = []
+    for _ in range(2):
+        provider = _provider()
+        with fake.install(
+            [
+                fake.reply(_good_reply(entity=[], relation=[], pii=[])),
+                fake.reply(_good_reply(entity=["borrower", "loan"], relation=["guarantees"])),
+            ]
+        ):
+            out = list(provider.induce([_chunk(index=0), _chunk(index=1)]))
+        dumps.append([c.model_dump_json() for c in out])
+    assert dumps[0] == dumps[1]
 
 
 # ---------------------------------------------------------------------------

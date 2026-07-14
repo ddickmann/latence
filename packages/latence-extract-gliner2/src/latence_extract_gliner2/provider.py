@@ -49,9 +49,13 @@ Licensing (ADR-0012 / research-diligence, verified 2026-07-10 — weights AND co
 
 The ``gliner2`` import is deferred to first use (ADR-0016) so importing this module (for Provider
 discovery) never requires torch; a missing optional dep raises a clear error only when the Provider
-is run. W9 perf seam: the native ``quantize`` (fp16) + ``compile`` (torch.compile + fused GPU
-kernels) load knobs default True on cuda / False on cpu, guarded so a quantize/compile fault
-degrades to a plain load (never a crash).
+is run. W9 perf seam: the native ``quantize`` (fp16) load knob defaults True on cuda / False on cpu,
+guarded so a fault degrades to a plain load (never a crash). W9-scaling hardening (Blackwell): the
+native ``compile`` knob defaults **OFF** (opt-in) because gliner2's ``dynamic=True`` compile
+recompile-thrashes on varied-length production chunks; torch intra-op threads are capped at load
+(default 8) to stop a many-core host oversubscribing to a CPU spin with the GPU idle; the fp16 model
+is explicitly moved to cuda and its device logged (the fp16-on-CPU defence); and extraction streams
+in bounded batches with per-batch progress logging so a large corpus never *appears* hung.
 """
 
 from __future__ import annotations
@@ -66,10 +70,14 @@ from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
+from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
+    cap_intra_op_threads,
+    ensure_gliner2_on_cuda,
     is_compile_backend_failure,
     load_gliner2_optimized,
     resolve_gliner2_knob,
+    resolve_intra_op_threads,
     resolve_max_len,
 )
 from latence_core.providers.profile import ProviderProfile
@@ -85,10 +93,28 @@ if TYPE_CHECKING:
 # over an mdeberta-v3 encoder via the fastino GLiNER2 framework.
 _DEFAULT_MODEL = "fastino/gliner2-multi-v1"
 
-# The default number of chunks sharing ONE fused forward pass. A sensible GPU value (the P8
-# autotuner overrides per-device); purely memory-shaping — the emitted mentions/relations are
-# record-for-record identical to a per-chunk loop for any positive batch size (ADR-0033).
+# The default streaming batch size: the number of chunks processed between progress checkpoints
+# (each chunk is still ONE bounded ≤ max_len forward — this provider does not pack multiple chunks
+# into a single native call, so batch_size shapes the PROGRESS cadence, not a padded batch tensor).
+# Bounded by _MAX_BATCH_SIZE so a large configured value can never make the stage run silently for
+# minutes with no visible progress (the "appears hung" failure). The emitted mentions/relations are
+# record-for-record identical for any positive batch size (input-order, per-chunk — ADR-0033).
 _DEFAULT_BATCH_SIZE = 16
+
+# The hard cap on the streaming batch (progress cadence). A configured batch_size above this is
+# clamped so extraction ALWAYS logs incremental progress at least this often on a large corpus —
+# the "a large single batch must never wedge / silently stall the stage" guarantee (W9-scaling).
+_MAX_BATCH_SIZE = 64
+
+# W9-scaling: torch.compile defaults OFF for this provider (opt-in only). gliner2 compiles with
+# ``dynamic=True``, which RECOMPILES per distinct chunk-shape; on a real varied-length corpus that
+# thrashes torch._dynamo past its recompile_limit (measured: worker pinned ~290% CPU, GPU 0%, no
+# progress after ~50 min). The pod-measured 2.83×/1.74× was on UNIFORM batch shapes, not production
+# corpora. Compile stays available as a config knob (``compile: true``) for a homogeneous workload,
+# with the docstring warning. NOTE: the W9 inference-time reload-uncompiled latch only catches
+# compile *crashes* (BackendCompilerFailed), NOT this silent recompile *thrash* — so the safe
+# default is the real fix, not the latch.
+_COMPILE_DEFAULT = False
 
 
 class Gliner2FusedExtractor:
@@ -115,15 +141,31 @@ class Gliner2FusedExtractor:
             offsets unreliable); this bounds the window explicitly. CAVEAT: the chunker
             (``chunk.markdown`` ``max_tokens``) counts in a DIFFERENT tokenizer, ~1.2× fewer tokens
             than mdeberta — keep the chunk cap ≤ ~640 for this 768 window; the guard is the backstop
-        batch_size: int  — how many chunks share ONE fused forward pass (default 16; the P8
-            autotuner overrides per-device). Purely memory-shaping: the emitted mentions AND
-            relations (offsets/labels/endpoints/order) are record-for-record identical for any
-            positive batch size. Must be ``>= 1``.
+        batch_size: int  — the streaming **progress cadence**: how many chunks are processed
+            between incremental progress checkpoints (default 16; clamped to 64). Each chunk is
+            still ONE bounded ≤ ``max_len`` forward — this provider does NOT pack multiple chunks
+            into one native call — so batch_size shapes the progress/GC granularity, not a padded
+            batch tensor; the emitted mentions AND relations (offsets/labels/endpoints/order) are
+            record-for-record identical for any positive batch size. Must be ``>= 1``. The clamp
+            guarantees a large corpus always logs progress often enough to never *appear* hung.
+        intra_op_threads: int  — cap on torch **intra-op** threads applied at load (W9-scaling,
+            default 8; ``<= 0`` disables the cap). On a many-core host gliner2's internal batching
+            oversubscribes torch's default ``os.cpu_count()`` intra-op pool to ~cpu_count threads —
+            a measured CPU spin with the GPU idle and no progress (``OMP_NUM_THREADS`` does NOT fix
+            it: torch owns its own pool once imported). Clamped to ``os.cpu_count()``; guarded so a
+            torch-free/failed cap is a logged no-op.
         quantize: bool | 'auto'  — gliner2 native ``quantize`` (fp16) load knob (W9, default
-            ``auto`` → True on cuda / False on cpu). Guarded → plain load on any fault.
+            ``auto`` → True on cuda / False on cpu). Guarded → plain load on any fault. When on, the
+            model is explicitly moved to cuda after load and its device is logged (W9-scaling), so a
+            fp16-converted model that silently stayed on CPU is caught, not a silent CPU spin. Set
+            ``quantize: false`` if a run is CPU-bound with the GPU idle despite placement.
         compile: bool | 'auto'  — gliner2 native ``compile`` (torch.compile + fused GPU kernels)
-            load knob (W9, default ``auto`` → True on cuda / False on cpu). Guarded like
-            ``quantize``.
+            load knob. **Default OFF** (opt-in) for this provider (W9-scaling): gliner2 compiles
+            with ``dynamic=True`` and RECOMPILES per distinct chunk-shape, which thrashes
+            torch._dynamo past its recompile_limit on a real varied-length corpus (CPU-pinned, GPU
+            idle, no progress). Enable ``compile: true`` ONLY for a homogeneous / uniform-length
+            workload. Guarded like ``quantize``; the inference-time reload-uncompiled latch catches
+            compile *crashes*, but NOT the recompile *thrash* — hence the off default.
 
     Fulfils BOTH the EntityExtractor and the FusedEntityRelationExtractor seam: it also exposes
     ``extract`` so it can stand in for a plain Entity-Extraction Stage when a Pipeline wants only
@@ -172,9 +214,12 @@ class Gliner2FusedExtractor:
             batch=True,
             cost_per_1k=None,
             perf_note=(
-                "gliner2 native quantize (fp16) + compile (torch.compile + fused GPU kernels) on "
-                "cuda, off on cpu (W9; pod-measured 1.74× combined NER+RE at byte-identical "
-                "output; guarded → plain load on any fault)"
+                "gliner2 native quantize (fp16) on cuda (W9; pod-measured 1.74× combined NER+RE at "
+                "byte-identical output; guarded → plain load on any fault; model moved to cuda + "
+                "device logged post-load). compile defaults OFF (W9-scaling: dynamic=True "
+                "recompile-thrashes on varied-length corpora; opt-in for uniform workloads). "
+                "Intra-op threads capped (default 8) against many-core oversubscription; "
+                "extraction streams in bounded batches with per-batch progress logging"
             ),
         )
 
@@ -203,25 +248,42 @@ class Gliner2FusedExtractor:
         # extract_entities/extract_relations take a native ``max_len``; past it the model silently
         # truncates (tail entities/relations lost, offsets unreliable). Explicit + configurable.
         self._max_len = resolve_max_len(config)
-        self._batch_size = validate_batch_size(
+        # Streaming progress cadence, clamped to _MAX_BATCH_SIZE so a large configured value can
+        # never let the stage run for minutes with no visible progress (W9-scaling): a corpus always
+        # checkpoints/logs at least every _MAX_BATCH_SIZE chunks.
+        requested_batch = validate_batch_size(
             config.get("batch_size", _DEFAULT_BATCH_SIZE),
             provider_name="fused_entity_relation.gliner2",
         )
-        # The perf-seam config knobs (quantize / compile), read at load (W9). Validate them eagerly
-        # (fail-fast at construction, like batch_size): an invalid value is an operator ConfigError
-        # up front, not a native fault buried in the lazy load. device=None ⇒ the torch-free CUDA
-        # probe (GLiNER2 auto-places), matching where the model will actually land.
+        self._batch_size = min(requested_batch, _MAX_BATCH_SIZE)
+        # W9-scaling: default torch.compile OFF for this provider (opt-in only) — gliner2's
+        # dynamic=True compile recompile-thrashes on varied-length production chunks. An operator
+        # who sets compile explicitly still gets it; absent, it is forced off. The perf-seam load
+        # (load_gliner2_optimized) reads compile from self._config, so injecting the default here is
+        # the single source of truth for both the eager validation below and the lazy load.
+        load_config: dict[str, Any] = dict(config)
+        if "compile" not in load_config:
+            load_config["compile"] = _COMPILE_DEFAULT
+        # The perf-seam config knobs (quantize / compile) + the intra-op thread cap, read at load
+        # (W9 / W9-scaling). Validate them eagerly (fail-fast at construction, like batch_size): an
+        # invalid value is an operator ConfigError up front, not a native fault buried in the lazy
+        # load. device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places), matching where the
+        # model will actually land.
         try:
-            resolve_gliner2_knob("quantize", None, config)
-            resolve_gliner2_knob("compile", None, config)
+            resolve_gliner2_knob("quantize", None, load_config)
+            resolve_gliner2_knob("compile", None, load_config)
+            self._intra_op_threads = resolve_intra_op_threads(load_config)
         except ValueError as exc:
             msg = f"fused_entity_relation.gliner2: {exc}"
             raise ConfigError(msg) from exc
-        self._config: dict[str, Any] = dict(config)
+        self._config: dict[str, Any] = load_config
         self._model: Any = None
         # Set once the inference-time compile guard has re-loaded the uncompiled model (W9), so the
         # fallback runs at most once per provider instance.
         self._compile_disabled: bool = False
+        # W9-scaling: the per-batch cumulative progress trail (chunks, mentions, relations), filled
+        # as extract_fused streams batches — empty until the first extract, readable for forensics.
+        self._progress: list[tuple[int, int, int]] = []
 
     # -- lazy model load ----------------------------------------------------
 
@@ -239,16 +301,32 @@ class Gliner2FusedExtractor:
     def _load_model(self) -> Any:
         if self._model is not None:
             return self._model
+        # W9-scaling: cap torch intra-op threads BEFORE the load/first forward so gliner2's
+        # internal batching cannot oversubscribe a many-core host (the ~cpu_count-thread CPU spin
+        # with the GPU idle). Guarded → a torch-free/failed cap is a logged no-op.
+        cap_intra_op_threads(
+            self._intra_op_threads, provider_name="fused_entity_relation.gliner2"
+        )
         # W9 perf seam: the gliner2 framework exposes NATIVE quantize (fp16) + compile
         # (torch.compile + fused GPU kernels) kwargs on from_pretrained — pod-measured 1.74×
-        # combined NER+RE at byte-identical output. Default True on cuda / False on cpu (or config),
-        # GUARDED so a quantize/compile fault degrades to a plain load (throughput only, never a
+        # combined NER+RE at byte-identical output. quantize defaults True on cuda / False on cpu;
+        # compile is defaulted OFF here (W9-scaling recompile-thrash guard) unless the operator opts
+        # in. GUARDED so a quantize/compile fault degrades to a plain load (throughput only, never a
         # crash). device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places on cuda).
         self._model = load_gliner2_optimized(
             self._gliner2_cls().from_pretrained,
             self._model_id,
             None,
             self._config,
+            provider_name="fused_entity_relation.gliner2",
+        )
+        # W9-scaling: when a GPU is present, ensure the (fp16) model is actually on cuda and LOG its
+        # device — the defence against the fp16-eager GPU-idle hang (a fp16-converted model that
+        # silently stayed on CPU → a CPU-bound spin). Best-effort + guarded (never crashes); a model
+        # from_pretrained already placed correctly makes the move a harmless no-op.
+        ensure_gliner2_on_cuda(
+            self._model,
+            cuda=cuda_available(),
             provider_name="fused_entity_relation.gliner2",
         )
         return self._model
@@ -277,6 +355,12 @@ class Gliner2FusedExtractor:
             cfg,
             provider_name="fused_entity_relation.gliner2",
         )
+        # Keep the uncompiled reload on cuda too (W9-scaling) — the placement/logging is idempotent.
+        ensure_gliner2_on_cuda(
+            self._model,
+            cuda=cuda_available(),
+            provider_name="fused_entity_relation.gliner2",
+        )
         return self._model
 
     # -- fused extraction ---------------------------------------------------
@@ -290,33 +374,58 @@ class Gliner2FusedExtractor:
         native gliner2 calls (``extract_entities`` + ``extract_relations``, both
         ``include_spans=True``). The per-chunk record building (offset/page resolution, relation→
         mention span resolution) is UNCHANGED from the relex path; emission is in input (chunk)
-        order. The in-flight state is bounded per chunk (never the whole corpus, ADR-0033).
+        order. The in-flight *model* state is bounded per chunk (each forward is one ≤ ``max_len``
+        call, never the whole corpus, ADR-0033).
+
+        **W9-scaling — incremental, batch-granular progress:** chunks are processed in bounded
+        batches of ``batch_size`` (clamped to :data:`_MAX_BATCH_SIZE`); after each batch the
+        provider logs cumulative progress (chunks / mentions / relations). On a large corpus (the
+        diagnosed 2,802-chunk run) this means the stage emits a steady progress trail instead of
+        running silently for tens of minutes — so a slow run is visible, never "appears hung", and
+        the log doubles as a coarse resume-forensics trail alongside the Runner's checkpoint writes.
         """
         loaded = False
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
+        processed = 0
+        #: cumulative (chunks_processed, mentions, relations) recorded per batch — the progress
+        #: trail an operator (or a test) reads to confirm the stage streams incrementally.
+        self._progress = []
 
-        for chunk in chunks:
-            if len(chunk.content.strip()) < self._min_chars:
-                continue
+        for batch_count, batch in enumerate(
+            _iter_batches(chunks, self._batch_size, self._min_chars), start=1
+        ):
             if not loaded:
                 self._load_model()
                 loaded = True
-            # W4 label-source seam (ADR-0038): UNION the config labels with the chunk's induced
-            # entity/relation types, deduped + order-stable, per slot. Absent ⇒ the config labels.
-            entity_labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.ENTITY)
-            relation_labels = effective_labels(
-                self._relation_labels, chunk.induced_labels, LabelSlot.RELATION
+            for chunk in batch:
+                # W4 label-source seam (ADR-0038): UNION the config labels with the chunk's induced
+                # entity/relation types, deduped + order-stable, per slot. Absent ⇒ config labels.
+                entity_labels = effective_labels(
+                    self._labels, chunk.induced_labels, LabelSlot.ENTITY
+                )
+                relation_labels = effective_labels(
+                    self._relation_labels, chunk.induced_labels, LabelSlot.RELATION
+                )
+                # The forward reads self._model (so an inference-time compile fallback that re-loads
+                # the uncompiled model is picked up transparently on the next call, W9).
+                raw_entities = self._extract_entities(chunk.content, entity_labels)
+                raw_relations = self._extract_relations(chunk.content, relation_labels)
+                chunk_mentions, chunk_relations = self._build_records(
+                    chunk, raw_entities, raw_relations
+                )
+                mentions.extend(chunk_mentions)
+                relations.extend(chunk_relations)
+                processed += 1
+            self._progress.append((processed, len(mentions), len(relations)))
+            _log.info(
+                "fused_entity_relation.gliner2: extract progress — batch %d (%d chunks done, "
+                "%d mentions, %d relations)",
+                batch_count,
+                processed,
+                len(mentions),
+                len(relations),
             )
-            # The forward reads self._model (so an inference-time compile fallback that re-loads the
-            # uncompiled model is picked up transparently on the next call, W9).
-            raw_entities = self._extract_entities(chunk.content, entity_labels)
-            raw_relations = self._extract_relations(chunk.content, relation_labels)
-            chunk_mentions, chunk_relations = self._build_records(
-                chunk, raw_entities, raw_relations
-            )
-            mentions.extend(chunk_mentions)
-            relations.extend(chunk_relations)
         return FusedExtraction(mentions=mentions, relations=relations)
 
     def _forward(self, op: str, invoke: Callable[[Any], Any]) -> Any:
@@ -528,6 +637,31 @@ class Gliner2FusedExtractor:
             )
             emitted += 1
         return mentions, relations
+
+
+def _iter_batches(
+    chunks: Iterable[ChunkRecord], batch_size: int, min_chars: int
+) -> Iterable[list[ChunkRecord]]:
+    """Group the (lazy) chunk stream into bounded batches of processable chunks (W9-scaling).
+
+    Chunks whose stripped content is below ``min_chars`` are dropped here (skipped without a model
+    call, exactly as before), so a batch is ``batch_size`` chunks that will each be extracted — the
+    progress cadence counts real work, not skipped empties. ``batch_size`` is already clamped to
+    :data:`_MAX_BATCH_SIZE` by the provider, so a batch is bounded regardless of config. Streaming:
+    it consumes the input iterable lazily and never materialises more than one batch at a time (the
+    accumulated OUTPUT records are inherent to the FusedExtraction contract, but the input transient
+    stays O(batch_size), ADR-0033).
+    """
+    batch: list[ChunkRecord] = []
+    for chunk in chunks:
+        if len(chunk.content.strip()) < min_chars:
+            continue
+        batch.append(chunk)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def _relation_confidence(rel: dict[str, Any]) -> float:

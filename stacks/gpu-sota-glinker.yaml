@@ -1,0 +1,152 @@
+# stacks/gpu-sota-glinker.yaml — the ENTERPRISE GLinker variant of stacks/gpu-sota-pod.yaml.
+#
+# Identical to stacks/gpu-sota-pod.yaml (same fused Entity+Relation Stage, same learned Redaction,
+# same Graph Assembly → completion → KG/RAG export spine, same in-process Granite r2 corpus
+# embedder) with ONE difference: the Disambiguation Stage is the enterprise
+# `disambiguation.glinker` (ADR-0046) instead of `disambiguation.embedding` — the neural GLinker
+# L2→L3→L4→L0 entity-linking pipeline + the audited 5-strategy resolver ported from
+# dataset-intelligence.
+#
+# WHY. `disambiguation.embedding` clusters mentions by a single surface+context embedding cosine;
+# `disambiguation.glinker` runs the full enterprise engine: a corpus-internal KB + the neural
+# gliner-linker biencoder (L3) + reranker (L4) LINKS each mention to its canonical entry (context
+# disambiguates IBM-vs-Microsoft-in-similar-context), then the audited resolver FUSES the linked
+# entities by exact/alias/acronym/substring/Granite-STS-embedding with a no-silent-over-merge audit
+# log (§19). The Granite embedder is RETAINED — it powers the resolver's STS embedding-by-label
+# merge rung (NOT EmbeddingGemma/vllm-factory; ADR-0045).
+#
+# DEVICE HONESTY (P3-F1). `disambiguation.glinker` is compute="gpu" (its neural biencoder needs a
+# GPU) and ships in a SEPARATE heavy package (latence-disambig-glinker) NOT in the CPU-only dev/CI
+# env (ADR-0016). On a CPU-only host `latence stack validate stacks/gpu-sota-glinker.yaml` reports
+# the disambiguate Stage skipped-with-flag (never faked), validates the CPU-reachable spine, and
+# exits 0. On a GPU pod (all learned Providers real):
+#
+#   LATENCE_CUDA=1 latence stack validate stacks/gpu-sota-glinker.yaml
+name: latence-gpu-sota-glinker-stack
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152
+      max_zip_ratio: 50.0
+
+  - name: parse
+    capability: parse
+    provider: parser.pdfplumber
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 640, overlap_tokens: 80, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  - name: extract
+    capability: fused_entity_relation
+    provider: fused_entity_relation.gliner2
+    depends_on: [content_screen]
+    config:
+      device: cuda
+      labels: [organization, person]
+      relation_labels: [works for, partner of]
+      threshold: 0.3
+
+  - name: redact
+    capability: redaction
+    provider: redaction.gliner_pii
+    depends_on: [content_screen]
+    config:
+      device: cuda
+      pii_labels: [person, email, phone number, address, credit card number, social security number]
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical
+    depends_on: [parse, extract]
+
+  # The ONE difference from gpu-sota-pod.yaml: the enterprise GLinker Disambiguator (ADR-0046).
+  # The neural gliner-linker L2→L3→L4→L0 linking + the audited resolver. The Granite embedder is
+  # RETAINED for the resolver's STS embedding-by-label merge rung (NOT the whole-mention embedding
+  # of disambiguation.embedding). compute="gpu" → skip-with-flag on a CPU host.
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.glinker
+    depends_on: [extract]
+    config:
+      device: cuda
+      context_window: 200          # ±chars of chunk context for the neural linker input
+      threshold: 0.3               # neural linking (L0) confidence threshold
+      use_reranker: true           # the L4 gliner-linker reranker
+      use_flash_deberta: true      # FlashDeBERTa when flash_attn present (graceful fallback)
+      # PRECISION (ER audit FIX-1): the Granite-STS embedding-by-label rung is OFF. On real short
+      # entity names the retrieval embedder collapses distinct persons/dates/orgs (no clean
+      # threshold — wrong merges 0.85–0.89 overlap right ones). Recall is carried by the neural
+      # linker + the string cascade + the conservative fuzzy rung below. Re-enable ONLY with a
+      # discriminative (non-retrieval) STS embedder, never the Granite corpus retrieval embedder.
+      use_embedding_merge: false
+      embedding_merge_threshold: 0.93   # safe floor IF the rung is opt-in re-enabled
+      # Conservative fuzzy edit-distance rung (ER audit FIX-3): merges same-label OCR/spelling
+      # variants (Kai Kölsch ↔ Kai Kolsch) the string cascade cannot and the embedding rung must not.
+      use_fuzzy_merge: true
+      min_similarity: 0.90         # normalized char-similarity cutoff (difflib ratio), same-label only
+      # NOTE: the embedder block below is NOT consumed while use_embedding_merge is false; it is kept
+      # as the opt-in wiring (and it still powers export_corpus's Granite r2 vectors). NOT
+      # EmbeddingGemma/vllm-factory (ADR-0045).
+      embedder:
+        provider: embedding.sentence_transformers
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
+      # External KB for the canonical entities' kb_id link (L2→L3/L4→L0; graceful fallback unlinked).
+      kb:
+        - {kb_id: Q1, name: Acme, entity_type: organization}
+        - {kb_id: Q2, name: International Business Machines, entity_type: organization, aliases: [IBM]}
+      kb_threshold: 0.5
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-gpu-sota-glinker-stack}
+
+  - name: complete
+    capability: graph_completion
+    provider: graph_completion.ultra
+    depends_on: [graph]
+    config:
+      corpus_id: latence-gpu-sota-glinker
+      scorer: auto
+      checkpoint: /root/ULTRA/ckpts/ultra_3g.pth
+      device: cuda
+      target_precision: 0.9
+      skip_if_unavailable: false
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph, complete]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+    config:
+      basename: corpus
+      embedder:
+        provider: embedding.sentence_transformers
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}

@@ -18,9 +18,12 @@ from latence_core.providers.perf import (
     ATTN_FA2,
     ATTN_SDPA,
     DEFAULT_GLINER_MAX_LEN,
+    DEFAULT_INTRA_OP_THREADS,
     DTYPE_BF16,
     DTYPE_FP32,
     apply_gliner_max_len,
+    cap_intra_op_threads,
+    ensure_gliner2_on_cuda,
     flash_attn_available,
     is_compile_backend_failure,
     load_gliner2_optimized,
@@ -31,6 +34,7 @@ from latence_core.providers.perf import (
     resolve_attn_impl,
     resolve_dtype_name,
     resolve_gliner2_knob,
+    resolve_intra_op_threads,
     resolve_max_len,
 )
 
@@ -404,3 +408,82 @@ def test_is_compile_backend_failure_false_for_ordinary_error() -> None:
     # A genuine (non-compile) runtime fault is NOT swallowed by the guard.
     assert is_compile_backend_failure(RuntimeError("cuda oom")) is False
     assert is_compile_backend_failure(ValueError("bad shape")) is False
+
+
+# --- W9-scaling: intra-op thread cap + fp16 cuda placement -------------------------------------
+
+
+def test_resolve_intra_op_threads_default_and_clamp() -> None:
+    import os
+
+    cores = os.cpu_count() or DEFAULT_INTRA_OP_THREADS
+    # Default 8, clamped to the core count (never more threads than cores).
+    assert resolve_intra_op_threads({}) == min(DEFAULT_INTRA_OP_THREADS, cores)
+    # A tiny explicit cap is honoured as-is.
+    assert resolve_intra_op_threads({"intra_op_threads": 2}) == 2
+    # A huge explicit cap is clamped to cores.
+    assert resolve_intra_op_threads({"intra_op_threads": 100_000}) == cores
+
+
+def test_resolve_intra_op_threads_disable_and_invalid() -> None:
+    # <= 0 disables the cap (None = leave torch's default pool).
+    assert resolve_intra_op_threads({"intra_op_threads": 0}) is None
+    assert resolve_intra_op_threads({"intra_op_threads": -1}) is None
+    for bad in ("lots", 3.5, True):
+        with pytest.raises(ValueError, match="invalid intra_op_threads"):
+            resolve_intra_op_threads({"intra_op_threads": bad})
+
+
+def test_cap_intra_op_threads_applies_via_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    fake_torch = types.ModuleType("torch")
+    fake_torch.set_num_threads = calls.append  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert cap_intra_op_threads(8) == 8
+    assert calls == [8]
+
+
+def test_cap_intra_op_threads_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    fake_torch = types.ModuleType("torch")
+    fake_torch.set_num_threads = calls.append  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert cap_intra_op_threads(None) is None
+    assert calls == []
+
+
+def test_cap_intra_op_threads_torch_free_is_guarded_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No torch installed → a logged no-op returning None (best-effort, never a crash).
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert cap_intra_op_threads(8) is None
+
+
+class _MovableModel:
+    """A model exposing ``.to`` + ``device`` — mirrors what ensure_gliner2_on_cuda moves/reads."""
+
+    def __init__(self) -> None:
+        self.to_calls: list[str] = []
+        self.device = "cpu"
+
+    def to(self, target: str) -> _MovableModel:
+        self.to_calls.append(target)
+        self.device = target
+        return self
+
+
+def test_ensure_gliner2_on_cuda_moves_and_detects() -> None:
+    model = _MovableModel()
+    assert ensure_gliner2_on_cuda(model, cuda=True) == "cuda"
+    assert model.to_calls == ["cuda"]
+
+
+def test_ensure_gliner2_on_cuda_cpu_does_not_move() -> None:
+    model = _MovableModel()
+    # cuda=False: no move, but the resident device is still read back (diagnostic).
+    assert ensure_gliner2_on_cuda(model, cuda=False) == "cpu"
+    assert model.to_calls == []
+
+
+def test_ensure_gliner2_on_cuda_guarded_on_bare_model() -> None:
+    # A model with no ``.to`` / no device (a test double, a frozen wrapper) never crashes.
+    assert ensure_gliner2_on_cuda(object(), cuda=True) is None

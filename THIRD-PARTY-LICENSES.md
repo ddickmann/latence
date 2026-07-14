@@ -42,14 +42,19 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 | Package | Version | License | Ships with |
 |---|---|---|---|
 | pypdf | 6.14.2 | BSD-3-Clause | latence-parser-document |
-| gliner | ≥0.2.5 | Apache-2.0 **(upstream)** | latence-ner-gliner, latence-relation-gliner, latence-pii-gliner |
+| gliner | ≥0.2.5,<0.3 | Apache-2.0 **(upstream)** | latence-ner-gliner, latence-relation-gliner, latence-pii-gliner |
+| glinker | ≥0.1,<0.2 | Apache-2.0 **(upstream)** | latence-disambig-glinker (Knowledgator; PROVIDES `ProcessorFactory` + the L2/L3/L4 GLinker stages — the direct import `from glinker import ProcessorFactory`; distinct from the `gliner` extraction library above) |
+| flashdeberta | ≥0.0.5,<0.1 | Apache-2.0 **(upstream)** | latence-disambig-glinker (GLinker FlashDeBERTa/FA2 acceleration; graceful fallback) |
+| transformers | ≥4.40,<5 | Apache-2.0 **(upstream)** | latence-disambig-glinker (+ glinker dep) |
+| huggingface-hub | ≥0.23,<1 | Apache-2.0 **(upstream)** | latence-disambig-glinker (model/tokenizer fetch + config patch) |
+| faiss-cpu | ≥1.7 | MIT **(upstream)** | latence-disambig-glinker (`faiss` extra — OPTIONAL large-group embedding-merge acceleration; brute-force fallback when absent) |
 | gliner2[local] | ≥1.0,<2 | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 |
 | peft | ≥0.10 | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 (gliner2 inference-engine dep, not declared by `gliner2[local]`) |
 | openai | ≥1.0 | Apache-2.0 **(upstream)** | latence-*-endpoint, latence-relation-llm |
 | presidio-analyzer | ≥2.2 | MIT **(upstream)** | latence-pii-presidio |
 | spacy (+ en_core_web_sm model) | (Presidio dep) | MIT **(upstream)** | latence-pii-presidio |
 | apache-airflow | ≥2.7 | Apache-2.0 **(upstream)** | latence-runner-airflow (`airflow` extra only) |
-| torch | ≥2.1 | BSD-3-Clause **(upstream)** | latence-parser-glm, latence-parser-lighton; latence-linkpred-ultra (`ultra`/`pykeen` extras) |
+| torch | ≥2.1 | BSD-3-Clause **(upstream)** | latence-parser-glm, latence-parser-lighton, latence-disambig-glinker (capped `<3`); latence-linkpred-ultra (`ultra`/`pykeen` extras) |
 | torch-geometric | (PyG wheel) | MIT **(upstream)** | latence-linkpred-ultra (`ultra` extra; PyG wheel index, not a plain PyPI pin) |
 | torch-scatter | (PyG wheel) | MIT **(upstream)** | latence-linkpred-ultra (`ultra` extra; PyG wheel index, not a plain PyPI pin) |
 | pykeen | ≥1.10,<2 | MIT **(upstream)** | latence-linkpred-ultra (`pykeen` extra) |
@@ -103,7 +108,8 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | fastino/gliner2-multi-v1 | Fused Entity+Relation Extraction (`fused_entity_relation.gliner2`, W9 unified default) | Apache-2.0 |
 | fastino/GLiNER2-Guardrails-PII-Multi | Redaction (`redaction.gliner2`) | Apache-2.0 |
 | urchade/gliner_multi_pii-v1 | Redaction | Apache-2.0 |
-| knowledgator/gliner-linker-large | Disambiguation | Apache-2.0 |
+| knowledgator/gliner-linker-large-v1.0 | Disambiguation (L3 linker; `disambiguation.cascade` reference + `disambiguation.glinker` enterprise, ADR-0046) | Apache-2.0 |
+| knowledgator/gliner-linker-rerank-v1.0 | Disambiguation (L4 reranker; `disambiguation.glinker`, ADR-0046) | Apache-2.0 |
 | ibm-granite/granite-embedding-311m-multilingual-r2 | Embedding (default, GPU tier; `embedding.sentence_transformers`) | Apache-2.0 |
 | ibm-granite/granite-embedding-97m-multilingual-r2 | Embedding (CPU tier) | Apache-2.0 |
 | intfloat/multilingual-e5-small | Embedding (fallback) | MIT |

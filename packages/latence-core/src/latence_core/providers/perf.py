@@ -428,6 +428,154 @@ def resolve_max_len(config: dict[str, Any], default: int = DEFAULT_GLINER_MAX_LE
     return max(1, int(config.get("max_len", default)))
 
 
+# ---------------------------------------------------------------------------
+# Intra-op thread cap + fp16 device placement (W9-scaling) — the two fixes for
+# the fp16-eager / thread-oversubscription hang the gliner2 providers hit at
+# scale on a many-core Blackwell host (RTX PRO 4500, torch 2.8/cu128).
+# ---------------------------------------------------------------------------
+
+#: The default cap on torch **intra-op** threads a gliner2 provider applies at load. On a many-core
+#: host (the diagnosed Blackwell box has 128 cores) torch's default intra-op pool is
+#: ``os.cpu_count()``, and gliner2's internal batching then oversubscribes to ~129 threads — a
+#: measured ~520% CPU spin with the GPU at 0% and NO forward progress (even with ``OMP_NUM_THREADS``
+#: exported, because once torch is imported it owns its own intra-op pool, not the OMP env). A small
+#: cap keeps CPU-side tokenisation/pre-processing from thrashing the scheduler; on a GPU the heavy
+#: math is off-CPU, so a low cap costs ~nothing. Configurable per provider (``intra_op_threads``).
+DEFAULT_INTRA_OP_THREADS = 8
+
+
+def resolve_intra_op_threads(
+    config: Mapping[str, Any], default: int = DEFAULT_INTRA_OP_THREADS
+) -> int | None:
+    """Resolve the intra-op thread cap (``config["intra_op_threads"]``) — torch-free (W9-scaling).
+
+    Unset → ``default`` (8). An explicit int pins it. A value ``<= 0`` **disables** the cap (returns
+    ``None`` — leave torch's default pool untouched, the explicit opt-out for a box that wants all
+    cores). A positive value is clamped to ``os.cpu_count()`` (never request more threads than
+    cores). A non-int is a hard error the caller surfaces as a ConfigError. Pure config read — no
+    torch import (ADR-0016), so a registry that only imports the module never pulls torch.
+    """
+    raw = config.get("intra_op_threads", default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        msg = f"invalid intra_op_threads {raw!r}: must be an int (>= 1 to cap, <= 0 to disable)"
+        raise ValueError(msg)
+    if raw <= 0:
+        return None
+    import os  # noqa: PLC0415 - stdlib, only to read the core count when a cap is requested
+
+    cores = os.cpu_count() or raw
+    return min(raw, cores)
+
+
+def cap_intra_op_threads(n: int | None, *, provider_name: str = "provider") -> int | None:
+    """Apply an intra-op thread cap via ``torch.set_num_threads(n)`` — guarded, never crashes (W9).
+
+    ``n`` is the resolved cap (:func:`resolve_intra_op_threads`); ``None`` is the explicit opt-out
+    (no cap applied, torch's default pool kept). Imports torch **lazily and defensively**: on a
+    torch-free host (the offline test env) or if torch rejects the call it is a **logged no-op**
+    (returns ``None``) — capping threads is best-effort throughput insurance against the many-core
+    oversubscription spin, never a hard dependency or a crash. Returns the applied cap, else
+    ``None``.
+    """
+    if n is None:
+        return None
+    try:
+        import torch  # noqa: PLC0415 - optional heavy dep, imported only when a cap is applied
+
+        torch.set_num_threads(n)
+    except Exception:  # noqa: BLE001 - deliberate: a thread-cap failure must never crash the load
+        _log.warning(
+            "%s: could not cap intra-op threads to %d (left at torch default)",
+            provider_name,
+            n,
+            exc_info=True,
+        )
+        return None
+    _log.info(
+        "%s: capped torch intra-op threads to %d (many-core oversubscription guard)",
+        provider_name,
+        n,
+    )
+    return n
+
+
+def _detect_model_device(model: Any) -> str | None:
+    """Best-effort **read** of a gliner2 model's resident torch device as a string — never raises.
+
+    Tries the common wrapper shapes (``model.device``, ``model.model.device``, the first parameter's
+    device) and returns a lowercase device string (``"cuda"``/``"cuda:0"``/``"cpu"``) or ``None`` if
+    none can be read. Purely diagnostic — used to LOG where inference will actually run so the
+    fp16-on-CPU failure (a fp16-converted model that silently stayed on CPU) is visible, not silent.
+    """
+    for holder in (model, getattr(model, "model", None)):
+        if holder is None:
+            continue
+        dev = getattr(holder, "device", None)
+        if dev is not None:
+            return str(dev).lower()
+        params = getattr(holder, "parameters", None)
+        if callable(params):
+            try:
+                first = next(iter(params()))
+            except (StopIteration, TypeError):
+                continue
+            dev = getattr(first, "device", None)
+            if dev is not None:
+                return str(dev).lower()
+    return None
+
+
+def ensure_gliner2_on_cuda(
+    model: Any, *, cuda: bool, provider_name: str = "provider"
+) -> str | None:
+    """Ensure a gliner2 model is on cuda when a GPU is present, then LOG its device — guarded (W9).
+
+    The fp16-eager GPU-idle hang the diagnosis flagged (``quantize=True`` → "Converted model to
+    fp16" then a CPU thread-spin with the GPU at 0%) is consistent with a fp16-converted model that
+    **stayed on CPU** — fp16 eager on CPU is pathologically slow and CPU-bound. This is the
+    defence: when a GPU is present the model is moved to cuda best-effort (``model.to("cuda")``,
+    tried across the ``model`` / ``model.model`` wrapper shapes), and its resident device is read
+    back and **logged** so an operator can SEE where inference lands (the fp16-on-CPU condition is
+    no longer silent). Torch-free-safe: on a torch-free host (offline tests) ``cuda`` is False under
+    the ``LATENCE_CUDA=0`` probe and this is a no-op returning ``None``. NEVER raises — placement is
+    insurance (``from_pretrained``/``quantize`` may already place correctly, in which case
+    ``.to("cuda")`` is a harmless no-op), and the exact GLiNER2 placement API is pod-validated by
+    the maintainer.
+    """
+    if not cuda:
+        return _detect_model_device(model)
+    moved = False
+    for target in (model, getattr(model, "model", None)):
+        if target is None:
+            continue
+        to = getattr(target, "to", None)
+        if callable(to):
+            try:
+                to("cuda")
+            except Exception:  # noqa: BLE001 - best-effort move; a rejecting wrapper is not fatal
+                continue
+            moved = True
+            break
+    device = _detect_model_device(model)
+    if device is not None and "cuda" in device:
+        _log.info("%s: gliner2 model on %s (cuda placement confirmed)", provider_name, device)
+    elif device is not None:
+        _log.warning(
+            "%s: gliner2 model reports device=%s AFTER cuda placement (move %s) — fp16-on-CPU "
+            "risk; set quantize=false if the run is CPU-bound with the GPU idle",
+            provider_name,
+            device,
+            "applied" if moved else "not available",
+        )
+    elif not moved:
+        _log.warning(
+            "%s: could not place the gliner2 model on cuda (no .to on the wrapper) or read its "
+            "device; verify GPU placement on the pod",
+            provider_name,
+        )
+    return device
+
+
 def apply_gliner_max_len(model: Any, max_len: int) -> None:
     """Bound a GLiNER-library model's token window to ``max_len`` (``config.max_len``), guarded.
 

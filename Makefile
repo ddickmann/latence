@@ -13,7 +13,7 @@ export PYTHONHASHSEED := 0
 HEAVY_PKGS := \
 	latence-ner-gliner latence-relation-gliner latence-relation-llm \
 	latence-pii-gliner latence-parser-endpoint latence-ner-endpoint \
-	latence-embedder-endpoint latence-runner-airflow
+	latence-embedder-endpoint latence-runner-airflow latence-disambig-glinker
 
 # Every package with a typed source tree (mirrors CI's mypy target list).
 ALL_PKGS := \

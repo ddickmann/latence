@@ -25,17 +25,28 @@ The LLM is UNTRUSTED output — every safety net is mandatory (the run NEVER cra
      ``finish_reason == "length"`` is truncated → ONE retry at doubled budget → if still truncated,
      fall back to config labels (never a truncated-JSON crash).
   3. **Parse-and-repair**: ``json.loads`` in a guard; on ``JSONDecodeError`` do ONE corrective retry
-     ("return ONLY valid JSON of this exact shape"); a second failure falls back. NEVER ``eval``,
-     NEVER execute model text.
+     ("return ONLY valid JSON of this exact shape"); a second failure falls back. The parser is also
+     tolerant of a JSON object the model wrapped in a Markdown fence or surrounding prose — it peels
+     the wrapper and re-tries the STRICT parser on the extracted object (it never loosens parsing,
+     so hallucinated noise still fails). NEVER ``eval``, NEVER execute model text.
   4. **Schema validation**: the parsed object MUST be ``{entity_types,relation_types,pii_types}``,
      each a list of strings; anything else → reject → fall back. Extra keys are ignored.
   5. **Label sanitization** (:mod:`~latence_schema_inducer.sanitize`): strip control chars, cap
      length ≤ 64, drop empties, dedupe case-insensitively, cap count ≤ 40 (dropped items logged).
-  6. **Fail-open, never crash** (G1 posture): ANY inducer failure (network, auth, malformed,
-     truncated-twice, schema-invalid, empty) leaves the document's chunks' ``induced_labels`` as
-     ``None`` so the extractors use their config labels and the run continues; the failure is a
-     typed, no-content log + a Quality-Report note (``induction_fallbacks``). A missing/unreachable
-     endpoint is a skip-with-flag (fail-open), not a crash.
+     Unicode/German label text (e.g. ``Rechnungsnummer``) is preserved — only control/format chars
+     are stripped, so a valid non-ASCII schema is never dropped to empty.
+  6. **Empty-induction recovery (the robustness net)**: a reply that parses + validates but
+     sanitizes to an EMPTY / below-``min_labels`` label set is NOT silently accepted — that quiet
+     degrade to the bare config floor is the quality cliff induce exists to prevent. The Provider
+     RE-PROMPTS once (the empty-recovery instruction at a doubled budget) and only a still-empty
+     result falls back — LOUDLY (``induction_empty_after_sanitization`` + the WARNING), never a
+     silent revert.
+  7. **Fail-open, never crash** (G1 posture): ANY inducer failure (network, auth, malformed,
+     truncated-twice, schema-invalid, empty-after-recovery) leaves the document's chunks'
+     ``induced_labels`` as ``None`` so the extractors use their config labels and the run continues;
+     the failure is a typed, no-content log + a Quality-Report note (``induction_fallbacks``, plus
+     ``induction_empty_after_sanitization`` for the empty case). A missing/unreachable endpoint is a
+     skip-with-flag (fail-open), not a crash.
 
 Concurrency (W6, ADR-0036): the LLM calls are pure per-request latency, so ``induce`` **fans the
 per-item calls out concurrently** — the ``openai`` async client (:class:`~openai.AsyncOpenAI`) +
@@ -66,6 +77,7 @@ import json
 import logging
 import os
 import random
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.contracts import InducedLabels
@@ -75,6 +87,7 @@ from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_schema_inducer.prompts import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT_TEMPLATE,
+    EMPTY_RECOVERY_INSTRUCTION,
     REPAIR_INSTRUCTION,
 )
 from latence_schema_inducer.sanitize import MAX_LABELS, sanitize_labels
@@ -85,6 +98,11 @@ if TYPE_CHECKING:
     from latence_core.contracts import ChunkRecord
 
 _LOG = logging.getLogger("latence.schema_induction")
+
+# A Markdown fenced code block (```` ```json … ``` ```` or a bare ```` ``` … ``` ````) some models
+# wrap their JSON in despite ``response_format=json_object``. The parse-hardening path peels the
+# fence and re-tries the STRICT parser on the body (never loosens parsing — see ``_try_parse``).
+_FENCE_RE = re.compile(r"```(?:[a-zA-Z0-9_-]+)?\s*(?P<body>.*?)```", re.DOTALL)
 
 # Default served-model id (a hosted service, no weights license). gpt-4.1-mini per the W4 spec —
 # NOT gpt-4o-mini.
@@ -97,9 +115,18 @@ _SLOTS = ("entity_types", "relation_types", "pii_types")
 # A chunk shorter than this (stripped) is treated as too small to induce a schema from — skipped,
 # its induced_labels left None (the extractors use config labels). Bounds a pointless LLM call.
 _DEFAULT_MIN_CHARS = 1
+# The minimum TOTAL induced labels a successful induction must yield (robustness fix). Below this
+# the result is treated as empty/near-empty → one empty-recovery re-prompt, then a LOUD fall-back.
+# 1 = "any label is enough"; an all-empty response (0 labels) always triggers recovery.
+_DEFAULT_MIN_LABELS = 1
 # The default bound on in-flight concurrent LLM calls (W6). 8 collapses the lbbw induce stage from
 # ~44s to ~6-8s; 1 = today's sequential behaviour. Clamped to >= 1 in __init__.
 _DEFAULT_MAX_CONCURRENCY = 8
+
+
+# Internal reason tag for the "parsed + validated but sanitized empty / below-min" miss — the one
+# safety-net outcome that triggers the empty-recovery re-prompt (not a direct fall-back).
+_EMPTY_AFTER_SANITIZATION = "empty-after-sanitization"
 
 
 class _Truncated(Exception):
@@ -144,6 +171,11 @@ class LLMLabelInducer:
         system_prompt / user_prompt_template: str  — override the default prompts (the template
             carries ``{text}`` / ``{max_labels}`` placeholders).
         min_chars: int  — a chunk/document shorter than this (stripped) is skipped (default 1).
+        min_labels: int  — the minimum TOTAL induced labels (entity + relation + pii) a successful
+            induction must yield (default 1). An induction that parses + validates but sanitizes to
+            fewer than this triggers ONE empty-recovery re-prompt (doubled budget), then a LOUD
+            fall-back (``induction_empty_after_sanitization`` + WARNING) — never a silent degrade to
+            the config-label floor. Raise it to demand a richer schema before accepting a result.
         retry_attempts / retry_base_delay / retry_max_delay  — the ported endpoint-retry policy
             knobs (identical to the other endpoint Providers); retries surface on
             ``endpoint_retries``.
@@ -207,6 +239,12 @@ class LLMLabelInducer:
         )
         self._max_tokens = max(1, int(config.get("max_tokens", _DEFAULT_MAX_TOKENS)))
         self._max_labels = max(1, min(int(config.get("max_labels", MAX_LABELS)), MAX_LABELS))
+        # The minimum TOTAL induced labels (entity + relation + pii) a successful induction must
+        # yield; below this the result is "empty / near-empty after sanitization" → the Provider
+        # RE-PROMPTS once before falling back (the robustness fix — an empty induction is the
+        # noisy-output failure induce exists to fix, never a silent accept). Default 1: a genuinely
+        # all-empty response triggers recovery; an operator can raise it to demand a richer schema.
+        self._min_labels = max(1, int(config.get("min_labels", _DEFAULT_MIN_LABELS)))
         self._temperature = float(config.get("temperature", 0.0))
         self._system_prompt = str(config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
         self._user_prompt_template = str(
@@ -239,6 +277,12 @@ class LLMLabelInducer:
         self.endpoint_retries = 0
         self.induction_fallbacks = 0
         self.induction_documents = 0
+        # LOUD signal for the specific regression this fix targets: how many documents fell back
+        # AFTER the empty-recovery re-prompt still yielded an empty / below-min label set (the
+        # quality cliff the silent fallback used to hide). A subset of ``induction_fallbacks``;
+        # surfaced on its own Quality-Report field so an operator SEES "the corpus induced nothing"
+        # rather than only reading a generic fallback count. 0 when every induction produced labels.
+        self.induction_empty_after_sanitization = 0
 
     # -- lazy client --------------------------------------------------------
 
@@ -470,29 +514,57 @@ class LLMLabelInducer:
         the extractors use their config labels. A typed, no-content log records which safety net
         fired and the ``induction_fallbacks`` tally is bumped — the Quality-Report note — but the
         failing document's content is NEVER logged (the no-PII discipline).
+
+        Robustness fix: an induction that parses + validates but sanitizes to an EMPTY / below-min
+        label set is NOT silently accepted (that quiet degrade to the bare config floor is the
+        quality cliff induce exists to prevent). It re-prompts the model ONCE (the empty-recovery
+        instruction at a doubled budget — the same precedent as the truncation retry) before falling
+        back, and a still-empty result falls back LOUDLY (``induction_empty_after_sanitization`` +
+        the WARNING), never a quiet revert.
+        """
+        induced, reason = await self._induce_attempt(client, text, recover=False)
+        if induced is not None:
+            return induced
+        if reason == _EMPTY_AFTER_SANITIZATION:
+            # Don't accept an empty induction — re-prompt once, then fall back LOUDLY if still bare.
+            induced, reason = await self._induce_attempt(client, text, recover=True)
+            if induced is not None:
+                return induced
+            if reason == _EMPTY_AFTER_SANITIZATION:
+                self._record_empty_after_sanitization()
+                return None
+        # Any other safety-net miss (endpoint / no-JSON / schema-invalid), or an empty→retry that
+        # then failed for a different reason: the ordinary fail-open note.
+        self._record_fallback(reason or "unknown inducer failure")
+        return None
+
+    async def _induce_attempt(
+        self, client: Any, text: str, *, recover: bool
+    ) -> tuple[InducedLabels | None, str | None]:
+        """One full induce attempt: call → parse → validate → sanitize; ``(labels, None)`` on ok.
+
+        On failure returns ``(None, reason)`` where ``reason`` is the safety-net tag; the sentinel
+        :data:`_EMPTY_AFTER_SANITIZATION` distinguishes the "valid but empty/below-min" case (which
+        the caller RETRIES) from the other misses (which fall back directly). ``recover=True`` runs
+        the empty-recovery variant of the call (the :data:`EMPTY_RECOVERY_INSTRUCTION` prompt at a
+        doubled budget). No tally is bumped here — the caller decides retry-vs-fallback and records.
         """
         try:
-            raw = await self._call_with_truncation_and_repair(client, text)
+            raw = await self._call_with_truncation_and_repair(client, text, recover=recover)
         except EndpointError as exc:
             # Network / auth / terminal-4xx / unreachable endpoint: fail open, never crash.
-            self._record_fallback(f"endpoint error ({exc.__class__.__name__})")
-            return None
+            return None, f"endpoint error ({exc.__class__.__name__})"
         except Exception as exc:  # noqa: BLE001 - fail-open is the whole point; no bad output crashes
-            self._record_fallback(f"unexpected inducer error ({exc.__class__.__name__})")
-            return None
+            return None, f"unexpected inducer error ({exc.__class__.__name__})"
         if raw is None:
-            # Parse/repair or truncation exhausted → already-fallen-back (logged + counted below).
-            self._record_fallback("no valid JSON after repair/truncation retry")
-            return None
+            return None, "no valid JSON after repair/truncation retry"
         validated = _validate_schema(raw)
         if validated is None:
-            self._record_fallback("schema-invalid (not {entity,relation,pii} lists of strings)")
-            return None
+            return None, "schema-invalid (not {entity,relation,pii} lists of strings)"
         induced = self._sanitize_to_induced(validated)
-        if induced is None:
-            self._record_fallback("empty after sanitization")
-            return None
-        return induced
+        if induced is None or _total_labels(induced) < self._min_labels:
+            return None, _EMPTY_AFTER_SANITIZATION
+        return induced, None
 
     def _record_fallback(self, reason: str) -> None:
         """Record a fail-open: bump the tally + emit a typed, no-content log (no PII)."""
@@ -502,10 +574,22 @@ class LLMLabelInducer:
             "schema_induction fell back to config labels: %s (model=%s)", reason, self._model
         )
 
+    def _record_empty_after_sanitization(self) -> None:
+        """Record the LOUD empty-induction signal: the dedicated counter PLUS the ordinary fallback.
+
+        Fired only when the empty-recovery re-prompt ALSO sanitized empty/below-min — the corpus
+        genuinely induced nothing usable. Bumps ``induction_empty_after_sanitization`` (its own
+        Quality-Report field so an operator sees the quality regression directly) and then the
+        normal ``_record_fallback`` (it IS a fallback, and emits the WARNING) — never a silent
+        revert to the bare config floor.
+        """
+        self.induction_empty_after_sanitization += 1
+        self._record_fallback("empty after sanitization (persisted through the recovery re-prompt)")
+
     # -- the structured call + truncation + repair (safety nets #1, #2, #3) --
 
     async def _call_with_truncation_and_repair(
-        self, client: Any, text: str
+        self, client: Any, text: str, *, recover: bool = False
     ) -> dict[str, Any] | None:
         """Return the parsed JSON object, or ``None`` when repair/truncation retries are exhausted.
 
@@ -517,36 +601,56 @@ class LLMLabelInducer:
           * The repair retry prepends a terse "return ONLY valid JSON of this exact shape"
             instruction (safety net #3). A second parse failure → return ``None`` (fall back).
 
+        ``recover=True`` is the empty-recovery variant (the robustness fix): it prepends the
+        :data:`EMPTY_RECOVERY_INSTRUCTION` (re-ask the model to actually extract the salient types)
+        and starts at a DOUBLED budget, so the re-prompt has both a sharper instruction and room
+        — the same "double the budget on retry" precedent as the truncation net.
+
         The network call itself rides the ported retry (:func:`call_with_retry`) for transient
         429/5xx/transport faults; a terminal fault raises :class:`EndpointError` up to the fail-open
         guard. NEVER ``eval`` — only ``json.loads`` in a guard.
         """
+        base_tokens = self._max_tokens * 2 if recover else self._max_tokens
+        instruction = EMPTY_RECOVERY_INSTRUCTION if recover else None
         # --- attempt 1 (with a one-shot doubled-budget retry on truncation) ---
         try:
-            content = await self._chat(client, text, max_tokens=self._max_tokens, repair=False)
+            content = await self._chat(
+                client, text, max_tokens=base_tokens, instruction=instruction
+            )
         except _Truncated:
             try:
                 content = await self._chat(
-                    client, text, max_tokens=self._max_tokens * 2, repair=False
+                    client, text, max_tokens=base_tokens * 2, instruction=instruction
                 )
             except _Truncated:
                 _LOG.warning(
                     "schema_induction reply truncated twice (max_tokens=%d then %d)",
-                    self._max_tokens,
-                    self._max_tokens * 2,
+                    base_tokens,
+                    base_tokens * 2,
                 )
                 return None
         parsed = _try_parse(content)
         if parsed is not None:
             return parsed
         # --- one corrective repair retry (safety net #3) ---
+        # On an empty-recovery attempt keep re-asserting the recovery ask alongside the JSON-shape
+        # repair, so a re-prompt that ALSO returns malformed JSON still steers toward real types.
+        repair_instruction = (
+            REPAIR_INSTRUCTION
+            if instruction is None
+            else f"{EMPTY_RECOVERY_INSTRUCTION}\n\n{REPAIR_INSTRUCTION}"
+        )
         try:
-            repaired = await self._chat(client, text, max_tokens=self._max_tokens * 2, repair=True)
+            repaired = await self._chat(
+                client, text, max_tokens=base_tokens * 2, instruction=repair_instruction
+            )
         except _Truncated:
             return None
         return _try_parse(repaired)
 
-    async def _chat(self, client: Any, text: str, *, max_tokens: int, repair: bool) -> str:
+    async def _chat(
+        self, client: Any, text: str, *, max_tokens: int, instruction: str | None
+    ) -> str:
         """One structured chat-completions call; returns the reply string or raises on truncation.
 
         Requests ``response_format={"type":"json_object"}`` (safety net #1, portable) at
@@ -554,12 +658,12 @@ class LLMLabelInducer:
         (safety net #2) so the caller retries at a bigger budget. The network call rides
         :func:`call_with_retry`; any client exception is normalized to a classed
         :class:`EndpointError` so the retry decides retry-vs-fail and a terminal failure re-raises
-        up to the fail-open guard. When ``repair`` is True the corrective instruction is prepended
-        to        the user message.
+        up to the fail-open guard. When ``instruction`` is not ``None`` it is prepended to the user
+        message (the repair and/or empty-recovery corrective).
         """
         user = self._user_prompt_template.format(text=text, max_labels=self._max_labels)
-        if repair:
-            user = f"{REPAIR_INSTRUCTION}\n\n{user}"
+        if instruction is not None:
+            user = f"{instruction}\n\n{user}"
         messages = [
             {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": user},
@@ -603,8 +707,9 @@ class LLMLabelInducer:
 
         Every slot is bounded by :mod:`~latence_schema_inducer.sanitize` (control-char strip, length
         ≤ 64, dedupe, count ≤ ``max_labels``). A wholly-empty result (the model returned only junk /
-        nothing usable) returns ``None`` so the Provider falls back to config labels rather than
-        annotating with an empty schema. Dropped-for-count overflow is logged (no silent drop).
+        nothing usable) returns ``None``; the caller then RE-PROMPTS once (empty-recovery) before
+        falling back to config labels — an empty schema is never silently accepted.
+        Dropped-for-count overflow is logged (no silent drop).
         """
         results = {slot: sanitize_labels(validated.get(slot, [])) for slot in _SLOTS}
         total_dropped = sum(r.dropped_for_count for r in results.values())
@@ -627,18 +732,65 @@ class LLMLabelInducer:
         )
 
 
-def _try_parse(content: str) -> dict[str, Any] | None:
-    """``json.loads`` in a guard (safety net #3): a dict is returned, anything else / bad JSON None.
+def _loads_object(content: str) -> dict[str, Any] | None:
+    """``json.loads`` in a guard: return the parsed value iff it is a dict, else ``None``.
 
     NEVER ``eval`` and NEVER execute model text — only ``json.loads``. A non-JSON body, a JSON
-    array/scalar at the top level, or a decode error all yield ``None`` (the caller repairs / falls
-    back).
+    array/scalar at the top level, or a decode error all yield ``None``.
     """
     try:
         parsed = json.loads(content)
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _json_object_candidates(content: str) -> Iterator[str]:
+    """Yield substrings that MIGHT be the JSON object, most-likely first (the parse-hardening path).
+
+    A conformant model returns a bare JSON object (``response_format=json_object``), but a real
+    OpenRouter/vLLM model sometimes wraps it — in a Markdown fence (```` ```json … ``` ````) or in a
+    line of prose ("Here are the types: { … }"). Rather than reject that wholesale (a repair round
+    trip that often re-wraps, then a silent fall-back that DISCARDS perfectly good labels), we peel
+    the common wrappers and re-try the strict parser on each candidate. This never LOOSENS parsing —
+    every candidate still goes through strict :func:`_loads_object`, which rejects anything that is
+    not a JSON object, so genuine garbage (single-quoted pseudo-JSON, prose with no braces) still
+    fails and falls back. It only changes WHERE we look for the object.
+    """
+    # 1) The body inside a fenced code block (```json … ``` or bare ``` … ```), if present.
+    for match in _FENCE_RE.finditer(content):
+        inner = match.group("body").strip()
+        if inner:
+            yield inner
+    # 2) The first ``{`` through the last ``}`` — recovers an object embedded in surrounding prose.
+    start = content.find("{")
+    end = content.rfind("}")
+    if start != -1 and end > start:
+        yield content[start : end + 1]
+
+
+def _try_parse(content: str) -> dict[str, Any] | None:
+    """Parse the reply into a JSON object, tolerant of fenced / prose-wrapped bodies (net #3).
+
+    Tries the strict parser on the raw body first (the conformant case), then on each wrapper-peeled
+    candidate (:func:`_json_object_candidates`). Returns the first dict that parses, or ``None`` if
+    none do (the caller repairs / falls back). Still NEVER ``eval`` — only strict ``json.loads`` on
+    each candidate — so hallucinated noise is still rejected; the tolerance is only about extracting
+    a genuine JSON object the model buried in prose or a code fence.
+    """
+    direct = _loads_object(content)
+    if direct is not None:
+        return direct
+    for candidate in _json_object_candidates(content):
+        parsed = _loads_object(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _total_labels(induced: InducedLabels) -> int:
+    """Total induced labels across all three slots — the ``min_labels`` emptiness gauge."""
+    return len(induced.entity_types) + len(induced.relation_types) + len(induced.pii_types)
 
 
 def _validate_schema(obj: dict[str, Any]) -> dict[str, list[str]] | None:
