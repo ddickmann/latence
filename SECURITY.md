@@ -70,6 +70,24 @@ items are enumerated there rather than papered over.
 This is **not yet a 1.0 release.** Performance-at-scale, deeper structural file
 validation, and dependency-CVE gating are tracked as Phase-2 hardening.
 
+The full data-pipeline threat model — trust boundaries, per-boundary mitigations,
+and honestly-enumerated residual risks — is in
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+
+## Supported versions
+
+The project is **pre-1.0** and ships from `main`. Only the latest released version
+(and `main`) receives security fixes; there are no maintained release branches yet.
+
+| Version        | Supported          |
+| -------------- | ------------------ |
+| `main` (HEAD)  | :white_check_mark: |
+| latest release | :white_check_mark: |
+| older releases | :x:                |
+
+A supported-versions table with real branches will replace this once a 1.0 line
+exists.
+
 ## Reporting a vulnerability
 
 Please report security issues **privately** — do not open a public GitHub issue
@@ -81,6 +99,18 @@ for a suspected vulnerability.
   `SECURITY: latence-framework`.
 
 Please include a description, reproduction steps or a proof-of-concept, and the
-affected version/commit. Expect an acknowledgement within a few days. Coordinated
-disclosure is appreciated: give the maintainer a reasonable window to ship a fix
-before any public disclosure.
+affected version/commit.
+
+**Response targets** (best-effort for a personally-maintained pre-1.0 project):
+
+- **Acknowledgement:** within 3 business days of the report.
+- **Triage / initial assessment:** within 10 business days (severity, affected
+  versions, whether it is in scope per the trust model above).
+- **Fix or mitigation:** severity-dependent; critical issues prioritized. You will
+  get progress updates until it is resolved or closed as out-of-scope.
+- **Disclosure:** coordinated. The default is a public advisory once a fix ships;
+  please give a reasonable embargo window (target 90 days) before any public
+  disclosure, and credit is gladly given unless you prefer to remain anonymous.
+
+Please do **not** publicly disclose, and do **not** open a public issue or PR that
+reveals the vulnerability, until an advisory is published.

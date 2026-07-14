@@ -33,10 +33,24 @@ dependencies = [
     "typer>=0.12",
 ]
 
+# Optional metrics/tracing EXPORT backends (ADR-0047). NOT a runtime dependency: the core
+# stays near-zero-dep (ADR-0016) and offline by default. Install with
+# ``pip install 'latence-core[observability]'`` to turn ``observability.build_metric_sink`` +
+# ``record_quality_report`` into a real Prometheus / OpenTelemetry export; absent it, the seam
+# degrades to a no-op (NoOpMetricSink), exactly the provider-optional pattern the heavy Provider
+# packages use. Same discipline as the tracing seam: this is opt-in, edge-side, never a core dep.
+[project.optional-dependencies]
+observability = [
+    "prometheus-client>=0.19",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+]
+
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"
 Repository = "https://github.com/ddickmann/latence-framework"
 Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
 
 [project.scripts]
 latence = "latence_core.cli:app"

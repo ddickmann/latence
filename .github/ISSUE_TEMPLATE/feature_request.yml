@@ -1,0 +1,67 @@
+name: Feature request
+description: Propose a new capability, Stage behaviour, contract change, or ergonomics improvement.
+title: "feat: <short summary>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals are held to the repo's bar (`issues/DEFINITION-OF-DONE.md`) and
+        its language (`CONTEXT.md`). To propose a **new model Provider**, please
+        use the *Provider request* template instead — it has the license-verification
+        fields that gate a Provider.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What can't be done today, or what is painful? Ground it in a concrete use case.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: >
+        What you'd like to see. Use the CONTEXT.md glossary terms (Stage, Runner,
+        Capability, Provider, Provenance, Evidence, …). Note if it changes an
+        inter-Stage contract (versioned Pydantic — needs a SCHEMA_VERSION bump).
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of change
+      options:
+        - New Stage behaviour
+        - New Capability
+        - Contract / schema change
+        - Runner / orchestration
+        - CLI / setup ergonomics
+        - Quality Report / observability
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Other approaches and why you'd reject them. Surprising trade-offs will need
+        an ADR (`docs/adr/`) if accepted.
+  - type: checkboxes
+    id: decision
+    attributes:
+      label: Decision surface
+      description: Would this be a non-obvious, hard-to-reverse decision?
+      options:
+        - label: This likely warrants an ADR (numbered, dated, alternatives-considered).
+        - label: This changes a versioned inter-Stage contract (SCHEMA_VERSION bump).
+        - label: This adds or changes a dependency (license must be verified).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and ADRs and this is not already covered.
+          required: true

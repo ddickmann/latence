@@ -1,0 +1,24 @@
+apiVersion: v2
+name: latence
+description: |
+  On-prem / VPC deployment of the Latence AI-ready-data pipeline: a Job (or CronJob) that runs the
+  pipeline over a corpus, a served vLLM OCR Deployment (LightOn-OCR-2) the SOTA pipeline depends on,
+  an optional served LLM Deployment, ConfigMaps for the stack YAML, a referenced Secret for endpoint
+  keys, and PVCs for the corpus/output + the HF model cache.
+type: application
+# Chart version — bump on chart changes. NOT the latence-core package version (that is unchanged).
+version: 0.1.0
+# The application (latence-core) version this chart deploys by default; overridden by image.tag.
+appVersion: "0.1.0"
+keywords:
+  - latence
+  - rag
+  - knowledge-graph
+  - ocr
+  - vllm
+  - on-prem
+home: https://github.com/ddickmann/latence-framework
+sources:
+  - https://github.com/ddickmann/latence-framework
+maintainers:
+  - name: ddickmann

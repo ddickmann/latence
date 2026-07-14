@@ -1,0 +1,111 @@
+{{- if .Values.vllmLlm.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "latence.llmServiceName" . }}
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "latence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vllm-llm
+  template:
+    metadata:
+      labels:
+        {{- include "latence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: vllm-llm
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllmLlm.gpu.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllmLlm.gpu.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllmLlm.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vllm-llm
+          image: "{{ .Values.vllmLlm.image.repository }}:{{ .Values.vllmLlm.image.tag }}"
+          imagePullPolicy: {{ .Values.vllmLlm.image.pullPolicy }}
+          args:
+            - "--model={{ .Values.vllmLlm.model }}"
+            - "--port={{ .Values.vllmLlm.port }}"
+            {{- range .Values.vllmLlm.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: HF_HOME
+              value: /data/hf-cache
+            {{- if .Values.secrets.existingSecret }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: HF_TOKEN
+                  optional: true
+            {{- else if .Values.secrets.create }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "latence.fullname" . }}-endpoint-keys
+                  key: HF_TOKEN
+                  optional: true
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.vllmLlm.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 40
+          resources:
+            {{- toYaml .Values.vllmLlm.resources | nindent 12 }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /data/hf-cache
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: hf-cache
+          {{- if .Values.persistence.hfCache.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.hfCache.existingClaim | default (printf "%s-hf-cache" (include "latence.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "latence.llmServiceName" . }}
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-llm
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "latence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-llm
+  ports:
+    - name: http
+      port: {{ .Values.vllmLlm.port }}
+      targetPort: http
+{{- end }}

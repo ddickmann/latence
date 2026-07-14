@@ -1,0 +1,56 @@
+name: OpenSSF Scorecard
+
+# Supply-chain security posture scoring (branch protection, token permissions,
+# pinned dependencies, dangerous workflow patterns, …). Runs on the default branch
+# and weekly — NOT on pull requests, so a fork PR can never request the elevated
+# token this needs. Results appear in the Security tab (and, if enabled, on the
+# OpenSSF Scorecard badge).
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "18 5 * * 1"
+  push:
+    branches: ["main"]
+
+# Read-only by default at the top level.
+permissions: read-all
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload SARIF to the Security tab
+      id-token: write          # publish results to the OpenSSF API (public repos)
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2.4.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # publish_results uploads the score to the public OpenSSF API so a badge
+          # can render it. Only meaningful on a public repo; harmless otherwise.
+          publish_results: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

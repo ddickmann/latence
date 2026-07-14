@@ -69,6 +69,29 @@ dependencies = [
     "latence-disambig-embedding",
 ]
 
+# Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
+# OPTIONAL extra so it never touches the CPU-first dev/test env (ADR-0007/0016): install
+# with `uv sync --extra docs` (or `pip install -e ".[docs]"`). The API Reference autodocs
+# `latence-core` + the CPU reference Providers already pinned in [project] dependencies
+# above, so `uv sync --extra docs` makes them importable for mkdocstrings. Built + deployed
+# by .github/workflows/docs.yml. See `make docs` / `make docs-serve`.
+[project.optional-dependencies]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+    "mkdocs-mermaid2-plugin>=1.1",
+    "black>=24.0",
+]
+# Optional observability EXPORT backends (ADR-0047), surfaced at the workspace root as a
+# convenience mirror of `latence-core[observability]` so the whole workspace can be resolved
+# with the export stack in one shot: `uv sync --extra observability`. The real extra is
+# defined on latence-core (the published package); this only re-exports it. It never touches
+# the CPU-first dev/test env (ADR-0007/0016) — plain `uv sync` still installs neither backend,
+# and `latence_core.observability` degrades to a no-op when they are absent.
+observability = [
+    "latence-core[observability]",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -137,6 +160,11 @@ module = [
     # inject a fake STS embedder, so they are treated as dynamically typed here. numpy enters only
     # the OPTIONAL faiss-GPU path (not in the CPU env), so it too is treated as dynamically typed.
     "glinker", "flashdeberta", "huggingface_hub", "faiss", "numpy", "numpy.*",
+    # OPTIONAL observability EXPORT backends (latence-core[observability], ADR-0047) — the
+    # Prometheus + OpenTelemetry clients are isolated in that optional group (ADR-0016), NOT in the
+    # CPU-first dev env; latence_core.observability lazily imports them and the seam's tests use a
+    # fake MetricSink + exercise the real no-op-when-absent degrade, so they are dynamically typed.
+    "prometheus_client", "opentelemetry", "opentelemetry.*",
 ]
 ignore_missing_imports = true
 
@@ -150,3 +178,22 @@ ignore_errors = true
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["packages"]
+
+# Coverage is SURFACED in CI (job summary + artifact + a badge-ready number), never
+# hard-gated — a % threshold flakes as the heavy/endpoint Providers (whose real backends
+# are monkeypatched, not executed) drag the number. This config only shapes what the
+# number MEANS: measure the packages' src, omit tests/conftest and the vendored ULTRA
+# subset so it reflects framework source coverage. It is inert unless `--cov` is passed
+# (CI does; scripts/verify-local.sh runs a plain `pytest` and is unaffected).
+[tool.coverage.run]
+branch = true
+relative_files = true
+omit = [
+    "*/tests/*",
+    "*/conftest.py",
+    "*/_vendor/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

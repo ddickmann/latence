@@ -1,0 +1,17 @@
+{{- if eq .Values.pipeline.kind "job" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "latence.fullname" . }}-run
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline
+  annotations:
+    # Re-run on `helm upgrade` by letting Helm replace the immutable Job.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.pipeline.backoffLimit }}
+  template:
+    {{- include "latence.pipelinePodTemplate" . | nindent 4 }}
+{{- end }}

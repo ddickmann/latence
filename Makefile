@@ -1,6 +1,6 @@
 # Local dev entrypoints. `test` pins PYTHONHASHSEED at launch so string-hash
 # ordering is deterministic; the root conftest fails fast if it is not pinned.
-.PHONY: sync test lint type
+.PHONY: sync test lint type sbom docs docs-serve
 
 # Pin the seed BEFORE the interpreter starts — a fixture cannot do this.
 export PYTHONHASHSEED := 0
@@ -35,3 +35,20 @@ lint:
 # mypy has no `files` in config; pass the source trees explicitly (mirrors CI).
 type:
 	uv run mypy --strict $(foreach p,$(ALL_PKGS),packages/$(p)/src)
+
+# Release-time SBOM (CycloneDX) derived from uv.lock. NOT a CI/merge gate — see
+# docs/SBOM.md. Writes sbom.cdx.json in the repo root.
+sbom:
+	bash scripts/generate-sbom.sh
+
+# Documentation site (mkdocs-material + mkdocstrings autodoc). The `docs` extra pulls the
+# toolchain AND the autodoc'd packages (latence-core + CPU reference Providers). `docs`
+# builds strictly (fails on any warning — mirrors the PR check in .github/workflows/docs.yml);
+# `docs-serve` runs the live-reload preview at http://127.0.0.1:8000.
+docs:
+	uv sync --extra docs
+	uv run mkdocs build --strict
+
+docs-serve:
+	uv sync --extra docs
+	uv run mkdocs serve

@@ -1,0 +1,102 @@
+name: Bug report
+description: Report a defect in the framework — a Stage, Provider, contract, or Runner that behaves incorrectly.
+title: "bug: <short summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please ground the report in what the code actually
+        does. A minimal, deterministic reproduction is worth ten paragraphs.
+
+        **Do not paste secrets, credentials, or real PII.** If the bug is a
+        suspected security vulnerability, do **not** file it here — see the
+        [Security Policy](../../security/policy) and report privately.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behaviour, and how it differs from what you expected.
+      placeholder: |
+        Running `latence stack validate stacks/default.yaml` I expected ... but got ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        The exact commands and a minimal Pipeline/stack YAML (redacted) that
+        reproduces the issue. Tests are seeded and hash-stable (PYTHONHASHSEED=0);
+        please note if the failure is order- or timing-dependent.
+      render: shell
+      placeholder: |
+        uv sync
+        uv run latence stack validate stacks/default.yaml
+        # ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the framework? (Stage / cross-cutting concern, using CONTEXT.md terms.)
+      options:
+        - Source
+        - Parse
+        - Chunk
+        - Entity Extraction
+        - Relation Extraction
+        - Redaction
+        - Screening
+        - Profiling
+        - Disambiguation
+        - Graph Assembly
+        - Export
+        - Runner (local / Airflow)
+        - Provenance / Classification / Evidence (contracts)
+        - Quality Report
+        - Corpus deltas (Delta / Reconciliation / Purge)
+        - CLI / setup wizard
+        - Storage seam (fsspec)
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider(s) involved
+      description: The concrete Provider(s), if relevant (e.g. parser.pdfplumber, entity.gliner, embedder.endpoint).
+      placeholder: parser.plaintext
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, `uv --version`, framework commit/version, CPU vs GPU host.
+      placeholder: |
+        macOS 15.3 / Python 3.12 / uv 0.5.x / commit abc1234 / CPU-only
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traceback
+      description: Relevant output. Redact any secrets or PII before pasting.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This is not a security vulnerability (those are reported privately per SECURITY.md).
+          required: true
+        - label: I have removed any secrets, credentials, and real PII from this report.
+          required: true

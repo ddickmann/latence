@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "latence.fullname" . }}-stack
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+data:
+  # The pipeline stack YAML, rendered from values.stack. The Parse stage's base_url is forced to
+  # the in-cluster vLLM OCR Service (or values.stack.ocrBaseUrl) so it always resolves regardless
+  # of the file's literal value. Mounted read-only at /etc/latence/stack.yaml on the pipeline pod.
+  stack.yaml: |
+    {{- $ctx := dict "ocrBaseUrl" (include "latence.ocrBaseUrl" .) "storageUri" .Values.stack.storageUri "corpusPath" .Values.stack.corpusPath }}
+    {{- tpl .Values.stack.yaml $ctx | nindent 4 }}

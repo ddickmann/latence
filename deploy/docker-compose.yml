@@ -1,0 +1,109 @@
+# deploy/docker-compose.yml — a self-contained ON-PREM run in one command (production, not demo).
+#
+#   cd deploy
+#   export HF_TOKEN=...            # only needed to DOWNLOAD the model the first time (not air-gapped)
+#   mkdir -p corpus out            # drop your PDFs/scans into ./corpus
+#   docker compose up --build      # brings up the vLLM OCR server, waits for it, runs the pipeline
+#
+# What it stands up (the SOTA served pipeline's server dependency, deployable in one file):
+#   * vllm-ocr   — a real vLLM OpenAI-compatible server serving LightOn-OCR-2 (GPU) — the OCR the
+#                  pipeline's Parse stage calls at http://vllm-ocr:8000/v1.
+#   * vllm-llm   — OPTIONAL local LLM server (enable with `--profile llm`) for the endpoint LLM
+#                  Providers (relation.llm / entity.endpoint / schema induction). Off by default.
+#   * pipeline   — the deploy/Dockerfile image running deploy/stacks/served-ocr.yaml over ./corpus,
+#                  writing the RAG corpus + KG + Quality Report to ./out.
+#
+# GPU required for vllm-ocr (nvidia-container-toolkit). The pipeline + the CPU spine are CPU-only.
+# Everything is wired by env (base_url); no key or model weights are embedded (ADR-0012).
+services:
+  vllm-ocr:
+    # Pin the vLLM image (never `latest`) for a reproducible serving stack. Bump deliberately.
+    image: vllm/vllm-openai:v0.11.0
+    command:
+      - "--model=lightonai/LightOnOCR-2-1B"      # Apache-2.0 weights AND code (ADR-0012)
+      - "--dtype=bfloat16"
+      - "--gpu-memory-utilization=0.90"
+      - "--max-model-len=10000"
+      - "--limit-mm-per-prompt={\"image\": 1}"
+      - "--mm-processor-cache-gb=0"
+      - "--no-enable-prefix-caching"
+      - "--max-num-seqs=32"
+      # Blackwell (SM 12.x) note: if vLLM's bundled FlashInfer cannot JIT cudagraphs
+      # ("FlashInfer requires sm75+"), add "--enforce-eager" here (a ~perf floor). Hopper/Ada/
+      # Ampere run cudagraphs fine. See docs/deployment.md.
+    environment:
+      # Only used to DOWNLOAD weights on first run; unset in air-gapped mode (pre-cache the model
+      # into ./hf-cache and set HF_HUB_OFFLINE=1). See docs/deployment.md.
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      # Persist the HF model cache so a restart / an air-gapped run does not re-download.
+      - ./hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"    # exposed for host debugging; the pipeline reaches it in-network as vllm-ocr
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      # The pipeline waits on this: /health returns 200 once the model is loaded + serving.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 40          # first boot downloads + loads the model; allow ~10 min
+      start_period: 60s
+
+  # OPTIONAL local LLM server for the endpoint LLM Providers. Enable with `--profile llm` and point
+  # the relevant stages at http://vllm-llm:8000/v1 (see deploy/stacks/served-ocr.yaml comments).
+  vllm-llm:
+    profiles: ["llm"]
+    image: vllm/vllm-openai:v0.11.0
+    command:
+      - "--model=${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+      - "--dtype=bfloat16"
+      - "--gpu-memory-utilization=0.85"
+      - "--max-model-len=8192"
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      - ./hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  pipeline:
+    build:
+      context: ..                       # repo root, so the whole uv workspace is in context
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      vllm-ocr:
+        condition: service_healthy       # do not start OCR calls until the server is live
+    environment:
+      # The vLLM endpoints the served Providers call. A local vLLM accepts any placeholder key.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-EMPTY}"
+      # Optional: turn on Prometheus metrics + write them for the node-exporter textfile collector.
+      # LATENCE_METRICS: "prometheus"
+      # LATENCE_METRICS_TEXTFILE: "/data/out/metrics/latence.prom"
+    volumes:
+      - ./corpus:/data/corpus:ro         # your input documents (read-only)
+      - ./out:/data/out                  # RAG corpus + KG + Quality Report land here
+      - ./stacks:/etc/latence:ro         # the served-ocr stack config (ConfigMap-equivalent)
+    command:
+      - "run"
+      - "/etc/latence/served-ocr.yaml"
+      - "--run-id"
+      - "prod-0001"

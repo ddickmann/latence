@@ -49,6 +49,7 @@ dependencies = [
 Homepage = "https://github.com/ddickmann/latence-framework"
 Repository = "https://github.com/ddickmann/latence-framework"
 Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
 
 # Registers the FUSED Provider under the discovery group. Installing this package makes
 # 'fused_entity_relation.gliner2' available to any Pipeline with no core change (ADR-0004). It

@@ -1,0 +1,19 @@
+{{- if eq .Values.pipeline.kind "cronjob" }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "latence.fullname" . }}-cron
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline
+spec:
+  schedule: {{ .Values.pipeline.schedule | quote }}
+  concurrencyPolicy: {{ .Values.pipeline.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.pipeline.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.pipeline.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.pipeline.backoffLimit }}
+      template:
+        {{- include "latence.pipelinePodTemplate" . | nindent 8 }}
+{{- end }}

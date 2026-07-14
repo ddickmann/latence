@@ -1,0 +1,218 @@
+site_name: Latence Framework
+site_description: >-
+  A model-agnostic, cloud-agnostic framework that turns messy, siloed enterprise
+  data into high-quality, AI-ready data — parsing through NER, relation extraction,
+  PII handling, enrichment and disambiguation to corpus-level knowledge graphs.
+site_author: ddickmann
+site_url: https://ddickmann.github.io/latence-framework/
+repo_name: ddickmann/latence-framework
+repo_url: https://github.com/ddickmann/latence-framework
+edit_uri: edit/main/docs/
+copyright: >-
+  Apache-2.0 licensed. Reference Providers ship permissive weights only
+  (ADR-0012); restricted-license models are opt-in.
+
+docs_dir: docs
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+
+plugins:
+  - search
+  - mermaid2
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - packages/latence-core/src
+            - packages/latence-parser-pdfplumber/src
+            - packages/latence-parser-plaintext/src
+            - packages/latence-disambig-embedding/src
+          options:
+            docstring_style: sphinx
+            docstring_section_style: table
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: true
+            show_if_no_docstring: false
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            members_order: source
+            filters:
+              - "!^_"
+            heading_level: 2
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      base_path:
+        - .
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ddickmann/latence-framework
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - getting-started/index.md
+      - Fresh-pod walkthrough: TUTORIAL-fresh-pod-walkthrough.md
+      - GPU testing guide: GPU-TESTING-GUIDE.md
+  - Concepts & Architecture:
+      - concepts/index.md
+      - Architecture: concepts/architecture.md
+      - Domain language: concepts/domain-language.md
+      - ProviderProfile & device handling: provider-profile.md
+  - Pipeline Stages:
+      - pipeline/index.md
+  - Providers:
+      - providers/README.md
+      - Provider catalog: providers/catalog.md
+      - Writing an adapter (AdapterBase): writing-an-adapter.md
+      - Conformance checklist: CONFORMANCE.md
+      - Embedders: embedders.md
+  - Guides:
+      - guides/index.md
+      - Run & validate a stack: running-a-stack.md
+      - Run a bake-off: running-a-bakeoff.md
+      - Tune a stack per device: tuning.md
+      - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
+      - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+  - Decision Log (ADRs):
+      - adr/index.md
+      - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
+      - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
+      - 0003 — Stage library + pluggable Runners: adr/0003-stage-library-with-pluggable-runners.md
+      - 0004 — Capability protocols + provider plugins: adr/0004-capability-protocols-with-provider-plugins.md
+      - 0005 — v1 scope, the AI-ready-data spine: adr/0005-v1-scope-the-ai-ready-data-spine.md
+      - 0006 — One schema, dual serialization: adr/0006-one-schema-dual-serialization.md
+      - 0007 — CPU-first reference Providers: adr/0007-cpu-first-reference-providers.md
+      - 0008 — Quality Report as first-class artifact: adr/0008-quality-report-as-first-class-artifact.md
+      - 0009 — fsspec Storage seam: adr/0009-fsspec-storage-seam.md
+      - 0010 — Local Runner state is files-on-Storage: adr/0010-local-runner-state-is-files-on-storage.md
+      - 0011 — Demo is one command + live swap: adr/0011-demo-is-one-command-plus-live-provider-swap.md
+      - 0012 — Permissive-only weights, Gemma opt-in: adr/0012-permissive-only-reference-providers-gemma-opt-in.md
+      - 0013 — Relation Extraction chosen empirically: adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md
+      - 0014 — Source seam, thin connectors: adr/0014-source-seam-thin-connectors.md
+      - 0015 — Python core, declarative YAML, Rust hot paths: adr/0015-python-core-declarative-yaml-rust-for-hot-paths.md
+      - 0016 — Thin core + per-provider packages: adr/0016-thin-core-per-provider-packages.md
+      - 0017 — AI-ready deliverable = RAG corpus + KG as files: adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md
+      - 0018 — Incremental corpus deltas: adr/0018-incremental-corpus-deltas.md
+      - 0019 — Parser input contract: adr/0019-parser-input-contract.md
+      - 0020 — Parse page map + error disposition: adr/0020-parse-page-map-and-error-disposition.md
+      - 0021 — Chunk offsets + two Screening checkpoints: adr/0021-chunk-offsets-and-screening-two-checkpoints.md
+      - 0022 — Entity mention record + zero-shot split: adr/0022-entity-mention-record-and-zero-shot-provider-split.md
+      - 0023 — Relation mention record + fused routing: adr/0023-relation-mention-record-and-fused-stage-routing.md
+      - 0024 — Redaction record + metadata-aware policy: adr/0024-redaction-record-and-metadata-aware-policy.md
+      - 0025 — Profiling feature record, corpus-level: adr/0025-profiling-feature-record-corpus-level-stage-and-fixed-feature-set.md
+      - 0026 — Disambiguation canonical-entity record: adr/0026-disambiguation-canonical-entity-scoped-record-ported-resolver-cascade-and-cpu-viable-linking.md
+      - 0027 — Graph Assembly + KG export as files: adr/0027-graph-assembly-scoped-graph-record-ported-builder-and-kg-export-as-files.md
+      - 0028 — Quality Report + gold-set harness: adr/0028-quality-report-promoted-gold-set-harness-is-a-runner-side-evaluation-keyed-by-file-name.md
+      - 0029 — Delta Runner affected-set: adr/0029-delta-runner-affected-set-via-blocking-keys-and-source-exclusion-deletion.md
+      - 0030 — Performance path + second Runner adapter: adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md
+      - 0031 — Entity Extraction true original offsets: adr/0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md
+      - 0033 — Streaming, memory-bounded Runner: adr/0033-streaming-memory-bounded-runner.md
+      - 0034 — Observability, typed errors, tracing seam: adr/0034-observability-typed-errors-and-thin-tracing-seam.md
+      - 0035 — Second CPU reference Providers: adr/0035-second-cpu-reference-providers-for-single-provider-capabilities.md
+      - 0036 — Provider ecosystem + bake-off: adr/0036-provider-ecosystem-and-bakeoff.md
+      - 0037 — Graph Completion optional stage: adr/0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md
+      - 0038 — Schema Induction optional LLM stage: adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md
+      - 0039 — Context Enrichment optional stage: adr/0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md
+      - 0041 — Guided setup + process CLI: adr/0041-guided-setup-and-process-cli-opinionated-quality-baked-config-and-one-toggle.md
+      - 0042 — Chunk-level redaction: adr/0042-chunk-level-redaction-fixes-the-document-truncation-leak.md
+      - 0043 — Incremental extraction + frozen schema: adr/0043-incremental-extraction-frozen-schema-and-doc-level-cross-run-reuse.md
+      - 0044 — Universal redaction floor: adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md
+      - 0045 — Granite r2 default Embedder: adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md
+      - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
+  - API Reference:
+      - reference/index.md
+      - Data contracts: reference/contracts.md
+      - Capability protocols: reference/capability.md
+      - Pipeline: reference/pipeline.md
+      - Local Runner: reference/runner.md
+      - Storage seam: reference/storage.md
+      - Provider base & profile: reference/providers.md
+      - Errors & tracing: reference/errors.md
+      - Example provider (pdfplumber): reference/example-provider.md
+  - Project Internals:
+      - Architecture audit (S1): audits/S1-architecture-audit.md
+      - Algorithmic asset inventory: ASSET-INVENTORY.md
+      - Dependency audit: DEPENDENCY-AUDIT.md
+      - Porting map: PORTING-MAP.md

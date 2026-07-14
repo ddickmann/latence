@@ -1,0 +1,6 @@
+# Runtime dirs created by deploy/docker-compose.yml — never committed.
+corpus/
+out/
+hf-cache/
+.env
+.env.*

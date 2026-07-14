@@ -1,0 +1,35 @@
+{{- if and .Values.persistence.data.enabled (not .Values.persistence.data.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "latence.fullname" . }}-data
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.data.accessMode }}
+  {{- if .Values.persistence.data.storageClass }}
+  storageClassName: {{ .Values.persistence.data.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.data.size | quote }}
+{{- end }}
+{{- if and .Values.persistence.hfCache.enabled (not .Values.persistence.hfCache.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "latence.fullname" . }}-hf-cache
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.hfCache.accessMode }}
+  {{- if .Values.persistence.hfCache.storageClass }}
+  storageClassName: {{ .Values.persistence.hfCache.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.hfCache.size | quote }}
+{{- end }}

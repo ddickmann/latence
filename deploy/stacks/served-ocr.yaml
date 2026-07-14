@@ -1,0 +1,63 @@
+# deploy/stacks/served-ocr.yaml — the PRODUCTION served-OCR stack (deploy/, not the demo).
+#
+# The SOTA scanned-document pipeline whose OCR runs on a *served vLLM endpoint* (LightOn-OCR-2),
+# not in-process (parser.lighton_vllm, ADR-0030/W6). It is the stack the deploy artifacts run:
+#   * deploy/docker-compose.yml mounts it and points `base_url` at the bundled `vllm-ocr` service;
+#   * deploy/helm renders it into a ConfigMap with `base_url` = the in-cluster vLLM Service.
+#
+# Concrete values (NOT the {STORAGE_URI}/{CORPUS_DIR} harness placeholders that stacks/*.yaml use)
+# so `latence run` executes it directly. Override the two paths + the endpoint by editing this file
+# (or the Helm values) — nothing else needs to change.
+#
+# The head (Source -> Intake -> Parse[OCR]) is the server-dependent part; everything downstream
+# (Chunk -> Content Screening -> RAG Export) is the deterministic in-core CPU spine. Swap the
+# in-core entity/relation stages for the endpoint Providers (entity.endpoint / relation.llm) to
+# route those through the optional LLM service — see docs/deployment.md.
+name: latence-served-ocr
+storage_uri: "file:///data/out"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "/data/corpus"
+      sensitivity: internal
+      extensions: [pdf, png, jpg, jpeg, tiff, tif, webp, bmp]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 8388608          # scans/photos are larger than text PDFs (8 MiB)
+      max_zip_ratio: 50.0
+
+  # --- Served OCR: hits the running vLLM OpenAI-compatible endpoint (LightOn-OCR-2) ---
+  # base_url points at the vLLM service; api_key falls back to $OPENAI_API_KEY (a local vLLM
+  # accepts any placeholder). No key or model weights are embedded here (ADR-0012).
+  - name: parse
+    capability: parse
+    provider: parser.lighton_vllm
+    depends_on: [intake_screen]
+    config:
+      base_url: "http://vllm-ocr:8000/v1"   # overridden by compose/Helm to the real endpoint
+      max_concurrency: 8                     # fan a document's page-images out concurrently
+      dpi: 200                               # PDF->image rasterisation DPI
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [content_screen]
+    config:
+      basename: corpus

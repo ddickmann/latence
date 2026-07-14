@@ -1,0 +1,22 @@
+Latence deployed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Pipeline: {{ .Values.pipeline.kind }} ({{ if eq .Values.pipeline.kind "cronjob" }}schedule {{ .Values.pipeline.schedule | quote }}{{ else }}one-shot run{{ end }})
+OCR:      {{ if .Values.vllmOcr.enabled }}served vLLM at {{ include "latence.ocrBaseUrl" . }} (model {{ .Values.vllmOcr.model }}){{ else }}DISABLED (point stack.ocrBaseUrl at an external endpoint){{ end }}
+LLM:      {{ if .Values.vllmLlm.enabled }}served vLLM (model {{ .Values.vllmLlm.model }}){{ else }}disabled{{ end }}
+Metrics:  {{ .Values.metrics.kind }}
+
+Next steps:
+  1. Stage your corpus into the data PVC ({{ include "latence.fullname" . }}-data) at /data/corpus,
+     or set persistence.data.existingClaim to a claim your corpus is already staged into.
+  2. Watch the OCR server come up (first boot downloads the model):
+       kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "latence.ocrServiceName" . }}
+  3. Watch the pipeline run:
+{{- if eq .Values.pipeline.kind "cronjob" }}
+       kubectl -n {{ .Release.Namespace }} get cronjob {{ include "latence.fullname" . }}-cron
+{{- else }}
+       kubectl -n {{ .Release.Namespace }} logs job/{{ include "latence.fullname" . }}-run -f
+{{- end }}
+  4. The RAG corpus + KG + Quality Report land under /data/out on the data PVC.
+
+Secrets: endpoint keys are env-only and REFERENCED, never embedded. See docs/secrets.md.
+Air-gapped: pre-cache the model into the hf-cache PVC and set HF_HUB_OFFLINE=1. See docs/deployment.md.

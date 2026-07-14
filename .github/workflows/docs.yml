@@ -1,0 +1,79 @@
+name: docs
+
+# Build the mkdocs-material documentation site and deploy it to GitHub Pages.
+#
+# - On push to main: build + deploy to Pages (least-privilege: pages:write + id-token:write).
+# - On pull requests: build ONLY, with `--strict` so any broken link / nav / autodoc
+#   warning fails the check before it can reach main. No Pages permissions on PRs.
+#
+# The API Reference is autodoc'd from `latence-core` (+ the CPU-first reference Providers),
+# so the docs extra installs those importable packages via `uv sync --extra docs`.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "packages/**/src/**"
+      - ".github/workflows/docs.yml"
+      - "pyproject.toml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "packages/**/src/**"
+      - ".github/workflows/docs.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+# Least privilege by default; the deploy job elevates only what Pages needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # PR + push: build the site with --strict (fail on any mkdocs warning).
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install docs toolchain (+ autodoc'd packages)
+        run: uv sync --extra docs
+
+      - name: Build (strict — fail on warnings)
+        run: uv run mkdocs build --strict --site-dir site
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Push to main only: publish the built artifact to GitHub Pages.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

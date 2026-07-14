@@ -1,0 +1,50 @@
+name: CodeQL
+
+# Static analysis (SAST) for the Python sources. Separate from ci.yml (which owns
+# the lint · type · test · build gates); this workflow only runs CodeQL.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # Weekly, so a newly-disclosed query pattern is caught even without a push.
+    - cron: "27 4 * * 1"
+
+# Least privilege: read the code, write only security events. No contents:write etc.
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload the SARIF results to the Security tab
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # Use the security-extended suite for a broader query set than the default.
+          queries: security-extended
+
+      # Python needs no compilation; the default autobuild is a no-op but keeps the
+      # standard three-step CodeQL shape and is safe for a pure-Python tree.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

@@ -39,6 +39,7 @@ dependencies = [
 Homepage = "https://github.com/ddickmann/latence-framework"
 Repository = "https://github.com/ddickmann/latence-framework"
 Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
 
 [project.entry-points."latence.providers"]
 "parser.document" = "latence_parser_document.provider:DocumentParser"

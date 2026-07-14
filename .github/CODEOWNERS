@@ -1,0 +1,30 @@
+# Code ownership for review routing.
+#
+# @ddickmann is a PLACEHOLDER owner — edit these lines to match your team as the
+# project grows (e.g. hand a Provider family or the docs to a co-maintainer).
+# The last matching pattern wins, so per-area rules below override the root rule.
+# See https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything.
+*                               @ddickmann
+
+# Core contracts, Stages, and the Runner — the load-bearing seam. Review carefully.
+/packages/latence-core/         @ddickmann
+
+# Architecture decisions and canonical language — changes here shape the whole repo.
+/CONTEXT.md                     @ddickmann
+/docs/adr/                      @ddickmann
+
+# Security-, license-, and supply-chain-sensitive surfaces.
+/SECURITY.md                    @ddickmann
+/docs/THREAT-MODEL.md           @ddickmann
+/NOTICE                         @ddickmann
+/THIRD-PARTY-LICENSES.md        @ddickmann
+/LICENSE                        @ddickmann
+/.secrets.baseline              @ddickmann
+
+# CI, community health, and supply-chain automation.
+/.github/                       @ddickmann
+
+# Issue tracking / process.
+/issues/                        @ddickmann

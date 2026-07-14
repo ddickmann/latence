@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussion
+    url: https://github.com/ddickmann/latence-framework/discussions
+    about: >
+      Usage questions, design discussion, and ideas that aren't yet a concrete bug or
+      feature. Please ask here before filing a bug for a how-do-I question.
+  - name: Report a security vulnerability (private)
+    url: https://github.com/ddickmann/latence-framework/security/advisories/new
+    about: >
+      Do NOT open a public issue for a suspected vulnerability. Report it privately via
+      GitHub Security Advisories (or email per SECURITY.md) for coordinated disclosure.

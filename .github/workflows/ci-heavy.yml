@@ -1,0 +1,201 @@
+name: CI (heavy lanes)
+
+# The slow/infra-heavy gates, split out of ci.yml so PR feedback there stays fast:
+#   - storage-s3 : the real pipeline e2e over MinIO (s3://) — spins a container
+#   - airflow-dag: the real build_dag tests under a constrained apache-airflow install
+#   - bake-off   : Goal-B per-Stage provider matrices, end-to-end on the bundled corpus
+#
+# Still runs on every PR + on pushes to main (so nothing merges unproven), plus a nightly
+# schedule and manual dispatch. Docs-only changes skip these lanes (paths-ignore) — a
+# README/ADR edit never needs a MinIO container. scripts/verify-local.sh covers the
+# bake-off locally; the MinIO + Airflow lanes are called out there as infra-only.
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "issues/**"
+      - "LICENSE"
+      - "NOTICE"
+      - "CHANGELOG.md"
+      - ".gitignore"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "issues/**"
+      - "LICENSE"
+      - "NOTICE"
+      - "CHANGELOG.md"
+      - ".gitignore"
+  schedule:
+    # 03:17 UTC nightly — an off-peak, non-round minute to dodge the top-of-hour surge.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONHASHSEED: "0"
+
+jobs:
+  bake-off:
+    name: CPU bake-offs (Goal B — per-Stage provider matrix)
+    runs-on: ubuntu-latest
+    env:
+      LATENCE_CUDA: "0"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Set up workspace (py3.12)
+        uses: ./.github/actions/setup-workspace
+        with:
+          python-version: "3.12"
+
+      # Each shipped CPU matrix runs its candidate Providers through the REAL pipeline
+      # (other stages held at stacks/default.yaml), measuring quality/latency/memory/cost/
+      # license/determinism/error-rate. GPU candidates skip-with-flag on this CPU host
+      # (never a fabricated number, #64). Kept byte-aligned with scripts/verify-local.sh.
+      - name: Run shipped CPU bake-off matrices
+        run: |
+          for m in parse chunk embed redaction disambiguation graph_completion schema_induction; do
+            if [ -f "matrix/$m.yaml" ]; then
+              echo "::group::bake-off $m"
+              uv run latence bake-off "matrix/$m.yaml" --out-dir "$(mktemp -d)"
+              echo "::endgroup::"
+            fi
+          done
+
+  storage-s3:
+    name: Pipeline e2e on MinIO (s3://)
+    runs-on: ubuntu-latest
+    env:
+      LATENCE_S3_ENDPOINT: http://localhost:9000
+      LATENCE_S3_BUCKET: latence-test
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      # botocore resolves the MinIO endpoint from these STANDARD env vars, so the
+      # framework's own Storage.for_uri("s3://…") (built with no options in the Runner)
+      # talks to MinIO with no code change — the ADR-0009 guarantee the real e2e exercises.
+      AWS_ENDPOINT_URL_S3: http://localhost:9000
+      AWS_ENDPOINT_URL: http://localhost:9000
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Start MinIO
+        run: |
+          # Run MinIO directly (services: can't pass the required `server` command).
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+          # Wait for the health endpoint (host curl, not container curl).
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live; then
+              echo "minio ready"; break
+            fi
+            echo "waiting for minio ($i)"; sleep 2
+          done
+          # Create the test bucket via the mc client.
+          docker run --rm --network host \
+            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            minio/mc:latest mb --ignore-existing local/latence-test
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Sync workspace (+ s3fs)
+        run: |
+          uv sync
+          uv pip install s3fs
+
+      # The Storage round-trip (5-byte) PLUS the real end-to-end pipeline on s3:// — the honest
+      # ADR-0009 coverage (H-E1 Part 2). The e2e drives the SAME screening spine the local
+      # test_e2e_pipeline_spine.py proves, over object storage: intake-quarantine-before-parse,
+      # offset round-trip, sensitivity inheritance, injection-marker survival, and a
+      # byte-identical idempotent resume — all on s3://, not file:// in disguise.
+      - name: Storage round-trip + real pipeline e2e on s3://
+        run: |
+          uv run pytest \
+            packages/latence-core/tests/test_storage_s3.py \
+            packages/latence-core/tests/test_e2e_s3.py \
+            -v
+
+  airflow-dag:
+    name: Airflow DAG structure (apache-airflow installed)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONHASHSEED: "0"
+      # Turns a SILENT skip of the real-airflow tests RED: the audit found the package's
+      # raison d'être had ZERO enforced CI coverage because CI never installed apache-airflow,
+      # so both @skipif(not _HAS_AIRFLOW) tests always skipped. This lane installs airflow and
+      # this flag makes the guard test assert it is importable (H-E1 Part 3).
+      LATENCE_REQUIRE_AIRFLOW: "1"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Set up Python
+        # apache-airflow's published constraints target CPython 3.11; pin the lane to it.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      # Install apache-airflow with its OFFICIAL constraints file (the only supported way — a bare
+      # `pip install apache-airflow` picks up incompatible transitive versions). Kept in a separate
+      # job so the heavy, constraint-pinned install never touches the light core lanes (ADR-0016).
+      - name: Install apache-airflow (pinned via official constraints)
+        run: |
+          AIRFLOW_VERSION=2.9.3
+          PY=3.11
+          CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PY}.txt"
+          python -m pip install --upgrade pip
+          python -m pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "${CONSTRAINTS}"
+          # The test runner, installed UNDER airflow's constraints so its transitive deps
+          # (typing_extensions, pluggy, packaging) stay pinned to the airflow-compatible set — a
+          # bare `pip install pytest` downgraded typing_extensions and broke airflow's import
+          # (`cannot import name 'Sentinel'`). Constraining keeps the solved env intact.
+          python -m pip install pytest --constraint "${CONSTRAINTS}"
+
+      # Install the framework source WITHOUT deps so the airflow constraint solve above is not
+      # disturbed (latence-core's runtime deps — pydantic/pyarrow/fsspec — are already pulled by
+      # the airflow constraints or are compatible; --no-deps keeps the pinned env intact).
+      - name: Install latence-core + the Airflow adapter + the parser provider (no deps)
+        run: |
+          python -m pip install --no-deps -e packages/latence-core
+          python -m pip install --no-deps -e packages/latence-runner-airflow
+          # The DAG-execution test runs a real pipeline that references parser.plaintext (the other
+          # providers it uses — source.local_folder / chunk.markdown / entity.gazetteer /
+          # export.jsonl_parquet — are in-core). Install that one provider package so its
+          # entry-point is registered; heavy provider packages are NOT needed here.
+          python -m pip install --no-deps -e packages/latence-parser-plaintext
+          # pydantic + pydantic-core MUST be a matched pair — install pydantic WITH deps so pip
+          # resolves the exact pydantic-core + Sentinel-bearing typing_extensions it needs. Separate
+          # --no-deps installs pulled mismatched latest versions (pydantic-core 2.47 vs pydantic
+          # wanting 2.46.4 → SystemError; and an old typing_extensions missing Sentinel).
+          python -m pip install pydantic
+          # Remaining light runtime deps latence-core imports (no-deps: keep the airflow-pinned set).
+          python -m pip install --no-deps pyarrow fsspec typer
+
+      # Run the REAL build_dag DAG-structure tests (the two @skipif(not _HAS_AIRFLOW) tests) plus
+      # the guard. Assert a non-zero collected count so a silent all-skip can never pass green:
+      # `--no-header -o addopts=` runs bare, and we grep the summary for the executed count.
+      - name: Real build_dag DAG-structure tests (assert they actually run)
+        run: |
+          python -m pytest \
+            packages/latence-runner-airflow/tests/test_airflow_dag_path.py \
+            -k "real_airflow or airflow_is_actually_installed" \
+            -v -o addopts= -p no:cacheprovider | tee /tmp/airflow_pytest.txt
+          # collected-count > 0 gate: at least the two real-airflow DAG tests must have PASSED
+          # (not skipped). A silent-skip regression would show 0 passed and fail this grep.
+          passed="$(grep -Eo '[0-9]+ passed' /tmp/airflow_pytest.txt | grep -Eo '[0-9]+' | head -1 || echo 0)"
+          echo "real-airflow tests passed: ${passed}"
+          test "${passed}" -ge 3

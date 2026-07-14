@@ -6,6 +6,17 @@ dist/
 build/
 *.egg-info/
 .uv/
+# Coverage (surfaced in CI as a job summary + artifact; never committed)
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+
+# Docs site build (mkdocs) + local docs venv
+/site/
+.docs-venv/
+
 # Data
 .DS_Store
 demo/data/

@@ -1,16 +1,24 @@
 name: CI
 
+# Fast, required merge gates. The heavy/slow lanes (MinIO s3:// e2e, the Airflow DAG
+# lane, and the Goal-B per-Stage bake-offs) live in ci-heavy.yml so PR feedback here
+# stays quick. scripts/verify-local.sh mirrors ALL of these gates locally.
 on:
   push:
     branches: ["**"]
   pull_request:
 
+# One in-flight run per ref; a new push cancels the previous run of THIS workflow.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: every job here only ever reads the repo.
+permissions:
+  contents: read
+
 env:
-  # Hash-stable runs for deterministic tests.
+  # Hash-stable runs for deterministic tests (the root conftest fails fast if unset).
   PYTHONHASHSEED: "0"
 
 jobs:
@@ -18,10 +26,10 @@ jobs:
     name: secret scan (detect-secrets)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
 
@@ -34,76 +42,26 @@ jobs:
       # + `git diff --exit-code`. That form rewrites volatile fields (the generated_at
       # timestamp and every finding's line_number) into the baseline on every run, so a
       # raw diff is guaranteed non-zero on a pristine tree with no new secret — CI-red
-      # on merge, and it drowns a real new secret in constant noise. (`detect-secrets-hook
-      # --baseline` has the same failure mode: it too rewrites drifted line numbers.)
-      # The script instead runs a fresh scan and compares the SET of
-      # (filename, hashed_secret) pairs against the audited baseline, ignoring line
-      # numbers and the timestamp entirely — pristine tree is always green; only a
-      # genuinely new or newly-un-audited secret turns it red. It never mutates the
-      # baseline. `uv run --with detect-secrets --no-project` puts the `detect-secrets`
-      # CLI (which the script shells out to) on PATH without syncing the workspace.
+      # on merge, and it drowns a real new secret in constant noise. The script instead
+      # runs a fresh scan and compares the SET of (filename, hashed_secret) pairs against
+      # the audited baseline, ignoring line numbers and the timestamp entirely — pristine
+      # tree is always green; only a genuinely new or newly-un-audited secret turns it red.
+      # `uv run --with detect-secrets --no-project` puts the CLI on PATH without syncing.
       - name: detect-secrets (audited baseline gate)
         run: uv run --with detect-secrets --no-project python scripts/secret_scan_gate.py
 
-  quality:
-    name: lint · type · test · build (py${{ matrix.python-version }})
+  # ---- Fast-feedback gate: lint + strict types on a single interpreter. Everything
+  # heavier (tests, stacks, build) waits on this so a lint/type break fails in ~1 min.
+  lint-type:
+    name: lint · type (fast gate)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
+      - name: Set up workspace (py3.12)
+        uses: ./.github/actions/setup-workspace
         with:
-          enable-cache: true
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Sync workspace
-        run: uv sync --python ${{ matrix.python-version }}
-
-      # latence-ner-gliner / latence-relation-gliner / latence-relation-llm are
-      # workspace members but NOT in the dev env's deps: the two gliner packages pull
-      # the heavy GLiNER stack (torch/transformers), the llm + the three -endpoint
-      # packages pull the openai client, latence-embedder-st pulls the
-      # sentence-transformers stack (torch/transformers), latence-parser-lighton /
-      # latence-parser-glm pull the LightOn-OCR / GLM-OCR transformers/torch/pillow/pypdfium2
-      # stack (their tests monkeypatch those with shape-matching fakes), the airflow adapter
-      # pulls apache-airflow, latence-linkpred-ultra pulls the ULTRA/PyKEEN link-prediction
-      # stack (torch/torch-geometric/torch-scatter/pykeen — its tests monkeypatch the Scorer with
-      # a faithful fake and AST-parse the vendored ULTRA API surface, so the merge gate runs
-      # torch-free), and latence-disambig-glinker pulls the GLinker linking stack
-      # (glinker/flashDeBERTa/transformers/torch/huggingface-hub — its tests monkeypatch a faithful
-      # fake backend + inject a fake STS embedder) — any would break the
-      # CPU-first, offline, deterministic test env (ADR-0007/0016).
-      # Install ONLY their source (no deps) so their src is type-checked and their tests
-      # (which monkeypatch the heavy/endpoint dep with a fake, or, for the Airflow
-      # adapter, use its Airflow-free in-process path) collect and run offline.
-      - name: Install heavy/endpoint Provider sources (no heavy deps)
-        run: |
-          uv pip install --no-deps -e packages/latence-ner-gliner
-          uv pip install --no-deps -e packages/latence-relation-gliner
-          uv pip install --no-deps -e packages/latence-relation-llm
-          uv pip install --no-deps -e packages/latence-pii-gliner
-          uv pip install --no-deps -e packages/latence-pii-gliner2
-          uv pip install --no-deps -e packages/latence-extract-gliner2
-          uv pip install --no-deps -e packages/latence-pii-presidio
-          uv pip install --no-deps -e packages/latence-parser-endpoint
-          uv pip install --no-deps -e packages/latence-ner-endpoint
-          uv pip install --no-deps -e packages/latence-embedder-endpoint
-          uv pip install --no-deps -e packages/latence-embedder-st
-          uv pip install --no-deps -e packages/latence-parser-lighton
-          uv pip install --no-deps -e packages/latence-parser-lighton-vllm
-          uv pip install --no-deps -e packages/latence-parser-glm
-          uv pip install --no-deps -e packages/latence-runner-airflow
-          uv pip install --no-deps -e packages/latence-linkpred-ultra
-          uv pip install --no-deps -e packages/latence-schema-inducer
-          uv pip install --no-deps -e packages/latence-parser-render
-          uv pip install --no-deps -e packages/latence-disambig-glinker
+          python-version: "3.12"
 
       - name: Ruff (lint)
         run: uv run ruff check packages
@@ -111,218 +69,144 @@ jobs:
       # Strict type check over BOTH src AND tests for every workspace package (issue #24).
       # The per-package loop (not a single `mypy --strict packages`) is deliberate: the
       # package dirs are hyphenated, so mypy maps every tests/conftest.py to the same bare
-      # `conftest` module and a whole-tree invocation aborts with a duplicate-module error
-      # before checking anything. scripts/typecheck.sh runs mypy once per package so each
-      # conftest is unique in its process; one non-zero exit fails the whole step.
+      # `conftest` module and a whole-tree invocation aborts with a duplicate-module error.
+      # scripts/typecheck.sh runs mypy once per package so each conftest is unique in its
+      # process; one non-zero exit fails the whole step.
       - name: Mypy (strict, src + tests)
         run: MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
 
-      - name: Pytest
-        run: uv run pytest
+  # ---- Full test suite + provider conformance + coverage, on both interpreters.
+  test:
+    name: test · conformance · coverage (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint-type
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Set up workspace (py${{ matrix.python-version }})
+        uses: ./.github/actions/setup-workspace
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Coverage is SURFACED, never hard-gated (a % threshold flakes; see the job summary
+      # + the uploaded artifact + the `coverage:` line below for the badge-ready number).
+      # Installed like the heavy sources (uv pip install into the synced venv, then uv run)
+      # so it never perturbs the locked dev env.
+      - name: Install pytest-cov
+        run: uv pip install pytest-cov
+
+      - name: Pytest (+ coverage)
+        run: >-
+          uv run pytest
+          --cov=packages
+          --cov-report=term-missing:skip-covered
+          --cov-report=xml:coverage.xml
+          --cov-report=json:coverage.json
 
       # Provider Conformance suite (P3-F3, ADR-0036 §5): the enterprise-readiness gate,
       # parametrized over EVERY registered Provider (CPU providers run for real; endpoint/GPU
-      # providers run the contract/graceful-failure/license/determinism-declaration subset
-      # against a deterministic stub — real numbers need a rig, #64). Run explicitly with
-      # LATENCE_CUDA=0 so the device seam is a reproducible CPU-only host and a GPU-declared
-      # provider is skipped-with-flag (never a fabricated number). It also runs inside the
-      # `Pytest` step above; this dedicated step makes the gate a visible, first-class check on
-      # both py3.11 + py3.12. GPU providers run the full suite where a GPU exists (not in CI).
+      # providers run the contract/graceful-failure/license/determinism subset against a
+      # deterministic stub). Run explicitly with LATENCE_CUDA=0 so the device seam is a
+      # reproducible CPU-only host and a GPU-declared provider is skipped-with-flag (never a
+      # fabricated number). It also runs inside `Pytest` above; this dedicated step makes the
+      # gate a visible, first-class check on both py3.11 + py3.12.
       - name: Provider conformance (LATENCE_CUDA=0, every registered provider)
         env:
           LATENCE_CUDA: "0"
         run: uv run pytest packages/latence-core/tests/test_conformance.py packages/latence-core/tests/test_e2e_conformance.py -q
 
-      # Goal A (P3-F4, ADR-0036 §3): "test the default stack, one command". Runs the blessed
-      # stacks/default.yaml end-to-end on the bundled corpus — the REAL pipeline (Source ->…->
-      # Export), not a config-parse smoke — and asserts contracts/KG/RAG/report + determinism +
-      # resume + graceful-failure. Offline + deterministic (LATENCE_CUDA=0); non-zero exit on any
-      # failing check gates the push, so the blessed stack is proven green on every commit. The
-      # gpu-sota.yaml run reports its learned Stages skipped-with-flag on this CPU host (never
-      # faked) and validates the CPU-reachable spine, so both committed stacks stand a standing gate.
-      # gpu-ocr.yaml (the scanned-document / OCR-first stack, W1-lighton #91) swaps Parse for the
-      # GPU parser.lighton: on this CPU host Parse (and its dependents) skip-with-flag and the
-      # CPU-reachable head still validates — never a fabricated CPU run of the GPU OCR model.
-      - name: Validate default stack (Goal A — end-to-end, one command)
-        env:
-          LATENCE_CUDA: "0"
+      - name: Coverage summary → job summary + badge number
+        if: always()
+        run: |
+          pct=$(python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
+          {
+            echo "### Coverage — py${{ matrix.python-version }}"
+            echo ""
+            echo "**\`coverage: ${pct}%\`**  (line coverage over \`packages/\`, tests/vendor omitted)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Badge-ready number on stdout for quick grepping / a shields.io endpoint.
+          echo "coverage: ${pct}%"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            coverage.json
+          if-no-files-found: warn
+
+  # ---- Goal A (P3-F4, ADR-0036 §3): the blessed stacks run end-to-end on the bundled
+  # corpus (real Source→…→Export, not a config-parse smoke). Fast enough to keep on every
+  # PR; the heavier per-Stage bake-offs (Goal B) live in ci-heavy.yml.
+  stacks:
+    name: stack validate (Goal A — end-to-end)
+    runs-on: ubuntu-latest
+    needs: lint-type
+    env:
+      LATENCE_CUDA: "0"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Set up workspace (py3.12)
+        uses: ./.github/actions/setup-workspace
+        with:
+          python-version: "3.12"
+
+      # GPU-declared Stages report skipped-with-flag on this CPU host (never faked); the
+      # CPU-reachable spine of every committed stack still validates. Kept byte-aligned
+      # with the stack list in scripts/verify-local.sh.
+      - name: Validate committed stacks
         run: |
           uv run latence stack validate stacks/default.yaml
           uv run latence stack validate stacks/gpu-sota.yaml
           uv run latence stack validate stacks/gpu-sota-pod.yaml
+          uv run latence stack validate stacks/gpu-sota-glinker.yaml
           uv run latence stack validate stacks/gpu-ocr.yaml
-          uv run latence stack validate stacks/universal-parse.yaml  # W5 any-file parser; Parse skip-with-flag on CPU
+          uv run latence stack validate stacks/universal-parse.yaml
+          uv run latence stack validate stacks/linkpred-base.yaml
+          uv run latence stack validate stacks/schema-induction.yaml
+          uv run latence stack validate stacks/context-enrichment.yaml
 
-      # Goal B (P3-F5, ADR-0036 §4): the per-Stage bake-off. Runs the two shipped CPU matrices —
-      # matrix/parse.yaml + matrix/chunk.yaml — end-to-end on the bundled corpus: each candidate
-      # Provider run through the REAL pipeline (other stages held at stacks/default.yaml), measuring
-      # quality/latency/memory(declared-vs-measured)/cost/license/determinism/error-rate. Offline +
-      # deterministic (LATENCE_CUDA=0), so the bake-off runs end-to-end and its numbers are
-      # reproducible on every push. GPU matrices (matrix/entity.yaml's gliner candidate, and
-      # matrix/embed.yaml's sentence_transformers candidate) have their GPU candidate skipped-with-
-      # flag on this CPU host, never a fabricated number (#64); their CPU candidate (hashing embedder
-      # for embed) runs for real. Writes MATRIX-RESULTS-<stage>.md + .json to a temp dir (CLI path).
-      - name: Run CPU bake-offs (Goal B — per-Stage provider matrix, end-to-end)
-        env:
-          LATENCE_CUDA: "0"
-        run: |
-          uv run latence bake-off matrix/parse.yaml --out-dir "$(mktemp -d)"
-          uv run latence bake-off matrix/chunk.yaml --out-dir "$(mktemp -d)"
-          uv run latence bake-off matrix/embed.yaml --out-dir "$(mktemp -d)"
-          uv run latence bake-off matrix/redaction.yaml --out-dir "$(mktemp -d)"
-          uv run latence bake-off matrix/disambiguation.yaml --out-dir "$(mktemp -d)"
-
-      - name: Build wheels
-        run: |
-          uv build --package latence-core
-          uv build --package latence-parser-plaintext
-          uv build --package latence-parser-document
-          uv build --package latence-parser-pdfplumber
-          uv build --package latence-ner-gliner
-          uv build --package latence-relation-gliner
-          uv build --package latence-relation-llm
-          uv build --package latence-pii-gliner
-          uv build --package latence-pii-gliner2
-          uv build --package latence-pii-presidio
-          uv build --package latence-parser-endpoint
-          uv build --package latence-ner-endpoint
-          uv build --package latence-embedder-endpoint
-          uv build --package latence-embedder-st
-          uv build --package latence-parser-lighton
-          uv build --package latence-parser-lighton-vllm
-          uv build --package latence-parser-glm
-          uv build --package latence-parser-render
-          uv build --package latence-runner-airflow
-          uv build --package latence-linkpred-ultra
-          uv build --package latence-schema-inducer
-          uv build --package latence-demo
-          uv build --package latence-disambig-embedding
-          uv build --package latence-disambig-glinker
-
-  storage-s3:
-    name: Pipeline e2e on MinIO (s3://)
+  # ---- Packaging gate: every publishable package builds a wheel + sdist. Runs only
+  # after tests pass; uploads the dist/ tree so a release dry-run is one click away.
+  build:
+    name: build wheels + sdists (all packages)
     runs-on: ubuntu-latest
-    env:
-      LATENCE_S3_ENDPOINT: http://localhost:9000
-      LATENCE_S3_BUCKET: latence-test
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      # botocore resolves the MinIO endpoint from these STANDARD env vars, so the
-      # framework's own Storage.for_uri("s3://…") (built with no options in the Runner)
-      # talks to MinIO with no code change — the ADR-0009 guarantee the real e2e exercises.
-      AWS_ENDPOINT_URL_S3: http://localhost:9000
-      AWS_ENDPOINT_URL: http://localhost:9000
-      AWS_DEFAULT_REGION: us-east-1
+    needs: test
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Start MinIO
-        run: |
-          # Run MinIO directly (services: can't pass the required `server` command).
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-          # Wait for the health endpoint (host curl, not container curl).
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live; then
-              echo "minio ready"; break
-            fi
-            echo "waiting for minio ($i)"; sleep 2
-          done
-          # Create the test bucket via the mc client.
-          docker run --rm --network host \
-            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
-            minio/mc:latest mb --ignore-existing local/latence-test
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
 
-      - name: Sync workspace (+ s3fs)
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      # Build EVERY package under packages/ (name == dist name here) into a single dist/.
+      # Iterating the dir (vs a hardcoded list) means a newly added package can never be
+      # silently left unbuilt/unpublished.
+      - name: Build all packages
         run: |
-          uv sync
-          uv pip install s3fs
+          for pkg in packages/*/; do
+            name="$(basename "$pkg")"
+            echo "::group::uv build --package ${name}"
+            uv build --package "${name}" --out-dir dist
+            echo "::endgroup::"
+          done
+          echo "## Built distributions" >> "$GITHUB_STEP_SUMMARY"
+          ls -1 dist >> "$GITHUB_STEP_SUMMARY"
 
-      # The Storage round-trip (5-byte) PLUS the real end-to-end pipeline on s3:// — the honest
-      # ADR-0009 coverage (H-E1 Part 2). The e2e drives the SAME screening spine the local
-      # test_e2e_pipeline_spine.py proves, over object storage: intake-quarantine-before-parse,
-      # offset round-trip, sensitivity inheritance, injection-marker survival, and a
-      # byte-identical idempotent resume — all on s3://, not file:// in disguise.
-      - name: Storage round-trip + real pipeline e2e on s3://
-        run: |
-          uv run pytest \
-            packages/latence-core/tests/test_storage_s3.py \
-            packages/latence-core/tests/test_e2e_s3.py \
-            -v
-
-  airflow-dag:
-    name: Airflow DAG structure (apache-airflow installed)
-    runs-on: ubuntu-latest
-    env:
-      PYTHONHASHSEED: "0"
-      # Turns a SILENT skip of the real-airflow tests RED: the audit found the package's
-      # raison d'être had ZERO enforced CI coverage because CI never installed apache-airflow,
-      # so both @skipif(not _HAS_AIRFLOW) tests always skipped. This lane installs airflow and
-      # this flag makes the guard test assert it is importable (H-E1 Part 3).
-      LATENCE_REQUIRE_AIRFLOW: "1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        # apache-airflow's published constraints target CPython 3.11; pin the lane to it.
-        uses: actions/setup-python@v5
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          python-version: "3.11"
-
-      # Install apache-airflow with its OFFICIAL constraints file (the only supported way — a bare
-      # `pip install apache-airflow` picks up incompatible transitive versions). Kept in a separate
-      # job so the heavy, constraint-pinned install never touches the light core lanes (ADR-0016).
-      - name: Install apache-airflow (pinned via official constraints)
-        run: |
-          AIRFLOW_VERSION=2.9.3
-          PY=3.11
-          CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PY}.txt"
-          python -m pip install --upgrade pip
-          python -m pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "${CONSTRAINTS}"
-          # The test runner, installed UNDER airflow's constraints so its transitive deps
-          # (typing_extensions, pluggy, packaging) stay pinned to the airflow-compatible set — a
-          # bare `pip install pytest` downgraded typing_extensions and broke airflow's import
-          # (`cannot import name 'Sentinel'`). Constraining keeps the solved env intact.
-          python -m pip install pytest --constraint "${CONSTRAINTS}"
-
-      # Install the framework source WITHOUT deps so the airflow constraint solve above is not
-      # disturbed (latence-core's runtime deps — pydantic/pyarrow/fsspec — are already pulled by
-      # the airflow constraints or are compatible; --no-deps keeps the pinned env intact).
-      - name: Install latence-core + the Airflow adapter + the parser provider (no deps)
-        run: |
-          python -m pip install --no-deps -e packages/latence-core
-          python -m pip install --no-deps -e packages/latence-runner-airflow
-          # The DAG-execution test runs a real pipeline that references parser.plaintext (the other
-          # providers it uses — source.local_folder / chunk.markdown / entity.gazetteer /
-          # export.jsonl_parquet — are in-core). Install that one provider package so its
-          # entry-point is registered; heavy provider packages are NOT needed here.
-          python -m pip install --no-deps -e packages/latence-parser-plaintext
-          # pydantic + pydantic-core MUST be a matched pair — install pydantic WITH deps so pip
-          # resolves the exact pydantic-core + Sentinel-bearing typing_extensions it needs. Separate
-          # --no-deps installs pulled mismatched latest versions (pydantic-core 2.47 vs pydantic
-          # wanting 2.46.4 → SystemError; and an old typing_extensions missing Sentinel).
-          python -m pip install pydantic
-          # Remaining light runtime deps latence-core imports (no-deps: keep the airflow-pinned set).
-          python -m pip install --no-deps pyarrow fsspec typer
-
-      # Run the REAL build_dag DAG-structure tests (the two @skipif(not _HAS_AIRFLOW) tests) plus
-      # the guard. Assert a non-zero collected count so a silent all-skip can never pass green:
-      # `--no-header -o addopts=` runs bare, and we grep the summary for the executed count.
-      - name: Real build_dag DAG-structure tests (assert they actually run)
-        run: |
-          python -m pytest \
-            packages/latence-runner-airflow/tests/test_airflow_dag_path.py \
-            -k "real_airflow or airflow_is_actually_installed" \
-            -v -o addopts= -p no:cacheprovider | tee /tmp/airflow_pytest.txt
-          # collected-count > 0 gate: at least the two real-airflow DAG tests must have PASSED
-          # (not skipped). A silent-skip regression would show 0 passed and fail this grep.
-          passed="$(grep -Eo '[0-9]+ passed' /tmp/airflow_pytest.txt | grep -Eo '[0-9]+' | head -1 || echo 0)"
-          echo "real-airflow tests passed: ${passed}"
-          test "${passed}" -ge 3
+          name: dist
+          path: dist/
+          if-no-files-found: error

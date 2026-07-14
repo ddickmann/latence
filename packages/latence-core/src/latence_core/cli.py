@@ -236,6 +236,7 @@ def _execute_pipeline_file(
         report.document_count,
         report.contracts_complete,
     )
+    _maybe_export_metrics(report)
     storage = Storage.for_uri(pipeline.storage_uri)
     run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
     report_uri = f"{run_dir}/quality-report.json"
@@ -247,6 +248,39 @@ def _execute_pipeline_file(
     typer.echo(report.to_json())
     if not storage.exists(report_uri):  # pragma: no cover - defensive
         typer.echo("warning: quality report was not persisted", err=True)
+
+
+def _maybe_export_metrics(report: QualityReport) -> None:
+    """Export the run's Quality-Report metrics IFF ``LATENCE_METRICS`` opts in (ADR-0047).
+
+    Off by default: ``LATENCE_METRICS`` unset (or ``none``) is a no-op, so a normal ``latence
+    run`` behaves exactly as before and pulls no optional dependency. Set ``LATENCE_METRICS`` to
+    ``prometheus`` or ``otel`` (with ``latence-core[observability]`` installed) to record the
+    per-Stage durations/counts/errors + the ER-merge audit through
+    :func:`~latence_core.observability.record_quality_report`. For the Prometheus batch case,
+    ``LATENCE_METRICS_TEXTFILE`` dumps the registry for the node-exporter textfile collector.
+    Observability never breaks a run: any failure here is logged, not raised.
+    """
+    kind = os.environ.get("LATENCE_METRICS", "none")
+    if kind.lower() in {"", "none", "noop"}:
+        return
+    try:
+        from latence_core.observability import (
+            PrometheusMetricSink,
+            build_metric_sink,
+            record_quality_report,
+        )
+
+        sink = build_metric_sink(kind)
+        record_quality_report(report, sink)
+        textfile = os.environ.get("LATENCE_METRICS_TEXTFILE")
+        if textfile and isinstance(sink, PrometheusMetricSink):
+            sink.write_textfile(textfile)
+            logger.info("metrics written to textfile: %s", textfile)
+    except Exception:  # pragma: no cover - observability must never break a run
+        logger.warning(
+            "metrics export failed (LATENCE_METRICS=%s); continuing", kind, exc_info=True
+        )
 
 
 @stack_app.command("validate")

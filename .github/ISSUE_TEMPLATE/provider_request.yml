@@ -1,0 +1,126 @@
+name: Provider request / proposal
+description: Propose or request a new Provider (a concrete implementation of a Capability — a model, endpoint, or cloud service).
+title: "provider: <capability>.<name> — <model or service>"
+labels: ["provider", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The whole framework is pluggable Providers: it names **Capabilities** and lets
+        **Providers** fulfil them (ADR-0004). A new Provider lives in its own package
+        (ADR-0016) and must clear the license gate (ADR-0012) before it can ship as a
+        default. This form collects what that gate needs — especially the **separate
+        weights-and-code license verification** for any model.
+  - type: dropdown
+    id: capability
+    attributes:
+      label: Capability
+      description: Which Capability does this Provider fulfil? (A Fused Provider may fulfil more than one — note that below.)
+      options:
+        - Source (Connector)
+        - Parser (Parse)
+        - Chunker (Chunk)
+        - EntityExtractor (Entity Extraction)
+        - RelationExtractor (Relation Extraction)
+        - PIIDetector / Redactor (Redaction)
+        - Screener (Screening)
+        - Profiler (Profiling)
+        - Disambiguator (Disambiguation)
+        - GraphCompleter (Graph Completion)
+        - SchemaInducer (Schema Induction)
+        - Embedder
+        - Runner (execution adapter)
+        - Other / new Capability
+    validations:
+      required: true
+  - type: input
+    id: name
+    attributes:
+      label: Proposed Provider id
+      description: The registered plugin id, `<capability>.<name>`.
+      placeholder: parser.docling
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What it does and why
+      description: The model/endpoint/service, what it improves over existing Providers, and the use case.
+    validations:
+      required: true
+  - type: dropdown
+    id: substrate
+    attributes:
+      label: Substrate
+      description: How does it run? (CPU-first, offline reference Providers are preferred defaults — ADR-0007.)
+      options:
+        - In-process model, CPU-only
+        - In-process model, GPU
+        - Remote inference endpoint (e.g. OpenAI-compatible, vLLM)
+        - Cloud AI service
+    validations:
+      required: true
+  - type: input
+    id: model-id
+    attributes:
+      label: Model id (if a model-backed Provider)
+      description: The exact checkpoint, e.g. a Hugging Face repo id. Leave blank for a pure-code Provider.
+      placeholder: knowledgator/gliner-linker-large
+  - type: input
+    id: weights-license
+    attributes:
+      label: Weights license
+      description: >
+        The license on the MODEL WEIGHTS specifically (a checkpoint's license is per-weight
+        and cannot be inferred from the library — ADR-0012). Only permissive
+        (Apache-2.0 / MIT / BSD) weights can ship as a default; restricted licenses are opt-in.
+      placeholder: Apache-2.0
+    validations:
+      required: true
+  - type: input
+    id: code-license
+    attributes:
+      label: Code / library license
+      description: The license on the inference CODE, verified SEPARATELY from the weights.
+      placeholder: Apache-2.0
+    validations:
+      required: true
+  - type: input
+    id: license-source
+    attributes:
+      label: License source
+      description: Where you verified each license (URLs to the model card LICENSE and the library LICENSE file).
+      placeholder: https://huggingface.co/.../blob/main/LICENSE
+    validations:
+      required: true
+  - type: dropdown
+    id: default-or-optin
+    attributes:
+      label: Intended tier
+      options:
+        - Default reference Provider (requires permissive weights AND code)
+        - Opt-in, non-default Provider (may carry restricted-license flow-down obligations)
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: Heavy dependencies
+      description: >
+        Does it pull torch/transformers, an inference client, or other heavy deps? Those keep the
+        package out of the default CPU-first, offline dev env and its tests must monkeypatch the
+        heavy/endpoint dep with a faithful fake (ADR-0007/0016). List them.
+      placeholder: torch, transformers, huggingface-hub
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I verified the WEIGHTS license and the CODE license SEPARATELY, and linked both sources above.
+          required: true
+        - label: If proposing a default, the weights are permissive (Apache-2.0 / MIT / BSD).
+          required: false
+        - label: I understand a new Provider lives in its own package and declares a ProviderProfile (license, determinism, compute, cost).
+          required: true
+        - label: I searched existing Providers and issues and this is not a duplicate.
+          required: true

@@ -55,6 +55,7 @@ dependencies = [
 Homepage = "https://github.com/ddickmann/latence-framework"
 Repository = "https://github.com/ddickmann/latence-framework"
 Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
 
 # Registers this Provider under the framework's discovery group (ADR-0004). Installing this package
 # makes 'parser.render' available to any Pipeline with no core change — the universal any-file Parse

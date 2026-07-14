@@ -1,0 +1,117 @@
+{{- if .Values.vllmOcr.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "latence.ocrServiceName" . }}
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-ocr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "latence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vllm-ocr
+  template:
+    metadata:
+      labels:
+        {{- include "latence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: vllm-ocr
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllmOcr.gpu.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllmOcr.gpu.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllmOcr.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vllm-ocr
+          image: "{{ .Values.vllmOcr.image.repository }}:{{ .Values.vllmOcr.image.tag }}"
+          imagePullPolicy: {{ .Values.vllmOcr.image.pullPolicy }}
+          args:
+            - "--model={{ .Values.vllmOcr.model }}"
+            - "--port={{ .Values.vllmOcr.port }}"
+            {{- range .Values.vllmOcr.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: HF_HOME
+              value: /data/hf-cache
+            {{- if .Values.secrets.existingSecret }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: HF_TOKEN
+                  optional: true
+            {{- else if .Values.secrets.create }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "latence.fullname" . }}-endpoint-keys
+                  key: HF_TOKEN
+                  optional: true
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.vllmOcr.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.vllmOcr.resources | nindent 12 }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /data/hf-cache
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: hf-cache
+          {{- if .Values.persistence.hfCache.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.hfCache.existingClaim | default (printf "%s-hf-cache" (include "latence.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "latence.ocrServiceName" . }}
+  labels:
+    {{- include "latence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-ocr
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "latence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-ocr
+  ports:
+    - name: http
+      port: {{ .Values.vllmOcr.port }}
+      targetPort: http
+{{- end }}

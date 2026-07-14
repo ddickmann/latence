@@ -123,6 +123,17 @@ from latence_core.goldset import (
 )
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
+from latence_core.observability import (
+    MetricSink,
+    MetricsSpanSink,
+    MissingObservabilityExtra,
+    NoOpMetricSink,
+    OpenTelemetryMetricSink,
+    PrometheusMetricSink,
+    build_metric_sink,
+    observability_available,
+    record_quality_report,
+)
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
@@ -279,7 +290,12 @@ __all__ = [
     "MentionView",
     "MergeDecision",
     "MergeStrategy",
+    "MetricSink",
+    "MetricsSpanSink",
+    "MissingObservabilityExtra",
+    "NoOpMetricSink",
     "NormalizedRelation",
+    "OpenTelemetryMetricSink",
     "OffsetIndex",
     "OffsetMap",
     "OffsetSegment",
@@ -287,6 +303,7 @@ __all__ = [
     "PageMap",
     "PageMapAssembly",
     "PageOffsetIndex",
+    "PrometheusMetricSink",
     "PIIDetector",
     "PIISpan",
     "PageSpan",
@@ -333,6 +350,7 @@ __all__ = [
     "StorageError",
     "WalRecovery",
     "WriteAheadLog",
+    "build_metric_sink",
     "chunk_document",
     "chunk_document_by_sentence",
     "compute_affected_set",
@@ -342,7 +360,9 @@ __all__ = [
     "error_category",
     "estimate_tokens",
     "make_graph_id",
+    "observability_available",
     "profile_of",
+    "record_quality_report",
     "score_entities",
     "score_relations",
     "select_device",
