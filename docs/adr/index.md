@@ -1,7 +1,7 @@
 # Decision Log (ADRs)
 
 The **Architecture Decision Records** are the reasoning behind every seam in the framework —
-44 decisions, each recording the context, the choice, and the alternatives rejected. They
+each recording the context, the choice, and the alternatives rejected. They
 are the authoritative source; the [Concepts](../concepts/index.md) and
 [Architecture](../concepts/architecture.md) pages are navigational summaries over them.
 
@@ -87,3 +87,17 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | --- | --- |
 | [0013](0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md) | Relation Extraction Provider is chosen empirically; a Provider may fulfil fused Capabilities |
 | [0046](0046-enterprise-glinker-entity-linking-and-audited-resolver.md) | Enterprise GLinker entity-linking + audited resolver, ported from dataset-intelligence |
+
+## Retrieval-quality tooling (the query-side layer)
+
+The stateless, downstream layer that feeds an adopter's retrieval engine without being one (design;
+see [Retrieval-quality tooling](../retrieval-tooling.md)).
+
+| ADR | Decision |
+| --- | --- |
+| [0048](0048-retrieval-tooling-is-strictly-stateless.md) | Retrieval tooling is strictly stateless — it generates signals and transforms candidates, holds no index |
+| [0049](0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md) | Clock-split: index-time signals extend the pipeline; query-time is a downstream library with its own `latence.retrieval` seam |
+| [0050](0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md) | Multi-vector / MUVERA-FDE ships real-but-experimental, off by default, behind a stable seam |
+| [0051](0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md) | Zero-ops multi-hop graph retrieval via DuckDB over the emitted graph parquet; Neo4j optional |
+| [0052](0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md) | Retrieval MCP ports memory_engine hardening; bring-your-own backend; config-driven stack-adaptive copy |
+| [0053](0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md) | SPLADE sparse is a structured composition (model ⊕ confidence-gated NER ⊕ metadata), redacted by default |

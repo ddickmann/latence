@@ -155,6 +155,7 @@ nav:
       - Tune a stack per device: tuning.md
       - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
       - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+      - Retrieval-quality tooling (design): retrieval-tooling.md
   - Decision Log (ADRs):
       - adr/index.md
       - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
@@ -201,6 +202,12 @@ nav:
       - 0044 — Universal redaction floor: adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md
       - 0045 — Granite r2 default Embedder: adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md
       - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
+      - 0048 — Retrieval tooling is strictly stateless: adr/0048-retrieval-tooling-is-strictly-stateless.md
+      - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
+      - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md
+      - 0051 — DuckDB zero-ops multi-hop graph retrieval: adr/0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md
+      - 0052 — Retrieval MCP: ported hardening + config-driven copy: adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
+      - 0053 — SPLADE structured composition: adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md
   - API Reference:
       - reference/index.md
       - Data contracts: reference/contracts.md
