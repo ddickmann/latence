@@ -19,7 +19,7 @@ HEAVY_PKGS := \
 ALL_PKGS := \
 	latence-core latence-parser-plaintext latence-parser-document \
 	latence-parser-pdfplumber \
-	$(HEAVY_PKGS) latence-demo latence-disambig-embedding
+	$(HEAVY_PKGS) latence-demo latence-disambig-embedding latence-muvera
 
 # One-time setup for a fresh checkout: run this before `make test`.
 sync:

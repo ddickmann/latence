@@ -66,6 +66,16 @@ def _scrub(value: str) -> str:
     return _XML_ILLEGAL.sub("", value)
 
 
+def _feature_float(value: Any) -> float | None:
+    """A stamped graph-feature centrality as a float column cell (None if absent/malformed)."""
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _feature_str(value: Any) -> str | None:
+    """A stamped graph-feature community id as a string column cell (None if absent/malformed)."""
+    return value if isinstance(value, str) else None
+
+
 class KnowledgeGraphExport:
     """Export Provider writing the KG as Parquet + TTL + GraphML (ADR-0017).
 
@@ -139,6 +149,12 @@ class KnowledgeGraphExport:
 
     @staticmethod
     def _write_nodes_parquet(nodes: list[GraphNode], storage: Storage, uri: str) -> None:
+        # ADR-0051: promote the graph-feature enrichment to FIRST-CLASS ``centrality`` (double) +
+        # ``community`` (string) columns — the shape the Knapsack packer / a graph-aware ranker
+        # reads directly (they also ride the ``properties`` JSON; this is the consumable view).
+        # Added ONLY when a node carries them (the assembler stamped features), so the schema is
+        # byte-identical to today when the enrichment is off (the genuinely-optional guarantee).
+        has_features = any("centrality" in n.properties for n in nodes)
         flat = [
             {
                 "node_id": n.node_id,
@@ -155,24 +171,33 @@ class KnowledgeGraphExport:
                 "source_document_ids": json.dumps(n.source_document_ids, sort_keys=True),
                 "properties": json.dumps(n.properties, sort_keys=True),
                 "evidence": json.dumps(n.evidence.model_dump(mode="json"), sort_keys=True),
+                **(
+                    {
+                        "centrality": _feature_float(n.properties.get("centrality")),
+                        "community": _feature_str(n.properties.get("community")),
+                    }
+                    if has_features
+                    else {}
+                ),
             }
             for n in nodes
         ]
-        schema = pa.schema(
-            [
-                ("node_id", pa.string()),
-                ("entity_id", pa.string()),
-                ("type", pa.string()),
-                ("canonical_name", pa.string()),
-                ("kb_id", pa.string()),
-                ("confidence", pa.float64()),
-                ("member_mention_ids", pa.string()),
-                ("source_document_ids", pa.string()),
-                ("properties", pa.string()),
-                ("evidence", pa.string()),
-            ]
-        )
-        table = pa.Table.from_pylist(flat, schema=schema)
+        fields: list[tuple[str, pa.DataType]] = [
+            ("node_id", pa.string()),
+            ("entity_id", pa.string()),
+            ("type", pa.string()),
+            ("canonical_name", pa.string()),
+            ("kb_id", pa.string()),
+            ("confidence", pa.float64()),
+            ("member_mention_ids", pa.string()),
+            ("source_document_ids", pa.string()),
+            ("properties", pa.string()),
+            ("evidence", pa.string()),
+        ]
+        if has_features:
+            fields.append(("centrality", pa.float64()))
+            fields.append(("community", pa.string()))
+        table = pa.Table.from_pylist(flat, schema=pa.schema(fields))
         with storage.open(uri, "wb") as fh:
             pq.write_table(table, fh)  # type: ignore[no-untyped-call]
 

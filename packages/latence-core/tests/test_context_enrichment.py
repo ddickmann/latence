@@ -243,6 +243,34 @@ def test_confidence_gate_drops_low_confidence_entities_and_edges() -> None:
     assert h1.neighbor_triples == ["Alice —works_for→ Acme"]
 
 
+def test_header_carries_per_entity_admission_confidence() -> None:
+    """R5: the header carries a REAL per-entity confidence aligned with ``entities`` (ADR-0053).
+
+    The admission confidence is ``min(strongest gated mention confidence for the node, node
+    confidence)`` — the value at which THIS gate would admit the entity — so a downstream composing
+    SparseEmbedder's ``confidence_threshold`` gates weak NER at index time by the identical rule.
+    Proves the max-over-mentions aggregation AND the node bound, not a hardcoded 1.0.
+    """
+    chunk = _chunk("c1", 0, "Acme and Zeta.")
+    mentions = [
+        # Two mentions resolve to Acme; the STRONGER (0.7) is the entity's NER evidence, node 0.9.
+        _mention("m-acme-weak", "c1", 0, "Acme", 0.2),
+        _mention("m-acme-strong", "c1", 1, "Acme", 0.7),
+        # One mention (0.95) to Zeta, but the NODE confidence (0.4) bounds the admission confidence.
+        _mention("m-zeta", "c1", 2, "Zeta", 0.95),
+    ]
+    graph = [
+        _node("n-acme", "Acme", "ORG", ["m-acme-weak", "m-acme-strong"], confidence=0.9),
+        _node("n-zeta", "Zeta", "ORG", ["m-zeta"], confidence=0.4),
+    ]
+    out = list(ContextHeaderEnricher({}).enrich([chunk], mentions, graph))
+    header = out[0].context_header
+    assert header is not None
+    assert header.entities == ["Acme", "Zeta"]  # sorted by canonical name
+    # Acme: min(max(0.2, 0.7), 0.9) = 0.7 ; Zeta: min(0.95, 0.4) = 0.4 — aligned with ``entities``.
+    assert header.entity_confidences == [0.7, 0.4]
+
+
 def test_chunk_with_no_gated_entity_gets_none_header() -> None:
     """A chunk whose only mention is gated out is left context_header=None (nothing to add)."""
     chunks, mentions, graph = _small_kg()

@@ -650,7 +650,11 @@ class ContextHeader(BaseModel):
     live DB; W13 only emits the keys).
 
     * ``entities`` — the chunk's canonical entity names (sorted, deduped), and ``entity_types`` the
-      aligned entity type per name (same length + order as ``entities``).
+      aligned entity type per name (same length + order as ``entities``). ``entity_confidences`` is
+      the aligned per-entity 0..1 admission confidence (ADR-0053) — the value the enrichment gate
+      admitted the entity at, carried so a downstream composing SparseEmbedder's
+      ``confidence_threshold`` gates weak NER at index time by the identical rule; ``[]`` for a
+      header built without it.
     * ``neighbor_triples`` — the chunk's top KG-neighbor relations rendered ``A —label→ B``,
       confidence-sorted and CAPPED (``max_neighbors_per_entity`` per entity, ``max_triples``
       overall)
@@ -662,6 +666,12 @@ class ContextHeader(BaseModel):
     * ``neighbor_node_ids`` — the node ids of the neighbor entities the triples reach (the
     query-time
       KG-expansion keys), sorted + deduped.
+    * ``kg_node_centrality`` / ``kg_node_community`` — the OPTIONAL ADR-0051 graph-feature
+      projection: each entity's index-time **centrality** score and **community** id, aligned 1:1
+      with ``kg_node_ids`` (same length + order), so a downstream ranker reads a chunk's own
+      entities' structural importance/cluster off the header it already holds. Both are ``[]`` when
+      the ``graph_features`` enrichment is OFF (the nodes carry no centrality) — byte-identical to a
+      run without it — and both full-length (aligned with ``kg_node_ids``) when it is ON.
     * ``situating_sentence`` — OPTIONAL LLM-generated Contextual-Retrieval-style sentence
       (deterministic=False, a documented follow-on, ADR-0039); ``None`` in the deterministic default
       reference build. ``model_id`` records the LLM when that mode is used (audit), ``None`` for the
@@ -677,6 +687,15 @@ class ContextHeader(BaseModel):
     entity_types: list[str] = Field(
         default_factory=list, description="Entity type per name (aligned with ``entities``)."
     )
+    entity_confidences: list[float] = Field(
+        default_factory=list,
+        description=(
+            "Per-entity 0..1 admission confidence aligned with ``entities`` (ADR-0053): the value "
+            "at which the enrichment gate admitted the entity, so a downstream composing "
+            "SparseEmbedder's ``confidence_threshold`` applies the identical rule at index time. "
+            "``[]`` for a header built without it (byte-identical to a run without the field)."
+        ),
+    )
     neighbor_triples: list[str] = Field(
         default_factory=list,
         description="Top-k KG-neighbor relations 'A —label→ B' (confidence-sorted, capped).",
@@ -687,6 +706,14 @@ class ContextHeader(BaseModel):
     neighbor_node_ids: list[str] = Field(
         default_factory=list,
         description="Node ids the triples reach (query-time KG-expansion keys; sorted, deduped).",
+    )
+    kg_node_centrality: list[float] = Field(
+        default_factory=list,
+        description="Per-entity centrality, aligned with ``kg_node_ids`` (ADR-0051); [] if off.",
+    )
+    kg_node_community: list[str] = Field(
+        default_factory=list,
+        description="Per-entity community id, aligned with ``kg_node_ids`` (ADR-0051); [] if off.",
     )
     situating_sentence: str | None = Field(
         default=None,
@@ -704,6 +731,18 @@ class ContextHeader(BaseModel):
                 f"(got {len(self.entities)} names, {len(self.entity_types)} types)."
             )
             raise ValueError(msg)
+        # ADR-0051: the graph-feature projection is either OFF (empty) or aligned 1:1 with the
+        # chunk's own entity node ids — never a partial per-entity map (anti-false-green).
+        for name, values in (
+            ("kg_node_centrality", self.kg_node_centrality),
+            ("kg_node_community", self.kg_node_community),
+        ):
+            if values and len(values) != len(self.kg_node_ids):
+                msg = (
+                    f"A ContextHeader's {name} must be empty or aligned with kg_node_ids "
+                    f"(got {len(values)} values for {len(self.kg_node_ids)} node ids)."
+                )
+                raise ValueError(msg)
         return self
 
     @property

@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-muvera"
+version = "0.1.0"
+description = "Canonical, training-free MUVERA FDE FdeConverter Provider (multi-vector → one dense vector approximating MaxSim, for a customer's dense index) for the Latence framework (ADR-0050, experimental)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "multi-vector", "colbert", "muvera", "fde", "late-interaction"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# MUVERA FDE is data-oblivious and TRAINING-FREE (ADR-0050): it ships no model and no weights, and
+# the canonical construction is pure-Python arithmetic (SimHash partition + asymmetric cell
+# aggregation), so this package pulls NOTHING heavy — only latence-core. It is therefore installed in
+# the CPU-first offline dev env (unlike the torch/transformers Provider packages) so its
+# offline/deterministic tests + the conformance suite exercise the real converter (ADR-0007/0016).
+# Deliberately numpy-free to keep that dev env numpy-free (ADR-0016); a numpy/SIMD accelerator is the
+# deferred SOTA-kernel follow-on (ADR-0049/0050).
+dependencies = [
+    "latence-core",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+# Registers this Provider under the framework's index-time discovery group (ADR-0004/0049). An
+# FdeConverter is an index-time signal generator (it emits the dense 'fde_embedding' column at
+# Export), so it registers under 'latence.providers' (the pipeline Stage seam), NOT the query-time
+# 'latence.retrieval' group. Installing this package makes 'fde.muvera' available to any Pipeline's
+# Export with no core change, alongside the in-core deterministic 'fde.reference' — swappable by one
+# config line (ADR-0007).
+[project.entry-points."latence.providers"]
+"fde.muvera" = "latence_muvera.converter:MuveraFdeConverter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_muvera"]

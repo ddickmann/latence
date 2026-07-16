@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
 from latence_core.providers.profile import ProviderProfile, profile_of
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from latence_core.contracts import (
         ChunkRecord,
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
         DocumentRecord,
         EntityMention,
         FeatureRecord,
+        GraphEdge,
+        GraphNode,
         GraphRecord,
         ParserInput,
         QuarantineRecord,
@@ -497,6 +499,95 @@ class ContextEnricher(Protocol):
 
 
 @dataclass(frozen=True)
+class GraphFeatures:
+    """Per-node structural features over the assembled KG: centrality + community (ADR-0051).
+
+    The result a :class:`GraphFeatureComputer` returns: for **every** node in the assembled graph,
+    a ``centrality`` score and a ``community`` id. It is a *value* the Graph-Assembly Stage stamps
+    onto each :class:`~latence_core.contracts.GraphNode`'s ``properties`` bag (``centrality`` /
+    ``community``) — the computer holds nothing and mutates nothing (ADR-0048). Invariants (enforced
+    at construction so a Provider cannot emit a half-populated result, so the downstream stamp is
+    total):
+
+    * ``centrality`` and ``community`` cover the **same** node-id set — every node gets both a
+      centrality and a community, never one without the other (the anti-false-green contract: a
+      computer that skips nodes fails here, not silently downstream);
+    * each ``centrality`` value is a finite float (the normalisation is the Provider's business —
+      degree-centrality lands in ``[0, 1]``, PageRank sums to ~1 — but every value is a real number,
+      never NaN/inf);
+    * each ``community`` id is a non-empty string — the deterministic, content-addressed id of the
+      node's community (the reference Providers use the community's lexicographically-smallest
+      ``node_id``), so two runs over the same corpus agree byte-for-byte (the Baseline bar).
+
+    An empty graph yields the empty :class:`GraphFeatures` (both maps empty), never an error.
+    """
+
+    centrality: dict[str, float] = field(default_factory=dict)
+    community: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        import math
+
+        if self.centrality.keys() != self.community.keys():
+            missing_c = sorted(self.community.keys() - self.centrality.keys())
+            missing_k = sorted(self.centrality.keys() - self.community.keys())
+            msg = (
+                "GraphFeatures must cover the same node-id set for centrality and community "
+                f"(nodes missing centrality: {missing_c}; missing community: {missing_k})."
+            )
+            raise ValueError(msg)
+        for node_id, value in self.centrality.items():
+            if not math.isfinite(value):
+                msg = (
+                    f"GraphFeatures centrality for node {node_id!r} must be finite, got {value!r}."
+                )
+                raise ValueError(msg)
+        for node_id, community_id in self.community.items():
+            if not community_id:
+                msg = f"GraphFeatures community id for node {node_id!r} must be a non-empty string."
+                raise ValueError(msg)
+
+
+@runtime_checkable
+class GraphFeatureComputer(Protocol):
+    """Computes centrality + community per node over the assembled KG (CONTEXT ``Graph Assembly``).
+
+    The index-time **graph-feature enrichment** Capability (ADR-0051): a pure transform that, given
+    the assembled graph's :class:`~latence_core.contracts.GraphNode`s and
+    :class:`~latence_core.contracts.GraphEdge`s, returns one :class:`GraphFeatures` — a
+    **centrality** measure (degree / PageRank) and a **community** id per node. It holds no index,
+    runs no search (ADR-0048), names no model. The Graph-Assembly Stage OPTIONALLY resolves a
+    computer from its ``config['graph_features']`` (the same ``{"provider", "config"}`` composition
+    Export uses for its Embedder) and stamps the returned features onto each node's ``properties``
+    bag, so they flow into ``graph-nodes.parquet`` columns and — via Context Enrichment — onto each
+    chunk's :class:`~latence_core.contracts.ContextHeader` (the two consumers ADR-0051 names:
+    graph-augmented retrieval and the Knapsack packer's ``centrality`` / ``cluster_ids`` inputs).
+    Genuinely optional: a Stage that names no computer emits the graph byte-identically to today.
+
+    Behaviour VARIES behind the seam, so it ships **two** in-core reference adapters
+    (:mod:`latence_core.stages.graph_features`): ``graph_features.degree`` (degree centrality +
+    connected-components community) and ``graph_features.pagerank`` (PageRank centrality +
+    label-propagation community). Both are pure-Python, zero-dependency and DETERMINISTIC (fixed
+    iteration order, rounded scores, content-addressed community ids), so a seeded run is
+    byte-reproducible. They are *references*, not the blessed Louvain/Leiden community detection
+    (ADR-0051), which — like SPLADE/MUVERA — ships as a pluggable, license-verified package.
+    """
+
+    def compute_features(
+        self, nodes: Iterable[GraphNode], edges: Iterable[GraphEdge]
+    ) -> GraphFeatures:
+        """Compute one :class:`GraphFeatures` (centrality + community per node) over the KG.
+
+        Consumes the whole assembled graph (all nodes + all edges); returns a
+        :class:`GraphFeatures` covering **every** input node (never a partial map). An edge whose
+        endpoint is not among ``nodes`` is ignored (belt-and-braces — the assembler validates
+        endpoints). An empty graph yields the empty :class:`GraphFeatures`. Deterministic → a seeded
+        run is byte-reproducible (the Baseline bar).
+        """
+        ...
+
+
+@dataclass(frozen=True)
 class DeltaOutcome:
     """The result of applying a :class:`Delta` to the parent corpus (S11 affected-set recompute).
 
@@ -595,6 +686,257 @@ class Embedder(Protocol):
 
     def embed(self, texts: Iterable[str]) -> Iterator[list[float]]:
         """Map each input text to a ``dimension``-wide vector, in input order."""
+        ...
+
+
+@dataclass(frozen=True)
+class SparseVector:
+    """A sparse term-weight vector — the index-time SPLADE-family signal (ADR-0050/0053).
+
+    The shape every vector DB's sparse index expects: two parallel columns, ``indices`` (the
+    term ids that have non-zero weight) and ``values`` (their weights), materialised at Export as
+    ``sparse_indices: list<int>`` + ``sparse_values: list<float>`` (ADR-0050). Invariants (enforced
+    at construction so a Provider cannot emit a malformed vector, and so the emission is
+    byte-deterministic regardless of a Provider's internal dict ordering):
+
+    * ``indices`` and ``values`` are the same length;
+    * ``indices`` are **strictly ascending** (hence unique) and non-negative — the canonical order
+      a sparse index ingests, and the order two runs must agree on for a byte-identical export;
+    * a zero vector (empty text, no surviving terms) is the empty ``SparseVector()`` — never a
+      dense run of zeros.
+
+    A :class:`SparseEmbedder` Provider builds one via :meth:`from_terms` from its natural
+    ``{term_id: weight}`` map, which sorts and validates in one place.
+    """
+
+    indices: list[int] = field(default_factory=list)
+    values: list[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if len(self.indices) != len(self.values):
+            msg = (
+                f"SparseVector indices/values length mismatch: "
+                f"{len(self.indices)} indices vs {len(self.values)} values."
+            )
+            raise ValueError(msg)
+        prev = -1
+        for idx in self.indices:
+            if idx < 0:
+                msg = f"SparseVector index must be non-negative, got {idx}."
+                raise ValueError(msg)
+            if idx <= prev:
+                msg = (
+                    "SparseVector indices must be strictly ascending (unique) — the canonical "
+                    f"sparse-index order; got {idx} after {prev}."
+                )
+                raise ValueError(msg)
+            prev = idx
+
+    @classmethod
+    def from_terms(cls, terms: dict[int, float]) -> SparseVector:
+        """Build a canonical :class:`SparseVector` from a ``{term_id: weight}`` map.
+
+        Sorts the terms by id (the ascending-index invariant) so the emitted vector is
+        byte-identical no matter what order the Provider accumulated the terms in — the single
+        place ordering is imposed, so no Provider re-implements it. Zero-weight terms are dropped
+        (a sparse vector carries only non-zero weights).
+        """
+        kept = sorted((idx, w) for idx, w in terms.items() if w != 0.0)
+        return cls(indices=[idx for idx, _ in kept], values=[w for _, w in kept])
+
+
+@runtime_checkable
+class SparseEmbedder(Protocol):
+    """Encodes corpus text into a sparse term-weight vector (a ``Signal generator``; ADR-0053).
+
+    The index-time SPLADE-family sibling of :class:`Embedder` for the shape a dense vector cannot
+    express: a variable-support term-weight map over a fixed vocabulary, emitted at Export as the
+    parallel ``sparse_indices`` / ``sparse_values`` columns a store's sparse index ingests directly
+    (ADR-0050). Like every signal generator it is a **pure transform** that holds nothing (ADR-0048)
+    and names no model — the framework names the seam.
+
+    The blessed real Provider (ADR-0053) composes a multilingual SPLADE model's term-weights with
+    the pipeline's confidence-gated NER entity terms + selected metadata, over the *redacted* corpus
+    text by default; that composition + its license-verified model ship as a pluggable package
+    (``latence-splade``), NOT in core. The in-core ``sparse.hashing`` reference is a deterministic,
+    dependency-free hashing sparse encoder that exercises the seam + emission path offline (no
+    model, no weights, no license to verify — ADR-0012/0016), exactly as ``embedding.hashing`` does
+    for the dense seam. It is a reference, not SPLADE.
+    """
+
+    @property
+    def vocab_size(self) -> int:
+        """The size of the term-index space: every emitted index lies in ``[0, vocab_size)``."""
+        ...
+
+    def encode_sparse(self, texts: Iterable[str]) -> Iterator[SparseVector]:
+        """Map each text to a :class:`SparseVector` (canonical ascending indices), in input order.
+
+        One vector per input text, in order (like :meth:`Embedder.embed`). Empty/degenerate text
+        yields the empty ``SparseVector()`` (never a crash). A deterministic Provider is
+        byte-reproducible (the Baseline bar).
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class SparseSignals:
+    """The per-record structured signals a composing ``SparseEmbedder`` injects at index time.
+
+    ADR-0053's sparse vector is not plain ``SPLADE(text)`` but the structured composition
+    ``SPLADE(text) ⊕ boost·entity_terms ⊕ boost·metadata_terms``. The text-only
+    :meth:`SparseEmbedder.encode_sparse` seam can only build the model leg — no structured signal
+    crosses it — so a :class:`ComposingSparseEmbedder` receives this parallel per-record carrier and
+    folds the chunk's own structured signals into the emitted vector. That is what makes the
+    index-time and query-time sparse spaces **match** (the ADR-0053 one-composition-two-clocks
+    guarantee): without it the query encoder injects boosted entity/metadata terms the corpus never
+    carried, and a hybrid search on an injected term matches zero documents. A record with no
+    structured signals is :data:`EMPTY_SPARSE_SIGNALS` and composes to exactly the model leg —
+    identical to the text-only path (so the additive/byte-identical guarantee is untouched when no
+    signals exist).
+
+    * ``entities`` — the chunk's ``(surface, confidence)`` entity mentions offered to the
+      composition. The composition confidence-gates them; the embedder's redaction gate additionally
+      drops any surface that no longer occurs in the (redacted) corpus text, so a masked PII surface
+      is never re-injected as a term (ADR-0053, REDACTION-BY-DEFAULT).
+    * ``metadata`` — the chunk's ``{field: value}`` map from which the embedder's operator-selected
+      ``metadata_fields`` are injected (e.g. its classification category).
+    """
+
+    entities: tuple[tuple[str, float], ...] = ()
+    metadata: Mapping[str, str] = field(default_factory=dict)
+
+
+#: The signals of a record that carries no structured entity/metadata signal — composes to exactly
+#: the model leg (identical to the text-only :meth:`SparseEmbedder.encode_sparse` path).
+EMPTY_SPARSE_SIGNALS = SparseSignals()
+
+
+@runtime_checkable
+class ComposingSparseEmbedder(Protocol):
+    """A :class:`SparseEmbedder` that also composes structured per-record signals (ADR-0053).
+
+    The index-time seam for the ADR-0053 **structured composition**. A plain :class:`SparseEmbedder`
+    exposes only the text-only :meth:`~SparseEmbedder.encode_sparse` (the model leg); a *composing*
+    embedder additionally accepts, per record, the :class:`SparseSignals` (confidence-bearing entity
+    surfaces + selected metadata) and folds them into the emitted vector — so the corpus's sparse
+    space carries the SAME boosted entity/metadata terms the query-side encoder injects (the
+    one-composition-two-clocks guarantee). Export detects this Capability and passes each row's
+    signals; an embedder that does NOT implement it (e.g. the deterministic ``sparse.hashing``
+    reference) is driven text-only, byte-identically to today.
+
+    An implementer is also a :class:`SparseEmbedder` (it keeps the text-only ``encode_sparse`` for
+    the no-signal path); this Protocol declares only the additional composing method so an
+    ``isinstance`` check cleanly discriminates the two.
+    """
+
+    def encode_sparse_composed(
+        self, texts: Iterable[str], signals: Sequence[SparseSignals]
+    ) -> Iterator[SparseVector]:
+        """Map each ``(text, signals)`` pair to its composed :class:`SparseVector`, in input order.
+
+        ``signals`` is **parallel** to ``texts`` (one :class:`SparseSignals` per text, same length +
+        order). One vector per input, in order; a record whose signals are
+        :data:`EMPTY_SPARSE_SIGNALS` composes to exactly the model leg (identical to
+        :meth:`SparseEmbedder.encode_sparse` on that text — the additive guarantee).
+        """
+        ...
+
+
+@runtime_checkable
+class MultiVectorEmbedder(Protocol):
+    """Encodes text into a variable-length multi-vector — one vector per token (ADR-0050).
+
+    The index-time generator for the ColBERT-style late-interaction shape: a text becomes a
+    *sequence* of fixed-width token vectors (not one pooled vector). Raw multi-vectors are heavy and
+    have a different access pattern, so Export writes them to a **sidecar** ``multivectors.parquet``
+    (``list<list<double>>`` keyed by ``record_id``), never into ``records.parquet`` (ADR-0050). They
+    also feed an :class:`FdeConverter` to produce the dense ``fde_embedding`` column.
+
+    Experimental and off by default (ADR-0050). The in-core ``multivector.hashing`` reference is a
+    deterministic, dependency-free per-token hashing encoder that exercises the seam offline; a real
+    ColBERT-family encoder is a pluggable package.
+    """
+
+    @property
+    def dimension(self) -> int:
+        """The fixed width of every token vector in every returned multi-vector."""
+        ...
+
+    def encode_multivector(self, texts: Iterable[str]) -> Iterator[list[list[float]]]:
+        """Map each text to a list of ``dimension``-wide token vectors, in input order.
+
+        One multi-vector per input text, in order. Empty/degenerate text yields an empty list (no
+        tokens, never a crash). Every token vector has width :attr:`dimension`. A deterministic
+        Provider is byte-reproducible.
+        """
+        ...
+
+
+@runtime_checkable
+class FdeConverter(Protocol):
+    """Converts a multi-vector into one fixed-width dense vector (MUVERA FDE; ADR-0050).
+
+    A **data-oblivious, training-free** reduction that maps a variable-length multi-vector to a
+    single ``dimension``-wide dense vector, so late-interaction quality can be approximated inside a
+    customer's ordinary **dense** index with no special store — emitted at Export as the
+    ``fde_embedding`` column (ADR-0050). Pure transform, holds nothing, names no model.
+
+    Experimental and off by default (ADR-0050): the *production* converter decision (canonical
+    MUVERA vs a regularizer-refined variant) is deferred, and the quality-blessed canonical MUVERA
+    reference is a pluggable Provider (``fde.muvera``). The in-core ``fde.reference`` is a
+    deterministic, dependency-free SimHash space-partition-and-sum converter that exercises the seam
+    + emission path offline — a genuine data-oblivious FDE (NOT a passthrough that lies, the
+    anti-false-green bar), without claiming a MaxSim-approximation quality guarantee on any corpus.
+    """
+
+    @property
+    def dimension(self) -> int:
+        """The fixed width of the produced dense vector, independent of the multi-vector length."""
+        ...
+
+    def convert(self, multivectors: Iterable[list[list[float]]]) -> Iterator[list[float]]:
+        """Map each multi-vector to one ``dimension``-wide dense vector, in input order.
+
+        One dense vector per input multi-vector, in order. An empty multi-vector yields the
+        zero vector of width :attr:`dimension`. A token vector whose width does not match the
+        converter's declared input width is rejected with a typed error (the faithful contract a
+        real converter enforces — anti-false-green). A deterministic Provider is byte-reproducible.
+        """
+        ...
+
+
+@runtime_checkable
+class Tokenizer(Protocol):
+    """Splits text into lexical terms — the varying seam of the BM25 term-stats export (ADR-0048).
+
+    BM25 is a *lexical* signal, so its corpus statistics (document frequency, term frequency,
+    document length, average document length) are a pure function of one thing that genuinely
+    **varies**: how text is split into terms. This Capability is that seam. Everything else in the
+    :class:`~latence_core.bm25.Bm25Accumulator` — the df/tf fold, the Robertson idf, the ascending
+    canonical order — is fixed math; the tokenisation is the knob a corpus tunes. Like every
+    retrieval-tooling piece it is a **pure transform that holds nothing** (ADR-0048) and names no
+    model — the framework names the seam.
+
+    Two in-core reference adapters ship behind it (:mod:`latence_core.bm25`), and they are
+    genuinely different tokenisations (not a clone + a rename — the anti-false-green bar for a real
+    seam): ``tokenizer.regex`` folds to lowercase alphanumeric runs (punctuation is a boundary and
+    is dropped, matching the dense/sparse hashing references), while ``tokenizer.whitespace`` splits
+    only on whitespace and keeps punctuation attached to the token (so ``"foo,"`` and ``"foo"`` are
+    distinct terms). A corpus that wants a store's exact analyzer plugs its own Tokenizer in behind
+    this same seam. Both references are deterministic, so the emitted BM25 artifact is
+    byte-reproducible (the Baseline bar).
+    """
+
+    def tokenize(self, texts: Iterable[str]) -> Iterator[list[str]]:
+        """Map each text to its list of terms, in input order (one token list per input text).
+
+        One token list per input text, in order (like :meth:`Embedder.embed`). The terms appear in
+        their order of occurrence in the text (a BM25 term frequency counts occurrences, so order is
+        immaterial to the statistic but the contract is occurrence-order, not sorted). Empty or
+        term-free text yields the empty list ``[]`` (never a crash). A deterministic Tokenizer is
+        byte-reproducible (the Baseline bar).
+        """
         ...
 
 

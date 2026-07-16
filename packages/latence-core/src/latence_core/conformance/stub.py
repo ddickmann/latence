@@ -453,6 +453,132 @@ def install_sentence_transformers(*, dimension: int = 8) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# transformers stub (the real multilingual SPLADE SparseEmbedder Provider)
+# ---------------------------------------------------------------------------
+
+
+_SPLADE_STUB_VOCAB = 256
+#: Public alias of the stub SPLADE vocab bound — the conformance sparse case's C1 index bound
+#: (every emitted index must lie in ``[0, SPLADE_STUB_VOCAB)``).
+SPLADE_STUB_VOCAB = _SPLADE_STUB_VOCAB
+
+
+def _splade_token_id(token: str) -> int:
+    """A stable vocab id for a token — byte-stable ``sha256`` (not the salted builtin ``hash``)."""
+    import hashlib
+
+    digest = hashlib.sha256(token.encode()).digest()
+    return int.from_bytes(digest[:8], "big") % _SPLADE_STUB_VOCAB
+
+
+def _splade_token_ids(text: str) -> list[int]:
+    import re
+
+    return [_splade_token_id(t) for t in re.findall(r"[a-z0-9]+", text.lower())]
+
+
+class _StubArray:
+    """A minimal stand-in for a torch tensor: the only surface the adapter uses is ``.tolist()``."""
+
+    def __init__(self, data: Any) -> None:
+        self._data = data
+
+    def tolist(self) -> Any:
+        return self._data
+
+
+class _StubSpladeTokenizer:
+    """Stands in for a ``transformers`` ``AutoTokenizer`` for a SPLADE checkpoint.
+
+    Faithful to the surface the real adapter touches: a batch call returns padded ``input_ids`` +
+    an ``attention_mask`` (masking the padding), a single-string call (used for injected-term
+    resolution) returns that term's ids, and a bad checkpoint id raises ``OSError`` exactly as the
+    real ``from_pretrained`` does — so the adapter's config-error mapping is genuinely exercised.
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubSpladeTokenizer:
+        if model_id == "bad/model":
+            raise OSError("stub: model 'bad/model' not found")
+        return cls()
+
+    def __call__(self, texts: Any, **_kwargs: Any) -> dict[str, _StubArray]:
+        if isinstance(texts, str):
+            ids = _splade_token_ids(texts)
+            return {"input_ids": _StubArray(ids), "attention_mask": _StubArray([1] * len(ids))}
+        seqs = [_splade_token_ids(t) for t in texts]
+        width = max((len(s) for s in seqs), default=0)
+        padded = [s + [0] * (width - len(s)) for s in seqs]
+        mask = [[1] * len(s) + [0] * (width - len(s)) for s in seqs]
+        return {"input_ids": _StubArray(padded), "attention_mask": _StubArray(mask)}
+
+
+class _StubSpladeConfig:
+    vocab_size = _SPLADE_STUB_VOCAB
+
+
+class _StubSpladeOutput:
+    def __init__(self, logits: _StubArray) -> None:
+        self.logits = logits
+
+
+class _StubSpladeMaskedLM:
+    """Stands in for a ``transformers`` ``AutoModelForMaskedLM``: deterministic MLM logits.
+
+    Emits a positive logit at each token's own vocab id (zero elsewhere), so the adapter's real
+    SPLADE pooling (``max_t log(1+relu)``) yields a genuine non-empty term-weight map keyed by the
+    tokens present — a faithful shape, not a passthrough that lies.
+    """
+
+    def __init__(self) -> None:
+        self.config = _StubSpladeConfig()
+
+    @classmethod
+    def from_pretrained(cls, _model_id: str, **_kwargs: Any) -> _StubSpladeMaskedLM:
+        return cls()
+
+    def eval(self) -> _StubSpladeMaskedLM:
+        return self
+
+    def __call__(
+        self, input_ids: _StubArray, attention_mask: _StubArray | None = None, **_kwargs: Any
+    ) -> _StubSpladeOutput:
+        logits: list[list[list[float]]] = []
+        for seq in input_ids.tolist():
+            seq_logits: list[list[float]] = []
+            for token_id in seq:
+                row = [0.0] * _SPLADE_STUB_VOCAB
+                row[token_id] = 3.0
+                seq_logits.append(row)
+            logits.append(seq_logits)
+        return _StubSpladeOutput(_StubArray(logits))
+
+
+@contextlib.contextmanager
+def install_splade() -> Iterator[None]:
+    """Install a fake ``transformers`` module so the real SPLADE adapter runs offline (torch-free).
+
+    The heavy ``transformers``/``torch`` stack is not installed in the CPU-first, offline test env
+    (ADR-0007/0016). This installs a faithful fake ``transformers`` exposing ``AutoTokenizer`` +
+    ``AutoModelForMaskedLM``, so ``sparse.splade``'s real ``TransformersSpladeModel`` — its
+    tokenise → MLM → SPLADE-pool path — is exercised for the C1/C2/C3/C5/C6 conformance subset
+    without weights (the live numbers need a rig, and a *cleared* checkpoint, per ADR-0053/0012).
+    """
+    module = types.ModuleType("transformers")
+    module.AutoTokenizer = _StubSpladeTokenizer  # type: ignore[attr-defined]
+    module.AutoModelForMaskedLM = _StubSpladeMaskedLM  # type: ignore[attr-defined]
+    saved = sys.modules.get("transformers")
+    sys.modules["transformers"] = module
+    try:
+        yield
+    finally:
+        if saved is not None:
+            sys.modules["transformers"] = saved
+        else:
+            sys.modules.pop("transformers", None)
+
+
+# ---------------------------------------------------------------------------
 # presidio-analyzer stub (the real Microsoft Presidio Redaction Provider)
 # ---------------------------------------------------------------------------
 

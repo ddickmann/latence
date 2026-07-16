@@ -63,9 +63,14 @@ class Capability(StrEnum):
     DISAMBIGUATION = "disambiguation"
     GRAPH = "graph"
     GRAPH_COMPLETION = "graph_completion"
+    GRAPH_FEATURES = "graph_features"
     CONTEXT_ENRICHMENT = "context_enrichment"
     EXPORT = "export"
     EMBEDDING = "embedding"
+    SPARSE_EMBEDDING = "sparse"
+    MULTIVECTOR_EMBEDDING = "multivector"
+    FDE = "fde"
+    TOKENIZER = "tokenizer"
     DELTA = "delta"
 
 
@@ -91,9 +96,17 @@ _PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     "disambiguation": Capability.DISAMBIGUATION,
     "graph": Capability.GRAPH,
     "graph_completion": Capability.GRAPH_COMPLETION,
+    "graph_features": Capability.GRAPH_FEATURES,
     "context": Capability.CONTEXT_ENRICHMENT,
     "export": Capability.EXPORT,
     "embedding": Capability.EMBEDDING,
+    # Index-time retrieval-signal generators (ADR-0049/0050): siblings of the dense Embedder under
+    # the same latence.providers seam.
+    "sparse": Capability.SPARSE_EMBEDDING,
+    "multivector": Capability.MULTIVECTOR_EMBEDDING,
+    "fde": Capability.FDE,
+    # #164: the Tokenizer seam of the BM25 term-statistics exporter (ADR-0048/0049).
+    "tokenizer": Capability.TOKENIZER,
     "delta": Capability.DELTA,
 }
 
@@ -1168,6 +1181,68 @@ def _graph_completion_ultra_case() -> ConformanceCase:
     )
 
 
+def _graph_features_case() -> ConformanceCase:
+    """Graph-feature enrichment (ADR-0051): centrality + community per node over the assembled KG.
+
+    Invokes the computer on the reference-assembled graph (NODE + EDGE GraphRecords) and RETURNS the
+    per-node features (as sorted ``(node_id, centrality, community)`` tuples) so C4 byte-compares
+    them — a computer that lied about ``deterministic`` (an unrounded PageRank, a randomised
+    label-propagation) FAILs. C1 (custom ``valid_output``) asserts EVERY node is covered, each
+    centrality a finite float and each community a non-empty string (a genuine compute, not a
+    no-op). C2's adversarial input is the EMPTY graph → the empty feature set (graceful empty).
+    """
+    from latence_core.contracts import GraphScope
+
+    def _split(records: list[Any]) -> tuple[list[Any], list[Any]]:
+        nodes = [r.node for r in records if r.scope is GraphScope.NODE and r.node is not None]
+        edges = [r.edge for r in records if r.scope is GraphScope.EDGE and r.edge is not None]
+        return nodes, edges
+
+    def _flatten(features: Any) -> list[object]:
+        # Sorted (node_id, centrality, community) tuples — a deterministic, serialisable surface the
+        # harness's ``str()``-based dump byte-compares for C4.
+        return [
+            (node_id, features.centrality[node_id], features.community[node_id])
+            for node_id in sorted(features.centrality)
+        ]
+
+    node_ids = {r.node.node_id for r in fixtures.assembled_graph() if r.node is not None}
+
+    def invoke(provider: Any) -> Sequence[object]:
+        nodes, edges = _split(fixtures.assembled_graph())
+        return _flatten(provider.compute_features(nodes, edges))
+
+    def valid_output(produced: Sequence[object]) -> bool:
+        rows = [row for row in produced if isinstance(row, tuple)]
+        if not rows:
+            return False
+        # Every assembled node is covered exactly once (the total-coverage contract).
+        if {row[0] for row in rows} != node_ids:
+            return False
+        import math
+
+        return all(
+            isinstance(row[1], float)
+            and math.isfinite(row[1])
+            and isinstance(row[2], str)
+            and bool(row[2])
+            for row in rows
+        )
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # The empty graph yields the empty feature set — a graceful empty, never a crash.
+        return _capture_raise(lambda: _flatten(provider.compute_features([], [])))
+
+    return ConformanceCase(
+        capability=Capability.GRAPH_FEATURES,
+        config={},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+    )
+
+
 def _context_enrichment_case() -> ConformanceCase:
     """Context Enrichment (W13): project the assembled KG back onto each chunk as a context_header.
 
@@ -1345,6 +1420,209 @@ def _embedding_cpu_dimension() -> int:
     return HashingEmbedder({}).dimension
 
 
+def _sparse_embedding_case(*, stub_scoped: bool = False) -> ConformanceCase:
+    """Sparse embedding (ADR-0050/0053): map texts to canonical :class:`SparseVector`s.
+
+    Like the dense :func:`_embedding_case`, the produced sparse vectors are RETURNED to the harness
+    so C4 byte-compares them (a non-deterministic sparse encoder that lied about ``deterministic``
+    FAILs). C1 asserts one vector per text, each a well-formed :class:`SparseVector` (ascending
+    indices in ``[0, vocab_size)``, matching value lengths) with at least one non-empty vector (a
+    genuine encode, not an all-zero no-op). The adversarial input is an empty text batch → an empty
+    result (graceful empty, never a crash).
+
+    ``stub_scoped`` selects the real ``sparse.splade`` composition Provider (ADR-0053), whose heavy
+    ``transformers`` model can't run in the offline env: the invoke installs a faithful fake
+    ``transformers`` (:func:`stubs.install_splade`) so its real tokenise → MLM → SPLADE-pool path is
+    checked without weights (its live numbers need a rig + a *cleared* checkpoint). Otherwise the
+    in-core deterministic ``sparse.hashing`` reference runs for real.
+    """
+    from latence_core.capability import SparseVector
+
+    texts = ["alpha beta alpha", "gamma delta", "epsilon"]
+    vocab = stubs.SPLADE_STUB_VOCAB if stub_scoped else _sparse_vocab_size()
+
+    def _run(provider: Any) -> Sequence[object]:
+        return list(provider.encode_sparse(texts))
+
+    def valid_output(vectors: Sequence[object]) -> bool:
+        vecs = [v for v in vectors if isinstance(v, SparseVector)]
+        if len(vecs) != len(texts):
+            return False
+        for v in vecs:
+            if len(v.indices) != len(v.values):
+                return False
+            if any(not (0 <= idx < vocab) for idx in v.indices):
+                return False
+            if list(v.indices) != sorted(set(v.indices)):
+                return False
+        # At least one non-empty vector — the canonical texts have tokens, so an all-empty result
+        # would be a broken encoder, not a valid one.
+        return any(v.indices for v in vecs)
+
+    if stub_scoped:
+
+        def invoke(provider: Any) -> Sequence[object]:
+            with stubs.install_splade():
+                return _run(provider)
+
+        def adversarial(provider: Any) -> AdversarialOutcome:
+            with stubs.install_splade():
+                return _capture_raise(lambda: list(provider.encode_sparse([])))
+
+        config: dict[str, Any] = {"model": "stub/splade"}
+    else:
+
+        def invoke(provider: Any) -> Sequence[object]:
+            return _run(provider)
+
+        def adversarial(provider: Any) -> AdversarialOutcome:
+            # An empty input batch yields an empty result — graceful empty, never a crash.
+            return _capture_raise(lambda: list(provider.encode_sparse([])))
+
+        config = {}
+
+    return ConformanceCase(
+        capability=Capability.SPARSE_EMBEDDING,
+        config=config,
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+        stub_scoped=stub_scoped,
+    )
+
+
+def _sparse_vocab_size() -> int:
+    """The vocab size the in-core hashing SparseEmbedder uses (default) — this case's C1 bound."""
+    from latence_core.signals import SparseHashingEmbedder
+
+    return SparseHashingEmbedder({}).vocab_size
+
+
+_MULTIVECTOR_DIM = 16
+
+
+def _multivector_embedding_case() -> ConformanceCase:
+    """Multi-vector embedding (ADR-0050): map texts to variable-length lists of token vectors.
+
+    The produced multi-vectors are RETURNED so C4 byte-compares them. C1 asserts one multi-vector
+    per text, every token vector of the declared width, and at least one non-empty multi-vector (a
+    genuine per-token encode). The adversarial input is an empty batch → an empty result (graceful).
+    """
+    texts = ["alpha beta alpha", "gamma delta", "epsilon"]
+
+    def invoke(provider: Any) -> Sequence[object]:
+        return list(provider.encode_multivector(texts))
+
+    def valid_output(multivectors: Sequence[object]) -> bool:
+        mvs = [m for m in multivectors if isinstance(m, list)]
+        if len(mvs) != len(texts):
+            return False
+        for mv in mvs:
+            for token_vector in mv:
+                if not isinstance(token_vector, list) or len(token_vector) != _MULTIVECTOR_DIM:
+                    return False
+        return any(mv for mv in mvs)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        return _capture_raise(lambda: list(provider.encode_multivector([])))
+
+    return ConformanceCase(
+        capability=Capability.MULTIVECTOR_EMBEDDING,
+        config={"dimension": _MULTIVECTOR_DIM},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+    )
+
+
+_FDE_INPUT_DIM = 8
+_FDE_BUCKETS = 4
+
+
+def _fde_input_multivectors() -> list[list[list[float]]]:
+    """A small, deterministic set of multi-vectors (``_FDE_INPUT_DIM`` wide) for the FDE case."""
+    return [
+        [[float((i + j) % 3) for j in range(_FDE_INPUT_DIM)] for i in range(4)],
+        [[float((i * j) % 2) for j in range(_FDE_INPUT_DIM)] for i in range(2)],
+        [],  # an empty multi-vector → the zero dense vector (the defined degenerate case)
+    ]
+
+
+def _fde_case() -> ConformanceCase:
+    """FDE conversion (ADR-0050): reduce each multi-vector to one fixed-width dense vector.
+
+    The produced dense vectors are RETURNED so C4 byte-compares them (a non-deterministic converter
+    FAILs). C1 asserts one dense vector per input multi-vector, each of the fixed output width
+    (``buckets × input_dimension``). The adversarial input is a token vector of the WRONG width — a
+    real converter rejects it, so C2 expects a typed :class:`~latence_core.errors.LatenceError`
+    (the faithful contract, anti-false-green: the converter does not silently swallow a mismatch).
+    """
+    inputs = _fde_input_multivectors()
+    output_dim = _FDE_BUCKETS * _FDE_INPUT_DIM
+
+    def invoke(provider: Any) -> Sequence[object]:
+        return [tuple(v) for v in provider.convert(inputs)]
+
+    def valid_output(vectors: Sequence[object]) -> bool:
+        vecs = [v for v in vectors if isinstance(v, tuple)]
+        if len(vecs) != len(inputs):
+            return False
+        return all(len(v) == output_dim for v in vecs)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # A token vector of the wrong width: the converter raises a typed LatenceError
+        # (ConfigError), not a silent mis-encode — the faithful rejection a real converter performs.
+        bad = [[[0.0] * (_FDE_INPUT_DIM + 1)]]
+        return _capture_raise(lambda: list(provider.convert(bad)))
+
+    return ConformanceCase(
+        capability=Capability.FDE,
+        config={"input_dimension": _FDE_INPUT_DIM, "buckets": _FDE_BUCKETS},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+    )
+
+
+def _tokenizer_case() -> ConformanceCase:
+    """Tokenizer (#164): split texts into terms — the varying seam of the BM25 export (ADR-0048).
+
+    Like the Embedder/Sparse cases, a Tokenizer yields raw ``list[str]`` (not Records), so the
+    invoke RETURNS the token lists (as tuples) and C4 byte-compares them — a tokenizer that lied
+    about ``deterministic`` FAILs. C1 (custom ``valid_output``) asserts one token list per text,
+    every token a string, and at least one non-empty list (a genuine split of the canonical texts,
+    not an all-empty no-op). The adversarial input is an empty batch → an empty result (graceful
+    empty, never a crash).
+    """
+    texts = ["Alpha, beta ALPHA.", "gamma delta", "epsilon"]
+
+    def invoke(provider: Any) -> Sequence[object]:
+        return [tuple(toks) for toks in provider.tokenize(texts)]
+
+    def valid_output(produced: Sequence[object]) -> bool:
+        lists = [t for t in produced if isinstance(t, tuple)]
+        if len(lists) != len(texts):
+            return False
+        if not all(isinstance(tok, str) for toks in lists for tok in toks):
+            return False
+        return any(toks for toks in lists)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        return _capture_raise(lambda: list(provider.tokenize([])))
+
+    return ConformanceCase(
+        capability=Capability.TOKENIZER,
+        config={},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+    )
+
+
 def _delta_case() -> ConformanceCase:
     """Delta: apply a Delta to a parent corpus; an empty delta is a graceful no-op."""
 
@@ -1394,9 +1672,14 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
     Capability.DISAMBIGUATION: _disambiguation_case(),
     Capability.GRAPH: _graph_case(),
     Capability.GRAPH_COMPLETION: _graph_completion_case(),
+    Capability.GRAPH_FEATURES: _graph_features_case(),
     Capability.CONTEXT_ENRICHMENT: _context_enrichment_case(),
     Capability.EXPORT: _export_case(),
     Capability.EMBEDDING: _embedding_case(stub_scoped=False),
+    Capability.SPARSE_EMBEDDING: _sparse_embedding_case(),
+    Capability.MULTIVECTOR_EMBEDDING: _multivector_embedding_case(),
+    Capability.FDE: _fde_case(),
+    Capability.TOKENIZER: _tokenizer_case(),
     Capability.DELTA: _delta_case(),
 }
 
@@ -1426,6 +1709,10 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "embedding.sentence_transformers": _embedding_case(
         stub_scoped=True, backend="sentence_transformers"
     ),
+    # The real multilingual SPLADE structured-composition SparseEmbedder (ADR-0053): its heavy
+    # transformers model can't run offline, so it is stub-scoped (a faithful fake transformers), and
+    # it needs a 'model' id (ADR-0053 pins no default) — supplied as the stub checkpoint here.
+    "sparse.splade": _sparse_embedding_case(stub_scoped=True),
     "graph_completion.ultra": _graph_completion_ultra_case(),
 }
 

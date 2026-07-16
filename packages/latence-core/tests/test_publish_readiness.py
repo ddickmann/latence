@@ -140,14 +140,21 @@ def test_project_urls_did_not_swallow_dependencies() -> None:
     This is the exact TOML footgun the fix had to avoid: if [project.urls] is emitted
     before `dependencies`, `dependencies` is parsed as a child of `project.urls` and
     vanishes from `project`. Assert every package still exposes its declared
-    dependencies (all depend on latence-core except core itself).
+    dependencies (all depend on latence-core except the standalone root libraries).
     """
+    # The two workspace ROOTS that intentionally declare no latence-core dependency:
+    # latence-core itself, and latence-retrieval — the SEPARATE stateless downstream
+    # query-time library (ADR-0048/0049), a thin pure-Python root (only pydantic) that an
+    # adopter installs à la carte without pulling the pipeline. Both still must expose a
+    # non-empty [project.dependencies] (the footgun guard) — they are exempt only from the
+    # latence-core-edge proxy, not from the "dependencies survived parsing" check.
+    _standalone_roots = {"latence-core", "latence-retrieval"}
     for pp in _package_pyprojects():
         proj = tomllib.loads(pp.read_text())["project"]
         name = pp.parent.name
         deps = proj.get("dependencies")
-        assert deps is not None, f"{name}: dependencies lost from [project]"
-        if name != "latence-core":
+        assert deps, f"{name}: dependencies lost from [project]"
+        if name not in _standalone_roots:
             assert any(d.startswith("latence-core") for d in deps), (
                 f"{name}: expected a latence-core dependency, got {deps}"
             )

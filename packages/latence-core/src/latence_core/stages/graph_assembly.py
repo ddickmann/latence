@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from latence_core.capability import GraphFeatureComputer, ProviderRegistry
 from latence_core.contracts import (
     DisambiguationRecord,
     DisambiguationScope,
@@ -35,6 +36,7 @@ from latence_core.contracts import (
     GraphRecord,
     GraphScope,
 )
+from latence_core.errors import ConfigError, ContractError
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
@@ -42,6 +44,93 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from latence_core.contracts import CanonicalEntity, NormalizedRelation
+
+
+def _resolve_feature_computer(
+    spec: Any, registry: ProviderRegistry
+) -> GraphFeatureComputer | None:
+    """Resolve the OPTIONAL ``graph_features`` computer from a ``{"provider", "config"}`` block.
+
+    The same composition Export uses for its Embedder (ADR-0017): ``spec`` is ``None`` (enrichment
+    off — the graph is emitted byte-identically to today, ADR-0051) or a ``{"provider", "config"}``
+    map naming a :class:`~latence_core.capability.GraphFeatureComputer` Provider (the in-core
+    ``graph_features.degree`` / ``graph_features.pagerank`` references, or a pluggable
+    Louvain/Leiden package). A mis-named Provider fails **loudly at wiring time** — a
+    :class:`~latence_core.errors.ContractError` — rather than silently emitting no features; a
+    malformed ``spec`` shape is a :class:`~latence_core.errors.ConfigError`.
+    """
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        msg = (
+            "Graph Assembly config 'graph_features' must be a mapping "
+            "{'provider': <name>, 'config': {...}} or absent; "
+            f"got {type(spec).__name__}."
+        )
+        raise ConfigError(msg)
+    provider_name = spec.get("provider")
+    if not isinstance(provider_name, str) or not provider_name:
+        msg = (
+            "Graph Assembly config 'graph_features' requires a non-empty string 'provider' "
+            "entry-point name."
+        )
+        raise ConfigError(msg)
+    provider_config = spec.get("config", {})
+    if not isinstance(provider_config, dict):
+        msg = "Graph Assembly config 'graph_features.config' must be a mapping if present."
+        raise ConfigError(msg)
+    provider_cls = registry.load(provider_name)
+    provider = provider_cls(provider_config)
+    if not isinstance(provider, GraphFeatureComputer):
+        msg = (
+            f"Provider {provider_name!r} named in Graph Assembly config 'graph_features' does not "
+            "satisfy the GraphFeatureComputer capability."
+        )
+        raise ContractError(msg)
+    return provider
+
+
+def _stamp_features(
+    node_records: list[GraphRecord],
+    edge_records: list[GraphRecord],
+    computer: GraphFeatureComputer | None,
+) -> list[GraphRecord]:
+    """Stamp centrality + community onto each NODE record's ``properties`` (ADR-0051), additively.
+
+    When no computer is wired the node records are returned UNCHANGED (the graph is byte-identical
+    to today — the genuinely-optional guarantee). Otherwise the computer sees the whole assembled
+    graph (all nodes + all edges) and returns a :class:`~latence_core.capability.GraphFeatures`
+    covering every node; each node gets ``properties['centrality']`` (float) +
+    ``properties['community']`` (str) added via ``model_copy`` (offsets / Evidence / Provenance
+    untouched). A node the computer failed to score is a loud
+    :class:`~latence_core.errors.ContractError` (the GraphFeatures contract already forbids a
+    partial map — this is belt-and-braces), never a silently-unenriched node.
+    """
+    if computer is None:
+        return node_records
+    nodes = [r.node for r in node_records if r.node is not None]
+    edges = [r.edge for r in edge_records if r.edge is not None]
+    features = computer.compute_features(nodes, edges)
+    stamped: list[GraphRecord] = []
+    for record in node_records:
+        node = record.node
+        if node is None:  # pragma: no cover - node_records are all NODE-scope by construction
+            stamped.append(record)
+            continue
+        if node.node_id not in features.centrality or node.node_id not in features.community:
+            msg = (
+                f"GraphFeatureComputer returned no features for node {node.node_id!r}; the "
+                "GraphFeatures contract covers every node."
+            )
+            raise ContractError(msg)
+        new_properties = {
+            **node.properties,
+            "centrality": features.centrality[node.node_id],
+            "community": features.community[node.node_id],
+        }
+        new_node = node.model_copy(update={"properties": new_properties})
+        stamped.append(record.model_copy(update={"node": new_node}))
+    return stamped
 
 
 class CanonicalGraphAssembler:
@@ -78,10 +167,20 @@ class CanonicalGraphAssembler:
             cost_per_1k=None,
         )
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        registry: ProviderRegistry | None = None,
+    ) -> None:
         config = config or {}
         self._corpus_id = str(config.get("corpus_id", "corpus"))
         self._max_evidence_per_node = int(config.get("max_evidence_per_node", 0))
+        # ADR-0051: the OPTIONAL graph-feature enrichment. Absent ⇒ no computer ⇒ the graph is
+        # emitted byte-identically to today. Resolved from config like Export resolves its Embedder.
+        registry = registry or ProviderRegistry()
+        self._feature_computer = _resolve_feature_computer(
+            config.get("graph_features"), registry
+        )
 
     def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
         entities, entity_src, relations, relation_src = _partition(records)
@@ -90,10 +189,13 @@ class CanonicalGraphAssembler:
         )
         nodes, edges = builder.build(entities, relations)
 
-        for node in nodes:
-            yield self._node_record(node, entity_src[node.entity_id])
-        for edge in edges:
-            yield self._edge_record(edge, relation_src[edge.relation_id])
+        node_records = [self._node_record(node, entity_src[node.entity_id]) for node in nodes]
+        edge_records = [self._edge_record(edge, relation_src[edge.relation_id]) for edge in edges]
+        # ADR-0051: stamp centrality + community onto each node (a no-op when unconfigured, so the
+        # emitted stream — nodes then edges, in id order — is byte-identical to today).
+        node_records = _stamp_features(node_records, edge_records, self._feature_computer)
+        yield from node_records
+        yield from edge_records
 
     @staticmethod
     def _node_record(node: BuiltNode, source: DisambiguationRecord) -> GraphRecord:
@@ -250,10 +352,19 @@ class WeightedGraphAssembler:
             cost_per_1k=None,
         )
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        registry: ProviderRegistry | None = None,
+    ) -> None:
         config = config or {}
         self._corpus_id = str(config.get("corpus_id", "corpus"))
         self._max_evidence_per_node = int(config.get("max_evidence_per_node", 0))
+        # ADR-0051: the OPTIONAL graph-feature enrichment (parity with the reference assembler).
+        registry = registry or ProviderRegistry()
+        self._feature_computer = _resolve_feature_computer(
+            config.get("graph_features"), registry
+        )
 
     def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
         entities, entity_src, relations, relation_src = _partition(records)
@@ -263,11 +374,17 @@ class WeightedGraphAssembler:
         nodes, edges = builder.build(entities, relations)
 
         # Nodes are assembled identically to the reference (node parity).
-        for node in nodes:
-            yield CanonicalGraphAssembler._node_record(node, entity_src[node.entity_id])
-
+        node_records = [
+            CanonicalGraphAssembler._node_record(node, entity_src[node.entity_id])
+            for node in nodes
+        ]
         # Fold parallel edges (same source, target, label) into one weighted edge.
-        yield from self._weighted_edge_records(edges, relation_src)
+        edge_records = list(self._weighted_edge_records(edges, relation_src))
+        # ADR-0051: stamp centrality + community over the WEIGHTED graph (its folded edges), so the
+        # features reflect this assembler's edge model. A no-op when unconfigured (byte-identical).
+        node_records = _stamp_features(node_records, edge_records, self._feature_computer)
+        yield from node_records
+        yield from edge_records
 
     def _weighted_edge_records(
         self, edges: list[BuiltEdge], relation_src: dict[str, DisambiguationRecord]

@@ -2,8 +2,9 @@
 
 The crux (ADR-0039): the compact :class:`~latence_core.contracts.ContextHeader` inflates the EMBEDDING
 input, never the stored chunk text — the LLM window stays byte-for-byte the clean chunk. And, opt-in,
-two Parquet columns (``context_header`` JSON + ``neighbor_entity_ids`` native list) surface the KG
-join keys for a downstream retriever, without touching the default schema.
+Parquet columns (``context_header`` JSON + the ``kg_node_ids`` / ``neighbor_node_ids`` /
+``kg_node_community`` / ``kg_node_centrality`` native lists, named for the consumers' default metadata
+keys) surface the KG projection for a downstream retriever, without touching the default schema.
 """
 
 from __future__ import annotations
@@ -108,7 +109,13 @@ def test_no_header_embeds_plain_content_byte_identical(tmp_path: Path) -> None:
 
 
 def test_context_columns_present_and_populated_when_opted_in(tmp_path: Path) -> None:
-    """With ``context_columns: true`` the two metadata columns are written + populated."""
+    """With ``context_columns: true`` the KG metadata columns are written + populated.
+
+    The columns are named for the exact default metadata keys the ``expand`` / ``multihop`` / ``pack``
+    consumers read (``kg_node_ids`` / ``neighbor_node_ids`` / ``kg_node_community`` /
+    ``kg_node_centrality``), so a store that copies columns into candidate metadata makes the graph
+    seam alive off the framework's own corpus (ADR-0051).
+    """
     store = f"file://{tmp_path}"
     storage = Storage.for_uri(store)
     export = JsonlParquetExport({"basename": "corpus", "context_columns": True})
@@ -118,11 +125,15 @@ def test_context_columns_present_and_populated_when_opted_in(tmp_path: Path) -> 
     with storage.open(parquet_uri, "rb") as fh:
         table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert "context_header" in table.column_names
-    assert "neighbor_entity_ids" in table.column_names
-    # context_header is the header as a JSON string; neighbor_entity_ids the native list of keys.
+    # The graph columns are named for the consumers' default keys (not an opaque header blob).
+    assert {"kg_node_ids", "neighbor_node_ids", "kg_node_community", "kg_node_centrality"} <= set(
+        table.column_names
+    )
+    # context_header is the full header as a JSON string; the graph columns are native lists.
     header_json = table.column("context_header")[0].as_py()
     assert json.loads(header_json)["entities"] == ["Acme", "Alice"]
-    assert table.column("neighbor_entity_ids")[0].as_py() == ["n-berlin"]
+    assert table.column("kg_node_ids")[0].as_py() == ["n-acme", "n-alice"]
+    assert table.column("neighbor_node_ids")[0].as_py() == ["n-berlin"]
 
 
 def test_context_columns_absent_by_default_schema_byte_identical(tmp_path: Path) -> None:
@@ -135,7 +146,9 @@ def test_context_columns_absent_by_default_schema_byte_identical(tmp_path: Path)
     with storage.open(parquet_uri, "rb") as fh:
         table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert "context_header" not in table.column_names
-    assert "neighbor_entity_ids" not in table.column_names
+    assert {"kg_node_ids", "neighbor_node_ids", "kg_node_community", "kg_node_centrality"}.isdisjoint(
+        table.column_names
+    )
     assert set(table.column_names) == {
         "record_id",
         "schema_version",
@@ -144,6 +157,88 @@ def test_context_columns_absent_by_default_schema_byte_identical(tmp_path: Path)
         "content",
         "media_type",
     }
+
+
+def _redacted_chunk(
+    *, content: str, masked_content: str, header: ContextHeader
+) -> ChunkRecord:
+    """A chunk the Redaction Stage handled: raw ``content`` + its PII-masked ``masked_content``."""
+    return ChunkRecord(
+        record_id="c-red",
+        provenance=_prov(len(content)),
+        classification=Classification(language="en", sensitivity="confidential"),
+        document_record_id="d1",
+        index=0,
+        content=content,
+        masked_content=masked_content,
+        token_count=max(1, len(content.split())),
+        context_header=header,
+    )
+
+
+def test_redacted_header_never_re_leaks_masked_pii_into_inspectable_cells(tmp_path: Path) -> None:
+    """R5 regression (ADR-0053): the EXPORTED ContextHeader must not carry a name redaction removed.
+
+    Under the default ``extract_on='unmasked'`` posture the header's entity canonical names + rendered
+    triples are the REAL, pre-redaction names. The header is embedding-input for the dense vector only
+    (safe), but it is ALSO written into two INSPECTABLE sinks — the JSONL ``context_header`` field and
+    the opt-in Parquet ``context_header`` column. Writing the raw names there re-leaks exactly what the
+    corpus redaction stripped from ``content`` (REDACTION-BY-DEFAULT). This asserts the masked name is
+    gone from BOTH inspectable sinks, a surviving non-PII entity stays, AND the dense vector is
+    unchanged (it still sees the full header — vector-only is safe). FAILS on the pre-fix code (the raw
+    ``Jane Confidential`` reaches both cells).
+    """
+    store = f"file://{tmp_path}"
+    storage = Storage.for_uri(store)
+    # NER ran on the RAW text, so the header names 'Jane Confidential'; the Redaction Stage masked
+    # that person name out of the corpus text (masked_content), leaving the ORG 'Acme'.
+    header = ContextHeader(
+        entities=["Acme", "Jane Confidential"],
+        entity_types=["ORG", "PERSON"],
+        neighbor_triples=["Jane Confidential —works_for→ Acme", "Acme —located_in→ Berlin"],
+        kg_node_ids=["n-acme", "n-jane"],
+        neighbor_node_ids=["n-berlin"],
+    )
+    chunk = _redacted_chunk(
+        content="Jane Confidential works at Acme.",
+        masked_content="[NAME] works at Acme.",
+        header=header,
+    )
+    export = JsonlParquetExport(
+        {"basename": "corpus", "context_columns": True, "embedder": _embedder_spec()}
+    )
+    uris = export.export([chunk], storage, store)
+
+    # (1) JSONL: the whole line (content + the context_header field) is clean of the masked name.
+    jsonl_uri = next(u for u in uris if u.endswith(".jsonl"))
+    jsonl_text = storage.read_text(jsonl_uri)
+    assert "Jane Confidential" not in jsonl_text
+    row = json.loads(jsonl_text.splitlines()[0])
+    assert row["context_header"]["entities"] == ["Acme"]  # the PERSON dropped, the ORG kept
+    assert row["context_header"]["neighbor_triples"] == []  # both triples name a non-surviving endpoint
+
+    # (2) Parquet: no cell carries the masked name; the ``context_header`` column keeps only 'Acme'.
+    parquet_uri = next(u for u in uris if u.endswith(".parquet"))
+    with storage.open(parquet_uri, "rb") as fh:
+        table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
+    all_cells = " ".join(str(v) for col in table.columns for v in col.to_pylist())
+    assert "Jane Confidential" not in all_cells
+    header_json = json.loads(table.column("context_header")[0].as_py())
+    assert header_json["entities"] == ["Acme"]
+    assert "Acme" in table.column("context_header")[0].as_py()
+    # The surviving entity keeps its aligned join key; the masked entity's is dropped with it.
+    assert table.column("kg_node_ids")[0].as_py() == ["n-acme"]
+
+    # (3) The dense vector is UNCHANGED — it still embeds the FULL header (vector-only is safe), so the
+    # export-time redaction did not weaken the retrieval signal.
+    full_header_text = (
+        "Entities: Acme (ORG), Jane Confidential (PERSON) | "
+        "Relations: Jane Confidential —works_for→ Acme; Acme —located_in→ Berlin"
+    )
+    expected = next(
+        HashingEmbedder({"dimension": _DIMENSION}).embed([f"{full_header_text}\n[NAME] works at Acme."])
+    )
+    assert row["embedding"] == expected
 
 
 def test_unenriched_row_gets_empty_context_columns(tmp_path: Path) -> None:
@@ -156,4 +251,7 @@ def test_unenriched_row_gets_empty_context_columns(tmp_path: Path) -> None:
     with storage.open(parquet_uri, "rb") as fh:
         table = pq.read_table(fh)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     assert table.column("context_header")[0].as_py() == ""
-    assert table.column("neighbor_entity_ids")[0].as_py() == []
+    assert table.column("kg_node_ids")[0].as_py() == []
+    assert table.column("neighbor_node_ids")[0].as_py() == []
+    assert table.column("kg_node_community")[0].as_py() == []
+    assert table.column("kg_node_centrality")[0].as_py() == []

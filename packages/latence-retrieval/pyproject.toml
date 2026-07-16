@@ -1,0 +1,202 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-retrieval"
+version = "0.1.0"
+description = "Stateless query-time retrieval-quality tooling for the Latence framework: the Candidate contract, the RetrievalBackend seam, and the latence.retrieval component registry (candidate processors). Holds no index and runs no first-stage search (ADR-0048)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "rag", "retrieval", "rerank", "fusion", "context-packing", "model-agnostic", "stateless"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Pure-Python core (ADR-0049, ADR-0016 discipline mirrored): the query-time library ships only
+# the framework's serialization spine (pydantic), NEVER a heavy retrieval/model dep. It is a
+# SEPARATE downstream library from latence-core — an adopter who wants only `rerank`/`fuse`/`pack`
+# installs this without pulling the whole pipeline (pyarrow/typer/fsspec). Heavy query-time deps
+# (cross-encoders, the Rust knapsack, DuckDB, the MCP stack, per-backend clients) land behind
+# extras on this package in later tickets, mirroring the thin-core / per-provider discipline.
+dependencies = [
+    "pydantic>=2.5",
+]
+
+# Heavy query-time deps behind extras (ADR-0016/0049 discipline), so an adopter installs only what
+# a given transform needs and the pure-Python core stays weightless.
+[project.optional-dependencies]
+# rerank (#166): the real cross-encoder adapter. `sentence-transformers` (+ its torch/transformers
+# stack) is Apache-2.0 (code); it pulls NO model — a cross-encoder CHECKPOINT is config-selected and
+# its weights+code license verified separately before wiring (ADR-0012). Offline tests use the
+# shipped faithful `FakeCrossEncoder` and never need this extra.
+rerank = [
+    "sentence-transformers>=2.2",
+]
+# pack (#167): the real, exact token counter for the Knapsack QKP context-packer. `tiktoken` is
+# MIT (code: https://github.com/openai/tiktoken/blob/main/LICENSE) and ships its encoding data — it
+# pulls NO model weights; an ENCODING is config-selected and license-verified separately before
+# wiring (ADR-0012). The packer runs day one on the pure-Python `HeuristicTokenCounter` with NO
+# extra; offline tests drive the heuristic + a fake `tiktoken` module and never need this extra.
+pack = [
+    "tiktoken>=0.5",
+]
+# backend-qdrant (#173): the reference production RetrievalBackend adapter over Qdrant. `qdrant-client`
+# is Apache-2.0 (code: https://github.com/qdrant/qdrant-client/blob/master/LICENSE) and the Qdrant
+# engine it talks to is Apache-2.0 — a vector store ships NO model weights, so there is nothing to
+# verify beyond the permissive code license (ADR-0012, verified 2026-07-16). Pinned `>=1.10` for the
+# unified `query_points` API. Offline tests drive a faithful fake `qdrant_client` module (mirroring
+# the rerank/pack fake-module boundary), so protocol conformance is covered without the heavy client;
+# live-store validation against a running Qdrant is done out of band.
+backend-qdrant = [
+    "qdrant-client>=1.10",
+]
+# sparse (#170): query-side sparse generation reusing the ADR-0053 index-time SPLADE composition.
+# `latence-splade` is the (Apache-2.0) package that owns the composition — depending on it here (not
+# re-implementing it) keeps the query vector byte-identical to the emitted corpus signal. It pulls
+# `latence-core`, and only when a REAL model is wired the `transformers` stack; NO checkpoint is
+# pinned — a multilingual SPLADE model is config-selected and its weights+code license verified
+# separately (ADR-0012/0053) before use. Offline tests inject the shipped faithful `FakeSpladeModel`
+# and never need a real model; the `latence_splade` import is lazy so the pure-Python core and
+# registry discovery never require this extra.
+sparse = [
+    "latence-splade",
+]
+# multivector (#171): query-side multi-vector generation for the experimental MaxSim rerank path
+# (ADR-0050). `latence-core` owns the index-time `multivector.hashing` reference embedder — reusing
+# it here (not re-implementing it) keeps the query multi-vector byte-identical to the emitted corpus
+# sidecar. MUVERA FDE / the reference multi-vector encoder are data-oblivious and TRAINING-FREE, so
+# this pulls NO model and NO weights (Apache-2.0, verified 2026-07-16); a real ColBERT-family encoder
+# is a config/injected alternative whose weights+code license is verified separately (ADR-0012).
+# Offline tests inject the shipped faithful `FakeMultiVectorEmbedder` and never need this extra; the
+# `latence_core` import is lazy so the pure-Python core and registry discovery never require it.
+multivector = [
+    "latence-core",
+]
+# graph-duckdb (#169): the ZERO-OPS default for multi-hop `expand` — an embedded, serverless engine
+# that runs a recursive-CTE traversal directly over the emitted `graph-edges.parquet`, read-only per
+# call, with NO server to operate (ADR-0051). `duckdb` is MIT (code:
+# https://github.com/duckdb/duckdb/blob/main/LICENSE) and ships NO model weights — an embedded query
+# engine, so there is nothing to verify beyond the permissive code license (ADR-0012, verified
+# 2026-07-16). Offline tests drive the shipped faithful `FakeGraphSource` and a real-DuckDB
+# equivalence test gated on this dep (skipped when absent); the `duckdb` import is lazy so the
+# pure-Python core and registry discovery never require it.
+graph-duckdb = [
+    "duckdb>=0.10",
+]
+# graph-networkx (#169): the pure-Python multi-hop REFERENCE for small graphs (ADR-0051) — loads the
+# same `graph-edges.parquet` into an undirected graph and reads bounded shortest-path hop distances.
+# `networkx` is BSD-3-Clause (code: https://github.com/networkx/networkx/blob/main/LICENSE.txt),
+# pure-Python, and ships NO model weights (ADR-0012, verified 2026-07-16); the edge parquet is read
+# with `pyarrow` (the pipeline's existing parquet spine). Offline tests drive `FakeGraphSource` and a
+# real-networkx equivalence test gated on this dep; the imports are lazy so the core never needs it.
+graph-networkx = [
+    "networkx>=3.0",
+]
+# graph-neo4j (#169): the OPTIONAL enterprise multi-hop backend for shops that ALREADY run Neo4j
+# (ADR-0051) — a variable-length Cypher path query against a live deployment (never a server the
+# tooling stands up). The `neo4j` Python driver is Apache-2.0 (code:
+# https://github.com/neo4j/neo4j-python-driver/blob/5.0/LICENSE.txt) and ships NO model weights — a
+# graph database, nothing to verify beyond the permissive code license (ADR-0012, verified
+# 2026-07-16). Offline tests drive a faithful fake `neo4j` module (the same fake-module boundary the
+# rerank/pack/qdrant tests use); a live-Neo4j smoke is gated on the dep + a URL env var (skipped
+# offline). The `neo4j` import is lazy so the core and registry discovery never require it.
+graph-neo4j = [
+    "neo4j>=5.0",
+]
+# mcp (#174): the optional MCP-protocol face over the hardened, stateless server core. The `mcp`
+# Python SDK (modelcontextprotocol/python-sdk) is MIT (code:
+# https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE) and ships NO model weights —
+# a protocol library, so there is nothing to verify beyond the permissive code license (ADR-0012,
+# verified 2026-07-16 against the upstream LICENSE + PyPI `License: MIT`). The whole hardened core
+# (auth, rate-limit, envelope, config-driven copy, the tool handlers) is PURE-PYTHON and needs NO
+# extra — only the thin `build_mcp_server` / `run_stdio` binding imports `mcp`, lazily. Offline tests
+# drive the tool-call boundary directly + a faithful fake `mcp` module (the same fake-module boundary
+# the qdrant/neo4j adapters use), so the surface is covered without the SDK; live-client validation
+# is out of band.
+mcp = [
+    "mcp>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+# The NEW query-time registry seam (ADR-0049) — SEPARATE from and parallel to the pipeline's
+# `latence.providers`. Installing this package makes `processor.identity` resolvable by config
+# through the RetrievalRegistry with no core change. Later tickets register more processors
+# (fuse/rerank/pack/expand) and the swappable models under this same group.
+[project.entry-points."latence.retrieval"]
+"processor.identity" = "latence_retrieval.processor:IdentityProcessor"
+# fuse (#165): merge N ranked lists → one. Two adapters of the one `Fuser` seam, selected by
+# config name — RRF (rank-only, scale-free, the robust default) and weighted score fusion
+# (per-list min-max-normalised weighted sum). Resolved via `resolve_fuser`.
+"fuser.rrf" = "latence_retrieval.fuser:RrfFuser"
+"fuser.weighted" = "latence_retrieval.fuser:WeightedFuser"
+# rerank (#166): re-score one candidate list with a config-selected, license-verified cross-encoder
+# and reorder it. A CandidateProcessor, resolved via `resolve_processor`; the real model rides the
+# `[rerank]` extra, offline tests the shipped faithful `FakeCrossEncoder`.
+"processor.rerank" = "latence_retrieval.rerank:Reranker"
+# pack (#167): select a token-budgeted subset maximising coverage/relevance minus redundancy — the
+# ported Apache-2.0 Knapsack QKP context-packer. A CandidateProcessor, resolved via
+# `resolve_processor`; runs day one on the pure-Python heuristic token counter (no extra), the exact
+# `tiktoken` counter rides the `[pack]` extra. Deterministic on CPU (ADR-0049).
+"processor.pack" = "latence_retrieval.pack:Packer"
+# expand (#168): 1-hop graph-augmented rescoring/reordering over the KG columns the pipeline
+# denormalised onto each chunk (kg_node_ids / neighbor_node_ids / kg_node_community /
+# kg_node_centrality). A pure-Python CandidateProcessor — no graph database, works on any store
+# (ADR-0051 default 1-hop path), resolved via `resolve_processor`. Optional signals degrade
+# gracefully; multi-hop (DuckDB/networkx/Neo4j) is a separate, later seam.
+"processor.expand" = "latence_retrieval.expand:Expander"
+# bm25 (#170): exact Okapi BM25 rescoring of a caller-supplied candidate set — IDF from supplied
+# corpus stats or the candidate pool, query-term-driven for large sets, NEVER a first-stage index
+# (ADR-0048). A CandidateProcessor, resolved via `resolve_processor`; pure-Python, deterministic, no
+# extra.
+"processor.bm25" = "latence_retrieval.bm25:Bm25Rescorer"
+# query_sparse.splade (#170): query-side sparse generation reusing the ADR-0053 index-time SPLADE
+# composition so the query lands in the corpus's sparse space (one composition, two clocks). A
+# SparseQueryEncoder, resolved via `resolve_sparse_encoder`; `latence-splade` rides the `[sparse]`
+# extra and is imported lazily, offline tests inject the faithful `FakeSpladeModel`. The name is
+# `query_sparse.*` (not `sparse.*`) so it never collides with the index-time `sparse.splade`
+# Provider under `latence.providers` — the two seams keep strictly disjoint names (ADR-0049).
+"query_sparse.splade" = "latence_retrieval.sparse:SpladeQueryEncoder"
+# maxsim (#171): the EXPERIMENTAL late-interaction rerank — re-score one candidate list by exact
+# MaxSim over the raw `multivectors.parquet` sidecar the caller loaded onto each candidate, against
+# the query's multi-vector (ADR-0050). A CandidateProcessor, resolved via `resolve_processor`;
+# real (not faked) math, pure-Python + deterministic, OFF BY DEFAULT. The query encoder rides the
+# `[multivector]` extra and is imported lazily; offline tests inject the faithful
+# `FakeMultiVectorEmbedder`. A numpy/SIMD MaxSim kernel is the deferred accelerator (ADR-0049/0050).
+"processor.maxsim" = "latence_retrieval.maxsim:MaxSimReranker"
+# query_multivector.hashing (#171): query-side multi-vector generation reusing the ADR-0050
+# index-time `multivector.hashing` reference so the query lands in the corpus's multi-vector space
+# (one construction, two clocks). A MultiVectorQueryEncoder, resolved via
+# `resolve_multivector_encoder`; `latence-core` rides the `[multivector]` extra and is imported
+# lazily, offline tests inject the faithful `FakeMultiVectorEmbedder`. The name is
+# `query_multivector.*` (not `multivector.*`) so it never collides with the index-time
+# `multivector.hashing` Provider under `latence.providers` — the two seams keep strictly disjoint
+# names (ADR-0049).
+"query_multivector.hashing" = "latence_retrieval.maxsim:HashingMultiVectorQueryEncoder"
+# multihop_expand (#169): the MULTI-HOP `expand` path — rescore a candidate list by hop-decayed
+# proximity to the seeds' bounded neighbourhood, traversed over the emitted `graph-edges.parquet`
+# through the two-adapter `GraphSource` seam (DuckDB zero-ops default / networkx reference / optional
+# Neo4j / faithful `FakeGraphSource`). A CandidateProcessor that ACCEPTS a GraphSource (dependency
+# injection), resolved via `resolve_processor`; the engines ride the `[graph-duckdb]` /
+# `[graph-networkx]` / `[graph-neo4j]` extras and are imported lazily. Bounded depth + stateless
+# (ADR-0051/0048); distinct from the pure-Python 1-hop `processor.expand`.
+"processor.multihop_expand" = "latence_retrieval.multihop:MultiHopExpander"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_retrieval"]

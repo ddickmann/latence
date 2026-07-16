@@ -34,7 +34,7 @@ for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
          latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \
          latence-linkpred-ultra latence-schema-inducer latence-parser-render \
-         latence-disambig-glinker; do
+         latence-disambig-glinker latence-splade; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
 done
 ok "workspace synced + heavy sources installed --no-deps"

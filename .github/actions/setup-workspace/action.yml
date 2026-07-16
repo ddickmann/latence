@@ -41,6 +41,6 @@ runs:
                  latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
                  latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \
                  latence-linkpred-ultra latence-schema-inducer latence-parser-render \
-                 latence-disambig-glinker; do
+                 latence-disambig-glinker latence-splade; do
           uv pip install --no-deps -e "packages/$p"
         done

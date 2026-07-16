@@ -89,7 +89,9 @@ def _model_profile(
     )
 
 # The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 44 Providers across 17 Capabilities (P3 landscape + the first real Wave-1 adapter H-A1 + the
+# 50 Providers across 21 Capabilities (P3 landscape + the three index-time retrieval-signal
+# reference generators sparse.hashing / multivector.hashing / fde.reference #160 + the first real
+# Wave-1 adapter H-A1 + the
 # learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii + the real
 # GPU LightOn-OCR Parser W1-lighton + its served-vLLM twin parser.lighton_vllm W10 + its MIT twin
 # the GPU GLM-OCR Parser W1-glm + the OPTIONAL reference GraphCompleter W2-linkpred Slice 1 + the
@@ -98,7 +100,9 @@ def _model_profile(
 # license-clean parser.render W5-universal-parser + the unified fused Entity+Relation gliner2
 # extractor W9-gliner2-unified, the relex drop-in + the OPTIONAL reference ContextEnricher
 # context.kg_header W13-context-enrichment + the enterprise GLinker Disambiguator
-# disambiguation.glinker ADR-0046 — the neural L2→L3→L4→L0 linking + audited resolver, GPU).
+# disambiguation.glinker ADR-0046 — the neural L2→L3→L4→L0 linking + audited resolver, GPU + the two
+# OPTIONAL reference GraphFeatureComputers graph_features.degree / graph_features.pagerank — degree/
+# connected-components + PageRank/label-propagation centrality+community, ADR-0051 #161).
 # If a Provider is added/removed, this list is updated deliberately, so the count check catches an
 # accidental un-covered Provider.
 _EXPECTED_PROVIDERS = frozenset(
@@ -139,6 +143,8 @@ _EXPECTED_PROVIDERS = frozenset(
         "graph.weighted",
         "graph_completion.reference",
         "graph_completion.ultra",
+        "graph_features.degree",
+        "graph_features.pagerank",
         "context.kg_header",
         "export.jsonl_parquet",
         "export.knowledge_graph",
@@ -146,6 +152,18 @@ _EXPECTED_PROVIDERS = frozenset(
         "embedding.hashing",
         "embedding.endpoint",
         "embedding.sentence_transformers",
+        "sparse.hashing",
+        "sparse.splade",
+        "multivector.hashing",
+        "fde.reference",
+        # The real, canonical MUVERA FDE (latence-muvera, #163) — pure-Python, training-free,
+        # numpy-free, installed in the CPU-first dev env so it RUNS the default _fde_case() for
+        # real, alongside the in-core fde.reference (ADR-0050).
+        "fde.muvera",
+        # The two in-core reference Tokenizers (#164) — the varying seam of the optional BM25
+        # term-statistics artifact exporter (ADR-0048/0049). Pure-Python, deterministic, zero-dep.
+        "tokenizer.regex",
+        "tokenizer.whitespace",
         "delta.affected_set",
     }
 )
@@ -171,12 +189,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 44 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 53 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 44
+    assert len(names) == 53
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -214,10 +232,10 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     """The rolled-up report: all pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 44
+    assert report.providers_total == 53
     assert report.providers_failed == 0
     assert report.all_passed
-    # The twelve endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
+    # The endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
     stub_scoped = {r.provider for r in report.results if r.stub_scoped}
     assert stub_scoped == {
         "parser.endpoint",
@@ -233,6 +251,7 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
         "redaction.presidio",
         "embedding.endpoint",
         "embedding.sentence_transformers",
+        "sparse.splade",
         "graph_completion.ultra",
     }
     # The GPU-only Providers (compute="gpu"): the LightOn-OCR + MIT twin GLM-OCR Parsers and the

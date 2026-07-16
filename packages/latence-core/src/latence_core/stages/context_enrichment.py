@@ -78,6 +78,30 @@ class _Neighbor:
         return (-self.confidence, self.triple, self.edge_id)
 
 
+def _graph_features(
+    ordered_entities: list[GraphNode],
+) -> tuple[list[float], list[str]]:
+    """The chunk's entities' centrality + community, aligned with ``ordered_entities`` (ADR-0051).
+
+    Reads the ``centrality`` / ``community`` the ``graph_features`` enrichment stamped onto each
+    :class:`~latence_core.contracts.GraphNode`'s ``properties`` bag. Returns aligned lists ONLY when
+    EVERY entity carries both (the assembler stamps all-or-none, so an enriched graph has them on
+    every node); otherwise returns ``([], [])`` — byte-identical to a run without it (the header's
+    fields stay empty). A malformed value (a non-numeric centrality) is treated as absent, so a
+    hand-built graph never crashes enrichment.
+    """
+    centrality: list[float] = []
+    community: list[str] = []
+    for node in ordered_entities:
+        raw_centrality = node.properties.get("centrality")
+        raw_community = node.properties.get("community")
+        if not isinstance(raw_centrality, (int, float)) or not isinstance(raw_community, str):
+            return [], []
+        centrality.append(float(raw_centrality))
+        community.append(raw_community)
+    return centrality, community
+
+
 class ContextHeaderEnricher:
     """ContextEnricher Provider: chunks + mentions + assembled graph -> the SAME chunks, enriched.
 
@@ -213,8 +237,10 @@ class ContextHeaderEnricher:
         """Build one chunk's capped, confidence-gated ContextHeader (or None if it has no
         entity)."""
         # 1. The chunk's canonical entities: its gated mentions -> their canonical nodes (both the
-        #    mention confidence and the node confidence must clear ``min_entity_confidence``).
-        entity_node_ids: set[str] = set()
+        #    mention confidence and the node confidence must clear ``min_entity_confidence``). Track
+        #    the STRONGEST gated mention confidence per node — this chunk's best NER evidence for
+        #    the entity — so the header carries a real per-entity confidence downstream (ADR-0053).
+        best_mention_conf: dict[str, float] = {}
         for mention in chunk_mentions:
             if mention.confidence < self._min_entity_confidence:
                 continue
@@ -224,12 +250,14 @@ class ContextHeaderEnricher:
             node = nodes.get(node_id)
             if node is None or node.confidence < self._min_entity_confidence:
                 continue
-            entity_node_ids.add(node_id)
+            prev = best_mention_conf.get(node_id)
+            if prev is None or mention.confidence > prev:
+                best_mention_conf[node_id] = mention.confidence
 
-        if not entity_node_ids:
+        if not best_mention_conf:
             return None
 
-        own_ids = sorted(entity_node_ids)
+        own_ids = sorted(best_mention_conf)
         # Entities/types aligned + sorted by canonical name (then node id) — deterministic surface.
         ordered_entities = sorted(
             (nodes[nid] for nid in own_ids), key=lambda n: (n.canonical_name, n.node_id)
@@ -237,6 +265,18 @@ class ContextHeaderEnricher:
         entities = [n.canonical_name for n in ordered_entities]
         entity_types = [n.label for n in ordered_entities]
         kg_node_ids = [n.node_id for n in ordered_entities]
+        # Per-entity ADMISSION confidence, aligned with ``entities``: min(best gated mention conf,
+        # node conf) — the exact value v s.t. this gate at threshold t admits the entity iff v >= t.
+        # Carrying it lets a composing SparseEmbedder's ``confidence_threshold`` apply the identical
+        # rule at index time (ADR-0053; #162 AC-04), so weak NER never pollutes the sparse signal.
+        entity_confidences = [
+            min(best_mention_conf[n.node_id], n.confidence) for n in ordered_entities
+        ]
+        # ADR-0051: project the index-time graph features onto the header, aligned with kg_node_ids.
+        # All-or-nothing: only when EVERY one of the chunk's own entities carries the stamped
+        # centrality + community (the assembler stamps every node, so an enriched graph has them on
+        # all) — otherwise both stay empty, byte-identical to a run without graph_features.
+        centrality, community = _graph_features(ordered_entities)
 
         # 2. The chunk's KG-neighbor triples: per-entity top-k capped (the hub-entity guard), then
         #    an overall cap. Iterate entities in node-id order for determinism.
@@ -273,9 +313,12 @@ class ContextHeaderEnricher:
         return ContextHeader(
             entities=entities,
             entity_types=entity_types,
+            entity_confidences=entity_confidences,
             neighbor_triples=neighbor_triples,
             kg_node_ids=kg_node_ids,
             neighbor_node_ids=neighbor_node_ids,
+            kg_node_centrality=centrality,
+            kg_node_community=community,
             situating_sentence=None,
             model_id=None,
         )

@@ -107,6 +107,13 @@ latence = "latence_core.cli:app"
 # parallel same-typed relations into one weighted edge — a distinct CPU strategy, same
 # deterministic-id + per-edge-Evidence contract, behind the same seam.
 "graph.weighted" = "latence_core.stages.graph_assembly:WeightedGraphAssembler"
+# ADR-0051 graph-feature enrichment: the two OPTIONAL in-core REFERENCE GraphFeatureComputers a
+# Graph-Assembly Stage resolves from config['graph_features'] to stamp centrality + community onto
+# each node (→ graph-nodes.parquet columns + each chunk's context_header). Degree/connected-
+# components and PageRank/label-propagation — pure Python, deterministic, zero-dep (no model —
+# ADR-0012). The blessed Louvain/Leiden community detection is a pluggable, license-verified package.
+"graph_features.degree" = "latence_core.stages.graph_features:DegreeComponentGraphFeatureComputer"
+"graph_features.pagerank" = "latence_core.stages.graph_features:PageRankLabelPropGraphFeatureComputer"
 # W2-linkpred Slice 1/2: the OPTIONAL post-Assembly GraphCompleter reference Provider — a
 # deterministic, bounded 2-hop transitive/symmetric closure that appends PREDICTED edges marked
 # properties.inferred=True (honest model-derived Evidence, never merged into asserted edges). Pure
@@ -120,6 +127,21 @@ latence = "latence_core.cli:app"
 "context.kg_header" = "latence_core.stages.context_enrichment:ContextHeaderEnricher"
 "export.knowledge_graph" = "latence_core.stages.graph_export:KnowledgeGraphExport"
 "embedding.hashing" = "latence_core.embedding:HashingEmbedder"
+# Index-time retrieval-signal generators (ADR-0049/0050): the CPU-viable, dependency-free
+# REFERENCE emitters that exercise the sparse/multi-vector/FDE seams + their additive Export
+# emission offline (no model, no weights — ADR-0012/0016), exactly as embedding.hashing does for
+# the dense seam. The blessed real Providers — the multilingual SPLADE composition (ADR-0053) and
+# the canonical MUVERA FDE + ColBERT multi-vector encoder (ADR-0050) — are pluggable packages.
+"sparse.hashing" = "latence_core.signals:SparseHashingEmbedder"
+"multivector.hashing" = "latence_core.signals:HashingMultiVectorEmbedder"
+"fde.reference" = "latence_core.signals:ReferenceFdeConverter"
+# #164 (ADR-0048/0049): the two in-core REFERENCE Tokenizers — the varying seam of the optional
+# BM25 term-statistics artifact exporter. tokenizer.regex (lowercase alphanumeric runs, matching the
+# dense/sparse hashing references) and tokenizer.whitespace (whitespace-split, punctuation kept) are
+# genuinely different tokenisations behind one seam. Pure Python, deterministic, zero-dep (no model —
+# ADR-0012). A store's exact analyzer is a pluggable Tokenizer behind the same seam.
+"tokenizer.regex" = "latence_core.bm25:RegexWordTokenizer"
+"tokenizer.whitespace" = "latence_core.bm25:WhitespaceTokenizer"
 # S11 built-in: the affected-set DeltaProcessor (retract-by-Evidence-provenance graph patcher +
 # blocking-neighborhood affected-set recompute catching merge-on-add / split-on-delete; drift-
 # triggered Reconciliation). Pure Python, deterministic, CPU-viable — a distributed blocking
