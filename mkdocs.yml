@@ -134,6 +134,7 @@ nav:
   - Getting Started:
       - getting-started/index.md
       - Fresh-pod walkthrough: TUTORIAL-fresh-pod-walkthrough.md
+      - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
       - GPU testing guide: GPU-TESTING-GUIDE.md
   - Concepts & Architecture:
       - concepts/index.md
