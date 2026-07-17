@@ -26,6 +26,7 @@ this accurately in the file header.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -102,6 +103,124 @@ _DEFAULT_EXTENSIONS: tuple[str, ...] = (
 DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_LLM_MODEL = "openai/gpt-4.1-mini"
 
+# -- the intake oversize guard, sized from the SCANNED corpus ------------------------------------
+#
+# `intake_screen` (screening.intake_signature) quarantines any file over `max_bytes` — the
+# oversize/DoS guard (issue #62). It MUST stay a real guard, but a FIXED cap silently quarantines
+# the very corpus the wizard just scanned: a book-sized 33 MB PDF is 16x over the old flat 2 MiB
+# cap, so `latence setup && latence process` produced an EMPTY corpus with no visible failure. So
+# the cap is now SIZED from the largest file actually observed under the source folder:
+#
+#     cap = clamp(round_up_to_mib(largest_observed * HEADROOM), FLOOR, CEILING)
+#
+# The bounds, justified:
+#   * FLOOR (2 MiB) — the previous flat cap, kept as the never-go-below default. It is what an
+#     un-scannable / empty / remote source still gets (with a loud warning), so nothing regresses
+#     for a corpus that never needed more, and a config generated without a scan is byte-identical
+#     to the pre-fix output.
+#   * HEADROOM (2x) — files that arrive AFTER setup are the norm (a corpus grows); doubling the
+#     largest observed file admits the next, somewhat-larger document without a re-run, while
+#     staying within one binary order of magnitude of real, observed evidence. It is deliberately
+#     NOT "infinity": a file 2x larger than anything in the corpus is genuinely anomalous.
+#   * MiB rounding — a tidy, human-readable cap in the emitted YAML (67797168 -> 68157440) that
+#     does not leak the exact byte size of one operator document into the config.
+#   * CEILING (2 GiB) — the guard's backstop. Past this the cap stops tracking the corpus, because
+#     a multi-GiB single document is a stack-design problem (and a memory-exhaustion vector — the
+#     screen reads the bytes), not something to silently wave through. When the ceiling clamps
+#     below the largest observed file the CLI warns LOUDLY that those files will be quarantined.
+#
+# Pure arithmetic over the scan result, so the byte-identical determinism contract holds: the same
+# corpus always yields the same cap.
+INTAKE_MAX_BYTES_FLOOR = 2 * 1024 * 1024  # 2 MiB — the pre-fix flat cap, now the floor/default.
+INTAKE_MAX_BYTES_CEILING = 2 * 1024 * 1024 * 1024  # 2 GiB — the backstop the guard never exceeds.
+INTAKE_HEADROOM = 2  # Admit files up to 2x the largest one observed at setup.
+_MIB = 1024 * 1024
+
+
+def intake_max_bytes(largest_source_bytes: int) -> int:
+    """The ``intake_screen`` ``max_bytes`` cap for a corpus whose largest file is that many bytes.
+
+    ``0`` (nothing observed — an empty, unreadable, or non-local source) yields
+    :data:`INTAKE_MAX_BYTES_FLOOR`, the pre-fix flat cap. Otherwise the largest observed file is
+    given :data:`INTAKE_HEADROOM` headroom, rounded up to a whole MiB, and clamped into
+    ``[FLOOR, CEILING]``. Pure + deterministic (same corpus -> same cap).
+    """
+    if largest_source_bytes <= 0:
+        return INTAKE_MAX_BYTES_FLOOR
+    sized = -(-(largest_source_bytes * INTAKE_HEADROOM) // _MIB) * _MIB  # ceil-div to whole MiB
+    return min(max(sized, INTAKE_MAX_BYTES_FLOOR), INTAKE_MAX_BYTES_CEILING)
+
+
+@dataclass(frozen=True)
+class CorpusScan:
+    """What ONE best-effort walk of the source folder observed (file types + the largest file).
+
+    ``scanned`` is the honesty bit: ``False`` means the walk could not observe the corpus at all —
+    a non-local Storage URI, a missing/unreadable folder, or a folder with no files — so
+    ``extensions`` is the broad default set and ``largest_bytes`` is 0 (the caller warns and the
+    generator falls back to :data:`INTAKE_MAX_BYTES_FLOOR`). Never raises.
+    """
+
+    extensions: tuple[str, ...]
+    largest_bytes: int
+    scanned: bool
+
+
+def scan_source(path: str | Path) -> CorpusScan:
+    """Walk ``path`` once and report its file types + largest file size (best-effort, never raises).
+
+    ONE walk answers both questions the wizard asks of a corpus — which parser it needs (the
+    extensions) and how big its documents actually are (the intake cap) — so a wizard run never
+    reads the folder twice or disagrees with itself. A non-local URI (``s3://…``), a missing folder,
+    an unreadable tree, or an empty folder all degrade to ``scanned=False`` + the broad default
+    extensions rather than failing: setup still emits a config, and the caller surfaces the warning.
+    Deterministic (extensions sorted; the largest size is a property of the corpus, not the walk).
+    """
+    p = Path(str(path).removeprefix("file://"))
+    try:
+        if not p.exists() or not p.is_dir():
+            return CorpusScan(_DEFAULT_EXTENSIONS, 0, scanned=False)
+        found: set[str] = set()
+        largest = 0
+        seen_file = False
+        for child in p.rglob("*"):
+            try:
+                if not child.is_file():
+                    continue
+                size = child.stat().st_size
+            except OSError:
+                # An unreadable / vanished / broken-symlink entry is skipped, never a crash: the
+                # scan is advisory, and a partial observation still beats no observation.
+                continue
+            seen_file = True
+            if child.suffix:
+                found.add(child.suffix.lstrip(".").lower())
+            largest = max(largest, size)
+    except OSError:
+        return CorpusScan(_DEFAULT_EXTENSIONS, 0, scanned=False)
+    if not seen_file:
+        return CorpusScan(_DEFAULT_EXTENSIONS, 0, scanned=False)
+    extensions = tuple(sorted(found)) if found else _DEFAULT_EXTENSIONS
+    return CorpusScan(extensions, largest, scanned=True)
+
+
+# The single-line, length-capped form the domain hint takes in the emitted config + header comment.
+# The hint is free-text operator input that lands in (a) a YAML comment — where a newline would
+# break out of the comment and corrupt the config — and (b) the `induce` Stage's `domain` key, from
+# which the inducer Provider injects it into an LLM prompt. Both want one bounded line. 512 chars is
+# ample for "German customs law: tariff classification, export-control rulings" and far short of any
+# prompt-bloat concern. The Provider sanitizes independently (defence in depth: a hand-edited config
+# is not this function's output), so this is about a tidy, well-formed config, not the trust
+# boundary.
+DOMAIN_HINT_MAX_CHARS = 512
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def normalize_domain_hint(raw: str) -> str:
+    """Collapse a free-text domain hint to ONE bounded line (``""`` when it carries no text)."""
+    collapsed = _WHITESPACE_RUN.sub(" ", raw).strip()
+    return collapsed[:DOMAIN_HINT_MAX_CHARS].strip()
+
 
 class SetupConfigError(ValueError):
     """A generated config failed its dry validation (structural / DAG / capability wiring).
@@ -139,7 +258,17 @@ class SetupAnswers:
     #   "masked"   — extraction reads the REDACTED chunk stream so PII never reaches the KG at all
     #                (the stricter posture; requires PII redaction ON).
     extract_on: str = "unmasked"
-    domain: str = ""  # Optional free-text domain hint (recorded as a header comment).
+    # Optional free-text domain hint. Recorded as a header comment AND threaded into schema
+    # induction (the `induce` Stage's `domain` key), so it genuinely steers the induced schema
+    # rather than only annotating the file. Empty ⇒ neither is emitted (byte-identical to a run
+    # without a hint).
+    domain: str = ""
+    # The size (bytes) of the LARGEST file observed under ``source`` at setup — from
+    # :func:`scan_source`. It SIZES the `intake_screen` oversize cap (see :func:`intake_max_bytes`)
+    # so the scanned corpus is actually admitted instead of being wholly quarantined at intake.
+    # 0 (the default, and what an unreadable / empty / non-local source yields) keeps the pre-fix
+    # flat 2 MiB floor.
+    largest_source_bytes: int = 0
     extensions: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_EXTENSIONS)
 
 
@@ -149,18 +278,10 @@ def detect_extensions(path: str | Path) -> tuple[str, ...]:
     A best-effort local scan used to seed the ``source`` Stage's ``extensions`` and to recommend a
     parser. A non-existent / empty folder returns the broad default set so a config still generates
     (the operator can prune it). Deterministic (sorted) so it never perturbs the byte-identical
-    contract.
+    contract. The extensions half of :func:`scan_source` — use that when you also need the corpus's
+    file sizes (it answers both from ONE walk).
     """
-    p = Path(str(path).removeprefix("file://"))
-    if not p.exists() or not p.is_dir():
-        return _DEFAULT_EXTENSIONS
-    found: set[str] = set()
-    for child in p.rglob("*"):
-        if child.is_file() and child.suffix:
-            found.add(child.suffix.lstrip(".").lower())
-    if not found:
-        return _DEFAULT_EXTENSIONS
-    return tuple(sorted(found))
+    return scan_source(path).extensions
 
 
 def recommend_parser(extensions: tuple[str, ...]) -> str:
@@ -186,6 +307,35 @@ def llm_key_env_var(base_url: str) -> str:
     names the var so the CLI can warn when it is unset.
     """
     return "OPENROUTER_API_KEY" if "openrouter" in (base_url or "").lower() else "OPENAI_API_KEY"
+
+
+def _induce_stage(answers: SetupAnswers, *, depends_on: str) -> dict[str, object]:
+    """The ``induce`` Stage (LLM schema induction at corpus granularity) — shared by both profiles.
+
+    The operator's ``--domain`` hint is threaded onto the Stage's ``domain`` config key, which the
+    inducer Provider injects into its OWN prompt (the Provider owns its prompt engineering — the
+    wizard hands it the hint, never a hand-crafted prompt string). So a hint genuinely steers the
+    induced schema instead of only annotating the file. No hint ⇒ the key is OMITTED entirely, so
+    the emitted config and the Provider's prompts are byte-identical to a run without one.
+    """
+    config: dict[str, object] = {
+        "model": answers.llm_model,
+        "base_url": answers.llm_base_url,
+        "granularity": "corpus",
+        "max_tokens": 2048,
+        "max_labels": 40,
+        "temperature": 0.0,
+    }
+    domain = normalize_domain_hint(answers.domain)
+    if domain:
+        config["domain"] = domain
+    return {
+        "name": "induce",
+        "capability": "schema_induction",
+        "provider": "label_inducer.llm",
+        "depends_on": [depends_on],
+        "config": config,
+    }
 
 
 def _parse_stage(answers: SetupAnswers) -> dict[str, object]:
@@ -312,14 +462,19 @@ def _build_lite_stages(
         }
     )
 
-    # 2) intake screening (always) — reject oversized / malformed / zip-bomb files.
+    # 2) intake screening (always) — reject oversized / malformed / zip-bomb files. The oversize cap
+    # is SIZED from the scanned corpus (intake_max_bytes) so the operator's real documents are
+    # admitted rather than silently quarantined; it remains a real guard (see the constants).
     stages.append(
         {
             "name": "intake_screen",
             "capability": "intake_screening",
             "provider": "screening.intake_signature",
             "depends_on": ["source"],
-            "config": {"max_bytes": 2097152, "max_zip_ratio": 50.0},
+            "config": {
+                "max_bytes": intake_max_bytes(answers.largest_source_bytes),
+                "max_zip_ratio": 50.0,
+            },
         }
     )
 
@@ -351,22 +506,7 @@ def _build_lite_stages(
         induce_input = "content_screen"
 
     # 6) schema induction (mandatory quality lever) — one shared canonical schema for the corpus.
-    stages.append(
-        {
-            "name": "induce",
-            "capability": "schema_induction",
-            "provider": "label_inducer.llm",
-            "depends_on": [induce_input],
-            "config": {
-                "model": answers.llm_model,
-                "base_url": answers.llm_base_url,
-                "granularity": "corpus",
-                "max_tokens": 2048,
-                "max_labels": 40,
-                "temperature": 0.0,
-            },
-        }
-    )
+    stages.append(_induce_stage(answers, depends_on=induce_input))
 
     # 7) fused NER+RE in ONE pass (GLiNER2); config labels are a FLOOR, induced types union on.
     # W18: in `extract_on: masked` mode the extractor reads the REDACTED chunk stream (depends_on
@@ -531,14 +671,19 @@ def _build_sota_stages(
         }
     )
 
-    # 2) intake screening (always) — reject oversized / malformed / zip-bomb files.
+    # 2) intake screening (always) — reject oversized / malformed / zip-bomb files. The oversize cap
+    # is SIZED from the scanned corpus (intake_max_bytes) so the operator's real documents are
+    # admitted rather than silently quarantined; it remains a real guard (see the constants).
     stages.append(
         {
             "name": "intake_screen",
             "capability": "intake_screening",
             "provider": "screening.intake_signature",
             "depends_on": ["source"],
-            "config": {"max_bytes": 2097152, "max_zip_ratio": 50.0},
+            "config": {
+                "max_bytes": intake_max_bytes(answers.largest_source_bytes),
+                "max_zip_ratio": 50.0,
+            },
         }
     )
 
@@ -583,22 +728,7 @@ def _build_sota_stages(
         induce_input = "content_screen"
 
     # 6) LLM schema induction (corpus granularity) — the one shared canonical schema.
-    stages.append(
-        {
-            "name": "induce",
-            "capability": "schema_induction",
-            "provider": "label_inducer.llm",
-            "depends_on": [induce_input],
-            "config": {
-                "model": answers.llm_model,
-                "base_url": answers.llm_base_url,
-                "granularity": "corpus",
-                "max_tokens": 2048,
-                "max_labels": 40,
-                "temperature": 0.0,
-            },
-        }
-    )
+    stages.append(_induce_stage(answers, depends_on=induce_input))
 
     # 7) fused NER+RE in ONE pass (GLiNER2) — labels are a FLOOR, induced types union on. threshold
     # 0.3 (the SOTA recall floor); compile defaults to False in the provider (left to ride).
@@ -794,8 +924,15 @@ def _render_header(answers: SetupAnswers) -> str:
         "#",
         f"# Schema-induction LLM key: read from ${key_var} at run (never stored here).",
     ]
-    if answers.domain.strip():
-        lines += ["#", f"# Domain hint: {answers.domain.strip()}"]
+    domain = normalize_domain_hint(answers.domain)
+    if domain:
+        # Provenance AND a pointer at where it acts: the same hint rides `induce.config.domain`,
+        # where the inducer Provider folds it into its prompt to steer the induced schema.
+        lines += [
+            "#",
+            f"# Domain hint: {domain}",
+            "#   (also threaded into `induce.config.domain` — it steers the induced schema.)",
+        ]
     lines += ["#", ""]
     return "\n".join(lines)
 

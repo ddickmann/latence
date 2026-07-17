@@ -39,6 +39,11 @@ from dataclasses import dataclass
 MAX_LABEL_LEN = 64
 #: The per-type label-count cap (anti-bloat): labels beyond this are dropped and reported.
 MAX_LABELS = 40
+#: The character cap on the operator's ``domain`` hint (anti-bloat): a hint longer than this is
+#: truncated. 512 chars is ample for a real description ("German customs law: tariff classification,
+#: binding tariff information, export-control rulings") while bounding what an operator — or a
+#: config an operator was handed — can push into every induction prompt.
+MAX_DOMAIN_LEN = 512
 
 # Control characters to strip: Unicode "Cc" (C0/C1 control + DEL) and the zero-width /
 # bidi-override formatting chars ("Cf") a prompt-injection payload can hide in. A label is a plain
@@ -106,6 +111,38 @@ def sanitize_label(raw: object) -> str | None:
     if len(text) > MAX_LABEL_LEN:
         text = text[:MAX_LABEL_LEN].strip()
     return text or None
+
+
+def sanitize_domain(raw: object) -> str:
+    """Sanitize the operator's free-text ``domain`` hint into one bounded, fence-safe line.
+
+    The hint is config-supplied prose that the Provider folds into every induction prompt
+    (``DOMAIN_CONTEXT_TEMPLATE``), so it gets the same "untrusted text becomes prompt data" bounding
+    the induced labels get:
+
+      * coerce to ``str``; a non-coercible value yields ``""`` (the no-hint path);
+      * strip control / zero-width / bidi-override characters (``Cc``/``Cf``) — the anti-injection,
+        anti-hidden-payload rule;
+      * drop ``<`` and ``>`` so the hint can NEVER close or forge the ``<domain_context>`` fence it
+        is placed inside. A domain description is prose; angle brackets carry no meaning it needs,
+        and removing them makes fence-escape structurally impossible rather than merely discouraged;
+      * collapse every whitespace run to a single space, so the hint stays one line (it cannot
+        fabricate a new "message" with blank lines) and is stable in a comment;
+      * cap the length at :data:`MAX_DOMAIN_LEN` — the anti-bloat bound.
+
+    Pure + deterministic, and never raises: a wholly-unusable hint sanitizes to ``""``, which the
+    Provider treats exactly as "no hint given" (the byte-identical backward-compatible path).
+    """
+    try:
+        text = raw if isinstance(raw, str) else str(raw)
+    except Exception:  # noqa: BLE001 - a pathological __str__ never crashes sanitization
+        return ""
+    text = _strip_controls(text)
+    text = text.replace("<", "").replace(">", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > MAX_DOMAIN_LEN:
+        text = text[:MAX_DOMAIN_LEN].strip()
+    return text
 
 
 def sanitize_labels(raw_labels: object) -> SanitizeResult:

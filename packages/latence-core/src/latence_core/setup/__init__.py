@@ -10,22 +10,30 @@ from __future__ import annotations
 
 from latence_core.setup.wizard import (
     FINANCIAL_PII_LABELS,
+    CorpusScan,
     SetupAnswers,
     SetupConfigError,
     build_stack_config,
     detect_extensions,
+    intake_max_bytes,
     llm_key_env_var,
+    normalize_domain_hint,
     recommend_parser,
+    scan_source,
     validate_config_text,
 )
 
 __all__ = [
     "FINANCIAL_PII_LABELS",
+    "CorpusScan",
     "SetupAnswers",
     "SetupConfigError",
     "build_stack_config",
     "detect_extensions",
+    "intake_max_bytes",
     "llm_key_env_var",
+    "normalize_domain_hint",
     "recommend_parser",
+    "scan_source",
     "validate_config_text",
 ]

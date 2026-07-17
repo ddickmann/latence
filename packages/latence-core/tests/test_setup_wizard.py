@@ -24,9 +24,12 @@ from latence_core.setup import (
     SetupAnswers,
     build_stack_config,
     recommend_parser,
+    scan_source,
     validate_config_text,
 )
 from latence_core.setup.wizard import (
+    INTAKE_MAX_BYTES_CEILING,
+    INTAKE_MAX_BYTES_FLOOR,
     PARSER_OCR,
     PARSER_OCR_VLLM,
     PARSER_PDF_TEXT,
@@ -324,6 +327,188 @@ def test_masked_requires_pii_on(tmp_path: Path) -> None:
     """masked-before-extract is meaningless without a redact Stage — a clear error, not a bad config."""
     with pytest.raises(ValueError, match="requires PII redaction ON"):
         build_stack_config(_answers(tmp_path, pii=False, extract_on="masked"))
+
+
+# -- the intake cap is sized from the scanned corpus --------------------------
+#
+# The defect these pin: the wizard emitted a FLAT 2 MiB `max_bytes`, so a real corpus (the live
+# repro: a 33,898,584-byte German PDF, 16.5x the cap) was quarantined at intake in its ENTIRETY and
+# `latence setup && latence process` produced an empty corpus with no visible failure.
+
+
+def _big_source(tmp_path: Path, size: int) -> tuple[str, int]:
+    """A source folder holding one sparse file of ``size`` bytes (no 30 MB of real I/O)."""
+    d = tmp_path / "big-corpus"
+    d.mkdir()
+    big = d / "handbook.pdf"
+    with big.open("wb") as fh:
+        fh.truncate(size)
+    (d / "small.txt").write_text("x", encoding="utf-8")
+    return f"file://{d}", big.stat().st_size
+
+
+def _intake_cap(text: str) -> int:
+    return int(_stage(text, "intake_screen").config["max_bytes"])
+
+
+def test_setup_admits_the_largest_file_in_the_scanned_corpus(tmp_path: Path) -> None:
+    """The emitted intake cap ADMITS the biggest real file the wizard scanned.
+
+    The behavioural bar (not a flag): a book-sized document under the source folder is under the
+    cap the wizard writes, so `latence process` ingests it instead of quarantining it.
+    """
+    src, size = _big_source(tmp_path, 33_898_584)  # the live-repro PDF's exact size
+    out = tmp_path / "big.stack.yaml"
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "--non-interactive",
+            "--source",
+            src,
+            "--storage",
+            f"file://{tmp_path}/out",
+            "--output",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cap = _intake_cap(out.read_text(encoding="utf-8"))
+    assert cap >= size, f"intake cap {cap} quarantines the corpus's own {size}-byte file"
+    # It is still a REAL guard, not infinity: bounded by the headroom rule and the ceiling.
+    assert cap <= INTAKE_MAX_BYTES_CEILING
+    assert cap < size * 4
+    # And the operator is TOLD, in the summary, what the cap is and where it came from.
+    assert "intake size cap" in result.output
+    assert "sized from your corpus" in result.output
+
+
+def test_sized_intake_cap_is_deterministic(tmp_path: Path) -> None:
+    """Same corpus → byte-identical config (the sizing must not break the determinism contract)."""
+    src, _ = _big_source(tmp_path, 9_000_000)
+    args = ["setup", "--non-interactive", "--source", src, "--storage", f"file://{tmp_path}/o", "--output"]
+    out1, out2 = tmp_path / "a.yaml", tmp_path / "b.yaml"
+    assert runner.invoke(app, [*args, str(out1)]).exit_code == 0
+    assert runner.invoke(app, [*args, str(out2)]).exit_code == 0
+    assert out1.read_bytes() == out2.read_bytes()
+
+
+def test_small_corpus_keeps_the_default_floor(tmp_path: Path) -> None:
+    """A corpus well under the floor keeps the pre-fix 2 MiB default (no needless cap inflation)."""
+    text = build_stack_config(_answers(tmp_path))  # tiny files
+    assert _intake_cap(text) == INTAKE_MAX_BYTES_FLOOR
+
+
+def test_unscannable_source_keeps_the_default_and_warns(tmp_path: Path) -> None:
+    """A non-local / unreadable source degrades honestly: default cap + a visible warning, no crash.
+
+    `scan_source` observes nothing for a Storage URI it cannot walk, so the generator falls back to
+    the floor — and the operator is warned rather than silently handed a cap that may quarantine
+    everything.
+    """
+    scan = scan_source("s3://bucket/corpus")
+    assert scan.scanned is False
+    assert scan.largest_bytes == 0
+    assert build_stack_config(
+        _answers(tmp_path)  # largest_source_bytes defaults to 0 == "nothing observed"
+    ).count(f"max_bytes: {INTAKE_MAX_BYTES_FLOOR}") == 1
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    out = tmp_path / "e.stack.yaml"
+    result = runner.invoke(
+        app,
+        ["setup", "--non-interactive", "--source", f"file://{empty}", "--output", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "could not read any files under the source folder" in result.output
+    assert _intake_cap(out.read_text(encoding="utf-8")) == INTAKE_MAX_BYTES_FLOOR
+
+
+def test_cap_is_ceilinged_and_over_cap_files_warn_loudly(tmp_path: Path) -> None:
+    """Past the ceiling the cap stops tracking the corpus — and the operator is LOUDLY warned that
+    those files will be quarantined (never a silent empty corpus)."""
+    src, size = _big_source(tmp_path, INTAKE_MAX_BYTES_CEILING + 1)  # sparse: no real 2 GiB written
+    out = tmp_path / "huge.stack.yaml"
+    result = runner.invoke(
+        app,
+        ["setup", "--non-interactive", "--source", src, "--output", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    cap = _intake_cap(out.read_text(encoding="utf-8"))
+    assert cap == INTAKE_MAX_BYTES_CEILING  # the guard's backstop holds
+    assert size > cap
+    assert "WARNING" in result.output
+    assert "OVER the" in result.output and "intake cap" in result.output
+
+
+def test_sota_profile_sizes_the_cap_too(tmp_path: Path) -> None:
+    """The sizing rides on BOTH profiles (the SOTA stack has the same intake screen)."""
+    answers = SetupAnswers(
+        source=_src_dir(tmp_path),
+        storage=f"file://{tmp_path}/out",
+        parser=PARSER_UNIVERSAL,
+        profile=PROFILE_SOTA,
+        largest_source_bytes=33_898_584,
+        extensions=("pdf",),
+    )
+    assert _intake_cap(build_stack_config(answers)) >= 33_898_584
+
+
+# -- the domain hint reaches schema induction ---------------------------------
+#
+# The defect this pins: `--domain` was accepted, prompted for, and then only became a YAML comment
+# — it never reached the `induce` Stage, so an operator's domain hint changed nothing about the
+# induced schema (wired-but-dead).
+
+
+def test_domain_hint_reaches_the_induce_stage(tmp_path: Path) -> None:
+    """`--domain` lands on `induce.config.domain` (where the inducer Provider reads it), not only in
+    a comment — so it genuinely steers schema induction."""
+    out = tmp_path / "d.stack.yaml"
+    hint = "German customs law: tariff classification and export-control rulings"
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "--non-interactive",
+            "--source",
+            _src_dir(tmp_path),
+            "--storage",
+            f"file://{tmp_path}/out",
+            "--domain",
+            hint,
+            "--output",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = out.read_text(encoding="utf-8")
+    induce = _stage(text, "induce")
+    assert induce.config["domain"] == hint  # the Provider's own config key
+    assert f"# Domain hint: {hint}" in text  # provenance comment KEPT
+    validate_config_text(text)
+
+
+def test_no_domain_hint_is_byte_identical_to_before(tmp_path: Path) -> None:
+    """Backward compatibility: no hint ⇒ no `domain` key and no header note at all."""
+    text = build_stack_config(_answers(tmp_path))
+    assert "domain" not in _stage(text, "induce").config
+    assert "Domain hint" not in text
+
+
+def test_multiline_domain_hint_stays_one_comment_line(tmp_path: Path) -> None:
+    """A hint with newlines cannot break out of the YAML comment (it would corrupt the config)."""
+    answers = SetupAnswers(
+        source=_src_dir(tmp_path),
+        storage=f"file://{tmp_path}/out",
+        parser=PARSER_UNIVERSAL,
+        domain="customs law\nstages: []\n",
+        extensions=("pdf",),
+    )
+    text = build_stack_config(answers)
+    validate_config_text(text)  # would raise if the hint escaped the comment
+    assert _stage(text, "induce").config["domain"] == "customs law stages: []"
 
 
 # -- parser recommendation ----------------------------------------------------

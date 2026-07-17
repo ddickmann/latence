@@ -552,7 +552,12 @@ def setup(
         ),
     ] = None,
     domain: Annotated[
-        str | None, typer.Option("--domain", help="Optional free-text domain hint (a header note).")
+        str | None,
+        typer.Option(
+            "--domain",
+            help="Optional free-text description of your corpus's subject matter. It steers schema "
+            "induction (it rides `induce.config.domain`) and is recorded as a header note.",
+        ),
     ] = None,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Where to save the generated stack config.")
@@ -579,9 +584,9 @@ def setup(
         SetupAnswers,
         SetupConfigError,
         build_stack_config,
-        detect_extensions,
         llm_key_env_var,
         recommend_parser,
+        scan_source,
         validate_config_text,
     )
     from latence_core.setup.wizard import (
@@ -591,10 +596,12 @@ def setup(
         DEFAULT_LLM_MODEL,
         DEFAULT_OCR_BASE_URL,
         DEFAULT_OCR_MODEL,
+        INTAKE_MAX_BYTES_FLOOR,
         PARSER_OCR_VLLM,
         PROFILE_LITE,
         PROFILE_SOTA,
         SOTA_DEVICE,
+        normalize_domain_hint,
     )
 
     interactive = not non_interactive
@@ -621,8 +628,20 @@ def setup(
             f"Source folder does not exist (or is not a directory): {src}", err=True
         )
         raise typer.Exit(code=2)
-    extensions = detect_extensions(src)
+    # ONE walk answers both questions: which parser the corpus needs, and how big its documents
+    # actually are (which sizes the intake oversize cap, so a real corpus is not quarantined).
+    scan = scan_source(src)
+    extensions = scan.extensions
     typer.echo(f"Detected file types under the source folder: {', '.join(extensions)}", err=True)
+    if not scan.scanned:
+        typer.echo(
+            "WARNING: could not read any files under the source folder (empty, unreadable, or not "
+            f"a local path), so the file types above are the broad default set and the intake "
+            f"size cap stays at the {INTAKE_MAX_BYTES_FLOOR} byte default. If your documents are "
+            "larger than that they will be quarantined at intake — check `--source`, or raise "
+            "`intake_screen.config.max_bytes` in the generated config by hand.",
+            err=True,
+        )
 
     # b. Profile / tier — 'lite' (default) or 'enterprise-sota' (the pod-validated composed stack).
     chosen_profile = ask_text(
@@ -773,6 +792,7 @@ def setup(
         pii=pii_on,
         extract_on=extract_mode,
         domain=domain_hint,
+        largest_source_bytes=scan.largest_bytes,
         extensions=extensions,
     )
 
@@ -807,7 +827,27 @@ def setup(
     typer.echo(f"  parser: {chosen_parser}   device: {dev}")
     if is_sota:
         typer.echo(f"  OCR endpoint: {ocr_mdl} @ {ocr_base}")
+    # The intake oversize cap: say what it is AND where the number came from, because a cap below
+    # the corpus's own files is the difference between a full run and a silently empty one.
+    cap = int(next(s for s in pipeline.stages if s.name == "intake_screen").config["max_bytes"])
+    if scan.scanned:
+        typer.echo(
+            f"  intake size cap: {cap} bytes — sized from your corpus "
+            f"(largest file {scan.largest_bytes} bytes)"
+        )
+    else:
+        typer.echo(f"  intake size cap: {cap} bytes — the default (your corpus was not readable)")
+    if scan.largest_bytes > cap:
+        typer.echo(
+            f"  WARNING: the largest file in your source folder is {scan.largest_bytes} bytes, "
+            f"OVER the {cap} byte intake cap — files that big are quarantined at intake and will "
+            "NOT reach the corpus. Split them, or raise `intake_screen.config.max_bytes` by hand "
+            "(and expect the memory cost of screening a file that size)."
+        )
     typer.echo(f"  schema induction: {model} @ {base_url}  (key from ${key_var})")
+    hint = normalize_domain_hint(domain_hint)
+    if hint:
+        typer.echo(f"  domain hint: steering schema induction ({hint})")
     typer.echo(
         "  PII redaction + guardrail screening: "
         + ("ON (financial-PII; chunk-level masking + report)" if pii_on else "OFF")

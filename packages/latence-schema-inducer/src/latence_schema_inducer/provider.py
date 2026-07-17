@@ -87,10 +87,11 @@ from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_schema_inducer.prompts import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT_TEMPLATE,
+    DOMAIN_CONTEXT_TEMPLATE,
     EMPTY_RECOVERY_INSTRUCTION,
     REPAIR_INSTRUCTION,
 )
-from latence_schema_inducer.sanitize import MAX_LABELS, sanitize_labels
+from latence_schema_inducer.sanitize import MAX_LABELS, sanitize_domain, sanitize_labels
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -170,6 +171,16 @@ class LLMLabelInducer:
         temperature: float  — sampling temperature (default 0.0 for determinism).
         system_prompt / user_prompt_template: str  — override the default prompts (the template
             carries ``{text}`` / ``{max_labels}`` placeholders).
+        domain: str  — an OPTIONAL free-text description of the corpus's subject matter (what
+            ``latence setup --domain "German customs law: tariff classification, ..."`` emits). The
+            Provider folds it into its OWN prompt as a clearly-fenced BACKGROUND block
+            (``DOMAIN_CONTEXT_TEMPLATE``) on every call — including the repair / empty-recovery
+            re-prompts — so the model names and disambiguates types in the operator's domain instead
+            of guessing from the text alone. Untrusted text: it is sanitized
+            (:func:`~latence_schema_inducer.sanitize.sanitize_domain` — control chars stripped,
+            fence-safe, one line, ≤ 512 chars) and framed as reference-material-not-instructions,
+            and every safety net still applies to the reply. Absent / empty ⇒ NO block is added and
+            the prompts are byte-identical to a run without a hint.
         min_chars: int  — a chunk/document shorter than this (stripped) is skipped (default 1).
         min_labels: int  — the minimum TOTAL induced labels (entity + relation + pii) a successful
             induction must yield (default 1). An induction that parses + validates but sanitizes to
@@ -250,6 +261,10 @@ class LLMLabelInducer:
         self._user_prompt_template = str(
             config.get("user_prompt_template", DEFAULT_USER_PROMPT_TEMPLATE)
         )
+        # The operator's optional domain hint, sanitized at construction (once, not per call) into
+        # the bounded, fence-safe line the prompt block embeds. "" ⇒ no block is emitted at all, so
+        # a config without `domain` produces byte-identical prompts to pre-domain behaviour.
+        self._domain = sanitize_domain(config.get("domain", ""))
         self._min_chars = max(0, int(config.get("min_chars", _DEFAULT_MIN_CHARS)))
         # Ported retry (same as relation.llm): a 429/5xx/transport blip is retried with
         # backoff+jitter and tallied on ``endpoint_retries``; a terminal 4xx fails fast (and, being
@@ -660,8 +675,17 @@ class LLMLabelInducer:
         :class:`EndpointError` so the retry decides retry-vs-fail and a terminal failure re-raises
         up to the fail-open guard. When ``instruction`` is not ``None`` it is prepended to the user
         message (the repair and/or empty-recovery corrective).
+
+        A configured ``domain`` hint is folded in as a fenced BACKGROUND block between any
+        corrective instruction and the task itself: the corrective keeps top billing (it is the
+        sharpened ask), the domain frames the corpus, and the task's own restatement of the JSON
+        shape lands LAST — closest to the model's answer. The block rides every call (including the
+        retries), so a re-prompt never loses the domain steer. No hint ⇒ the user message is
+        byte-identical to the pre-domain build.
         """
         user = self._user_prompt_template.format(text=text, max_labels=self._max_labels)
+        if self._domain:
+            user = f"{DOMAIN_CONTEXT_TEMPLATE.format(domain=self._domain)}\n\n{user}"
         if instruction is not None:
             user = f"{instruction}\n\n{user}"
         messages = [
