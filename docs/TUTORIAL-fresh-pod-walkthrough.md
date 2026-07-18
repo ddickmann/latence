@@ -100,7 +100,10 @@ pip install --break-system-packages \
 ```
 
 - `gliner2 peft accelerate` — the GLiNER2 fused entity+relation extractor (mdeberta-v3 backbone).
-- `gliner` — the learned PII redactor (`redaction.gliner_pii`).
+- `gliner` — the learned PII redactor `redaction.gliner_pii`, which §4's hand-written stack wires.
+  (`latence setup --profile enterprise-sota` blesses `redaction.gliner2` instead — #197, ADR-0041
+  §7a — so it needs no package beyond the `gliner2` above. Both are supported; install both to run
+  §4 and §5 from the same environment.)
 - `glinker flashdeberta` — the neural GLinker entity-linker (`disambiguation.glinker`): the
   `gliner-linker-large` biencoder + `gliner-linker-rerank` reranker + FlashDeBERTa.
 - `sentence-transformers` — the Granite r2 embedder (the GLinker resolver's opt-in STS rung **and**
@@ -167,7 +170,8 @@ from latence_core.capability import ProviderRegistry
 names = set(ProviderRegistry().names())
 for n in ("source.local_folder","screening.intake_signature","parser.lighton_vllm",
           "chunk.markdown","screening.content_keyword","label_inducer.llm",
-          "fused_entity_relation.gliner2","redaction.gliner_pii","profiling.statistical",
+          "fused_entity_relation.gliner2","redaction.gliner_pii","redaction.gliner2",
+          "profiling.statistical",
           "disambiguation.glinker","graph.canonical","graph_completion.ultra",
           "context.kg_header","export.knowledge_graph","export.jsonl_parquet"):
     print(("ok " if n in names else "MISSING "), n)
@@ -261,7 +265,7 @@ capability wiring — the SAME machinery `latence stack validate` builds on, no 
 
 ```text
 source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
-  → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner_pii, financial-PII]
+  → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
   → profiling → disambiguate[glinker] → graph → complete[ultra, skip_if_unavailable]
   → enrich(context) → export_kg + export_corpus[Granite r2, context_columns]
 ```
@@ -286,8 +290,10 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 > - **induce → `label_inducer.llm`** at **corpus** granularity (`max_labels 40`, `temperature 0`) —
 >   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
->   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner_pii`**
->   (chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus` dataflow).
+>   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner2`**
+>   (#197, ADR-0041 §7a — the SAME GLiNER2 engine `extract` runs, so redaction adds no second
+>   model library; chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus`
+>   dataflow).
 > - **disambiguate → `disambiguation.glinker`** — the neural GLinker entity-linker + audited resolver
 >   (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the **IBM Granite r2**
 >   embedder. The precision-by-default knobs (embedding-merge OFF, fuzzy edit-distance rung +

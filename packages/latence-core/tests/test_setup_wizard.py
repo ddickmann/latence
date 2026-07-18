@@ -28,6 +28,7 @@ from latence_core.setup import (
     validate_config_text,
 )
 from latence_core.setup.wizard import (
+    BLESSED_REDACT_PROVIDER,
     INTAKE_MAX_BYTES_CEILING,
     INTAKE_MAX_BYTES_FLOOR,
     PARSER_OCR,
@@ -170,8 +171,9 @@ def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None
     assert "use_embedding_merge" not in disambiguate.config
     assert "min_similarity" not in disambiguate.config
 
-    # The enterprise redactor + ULTRA graph completion + Granite corpus vectors.
-    assert _stage(text, "redact").provider == "redaction.gliner_pii"
+    # The blessed redactor (#197, ADR-0041 §7a: the SAME gliner2 engine `extract` runs, in BOTH
+    # profiles) + ULTRA graph completion + Granite corpus vectors.
+    assert _stage(text, "redact").provider == BLESSED_REDACT_PROVIDER
     complete = _stage(text, "complete")
     assert complete.provider == "graph_completion.ultra"
     assert complete.config["skip_if_unavailable"] is True
@@ -221,10 +223,9 @@ def test_lite_profile_is_unchanged_and_default(tmp_path: Path) -> None:
     assert PARSER_OCR_VLLM not in providers
     assert "disambiguation.glinker" not in providers
     assert "graph_completion.ultra" not in providers
-    assert "redaction.gliner_pii" not in providers
-    # the prior lite disambiguator/redactor are intact
+    # the prior lite disambiguator + the blessed redactor (#197: the SAME one sota emits)
     assert "disambiguation.embedding" in providers
-    assert "redaction.gliner2" in providers
+    assert BLESSED_REDACT_PROVIDER in providers
 
 
 # -- the ONE PII toggle -------------------------------------------------------

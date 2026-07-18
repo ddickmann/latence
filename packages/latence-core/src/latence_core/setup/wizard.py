@@ -59,7 +59,8 @@ STACK_NAME = "latence-setup-stack"
 #     with THIS emitted config rather than assuming it.
 BLESSED_REDACT_PROVIDER = "redaction.gliner2"
 
-# The financial-PII label FLOOR the blessed redactor (`BLESSED_REDACT_PROVIDER`) runs when PII is ON.
+# The financial-PII label FLOOR the blessed redactor (`BLESSED_REDACT_PROVIDER`) runs when PII
+# is ON.
 # Wider than the generic person/email/phone default: the enterprise corpora this stack targets carry
 # account/tax/card identifiers. The induced pii_types UNION on top of this floor at run (ADR-0038),
 # so the effective set is always ⊇ this list. Kept as one constant so the generator and the tests
@@ -603,7 +604,7 @@ def _build_lite_stages(
             {
                 "name": "redact",
                 "capability": "redaction",
-                "provider": "redaction.gliner2",
+                "provider": BLESSED_REDACT_PROVIDER,
                 "depends_on": ["induce"],
                 "config": {
                     "device": answers.device,
@@ -707,10 +708,15 @@ def _build_sota_stages(
 
     Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: served
     vLLM OCR (``parser.lighton_vllm``) → chunk[640] → LLM schema induction[corpus] → fused GLiNER2
-    entity+relation → learned PII redaction (``redaction.gliner_pii``) → profiling → the neural
+    entity+relation → learned PII redaction (``redaction.gliner2``, #197) → profiling → the neural
     **GLinker** disambiguator (``disambiguation.glinker`` + Granite r2 STS embedder) → canonical KG
     → **ULTRA** graph completion (skip-with-flag when absent) → KG + context-enriched RAG-corpus
     export (Granite r2 vectors). Every learned Stage runs on CUDA (``SOTA_DEVICE``).
+
+    Deliberate delta from ``stacks/gpu-sota-glinker.yaml`` (#197): that hand-written stack predates
+    the decision and still wires ``redaction.gliner_pii``; the wizard emits the ONE blessed
+    :data:`BLESSED_REDACT_PROVIDER` in every profile. Both Providers remain supported behind the
+    same ``PIIDetector`` seam — the profile just no longer picks a different one per tier.
 
     The ONE PII toggle and the W18 mask-before-extract option ride exactly as in ``lite``: PII adds
     ``content_screen`` + ``redact`` and wires ``redact → enrich → export_corpus`` (W16 chunk-level
@@ -811,7 +817,9 @@ def _build_sota_stages(
         }
     )
 
-    # 8) learned PII redaction (GLiNER-PII) — the PII half of the ONE toggle. W16 (ADR-0042): a
+    # 8) learned PII redaction — the PII half of the ONE toggle, on the SAME blessed Provider `lite`
+    # emits (#197: `BLESSED_REDACT_PROVIDER`, the ADR-0036 W9 unified gliner2 engine this profile
+    # already runs for `extract`, so `redact` adds no second model library). W16 (ADR-0042): a
     # chunk→chunk transform over the induced chunk stream that sets each chunk's masked_content, so
     # `enrich` reads a masked stream and export_corpus is masked AND enriched.
     if answers.pii:
@@ -819,7 +827,7 @@ def _build_sota_stages(
             {
                 "name": "redact",
                 "capability": "redaction",
-                "provider": "redaction.gliner_pii",
+                "provider": BLESSED_REDACT_PROVIDER,
                 "depends_on": ["induce"],
                 "config": {
                     "device": SOTA_DEVICE,
@@ -984,6 +992,13 @@ def _render_header(answers: SetupAnswers) -> str:
     ]
     if answers.pii:
         lines += [
+            f"#   Redactor: `{BLESSED_REDACT_PROVIDER}` (#197, ADR-0036 W9) — the SAME GLiNER2",
+            "#   engine `extract` runs, so PII detection adds no second model library. Its",
+            "#   `pii_labels` are the ADR-0044 financial floor; the induced pii_types UNION on top",
+            "#   at run (ADR-0038), and the universal financial floor masks card/iban/ssn even",
+            "#   when",
+            "#   the model misses them. Any other Redaction Provider drops in behind the same",
+            "#   Capability seam — swap `redact.provider` and nothing else moves.",
             "#   W16 (ADR-0042): `redact` is a CHUNK-LEVEL transform — it consumes the induced",
             "#   chunk stream and sets each chunk's `masked_content` (each chunk fits the model",
             "#   window, so no PII is truncated). `enrich` reads THAT redacted chunk stream, and",
