@@ -301,7 +301,7 @@ def test_an_exclusion_without_a_reason_is_rejected(tmp_path: Path) -> None:
     spec.write_text(
         "name: x\nsummary: x\npython: '>=3.11'\nplatform: linux-x86_64\n"
         "workspace_packages: [packages/latence-core]\nproviders: [source.local_folder]\n"
-        "excluded_packages:\n  - package: flash-attn\n",
+        "excluded_distributions:\n  - package: flash-attn\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="reason"):
@@ -330,9 +330,9 @@ _ABI_BROKEN_WHEELS = ("flash-attn", "torchcodec")
 def test_the_abi_broken_wheels_are_excluded_from_both_ocr_environments(name: str) -> None:
     """Both halves of the split exclude both wheels — 'it can't reach us' is not a mechanism."""
     spec = load_environment(_ENV_ROOT / name / "environment.yaml")
-    excluded = {exclusion.package for exclusion in spec.excluded_packages}
+    excluded = {exclusion.package for exclusion in spec.excluded_distributions}
     assert set(_ABI_BROKEN_WHEELS) <= excluded, f"{name} excludes only {sorted(excluded)}"
-    for exclusion in spec.excluded_packages:
+    for exclusion in spec.excluded_distributions:
         assert exclusion.reason.strip(), exclusion.package
 
 
@@ -349,7 +349,7 @@ def test_an_exclusion_is_rendered_as_a_specifier_nothing_can_satisfy(name: str) 
 
     spec = load_environment(_ENV_ROOT / name / "environment.yaml")
     rendered = render_constraints(spec, _REPO_ROOT)
-    for exclusion in spec.excluded_packages:
+    for exclusion in spec.excluded_distributions:
         assert exclusion.requirement in rendered.splitlines(), exclusion.package
         specifier = Requirement(exclusion.requirement).specifier
         for candidate in ("0", "0.0.1", "1.0", "2.8.3", "99999.0", "1.0.0rc1", "0.14"):
@@ -572,3 +572,160 @@ def test_stack_walk_finds_nested_signal_providers(tmp_path: Path) -> None:
         "embedding.sentence_transformers",
         "sparse.splade",
     }
+
+
+# --------------------------------------------------------------------------------------------
+# The transformers split fails at DEPENDENCY RESOLUTION, not at runtime (issue #198).
+#
+# Both refusals below are lock-independent: they hold for an environment that has never been
+# solved, which is what makes them resolution-time failures. Gate 1 of ``smoke.sh`` runs them
+# before ``install.sh``, so the unsupported combination cannot reach a model load.
+# --------------------------------------------------------------------------------------------
+
+_GPU_ENV = "gpu-learned"
+
+
+def test_gpu_environment_enforces_the_transformers_four_window(sandbox: Path) -> None:
+    """The committed resolution is ONE window, not a menu: 4.51.3 <= transformers < 5."""
+    spec = load_environment(_spec_in(sandbox, _GPU_ENV))
+    windows = [c.requirement for c in spec.constraints if c.requirement.startswith("transformers")]
+    assert windows == ["transformers>=4.51.3,<5"]
+
+
+def test_a_transformers_five_package_cannot_resolve_into_the_gpu_environment(sandbox: Path) -> None:
+    """A package on the >=5 side of the split is refused by the BOUNDARY, before anything installs.
+
+    The disjointness is computed from the declared window against the enforced one — no lock, no
+    install, no import. This is the mechanism that makes the split a resolution failure.
+    """
+    pyproject = sandbox / "packages" / "latence-extract-gliner2" / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            '"peft>=0.10",', '"peft>=0.10",\n    "transformers>=5.0",'
+        ),
+        encoding="utf-8",
+    )
+    codes = _codes(sandbox, _GPU_ENV)
+    assert "E-CONSTRAINT-CONFLICT" in codes
+
+
+def test_a_satisfiable_window_is_not_reported_as_a_conflict(sandbox: Path) -> None:
+    """The conflict check must never cry wolf: an overlapping window is not a conflict.
+
+    A verifier that reports satisfiable pairs gets switched off, and then it guards nothing.
+    """
+    pyproject = sandbox / "packages" / "latence-extract-gliner2" / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            '"peft>=0.10",', '"peft>=0.10",\n    "transformers>=4.52,<4.99",'
+        ),
+        encoding="utf-8",
+    )
+    assert "E-CONSTRAINT-CONFLICT" not in _codes(sandbox, _GPU_ENV)
+
+
+def test_the_in_process_ocr_vlm_is_refused_by_name(sandbox: Path) -> None:
+    """The half of the split version metadata cannot express.
+
+    ``latence-parser-lighton`` declares an UNCAPPED ``transformers>=4.45``, so no version math
+    refuses it — a resolver installs it happily next to transformers 4.57 and the incompatibility
+    detonates at ``from_pretrained``. The named exclusion is what turns that into a gate-1 refusal.
+    """
+    spec_path = _spec_in(sandbox, _GPU_ENV)
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8").replace(
+            "  - packages/latence-parser-pdfplumber\n",
+            "  - packages/latence-parser-pdfplumber\n  - packages/latence-parser-lighton\n",
+        ),
+        encoding="utf-8",
+    )
+    assert "E-PACKAGE-EXCLUDED" in _codes(sandbox, _GPU_ENV)
+
+
+def test_an_excluded_package_dragged_in_transitively_is_refused(sandbox: Path) -> None:
+    """An excluded package can arrive as somebody else's dependency, never named in the spec.
+
+    That is exactly the shape ``latence-parser-lighton-vllm`` has in the real workspace: it
+    depends on ``latence-parser-lighton``. Here the same shape is induced on a package the GPU
+    environment DOES install, so the transitive rule is what has to catch it — checking only the
+    names listed in ``workspace_packages`` would see nothing at all.
+    """
+    pyproject = sandbox / "packages" / "latence-parser-pdfplumber" / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            '"latence-core"', '"latence-core", "latence-parser-lighton"'
+        ),
+        encoding="utf-8",
+    )
+    findings = verify_environment(load_environment(_spec_in(sandbox, _GPU_ENV)), sandbox).findings
+    dragged = [
+        f
+        for f in findings
+        if f.code == "E-PACKAGE-EXCLUDED" and "latence-parser-pdfplumber" in f.message
+    ]
+    assert dragged, [str(f) for f in findings]
+    assert "drags the excluded package in" in dragged[0].message
+
+
+def test_every_excluded_package_carries_a_reason(sandbox: Path) -> None:
+    """A refusal nobody can explain is folklore, exactly like an unexplained boundary."""
+    spec = load_environment(_spec_in(sandbox, _GPU_ENV))
+    assert spec.excluded_packages
+    for excluded in spec.excluded_packages:
+        assert excluded.reason.strip(), excluded.package
+
+
+# --------------------------------------------------------------------------------------------
+# A learned Provider the GPU gate can never speak for is a hole in the gate (issue #198).
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_learned_provider_missing_from_the_stack_is_caught(sandbox: Path) -> None:
+    """Declared-but-never-instantiated means the placement probe silently never drives it."""
+    stack = sandbox / "deploy" / "env" / _GPU_ENV / "stack.yaml"
+    kept = [
+        line
+        for line in stack.read_text(encoding="utf-8").splitlines()
+        if "provider: redaction.gliner_pii" not in line
+    ]
+    stack.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    codes = _codes(sandbox, _GPU_ENV)
+    assert "E-LEARNED-UNDRIVEN" in codes
+
+
+def test_a_learned_provider_outside_the_environment_is_caught(sandbox: Path) -> None:
+    """``learned_providers`` cannot name a Provider the environment does not even install."""
+    spec_path = _spec_in(sandbox, _GPU_ENV)
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8").replace(
+            "learned_providers:\n", "learned_providers:\n  - redaction.does_not_exist\n"
+        ),
+        encoding="utf-8",
+    )
+    assert "E-LEARNED-UNKNOWN" in _codes(sandbox, _GPU_ENV)
+
+
+def test_stack_components_carry_capability_and_config_for_nested_providers() -> None:
+    """The placement probe drives components, so it needs the capability AND the config of each."""
+    from latence_core.envspec import stack_components
+
+    spec = load_environment(_ENV_ROOT / _GPU_ENV / "environment.yaml")
+    by_provider = {c.provider: c for c in stack_components(spec.stack_path)}
+    # A nested signal Provider is as real a model as a Stage-level one; its nesting key is its
+    # capability, and its config is what the probe constructs it with.
+    nested = by_provider["embedding.sentence_transformers"]
+    assert nested.capability == "embedder"
+    assert nested.config["device"] == "cuda"
+    stage = by_provider["redaction.gliner_pii"]
+    assert stage.capability == "redaction"
+    assert stage.config["device"] == "cuda"
+
+
+def test_every_learned_provider_in_the_gpu_stack_is_pinned_to_cuda() -> None:
+    """``device: auto`` would resolve to cpu on a CPU host and quietly pass a GPU smoke test."""
+    from latence_core.envspec import stack_components
+
+    spec = load_environment(_ENV_ROOT / _GPU_ENV / "environment.yaml")
+    for component in stack_components(spec.stack_path):
+        if component.provider in spec.learned_providers:
+            assert component.config.get("device") == "cuda", component.provider

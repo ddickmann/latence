@@ -18,7 +18,7 @@ test is the regression guard.
 | [`cpu-text/`](cpu-text/) | CPU/text enterprise-sota: GLiNER2 fused extraction, learned GLiNER PII redaction, GLinker disambiguation, Granite r2 dense embeddings, SPLADE sparse | #195 |
 | [`served-ocr-server/`](served-ocr-server/) | the vLLM **serving** environment for LightOn-OCR-2 on CUDA-13/Blackwell (pinned image + bare-metal recipe) | #196 |
 | [`served-ocr-client/`](served-ocr-client/) | the CPU **client** environment that calls that endpoint (`parser.lighton_vllm` -> chunk -> RAG export) | #196 |
-| _gpu-learned/_ | the GPU learned-Provider environment with the `transformers` split resolved, Blackwell/CUDA-13 matrix | #198 |
+| [`gpu-learned/`](gpu-learned/) | GPU learned Providers on CUDA 13 / Blackwell: GLiNER2 fused extraction, GLiNER2 financial-PII + learned GLiNER PII redaction, GLinker disambiguation, Granite r2 GPU-tier embeddings — with the `transformers` split resolved and **real GPU placement asserted** | #198 |
 
 ## Using one
 
@@ -81,7 +81,7 @@ churn (`2.8+cu128` → `2.11+cu130`) had ABI-broken:
 | `flash-attn` | compiled against a specific torch C++ ABI; fails to import / segfaults against another | vLLM vendors its own attention backends and never imports the standalone package; the client runs no attention kernel at all |
 | `torchcodec` | binds a specific torch/FFmpeg build | the OCR path decodes no audio or video; `sentence-transformers` does not need it either |
 
-Both environments declare them under `excluded_packages`, which renders into `constraints.txt` as a
+Both environments declare them under `excluded_distributions`, which renders into `constraints.txt` as a
 pin **no release can satisfy** (`flash-attn<0`). The resolver therefore *refuses* — there is no
 "uninstall these afterwards" step anywhere, because such a step only runs when somebody remembers.
 Three independent things enforce it, and each is checked:
@@ -107,6 +107,32 @@ That is intended — moving past 0.24 must be a deliberate decision that revisit
 | `--gpu-memory-utilization 0.72` | `0.90` | at 0.90 the multimodal path OOM'd: per-request image tensors allocate *outside* the KV-cache fraction. |
 | `--max-num-seqs 16` | `32` | same OOM — each in-flight sequence holds a decoded page image. |
 | client `max_concurrency: 12` | `8`/`32` | 34 concurrent images OOM'd the server; 12 under a 16-slot server keeps every slot busy without oversubscribing. |
+
+## The `transformers` split, and the one supported resolution
+
+The GLiNER family (`gliner`, `gliner2`, `glinker`, `flashdeberta`) is written against the
+`transformers` **4.x** API. The OCR VLMs need **5.x**. One interpreter cannot hold both.
+
+There is exactly **one** supported resolution, and it is the ADR-0030 endpoint boundary:
+
+| side | what lives there | environment |
+| --- | --- | --- |
+| in-process, `transformers` 4.x | the GLiNER/mdeberta learned Provider set | [`gpu-learned/`](gpu-learned/) |
+| served, `transformers` 5.x | the OCR VLMs, behind an HTTP endpoint | [`served-ocr-server/`](served-ocr-server/) (#196) |
+
+`gpu-learned` reaches OCR through `parser.endpoint` over HTTP. A **two-phase install into one
+interpreter was rejected**: one `site-packages` holds one `transformers`, so whichever phase ran
+second wins and the other half breaks at model load — the failure is deferred, not resolved.
+
+That resolution is **enforced, not documented**. `gpu-learned/environment.yaml` names the
+in-process OCR packages under `excluded_packages`, and gate 1 refuses them whether they are listed
+directly or dragged in as another package's workspace dependency. Since gate 1 runs *before*
+`install.sh`, the unsupported combination fails at dependency resolution — never at runtime.
+
+> **Two refusal keys, deliberately distinct.** `excluded_distributions` (#196) refuses *third-party
+> distributions* by rendering an unsatisfiable pin into `constraints.txt`; `excluded_packages`
+> (#198) refuses *first-party workspace packages* by repo-relative path at resolution time. The
+> spec loader rejects a value filed under the wrong key, so the two cannot blur together.
 
 ## The shape (every environment has exactly these files)
 
@@ -137,6 +163,14 @@ byte-compares them against the render and fails if they drift.
 3. **End-to-end slice** — `latence stack validate stack.yaml` runs the tiny corpus through the
    real Providers and asserts the contract/KG/RAG/report/determinism/resume checks.
 
+A **GPU** environment adds a gate between 2 and 3:
+
+* **GPU placement** — `latence env placement` drives one real inference through every Provider in
+  `learned_providers` and reads torch's CUDA allocator around the call. A model that silently
+  stayed on the CPU allocates **zero CUDA bytes** however correct its output is. That is the #191
+  signature (`device: cuda` configured, ~11.5 s/chunk, the GPU idle, no warning), and this gate is
+  what makes it impossible to reintroduce. No CUDA device is a **failure**, not a skip.
+
 Gates 2 and 3 need the installed environment. If it is absent, `smoke.sh` **fails** rather than
 reporting success on gate 1 alone — a smoke test that quietly narrows its own scope is a false
 green. Pass `--spec-only` to ask for gate 1 deliberately.
@@ -160,6 +194,20 @@ Every one of these is a real regression test in
 | a package the environment installs *requires* an excluded wheel | `E-EXCLUSION-CONTRADICTED` |
 | an `extra_requirements` pin the lock does not carry | `E-LOCK-INCOMPLETE` |
 | a named workspace package is gone | `E-PACKAGE-MISSING` |
+| a package's declared version window is disjoint from an enforced boundary | `E-CONSTRAINT-CONFLICT` |
+| an excluded package enters the set, directly or as somebody's dependency | `E-PACKAGE-EXCLUDED` |
+| a `learned_providers` entry the smoke stack never instantiates | `E-LEARNED-UNDRIVEN` |
+| a `learned_providers` entry the environment does not install | `E-LEARNED-UNKNOWN` |
+
+And, for a GPU environment, what `latence env placement` catches:
+
+| Drift | Finding |
+| --- | --- |
+| a learned Provider ran and allocated zero CUDA bytes (**#191**) | `E-PLACEMENT-ON-CPU` |
+| no CUDA device (a GPU gate must fail, not narrow itself) | `E-PLACEMENT-NO-CUDA` |
+| a learned Stage pinned to `device: cpu` in a GPU stack | `E-PLACEMENT-DEVICE-NOT-CUDA` |
+| a learned Provider with no driver — unexercised is not passed | `E-PLACEMENT-UNDRIVABLE` |
+| the Provider could not be constructed or raised while driven | `E-PLACEMENT-FAILED` |
 
 ## Adding an environment (#198)
 

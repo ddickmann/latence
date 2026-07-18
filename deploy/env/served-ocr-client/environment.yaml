@@ -84,7 +84,7 @@ constraints:
 # --- EXCLUDED distributions -------------------------------------------------------------------
 # The same two wheels the serving environment excludes, for the same reason and with the same
 # mechanism — because "they can't reach the client" is an assumption, and this makes it a fact.
-excluded_packages:
+excluded_distributions:
   - package: flash-attn
     reason: >-
       Prebuilt flash-attn wheels bind a specific torch C++ ABI and were broken by the torch churn

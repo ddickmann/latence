@@ -80,7 +80,7 @@ constraints:
 # The acceptance criterion this environment exists to satisfy: these MUST NOT be able to end up
 # installed. Rendered into constraints.txt as pins no release can satisfy, so a resolver asked for
 # them — directly or transitively — exits non-zero. Not a "remember to uninstall these" note.
-excluded_packages:
+excluded_distributions:
   - package: flash-attn
     reason: >-
       ABI-broken by the serving layer's torch churn on the live run (2.8+cu128 -> 2.11+cu130): the
