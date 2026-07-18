@@ -544,8 +544,8 @@ def _check_coverage(
                 )
             )
         for component, kind in required_components(spec).items():
-            cell = by_key.get((name, component))
-            if cell is None:
+            mapped = by_key.get((name, component))
+            if mapped is None:
                 findings.append(
                     Finding(
                         "E-MATRIX-CELL-UNCOVERED",
@@ -554,20 +554,20 @@ def _check_coverage(
                         "a new boundary or learned Provider is mapped or the gate stays red.",
                     )
                 )
-            elif cell.kind != kind:
+            elif mapped.kind != kind:
                 findings.append(
                     Finding(
                         "E-MATRIX-CELL-UNKNOWN",
-                        f"cell {name}/{component} is filed as '{cell.kind}' but the environment "
+                        f"cell {name}/{component} is filed as '{mapped.kind}' but the environment "
                         f"declares it as '{kind}'.",
                     )
                 )
 
     for cell in matrix.cells:
-        spec = specs.get(cell.environment) if cell.environment in specs else None
-        if spec is None or cell.kind == _KIND_SERVED_MODEL:
+        declaring = specs.get(cell.environment)
+        if declaring is None or cell.kind == _KIND_SERVED_MODEL:
             continue
-        if cell.component not in required_components(spec):
+        if cell.component not in required_components(declaring):
             findings.append(
                 Finding(
                     "E-MATRIX-CELL-UNKNOWN",
@@ -880,7 +880,7 @@ def render_matrix(matrix: CompatibilityMatrix) -> str:
     )
     lines.append("")
     lines.append(
-        f"Two axes per cell. **resolution** — does the combination install from the pinned "
+        "Two axes per cell. **resolution** — does the combination install from the pinned "
         "environment (offline, machine-checked on every commit). **runtime** — does it *run* on "
         "Blackwell `sm_120`, which needs the hardware. A green resolution is not a runtime claim."
     )

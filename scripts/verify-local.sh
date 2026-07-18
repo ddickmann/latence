@@ -81,6 +81,17 @@ for env in deploy/env/*/smoke.sh; do
 done
 ok "environment specs"
 
+step "Blackwell/CUDA-13 compatibility matrix (#199 — every cell measured or explicitly UNVERIFIED)"
+# Offline and import-free, like the env specs. It fails when a cell claims 'verified' without a
+# date/hardware/command/observed measurement, when an UNVERIFIED cell has no runnable reproduce
+# command, when a learned Provider or serving dependency of a committed environment has no cell at
+# all, when a recorded version drifts from that environment's lock, when one of the live run's
+# failure modes leaves the matrix, or when the published docs/compatibility-matrix.md is not the
+# render of the YAML. The `--require-verified` variant (which also fails while anything is still
+# UNVERIFIED) is deliberately NOT run here — it is the maintainer's switch ON the Blackwell host.
+uv run latence env matrix deploy/env/compatibility-matrix.yaml
+ok "compatibility matrix"
+
 step "bake-off matrices (Goal B — the shipped CPU matrices)"
 for m in parse chunk embed redaction disambiguation graph_completion schema_induction; do
   [ -f "matrix/$m.yaml" ] && uv run latence bake-off "matrix/$m.yaml" --out-dir "$(mktemp -d)" >/dev/null

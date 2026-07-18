@@ -8,7 +8,7 @@
 
 Which learned Provider and which serving dependency of the enterprise-sota multilingual stack is known-good on which CUDA / torch / transformers combination on Blackwell (sm_120) — and, with equal weight, which combination nobody has measured yet.
 
-* **Reference hardware:** Reference target: Linux x86-64, NVIDIA Blackwell (compute capability 12.0, `sm_120`), CUDA-13 driver. The live run this matrix records was on such a pod; the field report does not record the exact SKU, so the SKU is deliberately not stated here rather than guessed. (A related 2026-07-14 run on an RTX PRO 4500 Blackwell / torch 2.8+cu128 is recorded in ADR-0036 §W9-scaling.)
+* **Reference hardware:** Linux x86-64, NVIDIA Blackwell (compute capability 12.0, `sm_120`), CUDA-13 driver. The live run this matrix records was on such a pod; the field report does not record the exact SKU, so the SKU is deliberately not stated here rather than guessed. (A related 2026-07-14 run on an RTX PRO 4500 Blackwell / torch 2.8+cu128 is recorded in ADR-0036 §W9-scaling.)
 * **Verification date:** 2026-07-17
 * **Source of truth:** `deploy/env/compatibility-matrix.yaml` (this page is generated from it)
 * **Check it:** `latence env matrix deploy/env/compatibility-matrix.yaml` — every cell is a measurement or `UNVERIFIED`; the verifier refuses a `verified` cell with no evidence and an `UNVERIFIED` cell with no reproduce command.
