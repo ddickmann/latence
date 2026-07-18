@@ -6,6 +6,14 @@ path; their 5.71 pg/s H100 headline figure is the vLLM path). The `parser.lighto
 drop-in for `parser.lighton` that POSTs each rasterised page to a running vLLM OpenAI-compatible
 endpoint. This note is the turnkey serve recipe + the client wiring.
 
+> **Reproducible version of this page:** `deploy/env/served-ocr-server/` (#196) is the *pinned*
+> serving environment — a solved lockfile (`vllm==0.24.0`, `torch==2.11.0+cu130`,
+> `transformers==5.14.1`), a digest-pinned `Dockerfile`, a `serve.sh` carrying the settings the
+> live Blackwell/CUDA-13 run actually needed, and exclusions that make the ABI-broken `flash-attn`
+> / `torchcodec` wheels *impossible* to install. Prefer it over the hand-typed commands below on
+> any CUDA-13 / Blackwell host; `deploy/env/README.md` documents why the serving and text-stack
+> environments are separate by design.
+
 ## 1. Serve LightOn-OCR-2 with vLLM (CUDA GRAPHS ON — production)
 
 LightOn's official + optimal-throughput config. **No `--enforce-eager` in production** — cudagraphs

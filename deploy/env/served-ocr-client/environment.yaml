@@ -1,0 +1,119 @@
+# deploy/env/served-ocr-client/environment.yaml — the TEXT-STACK side of the served-OCR split
+# (issue #196), the environment a pipeline actually runs in when its Parse Stage is served.
+#
+# THE SINGLE SOURCE OF TRUTH for this environment. `requirements.in` and `constraints.txt` are
+# GENERATED from it plus the workspace packages' real pyproject metadata (`latence env render`),
+# and `requirements.lock` is the solved resolution. `latence env verify` asserts all four agree.
+#
+# THE SPLIT (read deploy/env/README.md § "The two-environment split" for the full topology).
+# This environment and `deploy/env/served-ocr-server/` are separate BY DESIGN and are connected by
+# exactly one thing: an HTTP call from `parser.lighton_vllm` to the vLLM OpenAI-compatible
+# endpoint. That socket is the ADR-0030 endpoint seam, and it is what makes two irreconcilable
+# dependency sets both installable:
+#
+#     server : transformers==5.14.1   (LightOn-OCR-2 in vLLM 0.24 rides the 5.x line)
+#     client : transformers <5        (glinker/flashdeberta are written against the 4.x API)
+#
+# There is NO version of transformers that satisfies both. In-process OCR would force a choice;
+# served OCR does not. No CUDA, no vLLM and no OCR model weights exist on this side — the heaviest
+# thing here is a CPU torch, and the OCR Provider is a thin async HTTP client.
+#
+# Governing: ADR-0030 (the performance path is endpoint Providers), ADR-0016 (per-Provider
+# extras), ADR-0007 (CPU-first), ADR-0012 (weights + code licences verified separately).
+name: served-ocr-client
+summary: >-
+  The CPU client environment for the served-OCR pipeline: source -> intake screening ->
+  parser.lighton_vllm (HTTP to the vLLM LightOn-OCR endpoint) -> chunk -> content screening ->
+  RAG corpus export. Capped at transformers 4.x, so it can never merge with the serving
+  environment it talks to.
+
+python: ">=3.11,<3.13"
+
+# The solved platform, matching the CPU/text environment and the deploy/Dockerfile image.
+platform: linux-x86_64
+
+# CPU-only torch wheels. `latence-parser-lighton` declares torch because its IN-PROCESS Provider
+# needs one; this environment installs the package only for its pure-Python rasteriser (the shared
+# 200-dpi / 1540px LANCZOS page rasteriser `parser.lighton_vllm` reuses so the pixels are identical
+# between the in-process and served back-ends). Without this index the resolver takes the default
+# PyPI torch and drags ~2.5 GiB of nvidia-* CUDA payload into an environment that has no GPU and
+# runs no model.
+extra_index_urls:
+  - https://download.pytorch.org/whl/cpu
+index_strategy: unsafe-best-match
+
+# Installed from source with --no-deps, in order. Deliberately the SMALL set: the served-OCR
+# client's job is to rasterise, POST, and assemble — the learned text Providers (GLiNER2, PII,
+# GLinker, embedders) live in deploy/env/cpu-text and are composed on top when a deployment wants
+# them, which is exactly the per-Provider-extras composition ADR-0016 describes.
+workspace_packages:
+  - packages/latence-core
+  - packages/latence-parser-plaintext
+  - packages/latence-parser-lighton
+  - packages/latence-parser-lighton-vllm
+
+extra_requirements: []
+
+# --- ENFORCED conflict boundaries -----------------------------------------------------------
+constraints:
+  - requirement: "transformers<5"
+    reason: >-
+      THE client side of the split, and the reason the endpoint seam exists. The SERVING
+      environment resolves to transformers 5.14.1; the text stack cannot follow it there, because
+      glinker and flashdeberta (deploy/env/cpu-text, the Provider set this environment composes
+      with) are written against the transformers 4.x API. Capping HERE — in the environment that
+      talks to the 5.x server — is what keeps the two from converging: without it a resolver is
+      free to take 5.x on this side too, the client and server look identical, and the next person
+      "simplifies" the split away and rediscovers the conflict on a pod.
+  - requirement: "torch>=2.1,<3"
+    reason: >-
+      The cap latence-parser-lighton's in-process sibling declares. The lock additionally pins the
+      `+cpu` local version from the PyTorch CPU index: this environment runs NO model, so any CUDA
+      payload here is pure download weight and a lie about what the box needs.
+  - requirement: "openai>=1.0,<3"
+    reason: >-
+      The async HTTP client parser.lighton_vllm POSTs page images with (openai.AsyncOpenAI, code
+      Apache-2.0). The library breaks its API across majors; the current major is 2.x, so <3 is the
+      real current-major boundary — pinning <2 would exclude the shipping line.
+  - requirement: "pillow>=10.0"
+    reason: >-
+      The rasteriser's LANCZOS downscale and PNG encode, and the floor the shipped smoke fixture is
+      rendered with. Pillow's decoder CVEs are patched forward, so a floor is the security-relevant
+      boundary here; there is no upper cap because the rasteriser uses only the stable Image API.
+
+# --- EXCLUDED distributions -------------------------------------------------------------------
+# The same two wheels the serving environment excludes, for the same reason and with the same
+# mechanism — because "they can't reach the client" is an assumption, and this makes it a fact.
+excluded_packages:
+  - package: flash-attn
+    reason: >-
+      Prebuilt flash-attn wheels bind a specific torch C++ ABI and were broken by the torch churn
+      on the live run. Nothing on this side runs an attention kernel at all — the OCR model is on
+      the far side of the socket — so flash-attn here would be pure ABI risk for zero benefit. It
+      is a common transitive optional accelerator, which is exactly why the exclusion is a pin
+      rather than a note.
+  - package: torchcodec
+    reason: >-
+      Same ABI story, same zero benefit: this environment decodes PDF pages with pypdfium2 and
+      images with Pillow, never audio or video. sentence-transformers (the neighbouring cpu-text
+      environment) does not need it either — it appears only as an optional transitive extra, which
+      is precisely how it landed on the pod and broke the install.
+
+# --- The Provider set this environment must expose -------------------------------------------
+# smoke.sh gate 2 asserts every one of these RESOLVES from the registry, which imports the module
+# behind it — where a torch/transformers drift actually detonates.
+providers:
+  - source.local_folder
+  - screening.intake_signature
+  - parser.plaintext
+  - parser.lighton_vllm
+  - chunk.markdown
+  - screening.content_keyword
+  - export.jsonl_parquet
+
+# `parser.lighton` (the IN-PROCESS OCR Provider) is deliberately NOT in the Provider set above.
+# Its package is installed — `parser.lighton_vllm` imports its rasteriser — but importing its
+# Provider would load a 1B vision-language model into this CPU box, which is the exact thing the
+# served architecture exists to avoid. It is not "gpu_only" here in the cpu-text sense (it is not
+# skipped at runtime, it is never wired), so it is simply not promised.
+gpu_only_providers: []

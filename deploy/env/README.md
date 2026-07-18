@@ -16,7 +16,8 @@ test is the regression guard.
 | Environment | Slice | Ticket |
 | --- | --- | --- |
 | [`cpu-text/`](cpu-text/) | CPU/text enterprise-sota: GLiNER2 fused extraction, learned GLiNER PII redaction, GLinker disambiguation, Granite r2 dense embeddings, SPLADE sparse | #195 |
-| _served-ocr/_ | the served-OCR environment (vLLM-hosted LightOn-OCR + the light HTTP Provider set) | #196 |
+| [`served-ocr-server/`](served-ocr-server/) | the vLLM **serving** environment for LightOn-OCR-2 on CUDA-13/Blackwell (pinned image + bare-metal recipe) | #196 |
+| [`served-ocr-client/`](served-ocr-client/) | the CPU **client** environment that calls that endpoint (`parser.lighton_vllm` -> chunk -> RAG export) | #196 |
 | _gpu-learned/_ | the GPU learned-Provider environment with the `transformers` split resolved, Blackwell/CUDA-13 matrix | #198 |
 
 ## Using one
@@ -30,15 +31,92 @@ bash deploy/env/cpu-text/smoke.sh --spec-only   # just the offline gate — no i
 `scripts/verify-local.sh` runs `--spec-only` for **every** environment in this directory, so
 dependency drift fails the merge gate on any machine.
 
+## The two-environment split (served OCR, #196)
+
+`served-ocr-server/` and `served-ocr-client/` are **two environments on purpose**. They are not a
+packaging convenience and they must not be merged: their dependency sets are *irreconcilable*, and
+the thing that makes both installable is the socket between them.
+
+```
+  ┌─────────────────────────── GPU host (CUDA 13 / Blackwell) ───────────────────────────┐
+  │  deploy/env/served-ocr-server/          vllm==0.24.0                                 │
+  │                                         torch==2.11.0+cu130                          │
+  │      vllm serve lightonai/LightOnOCR-2-1B                                            │
+  │                                     ▲   transformers==5.14.1   ← 5.x                 │
+  └─────────────────────────────────────┼────────────────────────────────────────────────┘
+                                        │
+                    the ONLY connection: one HTTP POST per page image
+                     (OpenAI-compatible /v1/chat/completions — ADR-0030)
+                                        │
+  ┌─────────────────────────────────────┼────────────────────────────────────────────────┐
+  │  deploy/env/served-ocr-client/      ▼   transformers==4.57.6  ← <5                    │
+  │      parser.lighton_vllm  ->  chunk  ->  content screening  ->  RAG corpus export     │
+  │      torch==2.13.0+cpu   (no CUDA, no vLLM, no model weights)                         │
+  │      composes with deploy/env/cpu-text/ for the learned text Providers                │
+  └──────────────────────────────────── CPU host ─────────────────────────────────────────┘
+```
+
+**Why they cannot be one environment.** LightOn-OCR-2 support in vLLM 0.24 rides `transformers`
+5.x. The text stack cannot follow: `glinker` and `flashdeberta` are written against the 4.x API, so
+`cpu-text/` and `served-ocr-client/` both cap `transformers<5`. **No version satisfies both.** In
+one interpreter that is a dead end; across a socket both sides are simply correct. This is what
+ADR-0030's endpoint seam buys beyond throughput — it is a *dependency* boundary, not only a
+performance one. `test_the_ocr_split_is_a_genuine_dependency_conflict` asserts the conflict from
+the two committed specs, so nobody can quietly merge them and nobody has to take this paragraph on
+trust.
+
+**Consequences worth stating plainly.** The client has no CUDA, no vLLM and no OCR weights — its
+heaviest dependency is a CPU torch it never runs a model with (it is installed for the shared page
+rasteriser). The server has no `latence-*` package at all: it is a *service environment*, declaring
+`workspace_packages: []` and `providers: []`, and `latence env verify` checks its requirements,
+boundaries and exclusions exactly as it checks a client's.
+
+### The wheels that must be impossible to install
+
+The live 519-page Blackwell run lost hours to two prebuilt wheels that the serving layer's torch
+churn (`2.8+cu128` → `2.11+cu130`) had ABI-broken:
+
+| Wheel | Why it breaks | Why nothing here needs it |
+| --- | --- | --- |
+| `flash-attn` | compiled against a specific torch C++ ABI; fails to import / segfaults against another | vLLM vendors its own attention backends and never imports the standalone package; the client runs no attention kernel at all |
+| `torchcodec` | binds a specific torch/FFmpeg build | the OCR path decodes no audio or video; `sentence-transformers` does not need it either |
+
+Both environments declare them under `excluded_packages`, which renders into `constraints.txt` as a
+pin **no release can satisfy** (`flash-attn<0`). The resolver therefore *refuses* — there is no
+"uninstall these afterwards" step anywhere, because such a step only runs when somebody remembers.
+Three independent things enforce it, and each is checked:
+
+1. the generated `constraints.txt` is passed to every install as `-c` (`install.sh`, `Dockerfile`);
+2. the serving image bakes that same file in as `PIP_CONSTRAINT`/`UV_CONSTRAINT`, so a later
+   `pip install flash-attn` **inside a running container** fails too, and `verify-exclusions.py`
+   fails the *build* if either module is importable in the finished image;
+3. `latence env verify` reports `E-EXCLUSION-VIOLATED` if either ever appears in a committed lock,
+   and `smoke.sh` gate 2 asks the real resolver for each excluded wheel and requires a refusal.
+
+This is also the tripwire on the next upgrade: `vllm==0.25.1` declares `torchcodec>=0.14`, so
+bumping to it fails the resolve **loudly** instead of landing an ABI-mismatched wheel on a pod.
+That is intended — moving past 0.24 must be a deliberate decision that revisits the exclusion.
+
+### Blackwell / CUDA-13 settings that came from the run, not from a doc
+
+`served-ocr-server/serve.sh` carries them, each with the failure it fixes:
+
+| Setting | Generic doc says | Why it differs here |
+| --- | --- | --- |
+| `VLLM_USE_FLASHINFER_SAMPLER=0` | — | FlashInfer's sampler rejected a capable `sm_120` device with "requires sm75 or higher": its check misparses compute capability 12.0 as `12`. Disabling only the *sampler* keeps cudagraphs on — this is not `--enforce-eager`. |
+| `--gpu-memory-utilization 0.72` | `0.90` | at 0.90 the multimodal path OOM'd: per-request image tensors allocate *outside* the KV-cache fraction. |
+| `--max-num-seqs 16` | `32` | same OOM — each in-flight sequence holds a decoded page image. |
+| client `max_concurrency: 12` | `8`/`32` | 34 concurrent images OOM'd the server; 12 under a 16-slot server keeps every slot busy without oversubscribing. |
+
 ## The shape (every environment has exactly these files)
 
 | File | Hand-written? | What it is |
 | --- | --- | --- |
-| `environment.yaml` | **yes — the single source of truth** | which workspace packages the environment installs, the ENFORCED conflict boundaries *with the reason each exists*, the Provider set it must expose, the smoke stack, the target platform and indexes |
+| `environment.yaml` | **yes — the single source of truth** | which workspace packages the environment installs, the ENFORCED conflict boundaries and the EXCLUDED distributions *with the reason each exists*, the Provider set it must expose, the smoke stack, the target platform and indexes |
 | `requirements.in` | no — **generated** | the direct third-party requirements, derived from the Provider packages' real `pyproject.toml` |
-| `constraints.txt` | no — **generated** | the enforced conflict boundaries, passed to the installer as `-c` |
+| `constraints.txt` | no — **generated** | the enforced conflict boundaries *and the exclusions*, passed to the installer as `-c` |
 | `requirements.lock` | no — **solved** | the exact resolution (`uv pip compile`; regenerate with `install.sh --relock`) |
-| `stack.yaml` | yes | the tiny end-to-end slice the smoke test drives |
+| `stack.yaml` | yes | the tiny end-to-end slice the smoke test drives (a *service* environment has none — it registers no Providers) |
 | `install.sh` | yes | the one documented install path — no undocumented steps, no `--break-system-packages` |
 | `smoke.sh` | yes | the one-command guard (three gates, below) |
 
@@ -78,9 +156,12 @@ Every one of these is a real regression test in
 | a Provider is renamed out from under the recipe | `E-PROVIDER-UNREGISTERED` |
 | the smoke stack uses a Provider the environment does not install | `E-STACK-PROVIDER-UNDECLARED` |
 | `constraints.txt` is hand-edited (a boundary added *or relaxed*) | `E-CONSTRAINTS-STALE` |
+| an EXCLUDED wheel reaches the lock (a solve without `-c`) | `E-EXCLUSION-VIOLATED` |
+| a package the environment installs *requires* an excluded wheel | `E-EXCLUSION-CONTRADICTED` |
+| an `extra_requirements` pin the lock does not carry | `E-LOCK-INCOMPLETE` |
 | a named workspace package is gone | `E-PACKAGE-MISSING` |
 
-## Adding an environment (#196, #198)
+## Adding an environment (#198)
 
 1. `mkdir deploy/env/<name>` and write `environment.yaml` — the package set, the boundaries **with
    reasons**, the Provider set, the platform, the indexes.

@@ -1,0 +1,74 @@
+# deploy/env/served-ocr-client/stack.yaml — the end-to-end slice smoke.sh drives (issue #196).
+#
+# The SMALLEST pipeline that actually crosses the endpoint seam: one rendered page goes in, the
+# OCR happens on the vLLM server, and a RAG corpus with the page's text comes out. If the split is
+# wired correctly this passes; if the seam is broken there is nowhere for it to pass by accident,
+# because the ONLY source of text in this pipeline is the served OCR call.
+#
+#   source (image/PDF only) -> intake screening -> parser.lighton_vllm  ==HTTP==>  vLLM LightOn-OCR
+#                           -> chunk -> content screening -> RAG corpus export
+#
+# `{CORPUS_DIR}` / `{STORAGE_URI}` are the harness placeholders every deploy/env/*/stack.yaml uses.
+# `{OCR_BASE_URL}` is this environment's third one: smoke.sh fills it from $LATENCE_OCR_BASE_URL
+# and REFUSES to run without it. There is no localhost default on purpose — a default would let
+# this stack "pass" against whatever happens to be listening.
+#
+# MODEL (ADR-0012, weights and code verified SEPARATELY): lightonai/LightOnOCR-2-1B — WEIGHTS
+# Apache-2.0, CODE Apache-2.0. Named here only as the string the server registers; no weights and
+# no key are embedded on this side (the whole point of the endpoint seam).
+name: latence-served-ocr-client-env-smoke
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      # Image/scan formats ONLY. A .txt in this corpus would be parsed by a text Provider and the
+      # smoke would go green without the server ever being called — the false green this stack is
+      # shaped to make impossible.
+      extensions: [pdf, png, jpg, jpeg, tiff, tif, webp, bmp]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 8388608          # scans/photos are larger than text PDFs (8 MiB)
+      max_zip_ratio: 50.0
+
+  - name: parse
+    capability: parse
+    provider: parser.lighton_vllm
+    depends_on: [intake_screen]
+    config:
+      base_url: "{OCR_BASE_URL}"
+      model: lightonai/LightOnOCR-2-1B
+      # 12, pairing with the server's --max-num-seqs 16 (deploy/env/served-ocr-server/serve.sh).
+      # The live Blackwell run OOM'd the multimodal path at 34 concurrent images; 12 under a
+      # 16-slot server keeps every slot busy without ever oversubscribing it.
+      max_concurrency: 12
+      max_tokens: 4096            # content-safe (1024 truncates dense pages)
+      temperature: 0.2            # LightOn's official decoding settings
+      top_p: 0.9
+      dpi: 200                    # identical rasterisation to parser.lighton
+      max_longest_dim: 1540
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config: {max_tokens: 256, overlap_tokens: 32, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [content_screen]
+    config:
+      basename: corpus
