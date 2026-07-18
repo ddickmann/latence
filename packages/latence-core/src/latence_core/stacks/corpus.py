@@ -96,7 +96,7 @@ class ValidationCorpusManifest:
     document_ids: dict[str, str] = field(default_factory=dict)
 
 
-def _make_text_pdf(pages: list[str]) -> bytes:
+def make_text_pdf(pages: list[str]) -> bytes:
     """A dependency-free, deterministic multi-page text PDF (ported from the demo/test builder).
 
     A genuine PDF with page boundaries (exercises the real ``parser.pdfplumber`` /
@@ -174,7 +174,7 @@ def build_validation_corpus_bytes() -> tuple[dict[str, bytes], ValidationCorpusM
     """
     memo = _MEMO_MD.encode("utf-8")
     note = _NOTE_TXT.encode("utf-8")
-    pdf = _make_text_pdf(_PDF_PAGES)
+    pdf = make_text_pdf(_PDF_PAGES)
     injection = _INJECTION_MD.encode("utf-8")
 
     # Dangerous fixtures (planted to exercise Screening's two checkpoints):

@@ -154,6 +154,7 @@ nav:
       - Run & validate a stack: running-a-stack.md
       - Run a bake-off: running-a-bakeoff.md
       - Tune a stack per device: tuning.md
+      - Throughput envelopes (measured): perf-results.md
       - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
       - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
       - Retrieval-quality tooling (design): retrieval-tooling.md
