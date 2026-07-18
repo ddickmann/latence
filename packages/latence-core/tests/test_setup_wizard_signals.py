@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import pyarrow.parquet as pq
 from latence_core.conformance import fixtures
-from latence_core.contracts import Classification, ChunkRecord, Provenance
+from latence_core.contracts import ChunkRecord, Classification, Provenance
 from latence_core.pipeline import Pipeline
 from latence_core.setup import SetupAnswers, build_stack_config
 from latence_core.setup.wizard import PROFILE_LITE, PROFILE_SOTA
