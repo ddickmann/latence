@@ -5,7 +5,7 @@ and **how are vulnerabilities handled**.*
 
 This document is deliberately unflattering where reality is unflattering. Every
 claim below points at an artifact in this repository that proves it; the
-[verification appendix](#verification-appendix) maps claim → artifact, and a
+[verification appendix](#7-verification-appendix) maps claim → artifact, and a
 regression test (`packages/latence-core/tests/test_continuity_statement.py`) fails
 the build if a claim here drifts from what the repository actually contains.
 Nothing on this page is a roadmap item stated in the present tense.
