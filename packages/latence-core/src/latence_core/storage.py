@@ -10,6 +10,7 @@ framework never stores secrets.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any
 
 import fsspec
@@ -191,6 +192,31 @@ class Storage:
         entries: list[str] = self._fs.ls(self._check(uri), detail=False)
         return sorted(entries)
 
+    def modified(self, uri: str) -> datetime | None:
+        """The UTC last-modified time of ``uri``, or ``None`` when the store does not expose one.
+
+        A purely read-only metadata probe (#186): the run console reads *when* a run's manifest
+        and Quality Report landed straight off Storage, so a run list carries real timestamps
+        without the framework persisting any new state (ADR-0010 — run state is the files that
+        are already there). fsspec backends spell the field differently (``mtime`` on local,
+        ``LastModified`` on S3, ``updated`` on GCS, ``last_modified`` on Azure) and an in-memory
+        store exposes none at all, so this normalises the known spellings and returns ``None``
+        rather than fabricating a time when the backend has nothing to give. A missing path is
+        ``None`` too — the caller renders "unknown", it is never an error.
+        """
+        try:
+            info = self._fs.info(self._check(uri))
+        except (FileNotFoundError, KeyError, OSError, ValueError):
+            return None
+        if not isinstance(info, dict):
+            return None
+        for key in ("mtime", "LastModified", "last_modified", "updated", "created"):
+            value = info.get(key)
+            stamp = _as_utc(value)
+            if stamp is not None:
+                return stamp
+        return None
+
     def walk_files(self, uri: str, follow_symlinks: bool = False) -> Iterator[str]:
         """Yield every file (not directory) under ``uri``, recursively, sorted.
 
@@ -239,6 +265,23 @@ class Storage:
         real = os.path.realpath(path)
         root = root_real.rstrip(os.sep) + os.sep
         return real != root_real and not real.startswith(root)
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """Normalise an fsspec ``info`` timestamp (datetime / epoch seconds) to an aware UTC datetime.
+
+    Returns ``None`` for anything that is not a usable timestamp, so :meth:`Storage.modified`
+    degrades to "unknown" instead of guessing. ``bool`` is excluded explicitly — it is an ``int``
+    subclass and ``True`` would otherwise become 1970-01-01.
+    """
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
 
 
 def _token() -> str:

@@ -4,6 +4,8 @@ scheme allowlist (SSRF guard), and symlink-escape handling in walk_files."""
 from __future__ import annotations
 
 import os
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -168,3 +170,78 @@ def test_symlink_inside_source_is_still_read(tmp_path: Path) -> None:
     s = Storage.for_uri(f"file://{src}")
     names = {f.rsplit("/", 1)[-1] for f in s.walk_files(f"file://{src}")}
     assert {"a.txt", "link.txt"} <= names
+
+
+# -- modified(): the read-only timestamp probe the run console reads run times from (#186) --
+
+
+def test_modified_returns_an_aware_utc_time_for_a_real_file(tmp_path: Path) -> None:
+    s = Storage.for_uri(f"file://{tmp_path}")
+    uri = f"file://{tmp_path}/a.txt"
+    s.write_text(uri, "hello")
+
+    stamp = s.modified(uri)
+    assert stamp is not None
+    assert stamp.tzinfo is not None
+    assert stamp.utcoffset() == timedelta(0)
+    # Within a generous window of the file's own mtime — this is the real filesystem value,
+    # never a "now" the framework invented.
+    expected = datetime.fromtimestamp(Path(f"{tmp_path}/a.txt").stat().st_mtime, tz=UTC)
+    assert abs((stamp - expected).total_seconds()) < 1.0
+
+
+def test_modified_orders_two_writes(tmp_path: Path) -> None:
+    s = Storage.for_uri(f"file://{tmp_path}")
+    first, second = f"file://{tmp_path}/1.txt", f"file://{tmp_path}/2.txt"
+    s.write_text(first, "1")
+    time.sleep(0.01)
+    s.write_text(second, "2")
+    earlier, later = s.modified(first), s.modified(second)
+    assert earlier is not None
+    assert later is not None
+    assert later >= earlier
+
+
+def test_modified_is_none_for_a_missing_path(tmp_path: Path) -> None:
+    s = Storage.for_uri(f"file://{tmp_path}")
+    assert s.modified(f"file://{tmp_path}/nope.txt") is None
+
+
+def test_modified_reads_the_memory_backends_own_timestamp() -> None:
+    # fsspec's in-memory filesystem spells its timestamp `created`, not `mtime` — the probe
+    # normalises the spelling instead of only understanding the local filesystem's.
+    s = Storage.for_uri("memory://bucket/modified")
+    uri = "memory://bucket/modified/a.txt"
+    s.write_text(uri, "hello")
+    stamp = s.modified(uri)
+    assert stamp is not None
+    assert stamp.tzinfo is not None
+
+
+def test_modified_is_none_when_the_backend_exposes_no_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A backend whose info() carries no timestamp at all: the probe must say "unknown"
+    # rather than fabricate a time (e.g. "now"), which would silently mis-date every run.
+    s = Storage.for_uri(f"file://{tmp_path}")
+    uri = f"file://{tmp_path}/a.txt"
+    s.write_text(uri, "hello")
+    monkeypatch.setattr(
+        type(s._fs), "info", lambda self, path, **kw: {"name": path, "size": 5}, raising=True
+    )
+    assert s.modified(uri) is None
+
+
+def test_modified_does_not_create_or_touch_anything(tmp_path: Path) -> None:
+    s = Storage.for_uri(f"file://{tmp_path}")
+    uri = f"file://{tmp_path}/a.txt"
+    s.write_text(uri, "hello")
+    before = Path(f"{tmp_path}/a.txt").stat().st_mtime_ns
+    listing_before = sorted(p.name for p in tmp_path.iterdir())
+
+    for _ in range(3):
+        s.modified(uri)
+        s.modified(f"file://{tmp_path}/missing.txt")
+
+    assert Path(f"{tmp_path}/a.txt").stat().st_mtime_ns == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == listing_before

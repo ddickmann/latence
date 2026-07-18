@@ -23,6 +23,16 @@ latence process --config stack.yaml --input ./my-documents --out ./corpus
 graph, plus a first-class [Quality Report](../adr/0008-quality-report-as-first-class-artifact.md)
 substantiating the "AI-ready" claim.
 
+```bash
+# 3. Read the results — a read-only, offline, localhost console over what the run wrote.
+pip install latence-console
+latence-console ./corpus
+```
+
+`latence-console` serves the run list and each run's Quality Report as **headline quality
+verdicts a non-engineer can read**, not raw JSON. It writes nothing, holds no state, and makes
+no network requests — see [Read the results](run-console.md).
+
 ## Run it stage by stage
 
 To understand what each Stage does — and to swap in a learned or GPU Provider and see the
@@ -55,8 +65,16 @@ The `latence` CLI (installed with `latence-core`) is the entry point for every w
 | `latence delta` | Run an incremental corpus delta (ADR-0018). |
 | `latence retract` / `latence purge` | Soft-tombstone or hard-erase documents (GDPR). |
 
+The read-only run console ships as its own package (`pip install latence-console`) so the core
+CLI stays dependency-thin:
+
+| Command | What it does |
+| --- | --- |
+| `latence-console <location>` | Serve the read-only run console over a Storage location ([Read the results](run-console.md)). |
+
 ## Where to go next
 
+- Want to show a run to a non-engineer? [Read the results](run-console.md) — the run console.
 - New to the model? Read [Concepts & Architecture](../concepts/index.md) — the
   Capability / Provider / Stage / Runner / Storage vocabulary the rest of the docs assume.
 - Want to see what you can plug in? Browse the [Provider catalog](../providers/catalog.md).

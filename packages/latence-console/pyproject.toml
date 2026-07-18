@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-console"
+version = "0.1.0"
+description = "Read-only, offline, localhost run console for the Latence framework: the run list and the Quality Report rendered as headline quality verdicts a non-engineer can read. Reads only files already on Storage — no database, no server state, no telemetry (ADR-0010/0017)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "quality-report", "observability", "console", "read-only", "offline"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+# ZERO new dependencies beyond the core it reads (ADR-0016 discipline): the HTTP server is
+# `http.server` from the standard library and the pages are hand-rendered HTML, so the console
+# pulls in NO web framework, NO template engine, and NO asset toolchain. `latence-core` supplies
+# the Storage seam and the QualityReport contract it renders; `typer` (already a core dep) the
+# one command.
+dependencies = [
+    "latence-core",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+[project.scripts]
+# The one command (#186): `latence-console ./corpus` serves the read-only console.
+latence-console = "latence_console.cli:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_console"]

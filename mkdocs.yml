@@ -133,6 +133,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - getting-started/index.md
+      - Read the results — the run console: getting-started/run-console.md
       - Fresh-pod walkthrough: TUTORIAL-fresh-pod-walkthrough.md
       - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
       - GPU testing guide: GPU-TESTING-GUIDE.md

@@ -95,6 +95,20 @@ no extra packages.
 `diff examples/demo-pipeline.yaml examples/demo-pipeline.swap.yaml` shows the single-Provider
 change. See [`packages/latence-demo/README.md`](./packages/latence-demo/README.md) for details.
 
+### Read the results (one command)
+
+```bash
+uv pip install -e packages/latence-console
+uv run latence-console /tmp/latence-demo     # then open http://127.0.0.1:8787/
+```
+
+The **run console** is a read-only, offline, localhost view over the files a run already left on
+Storage: the run list (status + timestamps) and each run's Quality Report rendered as **headline
+quality verdicts a non-engineer can read** — traceability, unsafe input, personal data, the
+knowledge graph, and what changed on an incremental run — with the per-Stage drill-down beneath.
+It writes nothing, holds no state, and makes no network requests. See
+[`docs/getting-started/run-console.md`](./docs/getting-started/run-console.md).
+
 ## Install
 
 The framework is a thin core plus one installable package per Provider family
@@ -104,6 +118,7 @@ promise holds (no torch/cloud client unless you ask for it).
 ```bash
 pip install latence-core            # contracts, Capabilities, local Runner, Storage
 pip install latence-demo            # + the CPU demo set (real-PDF parser), one-command onboarding
+pip install latence-console         # + the read-only run console (`latence-console ./corpus`)
 pip install latence-ner-gliner      # opt-in: a learned NER Provider (pulls torch/transformers)
 pip install latence-relation-llm    # opt-in: LLM relation extraction over any OpenAI-compatible endpoint
 ```
@@ -129,6 +144,8 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 | `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
 | `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |
 | `latence-benchmark` | The reproducible **public** benchmark harness (pinned datasets, pinned stack configs, published results page). Not a pipeline Provider. |
+
+| `latence-console` | Read-only, offline, localhost run console: the run list + the Quality Report as headline verdicts (zero new deps). |
 
 ## Documentation & governance
 

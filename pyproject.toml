@@ -30,6 +30,8 @@ latence-benchmark = { workspace = true }
 latence-splade = { workspace = true }
 latence-muvera = { workspace = true }
 latence-sink-qdrant = { workspace = true }
+
+latence-console = { workspace = true }
 latence-demo = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
@@ -120,6 +122,12 @@ dependencies = [
     # dependency is latence-core; remote dataset acquisition rides its `[hub]` extra (ADR-0016), so
     # plain `uv sync` stays CPU-first, offline and deterministic.
     "latence-benchmark",
+
+    # The read-only run console (#186, ADR-0010/0017). ZERO new deps — `http.server` from the
+    # standard library plus hand-rendered HTML — so, like latence-demo, it installs into the
+    # default CPU-first dev env and its offline/deterministic tests run. It registers NO
+    # Provider entry point: it reads the files a run left behind, it never joins a Pipeline.
+    "latence-console",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
