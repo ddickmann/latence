@@ -78,6 +78,32 @@ Apache-2.0; github.com/microsoft/presidio — MIT; github.com/explosion/spaCy an
 `en_core_web_sm`/`en_core_web_lg` models — MIT; Apache Airflow — Apache-2.0). Verify against
 the installed `dist-info` when installing that Provider.
 
+### Optional extras on `latence-core` (never on the default install path)
+
+Licenses read back from the installed `*.dist-info/METADATA` in the workspace dev
+environment on 2026-07-18. None of these packages ships model weights, so ADR-0012's
+weights-vs-code split is trivially the same license for each (code license = distribution
+license; no separate weights license exists to verify).
+
+| Package | Version | License | Extra |
+|---|---|---|---|
+| prometheus-client | (upstream) | Apache-2.0 **(upstream)** | `latence-core[observability]` |
+| opentelemetry-api / -sdk | (upstream) | Apache-2.0 **(upstream)** | `latence-core[observability]` |
+| pyiceberg | 0.11.1 | Apache-2.0 (`License-Expression`) | `latence-core[iceberg]` — the Iceberg REST catalog client for the optional Iceberg-table Export output (#184) |
+| mmh3 | 5.2.1 | MIT | (pyiceberg dep) |
+| sortedcontainers | 2.4.0 | Apache-2.0 | (pyiceberg dep) |
+| strictyaml | 1.7.3 | MIT | (pyiceberg dep) |
+| tenacity | 9.1.4 | Apache-2.0 | (pyiceberg dep) |
+| cachetools | 6.2.6 | MIT | (pyiceberg dep) |
+| zstandard | 0.25.0 | BSD-3-Clause | (pyiceberg dep) |
+| requests | 2.34.2 | Apache-2.0 | (pyiceberg dep) |
+| pyparsing | 3.3.2 | MIT | (pyiceberg dep) |
+| SQLAlchemy | 2.0.51 | MIT | `pyiceberg[sql-sqlite]` — dev/test only (the local REST-catalog fixture's metastore); NOT pulled by `latence-core[iceberg]` |
+
+Apache Iceberg itself (the table format and the `iceberg-rest-fixture` reference REST
+catalog image used for the documented real-catalog run) is an Apache Software Foundation
+project under Apache-2.0. The framework bundles none of it.
+
 ### Dev-only tooling (not shipped in any wheel)
 
 | Package | Version | License |

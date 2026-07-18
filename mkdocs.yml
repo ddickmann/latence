@@ -156,6 +156,7 @@ nav:
       - Tune a stack per device: tuning.md
       - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
       - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+      - Iceberg-table Export (optional): iceberg-export.md
       - Retrieval-quality tooling (design): retrieval-tooling.md
   - Decision Log (ADRs):
       - adr/index.md
