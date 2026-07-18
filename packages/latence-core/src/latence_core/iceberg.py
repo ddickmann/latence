@@ -226,6 +226,9 @@ class IcebergCorpusTable:
                 if self._target.mode == _OVERWRITE and table.current_snapshot() is not None:
                     # Delete-all + add in ONE transaction ⇒ one atomic catalog commit: a concurrent
                     # reader sees the previous snapshot or the new one, never an empty table.
+                    # Guarded on there being something to delete: a first run into a fresh table
+                    # has no rows, and issuing the delete anyway only earns a "did not match any
+                    # records" warning for an operation that is definitionally a no-op.
                     from pyiceberg.expressions import AlwaysTrue
 
                     tx.delete(AlwaysTrue(), snapshot_properties=stamps)
