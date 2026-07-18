@@ -24,6 +24,7 @@ latence-disambig-embedding = { workspace = true }
 latence-disambig-glinker = { workspace = true }
 latence-runner-airflow = { workspace = true }
 latence-retrieval = { workspace = true }
+latence-benchmark = { workspace = true }
 latence-splade = { workspace = true }
 latence-muvera = { workspace = true }
 latence-demo = { workspace = true }
@@ -82,6 +83,13 @@ dependencies = [
     # latence-demo — its offline/deterministic MaxSim-approximation tests run, and the conformance
     # suite (C1–C6) exercises the REAL 'fde.muvera' converter, alongside the in-core 'fde.reference'.
     "latence-muvera",
+    # The reproducible PUBLIC benchmark harness (#181). It is NOT a pipeline Provider — it
+    # registers nothing under `latence.providers` — but it RUNS the real Stages through the real
+    # registry, so it installs into the default dev env (like latence-demo) and its offline tests
+    # score the real `parser.pdfplumber` Parse Stage over a faithful local dataset root. Its only
+    # dependency is latence-core; remote dataset acquisition rides its `[hub]` extra (ADR-0016), so
+    # plain `uv sync` stays CPU-first, offline and deterministic.
+    "latence-benchmark",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
