@@ -818,8 +818,12 @@ def test_supported_gliner2_loads_and_redacts_the_financial_pii_floor(
     proceeds and the financial-PII surface — IBAN, credit card, tax id — is masked exactly as
     before, with the raw values absent from both the masked text and the emitted spans.
     """
-    text = "IBAN DE89370400440532013000, card 4111111111111111, tax id DE123456789."
-    iban, card, tax = "DE89370400440532013000", "4111111111111111", "DE123456789"
+    # Reuses the module's audited _IBAN; the card / tax-id surfaces are deliberately non-numeric
+    # placeholders (the secret-scan gate flags a real-looking PAN / high-entropy id). The fake model
+    # detects exactly the spans the test seeds, so the surface FORM is irrelevant to the behaviour.
+    card, tax = "4111-XXXX-XXXX-0000", "TAX-ID-PLACEHOLDER"
+    text = f"IBAN {_IBAN}, card {card}, tax id {tax}."
+    iban = _IBAN
     fake_gliner2.entities = [
         {"start": text.index(v), "end": text.index(v) + len(v), "label": lbl, "confidence": 0.97}
         for v, lbl in ((iban, "iban"), (card, "credit card number"), (tax, "tax id"))

@@ -48,7 +48,7 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 | transformers | ≥4.40,<5 | Apache-2.0 **(upstream)** | latence-disambig-glinker (+ glinker dep) |
 | huggingface-hub | ≥0.23,<1 | Apache-2.0 **(upstream)** | latence-disambig-glinker (model/tokenizer fetch + config patch) |
 | faiss-cpu | ≥1.7 | MIT **(upstream)** | latence-disambig-glinker (`faiss` extra — OPTIONAL large-group embedding-merge acceleration; brute-force fallback when absent) |
-| gliner2[local] | ≥1.0,<2 | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 |
+| gliner2[local] | ≥1.3,<2 (latence-pii-gliner2, #192); ≥1.0,<2 (latence-extract-gliner2) | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 |
 | peft | ≥0.10 | Apache-2.0 **(upstream)** | latence-pii-gliner2, latence-extract-gliner2 (gliner2 inference-engine dep, not declared by `gliner2[local]`) |
 | openai | ≥1.0 | Apache-2.0 **(upstream)** | latence-*-endpoint, latence-relation-llm |
 | presidio-analyzer | ≥2.2 | MIT **(upstream)** | latence-pii-presidio |
