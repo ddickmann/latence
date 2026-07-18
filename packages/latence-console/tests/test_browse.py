@@ -59,7 +59,8 @@ def _page(app: ConsoleApp, path: str) -> str:
 def _chunk_url(app: ConsoleApp, chunk_id: str) -> str:
     """The console's own link to a chunk — found in the page, not hand-built."""
     listing = _page(app, f"/run/{RUN}/chunks")
-    for href in re.findall(r'href="(/run/[^"]*?/chunk\?[^"]+)"', listing):
+    hrefs: list[str] = re.findall(r'href="(/run/[^"]*?/chunk\?[^"]+)"', listing)
+    for href in hrefs:
         if app.respond("GET", href).status == 200 and chunk_id.rsplit("#", 1)[-1] in href:
             return href.replace("&amp;", "&")
     raise AssertionError(f"no console link to {chunk_id}")

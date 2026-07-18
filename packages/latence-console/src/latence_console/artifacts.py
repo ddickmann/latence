@@ -34,7 +34,7 @@ on Storage, all of it JSONL, all of it written by the local Runner under the run
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from latence_core.contracts import (
     ChunkRecord,
@@ -48,7 +48,7 @@ from latence_core.contracts import (
     ScreeningFinding,
     ScreeningVerdict,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -59,17 +59,20 @@ CHECKPOINTS_DIR = "checkpoints"
 QUARANTINE_DIR = "quarantine"
 SCREENING_DIR = "screening"
 
-# The record carriers a Stage checkpoint can hold that this console renders. Order matters
-# only as a tie-break: ``extra="forbid"`` on every contract makes them mutually exclusive, so
-# at most one of them accepts a given line. A line no carrier accepts (a relation mention, a
-# profiling record, a torn write) is skipped — the console stays legible over whatever is on
-# disk (the same posture :meth:`RunIndex.report` takes for an unreadable report).
-_CARRIERS: tuple[type[Any], ...] = (GraphRecord, EntityMention, ChunkRecord, DocumentRecord)
+#: One of the four record carriers a Stage checkpoint line can hold.
+Carrier = GraphRecord | EntityMention | ChunkRecord | DocumentRecord
+
+# Order matters only as a tie-break: ``extra="forbid"`` on every contract makes the carriers
+# mutually exclusive, so at most one of them accepts a given line. A line no carrier accepts
+# (a relation mention, a profiling record, a torn write) is skipped — the console stays
+# legible over whatever is on disk (the posture :meth:`RunIndex.report` takes for an
+# unreadable report).
+_CARRIERS: tuple[type[Carrier], ...] = (GraphRecord, EntityMention, ChunkRecord, DocumentRecord)
 
 # Cheap key hints that pick the likely carrier first, so the common line costs one validation
 # instead of four. Purely a shortcut: the chosen model still validates, and every other
 # carrier is still tried if it refuses, so the hint can never let a bad line through.
-_HINTS: tuple[tuple[str, type[Any]], ...] = (
+_HINTS: tuple[tuple[str, type[Carrier]], ...] = (
     ("scope", GraphRecord),
     ("chunk_record_id", EntityMention),
     ("document_record_id", ChunkRecord),
@@ -264,7 +267,7 @@ class _Scan:
         self.nodes: dict[str, GraphNode] = {}
         self.edges: dict[str, GraphEdge] = {}
 
-    def absorb(self, record: object) -> None:
+    def absorb(self, record: Carrier | None) -> None:
         if isinstance(record, ChunkRecord):
             self.chunks[record.record_id] = record
         elif isinstance(record, DocumentRecord):
@@ -278,7 +281,10 @@ class _Scan:
                 self.edges[record.edge.edge_id] = record.edge
 
 
-def _validated(model: type[Any], payload: dict[str, Any]) -> list[Any]:
+_M = TypeVar("_M", bound=BaseModel)
+
+
+def _validated(model: type[_M], payload: dict[str, Any]) -> list[_M]:
     """``[record]`` if the real contract accepts ``payload``, else ``[]``."""
     try:
         return [model.model_validate(payload)]
@@ -286,7 +292,7 @@ def _validated(model: type[Any], payload: dict[str, Any]) -> list[Any]:
         return []
 
 
-def _parse_record(payload: dict[str, Any]) -> object | None:
+def _parse_record(payload: dict[str, Any]) -> Carrier | None:
     """The typed record a checkpoint line holds, or ``None`` if no carrier accepts it."""
     hinted = next((model for key, model in _HINTS if key in payload), None)
     candidates = (

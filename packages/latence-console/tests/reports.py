@@ -11,6 +11,7 @@ produce would manufacture false green.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 from latence_core.contracts import (
     ChunkRecord,
@@ -48,6 +49,7 @@ from latence_core.quality import (
     StageMetrics,
 )
 from latence_core.storage import Storage
+from pydantic import BaseModel
 
 
 def write_run(
@@ -425,8 +427,8 @@ def write_artifacts(
         ).encode("utf-8"),
     )
 
-    def _jsonl(uri: str, records: list[object]) -> None:
-        payload = "".join(r.model_dump_json() + "\n" for r in records)  # type: ignore[attr-defined]
+    def _jsonl(uri: str, records: Sequence[BaseModel]) -> None:
+        payload = "".join(r.model_dump_json() + "\n" for r in records)
         storage.write_atomic(uri, payload.encode("utf-8"))
 
     document = DocumentRecord(

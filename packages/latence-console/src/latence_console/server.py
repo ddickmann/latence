@@ -140,7 +140,8 @@ class ConsoleApp:
                     else "That link is missing the chunk it should show."
                 ),
             )
-        return Response.html(200, render.render_chunk(run_id, browse.inspect_chunk(artifacts, chunk)))
+        inspection = browse.inspect_chunk(artifacts, chunk)
+        return Response.html(200, render.render_chunk(run_id, inspection))
 
     def _graph_view(self, run_id: str, artifacts: RunArtifacts, _id: str | None) -> Response:
         return Response.html(
