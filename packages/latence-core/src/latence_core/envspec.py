@@ -292,7 +292,7 @@ def _third_party_requirements(
     by_requirement: dict[str, list[str]] = {}
     for pkg in packages:
         for dep in pkg.dependencies:
-            parsed = _req.Requirement(dep)
+            parsed: Requirement = _req.Requirement(dep)
             if _utils.canonicalize_name(parsed.name).startswith(_WORKSPACE_PREFIX):
                 continue
             by_requirement.setdefault(dep, []).append(pkg.name)
@@ -379,7 +379,7 @@ def parse_lock(text: str) -> dict[str, str]:
         line = line.split(" ;")[0].split(";")[0].split(" #")[0].strip()
         if not line:
             continue
-        parsed = _req.Requirement(line)
+        parsed: Requirement = _req.Requirement(line)
         pins[_utils.canonicalize_name(parsed.name)] = str(parsed.specifier)
     return pins
 
@@ -459,7 +459,7 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
     # the lock and (b) satisfied by the locked version. This is the drift alarm: raise a floor or
     # drop a cap in any Provider package and the committed lock stops satisfying it.
     for requirement_str, owners in _third_party_requirements(packages):
-        requirement = _req.Requirement(requirement_str)
+        requirement: Requirement = _req.Requirement(requirement_str)
         dist = _utils.canonicalize_name(requirement.name)
         locked = versions.get(dist)
         if locked is None:
@@ -482,8 +482,8 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
             del extra  # extras pull transitive dists the lock covers; nothing to assert per-extra
 
     for constraint in spec.constraints:
-        requirement = _req.Requirement(constraint.requirement)
-        dist = _utils.canonicalize_name(requirement.name)
+        constraint_req: Requirement = _req.Requirement(constraint.requirement)
+        dist = _utils.canonicalize_name(constraint_req.name)
         locked = versions.get(dist)
         if locked is None:
             findings.append(
@@ -494,7 +494,7 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
                     "fix the lock",
                 )
             )
-        elif not _satisfies(locked, requirement):
+        elif not _satisfies(locked, constraint_req):
             findings.append(
                 Finding(
                     "E-CONSTRAINT-VIOLATED",

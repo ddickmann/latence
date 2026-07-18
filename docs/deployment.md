@@ -13,6 +13,7 @@ Contents:
 - [Option B — Kubernetes / Helm (on-prem, VPC)](#option-b--kubernetes--helm-on-prem-vpc)
 - [Air-gapped deployment](#air-gapped-deployment)
 - [Observability + secrets](#observability--secrets)
+- [Reproducible in-process environments](#reproducible-in-process-environments)
 
 ## What the pipeline depends on
 
@@ -176,3 +177,26 @@ local. Nothing leaves the VPC.
 * **Secrets:** endpoint keys and `HF_TOKEN` are env-only and **referenced**, never embedded — wire a
   Secret via `secrets.existingSecret` and your secret manager (Vault / External Secrets / cloud CSI).
   Full guide: `docs/secrets.md`.
+
+## Reproducible in-process environments
+
+Everything above is the **served** path: the heavy models live behind an HTTP endpoint and the
+pipeline image carries no `torch`. When you instead need the learned Providers **in process**
+(GLiNER2 extraction, learned PII redaction, GLinker disambiguation, Granite r2 embeddings, SPLADE
+sparse), the environment itself becomes the hard part — `torch` churn ABI-breaks prebuilt wheels,
+the GLiNER family and the OCR model disagree on the `transformers` major, and PEP 668 blocks naive
+installs.
+
+Those environments are pinned, one-command-installable, and **checked by the build**:
+
+```bash
+bash deploy/env/cpu-text/install.sh              # the ONE documented install path (PEP-668 safe)
+bash deploy/env/cpu-text/smoke.sh                # the ONE command that proves it stands up
+bash deploy/env/cpu-text/smoke.sh --spec-only    # the offline gate — no install, no network
+```
+
+The pins are **enforced constraints**, not documentation: `latence env verify` cross-checks the
+generated `requirements.in` / `constraints.txt`, the solved `requirements.lock`, the Provider
+packages' real dependency declarations and the smoke stack, and `scripts/verify-local.sh` runs it
+for every environment on every commit. See **[`deploy/env/README.md`](https://github.com/ddickmann/latence-framework/blob/main/deploy/env/README.md)**
+for the full shape and for how to add one.

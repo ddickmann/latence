@@ -51,12 +51,18 @@ step() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$1"; }
 
 # --- Gate 1: the spec (offline) --------------------------------------------------------------
 step "gate 1/3 — environment spec (offline: pins, conflict boundaries, providers, stack)"
+# Resolution order matters: the environment's own venv first, then the WORKSPACE (`uv run`, so a
+# checkout is verified against its own source), and only then a `latence` that happens to be on
+# PATH — a stale global install must never decide whether this gate passes.
 if [ -x "$VENV/bin/latence" ]; then
   "$VENV/bin/latence" env verify "$SPEC" --repo-root "$REPO_ROOT"
+elif [ -f "$REPO_ROOT/pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
+  ( cd "$REPO_ROOT" && uv run latence env verify "$SPEC" --repo-root "$REPO_ROOT" )
 elif command -v latence >/dev/null 2>&1; then
   latence env verify "$SPEC" --repo-root "$REPO_ROOT"
 else
-  ( cd "$REPO_ROOT" && uv run latence env verify "$SPEC" --repo-root "$REPO_ROOT" )
+  echo "no 'latence' available (install the env venv, or run from the workspace with uv)" >&2
+  exit 2
 fi
 
 if [ "$SPEC_ONLY" = "1" ]; then
