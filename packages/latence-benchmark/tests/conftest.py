@@ -9,6 +9,10 @@ that passes against this fixture exercises the same code path a full-dataset run
 The PDFs are generated (not committed binaries) by :func:`minimal_pdf`, which writes a genuine
 single-page PDF with a Helvetica text object. If pdfplumber could not read it, every test built
 on it would fail loudly rather than quietly measuring nothing.
+
+The RED^FM fixtures below follow the same rule: :func:`_write_redfm` reproduces the real
+``data/<split>.<language>.jsonl`` layout, and the rows it writes (built by
+``redfm_fixtures``) carry the real row schema, which the loader validates.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from latence_benchmark.parse_suite import OLMOCR_SPLITS
+from latence_benchmark.redfm import REDFM_LANGUAGES, REDFM_SPLIT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -81,6 +86,29 @@ def _write_dataset(root: Path, splits: dict[str, list[dict[str, Any]]]) -> Path:
 def write_dataset() -> Callable[[Path, dict[str, list[dict[str, Any]]]], Path]:
     """Write ``{split: [row, ...]}`` into a dataset root in the real on-disk layout."""
     return _write_dataset
+
+
+def _write_redfm(root: Path, rows: dict[str, list[dict[str, Any]]]) -> Path:
+    """Write ``{language: [row, ...]}`` into a RED^FM root in the real ``data/`` layout.
+
+    Every declared language file is written, empty if unpopulated: the real dataset always has
+    all seven and the manifest check rightly refuses a partial root.
+    """
+    data = root / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    for language in REDFM_LANGUAGES:
+        lines = rows.get(language, [])
+        (data / f"{REDFM_SPLIT}.{language}.jsonl").write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in lines),
+            encoding="utf-8",
+        )
+    return root
+
+
+@pytest.fixture
+def write_redfm() -> Callable[[Path, dict[str, list[dict[str, Any]]]], Path]:
+    """Write a RED^FM dataset root in the real on-disk layout."""
+    return _write_redfm
 
 
 @pytest.fixture

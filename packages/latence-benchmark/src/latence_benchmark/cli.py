@@ -1,10 +1,13 @@
 """``latence-benchmark`` — the one command an outsider runs.
 
     latence-benchmark run --suite parse
+    latence-benchmark run --suite all      # every registered suite, one results page
 
-Acquires the pinned dataset (license-gated first), runs the Stage under the pinned stack
-config, scores it, and writes both published artifacts. ``--dataset-root`` runs the identical
-pipeline against an already-downloaded copy, which is what CI and air-gapped hosts use.
+Acquires each suite's pinned dataset (license-gated first), runs the Stage under the pinned
+stack config, scores it, and writes both published artifacts. ``--dataset-root`` runs the
+identical pipeline against an already-downloaded copy, which is what CI and air-gapped hosts
+use; with ``--suite all`` it may be repeated as ``--dataset-root <dataset>=<path>`` because the
+suites do not share one corpus.
 
 Stdlib ``argparse`` deliberately: the harness must be runnable straight from a clone with the
 framework installed and nothing else.
@@ -13,6 +16,7 @@ framework installed and nothing else.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,19 +26,25 @@ from latence_benchmark.datasets import (
     DatasetUnavailableError,
     HuggingFaceDatasetSource,
     LocalDatasetSource,
+    ShippedCorpusSource,
 )
 from latence_benchmark.licensing import LicenseGateError, require_usable
+from latence_benchmark.providers import ProviderUnavailableError
 from latence_benchmark.results import write_results
-from latence_benchmark.suite import get_suite, suite_names
+from latence_benchmark.suite import StackPin, get_suite, suite_names
 from latence_benchmark.unittests import BenchmarkDataError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from latence_benchmark.datasets import DatasetSource
+    from latence_benchmark.datasets import DatasetSource, DatasetSpec
+    from latence_benchmark.suite import BenchmarkSuite, SuiteResult
 
 DEFAULT_MARKDOWN = Path("docs/BENCHMARKS.md")
 DEFAULT_JSON = Path("docs/benchmarks/results.json")
+
+#: ``--suite`` value meaning "every registered suite, onto one results page".
+ALL = "all"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,14 +58,19 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--suite",
         default="parse",
-        choices=list(suite_names()),
-        help="Which Stage benchmark suite to run (default: parse).",
+        choices=[*suite_names(), ALL],
+        help="Which Stage benchmark suite to run, or 'all' (default: parse).",
     )
     run.add_argument(
         "--dataset-root",
-        type=Path,
-        default=None,
-        help="Use an already-downloaded dataset at this path instead of fetching it.",
+        action="append",
+        default=[],
+        metavar="[DATASET=]PATH",
+        help=(
+            "Use an already-downloaded dataset instead of fetching it. Repeat as "
+            "'<dataset>=<path>' when running several suites; a bare path applies to every "
+            "suite that does not ship its own corpus."
+        ),
     )
     run.add_argument(
         "--provider",
@@ -80,8 +95,59 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _source(dataset_root: Path | None) -> DatasetSource:
-    return LocalDatasetSource(dataset_root) if dataset_root else HuggingFaceDatasetSource()
+def _dataset_roots(values: Sequence[str]) -> dict[str | None, Path]:
+    """Parse ``--dataset-root`` values into ``{dataset name or None (default): path}``."""
+    roots: dict[str | None, Path] = {}
+    for value in values:
+        name, separator, path = value.partition("=")
+        roots[name if separator else None] = Path(path if separator else value)
+    return roots
+
+
+def _source(spec: DatasetSpec, roots: dict[str | None, Path]) -> DatasetSource:
+    """Pick the acquisition adapter for one dataset."""
+    if spec.revision_kind == "content-digest":
+        # Shipped in this package; there is nothing to download and nothing to point at.
+        return ShippedCorpusSource()
+    root = roots.get(spec.name, roots.get(None))
+    return LocalDatasetSource(root) if root is not None else HuggingFaceDatasetSource()
+
+
+def _repin(suite: BenchmarkSuite, provider: str) -> BenchmarkSuite:
+    """Re-pin a suite's Provider, keeping everything else identical.
+
+    Works for every suite because a suite is a frozen dataclass — the immutability the protocol
+    asks for is what makes this a copy rather than a mutation.
+    """
+    if not dataclasses.is_dataclass(suite):  # pragma: no cover - all shipped suites are
+        msg = f"Suite {suite.name!r} cannot be re-pinned: it is not a dataclass."
+        raise TypeError(msg)
+    pin = StackPin(
+        stage=suite.stack_pin.stage,
+        provider=provider,
+        config=dict(suite.stack_pin.config),
+    )
+    return dataclasses.replace(suite, stack_pin=pin)
+
+
+def _summarise(result: SuiteResult) -> str:
+    headline = result.headline
+    if headline is not None:
+        precision = "n/a" if headline.precision is None else f"{headline.precision * 100:.1f}%"
+        recall = "n/a" if headline.recall is None else f"{headline.recall * 100:.1f}%"
+        f1 = "n/a" if headline.f1 is None else f"{headline.f1 * 100:.1f}%"
+        return (
+            f"{result.suite}: precision {precision}, recall {recall}, F1 {f1} "
+            f"(micro over {headline.dimension}; {headline.gold} gold items, "
+            f"{result.documents_scored} documents)"
+        )
+    overall = result.overall
+    rate = overall.pass_rate
+    rate_text = "n/a" if rate is None else f"{rate * 100:.1f}%"
+    return (
+        f"{result.suite}: {overall.passed}/{overall.scored} scored unit tests passed "
+        f"({rate_text}); {overall.unsupported} unsupported"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -94,43 +160,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{name}\tstage={suite.stage}\tdataset={suite.dataset.name}")
         return 0
 
-    from latence_benchmark.parse_suite import ParseSuite, ProviderUnavailableError, parse_suite
-
-    suite = get_suite(args.suite)
-    if args.provider and isinstance(suite, ParseSuite):
-        suite = parse_suite(provider=args.provider)
-
-    try:
-        # The license gate runs BEFORE acquisition — restricted bytes never land on disk.
-        require_usable(
-            suite.dataset.name,
-            suite.dataset.license,
-            accept_non_commercial=args.accept_non_commercial,
+    selected = suite_names() if args.suite == ALL else [args.suite]
+    if args.provider and len(selected) > 1:
+        # One Provider name cannot be the right pin for four different Stages, and quietly
+        # applying it to all of them would publish a page of nonsense.
+        print(
+            "error: --provider re-pins ONE Stage, so it cannot be combined with --suite all. "
+            f"Re-run it for a single suite, e.g. --suite {selected[0]} --provider {args.provider}",
+            file=sys.stderr,
         )
-        root = _source(args.dataset_root).materialise(suite.dataset)
-        result = suite.run(root, limit=args.limit)
-    except (LicenseGateError, DatasetUnavailableError, BenchmarkDataError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
         return 2
-    except ProviderUnavailableError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
+    roots = _dataset_roots(args.dataset_root)
+    results: list[SuiteResult] = []
+
+    for name in selected:
+        suite = get_suite(name)
+        if args.provider:
+            suite = _repin(suite, args.provider)
+        try:
+            # The license gate runs BEFORE acquisition — restricted bytes never land on disk.
+            require_usable(
+                suite.dataset.name,
+                suite.dataset.license,
+                accept_non_commercial=args.accept_non_commercial,
+            )
+            root = _source(suite.dataset, roots).materialise(suite.dataset)
+            results.append(suite.run(root, limit=args.limit))
+        except (LicenseGateError, DatasetUnavailableError, BenchmarkDataError) as exc:
+            print(f"error: {name}: {exc}", file=sys.stderr)
+            return 2
+        except ProviderUnavailableError as exc:
+            print(f"error: {name}: {exc}", file=sys.stderr)
+            return 3
 
     generated_on = datetime.now(UTC).date().isoformat()
     write_results(
-        [result],
+        results,
         markdown_path=args.markdown_out,
         json_path=args.json_out,
         generated_on=generated_on,
     )
-    overall = result.overall
-    rate = overall.pass_rate
-    rate_text = "n/a" if rate is None else f"{rate * 100:.1f}%"
-    print(
-        f"{result.suite}: {overall.passed}/{overall.scored} scored unit tests passed "
-        f"({rate_text}); {overall.unsupported} unsupported. "
-        f"Wrote {args.markdown_out} and {args.json_out}."
-    )
+    for result in results:
+        print(_summarise(result))
+    print(f"Wrote {args.markdown_out} and {args.json_out}.")
     return 0
 
 

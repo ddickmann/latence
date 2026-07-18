@@ -30,9 +30,10 @@ from latence_core.contracts import (
     ParserInput,
     Provenance,
 )
-from latence_core.pipeline import CapabilityKind, Stage
+from latence_core.pipeline import CapabilityKind
 
 from latence_benchmark.datasets import OLMOCR_BENCH, DatasetSpec
+from latence_benchmark.providers import ProviderUnavailableError, load_provider
 from latence_benchmark.scoring import Outcome, TestResult, score
 from latence_benchmark.suite import SplitScore, StackPin, SuiteResult
 from latence_benchmark.unittests import load_split
@@ -42,6 +43,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from latence_benchmark.unittests import UnitTest
+
+__all__ = [
+    "OLMOCR_SPLITS",
+    "PARSE_STACK_PIN",
+    "ParseSuite",
+    # Re-exported: the error moved to `latence_benchmark.providers` when the four #187 suites
+    # started needing the same Provider-resolution rules, and callers still catch it from here.
+    "ProviderUnavailableError",
+    "parse_suite",
+    "split_names",
+]
 
 #: Fixed split order — determinism, and it is also the order the results page reads best in.
 OLMOCR_SPLITS: tuple[str, ...] = (
@@ -60,10 +72,6 @@ OLMOCR_SPLITS: tuple[str, ...] = (
 #: not have. A GPU OCR Provider is a one-line pin change (``--provider parser.lighton``), which
 #: is exactly how the comparison should be run.
 PARSE_STACK_PIN = StackPin(stage="parse", provider="parser.pdfplumber", config={})
-
-
-class ProviderUnavailableError(RuntimeError):
-    """The pinned Parse Provider is not installed in this environment."""
 
 
 def _parser_input(path: Path, root: Path) -> ParserInput:
@@ -96,34 +104,12 @@ class ParseSuite:
 
     def _load_parser(self) -> Parser:
         """Resolve and instantiate the pinned Parse Provider through the real registry."""
-        # Validating through core's own Stage model means the pin is a genuine stack fragment:
-        # an unknown capability or an empty provider name is rejected by the framework's rules,
-        # not by a private copy of them.
-        stage = Stage(
-            name=self.stage,
+        return load_provider(
+            self.stack_pin,
             capability=CapabilityKind.PARSE,
-            provider=self.stack_pin.provider,
-            config=dict(self.stack_pin.config),
+            protocol=Parser,
+            registry=self.registry,
         )
-        try:
-            provider_cls = self.registry.load(stage.provider)
-        except KeyError as exc:
-            msg = (
-                f"The Parse benchmark is pinned to Provider {stage.provider!r}, which is not "
-                "installed. Install the package that registers it (e.g. "
-                "`pip install latence-parser-pdfplumber`) and re-run; the harness never "
-                "substitutes a different Provider silently, because that would change what the "
-                "published number means."
-            )
-            raise ProviderUnavailableError(msg) from exc
-        parser = provider_cls(dict(stage.config))
-        if not isinstance(parser, Parser):
-            msg = (
-                f"Provider {stage.provider!r} does not satisfy the Parser capability "
-                "(no .parse(inputs) method), so it cannot be benchmarked as a Parse Stage."
-            )
-            raise TypeError(msg)
-        return parser
 
     def _parse(self, parser: Parser, path: Path, root: Path) -> DocumentRecord:
         """Parse one document, turning any Provider exception into a PARSE_ERROR record."""

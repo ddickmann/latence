@@ -5,10 +5,15 @@ over a public dataset pinned to an exact commit, under a pinned stack config, an
 a human-readable results page and a machine-readable sidecar.
 
 ```bash
-uv run latence-benchmark run --suite parse
+uv run latence-benchmark run --suite all
 ```
 
-That fetches [`allenai/olmOCR-bench`](https://huggingface.co/datasets/allenai/olmOCR-bench) at
+Five suites, one results page: `parse` (olmOCR-bench), `entity_extraction`,
+`relation_extraction` and `disambiguation` (RED^FM, seven languages including German), and
+`redaction` (a synthetic PII corpus that ships inside this package). Run one on its own with
+`--suite <name>`.
+
+Running just the Parse slice fetches [`allenai/olmOCR-bench`](https://huggingface.co/datasets/allenai/olmOCR-bench) at
 its pinned revision (needs the `[hub]` extra), runs the Parse Stage through
 `parser.pdfplumber`, scores the dataset's unit tests, and writes `docs/BENCHMARKS.md` +
 `docs/benchmarks/results.json`. Already have the dataset? Point at it and run fully offline:
@@ -36,14 +41,24 @@ land on disk. This is not hypothetical: OmniDocBench, the obvious pick for docum
 ships an Apache-2.0 toolkit next to a corpus that is research-only, so it is registered but
 gated behind `--accept-non-commercial` and is never the default.
 
-**Flatter itself.** `table` and `math` assertions are not scored yet, so they are reported as
-*unsupported* — excluded from the pass-rate denominator and shown in their own column, rather
+**Flatter itself.** The redaction corpus deliberately plants PII a rule engine CANNOT catch
+(person names, postal addresses), so its published recall is a measurement rather than a
+tautology, and the residual is visible per PII type. Relation Extraction is scored from gold
+mentions so a weak NER cannot cap it, and gold predicates the pin declares no rule for are out
+of scope on BOTH sides rather than counted as misses. `table` and `math` assertions are not
+scored yet, so they are reported as *unsupported* — excluded from the pass-rate denominator and shown in their own column, rather
 than counted as passes. A parse failure counts its document's tests as failures, so a parser
 cannot crash its way to a better score. Vendor numbers are labelled claims and live in their own
 section, because we did not run them.
 
-## Adding a Stage suite (#187)
+## Adding a Stage suite
 
 The seam is `latence_benchmark.suite.BenchmarkSuite`. Supply a name, the Stage you measure, a
 pinned `DatasetSpec`, a `StackPin` and a `run(root)`, then `register_suite` it — the CLI and the
-results page pick it up with no other change. See the module docstring in `suite.py`.
+results page pick it up with no other change. See the module docstring in `suite.py`; the four
+suites added by #187 went in exactly that way, without touching the CLI, the license gate or the
+acquisition adapters.
+
+Report in one of the two existing currencies: `SplitScore` (pass/fail/unsupported) for unit
+tests, `MetricScore` (TP/FP/FN → precision/recall/F1) for a labelled set. An undefined ratio is
+`None`, never `0.0`.
