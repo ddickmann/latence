@@ -25,8 +25,8 @@ OneDrive Personal) in the *listing*, before any download. The connector mints
   intersects ids with the parent Corpus Version, marks it UNCHANGED, and injects it into this
   Provider's ``exclude_document_ids``;
 * **and this Provider then skips it without downloading it.** The exclusion is checked against
-  the id derived from the *listing*, before :meth:`~latence_source_sharepoint.graph.GraphClient.download`
-  is ever called. That is the whole point: an incremental run over a 50k-document library
+  the id derived from the *listing*, before the download call is ever made. That is the whole
+  point: an incremental run over a 50k-document library
   transfers only the documents that actually changed. The offline suite asserts it by counting
   the fake transport's download calls, not by reading a flag.
 * a document that changed gets a new id (ADDED) and retires the old one (DELETED); a document

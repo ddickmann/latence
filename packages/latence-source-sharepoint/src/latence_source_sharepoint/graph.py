@@ -199,7 +199,9 @@ class GraphClient:
             # and the storage host rejects an unexpected Authorization header outright.
             response = self._transport.request("GET", location, headers={})
         if response.status != 200:
-            raise ProviderError(self._failure_message(response, what=f"download {item.drive_path!r}"))
+            raise ProviderError(
+                self._failure_message(response, what=f"download {item.drive_path!r}")
+            )
         data = response.body
         if len(data) != item.size:
             msg = (

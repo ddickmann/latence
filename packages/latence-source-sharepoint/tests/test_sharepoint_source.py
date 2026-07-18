@@ -224,7 +224,8 @@ def test_deletion_and_change_are_surfaced_by_the_content_hash_manifest(
             i.provenance.document_id: ManifestEntry(
                 document_id=i.provenance.document_id,
                 content_hash=content_hash(
-                    i.provenance.document_id, i.content.decode("utf-8")
+                    i.provenance.document_id,
+                    i.content.decode("utf-8") if isinstance(i.content, bytes) else i.content,
                 ),
                 file_name=i.provenance.file_name,
             )

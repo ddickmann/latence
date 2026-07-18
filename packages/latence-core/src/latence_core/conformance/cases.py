@@ -526,8 +526,8 @@ def _sharepoint_source_case() -> ConformanceCase:
             return False
         # A source-system connector must stamp the source system + a resolvable identity.
         return all(
-            getattr(r, "provenance").source_system == "sharepoint"
-            and getattr(r, "provenance").source_uri.startswith("sharepoint://")
+            r.provenance.source_system == "sharepoint"
+            and r.provenance.source_uri.startswith("sharepoint://")
             for r in _as_records(records)
         )
 

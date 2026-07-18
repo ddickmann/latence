@@ -231,7 +231,9 @@ class FakeGraphApi:
         token = authorization[len("Bearer ") :]
         if token not in self.valid_tokens and token != self.issued_token:
             return _graph_error(
-                401, "InvalidAuthenticationToken", "Lifetime validation failed, the token is expired."
+                401,
+                "InvalidAuthenticationToken",
+                "Lifetime validation failed, the token is expired.",
             )
         if "$skip" in query:
             # Graph: "$skip is not supported on this API." Only nextLink paging works here.
@@ -255,7 +257,8 @@ class FakeGraphApi:
             entry = self._file_by_item_id(urllib.parse.unquote(item_id))
             if entry is None:
                 return _graph_error(404, "itemNotFound", "The resource could not be found.")
-            location = f"{DOWNLOAD_HOST}/download?itemId={urllib.parse.quote(self.item_id(entry.path))}"
+            quoted = urllib.parse.quote(self.item_id(entry.path))
+            location = f"{DOWNLOAD_HOST}/download?itemId={quoted}"
             return HttpResponse(status=302, headers={"Location": location}, body=b"")
 
         folder = self._folder_for(remainder)

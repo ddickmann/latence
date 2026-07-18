@@ -42,6 +42,16 @@ CPU reference Provider so the seam is exercised by real alternatives
 | Delta | `delta.affected_set` | Affected-set recompute + drift reconcile | cpu |
 | Export | `export.jsonl_parquet`, `export.knowledge_graph` | JSONL/Parquet + TTL/GraphML files | cpu |
 
+## Source
+
+Connectors to source *systems* live outside core as their own Provider packages
+([ADR-0014](../adr/0014-source-seam-thin-connectors.md)) — the Source seam is what makes a real
+connector a plugin rather than a fork.
+
+| Provider | Package | Technique | License | Compute |
+| --- | --- | --- | --- | --- |
+| `source.sharepoint` | `latence-source-sharepoint` | SharePoint / OneDrive via Microsoft Graph; content-hash Delta skips unchanged documents **without downloading them**; secrets env-only | Apache-2.0 (code), **no third-party dependency** | cpu |
+
 ## Parse
 
 | Provider | Package | Model / technique | License | Compute |
