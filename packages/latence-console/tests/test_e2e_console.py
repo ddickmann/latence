@@ -67,7 +67,7 @@ def test_the_console_serves_the_demo_corpus_over_a_real_socket(demo_corpus: str)
         # The demo's own headline facts, rendered as sentences (not JSON).
         assert "can be traced back to the exact page it came from" in page
         assert "knowledge graph holds 6 things connected by 33 relationships" in page
-        assert "3 files were held back as unsafe" in page
+        assert "3 files held back as unsafe, 1 item flagged for review." in page
         assert "zip compression ratio" in page
         assert render.external_references(page) == []
 

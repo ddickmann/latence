@@ -9,7 +9,24 @@ workspace are versioned and released together under one version number.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`latence-console`** — the read-only run console (#186). One command,
+  `latence-console <storage-location>`, serves a localhost page over the files a run already
+  left on Storage: the run list (status + timestamps) and each run's Quality Report rendered
+  as **headline quality verdicts a non-engineer can read** — traceability, unsafe input,
+  personal data, knowledge-graph statistics, gold-set scores, and the what-changed summary of
+  an incremental run — with the per-Stage drill-down beneath. Read-only and stateless by
+  construction (ADR-0010/0017): it reaches only `exists`/`ls`/`read_text`/`modified` on the
+  Storage seam, refuses non-read HTTP methods with `405`, caches nothing between requests,
+  binds the loopback interface only, and emits self-contained pages with no CDN, script, or
+  beacon. Zero new dependencies — `http.server` from the standard library plus `latence-core`.
+
+- **`Storage.modified(uri)`** — a read-only last-modified probe on the Storage seam,
+  normalising the per-backend spellings (`mtime` / `LastModified` / `updated` / `created`) to
+  an aware UTC datetime and returning `None` rather than fabricating a time when a backend
+  exposes none. This is how the run console reads real run timestamps without the framework
+  persisting any new state.
 
 ## [0.1.0] - 2026-07-14
 

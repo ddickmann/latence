@@ -33,7 +33,7 @@ def test_headline_verdicts_are_plain_sentences_with_numbers(populated: str) -> N
     page = _page(populated, "run-0001")
     assert "can be traced back to the exact page it came from" in page
     assert "knowledge graph holds 6 things connected by 33 relationships" in page
-    assert "held back as unsafe" in page
+    assert "1 file held back as unsafe, 1 item flagged for review." in page
 
 
 def test_per_stage_metrics_are_rendered(populated: str) -> None:
@@ -81,6 +81,23 @@ def test_unfinished_run_says_so_instead_of_guessing(populated: str) -> None:
     page = _page(populated, "run-0005")
     assert "Unfinished" in page
     assert "never wrote a Quality Report" in page
+
+
+def test_counts_read_grammatically_in_the_singular() -> None:
+    """A one-file, one-item run must not read '1 files were ...' — this page is prose."""
+    report = healthy_report()
+    assert report.screening is not None
+    one = report.model_copy(
+        update={"screening": report.screening.model_copy(update={"quarantined": 1, "flagged": 1})}
+    )
+    verdict = next(v for v in headline_verdicts(one) if v.title == "Unsafe input")
+    assert verdict.headline == "1 file held back as unsafe, 1 item flagged for review."
+
+    many = report.model_copy(
+        update={"screening": report.screening.model_copy(update={"quarantined": 3, "flagged": 2})}
+    )
+    verdict = next(v for v in headline_verdicts(many) if v.title == "Unsafe input")
+    assert verdict.headline == "3 files held back as unsafe, 2 items flagged for review."
 
 
 def test_worst_verdict_is_listed_first() -> None:

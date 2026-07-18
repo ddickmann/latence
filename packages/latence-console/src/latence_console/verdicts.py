@@ -147,8 +147,8 @@ def screening_verdict(report: QualityReport) -> Verdict | None:
         title="Unsafe input",
         tone=Tone.GOOD,
         headline=(
-            f"{_plural(s.quarantined, 'file')} were held back as unsafe and "
-            f"{_plural(s.flagged, 'item')} were flagged for review."
+            f"{_plural(s.quarantined, 'file')} held back as unsafe, "
+            f"{_plural(s.flagged, 'item')} flagged for review."
         ),
         evidence=(
             "Held-back files never reached the corpus. This is the screen working, "
@@ -409,7 +409,10 @@ def fact_tables(report: QualityReport) -> list[Facts]:
             Facts(
                 "What changed since the previous version",
                 [
-                    ("Previous version", "none" if churn.from_version is None else str(churn.from_version)),
+                    (
+                        "Previous version",
+                        "none" if churn.from_version is None else str(churn.from_version),
+                    ),
                     ("This version", str(churn.to_version)),
                     ("Documents added", str(churn.documents_added)),
                     ("Documents updated", str(churn.documents_updated)),
