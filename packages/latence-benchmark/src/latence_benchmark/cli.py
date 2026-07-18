@@ -127,7 +127,7 @@ def _repin(suite: BenchmarkSuite, provider: str) -> BenchmarkSuite:
         provider=provider,
         config=dict(suite.stack_pin.config),
     )
-    return dataclasses.replace(suite, stack_pin=pin)  # type: ignore[type-var]
+    return dataclasses.replace(suite, stack_pin=pin)
 
 
 def _summarise(result: SuiteResult) -> str:

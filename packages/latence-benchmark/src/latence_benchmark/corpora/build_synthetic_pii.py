@@ -1,15 +1,40 @@
-"""Generate the shipped synthetic PII corpus (offsets computed, never hand-written)."""
+"""The generator that IS the synthetic PII corpus's provenance.
+
+``synthetic_pii.jsonl`` next to this module is generated from the templates below, and a test
+regenerates it and asserts byte-equality — so the shipped corpus can never drift from the
+auditable source that proves it holds **no real personal data**. Every planted value is a
+reserved or published example:
+
+* e-mail — ``example.com`` / ``example.org`` / ``example.net`` / ``example.de`` (RFC 2606,
+  reserved for documentation and never resolvable to a real mailbox);
+* IPv4 — ``192.0.2.0/24`` and ``203.0.113.0/24`` (RFC 5737 TEST-NET-1 / TEST-NET-3);
+* NANP phone — the ``555-01xx`` range reserved for fiction;
+* payment card — the ``4111 1111 1111 1111`` / ``5555 5555 5555 4444`` test numbers published
+  by the card networks for integration testing;
+* IBAN — the published example IBANs (``DE89 3704 0044 0532 0130 00`` and friends);
+* AWS key — ``AKIAIOSFODNN7EXAMPLE``, AWS's own documentation key;
+* names and addresses — deliberately fictional (``Erika Mustermann``, ``John Q. Public``,
+  ``Musterstraße 12``).
+
+Offsets are computed from the templates, never written by hand. The gold set deliberately
+includes types a rule-based redactor CANNOT catch (person names, postal addresses) so the
+published recall is a real measurement rather than a tautology.
+
+Regenerate with::
+
+    python -m latence_benchmark.corpora.build_synthetic_pii
+"""
 
 from __future__ import annotations
 
-import hashlib
 import json
-import sys
 from pathlib import Path
+from typing import Any
 
-# (pii_type, value) planted into a template at {}. Values are reserved/documented
-# example values only — see the corpus README block in redaction_suite.py.
+#: One document: ``(doc_id, language, template with {} per planted value, [(pii_type, value)])``.
 Doc = tuple[str, str, str, list[tuple[str, str]]]
+
+CORPUS_PATH = Path(__file__).parent / "synthetic_pii.jsonl"
 
 EN: list[Doc] = [
     (
@@ -215,15 +240,16 @@ DE: list[Doc] = [
 ]
 
 
-def build(docs: list[Doc]) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def _rows(docs: list[Doc]) -> list[dict[str, Any]]:
+    """Render templates into documents, computing every gold offset from the substitution."""
+    rows: list[dict[str, Any]] = []
     for doc_id, language, template, planted in docs:
         parts = template.split("{}")
         if len(parts) != len(planted) + 1:
-            msg = f"{doc_id}: {len(parts) - 1} placeholders for {len(planted)} values"
-            raise SystemExit(msg)
+            msg = f"{doc_id}: {len(parts) - 1} placeholder(s) for {len(planted)} planted value(s)."
+            raise ValueError(msg)
         text = ""
-        spans: list[dict[str, object]] = []
+        spans: list[dict[str, Any]] = []
         for index, part in enumerate(parts):
             text += part
             if index < len(planted):
@@ -233,8 +259,6 @@ def build(docs: list[Doc]) -> list[dict[str, object]]:
                 spans.append(
                     {"pii_type": pii_type, "value": value, "start": start, "end": len(text)}
                 )
-        for span in spans:
-            assert text[span["start"] : span["end"]] == span["value"], doc_id
         rows.append(
             {
                 "doc_id": doc_id,
@@ -247,19 +271,16 @@ def build(docs: list[Doc]) -> list[dict[str, object]]:
     return rows
 
 
-def main() -> None:
-    out = Path(sys.argv[1])
-    rows = build(EN) + build(DE)
-    payload = "".join(
-        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows
-    )
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(payload, encoding="utf-8")
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    print(f"{len(rows)} rows, {sum(len(r['pii']) for r in rows)} gold spans")
-    print("sha256", digest)
-    print("revision (first 40 hex)", digest[:40])
+def build_corpus() -> str:
+    """Return the corpus file's exact contents (JSONL, one document per line)."""
+    rows = _rows(EN) + _rows(DE)
+    return "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
 
 
-if __name__ == "__main__":
+def main() -> None:  # pragma: no cover - the regeneration entry point
+    CORPUS_PATH.write_text(build_corpus(), encoding="utf-8")
+    print(f"wrote {CORPUS_PATH}")
+
+
+if __name__ == "__main__":  # pragma: no cover
     main()

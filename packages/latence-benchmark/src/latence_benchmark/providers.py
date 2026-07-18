@@ -14,7 +14,7 @@ generalises so the four #187 suites cannot quietly break them:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from latence_core.capability import ProviderRegistry
 from latence_core.pipeline import Stage
@@ -35,7 +35,7 @@ def load_provider(
     pin: StackPin,
     *,
     capability: CapabilityKind,
-    protocol: type[P],
+    protocol: type[P] | Any,
     registry: ProviderRegistry | None = None,
 ) -> P:
     """Resolve and instantiate ``pin``'s Provider, checked against ``protocol``.
@@ -43,7 +43,10 @@ def load_provider(
     :param protocol: The Capability protocol the Provider must satisfy (``Parser``,
         ``EntityExtractor``, ...). A Provider registered under the right name but missing the
         Capability's method is rejected here rather than at the first call, so the failure names
-        the real problem.
+        the real problem. It is typed loosely because a ``Protocol`` class is not a concrete
+        ``type[P]`` to mypy; the caller pins the result's type by annotating it
+        (``parser: Parser = load_provider(...)``), and the runtime ``isinstance`` below is what
+        actually enforces the Capability.
     :raises ProviderUnavailableError: The pinned Provider is not installed.
     :raises TypeError: It is installed but does not satisfy the Capability.
     """
@@ -67,7 +70,8 @@ def load_provider(
     provider = provider_cls(dict(stage.config))
     if not isinstance(provider, protocol):
         msg = (
-            f"Provider {stage.provider!r} does not satisfy the {protocol.__name__} Capability, "
+            f"Provider {stage.provider!r} does not satisfy the "
+            f"{getattr(protocol, '__name__', protocol)} Capability, "
             f"so it cannot be benchmarked as a {pin.stage} Stage."
         )
         raise TypeError(msg)

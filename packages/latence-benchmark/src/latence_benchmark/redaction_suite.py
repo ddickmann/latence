@@ -72,11 +72,11 @@ SYNTHETIC_PII = register_dataset(
             source_url="https://github.com/ddickmann/latence-framework/blob/main/LICENSE",
             notes=(
                 "Corpus and generator are both original work in this repository and carry this "
-                "repository's own Apache-2.0 license — the one case where the corpus and toolkit "
-                "licenses coincide, verified rather than assumed (ADR-0012). The corpus contains NO "
-                "real personal data: every value is a reserved or published example (RFC 2606 "
-                "example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone numbers, "
-                "the 4111... test card, AWS's AKIAIOSFODNN7EXAMPLE documentation key, published "
+                "repository's own Apache-2.0 license — the one case where corpus and toolkit "
+                "licenses coincide, verified rather than assumed (ADR-0012). The corpus contains "
+                "NO real personal data: every value is a reserved or published example (RFC 2606 "
+                "example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone "
+                "numbers, the 4111... test card, AWS's AKIAIOSFODNN7EXAMPLE docs key, published "
                 "example IBANs, and fictional names). It is inspectable in full in the repository."
             ),
         ),
@@ -210,7 +210,7 @@ class RedactionSuite:
     stack_pin: StackPin = REDACTION_STACK_PIN
 
     def run(self, root: Path, *, limit: int | None = None) -> SuiteResult:
-        redactor = load_provider(
+        redactor: PIIDetector = load_provider(
             self.stack_pin,
             capability=CapabilityKind.REDACTION,
             protocol=PIIDetector,

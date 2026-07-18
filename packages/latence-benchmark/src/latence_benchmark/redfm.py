@@ -23,8 +23,8 @@ guessed — that is the whole point of :mod:`latence_benchmark.licensing`.
 The reader below is deliberately strict. Every row must carry the keys the real corpus carries,
 and every annotated span must satisfy ``text[start:end] == surfaceform`` — which the real
 release does, exactly, for all 24,812 entity spans and both endpoints of all 6,367 relation
-triples across the seven
-``test`` files at the pinned revision (checked 2026-07-18). A loader that tolerated a
+triples across the seven ``test`` files at the pinned revision (checked 2026-07-18). A loader
+that tolerated a
 mismatch would let a subtly mis-aligned corpus, or a hand-written fixture the real data would
 never produce, score as if it were the benchmark.
 """
@@ -70,11 +70,12 @@ REDFM = register_dataset(
                 "Corpus license verified twice over at the pinned revision: the card front-matter "
                 "says `license: cc-by-sa-4.0` and the card's own License section says 'RED^FM is "
                 "licensed under the CC BY-SA 4.0 license.' CC BY-SA 4.0 permits commercial use and "
-                "requires attribution; its ShareAlike term binds ADAPTATIONS of the corpus, and this "
-                "harness distributes none — it reads the corpus at run time from the pinned upstream "
-                "revision, vendors no part of it into this repository, and publishes only aggregate "
-                "metrics. The evaluation toolkit is the repository's own `REDFM.py`, whose file "
-                "header carries the Apache-2.0 notice, verified separately per ADR-0012; this "
+                "requires attribution; its ShareAlike term binds ADAPTATIONS of the corpus, and "
+                "this harness distributes none — it reads the corpus at run time from the pinned "
+                "upstream revision, vendors no part of it into this repository, and publishes "
+                "only aggregate metrics. The evaluation toolkit is the repository's own "
+                "`REDFM.py`, whose header carries the Apache-2.0 notice, verified separately "
+                "per ADR-0012; this "
                 "harness reads the JSONL directly and never executes that script. The authors' "
                 "related model repository (github.com/Babelscape/rebel) declares NO license file "
                 "(GitHub API, 2026-07-18) — that artifact is therefore UNVERIFIED and is not used."

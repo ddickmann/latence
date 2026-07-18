@@ -28,7 +28,7 @@ plainly what its pinned Provider structurally cannot do, and names the learned r
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import Disambiguator, EntityExtractor, RelationExtractor
@@ -58,7 +58,10 @@ if TYPE_CHECKING:
 #: A language-agnostic proper-noun recogniser plus a numeric recogniser, expressed with **bounded
 #: quantifiers only** — core's config-regex ReDoS guard (issue #28) rejects nested/adjacent
 #: unbounded quantifiers, and rightly so.
-_PROPER_NOUN = r"[A-ZÀ-ÖØ-Þ][\w'’.-]{0,29}(?: [A-ZÀ-ÖØ-Þ][\w'’.-]{0,29}){0,4}"  # noqa: E501
+# The token class deliberately excludes ``.``: including it swallows the sentence-final period
+# into the last token ("Ada Lovelace." instead of "Ada Lovelace"), which is a boundary error on
+# every sentence-final entity — a measurable, and avoidable, self-inflicted recall loss.
+_PROPER_NOUN = r"[A-ZÀ-ÖØ-Þ][\w'’-]{0,29}(?: [A-ZÀ-ÖØ-Þ][\w'’-]{0,29}){0,4}"
 _NUMBER = r"\d[\d.,]{0,14}"
 
 #: The pinned Entity-Extraction stack. ``entity.gazetteer`` is the zero-dep CPU default, so this
@@ -211,7 +214,7 @@ class EntitySuite:
     languages: tuple[str, ...] = REDFM_LANGUAGES
 
     def run(self, root: Path, *, limit: int | None = None) -> SuiteResult:
-        extractor = load_provider(
+        extractor: EntityExtractor = load_provider(
             self.stack_pin,
             capability=CapabilityKind.ENTITY_EXTRACTION,
             protocol=EntityExtractor,
@@ -292,7 +295,7 @@ class RelationSuite:
     languages: tuple[str, ...] = REDFM_LANGUAGES
 
     def run(self, root: Path, *, limit: int | None = None) -> SuiteResult:
-        extractor = load_provider(
+        extractor: RelationExtractor = load_provider(
             self.stack_pin,
             capability=CapabilityKind.RELATION_EXTRACTION,
             protocol=RelationExtractor,
@@ -395,7 +398,7 @@ class DisambiguationSuite:
     languages: tuple[str, ...] = REDFM_LANGUAGES
 
     def run(self, root: Path, *, limit: int | None = None) -> SuiteResult:
-        disambiguator = load_provider(
+        disambiguator: Disambiguator = load_provider(
             self.stack_pin,
             capability=CapabilityKind.DISAMBIGUATION,
             protocol=Disambiguator,
