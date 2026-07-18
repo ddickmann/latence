@@ -234,3 +234,55 @@ def test_guard_accepts_both_seam_routed_loads() -> None:
             and _is_model_from_pretrained(n)
         ]
         assert not flagged, f"a perf-seam-routed model load must NOT be flagged: {good!r}"
+
+
+# --- #190: the mdeberta JIT-neutralization is a SHARED seam, never a per-Provider copy ------------
+
+# The mdeberta-v3-backed Providers. Their encoder scripts ``build_relative_position`` with
+# ``@torch.jit.script``, which dies in nvrtc on Blackwell/CUDA-13 (``libnvrtc-builtins.so.13.0``) on
+# the FIRST forward. Every one of them must inherit the fix from the shared perf seam by loading
+# through a JIT-neutralizing loader — none may hand-roll the env-var workaround locally.
+_MDEBERTA_PROVIDER_SOURCES = (
+    "latence-ner-gliner/src/latence_ner_gliner/provider.py",
+    "latence-relation-gliner/src/latence_relation_gliner/provider.py",
+    "latence-pii-gliner/src/latence_pii_gliner/provider.py",
+    "latence-pii-gliner2/src/latence_pii_gliner2/provider.py",
+    "latence-extract-gliner2/src/latence_extract_gliner2/provider.py",
+)
+
+# The shared perf-seam loaders that neutralize the TorchScript JIT before calling the native loader.
+_JIT_NEUTRALIZING_LOADERS = ("load_then_cast", "load_gliner2_optimized")
+
+
+@pytest.mark.parametrize("rel_source", _MDEBERTA_PROVIDER_SOURCES)
+def test_mdeberta_providers_load_through_a_jit_neutralizing_seam(rel_source: str) -> None:
+    """Every mdeberta-backed Provider's model load routes through the shared JIT-neutralizing seam.
+
+    The teeth for #190's "shared seam, not a per-Provider copy": a sixth mdeberta Provider that
+    calls ``GLiNER2.from_pretrained`` directly (bypassing ``load_then_cast`` /
+    ``load_gliner2_optimized``) re-opens the Blackwell nvrtc crash, and this scan bites the moment
+    its source lands.
+    """
+    path = _packages_root() / rel_source
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    seam_routed = _model_from_pretrained_passed_to_perf_seam(tree)
+    assert seam_routed, f"{rel_source}: no model load routed through the shared perf seam"
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or id(node.func) in seam_routed:
+            continue
+        assert not _is_model_from_pretrained(node), (
+            f"{rel_source} line {node.lineno}: {_callee_root_name(node)}(...) bypasses the shared "
+            "JIT-neutralizing loaders "
+            f"({', '.join(_JIT_NEUTRALIZING_LOADERS)}) — re-opens the Blackwell/CUDA-13 nvrtc crash"
+        )
+
+
+@pytest.mark.parametrize("rel_source", _MDEBERTA_PROVIDER_SOURCES)
+def test_no_provider_hand_rolls_the_pytorch_jit_workaround(rel_source: str) -> None:
+    """No Provider sets ``PYTORCH_JIT`` itself — the neutralization lives ONCE, in the perf seam."""
+    src = (_packages_root() / rel_source).read_text(encoding="utf-8")
+    assert "PYTORCH_JIT" not in src, (
+        f"{rel_source}: the PYTORCH_JIT workaround must live in latence_core.providers.perf "
+        "(neutralize_torch_jit), not be copied per Provider"
+    )

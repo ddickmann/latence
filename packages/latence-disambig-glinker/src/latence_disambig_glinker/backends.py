@@ -328,6 +328,15 @@ class GLinkerBackend(InferenceBackend):
     def _init_executor(self) -> None:
         import os
 
+        # W9-jit: neutralize the TorchScript JIT BEFORE torch/glinker are imported. This backend is
+        # DeBERTa-backed and does not route through the shared gliner loaders, so it calls the SAME
+        # shared seam (latence_core.providers.perf) directly — the mdeberta relative-position helper
+        # is otherwise scripted with @torch.jit.script and dies in nvrtc on Blackwell/CUDA-13
+        # (libnvrtc-builtins.so.13.0) on the first forward. Throughput-only, byte-identical output.
+        from latence_core.providers.perf import neutralize_torch_jit
+
+        neutralize_torch_jit(provider_name="disambiguation.glinker")
+
         import torch
 
         torch.set_float32_matmul_precision("high")

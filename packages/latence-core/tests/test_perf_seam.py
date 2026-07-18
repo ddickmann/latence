@@ -21,6 +21,7 @@ from latence_core.providers.perf import (
     DEFAULT_INTRA_OP_THREADS,
     DTYPE_BF16,
     DTYPE_FP32,
+    TORCH_JIT_ENV,
     apply_gliner_max_len,
     cap_intra_op_threads,
     ensure_gliner2_on_cuda,
@@ -31,6 +32,7 @@ from latence_core.providers.perf import (
     load_then_cast,
     load_with_fa2_fallback,
     maybe_compile,
+    neutralize_torch_jit,
     resolve_attn_impl,
     resolve_dtype_name,
     resolve_gliner2_knob,
@@ -487,3 +489,173 @@ def test_ensure_gliner2_on_cuda_cpu_does_not_move() -> None:
 def test_ensure_gliner2_on_cuda_guarded_on_bare_model() -> None:
     # A model with no ``.to`` / no device (a test double, a frozen wrapper) never crashes.
     assert ensure_gliner2_on_cuda(object(), cuda=True) is None
+
+
+# --- W9-jit: TorchScript JIT neutralization (the Blackwell/CUDA-13 nvrtc crash) -------------------
+
+
+class _FakeScriptFunction:
+    """What ``torch.jit.script`` returns while the JIT is ENABLED — and what dies on Blackwell.
+
+    A real ``torch.jit.script`` builds a ScriptFunction whose fused kernels are compiled at CALL
+    time by nvrtc; on the CUDA-13 / Blackwell pod that compile fails in native code with
+    ``failed to open libnvrtc-builtins.so.13.0``. The fake raises exactly there — so a fake that
+    "accepts" a JIT the real box rejects is impossible: with the JIT on, the forward dies.
+    """
+
+    def __init__(self, fn: Any) -> None:
+        self.fn = fn
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        msg = (
+            "The following operation failed in the TorchScript interpreter: Compilation error: "
+            "nvrtc: failed to open libnvrtc-builtins.so.13.0"
+        )
+        raise RuntimeError(msg)
+
+
+class _FakeEnabled:
+    """Mirrors ``torch.jit._state._enabled`` — the proxy torch parses ``PYTORCH_JIT`` into."""
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+
+def _install_fake_torch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Install a fake ``torch`` that mirrors the REAL TorchScript JIT switch semantics.
+
+    Real torch parses ``PYTORCH_JIT`` **once, at import**, into ``torch.jit._state._enabled.enabled``
+    and ``torch.jit.script`` then returns the function **unchanged** when that flag is False, or a
+    ScriptFunction when it is True. ``torch.jit._state.disable()`` flips the flag at runtime. The
+    fake reproduces all three, so the seam is exercised against the real contract.
+    """
+    import os
+
+    torch = types.ModuleType("torch")
+    jit = types.ModuleType("torch.jit")
+    state = types.ModuleType("torch.jit._state")
+    enabled = _FakeEnabled(os.environ.get("PYTORCH_JIT", "1") != "0")
+    state._enabled = enabled  # type: ignore[attr-defined]
+    state.disable = lambda: setattr(enabled, "enabled", False)  # type: ignore[attr-defined]
+
+    def script(fn: Any) -> Any:
+        # The real torch.jit.script: a pass-through while the JIT is disabled, a ScriptFunction
+        # otherwise. This IS the neutralization the seam relies on.
+        return _FakeScriptFunction(fn) if enabled.enabled else fn
+
+    jit.script = script  # type: ignore[attr-defined]
+    jit._state = state  # type: ignore[attr-defined]
+    torch.jit = jit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.jit", jit)
+    return torch
+
+
+def _build_relative_position(query_size: int, key_size: int) -> int:
+    """Stands in for transformers' ``@torch.jit.script`` mdeberta relative-position helper."""
+    return query_size - key_size
+
+
+def test_torch_jit_enabled_reproduces_the_blackwell_nvrtc_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fault this seam exists for: with the JIT ON, the scripted helper dies in nvrtc."""
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    torch = _install_fake_torch(monkeypatch)
+    scripted = torch.jit.script(_build_relative_position)
+    with pytest.raises(RuntimeError, match="libnvrtc-builtins.so.13.0"):
+        scripted(5, 2)
+
+
+def test_neutralize_torch_jit_makes_scripting_a_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the seam runs, ``torch.jit.script`` returns the eager function — same value, no nvrtc.
+
+    Asserts BEHAVIOUR (scripting is neutralized and the helper still computes the same answer), not
+    a flag recording intent.
+    """
+    import os
+
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    torch = _install_fake_torch(monkeypatch)
+    assert neutralize_torch_jit() is True
+    assert os.environ[TORCH_JIT_ENV] == "0"
+    scripted = torch.jit.script(_build_relative_position)
+    assert scripted is _build_relative_position  # no ScriptFunction, so nothing reaches nvrtc
+    assert scripted(5, 2) == _build_relative_position(5, 2) == 3  # byte-identical output
+
+
+def test_neutralize_torch_jit_without_torch_still_sets_the_env_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Torch-free host: the env switch is still set (a later ``import torch`` comes up JIT-free)."""
+    import os
+
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert neutralize_torch_jit() is False  # nothing to disable in-process
+    assert os.environ[TORCH_JIT_ENV] == "0"
+
+
+def test_neutralize_torch_jit_is_guarded_on_a_torch_without_jit_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A torch that exposes no ``jit._state`` (a stub, a future rename) is a logged no-op."""
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+    assert neutralize_torch_jit() is False  # never raises
+
+
+def _mdeberta_loader(torch: Any) -> Any:
+    """A loader mirroring the mdeberta-v3 encoder: it SCRIPTS its relative-position helper at load
+    and calls it in the forward — the exact shape of the Blackwell crash."""
+
+    def loader(model_id: str, **kwargs: Any) -> Any:
+        rel_pos = torch.jit.script(_build_relative_position)
+        return types.SimpleNamespace(
+            model_id=model_id,
+            kwargs=kwargs,
+            forward=lambda q, k: rel_pos(q, k),
+        )
+
+    return loader
+
+
+def test_load_then_cast_neutralizes_the_jit_for_the_gliner_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION (#190): the shared gliner-library load path must not leave a scripted forward.
+
+    Pre-fix this raises ``RuntimeError: ... libnvrtc-builtins.so.13.0`` from ``model.forward``.
+    """
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    torch = _install_fake_torch(monkeypatch)
+    model = load_then_cast(_mdeberta_loader(torch), "mdeberta-model", {}, "cpu")
+    assert model.forward(5, 2) == 3  # the forward runs eagerly, same value, no nvrtc
+
+
+def test_load_gliner2_optimized_neutralizes_the_jit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REGRESSION (#190): the shared gliner2 load path must not leave a scripted forward.
+
+    Pre-fix this raises ``RuntimeError: ... libnvrtc-builtins.so.13.0`` from ``model.forward``.
+    """
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    torch = _install_fake_torch(monkeypatch)
+    model = load_gliner2_optimized(_mdeberta_loader(torch), "gliner2-model", None, {})
+    assert model.forward(5, 2) == 3
+
+
+def test_load_gliner2_optimized_neutralizes_the_jit_on_the_optimized_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The neutralization is unconditional — it applies to the quantize/compile load too, not only
+    the plain one (a Blackwell box is exactly where quantize=True is on)."""
+    monkeypatch.setenv("PYTORCH_JIT", "1")
+    torch = _install_fake_torch(monkeypatch)
+    model = load_gliner2_optimized(
+        _mdeberta_loader(torch), "gliner2-model", "cuda", {"quantize": True}
+    )
+    assert model.kwargs == {"quantize": True, "compile": True}
+    assert model.forward(5, 2) == 3
