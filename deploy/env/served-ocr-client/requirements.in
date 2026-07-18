@@ -1,0 +1,31 @@
+# GENERATED FILE — do not edit by hand.
+# Source of truth: deploy/env/served-ocr-client/environment.yaml + the workspace packages' pyproject.toml.
+# Regenerate:      latence env render deploy/env/served-ocr-client/environment.yaml
+# Verify:          latence env verify deploy/env/served-ocr-client/environment.yaml
+
+#
+# Direct third-party requirements of the 'served-ocr-client' environment.
+# The workspace latence-* packages are installed from source with --no-deps by
+# install.sh, so their intra-workspace requirements never appear here — this file is
+# what actually pins their third-party surface.
+
+fsspec>=2024.2
+    # via latence-core
+openai>=1.0,<3
+    # via latence-parser-lighton-vllm
+pillow>=10.0
+    # via latence-parser-lighton, latence-parser-lighton-vllm
+pyarrow>=15.0
+    # via latence-core
+pydantic>=2.5
+    # via latence-core
+pypdfium2>=4.0
+    # via latence-parser-lighton, latence-parser-lighton-vllm
+pyyaml>=6.0
+    # via latence-core
+torch>=2.1
+    # via latence-parser-lighton
+transformers>=4.45
+    # via latence-parser-lighton
+typer>=0.12
+    # via latence-core

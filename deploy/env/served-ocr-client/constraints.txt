@@ -1,0 +1,34 @@
+# GENERATED FILE — do not edit by hand.
+# Source of truth: deploy/env/served-ocr-client/environment.yaml + the workspace packages' pyproject.toml.
+# Regenerate:      latence env render deploy/env/served-ocr-client/environment.yaml
+# Verify:          latence env verify deploy/env/served-ocr-client/environment.yaml
+
+#
+# ENFORCED conflict boundaries for the 'served-ocr-client' environment.
+# Passed to the installer as `-c constraints.txt`, so they bind the resolution — they
+# are not documentation. Every one is also asserted against requirements.lock by
+# `latence env verify`, so a boundary that stops holding fails the build.
+
+# THE client side of the split, and the reason the endpoint seam exists. The SERVING environment resolves to transformers 5.14.1; the text stack cannot follow it there, because glinker and flashdeberta (deploy/env/cpu-text, the Provider set this environment composes with) are written against the transformers 4.x API. Capping HERE — in the environment that talks to the 5.x server — is what keeps the two from converging: without it a resolver is free to take 5.x on this side too, the client and server look identical, and the next person "simplifies" the split away and rediscovers the conflict on a pod.
+transformers<5
+
+# The cap latence-parser-lighton's in-process sibling declares. The lock additionally pins the `+cpu` local version from the PyTorch CPU index: this environment runs NO model, so any CUDA payload here is pure download weight and a lie about what the box needs.
+torch>=2.1,<3
+
+# The async HTTP client parser.lighton_vllm POSTs page images with (openai.AsyncOpenAI, code Apache-2.0). The library breaks its API across majors; the current major is 2.x, so <3 is the real current-major boundary — pinning <2 would exclude the shipping line.
+openai>=1.0,<3
+
+# The rasteriser's LANCZOS downscale and PNG encode, and the floor the shipped smoke fixture is rendered with. Pillow's decoder CVEs are patched forward, so a floor is the security-relevant boundary here; there is no upper cap because the rasteriser uses only the stable Image API.
+pillow>=10.0
+
+# --- EXCLUDED distributions -----------------------------------------------------
+# Each is pinned to a specifier NO release can satisfy, so the resolver REFUSES the
+# install ("no solution found") the moment anything asks for it, directly or
+# transitively. This is the enforcement: never a post-install uninstall step, which
+# only runs if somebody remembers to run it.
+
+# Prebuilt flash-attn wheels bind a specific torch C++ ABI and were broken by the torch churn on the live run. Nothing on this side runs an attention kernel at all — the OCR model is on the far side of the socket — so flash-attn here would be pure ABI risk for zero benefit. It is a common transitive optional accelerator, which is exactly why the exclusion is a pin rather than a note.
+flash-attn<0
+
+# Same ABI story, same zero benefit: this environment decodes PDF pages with pypdfium2 and images with Pillow, never audio or video. sentence-transformers (the neighbouring cpu-text environment) does not need it either — it appears only as an optional transitive extra, which is precisely how it landed on the pod and broke the install.
+torchcodec<0
