@@ -24,6 +24,7 @@ latence-disambig-embedding = { workspace = true }
 latence-disambig-glinker = { workspace = true }
 latence-runner-airflow = { workspace = true }
 latence-retrieval = { workspace = true }
+latence-source-sharepoint = { workspace = true }
 latence-splade = { workspace = true }
 latence-muvera = { workspace = true }
 latence-demo = { workspace = true }
@@ -82,6 +83,12 @@ dependencies = [
     # latence-demo — its offline/deterministic MaxSim-approximation tests run, and the conformance
     # suite (C1–C6) exercises the REAL 'fde.muvera' converter, alongside the in-core 'fde.reference'.
     "latence-muvera",
+    # The SharePoint/OneDrive Source connector (#182, ADR-0014/0018). Pure-Python and
+    # DEPENDENCY-FREE (it speaks Microsoft Graph's REST/JSON API over the standard library), so
+    # unlike the torch/openai Provider packages it installs into the default dev env like
+    # latence-demo: its offline tests run against the faithful Graph fake it ships, and the
+    # conformance suite (C1-C6) exercises the REAL connector against that fake.
+    "latence-source-sharepoint",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An

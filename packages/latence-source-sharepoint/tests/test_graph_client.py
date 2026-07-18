@@ -1,0 +1,242 @@
+"""GraphClient behaviour: pagination, throttling, token refresh, and the transport's TLS guard.
+
+These drive the REAL client against the shipped faithful fake, so the retry/refresh/pagination
+logic under test is the logic that ships — not a parallel implementation living in a test.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+from latence_core.errors import ConfigError, ProviderError
+from latence_source_sharepoint.graph import MAX_PAGE_SIZE, GraphClient
+from latence_source_sharepoint.testing import (
+    GRAPH_HOST,
+    FakeFile,
+    FakeGraphApi,
+    FakeGraphTransport,
+)
+from latence_source_sharepoint.transport import UrllibTransport, require_tls
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from latence_source_sharepoint.auth import TokenProvider
+
+
+class _ScriptedTokenProvider:
+    """Hands out tokens from a list, advancing only when a refresh is forced."""
+
+    def __init__(self, tokens: list[str]) -> None:
+        self._tokens = tokens
+        self.index = 0
+        self.refreshes = 0
+
+    def token(self, *, force_refresh: bool = False) -> str:
+        if force_refresh and self.index + 1 < len(self._tokens):
+            self.index += 1
+            self.refreshes += 1
+        return self._tokens[self.index]
+
+
+def _client(
+    api: FakeGraphApi,
+    *,
+    token_provider: TokenProvider | None = None,
+    sleeps: list[float] | None = None,
+    page_size: int = 200,
+    max_retries: int = 5,
+    max_retry_after_seconds: float = 300.0,
+) -> tuple[GraphClient, FakeGraphTransport]:
+    transport = FakeGraphTransport(api)
+    provider = token_provider or _ScriptedTokenProvider(["valid-token"])
+    return (
+        GraphClient(
+            transport=transport,
+            token_provider=provider,
+            drive_id=api.drive_id,
+            base_url=GRAPH_HOST,
+            page_size=page_size,
+            max_retries=max_retries,
+            max_retry_after_seconds=max_retry_after_seconds,
+            sleep=(sleeps.append if sleeps is not None else lambda _seconds: None),
+        ),
+        transport,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+
+def test_pagination_follows_odata_next_link_across_every_page() -> None:
+    files = [FakeFile(path=f"/doc-{n:02d}.md", content=f"body {n}".encode()) for n in range(25)]
+    client, transport = _client(FakeGraphApi(files=files), page_size=4)
+    listed = list(client.list_files())
+    assert [item.name for item in listed] == sorted(f.path.lstrip("/") for f in files)
+    # 25 items at 4 per page = 7 pages; a client that ignored nextLink would make one request.
+    assert sum(1 for call in transport.calls if "children" in call.url) == 7
+
+
+def test_the_fake_rejects_skip_paging_the_way_graph_does() -> None:
+    """Guards the fake's faithfulness: Graph does not support $skip on driveItem children."""
+    api = FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")])
+    transport = FakeGraphTransport(api)
+    response = transport.request(
+        "GET",
+        f"{GRAPH_HOST}/drives/{api.drive_id}/root/children?$top=10&$skip=10",
+        headers={"Authorization": "Bearer valid-token"},
+    )
+    assert response.status == 400
+    assert b"invalidRequest" in response.body
+
+
+def test_page_size_beyond_the_graph_ceiling_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match=str(MAX_PAGE_SIZE)):
+        _client(FakeGraphApi(), page_size=MAX_PAGE_SIZE + 1)
+
+
+# ---------------------------------------------------------------------------
+# Throttling
+# ---------------------------------------------------------------------------
+
+
+def test_a_429_is_retried_after_exactly_the_retry_after_interval() -> None:
+    api = FakeGraphApi(
+        files=[FakeFile(path="/a.md", content=b"a")],
+        throttle_after=0,
+        throttle_burst=1,
+        retry_after_seconds=11,
+    )
+    sleeps: list[float] = []
+    client, _ = _client(api, sleeps=sleeps)
+    assert [item.name for item in client.list_files()] == ["a.md"]
+    assert sleeps == [11.0]
+
+
+def test_persistent_throttling_raises_a_typed_error_instead_of_looping_forever() -> None:
+    api = FakeGraphApi(
+        files=[FakeFile(path="/a.md", content=b"a")],
+        throttle_after=0,
+        throttle_burst=99,
+        retry_after_seconds=1,
+    )
+    sleeps: list[float] = []
+    client, _ = _client(api, sleeps=sleeps, max_retries=3)
+    with pytest.raises(ProviderError, match="throttling"):
+        list(client.list_files())
+    assert sleeps == [1.0, 1.0, 1.0]
+
+
+def test_an_absurd_retry_after_is_refused_rather_than_parking_the_pipeline() -> None:
+    api = FakeGraphApi(
+        files=[FakeFile(path="/a.md", content=b"a")],
+        throttle_after=0,
+        throttle_burst=1,
+        retry_after_seconds=3600,
+    )
+    sleeps: list[float] = []
+    client, _ = _client(api, sleeps=sleeps, max_retry_after_seconds=60.0)
+    with pytest.raises(ProviderError, match="back-off"):
+        list(client.list_files())
+    assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# Auth failure and refresh
+# ---------------------------------------------------------------------------
+
+
+def test_an_expired_token_triggers_exactly_one_refresh_and_the_run_continues() -> None:
+    tokens = _ScriptedTokenProvider(["expired-token", "valid-token"])
+    client, _ = _client(
+        FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")]), token_provider=tokens
+    )
+    assert [item.name for item in client.list_files()] == ["a.md"]
+    assert tokens.refreshes == 1
+
+
+def test_a_permanently_bad_token_fails_with_the_graph_error_code() -> None:
+    tokens = _ScriptedTokenProvider(["nope"])
+    client, _ = _client(
+        FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")]), token_provider=tokens
+    )
+    with pytest.raises(ProviderError, match="InvalidAuthenticationToken"):
+        list(client.list_files())
+
+
+def test_an_unknown_drive_is_a_config_error_not_a_provider_error() -> None:
+    api = FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")])
+    transport = FakeGraphTransport(api)
+    client = GraphClient(
+        transport=transport,
+        token_provider=_ScriptedTokenProvider(["valid-token"]),
+        drive_id="no-such-drive",
+        base_url=GRAPH_HOST,
+        sleep=lambda _seconds: None,
+    )
+    with pytest.raises(ConfigError, match="does not exist"):
+        list(client.list_files())
+
+
+def test_an_unknown_root_path_is_a_config_error() -> None:
+    client, _ = _client(FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")]))
+    with pytest.raises(ConfigError, match="root_path"):
+        list(client.list_files("/no-such-folder"))
+
+
+def test_a_query_string_token_is_rejected_the_way_graph_rejects_it() -> None:
+    """Guards the fake's faithfulness: Graph accepts a bearer token in the header only."""
+    api = FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")])
+    transport = FakeGraphTransport(api)
+    response = transport.request(
+        "GET",
+        f"{GRAPH_HOST}/drives/{api.drive_id}/root/children?access_token=valid-token",
+        headers={},
+    )
+    assert response.status == 401
+    assert b"InvalidAuthenticationToken" in response.body
+
+
+# ---------------------------------------------------------------------------
+# Download integrity
+# ---------------------------------------------------------------------------
+
+
+def test_a_truncated_download_is_refused_rather_than_ingested() -> None:
+    class _TruncatingApi(FakeGraphApi):
+        def _file_entry(self, entry: FakeFile) -> dict[str, object]:
+            listed = super()._file_entry(entry)
+            listed["size"] = len(entry.content) + 10  # Graph says 10 bytes more than arrive
+            return listed
+
+    client, _ = _client(_TruncatingApi(files=[FakeFile(path="/a.md", content=b"short")]))
+    item = next(iter(client.list_files()))
+    with pytest.raises(ProviderError, match="truncated download"):
+        client.download(item)
+
+
+# ---------------------------------------------------------------------------
+# The transport's TLS guard (the production transport, not the fake)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url", ["http://graph.microsoft.com/v1.0/drives", "ftp://example.invalid/x", "graph/v1.0"]
+)
+def test_a_non_tls_url_is_refused_before_any_header_is_written(url: str) -> None:
+    with pytest.raises(ConfigError, match="https"):
+        require_tls(url)
+
+
+@pytest.mark.parametrize("url", ["https://graph.microsoft.com/v1.0", "http://localhost:8080/v1.0"])
+def test_tls_and_loopback_urls_are_allowed(url: str) -> None:
+    require_tls(url)  # does not raise
+
+
+def test_the_production_transport_refuses_a_cleartext_request() -> None:
+    headers: Mapping[str, str] = {"Authorization": "Bearer secret"}
+    with pytest.raises(ConfigError, match="https"):
+        UrllibTransport().request("GET", "http://graph.microsoft.com/v1.0/me", headers=headers)
