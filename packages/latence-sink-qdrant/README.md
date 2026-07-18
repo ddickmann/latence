@@ -77,6 +77,11 @@ latence-sink-qdrant verify-absent 'contract-42#chunk-0' 'contract-42#chunk-1' \
 (Qdrant marks deleted vectors in its HNSW graph and reclaims them on optimisation. The guarantee
 here is the one erasure needs: the point and its payload are no longer retrievable or searchable.)
 
+The sweep filters on the `_latence_load_id` payload field. On a large collection that is a payload
+scan; if it becomes the slow part of your load, add a keyword payload index on that field in Qdrant
+once (`create_payload_index`) — the sink needs no change, and creating that index is left to the
+operator rather than assumed here.
+
 ### When to turn reconciling off
 
 Reconciling assumes the collection is *this* Export's projection — the normal setup, and the

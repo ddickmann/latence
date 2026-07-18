@@ -294,11 +294,13 @@ class QdrantSink:
                 self._upsert(changed)
                 upserted += len(changed)
             if same:
-                # Unchanged records are NOT re-upserted (that is the whole point), but they must
-                # still carry this run's sweep marker or the reconcile below would delete them as
-                # stale. A payload-only stamp is O(id), never a vector rewrite.
-                self._restamp(same, load_id)
                 unchanged += len(same)
+                if self._reconcile:
+                    # Unchanged records are NOT re-upserted (that is the whole point), but they
+                    # must still carry this run's sweep marker or the reconcile below would delete
+                    # them as stale. A payload-only stamp is O(id), never a vector rewrite — and
+                    # with reconciling off there is no sweep, so it is skipped entirely.
+                    self._restamp(same, load_id)
 
         if dimension is None:
             # An Export with zero records. If the collection does not exist there is nothing to
