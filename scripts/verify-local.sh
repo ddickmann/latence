@@ -71,8 +71,11 @@ ok "stack validate"
 step "reproducible-environment specs (#195 — pins, enforced conflict boundaries, providers)"
 # The OFFLINE gate of every deploy/env/<name>/ environment: `smoke.sh --spec-only`. It needs no
 # heavy install and no network, and it is what turns dependency drift in a Provider package RED
-# on every commit (the full 3-gate smoke, which stands the environment up and runs the tiny
-# end-to-end slice, needs the installed venv — see deploy/env/README.md).
+# on every commit. It also enforces the #198 transformers-split resolution BEFORE any install:
+# a package whose declared window is disjoint from an enforced boundary, or an excluded
+# in-process OCR package entering the set, fails right here. The remaining gates — standing the
+# environment up, PROVING real GPU placement, and the tiny end-to-end slice — need the installed
+# venv (and a GPU); see deploy/env/README.md.
 for env in deploy/env/*/smoke.sh; do
   [ -f "$env" ] && bash "$env" --spec-only
 done
@@ -88,4 +91,4 @@ printf '\n\033[1;32m========================================\n'
 printf 'LOCAL VERIFY GREEN — all mirrored CI gates pass.\n'
 printf '========================================\033[0m\n'
 printf 'Not run here (separate/infra): MinIO s3 e2e, Airflow DAG lane, GPU real runs (pod),\n'
-printf '  deploy/env/* gates 2+3 (need the installed heavy venv: bash deploy/env/<name>/smoke.sh).\n'
+printf '  deploy/env/* gates 2+ (need the installed heavy venv, and a CUDA-13 GPU for the\n  gpu-learned placement gate: bash deploy/env/<name>/smoke.sh).\n'
