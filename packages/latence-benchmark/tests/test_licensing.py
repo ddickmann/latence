@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from latence_benchmark.licensing import (
     UNVERIFIED,
     DatasetLicense,

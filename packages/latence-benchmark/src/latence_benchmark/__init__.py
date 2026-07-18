@@ -64,6 +64,7 @@ __all__ = [
     "get_suite",
     "parse_suite",
     "register_suite",
+    "require_usable",
     "render_json",
     "render_markdown",
     "score",

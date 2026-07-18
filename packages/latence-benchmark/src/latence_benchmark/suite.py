@@ -173,17 +173,36 @@ class SuiteResult:
 class BenchmarkSuite(Protocol):
     """One Stage benchmarked on one pinned public dataset."""
 
-    #: Registry key, e.g. ``"parse"``.
-    name: str
-    #: The pipeline Stage under measurement, e.g. ``"parse"``.
-    stage: str
-    #: The pinned dataset this suite scores against.
-    dataset: DatasetSpec
-    #: The exact Providers + config the numbers are produced with.
-    stack_pin: StackPin
+    # Declared as read-only properties, not attributes, so an immutable (frozen-dataclass)
+    # suite satisfies the protocol — a benchmark suite that could be mutated mid-run is
+    # exactly what a reproducible harness must not allow.
 
-    def run(self, root: Path) -> SuiteResult:
-        """Score a materialised dataset directory and return the result."""
+    @property
+    def name(self) -> str:
+        """Registry key, e.g. ``"parse"``."""
+        ...
+
+    @property
+    def stage(self) -> str:
+        """The pipeline Stage under measurement, e.g. ``"parse"``."""
+        ...
+
+    @property
+    def dataset(self) -> DatasetSpec:
+        """The pinned dataset this suite scores against."""
+        ...
+
+    @property
+    def stack_pin(self) -> StackPin:
+        """The exact Providers + config the numbers are produced with."""
+        ...
+
+    def run(self, root: Path, *, limit: int | None = None) -> SuiteResult:
+        """Score a materialised dataset directory and return the result.
+
+        ``limit`` caps the documents scored per split; a capped run must record itself as a
+        clearly-labelled subset in :attr:`SuiteResult.notes`.
+        """
         ...
 
 

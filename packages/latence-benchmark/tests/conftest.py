@@ -17,7 +17,6 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
-
 from latence_benchmark.parse_suite import OLMOCR_SPLITS
 
 if TYPE_CHECKING:

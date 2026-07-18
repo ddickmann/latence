@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-
 from latence_benchmark.parse_suite import ParseSuite, ProviderUnavailableError, parse_suite
 from latence_benchmark.suite import SuiteResult
 

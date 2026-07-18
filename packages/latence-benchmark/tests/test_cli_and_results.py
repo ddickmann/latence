@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-
 from latence_benchmark import cli
 from latence_benchmark.datasets import OMNIDOCBENCH
 from latence_benchmark.parse_suite import ParseSuite

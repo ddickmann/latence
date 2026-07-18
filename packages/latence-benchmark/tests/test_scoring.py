@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from latence_benchmark.scoring import Outcome, fuzzy_contains, fuzzy_find, normalise, score
 from latence_benchmark.unittests import UnitTest, UnitTestType
 
@@ -131,3 +130,50 @@ def test_unimplemented_classes_are_unsupported_never_a_free_pass(payload: dict[s
     assert result.outcome is Outcome.UNSUPPORTED
     assert "#187" in result.reason
     assert result.type in (UnitTestType.TABLE, UnitTestType.MATH)
+
+
+# -- baseline ------------------------------------------------------------------------------
+
+
+def test_baseline_passes_on_a_plausible_parse() -> None:
+    row = _test(type="baseline", text=None)
+    assert score(row, "A page with genuine content on it.", split="s").outcome is Outcome.PASSED
+
+
+def test_baseline_fails_on_an_empty_parse() -> None:
+    """The failure a `present`/`absent` pair cannot express: the page yielded nothing."""
+    row = _test(type="baseline", text=None)
+    result = score(row, "   \n\n  ", split="s")
+    assert result.outcome is Outcome.FAILED
+    assert "no text at all" in result.reason
+
+
+def test_baseline_fails_on_a_degenerate_repetition() -> None:
+    row = _test(type="baseline", text=None)
+    result = score(row, "aaaa aaaa aaaaaa aaa", split="s")
+    assert result.outcome is Outcome.FAILED
+    assert "degenerate" in result.reason
+
+
+def test_baseline_flags_mis_decoded_text_only_when_the_row_asks() -> None:
+    lenient = _test(type="baseline", text=None)
+    strict = _test(type="baseline", text=None, check_disallowed_characters=True)
+    garbled = "some text with a � replacement character"
+    assert score(lenient, garbled, split="s").outcome is Outcome.PASSED
+    assert score(strict, garbled, split="s").outcome is Outcome.FAILED
+
+
+def test_a_baseline_row_needs_no_assertion_payload() -> None:
+    """The real dataset's baseline rows carry only metadata — the schema must accept that."""
+    row = UnitTest.model_validate(
+        {
+            "pdf": "tables/9e6a_pg12.pdf",
+            "page": 1,
+            "id": "9e6a_pg12_table_baseline",
+            "type": "baseline",
+            "max_diffs": 0,
+            "checked": "verified",
+            "check_disallowed_characters": False,
+        }
+    )
+    assert row.type is UnitTestType.BASELINE

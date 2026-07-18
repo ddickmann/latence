@@ -30,13 +30,21 @@ class BenchmarkDataError(ValueError):
 
 
 class UnitTestType(StrEnum):
-    """The five olmOCR-bench test classes."""
+    """The olmOCR-bench test classes present at the pinned revision.
+
+    ``baseline`` is the easy one to miss: it appears only 9 times in 7,010 rows (7 in
+    ``headers_footers``, 2 in ``table_tests``) and carries no assertion payload at all — it is
+    a sanity check that the page produced a plausible parse rather than empty or degenerate
+    output. The strict reader is what surfaced it; a lenient one would have dropped nine rows
+    and nobody would ever have known.
+    """
 
     PRESENT = "present"
     ABSENT = "absent"
     ORDER = "order"
     TABLE = "table"
     MATH = "math"
+    BASELINE = "baseline"
 
 
 class UnitTest(BaseModel):
@@ -78,6 +86,9 @@ class UnitTest(BaseModel):
     # math
     math: str | None = None
 
+    # baseline
+    check_disallowed_characters: bool = False
+
     @model_validator(mode="after")
     def _require_fields_for_type(self) -> UnitTest:
         required: tuple[str, ...]
@@ -87,8 +98,11 @@ class UnitTest(BaseModel):
             required = ("before", "after")
         elif self.type is UnitTestType.TABLE:
             required = ("cell",)
-        else:
+        elif self.type is UnitTestType.MATH:
             required = ("math",)
+        else:
+            # baseline carries no assertion payload — it asserts about the output as a whole.
+            required = ()
         missing = [name for name in required if not getattr(self, name)]
         if missing:
             msg = (

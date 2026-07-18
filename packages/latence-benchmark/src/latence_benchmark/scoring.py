@@ -37,8 +37,17 @@ _WHITESPACE = re.compile(r"\s+")
 
 #: Scoring classes that are implemented; the rest are reported UNSUPPORTED (#187).
 SUPPORTED_TYPES: frozenset[UnitTestType] = frozenset(
-    {UnitTestType.PRESENT, UnitTestType.ABSENT, UnitTestType.ORDER}
+    {UnitTestType.PRESENT, UnitTestType.ABSENT, UnitTestType.ORDER, UnitTestType.BASELINE}
 )
+
+#: A ``baseline`` row asserts nothing specific — it asserts the page produced a *plausible*
+#: parse. The predicate implemented here is stated explicitly so a reader can see exactly what
+#: our number means: the normalised output must be non-empty, and must not be a degenerate
+#: repetition of a single character (the classic OCR/VLM collapse). When the row sets
+#: ``check_disallowed_characters`` the output must additionally contain no Unicode replacement
+#: character, which is what a mis-decoded text layer produces.
+BASELINE_MIN_CHARS = 1
+_REPLACEMENT_CHAR = "�"
 
 
 def normalise(text: str) -> str:
@@ -127,6 +136,31 @@ def _window(text: str, test: UnitTest) -> str:
     return text
 
 
+def _score_baseline(test: UnitTest, text: str, split: str) -> TestResult:
+    """Score a ``baseline`` sanity check. See :data:`BASELINE_MIN_CHARS` for the predicate."""
+    if len(text) < BASELINE_MIN_CHARS:
+        return TestResult(
+            test.id, split, test.type, Outcome.FAILED, "the parse produced no text at all"
+        )
+    if len(set(text.replace(" ", ""))) <= 1:
+        return TestResult(
+            test.id,
+            split,
+            test.type,
+            Outcome.FAILED,
+            "the parse output is a degenerate repetition of a single character",
+        )
+    if test.check_disallowed_characters and _REPLACEMENT_CHAR in text:
+        return TestResult(
+            test.id,
+            split,
+            test.type,
+            Outcome.FAILED,
+            "the parse output contains Unicode replacement characters (mis-decoded text)",
+        )
+    return TestResult(test.id, split, test.type, Outcome.PASSED)
+
+
 def score(test: UnitTest, output: str, *, split: str) -> TestResult:
     """Score one parser ``output`` against one ``test``."""
     if test.type not in SUPPORTED_TYPES:
@@ -139,6 +173,10 @@ def score(test: UnitTest, output: str, *, split: str) -> TestResult:
         )
 
     text = normalise(output)
+
+    if test.type is UnitTestType.BASELINE:
+        return _score_baseline(test, text, split)
+
     if not test.case_sensitive:
         text = text.casefold()
 

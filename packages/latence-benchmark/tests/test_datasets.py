@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-
 from latence_benchmark.datasets import (
     DATASETS,
     OLMOCR_BENCH,

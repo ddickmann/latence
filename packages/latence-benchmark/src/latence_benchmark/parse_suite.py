@@ -199,7 +199,13 @@ class ParseSuite:
                 results.extend(score(t, record.content, split=split) for t in split_tests)
             split_scores.append(SplitScore.from_results(split, results))
 
-        notes: list[str] = []
+        notes: list[str] = [
+            f"Scored with Provider {self.stack_pin.provider!r} exactly as pinned. A text-layer "
+            "PDF parser cannot recover text from a scanned page, and much of olmOCR-bench "
+            "(old_scans, long_tiny_text) is photographed or scanned material with no text "
+            "layer — those tests fail by construction, not by defect. Comparing an OCR "
+            "Provider means re-pinning: `--provider parser.lighton` (GPU).",
+        ]
         if limit is not None:
             notes.append(
                 f"SUBSET RUN — capped at {limit} document(s) per split. These numbers are NOT "
