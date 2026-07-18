@@ -12,13 +12,13 @@ requires-python = ">=3.11"
 # framework package. The GLM-OCR *model* (weights + upstream code) is MIT — that is recorded,
 # evidence-bearingly, in the ProviderProfile (license_weights/license_code = MIT), NOT here: this
 # field describes the license of the code shipped in THIS package, which is framework code.
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "ocr", "glm", "vision-language", "adapter", "gpu"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

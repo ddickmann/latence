@@ -13,8 +13,10 @@ are the adopter's choice.
   **Providers** (an in-process model, a remote endpoint, a cloud service) fulfil them as
   plugins. See [Capability protocols with provider plugins](adr/0004-capability-protocols-with-provider-plugins.md).
 - **Cloud-agnostic.** Storage is an [fsspec seam](adr/0009-fsspec-storage-seam.md); the
-  same Pipeline runs on a laptop, in a Databricks job, or as an Airflow DAG through a
-  swappable [Runner](adr/0003-stage-library-with-pluggable-runners.md).
+  same Pipeline runs on a laptop or as an Airflow DAG through a swappable
+  [Runner](adr/0003-stage-library-with-pluggable-runners.md). Two Runners ship today — the
+  built-in local one and `latence-runner-airflow`; other substrates (Databricks Workflows,
+  plain containers) are seam-compatible follow-ons, not shipped adapters.
 - **CPU-first, offline by default.** Every Stage ships a deterministic, dependency-light
   reference Provider that runs on a laptop with no GPU and no network
   ([ADR-0007](adr/0007-cpu-first-reference-providers.md)). GPU serving is an upgrade path,

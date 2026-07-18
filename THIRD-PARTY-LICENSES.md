@@ -13,7 +13,7 @@ PSF / MPL-2.0). None are copyleft in a way that reaches the framework's code.
 
 Licenses read back from each package's installed `*.dist-info/METADATA`
 (`License` / `License-Expression` / `Classifier: License ::`) in the workspace
-dev environment on 2026-07-07, except where a package is a heavy/optional
+dev environment on 2026-07-18 (the pre-publish refresh, issue #72), except where a package is a heavy/optional
 Provider dep not installed in the CPU-first dev env (ADR-0016) — those are marked
 **(upstream)** and cite the license the project publishes.
 
@@ -30,8 +30,8 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 | pyarrow | 24.0.0 | Apache-2.0 | Parquet / Arrow serialization |
 | pyyaml | 6.0.3 | MIT | declarative pipeline YAML |
 | typer | 0.26.8 | MIT | CLI |
-| click | (typer dep) | BSD-3-Clause | (typer dep) |
-| rich | 15.0.0 | MIT | CLI rendering |
+| click | 8.4.2 | BSD-3-Clause | (typer dep) |
+| rich | 14.3.4 | MIT | CLI rendering |
 | shellingham | 1.5.4 | ISC | (typer dep) |
 | markdown-it-py | 4.2.0 | MIT | (rich dep) |
 | mdurl | 0.1.2 | MIT | (markdown-it-py dep) |

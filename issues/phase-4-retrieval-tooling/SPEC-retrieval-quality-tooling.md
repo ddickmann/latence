@@ -147,7 +147,7 @@ Every piece is independently adoptable, stack-agnostic, and stateless.
 
 ## Further Notes
 
-- The whole layer is the consumer-side complement to `docs/INTEROP.md` (which describes how the pipeline's output loads into each stack) and the `RETRIEVAL-ENGINE-INPUT-SPEC.md`. It honours ADR-0017 (files, not a database) by holding nothing durable.
+- The whole layer is the consumer-side complement to `docs/RETRIEVAL-ENGINE-INPUT-SPEC.md` (which describes how the pipeline's output loads into each stack). It honours ADR-0017 (files, not a database) by holding nothing durable.
 - The MUVERA reference implements the canonical, training-free Google MUVERA FDE. Note that the article originally cited as the "FDE spec" is in fact the LightOn hierarchical-pooling *regularizer* (a different, training-required method), which is why it is deferred rather than adopted.
 - Build sequencing suggestion (not binding): index-time signal generators first (they extend a well-understood seam and unblock evaluation), then the Level-1 query-time transforms behind the `RetrievalBackend` fake, then the Level-2 orchestrator, then the MCP server. Graph multi-hop (DuckDB) and the Knapsack packer are the two heaviest ports and can proceed in parallel behind their extras.
 - Every model choice (sparse, cross-encoder, and any future multi-vector encoder) must pass separate weights-and-code license verification before it is wired, per the research-diligence directive and ADR-0012.

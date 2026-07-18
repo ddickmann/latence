@@ -10,7 +10,7 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 > security review, reliability/chaos (crash-resume, Delta idempotency), a
 > performance baseline, and determinism ([`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md)).
 > The grilled architecture lives in [`CONTEXT.md`](./CONTEXT.md) (the glossary)
-> and [`docs/adr/`](./docs/adr/) (32 architecture decisions), with
+> and [`docs/adr/`](./docs/adr/) (52 architecture decisions), with
 > [`docs/PORTING-MAP.md`](./docs/PORTING-MAP.md) recording what was mined from four
 > private production repos. **Not yet 1.0:** performance-at-scale and deeper
 > structural file validation are flagged as Phase-2 hardening; see the honest
@@ -21,7 +21,7 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 - **Stages** are units of work with typed input/output contracts (Source → Screen → Parse → Chunk → Screen → Entity Extraction → Relation Extraction → Redaction → Profiling → Disambiguation → Graph Assembly → Export).
 - **Capabilities** are the narrow interfaces a Stage depends on (Parser, EntityExtractor, Embedder, …). The framework never names a model.
 - **Providers** fulfil Capabilities — an in-process model, a remote endpoint, or a cloud AI service. Swapping a model is a one-line config change.
-- **Runners** execute a Pipeline. A built-in local Runner runs the whole thing on a laptop (CPU-only) with checkpoint/resume; thin adapters run the same Stages on Databricks or Airflow.
+- **Runners** execute a Pipeline. A built-in local Runner runs the whole thing on a laptop (CPU-only) with checkpoint/resume; a second, shipped adapter (`latence-runner-airflow`) runs the identical Stages as an Airflow DAG. The Runner seam is the contract, so further adapters (Databricks Workflows, plain containers) are seam-compatible follow-ons — they are **not** shipped today (ADR-0003/0030).
 - **Storage** is one fsspec seam: `file://`, `s3://`, `gs://`, `abfs://` — no code change.
 - Every record carries **Provenance** (source lineage) and **Classification** (language, category, sensitivity), enforced at every Stage boundary.
 - Every run emits a **Quality Report** so "AI-ready" is measured, not asserted.
@@ -44,7 +44,7 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 latence-framework/
 ├── CONTEXT.md                 # glossary — the canonical language
 ├── docs/
-│   ├── adr/                   # architecture decisions (0001–0033)
+│   ├── adr/                   # architecture decisions (0001–0053, 0040 unissued)
 │   └── PORTING-MAP.md         # what was mined from the private repos
 ├── packages/
 │   ├── latence-core/          # contracts, Capabilities, Runner, Storage (pure-Python)
@@ -123,8 +123,12 @@ pip install latence-ner-gliner      # opt-in: a learned NER Provider (pulls torc
 pip install latence-relation-llm    # opt-in: LLM relation extraction over any OpenAI-compatible endpoint
 ```
 
-The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
-`latence-demo`); the heavy/endpoint Providers stay isolated. Python ≥ 3.11.
+There is **no** `pip install latence` meta-package — installing is always one or more of the
+distributions above. `latence-demo` is the closest thing to a batteries-included entry point: it
+depends on `latence-core` + `latence-parser-document`, so `pip install latence-demo` gives you the
+one-command demo set and nothing heavy. Every other Provider (torch, endpoint clients, cloud SDKs)
+stays isolated in its own package (ADR-0016), so nothing pulls a GPU stack in behind your back.
+Python ≥ 3.11.
 
 ## Package map
 
@@ -144,8 +148,10 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 | `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
 | `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |
 | `latence-benchmark` | The reproducible **public** benchmark harness (pinned datasets, pinned stack configs, published results page). Not a pipeline Provider. |
-
 | `latence-console` | Read-only, offline, localhost run console: the run list + the Quality Report as headline verdicts (zero new deps). |
+
+The table is a tour of the families, not the full index — `packages/` holds every published
+distribution, and each one has its own README.
 
 ## Security & release integrity
 
@@ -161,7 +167,7 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 ## Documentation & governance
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary; the canonical language of the project.
-- [`docs/adr/`](./docs/adr/) — the 32 architecture decisions.
+- [`docs/adr/`](./docs/adr/) — the 52 architecture decisions.
 - [`docs/TUTORIAL-fresh-pod-walkthrough.md`](./docs/TUTORIAL-fresh-pod-walkthrough.md) — guided setup (`latence setup` → `latence process`) and the full stage-by-stage walkthrough.
 - [`docs/running-a-stack.md`](./docs/running-a-stack.md) — run + validate a full-spine stack (`latence stack validate`).
 - [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) — run a per-Stage provider bake-off (`latence bake-off`).
@@ -175,8 +181,8 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
   response you can expect.
 - [`docs/RELEASING.md`](./docs/RELEASING.md) — how a release is cut, and **how to verify
   one**: every release is signed with keyless Sigstore and ships a CycloneDX SBOM.
-
-- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
+- [`docs/GO-LIVE-RUNBOOK.md`](./docs/GO-LIVE-RUNBOOK.md) — the maintainer-manual launch steps
+  (visibility flip, PyPI publish, docs deploy, announcement) and their pre-flight checks.
 - [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) — **continuity & security process**: the honest bus factor, fork posture, support lifetime, CVD / patch / SBOM / signing posture, and CRA readiness. Start here if you are evaluating this for adoption.
 - [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
 - [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).

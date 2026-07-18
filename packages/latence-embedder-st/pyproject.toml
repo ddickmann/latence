@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Learned sentence-transformers Embedder Provider (IBM Granite Embedding r2, GPU 311m FA2+bf16 / CPU 97m) — the in-process semantic Embedder for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "embeddings", "sentence-transformers", "e5"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

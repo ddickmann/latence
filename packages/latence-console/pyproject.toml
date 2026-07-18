@@ -8,14 +8,14 @@ version = "0.1.0"
 description = "Read-only, offline, localhost run console for the Latence framework: the run list and the Quality Report rendered as headline quality verdicts a non-engineer can read. Reads only files already on Storage — no database, no server state, no telemetry (ADR-0010/0017)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "quality-report", "observability", "console", "read-only", "offline"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Web Environment",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
