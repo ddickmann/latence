@@ -720,27 +720,27 @@ def _check_excluded(
 
     findings: list[Finding] = []
     for rel_path in spec.workspace_packages:
-        entry = excluded_by_path.get(rel_path)
-        if entry is not None:
+        named = excluded_by_path.get(rel_path)
+        if named is not None:
             findings.append(
                 Finding(
                     "E-PACKAGE-EXCLUDED",
                     f"'{rel_path}' is in workspace_packages but this environment excludes it: "
-                    f"{entry.reason.strip().splitlines()[0]}",
+                    f"{named.reason.strip().splitlines()[0]}",
                 )
             )
     installed = {p.rel_path: p for p in packages}
     for rel_path, meta in sorted(installed.items()):
         for dep_dist in sorted(meta.workspace_dependencies):
-            entry = excluded_by_dist.get(dep_dist)
-            if entry is None:
+            dragged = excluded_by_dist.get(dep_dist)
+            if dragged is None:
                 continue
             findings.append(
                 Finding(
                     "E-PACKAGE-EXCLUDED",
                     f"'{rel_path}' requires '{dep_dist}', which this environment excludes "
-                    f"('{entry.package}') — installing it drags the excluded package in. "
-                    f"{entry.reason.strip().splitlines()[0]}",
+                    f"('{dragged.package}') — installing it drags the excluded package in. "
+                    f"{dragged.reason.strip().splitlines()[0]}",
                 )
             )
     return findings
@@ -902,14 +902,15 @@ def stack_components(stack_path: Path) -> tuple[StackComponent, ...]:
                     walk(item, capability)
             return
         provider = node.get("provider")
-        config = node.get("config") if isinstance(node.get("config"), dict) else {}
+        raw_config = node.get("config")
+        config: dict[str, Any] = dict(raw_config) if isinstance(raw_config, dict) else {}
         own_capability = node.get("capability") if isinstance(node.get("capability"), str) else None
         if isinstance(provider, str):
             found.append(
                 StackComponent(
                     capability=own_capability or capability,
                     provider=provider,
-                    config=dict(config),
+                    config=config,
                 )
             )
         for key, value in node.items():
