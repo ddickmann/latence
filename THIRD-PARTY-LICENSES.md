@@ -36,6 +36,7 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 | markdown-it-py | 4.2.0 | MIT | (rich dep) |
 | mdurl | 0.1.2 | MIT | (markdown-it-py dep) |
 | pygments | 2.20.0 | BSD-2-Clause | (rich dep) |
+| packaging | 26.2 | Apache-2.0 OR BSD-2-Clause | OPTIONAL (`latence-core[envspec]`) — PEP 440/508 parsing for `latence env verify` |
 
 ### Provider / adapter dependencies (installed only with that package)
 
@@ -112,6 +113,7 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | knowledgator/gliner-linker-rerank-v1.0 | Disambiguation (L4 reranker; `disambiguation.glinker`, ADR-0046) | Apache-2.0 |
 | ibm-granite/granite-embedding-311m-multilingual-r2 | Embedding (default, GPU tier; `embedding.sentence_transformers`) | Apache-2.0 |
 | ibm-granite/granite-embedding-97m-multilingual-r2 | Embedding (CPU tier) | Apache-2.0 |
+| opensearch-project/opensearch-neural-sparse-encoding-multilingual-v1 | Sparse signal (`sparse.splade`, wired in `deploy/env/cpu-text/stack.yaml`) | Apache-2.0 |
 | intfloat/multilingual-e5-small | Embedding (fallback) | MIT |
 | sentence-transformers/all-MiniLM-L6-v2 | Embedding (fallback) | Apache-2.0 |
 | microsoft/llmlingua-2 | Compression (post-v1) | MIT |
@@ -124,6 +126,13 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | Model | Capability | License | Note |
 |---|---|---|---|
 | google/embeddinggemma-300m | Embedding | Gemma | **Not a default; no Gemma-backed Provider ships in this repo.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). POLICY: the Gemma family is non-default and, were a Gemma Provider offered, it would be an explicitly opt-in Provider carrying the license and its flow-down obligations. Default Embedder is IBM Granite Embedding r2 (Apache-2.0). |
+
+Rejected after verification (recorded so the check is not repeated): **naver/splade-v3** —
+`cc-by-nc-sa-4.0` (non-commercial, not OSI open-source) and gated; not wired anywhere.
+**BAAI/bge-m3** is MIT-licensed and was cleared on licence grounds, but it is NOT wired into
+`sparse.splade`: its HF config declares `architectures: ["XLMRobertaModel"]` (no MLM head), so the
+`AutoModelForMaskedLM` load path that Provider uses would randomly initialise `lm_head` and emit a
+meaningless sparse vector. All three checked against the Hugging Face model API on 2026-07-18.
 
 Per the project's research-diligence directive, a GLiNER/HF checkpoint's license
 is per-weight and cannot be inferred from the library. Any model whose license
