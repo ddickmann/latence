@@ -9,7 +9,20 @@ workspace are versioned and released together under one version number.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Optional Iceberg-table Export output (#184, ADR-0017).** The corpus Export can now
+  *additionally* register the records it wrote as an Apache Iceberg table in an Iceberg **REST
+  catalog** (Unity / Polaris / Glue-via-REST / Lakekeeper), so the same data becomes directly
+  governable with no glue code. Enabled with one `iceberg:` config block on
+  `export.jsonl_parquet`; **off by default**, and with it off `pyiceberg` is never imported and
+  `records.jsonl` / `records.parquet` are byte-identical. The Iceberg schema *is* the Parquet
+  schema (including opt-in signal columns) and carries the same contract version stamp; the
+  registered data file is an immutable per-run copy under `<out_dir>/iceberg-data/`, so a
+  snapshot never points at a path a later run rewrites. Delta runs pick `mode: append` (a delta
+  run's records, added as a snapshot) or `mode: overwrite` (a full re-export, replacing the
+  contents in one atomic commit) — semantics documented in `docs/iceberg-export.md`. The client
+  ships as the `latence-core[iceberg]` extra (pyiceberg, Apache-2.0), never as a core dependency.
 
 ## [0.1.0] - 2026-07-14
 

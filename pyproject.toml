@@ -82,6 +82,16 @@ dependencies = [
     # latence-demo — its offline/deterministic MaxSim-approximation tests run, and the conformance
     # suite (C1–C6) exercises the REAL 'fde.muvera' converter, alongside the in-core 'fde.reference'.
     "latence-muvera",
+    # The OPTIONAL Iceberg-table Export output's client (#184, ADR-0017). It is an EXTRA on the
+    # published latence-core (`latence-core[iceberg]`), never a runtime dependency — but it IS
+    # pinned into the dev env, deliberately: the #184 acceptance criterion is an end-to-end
+    # verification against a REAL local Iceberg REST catalog, and the offline test
+    # (packages/latence-core/tests/_iceberg_rest.py) drives the real RestCatalog client over real
+    # HTTP against a real SqlCatalog. Faking pyiceberg would accept commits a real catalog rejects
+    # and manufacture false green. It is safe for the CPU-first offline env: pure-Python, no torch,
+    # no network at import, no model weights (Apache-2.0, ASF). `sql-sqlite` adds SQLAlchemy, the
+    # metastore behind the local REST fixture.
+    "pyiceberg[sql-sqlite]>=0.9",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
@@ -105,6 +115,11 @@ docs = [
 # and `latence_core.observability` degrades to a no-op when they are absent.
 observability = [
     "latence-core[observability]",
+]
+# Optional Iceberg-table Export output (#184, ADR-0017), mirrored at the workspace root for the
+# same one-shot-resolve convenience: `uv sync --extra iceberg`. The real extra is on latence-core.
+iceberg = [
+    "latence-core[iceberg]",
 ]
 
 [dependency-groups]
