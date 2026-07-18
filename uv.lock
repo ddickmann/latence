@@ -2037,6 +2037,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+envspec = [
+    { name = "packaging" },
+]
 observability = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-sdk" },
@@ -2048,13 +2051,14 @@ requires-dist = [
     { name = "fsspec", specifier = ">=2024.2" },
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.20" },
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.20" },
+    { name = "packaging", marker = "extra == 'envspec'", specifier = ">=23.0" },
     { name = "prometheus-client", marker = "extra == 'observability'", specifier = ">=0.19" },
     { name = "pyarrow", specifier = ">=15.0" },
     { name = "pydantic", specifier = ">=2.5" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.12" },
 ]
-provides-extras = ["observability"]
+provides-extras = ["envspec", "observability"]
 
 [[package]]
 name = "latence-demo"
@@ -2191,6 +2195,7 @@ observability = [
 dev = [
     { name = "hypothesis" },
     { name = "mypy" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -2217,6 +2222,7 @@ provides-extras = ["docs", "observability"]
 dev = [
     { name = "hypothesis", specifier = ">=6.100" },
     { name = "mypy", specifier = ">=1.11" },
+    { name = "packaging", specifier = ">=23.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.6" },
 ]

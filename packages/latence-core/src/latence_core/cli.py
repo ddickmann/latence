@@ -51,6 +51,13 @@ app = typer.Typer(add_completion=False, help="Latence — AI-ready data pipeline
 stack_app = typer.Typer(add_completion=False, help="Full-stack Pipeline configs + validation.")
 app.add_typer(stack_app, name="stack")
 
+# The ``env`` sub-command group (``latence env verify|render ...``, issue #195). The reproducible
+# environments under ``deploy/env/<name>/`` are specifications the build checks, not wiki pages.
+env_app = typer.Typer(
+    add_completion=False, help="Reproducible environment specs (deploy/env/<name>/)."
+)
+app.add_typer(env_app, name="env")
+
 logger = logging.getLogger("latence")
 
 
@@ -1019,6 +1026,98 @@ def purge(
         typer.echo(f"purge failed [{error_category(exc)}]: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     _emit_delta_report(pipeline, rid, report)
+
+
+def _repo_root_for(spec_path: Path) -> Path:
+    """The repo root a ``deploy/env/<name>/environment.yaml`` belongs to (three parents up)."""
+    return spec_path.resolve().parents[3]
+
+
+@env_app.command("verify")
+def env_verify(
+    spec_path: Annotated[
+        Path, typer.Argument(help="Path to a deploy/env/<name>/environment.yaml.")
+    ],
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: three parents up from spec)."),
+    ] = None,
+    probe: Annotated[
+        bool,
+        typer.Option(
+            "--probe",
+            help="Additionally LOAD every declared Provider from the registry (imports the heavy "
+            "stack). Only meaningful inside an installed environment.",
+        ),
+    ] = False,
+) -> None:
+    """Check a reproducible environment against the workspace it claims to stand up.
+
+    Offline and import-free: compares the generated ``requirements.in``/``constraints.txt``, the
+    solved lock, the Provider packages' declared dependencies and entry-points, and the smoke
+    stack. Exits non-zero on any finding, so dependency drift fails the build instead of the pod.
+    """
+    from latence_core.envspec import load_environment, probe_providers, verify_environment
+
+    try:
+        spec = load_environment(spec_path)
+        findings = verify_environment(spec, repo_root or _repo_root_for(spec_path)).findings
+        if probe:
+            findings += probe_providers(spec).findings
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"env verify failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    from latence_core.envspec import EnvironmentReport
+
+    report = EnvironmentReport(spec.name, findings)
+    typer.echo(report.describe())
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@env_app.command("render")
+def env_render(
+    spec_path: Annotated[
+        Path, typer.Argument(help="Path to a deploy/env/<name>/environment.yaml.")
+    ],
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: three parents up from spec)."),
+    ] = None,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Do not write; exit non-zero if a generated file is stale."),
+    ] = False,
+) -> None:
+    """Regenerate ``requirements.in`` + ``constraints.txt`` from the spec + the real pyprojects."""
+    from latence_core.envspec import load_environment, render_constraints, render_requirements
+
+    try:
+        spec = load_environment(spec_path)
+        root = repo_root or _repo_root_for(spec_path)
+        rendered = {
+            spec.requirements_path: render_requirements(spec, root),
+            spec.constraints_path: render_constraints(spec, root),
+        }
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"env render failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    stale = [
+        path
+        for path, text in rendered.items()
+        if not path.is_file() or path.read_text(encoding="utf-8") != text
+    ]
+    if check:
+        for path in stale:
+            typer.echo(f"stale: {path}", err=True)
+        typer.echo(f"{len(stale)} stale generated file(s) for environment '{spec.name}'")
+        if stale:
+            raise typer.Exit(code=1)
+        return
+    for path, text in rendered.items():
+        path.write_text(text, encoding="utf-8")
+    typer.echo(f"rendered {len(rendered)} file(s) for environment '{spec.name}'")
 
 
 def main() -> None:  # pragma: no cover - console entry shim

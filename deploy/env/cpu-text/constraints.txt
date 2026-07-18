@@ -1,0 +1,22 @@
+# GENERATED FILE — do not edit by hand.
+# Source of truth: deploy/env/cpu-text/environment.yaml + the workspace packages' pyproject.toml.
+# Regenerate:      latence env render deploy/env/cpu-text/environment.yaml
+# Verify:          latence env verify deploy/env/cpu-text/environment.yaml
+
+#
+# ENFORCED conflict boundaries for the 'cpu-text' environment.
+# Passed to the installer as `-c constraints.txt`, so they bind the resolution — they
+# are not documentation. Every one is also asserted against requirements.lock by
+# `latence env verify`, so a boundary that stops holding fails the build.
+
+# THE binding conflict of this stack. Floor: gliner 0.2.27 (the learned PII Provider's engine) declares transformers>=4.51.3. Cap: latence-disambig-glinker declares transformers<5 because glinker 0.1.1 and flashdeberta 0.0.7 are written against the transformers 4.x API. The latest transformers on PyPI is 5.14.1, so an UNCONSTRAINED install lands a 5.x and breaks GLinker at import. The only viable window is 4.51.3 <= v < 5.
+transformers>=4.51.3,<5
+
+# transformers 4.57.6 declares huggingface-hub>=0.34.0,<1.0, while the latest hub release is 1.24.0. Unconstrained, the resolver is free to take a 1.x that transformers 4.x cannot use. Also satisfies latence-disambig-glinker's own >=0.23,<1 cap.
+huggingface-hub>=0.34,<1
+
+# transformers 4.57.6 declares tokenizers>=0.22.0,<=0.23.0 and the latest tokenizers release is 0.23.1 — one patch outside the window. This is the classic silent-drift failure: nothing in the framework mentions tokenizers, yet an unpinned resolve can break the whole stack.
+tokenizers>=0.22,<=0.23.0
+
+# The cap latence-disambig-glinker declares (a torch major break would ABI-break the prebuilt flashdeberta/triton wheels this stack depends on). The lock additionally pins the `+cpu` local version from the PyTorch CPU index so no CUDA payload enters a CPU environment.
+torch>=2.1,<3

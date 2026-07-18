@@ -116,6 +116,11 @@ dev = [
     # never a runtime dependency of any package, so thin-core (ADR-0016) is unaffected —
     # hypothesis appears only in this dev group, not in latence-core's dependencies.
     "hypothesis>=6.100",
+    # PEP 440/508 parsing for the reproducible-environment verifier (issue #195). The real home is
+    # the OPTIONAL ``latence-core[envspec]`` extra (thin core, ADR-0016); it is pinned in the DEV
+    # group as well so ``latence env verify`` + its regression tests run in the plain workspace
+    # env and in scripts/verify-local.sh without an extra install step.
+    "packaging>=23.0",
 ]
 
 [tool.ruff]
