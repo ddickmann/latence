@@ -208,7 +208,7 @@ nav:
       - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
       - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md
       - 0051 — DuckDB zero-ops multi-hop graph retrieval: adr/0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md
-      - 0052 — Retrieval MCP: ported hardening + config-driven copy: adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
+      - "0052 — Retrieval MCP: ported hardening + config-driven copy": adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
       - 0053 — SPLADE structured composition: adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md
   - API Reference:
       - reference/index.md

@@ -11,13 +11,14 @@ Report already records) scaled to an hour, for the corpus shape named in the hea
 throughput is a function of the corpus, not a constant — 13 KiB business documents are not
 300-page scanned contracts, and the tables say which was run.
 
-**Contents**
+**Contents** (section headings, in order — deliberately unlinked so the same file renders
+identically on GitHub and on the docs site, which slugify anchors differently)
 
-1. [CPU envelope — per-Stage, Apple M1 Pro, default stack](#cpu-envelope--per-stage-default-stack-apple-m1-pro)
-2. [GPU envelope — Parse (OCR), NVIDIA RTX 2000 Ada](#gpu-envelope--parse-ocr-nvidia-rtx-2000-ada)
-3. [The OCR acceleration ladder that produced the GPU numbers](#the-accel-ladder-content-safe-byte-identical-across-rungs)
-4. [Encoder Providers — measured per-call latency](#encoder-providers--the-win-is-bf16-and-library-dependent)
-5. [Not yet measured](#not-yet-measured)
+1. *CPU envelope — per-Stage, default stack, Apple M1 Pro*
+2. *GPU envelope — Parse (OCR), NVIDIA RTX 2000 Ada*
+3. *The accel ladder* — the seconds-per-page measurements the GPU table converts
+4. *Encoder providers* — measured per-call latency on real weights
+5. *Not yet measured* — the explicit, non-negotiable gap list
 
 ---
 
