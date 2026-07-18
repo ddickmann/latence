@@ -80,6 +80,22 @@ SOTA_OCR_MAX_CONCURRENCY = 8
 # `latence stack validate` (device honesty, P3-F1) — the generated config still validates.
 SOTA_DEVICE = "cuda"
 
+# The index-time SIGNALS the blessed enterprise-SOTA stack bakes in (ADR-0041: the wizard emits ONE
+# opinionated, quality-baked config). Both are pure-Python, CPU-only, deterministic, zero extra deps
+# — they add no GPU cost and no new dependency to the pod stack, and both are strictly ADDITIVE:
+# omitting the block leaves the export byte-identical (the ADR-0049/0051 guarantee).
+#
+#   * graph features (ADR-0051, #161) — PageRank centrality + label-propagation community stamped
+#     onto every KG node, promoted by export_kg to first-class graph-nodes.parquet columns and
+#     projected by `enrich` onto each chunk's context_header. Feeds multi-hop expansion and the
+#     Knapsack packer's optional signals. `pagerank` (not `degree`): global influence over the
+#     whole citation-like graph an enterprise corpus builds, not just local degree.
+#   * BM25 (ADR-0049, #164) — the term-statistics artifact (`bm25-stats.json` +
+#     `bm25-postings.parquet`) the query-side sparse rescorer runs on. `tokenizer.regex` is the
+#     documented reference tokenizer (lowercase alphanumeric runs), matching the retrieval tooling.
+SOTA_GRAPH_FEATURES_PROVIDER = "graph_features.pagerank"
+SOTA_BM25_TOKENIZER = "tokenizer.regex"
+
 # Extensions that read as scanned/image inputs (OCR territory) vs born-digital PDF.
 _IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"})
 _OFFICE_EXTS = frozenset({"docx", "doc", "pptx", "ppt", "xlsx", "xls", "odt", "rtf", "html", "htm"})
@@ -404,6 +420,29 @@ def _sota_embedder_block() -> dict[str, object]:
             "attn_implementation": "flash_attention_2",
         },
     }
+
+
+def _sota_graph_features_block() -> dict[str, object]:
+    """The enterprise-SOTA graph-feature block (ADR-0051, #161) for the ``graph`` Stage.
+
+    PageRank centrality + label-propagation community, stamped onto every KG node and promoted by
+    ``export_kg`` to graph-nodes.parquet columns (and projected by ``enrich`` onto each chunk's
+    context_header). Pure Python, CPU-only, deterministic, zero extra deps — and additive: with the
+    block absent the emitted graph is byte-identical, so the enrichment costs the stack nothing it
+    did not already own.
+    """
+    return {"provider": SOTA_GRAPH_FEATURES_PROVIDER, "config": {}}
+
+
+def _sota_bm25_block() -> dict[str, object]:
+    """The enterprise-SOTA BM25 signal block (ADR-0049, #164) for the corpus Export.
+
+    Materializes the term-statistics artifact (``bm25-stats.json`` + ``bm25-postings.parquet``)
+    alongside the corpus Export — the index-time sparse signal the query-side BM25 rescorer runs on.
+    ``tokenizer.regex`` is the reference tokenizer (lowercase alphanumeric runs) the retrieval
+    tooling documents. Deterministic, CPU-only, and additive (absent ⇒ no files, byte-identical).
+    """
+    return {"provider": SOTA_BM25_TOKENIZER, "config": {}}
 
 
 def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
@@ -798,14 +837,20 @@ def _build_sota_stages(
         }
     )
 
-    # 11) canonical, evidence-linked KG.
+    # 11) canonical, evidence-linked KG — WITH the ADR-0051 graph-feature enrichment (#193): the
+    # assembler resolves the PageRank computer and stamps centrality + community onto every node,
+    # which export_kg promotes to graph-nodes.parquet columns and `enrich` projects onto each
+    # chunk's context_header. Those signals feed multi-hop expansion + the Knapsack packer.
     stages.append(
         {
             "name": "graph",
             "capability": "graph_assembly",
             "provider": "graph.canonical",
             "depends_on": ["disambiguate"],
-            "config": {"corpus_id": STACK_NAME},
+            "config": {
+                "corpus_id": STACK_NAME,
+                "graph_features": _sota_graph_features_block(),
+            },
         }
     )
 
@@ -858,7 +903,10 @@ def _build_sota_stages(
         }
     )
 
-    # 14b) RAG-corpus export from the ENRICHED chunk stream (context_columns + Granite r2 vectors).
+    # 14b) RAG-corpus export from the ENRICHED chunk stream (context_columns + Granite r2 vectors)
+    # PLUS the ADR-0049 BM25 index-time signal (#194): the term-statistics artifact
+    # (bm25-stats.json + bm25-postings.parquet) the query-side sparse rescorer runs on. Without it
+    # the blessed stack ships dense-only and the hybrid fuser has no sparse leg.
     stages.append(
         {
             "name": "export_corpus",
@@ -869,6 +917,7 @@ def _build_sota_stages(
                 "basename": "records",
                 "context_columns": True,
                 "embedder": _sota_embedder_block(),
+                "bm25": _sota_bm25_block(),
             },
         }
     )
@@ -899,6 +948,11 @@ def _render_header(answers: SetupAnswers) -> str:
             "#   disambiguator + IBM Granite r2 embeddings + ULTRA graph completion. Every learned",
             "#   Stage runs on CUDA; on a CPU-only host they skip-with-flag at `latence stack",
             "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR box.",
+            "#   Index-time signals (CPU, deterministic, zero extra deps): graph features on",
+            "#   `graph` (ADR-0051 — PageRank centrality + community, exported as graph-nodes",
+            "#   columns and projected onto each chunk's context_header) and BM25 on",
+            "#   `export_corpus` (ADR-0049 — bm25-stats.json + bm25-postings.parquet for the",
+            "#   query-side sparse rescorer). Drop either block to get the plain export back.",
         ]
     lines += [
         "#",
