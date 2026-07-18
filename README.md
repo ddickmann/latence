@@ -174,6 +174,9 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
   response you can expect.
 - [`docs/RELEASING.md`](./docs/RELEASING.md) — how a release is cut, and **how to verify
   one**: every release is signed with keyless Sigstore and ships a CycloneDX SBOM.
+
+- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
+- [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) — **continuity & security process**: the honest bus factor, fork posture, support lifetime, CVD / patch / SBOM / signing posture, and CRA readiness. Start here if you are evaluating this for adoption.
 - [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
 - [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).
 
