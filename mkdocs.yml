@@ -220,6 +220,10 @@ nav:
       - Errors & tracing: reference/errors.md
       - Example provider (pdfplumber): reference/example-provider.md
   - Project Internals:
+      - Continuity & security process: CONTINUITY.md
+      - Threat model: THREAT-MODEL.md
+      - SBOM & supply chain: SBOM.md
+      - Releasing: RELEASING.md
       - Architecture audit (S1): audits/S1-architecture-audit.md
       - Algorithmic asset inventory: ASSET-INVENTORY.md
       - Dependency audit: DEPENDENCY-AUDIT.md

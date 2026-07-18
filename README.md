@@ -139,6 +139,7 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 - [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.
 - [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
+- [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) — **continuity & security process**: the honest bus factor, fork posture, support lifetime, CVD / patch / SBOM / signing posture, and CRA readiness. Start here if you are evaluating this for adoption.
 - [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
 - [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).
 
