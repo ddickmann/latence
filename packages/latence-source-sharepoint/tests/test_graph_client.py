@@ -187,6 +187,30 @@ def test_an_unknown_root_path_is_a_config_error() -> None:
         list(client.list_files("/no-such-folder"))
 
 
+@pytest.mark.parametrize(
+    ("label", "headers"),
+    [
+        ("no Authorization header at all", {}),
+        ("a non-bearer scheme", {"Authorization": "Basic dXNlcjpwYXNz"}),
+        ("an unknown bearer token", {"Authorization": "Bearer not-a-real-token"}),
+    ],
+)
+def test_the_fake_refuses_every_unauthenticated_shape(
+    label: str, headers: dict[str, str]
+) -> None:
+    """Guards the fake's faithfulness: Graph 401s all three, so an offline pass means something.
+
+    Without this, a fake that quietly served documents to an unauthenticated request would let a
+    connector that forgot to attach credentials sail through the whole offline suite.
+    """
+    api = FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")])
+    response = FakeGraphTransport(api).request(
+        "GET", f"{GRAPH_HOST}/drives/{api.drive_id}/root/children", headers=headers
+    )
+    assert response.status == 401, label
+    assert b"InvalidAuthenticationToken" in response.body
+
+
 def test_a_query_string_token_is_rejected_the_way_graph_rejects_it() -> None:
     """Guards the fake's faithfulness: Graph accepts a bearer token in the header only."""
     api = FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")])
