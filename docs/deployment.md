@@ -193,7 +193,20 @@ Those environments are pinned, one-command-installable, and **checked by the bui
 bash deploy/env/cpu-text/install.sh              # the ONE documented install path (PEP-668 safe)
 bash deploy/env/cpu-text/smoke.sh                # the ONE command that proves it stands up
 bash deploy/env/cpu-text/smoke.sh --spec-only    # the offline gate — no install, no network
+
+bash deploy/env/gpu-learned/install.sh           # the GPU learned-Provider set on CUDA 13 / Blackwell
+bash deploy/env/gpu-learned/smoke.sh             # 4 gates, including REAL GPU-placement proof
 ```
+
+The GPU environment resolves the `transformers` split the only supported way — the ADR-0030
+endpoint boundary: the GLiNER/mdeberta family in-process on `transformers` 4.x, the OCR VLMs
+served on 5.x and reached over HTTP through `parser.endpoint`. Naming an in-process OCR package in
+that environment fails **gate 1**, i.e. at dependency resolution, before anything installs.
+
+Its extra gate is `latence env placement`: every learned Provider is driven through one real
+inference and must allocate CUDA memory doing it. A model that silently stayed on the CPU allocates
+zero bytes however correct its output is — the #191 failure (`device: cuda` configured, ~11.5
+s/chunk, the GPU idle, no warning) can no longer pass a green build.
 
 The pins are **enforced constraints**, not documentation: `latence env verify` cross-checks the
 generated `requirements.in` / `constraints.txt`, the solved `requirements.lock`, the Provider

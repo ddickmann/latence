@@ -11,6 +11,37 @@ workspace are versioned and released together under one version number.
 
 ### Added
 
+- **GPU learned-Provider environment (#198, ADR-0016/0007/0030/0036/0045/0046).**
+  `deploy/env/gpu-learned/` stands up the learned Provider set — GLiNER2 fused
+  extraction, GLiNER2 financial-PII and learned GLiNER PII redaction, GLinker
+  disambiguation, Granite r2 GPU-tier embeddings — pinned and reproducible on
+  CUDA 13 / Blackwell (`torch==2.13.0+cu130`, the wheel line carrying `sm_120`
+  kernels), from one documented `install.sh` with no trial-and-error and no
+  `--break-system-packages` (PEP-668 safe). The `transformers` major split has
+  exactly **one** supported resolution — the ADR-0030 endpoint boundary: the
+  4.x GLiNER/mdeberta family in-process, the 5.x OCR VLMs served and reached
+  over HTTP via `parser.endpoint`. A two-phase single-interpreter install was
+  rejected as merely deferring the failure. The resolution is **enforced**:
+  `latence env verify` now reports `E-CONSTRAINT-CONFLICT` when a package's
+  declared version window is disjoint from an enforced boundary, and
+  `E-PACKAGE-EXCLUDED` when an in-process OCR package enters the set directly or
+  as another package's workspace dependency — both before `install.sh` runs, so
+  the unsupported combination fails at dependency resolution rather than at model
+  load.
+
+- **Real GPU-placement proof (#198, closing the #191 class).** New
+  `latence env placement` drives one real inference through every Provider an
+  environment declares in `learned_providers` and reads torch's CUDA allocator
+  around the call. A model that silently stayed on the CPU allocates **zero CUDA
+  bytes** however correct its output is — which is exactly what #191 looked like
+  on the pod (`device: cuda` configured, ~11.5 s/chunk, ~94 minutes for one
+  Stage, the GPU idle, no warning). The assertion is behavioural and cannot be
+  satisfied by a flag or a config echo; a missing CUDA device is a **failure**,
+  not a skip. `latence env verify` additionally refuses a GPU environment whose
+  smoke stack never instantiates a declared learned Provider
+  (`E-LEARNED-UNDRIVEN`), since a Provider the gate never drives is a hole in the
+  gate.
+
 - **Optional Iceberg-table Export output (#184, ADR-0017).** The corpus Export can now
   *additionally* register the records it wrote as an Apache Iceberg table in an Iceberg **REST
   catalog** (Unity / Polaris / Glue-via-REST / Lakekeeper), so the same data becomes directly

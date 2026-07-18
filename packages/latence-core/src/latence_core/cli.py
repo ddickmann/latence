@@ -215,9 +215,7 @@ def run(
     _execute_pipeline_file(pipeline_path, run_id=run_id, tuned=tuned)
 
 
-def _execute_pipeline_file(
-    pipeline_path: Path, *, run_id: str, tuned: Path | None = None
-) -> None:
+def _execute_pipeline_file(pipeline_path: Path, *, run_id: str, tuned: Path | None = None) -> None:
     """Load a stack/pipeline YAML from disk and run it on the local Runner (shared by run+process).
 
     The single execution path both ``latence run`` and ``latence process`` delegate to: load the
@@ -426,9 +424,7 @@ def bake_off(
     from latence_core.bakeoff.harness import run_bakeoff
 
     if storage_root is not None:
-        result = run_bakeoff(
-            matrix_path, base_stack_path=resolved_base, storage_root=storage_root
-        )
+        result = run_bakeoff(matrix_path, base_stack_path=resolved_base, storage_root=storage_root)
     else:
         with tempfile.TemporaryDirectory(prefix="latence-bakeoff-") as tmp:
             result = run_bakeoff(
@@ -533,7 +529,9 @@ def setup(
     ] = None,
     storage: Annotated[
         str | None,
-        typer.Option("--storage", help="Output/state Storage URI. Default: file://<cwd>/latence-out."),
+        typer.Option(
+            "--storage", help="Output/state Storage URI. Default: file://<cwd>/latence-out."
+        ),
     ] = None,
     profile: Annotated[
         str | None,
@@ -662,9 +660,7 @@ def setup(
     )
     src_path = Path(src.removeprefix("file://"))
     if not src_path.exists() or not src_path.is_dir():
-        typer.echo(
-            f"Source folder does not exist (or is not a directory): {src}", err=True
-        )
+        typer.echo(f"Source folder does not exist (or is not a directory): {src}", err=True)
         raise typer.Exit(code=2)
     # ONE walk answers both questions: which parser the corpus needs, and how big its documents
     # actually are (which sizes the intake oversize cap, so a real corpus is not quarantined).
@@ -770,8 +766,7 @@ def setup(
         pii_on = pii
     elif interactive:
         typer.echo(
-            "  (adds content-screening + learned financial-PII detection/redaction; "
-            "default ON)",
+            "  (adds content-screening + learned financial-PII detection/redaction; default ON)",
             err=True,
         )
         pii_on = typer.confirm("Enable PII redaction + guardrail screening?", default=True)
@@ -811,10 +806,14 @@ def setup(
         raise typer.Exit(code=2)
 
     # g. Optional domain hint.
-    domain_hint = domain if domain is not None else (
-        str(typer.prompt("Domain / description hint (optional)", default=""))
-        if interactive
-        else ""
+    domain_hint = (
+        domain
+        if domain is not None
+        else (
+            str(typer.prompt("Domain / description hint (optional)", default=""))
+            if interactive
+            else ""
+        )
     )
 
     answers = SetupAnswers(
@@ -906,8 +905,9 @@ def process(
         Path,
         typer.Option("--config", "-c", help="The saved stack config to run."),
     ] = Path("latence.stack.yaml"),
-    run_id: Annotated[str, typer.Option("--run-id", help="Run id (state/checkpoint namespace).")]
-    = "run-0001",
+    run_id: Annotated[
+        str, typer.Option("--run-id", help="Run id (state/checkpoint namespace).")
+    ] = "run-0001",
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
 ) -> None:
     """Run a stack config saved by ``latence setup`` — one line to kick off the pipeline (W15).

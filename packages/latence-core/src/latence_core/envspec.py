@@ -263,9 +263,7 @@ def load_environment(spec_path: Path) -> EnvironmentSpec:
                 f"Environment spec {spec_path}: every excluded package needs 'package' + 'reason' "
                 "(a refusal nobody can explain is folklore)."
             )
-        excluded.append(
-            ExcludedPackage(package=str(entry["package"]), reason=str(entry["reason"]))
-        )
+        excluded.append(ExcludedPackage(package=str(entry["package"]), reason=str(entry["reason"])))
 
     workspace_packages = _strs("workspace_packages")
     providers = _strs("providers")
@@ -704,7 +702,7 @@ def check_resolution_conflicts(spec: EnvironmentSpec, repo_root: Path) -> tuple[
 def _check_excluded(
     spec: EnvironmentSpec, repo_root: Path, packages: list[_PackageMeta]
 ) -> list[Finding]:
-    """Refuse an excluded package, whether named directly or dragged in as a workspace dependency."""
+    """Refuse an excluded package, named directly OR dragged in as a workspace dependency."""
     if not spec.excluded_packages:
         return []
     excluded_by_path = {e.package: e for e in spec.excluded_packages}
@@ -713,8 +711,11 @@ def _check_excluded(
         pyproject = repo_root / entry.package / "pyproject.toml"
         dist = Path(entry.package).name
         if pyproject.is_file():
-            dist = str(tomllib.loads(pyproject.read_text(encoding="utf-8"))
-                       .get("project", {}).get("name", dist))
+            dist = str(
+                tomllib.loads(pyproject.read_text(encoding="utf-8"))
+                .get("project", {})
+                .get("name", dist)
+            )
         excluded_by_dist[dist.lower().replace("_", "-")] = entry
 
     findings: list[Finding] = []

@@ -13,7 +13,7 @@ graceful-degradation behaviour, which is precisely the shape #191 wore.
 For each learned component the environment's stack declares, it drives ONE real inference through
 the Provider's *public* Capability method and reads torch's CUDA allocator around the call:
 
-    torch.cuda.reset_peak_memory_stats()  →  drive the Provider  →  torch.cuda.max_memory_allocated()
+    reset_peak_memory_stats()  →  drive the Provider  →  max_memory_allocated()
 
 A model resident on the GPU allocates activation memory on every forward pass. A model that
 silently stayed on the CPU allocates **zero bytes**, no matter what it reports about itself, what
@@ -133,6 +133,7 @@ def _probe_chunk() -> ChunkRecord:
         provenance=Provenance(
             source_uri="file://placement-probe/doc.txt",
             source_system="placement-probe",
+            file_name="doc.txt",
             file_type="txt",
             file_size=len(_PROBE_TEXT),
             document_id="placement-probe-doc",
