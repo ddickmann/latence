@@ -19,7 +19,9 @@
       },
       "document_failures": 7,
       "documents_scored": 1403,
-      "notes": [],
+      "notes": [
+        "Scored with Provider 'parser.pdfplumber' exactly as pinned. A text-layer PDF parser cannot recover text from a scanned page, and much of olmOCR-bench (old_scans, long_tiny_text) is photographed or scanned material with no text layer \u2014 those tests fail by construction, not by defect. Comparing an OCR Provider means re-pinning: `--provider parser.lighton` (GPU)."
+      ],
       "overall": {
         "failed": 2090,
         "pass_rate": 0.20045906656465187,

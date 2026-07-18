@@ -127,6 +127,7 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 | `latence-embedder-endpoint` | Embedder performance path (endpoint-backed). |
 | `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
 | `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |
+| `latence-benchmark` | The reproducible **public** benchmark harness (pinned datasets, pinned stack configs, published results page). Not a pipeline Provider. |
 
 ## Documentation & governance
 
@@ -135,6 +136,7 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 - [`docs/TUTORIAL-fresh-pod-walkthrough.md`](./docs/TUTORIAL-fresh-pod-walkthrough.md) — guided setup (`latence setup` → `latence process`) and the full stage-by-stage walkthrough.
 - [`docs/running-a-stack.md`](./docs/running-a-stack.md) — run + validate a full-spine stack (`latence stack validate`).
 - [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) — run a per-Stage provider bake-off (`latence bake-off`).
+- [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) — public benchmark results (our reproducible numbers, kept separate from cited vendor claims), and [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) to reproduce them yourself.
 - [`docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge`](./docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge) — incremental corpus updates (`latence delta` / `retract` / `purge`).
 - [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.

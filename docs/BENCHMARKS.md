@@ -56,6 +56,10 @@ neither passes nor failures here. Issue #187 implements them through the same
 suite seam. This is why the OVERALL figure below is **not** directly comparable to
 the vendor claims, which are computed over all five classes.
 
+**Run notes:**
+
+- Scored with Provider 'parser.pdfplumber' exactly as pinned. A text-layer PDF parser cannot recover text from a scanned page, and much of olmOCR-bench (old_scans, long_tiny_text) is photographed or scanned material with no text layer — those tests fail by construction, not by defect. Comparing an OCR Provider means re-pinning: `--provider parser.lighton` (GPU).
+
 ### Reproduce
 
 ```bash
