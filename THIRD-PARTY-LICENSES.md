@@ -165,3 +165,22 @@ Per the project's research-diligence directive, a GLiNER/HF checkpoint's license
 is per-weight and cannot be inferred from the library. Any model whose license
 could not be verified is flagged UNVERIFIED rather than guessed; none in the
 default set are currently unverified.
+
+## Public benchmark datasets
+
+The framework bundles no benchmark data. These are the PUBLIC datasets the
+benchmark harness (`packages/latence-benchmark`, #181) can score against; each is
+fetched only when a benchmark run names it, always at a pinned commit SHA. A
+benchmark ships TWO artifacts under TWO licenses — the corpus and the evaluation
+toolkit — so each was verified separately on 2026-07-18, exactly as ADR-0012
+requires for weights vs. code. The harness's license gate refuses acquisition of
+a non-commercial corpus unless the operator opts in explicitly, and refuses an
+UNVERIFIED one unconditionally.
+
+| Dataset | Used by | Corpus license | Toolkit license | Commercial use | Status |
+|---|---|---|---|---|---|
+| allenai/olmOCR-bench | Parse benchmark suite (default) | ODC-BY-1.0 (dataset-card `license: odc-by`) | Apache-2.0 (github.com/allenai/olmocr) | Yes, with attribution | Default; attribution carried on the published results page |
+| opendatalab/OmniDocBench | Parse benchmark suite (opt-in) | **research-only, non-commercial** (project Copyright Statement: "The dataset is for research purposes only and not for commercial use.") | Apache-2.0 | **No** | Registered but GATED behind `--accept-non-commercial`; never a default, never vendored |
+
+The OmniDocBench row is why the two licenses are recorded separately: the
+repository's Apache-2.0 badge describes its evaluation toolkit, not its corpus.

@@ -68,6 +68,23 @@ workspace are versioned and released together under one version number.
   the stand-up turns the build red instead of a pod. New `latence env verify|render` commands and
   the optional `latence-core[envspec]` extra.
 
+- **`latence-benchmark`** — the reproducible **public** benchmark harness (#181). One command
+  (`latence-benchmark run --suite parse`) runs a framework Stage over a public dataset pinned to
+  an exact commit SHA, under a pinned stack config, and publishes `docs/BENCHMARKS.md` plus a
+  machine-readable `docs/benchmarks/results.json`. The Parse tracer slice scores
+  `parser.pdfplumber` against [olmOCR-bench](https://huggingface.co/datasets/allenai/olmOCR-bench)
+  (ODC-BY-1.0 corpus, Apache-2.0 toolkit — verified separately per ADR-0012). Not a pipeline
+  Provider: it registers nothing under `latence.providers`, and it is distinct from the
+  adopter-side gold-set harness of ADR-0028.
+
+  Structural guarantees, not conventions: a `DatasetSpec` rejects any revision that is not a full
+  40-hex SHA; a partial download is refused rather than partially scored; the license gate runs
+  *before* acquisition and treats an UNVERIFIED license as a non-overridable stop; a parse failure
+  counts its document's tests as failures; unimplemented test classes are reported *unsupported*
+  and excluded from the pass-rate denominator; vendor numbers are labelled claims and kept in
+  their own section. `latence_benchmark.suite.BenchmarkSuite` is the seam further Stage suites
+  (#187) plug into.
+
 ## [0.1.0] - 2026-07-14
 
 First public, coherent release of the workspace. All publishable distributions

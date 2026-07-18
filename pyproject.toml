@@ -25,6 +25,8 @@ latence-disambig-glinker = { workspace = true }
 latence-runner-airflow = { workspace = true }
 latence-retrieval = { workspace = true }
 latence-source-sharepoint = { workspace = true }
+
+latence-benchmark = { workspace = true }
 latence-splade = { workspace = true }
 latence-muvera = { workspace = true }
 latence-sink-qdrant = { workspace = true }
@@ -110,6 +112,14 @@ dependencies = [
     # NO `latence.providers` entry point (a sink consumes the finished Export, it is not a Stage), so
     # the conformance suite never sees it.
     "latence-sink-qdrant",
+
+    # The reproducible PUBLIC benchmark harness (#181). It is NOT a pipeline Provider — it
+    # registers nothing under `latence.providers` — but it RUNS the real Stages through the real
+    # registry, so it installs into the default dev env (like latence-demo) and its offline tests
+    # score the real `parser.pdfplumber` Parse Stage over a faithful local dataset root. Its only
+    # dependency is latence-core; remote dataset acquisition rides its `[hub]` extra (ADR-0016), so
+    # plain `uv sync` stays CPU-first, offline and deterministic.
+    "latence-benchmark",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An

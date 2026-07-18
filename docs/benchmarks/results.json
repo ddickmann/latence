@@ -1,0 +1,166 @@
+{
+  "generated_on": "2026-07-18",
+  "measurements": [
+    {
+      "dataset": {
+        "citation": "olmOCR-bench, Allen Institute for AI, ODC-BY-1.0 \u2014 https://huggingface.co/datasets/allenai/olmOCR-bench",
+        "homepage": "https://huggingface.co/datasets/allenai/olmOCR-bench",
+        "license": {
+          "attribution_required": true,
+          "code_license": "Apache-2.0",
+          "commercial_use": true,
+          "dataset_license": "ODC-BY-1.0",
+          "source_url": "https://huggingface.co/datasets/allenai/olmOCR-bench",
+          "verified_on": "2026-07-18"
+        },
+        "name": "olmocr-bench",
+        "repo_id": "allenai/olmOCR-bench",
+        "revision": "54a96a6fb6a2bd3b297e59869491db4d3625b711"
+      },
+      "document_failures": 7,
+      "documents_scored": 1403,
+      "notes": [
+        "Scored with Provider 'parser.pdfplumber' exactly as pinned. A text-layer PDF parser cannot recover text from a scanned page, and much of olmOCR-bench (old_scans, long_tiny_text) is photographed or scanned material with no text layer \u2014 those tests fail by construction, not by defect. Comparing an OCR Provider means re-pinning: `--provider parser.lighton` (GPU)."
+      ],
+      "overall": {
+        "failed": 2090,
+        "pass_rate": 0.20045906656465187,
+        "passed": 524,
+        "scored": 2614,
+        "split": "OVERALL",
+        "unsupported": 4405
+      },
+      "splits": [
+        {
+          "failed": 0,
+          "pass_rate": null,
+          "passed": 0,
+          "scored": 0,
+          "split": "arxiv_math",
+          "unsupported": 2927
+        },
+        {
+          "failed": 422,
+          "pass_rate": 0.44473684210526315,
+          "passed": 338,
+          "scored": 760,
+          "split": "headers_footers",
+          "unsupported": 0
+        },
+        {
+          "failed": 409,
+          "pass_rate": 0.0746606334841629,
+          "passed": 33,
+          "scored": 442,
+          "split": "long_tiny_text",
+          "unsupported": 0
+        },
+        {
+          "failed": 802,
+          "pass_rate": 0.09276018099547512,
+          "passed": 82,
+          "scored": 884,
+          "split": "multi_column",
+          "unsupported": 0
+        },
+        {
+          "failed": 456,
+          "pass_rate": 0.13307984790874525,
+          "passed": 70,
+          "scored": 526,
+          "split": "old_scans",
+          "unsupported": 0
+        },
+        {
+          "failed": 0,
+          "pass_rate": null,
+          "passed": 0,
+          "scored": 0,
+          "split": "old_scans_math",
+          "unsupported": 458
+        },
+        {
+          "failed": 1,
+          "pass_rate": 0.5,
+          "passed": 1,
+          "scored": 2,
+          "split": "table_tests",
+          "unsupported": 1020
+        }
+      ],
+      "stack_pin": {
+        "config": {},
+        "fingerprint": "4c438beb9b912e86",
+        "provider": "parser.pdfplumber",
+        "stage": "parse"
+      },
+      "stage": "parse",
+      "suite": "parse"
+    }
+  ],
+  "vendor_claims": [
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "Chandra OCR 0.1.0",
+      "value": "83.1 \u00b1 0.9"
+    },
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "olmOCR v0.4.0",
+      "value": "82.4 \u00b1 1.1"
+    },
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "PaddleOCR-VL",
+      "value": "80.0 \u00b1 1.0"
+    },
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "Marker 1.10.1",
+      "value": "76.1 \u00b1 1.1"
+    },
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "DeepSeek-OCR",
+      "value": "75.7 \u00b1 1.0"
+    },
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "MinerU 2.5.4",
+      "value": "75.2 \u00b1 1.1"
+    },
+    {
+      "dataset": "olmocr-bench",
+      "kind": "vendor-claim",
+      "metric": "Overall (all 5 test classes, olmOCR harness)",
+      "retrieved_on": "2026-07-18",
+      "source_url": "https://github.com/allenai/olmocr",
+      "system": "Mistral OCR API",
+      "value": "72.0 \u00b1 1.1"
+    }
+  ]
+}

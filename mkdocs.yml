@@ -158,6 +158,9 @@ nav:
       - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
       - Iceberg-table Export (optional): iceberg-export.md
       - Retrieval-quality tooling (design): retrieval-tooling.md
+      - Run the public benchmarks: running-the-benchmarks.md
+  - Benchmarks:
+      - Public benchmark results: BENCHMARKS.md
   - Decision Log (ADRs):
       - adr/index.md
       - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md

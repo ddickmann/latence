@@ -21,6 +21,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "latence-benchmark",
     "latence-core",
     "latence-demo",
     "latence-disambig-embedding",
@@ -2027,6 +2028,26 @@ wheels = [
 ]
 
 [[package]]
+name = "latence-benchmark"
+version = "0.1.0"
+source = { editable = "packages/latence-benchmark" }
+dependencies = [
+    { name = "latence-core" },
+]
+
+[package.optional-dependencies]
+hub = [
+    { name = "huggingface-hub" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "huggingface-hub", marker = "extra == 'hub'", specifier = ">=0.23" },
+    { name = "latence-core", editable = "packages/latence-core" },
+]
+provides-extras = ["hub"]
+
+[[package]]
 name = "latence-core"
 version = "0.1.0"
 source = { editable = "packages/latence-core" }
@@ -2176,6 +2197,7 @@ name = "latence-framework-dev"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "latence-benchmark" },
     { name = "latence-core" },
     { name = "latence-demo" },
     { name = "latence-disambig-embedding" },
@@ -2215,6 +2237,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'docs'", specifier = ">=24.0" },
+    { name = "latence-benchmark", editable = "packages/latence-benchmark" },
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "latence-core", extras = ["iceberg"], marker = "extra == 'iceberg'", editable = "packages/latence-core" },
     { name = "latence-core", extras = ["observability"], marker = "extra == 'observability'", editable = "packages/latence-core" },
