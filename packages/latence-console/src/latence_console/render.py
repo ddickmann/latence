@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from html import escape
 from typing import TYPE_CHECKING
+from urllib.parse import quote, urlencode
 
 from latence_console import verdicts as V
 from latence_console.runs import RunStatus
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
     from latence_core.quality import QualityReport
 
+    from latence_console import browse as B
     from latence_console.runs import RunSummary
 
 _STYLE = """
@@ -63,6 +65,12 @@ tr:last-child td { border-bottom:none; }
 .foot { color:var(--muted); font-size:.84rem; margin-top:2.5rem;
         border-top:1px solid var(--line); padding-top:1rem; }
 code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; }
+pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85rem;
+      white-space:pre-wrap; word-break:break-word; margin:0; }
+.nav { display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 1.25rem; }
+.nav .navlink { text-decoration:none; border:1px solid var(--line); border-radius:999px;
+                padding:.2rem .75rem; font-size:.85rem; background:var(--card); }
+.nav .navlink.on { border-color:currentColor; font-weight:600; }
 """
 
 _FOOTER = (
@@ -165,6 +173,7 @@ def render_run(summary: RunSummary, report: QualityReport | None) -> str:
         f'{escape(summary.status.label)}</span></p>'
         f'<p class="e">{escape(summary.status.blurb)}</p></div>'
     )
+    head += render_run_nav(summary.run_id, active="overview")
     if report is None:
         return _page(f"Run {summary.run_id}", head)
 
@@ -204,6 +213,388 @@ def render_run(summary: RunSummary, report: QualityReport | None) -> str:
                 + "</div>"
             )
     return _page(f"Run {summary.run_id}", "".join(parts))
+
+
+# -- #188: the debugging loop (quarantine · chunk inspector · KG with Evidence) ------------
+
+_NAV = (
+    ("overview", "Overview", ""),
+    ("quarantine", "Held back & flagged", "/quarantine"),
+    ("chunks", "Chunks", "/chunks"),
+    ("graph", "Knowledge graph", "/graph"),
+)
+
+
+def run_href(run_id: str, suffix: str = "", **params: str) -> str:
+    """A link into one run's console. Ids ride the QUERY string, percent-encoded.
+
+    A chunk ``record_id`` (``sha256:…#chunk-0``) and a mention id are not path segments —
+    they contain ``:`` and ``#``. Putting them in the query keeps every console path a plain
+    segment (so the traversal refusal in :func:`latence_console.runs.is_run_id` keeps
+    covering the whole path space), and the id is only ever *matched against records already
+    read*, never concatenated into a Storage URI.
+    """
+    url = f"/run/{quote(run_id, safe='')}{suffix}"
+    if params:
+        url += "?" + urlencode(params)
+    return url
+
+
+def render_run_nav(run_id: str, active: str) -> str:
+    """The one nav strip every run page carries, so the four views are reachable."""
+    links = []
+    for key, label, suffix in _NAV:
+        href = escape(run_href(run_id, suffix))
+        cls = "navlink on" if key == active else "navlink"
+        links.append(f'<a class="{cls}" href="{href}">{escape(label)}</a>')
+    return f'<p class="nav">{"".join(links)}</p>'
+
+
+def _run_head(run_id: str, title: str, blurb: str, active: str) -> str:
+    return (
+        f"<h1>{escape(title)}</h1>"
+        f'<p class="sub">Run <code>{escape(run_id)}</code> · '
+        f'<a href="{escape(run_href(run_id))}">back to the run overview</a></p>'
+        + render_run_nav(run_id, active)
+        + f'<p class="sub">{escape(blurb)}</p>'
+    )
+
+
+def _empty(message: str) -> str:
+    return f'<div class="card"><p>{escape(message)}</p></div>'
+
+
+def render_quarantine(
+    run_id: str, quarantined: list[B.QuarantineEntry], flagged: list[B.FlagEntry]
+) -> str:
+    """What Screening held back, and what it let through carrying a risk marker."""
+    parts = [
+        _run_head(
+            run_id,
+            "Held back & flagged",
+            "Screening removes dangerous input from the pipeline entirely (quarantine) and "
+            "marks risky input that still proceeds (a risk marker that rides into the "
+            "corpus, so a RAG consumer can exclude it). Both are listed here with the "
+            "reason the run recorded.",
+            "quarantine",
+        ),
+        f"<h2>Quarantined — removed from the pipeline ({len(quarantined)})</h2>",
+    ]
+    if quarantined:
+        parts.append(
+            '<div class="card">'
+            + _table(
+                ["File", "Type", "Bytes held back", "Checkpoint", "Detector", "Category",
+                 "Reason"],
+                [
+                    [
+                        e.file_name,
+                        e.file_type,
+                        f"{e.size_bytes:,}",
+                        e.checkpoint,
+                        e.detector,
+                        e.category,
+                        e.reason,
+                    ]
+                    for e in quarantined
+                ],
+            )
+            + "</div>"
+        )
+    else:
+        parts.append(_empty("Screening held nothing back in this run."))
+
+    parts.append(f"<h2>Flagged — kept, with a risk marker in the corpus ({len(flagged)})</h2>")
+    if flagged:
+        rows = []
+        for e in flagged:
+            link = (
+                f'<a href="{escape(run_href(run_id, "/chunk", id=e.chunk_id))}">'
+                f"{escape(e.file_name)}</a>"
+            )
+            rows.append(
+                "<tr>"
+                f"<td>{link}</td>"
+                f"<td>{escape(e.checkpoint)}</td>"
+                f"<td>{escape(e.category)}</td>"
+                f"<td>{escape(e.detector)}</td>"
+                f"<td>{e.score:.2f}</td>"
+                f"<td>{escape(e.reason)}</td>"
+                "</tr>"
+            )
+        parts.append(
+            '<div class="card"><table><thead><tr><th>Chunk</th><th>Checkpoint</th>'
+            "<th>Category</th><th>Detector</th><th>Score</th><th>Reason</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+        )
+    else:
+        parts.append(_empty("No record in this run's corpus carries a risk marker."))
+    return _page(f"Held back & flagged — {run_id}", "".join(parts))
+
+
+def render_chunks(run_id: str, rows: list[B.ChunkRow]) -> str:
+    """The chunk list: find the chunk you want to interrogate."""
+    parts = [
+        _run_head(
+            run_id,
+            "Chunks",
+            "Every retrieval-sized piece this run produced, with the source page and "
+            "character offsets it occupies in its source document. Open one to see how it "
+            "resolves back through Provenance.",
+            "chunks",
+        )
+    ]
+    if not rows:
+        parts.append(_empty("This run checkpointed no chunks."))
+        return _page(f"Chunks — {run_id}", "".join(parts))
+    body = []
+    for row in rows:
+        marks = []
+        if row.flagged:
+            marks.append('<span class="pill attention">flagged</span>')
+        if row.redacted:
+            marks.append('<span class="pill passed">redacted</span>')
+        href = escape(run_href(run_id, "/chunk", id=row.chunk_id))
+        body.append(
+            "<tr>"
+            f'<td><a href="{href}">{escape(row.file_name)}</a></td>'
+            f"<td>{row.index}</td>"
+            f"<td>{escape(row.pages)}</td>"
+            f"<td>{escape(row.char_span)}</td>"
+            f"<td>{row.token_count}</td>"
+            f"<td>{' '.join(marks)}</td>"
+            "</tr>"
+        )
+    parts.append(
+        f'<p class="sub">{len(rows)} chunk(s).</p><div class="card"><table><thead><tr>'
+        "<th>Source file</th><th>#</th><th>Page(s)</th><th>Characters</th><th>Tokens</th>"
+        f"<th></th></tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+    )
+    return _page(f"Chunks — {run_id}", "".join(parts))
+
+
+def render_chunk(run_id: str, view: B.ChunkInspection) -> str:
+    """The chunk inspector: where this chunk came from, and what was done to it."""
+    parts = [
+        _run_head(
+            run_id,
+            f"Chunk {view.index} of {view.file_name}",
+            "Resolved back through Provenance to its source document, page and character "
+            "offsets.",
+            "chunks",
+        )
+    ]
+
+    doc_state = (
+        f"parsed ({view.document_pages} page(s), {view.document_chars:,} characters)"
+        if view.document_parsed and view.document_pages is not None
+        and view.document_chars is not None
+        else ("parsed" if view.document_parsed else "not in this run's checkpoints")
+    )
+    if view.document_error:
+        doc_state += f" — parse error: {view.document_error}"
+    parts.append("<h2>Where it came from</h2>")
+    parts.append(
+        '<div class="card">'
+        + _table(
+            ["Measure", "Value"],
+            [
+                ["Source file", view.file_name],
+                ["Source URI", view.source_uri],
+                ["Source system", view.source_system or "—"],
+                ["Source document", doc_state],
+                ["Document id", view.document_id],
+                ["Source page(s) — Provenance", view.provenance_pages],
+                ["Source page(s) — resolved from the offset + page map", view.resolved_pages],
+                ["Character offsets — Provenance", view.provenance_span],
+                ["Character offsets — resolved from the offset map", view.resolved_span],
+                ["Chunk id", view.chunk_id],
+                ["Chunk length", f"{view.character_count:,} characters, "
+                                 f"{view.token_count} tokens"],
+            ],
+        )
+        + "</div>"
+    )
+
+    parts.append("<h2>Classification</h2>")
+    parts.append(
+        '<div class="card">'
+        + _table(
+            ["Measure", "Value"],
+            [
+                ["Language", view.language],
+                ["Category", view.category],
+                ["Sensitivity", view.sensitivity],
+            ],
+        )
+        + "</div>"
+    )
+
+    parts.append("<h2>Redaction disposition</h2>")
+    tone = "bad" if view.redaction.control_disabled else (
+        "good" if view.redaction.applied else "warn"
+    )
+    parts.append(
+        f'<div class="card verdict {tone}"><div class="t">Redaction</div>'
+        f'<p class="h">{escape(view.redaction.summary)}</p></div>'
+    )
+    if view.redaction.spans:
+        parts.append(
+            '<div class="card">'
+            + _table(
+                ["PII type", "Detector", "Action", "Placeholder", "In this chunk",
+                 "In the source document", "Page(s)", "Confidence"],
+                [
+                    [
+                        s.pii_type,
+                        s.detector,
+                        s.action,
+                        s.placeholder,
+                        s.chunk_span,
+                        s.source_span,
+                        s.pages,
+                        f"{s.confidence:.2f}",
+                    ]
+                    for s in view.redaction.spans
+                ],
+            )
+            + "</div>"
+        )
+
+    if view.risk_markers:
+        parts.append("<h2>Risk markers on this chunk</h2>")
+        parts.append(
+            '<div class="card">'
+            + _table(
+                ["Category", "Detector", "Score", "Reason"],
+                [
+                    [m.category, m.detector, f"{m.score:.2f}", m.reason]
+                    for m in view.risk_markers
+                ],
+            )
+            + "</div>"
+        )
+
+    label = "Corpus text (PII-handled)" if view.excerpt_is_masked else "Chunk text"
+    suffix = " — truncated" if view.excerpt_truncated else ""
+    parts.append(f"<h2>{escape(label)}{escape(suffix)}</h2>")
+    parts.append(f'<div class="card"><pre>{escape(view.excerpt)}</pre></div>')
+    return _page(f"Chunk {view.index} of {view.file_name} — {run_id}", "".join(parts))
+
+
+def _edge_card(run_id: str, edge: B.EdgeView) -> str:
+    """One edge and — always — the Evidence that justifies it."""
+    src = escape(run_href(run_id, "/entity", id=edge.source_node_id))
+    tgt = escape(run_href(run_id, "/entity", id=edge.target_node_id))
+    kind = " · inferred" if edge.inferred else ""
+    mention_rows = "".join(
+        "<tr>"
+        f"<td>{escape(m.text)}</td>"
+        f"<td>{escape(m.label)}</td>"
+        f"<td>{escape(m.file_name)}</td>"
+        f"<td>{escape(m.pages)}</td>"
+        f"<td>{escape(m.char_span)}</td>"
+        f"<td>{'—' if not m.resolved else f'{m.confidence:.2f}'}</td>"
+        f"<td><code>{escape(m.mention_id)}</code></td>"
+        "</tr>"
+        for m in edge.mentions
+    )
+    if mention_rows:
+        mentions = (
+            "<table><thead><tr><th>Mention</th><th>Type</th><th>File</th><th>Page(s)</th>"
+            "<th>Characters</th><th>Confidence</th><th>Mention id</th></tr></thead>"
+            f"<tbody>{mention_rows}</tbody></table>"
+        )
+    else:
+        mentions = (
+            '<p class="e">This Evidence cites no individual mention — see the '
+            "justification above.</p>"
+        )
+    return (
+        '<div class="card">'
+        f'<p class="h"><a href="{src}">{escape(edge.source_name)}</a> '
+        f"<strong>—{escape(edge.label)}→</strong> "
+        f'<a href="{tgt}">{escape(edge.target_name)}</a> '
+        f'<span class="e">(confidence {edge.confidence:.2f}{escape(kind)})</span></p>'
+        f'<p class="e">Evidence — confidence {edge.evidence_confidence:.2f} · '
+        f"{edge.document_count} source document(s) · "
+        f"{escape(edge.snippet) if edge.snippet else 'no justification text recorded'}</p>"
+        f"{mentions}</div>"
+    )
+
+
+def render_graph(run_id: str, entities: list[B.EntityView], edges: list[B.EdgeView]) -> str:
+    """The KG browser: entities to navigate, and every edge with its Evidence."""
+    parts = [
+        _run_head(
+            run_id,
+            "Knowledge graph",
+            "The canonical entities this run resolved and the relations between them. "
+            "Every edge is shown with the Evidence that justifies it — the source mentions, "
+            "where they sit in their documents, and how strongly.",
+            "graph",
+        ),
+        f"<h2>Entities ({len(entities)})</h2>",
+    ]
+    if entities:
+        rows = "".join(
+            "<tr>"
+            f'<td><a href="{escape(run_href(run_id, "/entity", id=e.node_id))}">'
+            f"{escape(e.canonical_name)}</a></td>"
+            f"<td>{escape(e.label)}</td>"
+            f"<td>{escape(e.kb_id or '—')}</td>"
+            f"<td>{e.confidence:.2f}</td>"
+            f"<td>{e.mention_count}</td>"
+            f"<td>{e.document_count}</td>"
+            f"<td>{e.edge_count}</td>"
+            "</tr>"
+            for e in entities
+        )
+        parts.append(
+            '<div class="card"><table><thead><tr><th>Entity</th><th>Type</th><th>KB link</th>'
+            "<th>Confidence</th><th>Mentions</th><th>Documents</th><th>Edges</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+    else:
+        parts.append(_empty("This run assembled no graph nodes."))
+
+    parts.append(f"<h2>Relations ({len(edges)})</h2>")
+    if edges:
+        parts.extend(_edge_card(run_id, edge) for edge in edges)
+    else:
+        parts.append(_empty("This run assembled no graph edges."))
+    return _page(f"Knowledge graph — {run_id}", "".join(parts))
+
+
+def render_entity(run_id: str, entity: B.EntityView, edges: list[B.EdgeView]) -> str:
+    """One entity, and every edge touching it — each with its Evidence."""
+    parts = [
+        _run_head(
+            run_id,
+            entity.canonical_name,
+            "One canonical entity and every relation that touches it.",
+            "graph",
+        ),
+        '<div class="card">'
+        + _table(
+            ["Measure", "Value"],
+            [
+                ["Type", entity.label],
+                ["External KB link", entity.kb_id or "not linked"],
+                ["Confidence", f"{entity.confidence:.2f}"],
+                ["Mentions folded into it", str(entity.mention_count)],
+                ["Source documents", str(entity.document_count)],
+                ["Node id", entity.node_id],
+            ],
+        )
+        + "</div>",
+        f"<h2>Relations ({len(edges)})</h2>",
+    ]
+    if edges:
+        parts.extend(_edge_card(run_id, edge) for edge in edges)
+    else:
+        parts.append(_empty("No relation in this graph touches this entity."))
+    return _page(f"{entity.canonical_name} — {run_id}", "".join(parts))
 
 
 def render_not_found(what: str) -> str:

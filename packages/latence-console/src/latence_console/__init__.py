@@ -17,6 +17,7 @@ Three properties are structural, not configured:
 
 from __future__ import annotations
 
+from latence_console.artifacts import RunArtifacts
 from latence_console.runs import RunIndex, RunStatus, RunSummary
 from latence_console.server import ConsoleApp, Response, serve
 from latence_console.verdicts import Tone, Verdict, headline_verdicts
@@ -24,6 +25,7 @@ from latence_console.verdicts import Tone, Verdict, headline_verdicts
 __all__ = [
     "ConsoleApp",
     "Response",
+    "RunArtifacts",
     "RunIndex",
     "RunStatus",
     "RunSummary",

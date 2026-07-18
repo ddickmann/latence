@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 from latence_core.quality import QualityReport
 
+from latence_console.artifacts import RunArtifacts
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -125,6 +127,14 @@ class RunIndex:
 
     def _run_dir(self, run_id: str) -> str:
         return f"{self.runs_uri}/{run_id}"
+
+    def artifacts(self, run_id: str) -> RunArtifacts:
+        """A typed, read-only view over everything that run left on Storage (#188).
+
+        Built fresh on every call: the console keeps no index and no cache between requests,
+        so a run that grew a checkpoint since the last page load shows it on this one.
+        """
+        return RunArtifacts(self._storage, self._run_dir(run_id))
 
     def run_ids(self) -> list[str]:
         """Every run id under the runs root that actually has a manifest, sorted."""
