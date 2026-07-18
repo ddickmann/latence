@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from latence_core.errors import LatenceError, error_category
+from latence_core.observability import (
+    DEFAULT_LINEAGE_NAMESPACE,
+    OpenLineageEmitter,
+    build_lineage_emitter,
+)
 from latence_core.pipeline import Pipeline
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
@@ -229,7 +234,7 @@ def _execute_pipeline_file(
         typer.echo(overlay.reason, err=True)
         pipeline = overlay.pipeline
 
-    report = LocalRunner().run(pipeline, run_id=run_id)
+    report = LocalRunner(lineage=_lineage_emitter_from_env()).run(pipeline, run_id=run_id)
 
     logger.info(
         "run complete: %d documents, contracts_complete=%s",
@@ -248,6 +253,32 @@ def _execute_pipeline_file(
     typer.echo(report.to_json())
     if not storage.exists(report_uri):  # pragma: no cover - defensive
         typer.echo("warning: quality report was not persisted", err=True)
+
+
+def _lineage_emitter_from_env() -> OpenLineageEmitter | None:
+    """Build the OpenLineage emitter IFF ``LATENCE_OPENLINEAGE_URL`` opts in (#185).
+
+    Off by default: with the variable unset this returns ``None`` and the Runner emits nothing,
+    opens no socket, and behaves exactly as before. Set it to an OpenLineage endpoint
+    (``http://localhost:5000`` for a local Marquez) to have each Stage show up in the catalog;
+    ``LATENCE_OPENLINEAGE_NAMESPACE`` names the catalog namespace and
+    ``LATENCE_OPENLINEAGE_API_KEY`` supplies a bearer token for a hosted collector. A misconfigured
+    endpoint never breaks a run: the ConfigError is logged and lineage stays off.
+    """
+    url = os.environ.get("LATENCE_OPENLINEAGE_URL", "")
+    if not url:
+        return None
+    try:
+        return build_lineage_emitter(
+            url,
+            namespace=os.environ.get("LATENCE_OPENLINEAGE_NAMESPACE", DEFAULT_LINEAGE_NAMESPACE),
+            api_key=os.environ.get("LATENCE_OPENLINEAGE_API_KEY") or None,
+        )
+    except Exception:  # pragma: no cover - observability must never break a run
+        logger.warning(
+            "OpenLineage endpoint %r is not usable; lineage disabled", url, exc_info=True
+        )
+        return None
 
 
 def _maybe_export_metrics(report: QualityReport) -> None:
