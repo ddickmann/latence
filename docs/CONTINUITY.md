@@ -159,27 +159,37 @@ says so.
   installs; it is never hand-maintained. See [`docs/SBOM.md`](SBOM.md).
 - **It is a release-time artifact, not a merge gate** — deliberately not wired into
   `.github/workflows/ci.yml` or `scripts/verify-local.sh`, and `docs/SBOM.md` says so.
-- **Not yet attached to a release automatically.** `.github/workflows/release.yml` does not currently
-  invoke `scripts/generate-sbom.sh`; attaching the SBOM is a manual release step
-  today. Stated here rather than implied.
+- **Attached to every release automatically.** The `release-integrity` job in
+  `.github/workflows/release.yml` runs `scripts/release-integrity.sh`, which emits a
+  per-release CycloneDX SBOM (`sbom.cdx.json`, stamped with the release version) into
+  the uploaded asset set. It is no longer a manual step.
 
-### 5.4 Release-signing posture — **not signed today**
+### 5.4 Release-signing posture — **signed, keyless Sigstore**
 
-This is the weakest link in the posture and it is not dressed up:
-
-- **Release artifacts are currently unsigned.** There is no Sigstore/cosign step, no
-  GPG signing, and no PEP-740 attestation in `.github/workflows/release.yml`. What a
-  downloader gets from a GitHub Release is a wheel and an sdist, and GitHub's own
-  transport integrity — nothing more.
-- **The credible path exists and is scaffolded.** The `pypi-publish` job is written
-  against **PyPI Trusted Publishing (OIDC)** — no long-lived API token is ever
-  stored — and is disabled behind `if: false` plus a protected `pypi` GitHub
-  Environment requiring a human reviewer. Turning it on is a documented four-step
-  checklist in `docs/RELEASING.md`.
-- **Until then, verify by rebuild.** The lockfile is committed and the build is
-  reproducible from source with `uv build --package <name>`; an adopter with a
-  high assurance bar should build from a tagged commit rather than trust an
-  unsigned artifact.
+- **Release artifacts are signed.** `scripts/release-integrity.sh` assembles the release
+  asset set — the distributions, `sbom.cdx.json`, `SHA256SUMS`, and a VERIFY.md instruction sheet — and
+  signs `SHA256SUMS` with **keyless Sigstore** (sigstore-python), producing
+  `SHA256SUMS.sigstore.json`. Because `SHA256SUMS` covers every other asset by digest,
+  that one signature transitively authenticates the whole release.
+- **Keyless means there is no private key to leak.** The signing identity is the GitHub
+  Actions workflow itself, certified by Fulcio from the job's OIDC token and logged in
+  Rekor. There is no long-lived key to store or rotate. A signature can therefore only be
+  produced inside the release workflow; a local dry run uses `--no-sign` and produces
+  everything except the bundle.
+- **Signing cannot be skipped by accident.** `--sign`/`--no-sign` is required and explicit,
+  with no default: a missing `id-token: write` permission fails the job loudly rather than
+  quietly shipping an unverifiable release.
+- **Adopters verify in two commands.** A generated VERIFY.md ships inside the asset set with
+  copy-pasteable instructions (verify the Sigstore bundle over `SHA256SUMS`, then
+  `sha256sum -c SHA256SUMS`).
+- **PyPI publication remains gated.** The `pypi-publish` job is written against **PyPI
+  Trusted Publishing (OIDC)** — no long-lived API token is ever stored — and is still
+  disabled behind `if: false` plus a protected `pypi` GitHub Environment requiring a human
+  reviewer. Turning it on is a documented checklist in `docs/RELEASING.md`.
+- **Verification by rebuild still works.** The lockfile is committed and the build is
+  reproducible from source with `uv build --package <name>`; an adopter with a high
+  assurance bar can still build from a tagged commit rather than trust any published
+  artifact.
 
 ### 5.5 Supply-chain controls (implemented)
 
