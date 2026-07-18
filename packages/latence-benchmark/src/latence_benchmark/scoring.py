@@ -11,8 +11,9 @@ end". :func:`fuzzy_find` is Sellers' algorithm (Levenshtein DP with a free start
 short-circuited by an exact ``str.find`` first because the overwhelming majority of tests match
 exactly and the DP is O(len(haystack) × len(needle)).
 
-Three of the five test classes are scored here — ``present``, ``absent`` and ``order`` — which
-is every class that is a pure property of the *text and its reading order*. ``table`` and
+Four of the six test classes are scored here — ``present``, ``absent``, ``order`` and
+``baseline`` — which is every class that is a pure property of *the text, its reading order, and
+whether a plausible parse happened at all*. ``table`` and
 ``math`` are structural assertions needing a markdown-table model and LaTeX normalisation
 respectively; they are reported as :attr:`Outcome.UNSUPPORTED` with an explicit count rather
 than being counted as passes or quietly dropped, and issue #187 adds them through the same
