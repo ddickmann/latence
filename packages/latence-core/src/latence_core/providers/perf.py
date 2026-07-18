@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from latence_core.errors import ProviderError
 from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
@@ -193,6 +194,51 @@ def load_with_fa2_fallback(
         _log.info("flash_attention_2 load failed for %r; retrying with sdpa", model_id)
         kwargs["attn_implementation"] = ATTN_SDPA
         return loader(model_id, **kwargs)
+
+
+def place_on_device(
+    model: Any, device: str | None, *, provider_name: str = "provider"
+) -> str | None:
+    """Move a plain-``gliner`` model onto the **resolved** device at load, and PROVE it landed.
+
+    The plain ``gliner`` library does NOT auto-place: ``GLiNER.from_pretrained`` loads onto CPU
+    (``map_location`` defaults there), so a Provider that never calls ``.to(device)`` runs on CPU no
+    matter what the device seam resolved — the exact silent performance cliff #191 measured on the
+    pod (``device: cuda`` configured, ~11.5 s/chunk, the GPU idle, and **no warning**). ADR-0036's
+    contract is honour-the-resolved-device-or-fail-loudly, so this is deliberately NOT best-effort:
+
+    * ``device is None`` (the seam skipped, or a Provider that resolves no device) → no-op; the
+      resident device is read back and returned for logging only.
+    * otherwise ``model.to(device)`` — a placement fault propagates as a
+      :class:`~latence_core.errors.ProviderError` naming the provider + device (never swallowed).
+    * the resident device is then read back from the model's parameters and **verified**: a model
+      that reports a different device than the one requested is a
+      :class:`~latence_core.errors.ProviderError`, not a logged shrug. Silence is the bug (#191).
+      A model whose device cannot be read at all (a test double, an exotic wrapper) is accepted —
+      there is nothing to contradict — but the placement call still had to succeed.
+
+    Returns the resident device string (or ``None`` when unreadable). Torch is never imported here:
+    the move and the read-back go through the model object itself (ADR-0016).
+    """
+    if device is not None:
+        try:
+            model.to(device)
+        except Exception as exc:
+            msg = f"{provider_name}: could not place the model on device {device!r}: {exc}"
+            raise ProviderError(msg) from exc
+    resident = _detect_model_device(model)
+    if device is None or resident is None:
+        return resident
+    # ``cuda`` matches ``cuda:0`` (torch names the ordinal); compare on the device TYPE.
+    if resident.split(":", 1)[0] != device.split(":", 1)[0]:
+        msg = (
+            f"{provider_name}: model was placed on {device!r} but reports device {resident!r} — "
+            "refusing to run on the wrong device (a silent CPU fallback is a ~10x throughput "
+            "cliff, ADR-0036)"
+        )
+        raise ProviderError(msg)
+    _log.info("%s: model resident on %s (resolved device %s)", provider_name, resident, device)
+    return resident
 
 
 def load_then_cast(
@@ -594,7 +640,7 @@ def cap_intra_op_threads(n: int | None, *, provider_name: str = "provider") -> i
 
 
 def _detect_model_device(model: Any) -> str | None:
-    """Best-effort **read** of a gliner2 model's resident torch device as a string — never raises.
+    """Best-effort **read** of a model's resident torch device as a string — never raises.
 
     Tries the common wrapper shapes (``model.device``, ``model.model.device``, the first parameter's
     device) and returns a lowercase device string (``"cuda"``/``"cuda:0"``/``"cpu"``) or ``None`` if
