@@ -58,6 +58,16 @@ workspace are versioned and released together under one version number.
     (404/409/403/400 incl. non-UUID point ids and wrong-width vectors), plus an opt-in live smoke
     test (`LATENCE_QDRANT_URL`).
 
+- **Reproducible environments (`deploy/env/`)** — a pinned lockfile, a one-command install recipe
+  and a one-command smoke test per Provider-set slice, starting with `cpu-text` (GLiNER2 fused
+  extraction, learned GLiNER PII redaction, GLinker disambiguation, Granite r2 dense embeddings,
+  SPLADE sparse). The pins are **enforced constraints**: `latence env verify` cross-checks the
+  generated `requirements.in`/`constraints.txt`, the solved `requirements.lock`, the Provider
+  packages' real dependency declarations and the smoke stack, offline and import-free, and
+  `scripts/verify-local.sh` runs it for every environment — so dependency drift that would break
+  the stand-up turns the build red instead of a pod. New `latence env verify|render` commands and
+  the optional `latence-core[envspec]` extra.
+
 ## [0.1.0] - 2026-07-14
 
 First public, coherent release of the workspace. All publishable distributions

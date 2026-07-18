@@ -68,6 +68,16 @@ uv run latence stack validate stacks/schema-induction.yaml  # induce+extract ski
 uv run latence stack validate stacks/context-enrichment.yaml  # the KG→chunk enrich Stage RUNS on CPU (W13)
 ok "stack validate"
 
+step "reproducible-environment specs (#195 — pins, enforced conflict boundaries, providers)"
+# The OFFLINE gate of every deploy/env/<name>/ environment: `smoke.sh --spec-only`. It needs no
+# heavy install and no network, and it is what turns dependency drift in a Provider package RED
+# on every commit (the full 3-gate smoke, which stands the environment up and runs the tiny
+# end-to-end slice, needs the installed venv — see deploy/env/README.md).
+for env in deploy/env/*/smoke.sh; do
+  [ -f "$env" ] && bash "$env" --spec-only
+done
+ok "environment specs"
+
 step "bake-off matrices (Goal B — the shipped CPU matrices)"
 for m in parse chunk embed redaction disambiguation graph_completion schema_induction; do
   [ -f "matrix/$m.yaml" ] && uv run latence bake-off "matrix/$m.yaml" --out-dir "$(mktemp -d)" >/dev/null
@@ -77,4 +87,5 @@ ok "bake-off"
 printf '\n\033[1;32m========================================\n'
 printf 'LOCAL VERIFY GREEN — all mirrored CI gates pass.\n'
 printf '========================================\033[0m\n'
-printf 'Not run here (separate/infra): MinIO s3 e2e, Airflow DAG lane, GPU real runs (pod).\n'
+printf 'Not run here (separate/infra): MinIO s3 e2e, Airflow DAG lane, GPU real runs (pod),\n'
+printf '  deploy/env/* gates 2+3 (need the installed heavy venv: bash deploy/env/<name>/smoke.sh).\n'

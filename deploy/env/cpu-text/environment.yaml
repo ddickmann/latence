@@ -1,0 +1,111 @@
+# deploy/env/cpu-text/environment.yaml — the CPU/text enterprise-sota environment (issue #195).
+#
+# THE SINGLE SOURCE OF TRUTH for this environment. `requirements.in` and `constraints.txt` are
+# GENERATED from this file plus the workspace packages' real pyproject metadata
+# (`latence env render`), and `requirements.lock` is the solved resolution. `latence env verify`
+# asserts all four agree — so a dependency change anywhere in the Provider set turns the smoke
+# test red instead of being discovered on a pod at 2am.
+#
+# Governing: ADR-0016 (per-Provider extras are the composition mechanism — the heavy stack lives
+# in the Provider packages, never in latence-core), ADR-0007 (CPU-first), ADR-0041 (opinionated
+# quality-baked defaults), ADR-0045 (Granite r2 embedder), ADR-0046 (GLinker), ADR-0053 (SPLADE).
+name: cpu-text
+summary: >-
+  The CPU/text portion of the enterprise-sota multilingual stack: GLiNER2 fused entity+relation
+  extraction, learned GLiNER PII redaction, GLinker disambiguation, IBM Granite r2 dense
+  embeddings and BAAI bge-m3 SPLADE sparse signals — installed from CPU-only wheels with no CUDA
+  payload.
+
+# PEP 668 (externally-managed-Python) is handled by install.sh creating a dedicated venv; the
+# interpreter range is the intersection of the packages' requires-python and the wheel coverage
+# of the solved set.
+python: ">=3.11,<3.13"
+
+# The solved platform. `flashdeberta` (a hard dependency of latence-disambig-glinker) requires
+# `triton>=3.0.0`, which publishes Linux wheels only — so this environment is Linux/x86-64 and the
+# lock is solved for it. macOS/arm64 is NOT a supported target for this environment.
+platform: linux-x86_64
+
+# CPU-only torch wheels. Without this index the resolver takes the default PyPI `torch`, which
+# drags the whole nvidia-* CUDA payload (~2.5 GiB) into a CPU environment. `unsafe-best-match`
+# lets the resolver consider both indexes for the same distribution, which is what makes the
+# `+cpu` local-version wheels reachable.
+extra_index_urls:
+  - https://download.pytorch.org/whl/cpu
+index_strategy: unsafe-best-match
+
+# The workspace packages this environment stands up, in install order (latence-core first). They
+# are installed from source with --no-deps: their third-party surface is pinned by the lock, which
+# is exactly why `latence env verify` asserts the lock satisfies every dependency they declare.
+workspace_packages:
+  - packages/latence-core
+  - packages/latence-parser-plaintext
+  - packages/latence-parser-pdfplumber
+  - packages/latence-disambig-embedding
+  - packages/latence-extract-gliner2
+  - packages/latence-pii-gliner
+  - packages/latence-disambig-glinker
+  - packages/latence-embedder-st
+  - packages/latence-splade
+
+# Third-party requirements that no workspace package declares directly but the environment owns.
+# Empty: every distribution here is reachable from a package's declared dependencies, and the
+# transitive closure is the lock's job.
+extra_requirements: []
+
+# --- ENFORCED conflict boundaries -----------------------------------------------------------
+# Each one is (a) emitted into constraints.txt and passed to the installer as `-c`, and
+# (b) asserted against requirements.lock by `latence env verify`. Every version claim below was
+# read from the distributions' own PyPI metadata on 2026-07-18.
+constraints:
+  - requirement: "transformers>=4.51.3,<5"
+    reason: >-
+      THE binding conflict of this stack. Floor: gliner 0.2.27 (the learned PII Provider's engine)
+      declares transformers>=4.51.3. Cap: latence-disambig-glinker declares transformers<5 because
+      glinker 0.1.1 and flashdeberta 0.0.7 are written against the transformers 4.x API. The
+      latest transformers on PyPI is 5.14.1, so an UNCONSTRAINED install lands a 5.x and breaks
+      GLinker at import. The only viable window is 4.51.3 <= v < 5.
+  - requirement: "huggingface-hub>=0.34,<1"
+    reason: >-
+      transformers 4.57.6 declares huggingface-hub>=0.34.0,<1.0, while the latest hub release is
+      1.24.0. Unconstrained, the resolver is free to take a 1.x that transformers 4.x cannot use.
+      Also satisfies latence-disambig-glinker's own >=0.23,<1 cap.
+  - requirement: "tokenizers>=0.22,<=0.23.0"
+    reason: >-
+      transformers 4.57.6 declares tokenizers>=0.22.0,<=0.23.0 and the latest tokenizers release
+      is 0.23.1 — one patch outside the window. This is the classic silent-drift failure: nothing
+      in the framework mentions tokenizers, yet an unpinned resolve can break the whole stack.
+  - requirement: "torch>=2.1,<3"
+    reason: >-
+      The cap latence-disambig-glinker declares (a torch major break would ABI-break the prebuilt
+      flashdeberta/triton wheels this stack depends on). The lock additionally pins the `+cpu`
+      local version from the PyTorch CPU index so no CUDA payload enters a CPU environment.
+
+# --- The Provider set this environment must expose -------------------------------------------
+# smoke.sh asserts every one of these RESOLVES from the registry (which imports the Provider
+# module, and therefore the heavy stack) — that import is where a transformers/torch drift
+# actually explodes, so it is the sharpest end-to-end proof the environment stands up.
+providers:
+  - source.local_folder
+  - screening.intake_signature
+  - parser.pdfplumber
+  - chunk.markdown
+  - screening.content_keyword
+  - fused_entity_relation.gliner2
+  - redaction.gliner_pii
+  - profiling.statistical
+  - disambiguation.glinker
+  - disambiguation.embedding
+  - graph.canonical
+  - export.knowledge_graph
+  - export.jsonl_parquet
+  - embedding.sentence_transformers
+  - sparse.splade
+
+# DEVICE HONESTY. disambiguation.glinker declares ProviderProfile compute="gpu" (its L3/L4
+# gliner-linker biencoder needs a GPU), so on a CPU host the Runner skips it with a flag rather
+# than faking it. It IS installed and IS registered by this environment — that is the claim the
+# smoke test makes about it — but its RUNTIME slice belongs to the GPU environment (#198). The
+# smoke's stack therefore drives disambiguation.embedding, which is CPU-real.
+gpu_only_providers:
+  - disambiguation.glinker

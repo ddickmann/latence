@@ -1,0 +1,43 @@
+# GENERATED FILE — do not edit by hand.
+# Source of truth: deploy/env/cpu-text/environment.yaml + the workspace packages' pyproject.toml.
+# Regenerate:      latence env render deploy/env/cpu-text/environment.yaml
+# Verify:          latence env verify deploy/env/cpu-text/environment.yaml
+
+#
+# Direct third-party requirements of the 'cpu-text' environment.
+# The workspace latence-* packages are installed from source with --no-deps by
+# install.sh, so their intra-workspace requirements never appear here — this file is
+# what actually pins their third-party surface.
+
+flashdeberta>=0.0.5,<0.1
+    # via latence-disambig-glinker
+fsspec>=2024.2
+    # via latence-core
+gliner>=0.2.5,<0.3
+    # via latence-pii-gliner
+gliner2[local]>=1.0,<2
+    # via latence-extract-gliner2
+glinker>=0.1,<0.2
+    # via latence-disambig-glinker
+huggingface-hub>=0.23,<1
+    # via latence-disambig-glinker
+pdfplumber>=0.11
+    # via latence-parser-pdfplumber
+peft>=0.10
+    # via latence-extract-gliner2
+pyarrow>=15.0
+    # via latence-core
+pydantic>=2.5
+    # via latence-core
+pyyaml>=6.0
+    # via latence-core
+sentence-transformers>=3.0,<6
+    # via latence-embedder-st
+torch>=2.1,<3
+    # via latence-disambig-glinker
+transformers>=4.40,<5
+    # via latence-disambig-glinker
+transformers>=4.40,<6
+    # via latence-splade
+typer>=0.12
+    # via latence-core
