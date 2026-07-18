@@ -201,6 +201,48 @@ def test_plain_gliner_uses_load_then_cast_never_perf_kwargs(rel_source: str) -> 
     )
 
 
+@pytest.mark.parametrize("rel_source", sorted(_PLAIN_GLINER_SOURCES))
+def test_plain_gliner_places_its_model_on_the_resolved_device(rel_source: str) -> None:
+    """EVERY plain-``gliner`` provider must PLACE its model (#191), not just cast its dtype.
+
+    #191 proved the plain ``gliner`` library never auto-places — ``GLiNER.from_pretrained``
+    map-locations to CPU — and encoded the fix in ``place_on_device``. But the fix was originally
+    wired to only ``redaction.gliner_pii``; ``entity.gliner`` and ``relation.gliner_relex`` kept
+    passing ``device=None`` into ``load_then_cast``, so they cast to bf16 off a bare
+    ``cuda_available()`` probe while the weights stayed resident on CPU — bf16-eager-on-CPU, slower
+    AND numerically different from the fp32 CPU path the seam intends, with no warning.
+
+    Structural teeth so a FOURTH plain-gliner provider cannot land without the fix:
+
+    1. the source calls ``place_on_device(...)``, and
+    2. its ``load_then_cast`` call does NOT hand a literal ``None`` as the device argument — the
+       dtype must key off the RESOLVED device, never a bare availability probe.
+    """
+    path = _packages_root() / rel_source
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(path))
+
+    assert "place_on_device" in src, (
+        f"{rel_source}: plain gliner does NOT auto-place its model (#191) — the provider must "
+        "call place_on_device(model, device, ...) after load_then_cast, or it silently runs on "
+        "CPU while claiming the resolved device"
+    )
+
+    for call in ast.walk(tree):
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "load_then_cast"
+            and len(call.args) >= 4
+        ):
+            device_arg = call.args[3]
+            assert not (isinstance(device_arg, ast.Constant) and device_arg.value is None), (
+                f"{rel_source}: load_then_cast(..., None) makes the bf16 cast key off a bare "
+                "CUDA-availability probe while the model stays on CPU (#191) — pass the RESOLVED "
+                "device instead"
+            )
+
+
 def test_guard_would_catch_a_bare_model_load() -> None:
     """Meta-test: the AST scan FAILS on a synthetic bare fp32 model load (no false-negative)."""
     bad = "m = GLiNER.from_pretrained(model_id)\n"

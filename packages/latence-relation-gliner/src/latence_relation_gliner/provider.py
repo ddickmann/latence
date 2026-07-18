@@ -47,14 +47,17 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
+from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
+from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import (
     apply_gliner_max_len,
     load_then_cast,
     maybe_compile,
+    place_on_device,
     resolve_max_len,
 )
 from latence_core.providers.profile import ProviderProfile
@@ -96,6 +99,10 @@ class GlinerRelexExtractor:
             autotuner overrides per-device). Purely memory-shaping: the emitted mentions AND
             relations (offsets/labels/endpoints/order) are record-for-record identical for any
             positive batch size (W7). Must be ``>= 1``.
+        device: str  — ``auto`` (default) | ``cpu`` | ``cuda``, routed through the ADR-0036
+            device seam and PLACED on at load (#191). ``cuda`` on a host with no CUDA is a
+            loud ConfigError, never a silent CPU run; an unknown string is a ConfigError
+            raised at construction, before any weights are downloaded.
 
     Fulfils BOTH the EntityExtractor and the FusedEntityRelationExtractor seam: it
     also exposes ``extract`` so it can stand in for a plain Entity-Extraction Stage
@@ -188,7 +195,26 @@ class GlinerRelexExtractor:
         )
         # The perf-seam config knobs (dtype / attn_implementation / compile), read at load (W8).
         self._config: dict[str, Any] = dict(config)
+        # #191: resolve the device ONCE here (cheap, torch-free routing over the declared profile);
+        # ``_load_model`` then PLACES the model on it. Resolving at construction turns an invalid
+        # ``device`` string into an operator ConfigError before any weights are downloaded.
+        self._device = self._resolve_device(config.get("device", "auto"))
         self._model: Any = None
+
+    @classmethod
+    def _resolve_device(cls, requested: object) -> DeviceDecision:
+        """Route the ``device`` config value (``auto|cpu|cuda``) through the ADR-0036 device seam.
+
+        ``compute="either"`` (see :meth:`profile`), so ``cpu`` pins CPU, ``auto`` follows
+        availability, and ``cuda`` resolves to CUDA when a GPU is present — else the seam returns a
+        **skip** decision, which :meth:`_load_model` turns into a loud ConfigError rather than the
+        pre-#191 silent CPU fallback. A malformed device string is a ConfigError, not a TypeError.
+        """
+        try:
+            return select_device(str(requested), cls.profile())
+        except ValueError as exc:
+            msg = f"relation.gliner_relex: invalid device config: {exc}"
+            raise ConfigError(msg) from exc
 
     # -- lazy model load ----------------------------------------------------
 
@@ -203,11 +229,21 @@ class GlinerRelexExtractor:
                 "Install it with: pip install latence-relation-gliner"
             )
             raise ImportError(msg) from exc
+        if self._device.skipped or self._device.device is None:
+            # #191: ``device: cuda`` on a host with no CUDA used to fall through to a CPU load and a
+            # ~11.5 s/chunk run with the GPU idle and NO warning. The seam's skip decision is now
+            # surfaced as an operator error — honour the resolved device or fail loudly (ADR-0036).
+            msg = f"relation.gliner_relex: {self._device.reason}"
+            raise ConfigError(msg)
+        device = self._device.device
         # W8 perf seam (pod-corrected): plain ``gliner`` 0.2.27 REJECTS torch_dtype/attn_impl in
-        # in from_pretrained and its encoder has no FA2/FlashDeBERTa — so load PLAIN, then .to(bf16)
-        # on cuda (measured 1.36× faster, byte-identical). device=None reads the torch-free probe
-        # (GLiNER auto-places on cuda); the cast is a no-op on CPU / fp32. Then optionally compile.
-        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, None)
+        # from_pretrained and its encoder has no FA2/FlashDeBERTa — so load PLAIN, then .to(bf16)
+        # on cuda (measured 1.36× faster, byte-identical); the cast is a no-op on CPU / fp32. The
+        # dtype keys off the RESOLVED device, not a bare availability probe.
+        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, device)
+        # #191: plain ``gliner`` does NOT auto-place — ``from_pretrained`` loads on CPU. Place the
+        # model on the resolved device HERE, at load, and verify it landed (a mismatch raises).
+        place_on_device(model, device, provider_name="relation.gliner_relex")
         # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
         # guard) so gliner never silently truncates a long chunk past config.max_len.
         apply_gliner_max_len(model, self._max_len)
