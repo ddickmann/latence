@@ -17,7 +17,9 @@ and a dedicated anchor test proves a provider that mis-parses that shape as a fl
 from __future__ import annotations
 
 import sys
+import tomllib
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,6 +35,7 @@ from latence_core.contracts import (
 )
 from latence_core.errors import ProviderError
 from latence_pii_gliner2 import Gliner2PIIRedactor
+from latence_pii_gliner2._compat import SUPPORTED_SPEC
 
 
 def _chunk(
@@ -169,11 +172,19 @@ class _FakeGLiNER2:
         self,
         texts: list[str],
         entity_types: list[str],
+        batch_size: int = 8,
         threshold: float = 0.5,
-        include_spans: bool = False,
+        format_results: bool = True,
         include_confidence: bool = False,
-        max_len: int = 768,
+        include_spans: bool = False,
+        max_len: int | None = None,
     ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        # SIGNATURE-FAITHFUL to gliner2 1.3.2 (verified against the released wheel, 2026-07-18):
+        # ``(texts, entity_types, batch_size=8, threshold=0.5, format_results=True,
+        #    include_confidence=False, include_spans=False, max_len=None)``. The parameter ORDER
+        # matters: the real 3rd positional is ``batch_size``, NOT ``threshold`` — a Provider that
+        # passed threshold positionally would be silently mis-wired against the real library, so
+        # the fake must not quietly accept that.
         # The real batched API: one forward pass over all texts; result[i] is texts[i]'s per-label
         # dict — the exact single-text shape, one per input.
         self.batch_calls += 1
@@ -193,11 +204,25 @@ class _FakeGLiNER2:
         ]
 
 
+#: The gliner2 release this repo pins + validated on the pod. The fake module carries it because
+#: the REAL gliner2 carries ``__version__`` on every released 1.x (verified against the released
+#: distributions, 2026-07-18) and the Provider's #192 compatibility gate reads exactly that.
+_PINNED_GLINER2 = "1.3.2"
+
+
+def _fake_gliner2_module(model_cls: type, version: str | None) -> types.ModuleType:
+    module = types.ModuleType("gliner2")
+    module.GLiNER2 = model_cls  # type: ignore[attr-defined]
+    if version is not None:
+        module.__version__ = version  # type: ignore[attr-defined]
+    return module
+
+
 @pytest.fixture()
 def fake_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER2]:
-    module = types.ModuleType("gliner2")
-    module.GLiNER2 = _FakeGLiNER2  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "gliner2", module)
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_FakeGLiNER2, _PINNED_GLINER2)
+    )
     _FakeGLiNER2.entities = []
     _FakeGLiNER2.per_text = None
     _FakeGLiNER2.raise_on_extract = False
@@ -614,14 +639,19 @@ class _NoBatchGLiNER2:
 def test_missing_batch_extract_entities_raises_clear_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The batched entry point is offline-unverifiable, so if the real checkpoint lacks it the
-    # provider must fail with an actionable message naming the batched API, not a bare
-    # AttributeError buried in the guard. Offline stand-in for the pod script's Gate 0.
-    module = types.ModuleType("gliner2")
-    module.GLiNER2 = _NoBatchGLiNER2  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "gliner2", module)
-    with pytest.raises(AttributeError, match="batch_extract_entities"):
+    """#192: a checkpoint without the batched API fails TYPED (ADR-0034), not as a native fault.
+
+    This test previously asserted a bare ``AttributeError`` — and that is exactly what the operator
+    got on the live pod run: unactionable. The Provider must name the batched API, the supported
+    gliner2 range, and the install command, as a framework :class:`ProviderError`.
+    """
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_NoBatchGLiNER2, _PINNED_GLINER2)
+    )
+    with pytest.raises(ProviderError, match="batch_extract_entities") as excinfo:
         list(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)]))
+    assert not isinstance(excinfo.value, AttributeError)
+    assert SUPPORTED_SPEC in str(excinfo.value)
 
 
 # --- W9 quantize/compile guarded optimized load (the redact 2.83× fix) ------------------------
@@ -689,3 +719,136 @@ def test_inference_time_compile_fault_degrades_to_uncompiled(
     assert provider._compile_disabled is True
     assert fake_gliner2.last_kwargs.get("compile") is False
     assert fake_gliner2.last_kwargs.get("quantize") is True
+
+
+# ---------------------------------------------------------------------------
+# #192 — gliner2 version/API compatibility. The field failure: a fresh env resolved a
+# gliner2 the Provider cannot drive and the load died with a NATIVE AttributeError, which is
+# unactionable for an operator. Two gates now: the package pin (resolution) and a typed
+# ProviderError (runtime), and the ADR-0044 financial-PII floor must survive both.
+# ---------------------------------------------------------------------------
+
+
+def _gliner2_specifier() -> str:
+    """The ``gliner2`` requirement string declared in this package's own metadata."""
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    deps = [d for d in data["project"]["dependencies"] if d.startswith("gliner2")]
+    assert len(deps) == 1, deps
+    return str(deps[0])
+
+
+def test_package_pins_the_supported_gliner2_range() -> None:
+    """The RESOLUTION gate (ADR-0016): the package pin excludes every unsupported gliner2.
+
+    Pre-#192 the pin was ``gliner2[local]>=1.0,<2``, which resolves happily to 1.0.x — a line with
+    no ``batch_extract_entities`` at all. The floor must be the supported one, and it must equal
+    the range the runtime gate reports so metadata and error message cannot drift.
+    """
+    assert _gliner2_specifier() == f"gliner2[local]{SUPPORTED_SPEC}"
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "1.0.2", "1.1.0", "1.2.0", "1.2.6", "2.0.0"])
+def test_runtime_gate_rejects_every_unsupported_gliner2_line(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    """Each line the pin excludes is ALSO refused at runtime — the two gates agree.
+
+    1.0.x has no ``batch_extract_entities``; 1.1.x rejects ``include_spans``/``max_len``;
+    1.2.0-1.2.5 reject ``max_len``; 1.2.6 predates the pod-validated line; 2.x is past the major
+    cap. (Verified against the released gliner2 distributions, 2026-07-18.)
+    """
+    monkeypatch.setitem(sys.modules, "gliner2", _fake_gliner2_module(_FakeGLiNER2, version))
+    with pytest.raises(ProviderError, match=r"requires gliner2 >=1\.3,<2"):
+        list(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)]))
+
+
+@pytest.mark.parametrize("version", ["1.3", "1.3.0", "1.3.2", "1.3.2.post1", "1.9.9"])
+def test_runtime_gate_accepts_every_supported_gliner2_line(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    """The gate is a gate, not a wall: every version the pin admits still loads and redacts."""
+    monkeypatch.setitem(sys.modules, "gliner2", _fake_gliner2_module(_FakeGLiNER2, version))
+    a_start = _TEXT.index("Alice")
+    _FakeGLiNER2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95}
+    ]
+    _FakeGLiNER2.per_text = None
+    _FakeGLiNER2.raise_on_extract = False
+    _FakeGLiNER2.raise_on_optimized_load = False
+    _FakeGLiNER2.compiled_forward_raises = False
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)])))
+    assert rec.masked_content is not None
+    assert "Alice" not in rec.masked_content
+
+
+def test_unsupported_gliner2_version_is_a_typed_error_not_a_native_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An env with gliner2 1.0.x fails as a TYPED ProviderError naming the fix (ADR-0034).
+
+    The check runs BEFORE ``from_pretrained``, so no weights are downloaded first.
+    """
+    # _NoBatchGLiNER2 mirrors the 1.0.x surface faithfully: ``extract_entities`` only, no batched
+    # entry point (verified against the released gliner2 1.0.0 distribution, 2026-07-18).
+    monkeypatch.setitem(sys.modules, "gliner2", _fake_gliner2_module(_NoBatchGLiNER2, "1.0.2"))
+    with pytest.raises(ProviderError) as excinfo:
+        list(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)]))
+    message = str(excinfo.value)
+    assert "gliner2 >=1.3,<2" in message          # the supported range
+    assert "1.0.2" in message                     # what is actually installed
+    assert "pip install 'gliner2[local]>=1.3,<2'" in message   # the actionable fix
+    # And it is NOT the native fault the operator got in the field.
+    assert not isinstance(excinfo.value, AttributeError)
+
+
+def test_unparseable_gliner2_version_is_a_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A nonsense version string is refused (typed), not optimistically accepted."""
+    monkeypatch.setitem(sys.modules, "gliner2", _fake_gliner2_module(_FakeGLiNER2, "nightly"))
+    with pytest.raises(ProviderError, match=r"gliner2 >=1\.3,<2"):
+        list(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)]))
+
+
+def test_supported_gliner2_loads_and_redacts_the_financial_pii_floor(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """AC1 + the ADR-0044 floor: on the PINNED gliner2 the Provider loads and still redacts.
+
+    The version gate must be a gate, not a wall: with gliner2 1.3.2 (the pinned line) the load
+    proceeds and the financial-PII surface — IBAN, credit card, tax id — is masked exactly as
+    before, with the raw values absent from both the masked text and the emitted spans.
+    """
+    # Reuses the module's audited _IBAN; the card / tax-id surfaces are deliberately non-numeric
+    # placeholders (the secret-scan gate flags a real-looking PAN / high-entropy id). The fake model
+    # detects exactly the spans the test seeds, so the surface FORM is irrelevant to the behaviour.
+    card, tax = "4111-XXXX-XXXX-0000", "TAX-ID-PLACEHOLDER"
+    text = f"IBAN {_IBAN}, card {card}, tax id {tax}."
+    iban = _IBAN
+    fake_gliner2.entities = [
+        {"start": text.index(v), "end": text.index(v) + len(v), "label": lbl, "confidence": 0.97}
+        for v, lbl in ((iban, "iban"), (card, "credit card number"), (tax, "tax id"))
+    ]
+    cfg = {"pii_labels": ["iban", "credit card number", "tax id"]}
+    rec = next(iter(Gliner2PIIRedactor(cfg).redact([_chunk(text)])))
+    assert rec.masked_content is not None
+    for raw in (iban, card, tax):
+        assert raw not in rec.masked_content
+        assert all(raw not in str(span) for span in rec.pii_spans)
+    assert {s.pii_type for s in rec.pii_spans} == {"iban", "credit card number", "tax id"}
+    assert [text[s.char_start : s.char_end] for s in rec.pii_spans] == [iban, card, tax]
+
+
+def test_version_gate_runs_before_any_model_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is cheap-first: an unsupported version never reaches ``from_pretrained``."""
+    loaded: list[str] = []
+
+    class _Tripwire(_FakeGLiNER2):
+        @classmethod
+        def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER2:
+            loaded.append(model_id)
+            return super().from_pretrained(model_id, **kwargs)
+
+    monkeypatch.setitem(sys.modules, "gliner2", _fake_gliner2_module(_Tripwire, "1.2.6"))
+    with pytest.raises(ProviderError):
+        list(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)]))
+    assert loaded == []
