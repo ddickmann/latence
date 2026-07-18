@@ -26,6 +26,7 @@ latence-runner-airflow = { workspace = true }
 latence-retrieval = { workspace = true }
 latence-splade = { workspace = true }
 latence-muvera = { workspace = true }
+latence-sink-qdrant = { workspace = true }
 latence-demo = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
@@ -82,6 +83,14 @@ dependencies = [
     # latence-demo — its offline/deterministic MaxSim-approximation tests run, and the conformance
     # suite (C1–C6) exercises the REAL 'fde.muvera' converter, alongside the in-core 'fde.reference'.
     "latence-muvera",
+    # The first first-party SINK: the one-shot Qdrant loader (#183, first slice of #156). Its whole
+    # mapping/idempotency/reconcile core is pure-Python over latence-core (already pinned) — the
+    # `qdrant-client` rides the OPTIONAL `[client]` extra and is imported lazily — so, like
+    # latence-demo and latence-retrieval, it installs into the default dev env and its
+    # offline/deterministic tests run against the shipped faithful `FakeQdrantClient`. It registers
+    # NO `latence.providers` entry point (a sink consumes the finished Export, it is not a Stage), so
+    # the conformance suite never sees it.
+    "latence-sink-qdrant",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An

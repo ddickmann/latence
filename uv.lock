@@ -49,6 +49,7 @@ members = [
     "latence-retrieval",
     "latence-runner-airflow",
     "latence-schema-inducer",
+    "latence-sink-qdrant",
     "latence-splade",
 ]
 
@@ -2174,6 +2175,7 @@ dependencies = [
     { name = "latence-parser-pdfplumber" },
     { name = "latence-parser-plaintext" },
     { name = "latence-retrieval" },
+    { name = "latence-sink-qdrant" },
 ]
 
 [package.optional-dependencies]
@@ -2207,6 +2209,7 @@ requires-dist = [
     { name = "latence-parser-pdfplumber", editable = "packages/latence-parser-pdfplumber" },
     { name = "latence-parser-plaintext", editable = "packages/latence-parser-plaintext" },
     { name = "latence-retrieval", editable = "packages/latence-retrieval" },
+    { name = "latence-sink-qdrant", editable = "packages/latence-sink-qdrant" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5" },
     { name = "mkdocs-mermaid2-plugin", marker = "extra == 'docs'", specifier = ">=1.1" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.26" },
@@ -2595,6 +2598,26 @@ requires-dist = [
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "openai", specifier = ">=1.0,<3" },
 ]
+
+[[package]]
+name = "latence-sink-qdrant"
+version = "0.1.0"
+source = { editable = "packages/latence-sink-qdrant" }
+dependencies = [
+    { name = "latence-core" },
+]
+
+[package.optional-dependencies]
+client = [
+    { name = "qdrant-client" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "latence-core", editable = "packages/latence-core" },
+    { name = "qdrant-client", marker = "extra == 'client'", specifier = ">=1.10" },
+]
+provides-extras = ["client"]
 
 [[package]]
 name = "latence-splade"
