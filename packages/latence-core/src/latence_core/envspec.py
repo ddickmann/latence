@@ -101,6 +101,30 @@ class Constraint:
 
 
 @dataclass(frozen=True)
+class ExcludedPackage:
+    """One workspace package that MUST NOT enter this environment, plus why (issue #198).
+
+    The mechanism that turns an incompatible-by-construction Provider into a **resolution-time**
+    refusal instead of a runtime surprise. The motivating case is the ``transformers`` major split:
+    the GLiNER family is written against ``transformers`` 4.x, while the in-process OCR VLM needs
+    5.x. That conflict is not expressible as a version range on either side — the OCR package's own
+    metadata declares an *uncapped* ``transformers>=4.45``, so a resolver happily installs it into a
+    ``transformers<5`` environment and the incompatibility only detonates at model load.
+
+    Naming the package here closes that hole: :func:`verify_environment` refuses the environment
+    the moment such a package appears in ``workspace_packages`` **or is reachable through another
+    installed package's workspace dependencies** (``latence-parser-lighton-vllm`` depends on
+    ``latence-parser-lighton``, so pulling the served wrapper in drags the in-process VLM with it).
+    Gate 1 of ``smoke.sh`` runs before ``install.sh``, so the unsupported combination fails at
+    dependency resolution, exactly as the ADR-0030 endpoint boundary requires.
+    """
+
+    package: str
+    """Repo-relative path of the workspace package (e.g. ``packages/latence-parser-lighton``)."""
+    reason: str
+
+
+@dataclass(frozen=True)
 class EnvironmentSpec:
     """A reproducible environment, as declared by ``deploy/env/<name>/environment.yaml``."""
 
@@ -116,10 +140,21 @@ class EnvironmentSpec:
     extra_requirements: tuple[str, ...]
     """Third-party requirements no workspace package declares (transitive pins the recipe owns)."""
     constraints: tuple[Constraint, ...]
+    excluded_packages: tuple[ExcludedPackage, ...]
+    """Workspace packages this environment REFUSES (issue #198) — see :class:`ExcludedPackage`."""
     providers: tuple[str, ...]
     """Provider names the environment must expose (the smoke test's strict assertion)."""
     gpu_only_providers: frozenset[str]
     """Providers whose *runtime* needs a GPU: installed + registered here, exercised by #198."""
+    learned_providers: frozenset[str]
+    """Providers that load a MODEL, and must therefore prove real GPU placement (issue #198).
+
+    The probe set of :func:`latence_core.placement.probe_placement`. A Provider named here is
+    driven through one real inference and must allocate CUDA memory doing it; a Provider that owns
+    no model (source, chunker, export) is not, because demanding GPU work of it would be noise.
+    Declared rather than inferred, so *adding* a learned Provider to a GPU environment without
+    adding it here is a visible omission in one file rather than a silent hole in the gate.
+    """
     extra_index_urls: tuple[str, ...]
     index_strategy: str
     requirements_file: str = "requirements.in"
@@ -218,6 +253,20 @@ def load_environment(spec_path: Path) -> EnvironmentSpec:
             Constraint(requirement=str(entry["requirement"]), reason=str(entry["reason"]))
         )
 
+    excluded: list[ExcludedPackage] = []
+    raw_excluded = raw.get("excluded_packages", []) or []
+    if not isinstance(raw_excluded, list):
+        raise ConfigError(f"Environment spec {spec_path}: 'excluded_packages' must be a list.")
+    for entry in raw_excluded:
+        if not isinstance(entry, dict) or "package" not in entry or "reason" not in entry:
+            raise ConfigError(
+                f"Environment spec {spec_path}: every excluded package needs 'package' + 'reason' "
+                "(a refusal nobody can explain is folklore)."
+            )
+        excluded.append(
+            ExcludedPackage(package=str(entry["package"]), reason=str(entry["reason"]))
+        )
+
     workspace_packages = _strs("workspace_packages")
     providers = _strs("providers")
     if not workspace_packages:
@@ -235,8 +284,10 @@ def load_environment(spec_path: Path) -> EnvironmentSpec:
         workspace_packages=workspace_packages,
         extra_requirements=_strs("extra_requirements"),
         constraints=tuple(constraints),
+        excluded_packages=tuple(excluded),
         providers=providers,
         gpu_only_providers=frozenset(_strs("gpu_only_providers")),
+        learned_providers=frozenset(_strs("learned_providers")),
         extra_index_urls=_strs("extra_index_urls"),
         index_strategy=_str("index_strategy", required=False, default="unsafe-best-match"),
         requirements_file=_str("requirements_file", required=False, default="requirements.in"),
@@ -257,6 +308,26 @@ class _PackageMeta:
     name: str
     dependencies: tuple[str, ...]
     provider_entry_points: frozenset[str]
+
+    @property
+    def workspace_dependencies(self) -> frozenset[str]:
+        """The ``latence-*`` distributions this package requires, by *distribution* name.
+
+        Installing this package installs those too, so an environment's real package set is the
+        transitive closure over them — which is what makes an excluded package reachable
+        indirectly (``latence-parser-lighton-vllm`` → ``latence-parser-lighton``).
+        """
+        names: set[str] = set()
+        for dep in self.dependencies:
+            # Strip the version specifier / extras / marker without needing ``packaging``: the
+            # distribution name is the leading run of name characters.
+            head = dep.strip().split(";")[0].split("[")[0]
+            for stop in ("<", ">", "=", "!", "~", " ", "("):
+                head = head.split(stop)[0]
+            head = head.strip().lower().replace("_", "-")
+            if head.startswith(_WORKSPACE_PREFIX):
+                names.add(head)
+        return frozenset(names)
 
 
 def _read_package(repo_root: Path, rel_path: str) -> _PackageMeta:
@@ -431,6 +502,10 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
             )
         packages.append(meta)
 
+    # Resolution-time refusals run FIRST and are lock-independent: an environment whose package
+    # set cannot resolve is broken whether or not it has ever been solved (issue #198).
+    findings.extend(check_resolution_conflicts(spec, repo_root))
+
     findings.extend(_check_generated(spec, repo_root, "requirements", render_requirements))
     findings.extend(_check_generated(spec, repo_root, "constraints", render_constraints))
 
@@ -507,6 +582,169 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
     return EnvironmentReport(spec.name, tuple(findings))
 
 
+# --------------------------------------------------------------------------------------------
+# Resolution-time refusals (issue #198): incompatibilities that must NEVER reach a model load.
+# --------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Interval:
+    """A version specifier reduced to a closed/open interval, for exact disjointness math."""
+
+    low: Version | None
+    low_inclusive: bool
+    high: Version | None
+    high_inclusive: bool
+
+    def intersect(self, other: _Interval) -> _Interval:
+        low, low_inc = self.low, self.low_inclusive
+        if other.low is not None and (low is None or other.low > low):
+            low, low_inc = other.low, other.low_inclusive
+        elif other.low is not None and other.low == low:
+            low_inc = low_inc and other.low_inclusive
+        high, high_inc = self.high, self.high_inclusive
+        if other.high is not None and (high is None or other.high < high):
+            high, high_inc = other.high, other.high_inclusive
+        elif other.high is not None and other.high == high:
+            high_inc = high_inc and other.high_inclusive
+        return _Interval(low, low_inc, high, high_inc)
+
+    @property
+    def empty(self) -> bool:
+        if self.low is None or self.high is None:
+            return False
+        if self.low > self.high:
+            return True
+        return self.low == self.high and not (self.low_inclusive and self.high_inclusive)
+
+
+def _as_interval(specifier: Any) -> _Interval | None:
+    """Reduce a :class:`SpecifierSet` to an interval, or ``None`` when it is not interval-shaped.
+
+    Deliberately **sound, not complete**: only the bound operators (``>=``/``>``/``<``/``<=``/
+    ``==`` with no wildcard) reduce to an interval. ``!=``/``~=``/``===``/wildcards make the set
+    non-convex, and rather than guess, this returns ``None`` and the caller skips the check. The
+    consequence is that a conflict can go *unreported* (a false negative), never that a satisfiable
+    pair is reported as conflicting (a false positive) — a verifier that cries wolf gets disabled.
+    """
+    _, _, _ver = _require_packaging()
+    interval = _Interval(None, True, None, True)
+    for spec in specifier:
+        if spec.operator not in {">=", ">", "<", "<=", "=="} or spec.version.endswith("*"):
+            return None
+        version = _ver.Version(spec.version)
+        if spec.operator == "==":
+            bound = _Interval(version, True, version, True)
+        elif spec.operator == ">=":
+            bound = _Interval(version, True, None, True)
+        elif spec.operator == ">":
+            bound = _Interval(version, False, None, True)
+        elif spec.operator == "<=":
+            bound = _Interval(None, True, version, True)
+        else:  # "<"
+            bound = _Interval(None, True, version, False)
+        interval = interval.intersect(bound)
+    return interval
+
+
+def check_resolution_conflicts(spec: EnvironmentSpec, repo_root: Path) -> tuple[Finding, ...]:
+    """Refuse an environment whose package set cannot resolve — **before** anything installs.
+
+    Two refusals, both lock-independent (they hold even for an environment that has never been
+    solved), which is what makes them *dependency-resolution* failures rather than runtime ones:
+
+    * ``E-CONSTRAINT-CONFLICT`` — a package in the set declares a requirement whose version window
+      is **disjoint** from an enforced conflict boundary. Adding a ``transformers>=5`` package to
+      an environment that enforces ``transformers<5`` is refused here, naming both sides, instead
+      of resolving to something and exploding at model load.
+    * ``E-PACKAGE-EXCLUDED`` — a package the spec names as incompatible-by-construction is in the
+      set, either directly or transitively through another package's workspace dependencies. This
+      covers the incompatibilities that version metadata cannot express (see
+      :class:`ExcludedPackage`).
+    """
+    _req, _utils, _ = _require_packaging()
+    findings: list[Finding] = []
+
+    boundaries: list[tuple[Constraint, Requirement, _Interval]] = []
+    for constraint in spec.constraints:
+        parsed: Requirement = _req.Requirement(constraint.requirement)
+        interval = _as_interval(parsed.specifier)
+        if interval is not None:
+            boundaries.append((constraint, parsed, interval))
+
+    packages: list[_PackageMeta] = []
+    for rel_path in spec.workspace_packages:
+        if (repo_root / rel_path / "pyproject.toml").is_file():
+            packages.append(_read_package(repo_root, rel_path))
+
+    for requirement_str, owners in _third_party_requirements(packages):
+        requirement: Requirement = _req.Requirement(requirement_str)
+        declared = _as_interval(requirement.specifier)
+        if declared is None:
+            continue
+        dist = _utils.canonicalize_name(requirement.name)
+        for constraint, parsed, boundary in boundaries:
+            if _utils.canonicalize_name(parsed.name) != dist:
+                continue
+            if declared.intersect(boundary).empty:
+                findings.append(
+                    Finding(
+                        "E-CONSTRAINT-CONFLICT",
+                        f"'{requirement_str}' (declared by {', '.join(owners)}) is disjoint from "
+                        f"the enforced boundary '{constraint.requirement}' — this environment "
+                        "cannot resolve. "
+                        f"{constraint.reason.strip().splitlines()[0]}",
+                    )
+                )
+
+    findings.extend(_check_excluded(spec, repo_root, packages))
+    return tuple(findings)
+
+
+def _check_excluded(
+    spec: EnvironmentSpec, repo_root: Path, packages: list[_PackageMeta]
+) -> list[Finding]:
+    """Refuse an excluded package, whether named directly or dragged in as a workspace dependency."""
+    if not spec.excluded_packages:
+        return []
+    excluded_by_path = {e.package: e for e in spec.excluded_packages}
+    excluded_by_dist: dict[str, ExcludedPackage] = {}
+    for entry in spec.excluded_packages:
+        pyproject = repo_root / entry.package / "pyproject.toml"
+        dist = Path(entry.package).name
+        if pyproject.is_file():
+            dist = str(tomllib.loads(pyproject.read_text(encoding="utf-8"))
+                       .get("project", {}).get("name", dist))
+        excluded_by_dist[dist.lower().replace("_", "-")] = entry
+
+    findings: list[Finding] = []
+    for rel_path in spec.workspace_packages:
+        entry = excluded_by_path.get(rel_path)
+        if entry is not None:
+            findings.append(
+                Finding(
+                    "E-PACKAGE-EXCLUDED",
+                    f"'{rel_path}' is in workspace_packages but this environment excludes it: "
+                    f"{entry.reason.strip().splitlines()[0]}",
+                )
+            )
+    installed = {p.rel_path: p for p in packages}
+    for rel_path, meta in sorted(installed.items()):
+        for dep_dist in sorted(meta.workspace_dependencies):
+            entry = excluded_by_dist.get(dep_dist)
+            if entry is None:
+                continue
+            findings.append(
+                Finding(
+                    "E-PACKAGE-EXCLUDED",
+                    f"'{rel_path}' requires '{dep_dist}', which this environment excludes "
+                    f"('{entry.package}') — installing it drags the excluded package in. "
+                    f"{entry.reason.strip().splitlines()[0]}",
+                )
+            )
+    return findings
+
+
 def _check_generated(
     spec: EnvironmentSpec,
     repo_root: Path,
@@ -563,10 +801,33 @@ def _check_providers(spec: EnvironmentSpec, packages: list[_PackageMeta]) -> lis
             )
         )
 
+    for provider in sorted(spec.learned_providers - set(spec.providers)):
+        findings.append(
+            Finding(
+                "E-LEARNED-UNKNOWN",
+                f"learned_providers lists '{provider}', which is not in this environment's "
+                "providers",
+            )
+        )
+
     if not spec.stack_path.is_file():
         findings.append(Finding("E-STACK-MISSING", f"smoke stack not found: {spec.stack_path}"))
         return findings
-    for provider in sorted(stack_providers(spec.stack_path)):
+
+    # A learned Provider the environment declares but the stack never instantiates is never
+    # driven, so the GPU-placement gate would silently have nothing to say about it (#198).
+    in_stack = stack_providers(spec.stack_path)
+    for provider in sorted(spec.learned_providers - in_stack):
+        findings.append(
+            Finding(
+                "E-LEARNED-UNDRIVEN",
+                f"learned provider '{provider}' never appears in {spec.stack_file}, so the "
+                "GPU-placement probe can never exercise it — an unexercised learned Provider is "
+                "exactly where a silent CPU fallback hides (#191)",
+            )
+        )
+
+    for provider in sorted(in_stack):
         if provider not in spec.providers:
             findings.append(
                 Finding(
@@ -605,6 +866,61 @@ def probe_providers(spec: EnvironmentSpec) -> EnvironmentReport:
                 )
             )
     return EnvironmentReport(spec.name, tuple(findings))
+
+
+@dataclass(frozen=True)
+class StackComponent:
+    """One ``provider`` + its ``config`` as a stack YAML declares it (issue #198).
+
+    Covers Stage-level components AND the nested signal components (``embedder`` /
+    ``sparse_embedder`` / ``multivector_embedder``): both are real, separately-loaded models, and
+    the GPU-placement probe must exercise the nested Granite embedder exactly as it exercises the
+    Stage-level extractor. ``capability`` is the Stage's declared capability, or the nesting key
+    for a nested component — either way it is what selects the driver that runs the model.
+    """
+
+    capability: str
+    provider: str
+    config: dict[str, Any]
+
+
+# The nesting keys under which a stack declares a *signal* component (a separately-loaded model
+# inside a Stage's config). The key doubles as the capability name for driver selection.
+_NESTED_COMPONENT_KEYS = ("embedder", "sparse_embedder", "multivector_embedder")
+
+
+def stack_components(stack_path: Path) -> tuple[StackComponent, ...]:
+    """Every provider a stack YAML instantiates, with its capability and config, in file order."""
+    raw = yaml.safe_load(stack_path.read_text(encoding="utf-8"))
+    found: list[StackComponent] = []
+
+    def walk(node: Any, capability: str) -> None:
+        if not isinstance(node, dict):
+            if isinstance(node, list):
+                for item in node:
+                    walk(item, capability)
+            return
+        provider = node.get("provider")
+        config = node.get("config") if isinstance(node.get("config"), dict) else {}
+        own_capability = node.get("capability") if isinstance(node.get("capability"), str) else None
+        if isinstance(provider, str):
+            found.append(
+                StackComponent(
+                    capability=own_capability or capability,
+                    provider=provider,
+                    config=dict(config),
+                )
+            )
+        for key, value in node.items():
+            if key == "config" and isinstance(value, dict):
+                for nested_key in _NESTED_COMPONENT_KEYS:
+                    if nested_key in value:
+                        walk(value[nested_key], nested_key)
+            elif key not in {"provider", "capability"}:
+                walk(value, own_capability or capability)
+
+    walk(raw, "")
+    return tuple(found)
 
 
 def stack_providers(stack_path: Path) -> set[str]:
