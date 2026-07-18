@@ -1,0 +1,137 @@
+# deploy/env/full-stack/stack.yaml — the ONE full-stack end-to-end verification (issue #199).
+#
+# This is not a fourth environment. It is the stack that runs INSIDE `deploy/env/gpu-learned/`
+# while `deploy/env/served-ocr-server/` is serving, and it is the only artifact in the repo where
+# all three legs of the enterprise-sota stack run in one pipeline:
+#
+#   served OCR (transformers 5.x, on the far side of the ADR-0030 endpoint boundary)
+#        ==HTTP==>  parser.endpoint
+#                       -> chunk -> content screening
+#                       -> GPU learned Providers (transformers 4.x, in-process, device: cuda)
+#                       -> graph -> KG export + RAG corpus export (Granite r2 GPU dense leg)
+#                       -> Quality Report
+#
+# Why it can only be verified on a Blackwell/CUDA-13 host: every learned Stage pins `device: cuda`
+# (never `auto` — `auto` is how a GPU verification quietly becomes a CPU one), and the ONLY source
+# of document text is the served OCR call.
+#
+# Placeholders, filled by verify-full-stack.sh: {CORPUS_DIR}, {STORAGE_URI}, {OCR_BASE_URL}.
+#
+# MODEL (ADR-0012, weights and code verified SEPARATELY):
+#   lightonai/LightOnOCR-2-1B — WEIGHTS Apache-2.0, CODE Apache-2.0 (named here only as the string
+#   the vLLM server registers; no weights and no key live on this side of the boundary).
+#   ibm-granite/granite-embedding-311m-multilingual-r2 — WEIGHTS Apache-2.0 (IBM model card),
+#   CODE Apache-2.0 (sentence-transformers / transformers loader path), verified 2026-07-18.
+name: latence-full-stack-blackwell-verification
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      # Scan formats ONLY. A .txt here would be parsed by a text Provider and the verification
+      # would go green with the OCR server never called — the false green this stack forbids.
+      extensions: [pdf, png, jpg, jpeg, tiff, tif, webp, bmp]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 8388608
+      max_zip_ratio: 50.0
+
+  # THE BOUNDARY. `parser.endpoint` is the transformers-4.x-side client of the transformers-5.x
+  # OCR server: this process holds no VLM, no CUDA kernel for it and no weights.
+  - name: parse
+    capability: parse
+    provider: parser.endpoint
+    depends_on: [intake_screen]
+    config:
+      base_url: "{OCR_BASE_URL}"
+      model: lightonai/LightOnOCR-2-1B
+      temperature: 0.2
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    # 640 chunker-tokens: the calibrated safe near-max for the gliner family's 768-token
+    # mdeberta-v3 window (the pod measurement, see stacks/gpu-sota-pod.yaml).
+    config: {max_tokens: 640, overlap_tokens: 80, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  - name: extract
+    capability: fused_entity_relation
+    provider: fused_entity_relation.gliner2
+    depends_on: [content_screen]
+    config:
+      device: cuda
+      labels: [organization, person]
+      relation_labels: [works for, partner of]
+      threshold: 0.3
+
+  - name: redact_pii
+    capability: redaction
+    provider: redaction.gliner_pii
+    depends_on: [content_screen]
+    config:
+      device: cuda
+      pii_labels: [person, email, phone number, address, credit card number]
+
+  - name: redact_financial
+    capability: redaction
+    provider: redaction.gliner2
+    depends_on: [content_screen]
+    config:
+      device: cuda
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical
+    depends_on: [parse, extract]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.glinker
+    depends_on: [extract]
+    config:
+      device: cuda
+      context_window: 200
+      threshold: 0.3
+      use_reranker: true
+      use_flash_deberta: true
+      use_embedding_merge: false
+      use_fuzzy_merge: true
+      min_similarity: 0.90
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-full-stack-blackwell-verification}
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact_financial]
+    config:
+      basename: corpus
+      embedder:
+        provider: embedding.sentence_transformers
+        config:
+          model: ibm-granite/granite-embedding-311m-multilingual-r2
+          dimension: 768
+          device: cuda

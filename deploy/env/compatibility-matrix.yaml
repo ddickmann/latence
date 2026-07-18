@@ -1,0 +1,540 @@
+# deploy/env/compatibility-matrix.yaml — the Blackwell / CUDA-13 compatibility matrix (issue #199).
+#
+# THE SINGLE SOURCE OF TRUTH. `docs/compatibility-matrix.md` is GENERATED from this file
+# (`latence env matrix deploy/env/compatibility-matrix.yaml --render`) and byte-compared by the
+# verifier, so the published page can never drift from the checked data.
+#
+# THE ONE RULE: every cell is a MEASUREMENT or explicitly `UNVERIFIED`. There is no third status,
+# and the verifier enforces both halves — a `verified` cell without date/hardware/command/observed
+# is E-MATRIX-EVIDENCE-MISSING, and an `UNVERIFIED` cell without a runnable reproduce command is
+# E-MATRIX-REPRODUCE-MISSING. Coverage is DERIVED from the committed deploy/env/*/environment.yaml
+# specs, so a new enforced boundary or learned Provider turns this file red until it is mapped.
+#
+# TWO AXES per cell, because they fail differently and independently:
+#   resolution — does the combination INSTALL from the pinned environment? Offline, import-free,
+#                machine-checked on every commit by `latence env verify`.
+#   runtime    — does it RUN on Blackwell sm_120? Needs the hardware. A green resolution is not a
+#                runtime claim, and this file refuses to let one be read as the other.
+#
+# HONESTY NOTE, stated once and reflected in every cell below: the pinned environments of #195,
+# #196 and #198 were authored offline. The live 2026-07-17 Blackwell/CUDA-13 run predates them and
+# ran at DIFFERENT versions (torch 2.8+cu128 -> 2.11+cu130 on the serving side). So the failure
+# MODES below carry real measurements from that run, while the runtime axis of every cell is
+# UNVERIFIED against the pins, with the exact command that turns it into a measurement. Nothing
+# here is inferred from "it should work".
+#
+# Governing: ADR-0016 (per-Provider packages carry the heavy deps), ADR-0036 (device profiles —
+# never fabricate a device fact), ADR-0030 (the endpoint seam that resolves the transformers
+# split), ADR-0012 (weights and code licences verified separately).
+name: blackwell-cuda13
+summary: >-
+  Which learned Provider and which serving dependency of the enterprise-sota multilingual stack is
+  known-good on which CUDA / torch / transformers combination on Blackwell (sm_120) — and, with
+  equal weight, which combination nobody has measured yet.
+hardware: >-
+  Reference target: Linux x86-64, NVIDIA Blackwell (compute capability 12.0, `sm_120`), CUDA-13
+  driver. The live run this matrix records was on such a pod; the field report does not record the
+  exact SKU, so the SKU is deliberately not stated here rather than guessed. (A related 2026-07-14
+  run on an RTX PRO 4500 Blackwell / torch 2.8+cu128 is recorded in ADR-0036 §W9-scaling.)
+verified_on: "2026-07-17"
+doc_path: docs/compatibility-matrix.md
+
+# --- Reusable evidence blocks ----------------------------------------------------------------
+# YAML anchors, not a schema feature: the same offline check backs every cell of an environment,
+# and re-typing its observed output 6 times is how a transcription becomes a paraphrase.
+_resolution_evidence:
+  cpu_text: &res_cpu_text
+    status: verified
+    evidence:
+      date: "2026-07-19"
+      hardware: "any host — the check is offline and import-free (run on macOS arm64)"
+      command: "latence env verify deploy/env/cpu-text/environment.yaml"
+      observed: "environment 'cpu-text': OK (no findings)"
+      source: "scripts/verify-local.sh runs this for every deploy/env/*/ on every commit"
+  ocr_server: &res_ocr_server
+    status: verified
+    evidence:
+      date: "2026-07-19"
+      hardware: "any host — the check is offline and import-free (run on macOS arm64)"
+      command: "latence env verify deploy/env/served-ocr-server/environment.yaml"
+      observed: "environment 'served-ocr-server': OK (no findings)"
+      source: "scripts/verify-local.sh runs this for every deploy/env/*/ on every commit"
+  ocr_client: &res_ocr_client
+    status: verified
+    evidence:
+      date: "2026-07-19"
+      hardware: "any host — the check is offline and import-free (run on macOS arm64)"
+      command: "latence env verify deploy/env/served-ocr-client/environment.yaml"
+      observed: "environment 'served-ocr-client': OK (no findings)"
+      source: "scripts/verify-local.sh runs this for every deploy/env/*/ on every commit"
+  gpu_learned: &res_gpu_learned
+    status: verified
+    evidence:
+      date: "2026-07-19"
+      hardware: "any host — the check is offline and import-free (run on macOS arm64)"
+      command: "latence env verify deploy/env/gpu-learned/environment.yaml"
+      observed: "environment 'gpu-learned': OK (no findings)"
+      source: "scripts/verify-local.sh runs this for every deploy/env/*/ on every commit"
+
+_runtime_pending:
+  cpu_text: &rt_cpu_text
+    status: UNVERIFIED
+    reproduce: "bash deploy/env/cpu-text/smoke.sh"
+    blocked_by: >-
+      Not stood up on a Blackwell/CUDA-13 host. This environment is CPU-only, so what is unmeasured
+      is the CPU/text leg running alongside the GPU legs on that host — not a CUDA kernel.
+  ocr_server: &rt_ocr_server
+    status: UNVERIFIED
+    reproduce: "bash deploy/env/served-ocr-server/smoke.sh"
+    blocked_by: >-
+      No Blackwell (sm_120) / CUDA-13 GPU on the authoring host. The pinned serving set
+      (vllm 0.24.0 + torch 2.11.0+cu130 + transformers 5.14.1) has never been started on hardware;
+      the live run used an earlier, different set.
+  ocr_client: &rt_ocr_client
+    status: UNVERIFIED
+    reproduce: "bash deploy/env/served-ocr-client/smoke.sh"
+    blocked_by: >-
+      Needs a RUNNING served-OCR endpoint ($LATENCE_OCR_BASE_URL) on a Blackwell/CUDA-13 host;
+      the client itself is CPU-only, so what is unmeasured is the crossing, not a local kernel.
+  gpu_learned: &rt_gpu_learned
+    status: UNVERIFIED
+    reproduce: "bash deploy/env/gpu-learned/smoke.sh"
+    blocked_by: >-
+      No Blackwell (sm_120) / CUDA-13 GPU on the authoring host. Gates 2-4 of the smoke — live
+      stand-up, the #191 GPU-placement probe and the end-to-end slice — need the installed
+      environment and a real sm_120 device.
+
+cells:
+  # --- deploy/env/cpu-text/ -------------------------------------------------------------------
+  - component: torch
+    kind: distribution
+    environment: cpu-text
+    version: "2.13.0+cpu"
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      CPU build on purpose: this environment runs the learned text Providers without CUDA, and is
+      the leg that keeps working when the GPU legs are unavailable.
+  - component: transformers
+    kind: distribution
+    environment: cpu-text
+    version: "4.57.6"
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: "The 4.x side of the split (FM-TRANSFORMERS-SPLIT); capped <5 by the GLiNER family."
+  - component: tokenizers
+    kind: distribution
+    environment: cpu-text
+    version: "0.22.2"
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: "Inside transformers 4.x's >=0.22,<=0.23.0 window; the classic silent-drift dependency."
+  - component: huggingface-hub
+    kind: distribution
+    environment: cpu-text
+    version: "0.36.2"
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      Held below 1.x, which transformers 4.x cannot use. Blackwell-specific operational note from
+      the pod walkthrough: the hub's XET transfer backend has hung on fresh Blackwell pods —
+      HF_HUB_DISABLE_XET=1 is the documented workaround (docs/TUTORIAL-fresh-pod-walkthrough.md).
+
+  # --- deploy/env/served-ocr-server/ ----------------------------------------------------------
+  - component: vllm
+    kind: distribution
+    environment: served-ocr-server
+    version: "0.24.0"
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    notes: >-
+      Pinned exactly. 0.25.1 declares torchcodec>=0.14, which this environment excludes, so a bump
+      fails at resolve rather than landing an ABI-mismatched wheel on a pod (FM-WHEEL-ABI).
+      Serving settings that came from the live run: FM-FLASHINFER-SM120 and FM-MULTIMODAL-OOM.
+  - component: torch
+    kind: distribution
+    environment: served-ocr-server
+    version: "2.11.0+cu130"
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    notes: >-
+      The +cu130 wheel line is the one carrying sm_120 kernels; a default-PyPI cu12 torch is the
+      "no kernel image is available for execution on the device" failure.
+  - component: transformers
+    kind: distribution
+    environment: served-ocr-server
+    version: "5.14.1"
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    notes: "The 5.x side of the split. It exists ONLY here, behind the endpoint boundary."
+  - component: flashinfer-python
+    kind: distribution
+    environment: served-ocr-server
+    version: "0.6.12"
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    notes: >-
+      The component of FM-FLASHINFER-SM120. Present and pinned; its SAMPLER is disabled by
+      serve.sh on Blackwell, which keeps cudagraphs on (this is not --enforce-eager).
+  - component: flash-attn
+    kind: excluded_distribution
+    environment: served-ocr-server
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    notes: >-
+      Made IMPOSSIBLE to install (constraints.txt pins flash-attn<0). vLLM vendors its own
+      attention backends and never imports the standalone package. See FM-WHEEL-ABI.
+  - component: torchcodec
+    kind: excluded_distribution
+    environment: served-ocr-server
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    notes: "Excluded for the same reason; the OCR path decodes no audio or video. FM-WHEEL-ABI."
+  - component: lightonai/LightOnOCR-2-1B
+    kind: served_model
+    environment: served-ocr-server
+    resolution: *res_ocr_server
+    runtime: *rt_ocr_server
+    weights_license: "Apache-2.0 (LightOn model card, verified 2026-07-09 per ADR-0012)"
+    code_license: "Apache-2.0 (LightOn model card / vLLM serving path, verified separately)"
+    notes: >-
+      The served VLM. It never enters a framework environment: the client side holds only the
+      model-id string.
+
+  # --- deploy/env/served-ocr-client/ ----------------------------------------------------------
+  - component: torch
+    kind: distribution
+    environment: served-ocr-client
+    version: "2.13.0+cpu"
+    resolution: *res_ocr_client
+    runtime: *rt_ocr_client
+    notes: >-
+      CPU torch the client never runs a model with — it is installed for the shared page
+      rasteriser. No CUDA on this side of the boundary at all.
+  - component: transformers
+    kind: distribution
+    environment: served-ocr-client
+    version: "4.57.6"
+    resolution: *res_ocr_client
+    runtime: *rt_ocr_client
+    notes: "Capped <5 like the rest of the text stack: the client composes with cpu-text."
+  - component: openai
+    kind: distribution
+    environment: served-ocr-client
+    version: "2.46.0"
+    resolution: *res_ocr_client
+    runtime: *rt_ocr_client
+    notes: "The whole client-side dependency on the OCR model: one OpenAI-compatible HTTP client."
+  - component: pillow
+    kind: distribution
+    environment: served-ocr-client
+    version: "12.3.0"
+    resolution: *res_ocr_client
+    runtime: *rt_ocr_client
+    notes: "Page rasterisation (200 dpi, 1540px longest side) before the POST."
+  - component: flash-attn
+    kind: excluded_distribution
+    environment: served-ocr-client
+    resolution: *res_ocr_client
+    runtime: *rt_ocr_client
+    notes: "Excluded: the client runs no attention kernel at all. FM-WHEEL-ABI."
+  - component: torchcodec
+    kind: excluded_distribution
+    environment: served-ocr-client
+    resolution: *res_ocr_client
+    runtime: *rt_ocr_client
+    notes: "Excluded: sentence-transformers does not need it and nothing here decodes media."
+
+  # --- deploy/env/gpu-learned/ ----------------------------------------------------------------
+  - component: torch
+    kind: distribution
+    environment: gpu-learned
+    version: "2.13.0+cu130"
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      CUDA-13 wheel line (sm_120 kernels). Note the deliberate asymmetry with the serving
+      environment's 2.11.0+cu130: the two sides are pinned independently BECAUSE they are separate
+      processes — that is what the endpoint boundary buys.
+  - component: transformers
+    kind: distribution
+    environment: gpu-learned
+    version: "4.57.6"
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: "The 4.x side, in-process. FM-TRANSFORMERS-SPLIT is why the OCR VLMs are not here."
+  - component: tokenizers
+    kind: distribution
+    environment: gpu-learned
+    version: "0.22.2"
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: "Inside transformers 4.x's window."
+  - component: huggingface-hub
+    kind: distribution
+    environment: gpu-learned
+    version: "0.36.2"
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      Below 1.x. On a fresh Blackwell pod set HF_HUB_DISABLE_XET=1 before the first weight
+      download (docs/TUTORIAL-fresh-pod-walkthrough.md §1.3).
+  - component: fused_entity_relation.gliner2
+    kind: learned_provider
+    environment: gpu-learned
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      mdeberta-v3 backbone — the Provider that produced FM-NVRTC-JIT on the live run, and the one
+      whose CUDA placement `latence env placement` measures in bytes rather than trusting output.
+  - component: redaction.gliner_pii
+    kind: learned_provider
+    environment: gpu-learned
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      The #191 Provider: gliner 0.2.x never auto-places, so a configured device: cuda with the
+      model on the CPU is silent and plausible. Runtime here means CUDA bytes allocated, measured.
+  - component: redaction.gliner2
+    kind: learned_provider
+    environment: gpu-learned
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: "mdeberta-v3 again (inherits the FM-NVRTC-JIT seam); carries the ADR-0044 financial floor."
+  - component: disambiguation.glinker
+    kind: learned_provider
+    environment: gpu-learned
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      DeBERTa-backed and compute=gpu; loads through the glinker library, which is why it calls the
+      SAME JIT-neutralising seam rather than a copy of it. Also pulls flashdeberta + triton, which
+      is what makes this environment Linux/x86-64 only.
+  - component: embedding.sentence_transformers
+    kind: learned_provider
+    environment: gpu-learned
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      The Granite r2 dense leg (ADR-0045): ibm-granite/granite-embedding-311m-multilingual-r2 —
+      WEIGHTS Apache-2.0 (IBM model card), CODE Apache-2.0 (sentence-transformers / transformers
+      loader), verified separately 2026-07-18 per ADR-0012.
+
+# --- The failure modes the live run produced -------------------------------------------------
+# Each one is a fact from 2026-07-17 (or, where noted, the 2026-07-14 run), not a prediction. The
+# `observation` axis is that the failure happened; the `resolution_state` axis is whether the fix
+# has been CONFIRMED on the pinned environments this matrix describes. They are different claims.
+failure_modes:
+  - id: FM-FLASHINFER-SM120
+    title: "FlashInfer's sm75 check misparses sm_120 and refuses a capable Blackwell device"
+    environment: served-ocr-server
+    component: flashinfer-python
+    symptom: >-
+      vLLM aborts at startup with "FlashInfer requires sm75+" (equivalently "requires sm75 or
+      higher") on a GPU whose compute capability is 12.0 — far above the stated floor.
+    cause: >-
+      The bundled FlashInfer's architecture check parses compute capability 12.0 as the integer 12
+      and compares it against 75, so every sm_120 device reads as below an sm75 floor. The device
+      is capable; the check is stale.
+    resolution: >-
+      Set VLLM_USE_FLASHINFER_SAMPLER=0 for the serve. This disables only the SAMPLER, so
+      cudagraphs stay ON — it is deliberately NOT --enforce-eager, which would cost the throughput
+      the served path exists for. Upgrading flashinfer past the fixed check is the other exit, and
+      it is a deliberate version bump, not a silent one.
+    enforced_by:
+      - deploy/env/served-ocr-server/serve.sh
+      - deploy/env/served-ocr-server/environment.yaml
+      - docs/serving-lighton-vllm.md
+    observation:
+      status: verified
+      evidence:
+        date: "2026-07-17"
+        hardware: "Blackwell (sm_120) / CUDA-13 pod (SKU not recorded in the field report)"
+        command: "vllm serve lightonai/LightOnOCR-2-1B ... (the LightOn production recipe)"
+        observed: "startup aborted: FlashInfer requires sm75+"
+        source: "docs/adr/0036-provider-ecosystem-and-bakeoff.md (W10-lighton-vllm); deploy/env/served-ocr-server/environment.yaml"
+    resolution_state:
+      status: UNVERIFIED
+      reproduce: "bash deploy/env/served-ocr-server/smoke.sh"
+      blocked_by: >-
+        The workaround is encoded in serve.sh but has not been re-measured against THIS pinned set
+        (vllm 0.24.0 / torch 2.11.0+cu130 / flashinfer-python 0.6.12) on an sm_120 device.
+
+  - id: FM-NVRTC-JIT
+    title: "TorchScript JIT asks nvrtc for CUDA-13 builtins that are not there, crashing mdeberta"
+    environment: gpu-learned
+    component: fused_entity_relation.gliner2
+    symptom: >-
+      A native RuntimeError "... failed to open libnvrtc-builtins.so.13.0" raised on the FIRST
+      forward pass (never at load), from the mdeberta-v3 encoder's @torch.jit.script-ed
+      build_relative_position. It killed a 519-page run mid-extraction.
+    cause: >-
+      Torch has TWO runtime compilers. The earlier guard neutralised torch.compile (dynamo /
+      inductor) and nothing else; the TorchScript JIT fuser still asked nvrtc to build kernels
+      against a builtins library absent for that CUDA-13 / torch pairing. Because the fault is a
+      bare native RuntimeError on first forward, no load-time try/except and no dynamo-fault
+      predicate can see it.
+    resolution: >-
+      neutralize_torch_jit() at the SHARED Provider load seam: it sets PYTORCH_JIT=0 (read by torch
+      at import, so module-import-time @torch.jit.script becomes a no-op) AND calls
+      torch.jit._state.disable() for an already-imported torch. Applied inside load_gliner2_optimized
+      and load_then_cast, so every mdeberta-backed Provider inherits it; glinker calls the same
+      function. Throughput-only degradation — output is byte-identical (issue #190).
+    enforced_by:
+      - packages/latence-core/src/latence_core/providers/perf.py
+      - deploy/env/gpu-learned/stack.yaml
+      - docs/adr/0036-provider-ecosystem-and-bakeoff.md
+    observation:
+      status: verified
+      evidence:
+        date: "2026-07-17"
+        hardware: "Blackwell (sm_120) / CUDA-13 pod (SKU not recorded in the field report)"
+        command: "a live 519-page German-corpus run through fused_entity_relation.gliner2"
+        observed: "RuntimeError: ... failed to open libnvrtc-builtins.so.13.0 (raised on the first forward)"
+        source: "docs/adr/0036-provider-ecosystem-and-bakeoff.md (W9-jit, 2026-07-17, #190)"
+    resolution_state:
+      status: UNVERIFIED
+      reproduce: "bash deploy/env/gpu-learned/smoke.sh"
+      blocked_by: >-
+        The seam is proven offline (17 tests in packages/latence-core/tests bite it, including one
+        whose fake torch RAISES the exact nvrtc error when the JIT is left enabled), but it has not
+        been re-run on an sm_120 device against torch 2.13.0+cu130.
+
+  - id: FM-WHEEL-ABI
+    title: "Prebuilt flash-attn / torchcodec wheels ABI-break under the serving layer's torch churn"
+    environment: served-ocr-server
+    component: flash-attn
+    symptom: >-
+      Import failures and segfaults from prebuilt wheels after the serving torch moved
+      2.8+cu128 -> 2.11+cu130. Hours lost to a stack that installs cleanly and dies at import.
+    cause: >-
+      flash-attn is compiled against a specific torch C++ ABI and torchcodec binds a specific
+      torch/FFmpeg build. Nothing in the framework's declared dependencies asks for either — they
+      arrive as somebody's transitive extra — so an "uninstall them afterwards" runbook step only
+      runs when somebody remembers.
+    resolution: >-
+      Declare both under excluded_distributions, which renders an UNSATISFIABLE pin
+      (flash-attn<0) into constraints.txt: the resolver REFUSES instead of installing. The serving
+      image bakes the same file in as PIP_CONSTRAINT so a later pip install inside a running
+      container fails too, verify-exclusions.py fails the image BUILD if either module is
+      importable, and `latence env verify` reports E-EXCLUSION-VIOLATED if either reaches a lock.
+    enforced_by:
+      - deploy/env/served-ocr-server/environment.yaml
+      - deploy/env/served-ocr-client/environment.yaml
+      - deploy/env/served-ocr-server/verify-exclusions.py
+      - deploy/env/served-ocr-server/constraints.txt
+    observation:
+      status: verified
+      evidence:
+        date: "2026-07-17"
+        hardware: "Blackwell (sm_120) / CUDA-13 pod (SKU not recorded in the field report)"
+        command: "standing up the vLLM serving environment across the torch 2.8+cu128 -> 2.11+cu130 move"
+        observed: "prebuilt flash-attn / torchcodec wheels failed to import against the new torch ABI"
+        source: "deploy/env/README.md (the wheels that must be impossible to install, #196)"
+    resolution_state:
+      status: verified
+      evidence:
+        date: "2026-07-19"
+        hardware: "any host — the refusal is a RESOLUTION-time fact, checked offline"
+        command: "uv run pytest packages/latence-core/tests/test_envspec.py -k 'exclusion or conflict'"
+        observed: "8 passed — the committed locks carry neither distribution, and an injected one is reported E-EXCLUSION-VIOLATED / E-EXCLUSION-CONTRADICTED"
+        source: "packages/latence-core/tests/test_envspec.py"
+
+  - id: FM-MULTIMODAL-OOM
+    title: "vLLM multimodal OOM at the documented gpu-memory-utilization and concurrency"
+    environment: served-ocr-server
+    component: vllm
+    symptom: >-
+      CUDA out-of-memory during OCR serving at the generic recipe's --gpu-memory-utilization 0.90
+      / --max-num-seqs 32, with 34 client images in flight.
+    cause: >-
+      Per-request decoded page images allocate OUTSIDE the KV-cache fraction that
+      gpu-memory-utilization governs, and every in-flight sequence holds one. The generic text-LLM
+      tuning therefore leaves no room for the pixels.
+    resolution: >-
+      Serve with --gpu-memory-utilization 0.72 and --max-num-seqs 16, and cap the client at
+      max_concurrency 12 (12 under a 16-slot server keeps every slot busy without oversubscribing
+      it). 0.72 was stable across the full 519-page corpus.
+    enforced_by:
+      - deploy/env/served-ocr-server/serve.sh
+      - deploy/env/served-ocr-client/stack.yaml
+      - deploy/env/README.md
+    observation:
+      status: verified
+      evidence:
+        date: "2026-07-17"
+        hardware: "Blackwell (sm_120) / CUDA-13 pod (SKU not recorded in the field report)"
+        command: "vllm serve ... --gpu-memory-utilization 0.90 --max-num-seqs 32 with 34 concurrent page images"
+        observed: "CUDA OOM on the multimodal path; stable after 0.72 / 16 / client concurrency 12 across 519 pages"
+        source: "deploy/env/README.md (Blackwell / CUDA-13 settings that came from the run)"
+    resolution_state:
+      status: UNVERIFIED
+      reproduce: "LATENCE_OCR_BASE_URL=... bash deploy/env/served-ocr-client/smoke.sh"
+      blocked_by: >-
+        The settings are encoded in serve.sh and the client stack, but the headroom has not been
+        re-measured against vllm 0.24.0 / torch 2.11.0+cu130 on an sm_120 device, and it is
+        VRAM-size dependent — an operator on a different Blackwell SKU should re-check it.
+
+  - id: FM-TRANSFORMERS-SPLIT
+    title: "transformers <5 (GLiNER family) vs 5.x (OCR VLMs) — no single interpreter satisfies both"
+    environment: gpu-learned
+    component: transformers
+    symptom: >-
+      Installing the OCR VLM next to the learned text stack produces one site-packages holding one
+      transformers: whichever half installed second works, and the other breaks at from_pretrained
+      — hours after the install "succeeded".
+    cause: >-
+      gliner / gliner2 / glinker / flashdeberta are written against the transformers 4.x API;
+      LightOn-OCR-2 support in vLLM 0.24 rides 5.x. The incompatibility lives in the MODEL code,
+      not in package metadata (latence-parser-lighton declares an uncapped transformers>=4.45), so
+      no resolver would ever object.
+    resolution: >-
+      The ADR-0030 endpoint boundary is the ONE supported resolution: 4.x in-process, 5.x served,
+      one HTTP POST between them. Enforced, not documented — gpu-learned names the in-process OCR
+      packages under excluded_packages, and the check walks the workspace dependency graph so a
+      package that merely DEPENDS on one is refused too (E-PACKAGE-EXCLUDED), at resolution time,
+      before install.sh runs. A two-phase install into one interpreter was explicitly rejected.
+    enforced_by:
+      - deploy/env/gpu-learned/environment.yaml
+      - packages/latence-core/src/latence_core/envspec.py
+      - deploy/env/README.md
+    observation:
+      status: verified
+      evidence:
+        date: "2026-07-17"
+        hardware: "Blackwell (sm_120) / CUDA-13 pod (SKU not recorded in the field report)"
+        command: "standing up the OCR VLM and the GLiNER learned set in one interpreter"
+        observed: "the two transformers majors are irreconcilable in one site-packages; the second install wins and the other half fails at model load"
+        source: "issue #198 pod field evidence; deploy/env/README.md (the two-environment split)"
+    resolution_state:
+      status: verified
+      evidence:
+        date: "2026-07-19"
+        hardware: "any host — the split is a RESOLUTION-time fact, checked offline"
+        command: "uv run pytest packages/latence-core/tests/test_envspec.py -k 'exclusion or conflict'"
+        observed: "8 passed, including test_the_ocr_split_is_a_genuine_dependency_conflict, which derives the conflict from the two committed specs rather than asserting a comment"
+        source: "packages/latence-core/tests/test_envspec.py"
+
+# --- The one documented full-stack end-to-end verification ------------------------------------
+full_stack_run:
+  status: UNVERIFIED
+  command: >-
+    LATENCE_OCR_BASE_URL=http://<host>:8000 bash deploy/env/full-stack/verify-full-stack.sh
+    --corpus <a small directory of scanned pages> --record
+  script: deploy/env/full-stack/verify-full-stack.sh
+  stack: deploy/env/full-stack/stack.yaml
+  artifacts:
+    - _latence/runs/full-stack-0001/quality-report.json
+    - _latence/runs/full-stack-0001/quality-report.md
+    - _latence/runs/full-stack-0001/export/corpus.jsonl
+    - _latence/runs/full-stack-0001/export/corpus.parquet
+    - _latence/runs/full-stack-0001/export/graph-nodes.parquet
+    - _latence/runs/full-stack-0001/export/graph-edges.parquet
+  blocked_by: >-
+    NOT YET RUN. It needs a Blackwell (sm_120) / CUDA-13 host with both pinned environments
+    installed and the OCR server running — none of which exists on the authoring host. Everything
+    the run needs is committed and one command away: the composed stack, the four gates and the
+    artifact assertions (which FAIL on a skipped Stage, a Stage that resolved to cpu, an empty
+    export or document_count=0, so the run cannot pass by narrowing itself). `--record` prints the
+    evidence block to paste back here, so the measurement is transcribed by the machine that made
+    it. Until then `latence env matrix ... --require-verified` stays red, on purpose.

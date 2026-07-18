@@ -1180,6 +1180,57 @@ def env_render(
     typer.echo(f"rendered {len(rendered)} file(s) for environment '{spec.name}'")
 
 
+@env_app.command("matrix")
+def env_matrix(
+    matrix_path: Annotated[
+        Path,
+        typer.Argument(help="Path to deploy/env/compatibility-matrix.yaml."),
+    ] = Path("deploy/env/compatibility-matrix.yaml"),
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: two parents up from the file)."),
+    ] = None,
+    render: Annotated[
+        bool,
+        typer.Option("--render", help="Write the generated Markdown document instead of checking."),
+    ] = False,
+    require_verified: Annotated[
+        bool,
+        typer.Option(
+            "--require-verified",
+            help="Also fail while ANY cell or the full-stack run is still UNVERIFIED. The switch "
+            "a maintainer flips ON the Blackwell host to prove the map is fully measured.",
+        ),
+    ] = False,
+) -> None:
+    """Check the Blackwell/CUDA-13 compatibility matrix (issue #199).
+
+    Offline and import-free. Every cell must be a measurement — date, hardware, command, observed
+    output — or explicitly ``UNVERIFIED`` with the exact command that turns it into one. Coverage
+    is derived from the committed ``deploy/env/*/environment.yaml`` specs, so a new enforced
+    boundary or learned Provider fails this check until it is mapped.
+    """
+    from latence_core.compat import load_matrix, render_matrix, verify_matrix
+
+    try:
+        matrix = load_matrix(matrix_path)
+        root = repo_root or matrix_path.resolve().parents[2]
+        if render:
+            doc = root / matrix.doc_path
+            doc.parent.mkdir(parents=True, exist_ok=True)
+            doc.write_text(render_matrix(matrix), encoding="utf-8")
+            typer.echo(f"rendered {matrix.doc_path} from {matrix_path}")
+            return
+        report = verify_matrix(matrix, root, require_verified=require_verified)
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"env matrix failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(report.describe())
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
 def main() -> None:  # pragma: no cover - console entry shim
     app()
 

@@ -132,6 +132,19 @@ def exclusion_requirement(package: str) -> str:
     return f"{package}{_EXCLUDED_SPECIFIER}"
 
 
+def distribution_name(requirement: str) -> str:
+    """The canonical distribution name of a PEP 508 requirement string.
+
+    Public because the compatibility matrix (:mod:`latence_core.compat`, issue #199) derives the
+    set of distributions it must have a cell for from the SAME committed specs this module parses.
+    A second, hand-rolled name-normaliser there is how a matrix quietly stops covering a
+    dependency whose requirement string grew an extra or a marker.
+    """
+    _req, _utils, _ = _require_packaging()
+    name: str = _utils.canonicalize_name(_req.Requirement(requirement).name)
+    return name
+
+
 @dataclass(frozen=True)
 class Exclusion:
     """One distribution that MUST NOT be installable in this environment, plus why.
