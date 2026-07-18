@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from latence_core.contracts import (
@@ -26,7 +27,11 @@ from latence_core.contracts import (
     Provenance,
     RedactionAction,
 )
+from latence_core.errors import ConfigError, ProviderError
 from latence_pii_gliner import GlinerPIIRedactor
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _chunk(
@@ -69,6 +74,20 @@ def _chunk(
     )
 
 
+# The dtype names ``load_then_cast`` may hand ``.to()`` on a torch-free host (it passes the NAME
+# string when torch is absent) — distinguished from a device string so the fake routes like torch.
+_TORCH_DTYPE_NAMES = frozenset({"bfloat16", "float16", "float32", "float64"})
+# The device types torch accepts at the start of a device string; anything else is a RuntimeError.
+_TORCH_DEVICE_TYPES = frozenset({"cpu", "cuda", "mps", "xpu", "meta"})
+
+
+@dataclass(frozen=True)
+class _FakeParam:
+    """A stand-in for a ``torch.nn.Parameter``: the only thing under test is its ``device``."""
+
+    device: str
+
+
 class _FakeGLiNER:
     """Stands in for gliner.GLiNER with predict_entities AND batch_predict_entities (W7).
 
@@ -89,6 +108,14 @@ class _FakeGLiNER:
         #: FAITHFUL to the real GLiNER model: a ``config`` with a ``max_len`` the library truncates
         #: to. The provider's W12 model-boundary guard sets this so a test can assert the bound.
         self.config = types.SimpleNamespace(max_len=384)
+        #: FAITHFUL to ``GLiNER.from_pretrained`` (a ``torch.nn.Module`` + PyTorchModelHubMixin):
+        #: the weights land on **CPU** — the library does NOT auto-place on cuda (#191). Only an
+        #: explicit ``.to(device)`` moves them, exactly like the real ``nn.Module``.
+        self._param = _FakeParam("cpu")
+
+    def parameters(self) -> Iterator[_FakeParam]:
+        """The real model's parameter iterator — the ground truth for "where does it run"."""
+        yield self._param
 
     @classmethod
     def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
@@ -101,8 +128,24 @@ class _FakeGLiNER:
         inst.model_id = model_id
         return inst
 
-    def to(self, dtype: Any) -> _FakeGLiNER:
-        self.cast_dtype = dtype  # W8: the plain-gliner dtype path is .to(bf16) on cuda
+    def to(self, arg: Any) -> _FakeGLiNER:
+        """``nn.Module.to`` — one call takes EITHER a device or a dtype (both are real usages).
+
+        FAITHFUL to torch: a device string moves the parameters (so ``parameters()[0].device``
+        changes); a dtype casts them; an unknown device string is a ``RuntimeError`` exactly as
+        ``torch.device("gpu")`` is, so a typo can never be mistaken for a successful placement.
+        """
+        if isinstance(arg, str) and arg in _TORCH_DTYPE_NAMES:
+            self.cast_dtype = arg  # W8: the plain-gliner dtype path is .to(bf16) on cuda
+            return self
+        if isinstance(arg, str):
+            base = arg.split(":", 1)[0]
+            if base not in _TORCH_DEVICE_TYPES:
+                msg = f"Expected one of {sorted(_TORCH_DEVICE_TYPES)} device type at start of device string: {arg}"
+                raise RuntimeError(msg)
+            self._param = _FakeParam(arg)
+            return self
+        self.cast_dtype = arg
         return self
 
     def _for_text(self, text: str, labels: list[str], threshold: float) -> list[dict[str, Any]]:
@@ -356,8 +399,83 @@ def test_skipped_chunks_need_no_model_call(fake_gliner: type[_FakeGLiNER]) -> No
     assert provider._model.batch_calls == 1
 
 
-def test_batch_size_must_be_positive_int() -> None:
-    from latence_core.errors import ConfigError
+# --- #191 device placement (ADR-0036 §2) -----------------------------------------------------
 
+
+def _model_param_device(provider: GlinerPIIRedactor) -> str:
+    """Where the LOADED model's parameters actually live — the only honest "what device ran this"."""
+    return next(iter(provider._model.parameters())).device
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_model_parameters_reside_on_the_resolved_device(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    """#191 regression: the model is PLACED on the resolved device at load, not left on CPU.
+
+    Device-parameterized so CPU-only CI still runs both lanes meaningfully: ``LATENCE_CUDA=1`` is
+    the framework's deterministic CUDA probe override (``latence_core.providers.device``), so the
+    ``cuda`` lane exercises the real resolution + placement path on a GPU-less box. Pre-fix the
+    provider never called ``.to(device)`` at all, so the cuda lane found the parameters on ``cpu``
+    — the silent 11.5 s/chunk cliff.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1" if device == "cuda" else "0")
+    provider = GlinerPIIRedactor({**_config(), "device": device})
+    list(provider.redact([_chunk(_TEXT)]))
+    assert _model_param_device(provider) == device
+
+
+def test_redaction_spans_are_identical_across_devices(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The output contract does not move with the device — only throughput does (#191 AC 3)."""
+    e_start = _TEXT.index("alice@acme.com")
+    fake_gliner.entities = [
+        {"start": e_start, "end": e_start + 14, "label": "email", "score": 0.9}
+    ]
+
+    def _run(device: str) -> list[tuple[Any, ...]]:
+        monkeypatch.setenv("LATENCE_CUDA", "1" if device == "cuda" else "0")
+        rec = list(GlinerPIIRedactor({**_config(), "device": device}).redact([_chunk(_TEXT)]))[0]
+        return [
+            (rec.masked_content, s.char_start, s.char_end, s.pii_type, s.action)
+            for s in rec.pii_spans
+        ]
+
+    assert _run("cuda") == _run("cpu")
+    assert _run("cpu")  # and it is a non-empty comparison, not two empty lists
+
+
+def test_cuda_requested_without_a_gpu_fails_loudly(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``device: cuda`` on a CPU-only host is an error, NEVER a silent CPU run (#191: silence IS
+    the bug)."""
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    provider = GlinerPIIRedactor({**_config(), "device": "cuda"})
+    with pytest.raises(ConfigError, match="no CUDA device is available"):
+        list(provider.redact([_chunk(_TEXT)]))
+
+
+def test_placement_mismatch_is_refused(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that reports the WRONG device after placement is refused, not logged and run.
+
+    Simulates the field failure directly: ``.to(device)`` succeeds but the weights stay on CPU.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    monkeypatch.setattr(_FakeGLiNER, "to", lambda self, arg: self)  # noqa: ARG005
+    provider = GlinerPIIRedactor({**_config(), "device": "cuda"})
+    with pytest.raises(ProviderError, match="reports device 'cpu'"):
+        list(provider.redact([_chunk(_TEXT)]))
+
+
+def test_invalid_device_string_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match="invalid device config"):
+        GlinerPIIRedactor({**_config(), "device": "gpu"})
+
+
+def test_batch_size_must_be_positive_int() -> None:
     with pytest.raises(ConfigError, match="batch_size must be >= 1"):
         GlinerPIIRedactor({"pii_labels": ["person"], "batch_size": 0})
