@@ -56,6 +56,10 @@ recompile-thrashes on varied-length production chunks; torch intra-op threads ar
 (default 8) to stop a many-core host oversubscribing to a CPU spin with the GPU idle; the fp16 model
 is explicitly moved to cuda and its device logged (the fp16-on-CPU defence); and extraction streams
 in bounded batches with per-batch progress logging so a large corpus never *appears* hung.
+W9-jit hardening (#190): the shared load seam also neutralizes the **TorchScript JIT** (the guard
+covered ``torch.compile`` and NOT ``torch.jit.script``) — the mdeberta encoder scripts its
+relative-position helper, which dies in nvrtc (``libnvrtc-builtins.so.13.0``) on a Blackwell /
+CUDA-13 box on the FIRST forward. Throughput-only; the emitted records are byte-identical.
 """
 
 from __future__ import annotations
@@ -219,7 +223,10 @@ class Gliner2FusedExtractor:
                 "device logged post-load). compile defaults OFF (W9-scaling: dynamic=True "
                 "recompile-thrashes on varied-length corpora; opt-in for uniform workloads). "
                 "Intra-op threads capped (default 8) against many-core oversubscription; "
-                "extraction streams in bounded batches with per-batch progress logging"
+                "extraction streams in bounded batches with per-batch progress logging. "
+                "TorchScript JIT neutralized at the shared load seam (#190: mdeberta's scripted "
+                "relative-position helper dies in nvrtc on Blackwell/CUDA-13) — throughput only, "
+                "byte-identical output"
             ),
         )
 

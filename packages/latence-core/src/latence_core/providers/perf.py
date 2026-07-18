@@ -217,9 +217,9 @@ def load_then_cast(
     cast is skipped (there is nothing to cast to) and the bare model is returned — the seam stays
     torch-free-to-import. ``maybe_compile`` still applies afterwards (guarded), independently.
 
-    W9-jit: the TorchScript JIT is neutralized (:func:`neutralize_torch_jit`) **before** the load, so
-    the mdeberta-v3 encoder this path serves never scripts its relative-position helper and never
-    reaches nvrtc on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
+    W9-jit: the TorchScript JIT is neutralized (:func:`neutralize_torch_jit`) **before** the
+    load, so the mdeberta-v3 encoder this path serves never scripts its relative-position helper
+    and never reaches nvrtc on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
     """
     neutralize_torch_jit()
     model = loader(model_id)
@@ -359,14 +359,14 @@ def neutralize_torch_jit(*, provider_name: str = "provider") -> bool:
 
     — the JIT fuser asking nvrtc to compile kernels against a builtins library that is not there for
     that CUDA/torch pairing. Exactly the W9 lesson repeated: the fault surfaces on the **first
-    forward**, not at load, so no load-time try/except can see it. The proven field workaround is the
-    env switch ``PYTORCH_JIT=0``; this function is that workaround **encoded in the seam** so it is
-    not operator folklore.
+    forward**, not at load, so no load-time try/except can see it. The proven field workaround is
+    the env switch ``PYTORCH_JIT=0``; this function is that workaround **encoded in the seam**, so
+    it is not operator folklore.
 
     Two levers, because either one alone has a hole:
 
-    * ``os.environ["PYTORCH_JIT"] = "0"`` — read by torch **at import**, so a torch that has not been
-      imported yet (the normal case: the Provider's model load is what pulls torch in) comes up with
+    * ``os.environ["PYTORCH_JIT"] = "0"`` — read by torch **at import**, so a torch not yet
+      imported (the normal case: the Provider's model load is what pulls torch in) comes up with
       the JIT already off, and every later ``@torch.jit.script`` at module-import time is a no-op.
     * ``torch.jit._state.disable()`` — the same switch at **runtime**, for a torch that is ALREADY
       imported (another library got there first), so scripting is neutralized from here on. Applied
@@ -407,7 +407,8 @@ def neutralize_torch_jit(*, provider_name: str = "provider") -> bool:
         )
         return False
     _log.info(
-        "%s: torch JIT neutralized (PYTORCH_JIT=0%s) — nvrtc-free mdeberta forward, throughput only",
+        "%s: torch JIT neutralized (PYTORCH_JIT=0%s) — nvrtc-free mdeberta forward, throughput "
+        "only",
         provider_name,
         ", runtime state disabled" if off else "",
     )
@@ -474,8 +475,8 @@ def load_gliner2_optimized(
     **W9-jit — the other compiler.** ``compile``/``quantize`` only govern ``torch.compile``; the
     ``gliner2`` backbone is mdeberta-v3, which scripts its relative-position helper with
     ``@torch.jit.script`` and, on a Blackwell/CUDA-13 box, dies in nvrtc on the FIRST forward
-    (``libnvrtc-builtins.so.13.0``) — a crash no load-time guard can catch. So the TorchScript JIT is
-    neutralized (:func:`neutralize_torch_jit`) **before** the load, unconditionally, for EVERY
+    (``libnvrtc-builtins.so.13.0``) — a crash no load-time guard can catch. So the TorchScript JIT
+    is neutralized (:func:`neutralize_torch_jit`) **before** the load, unconditionally, for EVERY
     gliner2 load path (optimized or plain): throughput-only, byte-identical output.
     """
     quantize = resolve_gliner2_knob("quantize", device, config)
