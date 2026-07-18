@@ -48,6 +48,18 @@ workspace are versioned and released together under one version number.
   UNVERIFIED** — it has not been run: no Blackwell/CUDA-13 host was available, and the matrix says
   so in the record rather than implying otherwise.
 
+- **Go-live runbook + a machine-checked front door (#189, #72).** `docs/GO-LIVE-RUNBOOK.md`
+  is the maintainer-manual launch procedure — visibility flip, docs deploy, signed release,
+  PyPI publish, announcement — each step with the check that proves it landed, a rollback
+  table, and the two decisions that must be made *before* step 1 (PyPI name availability,
+  and the fact that flipping visibility publishes git **history**, not just the tree).
+  Backing it, `test_front_door_truthfulness.py` now fails the build if the README claims a
+  Runner adapter with no package behind it, quotes an ADR count that disagrees with
+  `docs/adr/`, links at a file that does not exist, or tells a reader to install a
+  distribution that is not in `packages/`. The PyPI publish was rehearsed end to end: all
+  32 distributions build, `twine check` passes on all 64 artifacts, and `pip install
+  latence-demo` into a clean venv runs the full demo to a green Quality Report.
+
 - **Benchmark suites for Entity/Relation Extraction, Disambiguation and Redaction (#187).** The
   public benchmark harness (#181) now measures four more Stages through the same
   `BenchmarkSuite` seam, the same one command (`latence-benchmark run --suite all`) and the same
@@ -202,6 +214,27 @@ workspace are versioned and released together under one version number.
   an aware UTC datetime and returning `None` rather than fabricating a time when a backend
   exposes none. This is how the run console reads real run timestamps without the framework
   persisting any new state.
+
+### Changed
+
+- **Package license metadata is PEP 639 SPDX (#72).** Every publishable package moved from
+  the legacy `license = { text = "Apache-2.0" }` + `License ::` classifier combination —
+  which strict twine/PyPI validators reject — to a bare SPDX expression plus a
+  `license-files` glob, and each distribution now carries its own `LICENSE`. Wheels emit
+  `License-Expression: Apache-2.0` and `License-File: LICENSE`.
+- **Front-door claims corrected before publishing (#189).** The README promised "thin
+  adapters run the same Stages on Databricks or Airflow" when only `latence-runner-airflow`
+  exists; it quoted 32 ADRs against 52 on disk; it advertised a `latence` meta-package that
+  is not publishable. All three are fixed in the README and in the matching prose in
+  `CONTEXT.md`, `docs/index.md` and `docs/concepts/`. The dangling `docs/INTEROP.md`
+  references (a document that was never written) now point at
+  `docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`. `THIRD-PARTY-LICENSES.md`'s version snapshot was
+  re-read from the installed environment.
+- **Docs navigation is complete (#189).** ADR-0032 and ADR-0047 were missing from both the
+  site nav and `docs/adr/index.md`, and `deployment.md` / `observability.md` /
+  `secrets.md` were published but unreachable from the nav. Heading slugs now use the
+  GitHub-compatible slugifier, so a hand-written `#anchor` resolves on github.com *and* on
+  the docs site (this fixes four broken in-page links in `deployment.md`).
 
 ## [0.1.0] - 2026-07-14
 

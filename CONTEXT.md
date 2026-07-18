@@ -9,7 +9,7 @@ A unit of pipeline work with a typed input and output contract (e.g., parsing, e
 _Avoid_: Service, step, task
 
 **Runner**:
-An execution adapter that schedules Stages on a particular substrate — the built-in local runner, a Databricks job, an Airflow DAG. Runners own scheduling, retries, and checkpointing; they never define pipeline semantics.
+An execution adapter that schedules Stages on a particular substrate. Two ship today: the built-in local runner and the Airflow DAG adapter (`latence-runner-airflow`); further substrates (a Databricks job, a plain container scheduler) are seam-compatible follow-ons rather than shipped packages. Runners own scheduling, retries, and checkpointing; they never define pipeline semantics.
 _Avoid_: Orchestrator, worker, control plane
 
 **Pipeline**:
