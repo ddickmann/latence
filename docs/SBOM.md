@@ -32,9 +32,18 @@ workspace's own dependency set.
 - **Not a CI merge gate.** The script is intentionally **not** wired into
   `.github/workflows/ci.yml` or `scripts/verify-local.sh`. Generating an SBOM does
   not gate a merge; it is a **release-time** artifact.
-- **Release usage.** The release workstream calls `scripts/generate-sbom.sh` and
-  attaches the resulting `sbom.cdx.json` to the GitHub Release (and/or publishes it
-  alongside the built wheels). A release workflow can shell out to this same script.
+- **Release usage — automatic.** `.github/workflows/release.yml` runs
+  `scripts/release-integrity.sh` on every `v*` tag. That script calls
+  `scripts/generate-sbom.sh`, **stamps** the resulting document with the release identity
+  (`metadata.component` = `latence-framework` at the tag's version, plus
+  `latence:release:tag` / `latence:release:repository` properties), and attaches it to the
+  GitHub Release as `sbom.cdx.json` alongside the wheels. The SBOM's digest is recorded in
+  the release's `SHA256SUMS`, which is signed with keyless Sigstore — so the SBOM is not
+  just published, it is **authenticated**. See [`RELEASING.md`](RELEASING.md) →
+  *Release integrity*.
+- **Fail-closed.** A document that is not CycloneDX, has no `specVersion`, or lists **no
+  components** is rejected rather than attached. An empty SBOM is worse than none: it looks
+  like evidence while answering nothing.
 - **Format.** CycloneDX JSON is emitted because it is the OWASP-standard,
   tool-friendly format (consumable by `grype`, Dependency-Track, GitHub's
   dependency graph, etc.). Add SPDX output later if a consumer needs it.
