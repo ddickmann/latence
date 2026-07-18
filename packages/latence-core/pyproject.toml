@@ -45,6 +45,14 @@ observability = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
 ]
+# OPTIONAL Iceberg-table Export output (#184, ADR-0017). NOT a runtime dependency: the Export is
+# Parquet-first and the Iceberg block is OFF by default, so ``pyiceberg`` is never imported unless
+# an operator configures a REST catalog. Install with ``pip install 'latence-core[iceberg]'``.
+# pyiceberg is Apache-2.0 (Apache Software Foundation; code and distribution alike — it ships no
+# model weights, so ADR-0012's weights-vs-code split is trivially the same license).
+iceberg = [
+    "pyiceberg>=0.9",
+]
 
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"
