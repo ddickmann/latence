@@ -47,7 +47,7 @@ from latence_core.runner import LocalRunner
 # Unique, PII-shaped sentinels planted in the document body, the file name, and a Stage config —
 # the three places content could leak into a lineage facet.
 _BODY_SENTINEL = "patient-jane-doe-DOB-1970-01-01-body-sentinel"
-_SECRET_SENTINEL = "sk-live-do-not-leak-9f3c1a-secret-sentinel"
+_SECRET_SENTINEL = "inlined-credential-do-not-leak-secret-sentinel"
 
 
 def _pipeline(store: str, docs_dir: Path, *, parser: str = "parser.plaintext") -> Pipeline:

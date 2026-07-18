@@ -195,3 +195,88 @@ groups:
         annotations:
           summary: "Schema induction degraded to the config-label floor"
 ```
+
+## Layer 3 — OpenLineage run events (data lineage in your catalog)
+
+Point latence at any **OpenLineage** endpoint and a run shows up in the catalog your platform team
+already governs with — **Marquez**, **Atlan**, **Collibra**, **Dataplex**, or anything else that
+speaks the standard. One emitter, every consumer; nothing to build per catalog.
+
+Off by default, exactly like the metrics seam: with no endpoint configured no event is built and no
+socket is opened, and the run's Quality Report is identical either way.
+
+```bash
+# The env-toggle (mirrors LATENCE_METRICS)
+export LATENCE_OPENLINEAGE_URL=http://localhost:5000        # a local Marquez
+export LATENCE_OPENLINEAGE_NAMESPACE=my-platform            # optional; default "latence"
+export LATENCE_OPENLINEAGE_API_KEY=...                      # optional; sent as a Bearer token
+latence run stacks/default.yaml
+```
+
+```python
+# Or from code
+from latence_core import LocalRunner, build_lineage_emitter
+
+runner = LocalRunner(lineage=build_lineage_emitter("http://localhost:5000", namespace="my-platform"))
+report = runner.run(pipeline, run_id="run-0001")
+```
+
+`latence-core` speaks the wire format with `json` + `urllib` — the `openlineage-python` client is
+**not** a dependency (ADR-0016).
+
+### What a run looks like in the graph
+
+| latence concept | OpenLineage vocabulary |
+| --- | --- |
+| Pipeline (`Pipeline.name`) | a parent **Job** `<pipeline>`, `jobType` facet `PIPELINE`/`BATCH` |
+| Stage (`Stage.name`) | a **Job** `<pipeline>.<stage>`, `jobType` facet `STAGE`/`BATCH` |
+| Run (`run_id`, an operator string) | **Run** `runId` = `uuid5(namespace/pipeline/run_id[/stage])` — the spec requires a UUID; the hash is deterministic, so a **resume continues the same run** instead of forking a new one |
+| the Stage DAG (`depends_on`) | each Stage Job's `inputs` = its parents' checkpoint **Datasets**; a `parent` run facet nests every Stage under the pipeline run |
+| a Stage checkpoint (`_latence/runs/<run_id>/checkpoints/<stage>.jsonl`) | the Stage's output **Dataset** (`file` + path, or `s3://bucket` + key) |
+| the Source's `path`/`uri` config | the entry-point input **Dataset** (no schema — the raw corpus has no carrier contract yet) |
+| the Stage's carrier contract (`ChunkRecord`, `EntityMention`, …) | the output Dataset's **`schema` facet** — the contract's field *names* + coarse types, read from the model, never sampled from data |
+| `StageMetrics` counts + duration | the custom `latence_run` run facet: `records_in`, `records_out`, `duration_ms`, `from_checkpoint`, `skipped` |
+| the typed error taxonomy (`error_category()`) | a **FAIL** event whose `latence_run` facet carries `error_category` |
+| `Provenance` (per record) | **not** emitted — see below |
+
+### Counts only, and why `errorMessage` is absent
+
+The same ADR-0034 discipline as the metrics/tracing seams, applied to lineage: a facet carries
+counts, durations, names, dataset URIs, and schema field names — never a record body, a PII surface,
+a secret, or an **exception message**. That last one is deliberate and load-bearing: the standard
+`errorMessage` run facet (and its `stackTrace`) would ship `str(exc)` to the catalog, and an
+exception message routinely quotes the record that broke. latence emits the stable typed
+**category** instead (`provider`, `contract`, `config`, `storage`, `screening`, `unknown`).
+
+For the same reason per-record `Provenance` is aggregated away rather than emitted: lineage is about
+*datasets*, and per-document provenance stays in the Quality Report / the exported corpus, which are
+governed by the redaction posture. The dataset-level identity a catalog needs — where the run read
+from and wrote to — is exactly what the input/output Datasets carry.
+
+An emission failure **never fails a run**: a dead endpoint, a 500, or a serialisation bug is logged
+at WARNING on the `latence.observability` logger and the pipeline continues.
+
+### Verify it against a real Marquez
+
+`scripts/verify-openlineage-marquez.py` is the manual end-to-end gate (kept out of
+`verify-local.sh`, which is offline and dependency-free — Marquez needs Docker):
+
+```bash
+docker network create marquez-net
+docker run -d --name marquez-db --network marquez-net \
+    -e POSTGRES_USER=marquez -e POSTGRES_PASSWORD=marquez -e POSTGRES_DB=marquez postgres:14
+docker run -d --name marquez-api --network marquez-net -p 5050:5000 -p 5051:5001 \
+    -e POSTGRES_HOST=marquez-db -e POSTGRES_PORT=5432 -e POSTGRES_USER=marquez \
+    -e POSTGRES_PASSWORD=marquez -e POSTGRES_DB=marquez marquezproject/marquez:0.51.1
+
+uv run python scripts/verify-openlineage-marquez.py http://localhost:5050
+```
+
+It runs a real four-Stage pipeline and then asserts, through Marquez's own API, that the pipeline
+Job, every Stage Job, the checkpoint Datasets (with their schema fields), and a `COMPLETED` run
+state are all in the lineage graph.
+
+> Offline, `CollectingLineageTransport` validates every event against the OpenLineage 2-0-2 JSON
+> Schema constraints (`validate_run_event`) so the offline fake is never *laxer* than a real
+> consumer. It is in fact slightly stricter: Marquez 0.51.1's `POST /api/v1/lineage` was measured to
+> accept a non-UUID `runId` that the spec forbids and a schema-validating consumer rejects.
