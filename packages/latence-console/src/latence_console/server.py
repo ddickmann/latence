@@ -16,10 +16,11 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlsplit
+from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from latence_console import render
+from latence_console import browse, render
+from latence_console.artifacts import RunArtifacts
 from latence_console.runs import RunIndex, is_run_id
 
 if TYPE_CHECKING:
@@ -75,17 +76,20 @@ class ConsoleApp:
         """Answer one request. Pure: same files in, same bytes out, nothing written."""
         if method.upper() not in READ_METHODS:
             return Response.html(405, render.render_method_not_allowed())
-        path = unquote(urlsplit(target).path)
+        split = urlsplit(target)
+        path = unquote(split.path)
         if path in ("", "/"):
             return Response.html(
                 200,
                 render.render_run_list(self._index.storage_uri, self._index.list_runs()),
             )
         if path.startswith(_RUN_PREFIX):
-            return self._run_page(path[len(_RUN_PREFIX) :].strip("/"))
+            return self._run_page(path[len(_RUN_PREFIX) :].strip("/"), split.query)
         return Response.html(404, render.render_not_found(f"There is no page at {path!r}."))
 
-    def _run_page(self, run_id: str) -> Response:
+    def _run_page(self, tail: str, query: str) -> Response:
+        """Route ``/run/<run_id>[/<view>]`` — the overview plus the #188 debugging views."""
+        run_id, _, view = tail.partition("/")
         # A run id that is not a plain path segment is refused here — before it can be
         # concatenated into a Storage URI. `/run/../../etc/passwd` therefore reads nothing.
         if not is_run_id(run_id):
@@ -95,7 +99,97 @@ class ConsoleApp:
             return Response.html(
                 404, render.render_not_found(f"There is no run called {run_id!r} here.")
             )
-        return Response.html(200, render.render_run(summary, self._index.report(run_id)))
+        view = view.strip("/")
+        if not view:
+            return Response.html(200, render.render_run(summary, self._index.report(run_id)))
+        handler = self._VIEWS.get(view)
+        if handler is None:
+            return Response.html(
+                404, render.render_not_found(f"There is no {view!r} view of a run.")
+            )
+        # One fresh reader per request: the console holds no index between answers.
+        return handler(self, run_id, self._index.artifacts(run_id), _param(query, "id"))
+
+    # -- the #188 views ----------------------------------------------------
+
+    def _quarantine_view(
+        self, run_id: str, artifacts: RunArtifacts, _id: str | None
+    ) -> Response:
+        return Response.html(
+            200,
+            render.render_quarantine(
+                run_id, browse.quarantine_entries(artifacts), browse.flag_entries(artifacts)
+            ),
+        )
+
+    def _chunks_view(self, run_id: str, artifacts: RunArtifacts, _id: str | None) -> Response:
+        return Response.html(200, render.render_chunks(run_id, browse.chunk_rows(artifacts)))
+
+    def _chunk_view(
+        self, run_id: str, artifacts: RunArtifacts, record_id: str | None
+    ) -> Response:
+        # The id is MATCHED against records already read — never concatenated into a Storage
+        # URI — so a crafted id can only fail to match, not address a file.
+        chunk = artifacts.chunk(record_id) if record_id else None
+        if chunk is None:
+            return Response.html(
+                404,
+                render.render_not_found(
+                    f"There is no chunk {record_id!r} in run {run_id!r}."
+                    if record_id
+                    else "That link is missing the chunk it should show."
+                ),
+            )
+        inspection = browse.inspect_chunk(artifacts, chunk)
+        return Response.html(200, render.render_chunk(run_id, inspection))
+
+    def _graph_view(self, run_id: str, artifacts: RunArtifacts, _id: str | None) -> Response:
+        return Response.html(
+            200,
+            render.render_graph(
+                run_id, browse.entity_views(artifacts), browse.edge_views(artifacts)
+            ),
+        )
+
+    def _entity_view(
+        self, run_id: str, artifacts: RunArtifacts, node_id: str | None
+    ) -> Response:
+        node = artifacts.node(node_id) if node_id else None
+        if node is None:
+            return Response.html(
+                404,
+                render.render_not_found(
+                    f"There is no graph entity {node_id!r} in run {run_id!r}."
+                    if node_id
+                    else "That link is missing the entity it should show."
+                ),
+            )
+        return Response.html(
+            200,
+            render.render_entity(
+                run_id,
+                browse.entity_view(artifacts, node),
+                browse.edge_views(artifacts, node.node_id),
+            ),
+        )
+
+    _VIEWS: ClassVar[dict[str, Callable[[ConsoleApp, str, RunArtifacts, str | None], Response]]] = {
+        "quarantine": _quarantine_view,
+        "chunks": _chunks_view,
+        "chunk": _chunk_view,
+        "graph": _graph_view,
+        "entity": _entity_view,
+    }
+
+
+def _param(query: str, name: str) -> str | None:
+    """One query parameter, percent-decoded — ``None`` when absent or empty.
+
+    Record ids (``sha256:…#chunk-0``) ride the query rather than the path precisely so the
+    path space stays plain segments; ``parse_qs`` does the decoding.
+    """
+    values = parse_qs(query, keep_blank_values=False).get(name)
+    return values[0] if values else None
 
 
 def _require_loopback(host: str) -> str:

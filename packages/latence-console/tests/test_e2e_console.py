@@ -9,6 +9,7 @@ reading the served bytes.
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -82,4 +83,64 @@ def test_the_console_serves_the_demo_corpus_over_a_real_socket(demo_corpus: str)
         thread.join(timeout=10)
 
     # Serving the demo corpus changed nothing on disk.
+    assert _tree_digest(root) == before
+
+
+def test_the_deepened_views_work_on_the_demo_corpus(demo_corpus: str) -> None:
+    """#188 AC 5, taken literally: the debugging loop over the STANDARD demo corpus.
+
+    Not a hand-built fixture — the real :class:`~latence_demo.builder.DemoBuilder` run, whose
+    corpus deliberately contains three attack files (a zip bomb, an oversized dump, a
+    type-spoofed PDF) and one prompt-injection document.
+    """
+    root = Path(demo_corpus.removeprefix("file://"))
+    before = _tree_digest(root)
+    app = ConsoleApp.over_storage(Storage.for_uri(demo_corpus), demo_corpus)
+
+    def page(path: str) -> str:
+        response = app.respond("GET", path)
+        assert response.status == 200, path
+        body = response.body.decode("utf-8")
+        assert render.external_references(body) == [], path
+        return body
+
+    # 1. The Quarantine browser names every planted attack file and why it was held back.
+    quarantine = page("/run/demo/quarantine")
+    assert "archive.zip" in quarantine
+    assert "zip compression ratio" in quarantine
+    assert "dump.txt" in quarantine
+    assert "over the 2097152 cap" in quarantine
+    assert "invoice.pdf" in quarantine
+    assert "type_spoof" in quarantine
+    # …and the flagged-but-kept document, with the marker that rode into the corpus.
+    assert "prompt_injection" in quarantine
+    assert "matched injection pattern" in quarantine
+
+    # 2. The chunk inspector resolves a real demo chunk back through Provenance.
+    chunks = page("/run/demo/chunks")
+    hrefs = [
+        href.replace("&amp;", "&")
+        for href in re.findall(r'href="(/run/demo/chunk\?[^"]+)"', chunks)
+    ]
+    assert hrefs
+    inspected = page(hrefs[0])
+    assert "Source page(s) — Provenance" in inspected
+    assert "Source page(s) — resolved from the offset + page map" in inspected
+    assert "Character offsets — resolved from the offset map" in inspected
+    assert "Sensitivity" in inspected
+    assert "Redaction" in inspected
+
+    # 3. The KG browser shows the demo's 6 entities and every one of its 33 edges, each
+    #    with the Evidence that justifies it — the demo's own headline graph numbers.
+    graph = page("/run/demo/graph")
+    assert "Entities (6)" in graph
+    assert "Relations (33)" in graph
+    assert graph.count("Evidence — confidence") == 33
+
+    entity_hrefs = re.findall(r'href="(/run/demo/entity\?id=[^"]+)"', graph)
+    assert entity_hrefs
+    entity = page(entity_hrefs[0].replace("&amp;", "&"))
+    assert "Evidence — confidence" in entity
+
+    # Browsing the whole debugging loop changed nothing on disk.
     assert _tree_digest(root) == before

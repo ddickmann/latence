@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 from latence_core.storage import Storage
-from reports import delta_report, failed_report, gapped_report, healthy_report, write_run
+from reports import (
+    delta_report,
+    failed_report,
+    gapped_report,
+    healthy_report,
+    write_artifacts,
+    write_run,
+)
 
 
 @pytest.fixture
@@ -31,4 +38,12 @@ def populated(storage: Storage, storage_uri: str) -> str:
     write_run(storage, storage_uri, "run-0003", failed_report("run-0003"))
     write_run(storage, storage_uri, "run-0004", delta_report("run-0004"))
     write_run(storage, storage_uri, "run-0005", None)
+    return storage_uri
+
+
+@pytest.fixture
+def browsable(storage: Storage, storage_uri: str) -> str:
+    """One run with its checkpoints and screening sidecars on Storage (#188)."""
+    write_run(storage, storage_uri, "run-0001", healthy_report("run-0001"))
+    write_artifacts(storage, storage_uri, "run-0001")
     return storage_uri

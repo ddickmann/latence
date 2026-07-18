@@ -112,6 +112,23 @@ workspace are versioned and released together under one version number.
   binds the loopback interface only, and emits self-contained pages with no CDN, script, or
   beacon. Zero new dependencies — `http.server` from the standard library plus `latence-core`.
 
+- **The run console's debugging loop (#188).** Three deep views on top of the console, reached
+  from any run page. **Held back & flagged** lists every record Screening quarantined (checkpoint,
+  detector, category, recorded reason, bytes withheld) and every record it kept but marked, with
+  the risk marker that rode into the corpus. **The chunk inspector** answers "why is this chunk
+  wrong": each chunk resolves back through its Provenance to its source document, source *page*
+  and character offsets — computed with the framework's own `OffsetIndex`/`PageOffsetIndex` over
+  the record's own maps, so the console cannot disagree with the pipeline — alongside its
+  Classification and its Redaction disposition, including the case where the redaction policy ran
+  *no* detectors (an empty PII list then says "the control was OFF", never "clean"). **The
+  knowledge-graph browser** makes entities and edges navigable and shows **every edge with its
+  Evidence** — the source mentions resolved to text, file, page, offsets and confidence; a cited
+  mention the run no longer holds is shown as unresolved rather than dropped. All of it reads
+  JSONL the Runner already wrote (`checkpoints/`, `quarantine/`, `screening/`) through the real
+  contracts, so a malformed line is rejected exactly as the pipeline would reject it. Still
+  strictly read-only, still no new persistent state, still zero new dependencies, still offline —
+  and only the PII-handled corpus text is ever rendered.
+
 - **`Storage.modified(uri)`** — a read-only last-modified probe on the Storage seam,
   normalising the per-backend spellings (`mtime` / `LastModified` / `updated` / `created`) to
   an aware UTC datetime and returning `None` rather than fabricating a time when a backend
