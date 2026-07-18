@@ -29,6 +29,7 @@ echo "==> Exporting fully-pinned requirements from uv.lock"
 # --no-emit-project / --no-editable: describe installed third-party deps, not the
 # local editable workspace packages themselves.
 uv export \
+  --quiet \
   --frozen \
   --no-editable \
   --no-emit-project \
@@ -36,10 +37,21 @@ uv export \
   -o "$REQ"
 
 echo "==> Building CycloneDX SBOM -> $OUT"
-uv run --with cyclonedx-bom --no-project -- \
+# cyclonedx-bom is PINNED to a major range on purpose: this is release machinery, and an
+# unpinned tool silently changing its CLI is exactly how a release stops producing an SBOM.
+# (It did: `--outfile` was removed in favour of `-o`/`--output-file`.)
+#
+# --spec-version 1.6      the version this repo documents (docs/SBOM.md); the tool's default
+#                         floats forward, which would silently change the emitted schema.
+# --output-reproducible   drop the wall-clock timestamp + random serial number, so the same
+#                         uv.lock always yields byte-identical output. Required here: the
+#                         SBOM's digest is recorded in the release's signed SHA256SUMS, so a
+#                         non-reproducible SBOM makes the release unreproducible too.
+uv run --with 'cyclonedx-bom>=7,<8' --no-project -- \
   cyclonedx-py requirements "$REQ" \
   --output-format JSON \
-  --outfile "$OUT"
+  --spec-version 1.6 \
+  --output-reproducible \
+  --output-file "$OUT"
 
 echo "==> SBOM written: $OUT"
-echo "    Validate it with:  uv run --with cyclonedx-bom --no-project -- cyclonedx-py --version"

@@ -99,10 +99,21 @@ above against it. Re-run with `dry_run: false` (or just push the tag) to publish
 Locally, everything except the signature can be rehearsed offline:
 
 ```bash
-uv build --package latence-core --out-dir dist    # or the full loop from the workflow
+for pkg in packages/*/; do uv build --package "$(basename "$pkg")" --out-dir dist; done
 bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets --no-sign
 (cd release-assets && shasum -a 256 -c SHA256SUMS)
 ```
+
+**Last verified local dry run** (tag `v0.1.0`, all 25 packages): 56 distributions built,
+a 45-component CycloneDX 1.6 SBOM generated from `uv.lock` and stamped as
+`latence-framework 0.1.0`, 58 assets checksummed, and `shasum -a 256 -c SHA256SUMS`
+verified all 58. Running the script twice produced a byte-identical `sbom.cdx.json`
+(`--output-reproducible`), so the release is reproducible from the same lockfile.
+
+> The SBOM generator is version-pinned (`cyclonedx-bom>=7,<8`) on purpose. It had silently
+> stopped working: `cyclonedx-py` 7 removed the `--outfile` flag the script passed, so the
+> "existing SBOM machinery" produced nothing until this was fixed. Release tooling that is
+> only exercised at release time must pin its tools.
 
 ### Changing any of this
 

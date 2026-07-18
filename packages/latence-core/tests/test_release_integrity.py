@@ -285,10 +285,17 @@ def test_rejects_colliding_distribution_filenames(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------------------
 
 
-def _workflow() -> dict[str, Any]:
+def _workflow() -> dict[Any, Any]:
     loaded = yaml.safe_load(_WORKFLOW.read_text())
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _triggers(workflow: dict[Any, Any]) -> dict[str, Any]:
+    """The `on:` block. YAML 1.1 parses a bare ``on`` key as the boolean ``True``."""
+    triggers = workflow.get("on", workflow.get(True))
+    assert isinstance(triggers, dict), "release workflow has no parsable `on:` block"
+    return triggers
 
 
 def test_release_workflow_signs_and_sboms_every_tag() -> None:
@@ -334,7 +341,7 @@ def test_github_release_publishes_only_the_signed_asset_set() -> None:
 def test_dry_run_rehearses_without_publishing_anything() -> None:
     """workflow_dispatch dry_run builds + signs but creates no Release and never reaches PyPI."""
     workflow = _workflow()
-    inputs = workflow[True]["workflow_dispatch"]["inputs"]  # YAML parses bare `on:` as True
+    inputs = _triggers(workflow)["workflow_dispatch"]["inputs"]
     assert "dry_run" in inputs, "no dry-run rehearsal path"
 
     jobs = workflow["jobs"]
@@ -355,6 +362,50 @@ def test_front_page_and_docs_route_a_reporter_to_the_cvd_policy() -> None:
 
     security = (_REPO_ROOT / "SECURITY.md").read_text()
     assert "Reporting a vulnerability" in security
+
+
+# --------------------------------------------------------------------------------------
+# The SBOM generator itself
+#
+# These are static guards, and deliberately so: actually running generate-sbom.sh needs the
+# network (it fetches cyclonedx-bom) and ~30s, which does not belong in the merge gate. They
+# encode the failure that actually happened — cyclonedx-bom 7 removed `--outfile`, so the
+# unpinned script had silently stopped producing an SBOM at all. The end-to-end proof is the
+# release dry run documented in docs/RELEASING.md.
+# --------------------------------------------------------------------------------------
+
+_GENERATE_SBOM = _REPO_ROOT / "scripts" / "generate-sbom.sh"
+
+
+def _sbom_generator_commands() -> str:
+    """generate-sbom.sh with comment lines stripped — the flags it actually passes."""
+    return "\n".join(
+        line for line in _GENERATE_SBOM.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_sbom_generator_pins_its_tool() -> None:
+    """cyclonedx-bom is version-bounded: an unpinned CLI change silently broke this once."""
+    script = _sbom_generator_commands()
+    assert "cyclonedx-bom>=7,<8" in script, (
+        "cyclonedx-bom must be pinned to a major range — release machinery cannot depend on "
+        "whatever version happens to resolve today"
+    )
+    # The flag that was removed in 7.x. Its return would break the release, not just the docs.
+    assert "--outfile" not in script
+    assert "--output-file" in script
+
+
+def test_sbom_generator_emits_the_documented_reproducible_format() -> None:
+    """Spec version is pinned to what docs/SBOM.md claims, and output is byte-reproducible."""
+    script = _sbom_generator_commands()
+    assert "--spec-version 1.6" in script, "the emitted CycloneDX version must not float"
+    assert "--output-reproducible" in script, (
+        "the SBOM digest is recorded in the signed SHA256SUMS, so a timestamped/random-serial "
+        "SBOM would make every release unreproducible"
+    )
+    # The docs promise a specific schema version; the script must emit that one.
+    assert "1.6" in (_REPO_ROOT / "docs" / "SBOM.md").read_text()
 
 
 def test_releasing_doc_documents_the_signing_and_sbom_steps() -> None:
