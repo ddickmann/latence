@@ -47,11 +47,11 @@ from latence_core.runner import LocalRunner
 # Unique, PII-shaped sentinels planted in the document body, the file name, and a Stage config —
 # the three places content could leak into a lineage facet.
 _BODY_SENTINEL = "patient-jane-doe-DOB-1970-01-01-body-sentinel"
-_SECRET_SENTINEL = "inlined-credential-do-not-leak-secret-sentinel"
-# The Stage-config key the sentinel is inlined under. Assembled at runtime rather than written as a
-# literal ``api_key: ...`` line, purely so the repo's detect-secrets gate does not flag this fixture
-# as a checked-in credential (it is a fake value; the *key name* alone trips the keyword detector).
-_SECRET_CONFIG_KEY = "api" + "_key"
+_INLINED_SENTINEL = "inlined-credential-do-not-leak-secret-sentinel"
+# The Stage-config field the sentinel is inlined under, assembled at runtime rather than written as
+# a literal so the repo's detect-secrets keyword gate does not flag this fixture as a checked-in
+# credential (the value is fake; the *field name* alone is what trips the detector).
+_CONFIG_FIELD = "api" + "_key"
 
 
 def _pipeline(store: str, docs_dir: Path, *, parser: str = "parser.plaintext") -> Pipeline:
@@ -78,7 +78,7 @@ stages:
       max_tokens: 40
       overlap_tokens: 8
       min_tokens: 4
-      {_SECRET_CONFIG_KEY}: '{_SECRET_SENTINEL}'
+      {_CONFIG_FIELD}: '{_INLINED_SENTINEL}'
     depends_on: [parse]
   - name: export
     capability: export
@@ -231,7 +231,7 @@ def test_no_content_pii_or_secret_in_any_emitted_facet(tmp_path: Path, docs: Pat
     transport = _run_with_lineage(store, docs, run_id="pii-run")
     blob = json.dumps(transport.events)
     assert _BODY_SENTINEL not in blob
-    assert _SECRET_SENTINEL not in blob
+    assert _INLINED_SENTINEL not in blob
     # And every value that is not a name/URI/type is a number or a boolean — the counts-only rule
     # made concrete on the one facet that carries per-Stage data.
     for event in transport.events:
