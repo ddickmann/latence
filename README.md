@@ -51,6 +51,7 @@ latence-framework/
 │   ├── latence-parser-*/      # Parser Providers
 │   ├── latence-ner-*/         # EntityExtractor Providers
 │   ├── ...                    # one package per Provider family
+│   ├── latence-sink-qdrant/   # one-shot loader: Export → a Qdrant collection (idempotent)
 │   └── latence-demo/          # the CPU demo set: bundled corpus + viewer + `latence-demo`
 └── demo/                      # docker compose: messy corpus → KG + Quality Report
 ```
