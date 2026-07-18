@@ -73,6 +73,11 @@ from latence_core.redaction_policy import (
     plan_chunk_redaction,
 )
 
+from latence_pii_gliner2._compat import (
+    require_batched_entity_api,
+    require_supported_gliner2,
+)
+
 _log = logging.getLogger("latence.provider.gliner2_pii")
 
 if TYPE_CHECKING:
@@ -270,7 +275,15 @@ class Gliner2PIIRedactor(AdapterBase):
     # -- lazy model load ----------------------------------------------------
 
     def _gliner2_cls(self) -> Any:
+        """The ``gliner2.GLiNER2`` class, after the installed version is checked (#192).
+
+        The version gate runs HERE — before ``from_pretrained``, i.e. before any weight download —
+        so an unsupported ``gliner2`` is a typed, actionable
+        :class:`~latence_core.errors.ProviderError` naming the supported range, never the native
+        ``AttributeError``/``TypeError`` the mismatched API would raise later (ADR-0034).
+        """
         try:
+            import gliner2
             from gliner2 import GLiNER2
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
             msg = (
@@ -278,6 +291,7 @@ class Gliner2PIIRedactor(AdapterBase):
                 "Install it with: pip install latence-pii-gliner2"
             )
             raise ImportError(msg) from exc
+        require_supported_gliner2(gliner2, provider_name=self.provider_name)
         return GLiNER2
 
     def _load_model(self) -> Any:
@@ -304,6 +318,10 @@ class Gliner2PIIRedactor(AdapterBase):
                 self._config,
                 provider_name=self.provider_name,
             )
+        # #192: the loaded object must expose the batched-entity API this Provider drives. Checked
+        # at LOAD (not at the first flush) so an API mismatch is a typed, actionable ProviderError
+        # up front — the field failure was this surface raising a raw native AttributeError.
+        require_batched_entity_api(self._model, provider_name=self.provider_name)
         return self._model
 
     def _reload_uncompiled(self) -> Any:
@@ -442,18 +460,11 @@ class Gliner2PIIRedactor(AdapterBase):
         raw_by_chunk: dict[int, Any] = {}
         detect = [p for p in buffer if p.plan.needs_detection]
         if detect:
-            # The batched entry point is offline-unverifiable (the fake mirrors it); guard against
-            # a renamed/missing method with a clear, actionable error rather than a bare
-            # AttributeError (the guard would otherwise surface only the op label). The pod script's
-            # Gate 0 asserts this method EXISTS on the real checkpoint before any throughput number.
-            if not hasattr(self._load_model(), "batch_extract_entities"):
-                msg = (
-                    "redaction.gliner2 batches via model.batch_extract_entities(texts, "
-                    "entity_types, threshold=…), but the loaded GLiNER2 checkpoint exposes no "
-                    "'batch_extract_entities' method. Re-introspect the checkpoint and fix the "
-                    "batched call. See scripts/validate-encoder-batching-on-gpu.md Gate 0."
-                )
-                raise AttributeError(msg)
+            # The batched entry point is version-gated + capability-checked at LOAD (#192,
+            # :mod:`latence_pii_gliner2._compat`): an unsupported gliner2 or a checkpoint object
+            # without 'batch_extract_entities' has already failed as a typed ProviderError there,
+            # so by here the method is guaranteed callable. The pod script's Gate 0 asserts the
+            # same on the real checkpoint before any throughput number.
             # Group by effective label set (one label set per batched call). Order-stable: a dict
             # preserves first-seen group order, and emission below re-walks the buffer in input
             # order.
