@@ -19,6 +19,27 @@ It serves `http://127.0.0.1:8787/`:
   then the per-Stage table, the screening reasons, the knowledge-graph statistics, the
   completeness numbers, and — for an incremental run — what changed since the previous version.
 
+And, from every run page, the debugging loop:
+
+- **Held back & flagged** (`/run/<id>/quarantine`) — every record Screening removed from the
+  pipeline, with the checkpoint, detector, category, reason and the bytes withheld; and every
+  record it kept but *flagged*, with the risk marker that rode into the corpus so a RAG consumer
+  can exclude it.
+- **The chunk inspector** (`/run/<id>/chunks`) — answers "why is this chunk wrong". Each chunk
+  resolves back through its **Provenance** to its source document, the source *page*, and the
+  character offsets it occupies there — resolved through the record's own `offset_map`/`page_map`
+  with the framework's own resolvers, so the console cannot disagree with the pipeline about where
+  a chunk came from. Its Classification and its Redaction disposition are stated alongside,
+  including the case that matters most: a chunk whose redaction policy ran *no detectors* says the
+  control was OFF, rather than letting an empty PII list read as "clean".
+- **The knowledge-graph browser** (`/run/<id>/graph`) — entities and edges, navigable. **Every edge
+  is shown with its Evidence**: the source mentions it rests on, resolved to their surface text,
+  file, page and character offsets, with the confidence. A mention the run no longer holds is
+  shown as unresolved, never quietly dropped.
+
+Only the corpus's **PII-handled** text is ever rendered: a chunk's `masked_content` when Redaction
+produced one, and never the parent document's raw markdown.
+
 ## What it deliberately is not
 
 - **Not a writer.** It reaches only `exists` / `ls` / `read_text` / `modified` on the Storage seam.
@@ -34,8 +55,9 @@ It serves `http://127.0.0.1:8787/`:
 
 ## Scope
 
-This is the tracer slice (#186): run list + Quality Report view. The deep inspectors — the
-quarantine browser, the chunk inspector, the knowledge-graph browser — are the follow-up slice
-(#188).
+The tracer slice (#186) built the run list and the Quality Report view; #188 deepened it with the
+quarantine browser, the chunk inspector and the knowledge-graph browser. All of it reads material
+the pipeline already wrote — Provenance, Evidence, offset maps, screening sidecars — so the deep
+views add **no** new persistent state and no new dependency.
 
 Licensed under Apache-2.0.

@@ -13,6 +13,13 @@ Three properties are structural, not configured:
   requests; every page is re-derived from the files at request time.
 * **Offline.** Pages are single self-contained documents with inlined CSS — no CDN, no
   font host, no beacon — and the server binds the loopback interface only.
+
+On top of that summary sits the debugging loop (#188, :mod:`latence_console.artifacts` +
+:mod:`latence_console.browse`): the quarantine/screening browser, the chunk inspector that
+resolves a chunk back through Provenance to its source page and character offsets with its
+Redaction disposition, and the knowledge-graph browser where **every edge shows its Evidence**.
+Those views read the JSONL the Runner already wrote under the run directory, through the real
+contracts — so the three properties above hold for them unchanged.
 """
 
 from __future__ import annotations
