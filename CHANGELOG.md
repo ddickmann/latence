@@ -34,6 +34,30 @@ workspace are versioned and released together under one version number.
   and deliberately no `errorMessage` facet — only the typed error category), and an
   emission failure never fails a run. See `docs/observability.md`.
 
+- **`latence-sink-qdrant`** — the first first-party **sink**: one command between "pipeline
+  finished" and "my retrieval engine serves the corpus" (#183, the first slice of #156).
+  `latence-sink-qdrant load ./out/export --collection corpus --url …` reads the Export's
+  `records.parquet` (streamed in bounded batches), creates the collection if absent at the corpus's
+  own vector width, and upserts with the `embedding` column as the vector and every remaining column
+  as payload.
+  - **Idempotent** — point ids are a deterministic UUIDv5 of the content-addressed `record_id` (a
+    raw `record_id` string is not a legal Qdrant point id), and a stored content digest means an
+    unchanged record is **not** re-upserted, so a re-run or an incremental/Delta run
+    ([ADR-0018](docs/adr/0018-incremental-corpus-deltas.md)) writes only what changed.
+  - **Retraction/Purge honoured** — records the Export no longer contains are deleted by a
+    reconciling sweep, and the load **counts the stale set back to zero before reporting success**;
+    `latence-sink-qdrant verify-absent <record_id>…` is the operator-side audit step (exit 1 while
+    any named record is still there). `--no-reconcile` covers the incremental-Export case.
+  - A store fault mid-load aborts **before** the sweep, so a half-uploaded corpus can never delete
+    the records it did not reach.
+  - The Export stays the source of truth ([ADR-0017](docs/adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md));
+    the sink holds no index and runs no search ([ADR-0048](docs/adr/0048-retrieval-tooling-is-stateless.md)).
+  - `latence-core` takes **no** new dependency: the mapping/idempotency/reconcile core is pure-Python
+    over `latence-core`, and `qdrant-client` (Apache-2.0) rides the optional `[client]` extra,
+    imported lazily. Ships a faithful `FakeQdrantClient` that rejects what a real Qdrant rejects
+    (404/409/403/400 incl. non-UUID point ids and wrong-width vectors), plus an opt-in live smoke
+    test (`LATENCE_QDRANT_URL`).
+
 ## [0.1.0] - 2026-07-14
 
 First public, coherent release of the workspace. All publishable distributions
