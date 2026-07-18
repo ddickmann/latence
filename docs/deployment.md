@@ -14,6 +14,7 @@ Contents:
 - [Air-gapped deployment](#air-gapped-deployment)
 - [Observability + secrets](#observability--secrets)
 - [Reproducible in-process environments](#reproducible-in-process-environments)
+- [Blackwell / CUDA-13: the compatibility matrix](#blackwell--cuda-13-the-compatibility-matrix)
 
 ## What the pipeline depends on
 
@@ -213,3 +214,41 @@ generated `requirements.in` / `constraints.txt`, the solved `requirements.lock`,
 packages' real dependency declarations and the smoke stack, and `scripts/verify-local.sh` runs it
 for every environment on every commit. See **[`deploy/env/README.md`](https://github.com/ddickmann/latence-framework/blob/main/deploy/env/README.md)**
 for the full shape and for how to add one.
+
+## Blackwell / CUDA-13: the compatibility matrix
+
+Which learned Provider and which serving dependency is known-good on which CUDA / torch /
+`transformers` combination — and which combination **nobody has measured** — is a checked artifact,
+not tribal knowledge: **[the compatibility matrix](compatibility-matrix.md)**.
+
+Read it before standing up on Blackwell (`sm_120`). It carries its reference hardware and
+verification date, and it records the failure modes the live 519-page CUDA-13 run actually produced
+— the FlashInfer `sm75` check that misparses `sm_120`, the `nvrtc`/TorchScript crash inside the
+mdeberta encoder, the ABI-broken `flash-attn`/`torchcodec` wheels, the multimodal OOM at the
+generic serve settings, and the `transformers` 4.x/5.x split — each with the resolution and the
+file in the repo that *enforces* it.
+
+Every cell is a measurement or explicitly `UNVERIFIED`, and that is machine-enforced:
+
+```bash
+latence env matrix deploy/env/compatibility-matrix.yaml        # the merge gate runs this
+latence env matrix deploy/env/compatibility-matrix.yaml --render   # regenerate the published page
+latence env matrix deploy/env/compatibility-matrix.yaml --require-verified  # nothing may be UNVERIFIED
+```
+
+A `verified` cell without date/hardware/command/observed output is rejected, an `UNVERIFIED` cell
+without a runnable reproduce command is rejected, and coverage is *derived* from the committed
+`deploy/env/*/environment.yaml` — so a new enforced boundary or learned Provider fails the gate
+until somebody maps it.
+
+The one full-stack end-to-end verification (served OCR **plus** the GPU learned Providers **plus**
+the text stack, small corpus in, Quality Report + Exports out) is one command:
+
+```bash
+export LATENCE_OCR_BASE_URL=http://<host>:8000        # the RUNNING served-OCR environment
+bash deploy/env/full-stack/verify-full-stack.sh --corpus <dir of scanned pages> --record
+```
+
+Its artifact gate fails on a skipped Stage, a Stage that silently resolved to `cpu`, an empty
+export or `document_count: 0`, so the run cannot pass by narrowing its own scope; `--record` prints
+the evidence block to paste back into the matrix.

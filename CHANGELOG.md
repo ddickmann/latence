@@ -11,6 +11,43 @@ workspace are versioned and released together under one version number.
 
 ### Added
 
+- **Blackwell / CUDA-13 compatibility matrix, machine-checked (#199, ADR-0016/0036/0030/0012).**
+  `deploy/env/compatibility-matrix.yaml` maps every learned Provider and serving dependency of the
+  enterprise-sota stack against every pinned environment (#195/#196/#198), and
+  `docs/compatibility-matrix.md` is **generated** from it and byte-compared, so the published page
+  cannot drift from the checked data. The rule the new `latence env matrix` command enforces is the
+  reason the file exists: **every cell is a MEASUREMENT or explicitly `UNVERIFIED`**, with no third,
+  softer status. A `verified` cell without date/hardware/command/observed output is
+  `E-MATRIX-EVIDENCE-MISSING`; an `UNVERIFIED` cell without a *runnable* reproduce command is
+  `E-MATRIX-REPRODUCE-MISSING` / `-UNRUNNABLE`; coverage is **derived from the committed
+  `environment.yaml` files**, so a new enforced boundary or learned Provider is
+  `E-MATRIX-CELL-UNCOVERED` until it is mapped; a recorded version that disagrees with that
+  environment's committed lock is `E-MATRIX-VERSION-DRIFT`; a named served model without its
+  weights AND code licences cited separately is `E-MATRIX-LICENCE-UNCITED` (ADR-0012). Each cell
+  carries two independent axes — **resolution** (does it install: offline, checked on every commit)
+  and **runtime** (does it run on `sm_120`: needs the hardware) — because a green resolution is not
+  a runtime claim. The five failure modes of the live 519-page run are matrix entries with their
+  resolutions and the file that enforces each (`FM-FLASHINFER-SM120` — the `sm75` check that
+  misparses compute capability 12.0; `FM-NVRTC-JIT` — the TorchScript/nvrtc crash in the mdeberta
+  encoder, #190; `FM-WHEEL-ABI` — the ABI-broken `flash-attn`/`torchcodec` wheels;
+  `FM-MULTIMODAL-OOM` — the multimodal OOM at the generic serve settings; `FM-TRANSFORMERS-SPLIT`);
+  dropping any one of them fails the check. `scripts/verify-local.sh` runs the verifier on every
+  commit; `--require-verified` (the maintainer's switch ON the Blackwell host) additionally fails
+  while anything is still unmeasured.
+
+- **The one full-stack end-to-end verification (#199).** `deploy/env/full-stack/` composes the
+  served-OCR environment and the GPU learned-Provider environment into a single pipeline — the only
+  artifact where both legs run in one run — as one command:
+  `bash deploy/env/full-stack/verify-full-stack.sh --corpus <scans> --record`. Four gates: both
+  environments' offline spec gates, the gpu-learned smoke (GPU-placement probe included), the
+  composed run, then `assert_full_stack.py`, which refuses every near-miss shape the project's own
+  history has produced — a **skipped** Stage (correct on a CPU host, a false green for a GPU
+  verification), a Stage that silently resolved to `cpu` (the #191 signature), an empty export,
+  `document_count: 0` or `contracts_complete: false`. `--record` prints the evidence block to paste
+  back into the matrix, so the measurement is transcribed by the machine that made it. **Status:
+  UNVERIFIED** — it has not been run: no Blackwell/CUDA-13 host was available, and the matrix says
+  so in the record rather than implying otherwise.
+
 - **Benchmark suites for Entity/Relation Extraction, Disambiguation and Redaction (#187).** The
   public benchmark harness (#181) now measures four more Stages through the same
   `BenchmarkSuite` seam, the same one command (`latence-benchmark run --suite all`) and the same

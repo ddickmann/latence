@@ -20,6 +20,13 @@ test is the regression guard.
 | [`served-ocr-client/`](served-ocr-client/) | the CPU **client** environment that calls that endpoint (`parser.lighton_vllm` -> chunk -> RAG export) | #196 |
 | [`gpu-learned/`](gpu-learned/) | GPU learned Providers on CUDA 13 / Blackwell: GLiNER2 fused extraction, GLiNER2 financial-PII + learned GLiNER PII redaction, GLinker disambiguation, Granite r2 GPU-tier embeddings — with the `transformers` split resolved and **real GPU placement asserted** | #198 |
 
+Two files here are not environments but describe them:
+
+| File | What it is | Ticket |
+| --- | --- | --- |
+| [`compatibility-matrix.yaml`](compatibility-matrix.yaml) | the Blackwell/CUDA-13 **compatibility matrix** — every learned Provider and serving dependency × every pinned environment, each cell MEASURED or explicitly `UNVERIFIED`, plus the live run's failure modes with their resolutions. Published as [`docs/compatibility-matrix.md`](../../docs/compatibility-matrix.md), which is GENERATED from it. Checked by `latence env matrix`. | #199 |
+| [`full-stack/`](full-stack/) | the ONE documented end-to-end verification: served OCR **+** GPU learned Providers **+** text stack in one run, small corpus in, Quality Report + Exports out | #199 |
+
 ## Using one
 
 ```bash
@@ -223,6 +230,47 @@ And, for a GPU environment, what `latence env placement` catches:
 Nothing else is needed: `test_envspec.py` globs `deploy/env/*/environment.yaml` and
 `scripts/verify-local.sh` globs `deploy/env/*/smoke.sh`, so a new environment is covered by the
 merge gate the moment it lands.
+
+## The compatibility matrix, and the one full-stack run (#199)
+
+`smoke.sh` proves one environment stands up. It does not say **which CUDA / torch /
+`transformers` combination is known-good on Blackwell**, and — the part that actually costs an
+operator a day — which combination nobody has measured. That is
+[`compatibility-matrix.yaml`](compatibility-matrix.yaml), and it is a specification the build
+checks, exactly like `environment.yaml`:
+
+```bash
+latence env matrix deploy/env/compatibility-matrix.yaml               # verify (runs in the gate)
+latence env matrix deploy/env/compatibility-matrix.yaml --render      # regenerate the published doc
+latence env matrix deploy/env/compatibility-matrix.yaml --require-verified   # nothing UNVERIFIED
+```
+
+The rule it exists to enforce: **every cell is a MEASUREMENT or explicitly `UNVERIFIED`**, with no
+third status. A `verified` cell must carry date, hardware, the exact command and the observed
+output; an `UNVERIFIED` cell must carry the exact command the next operator runs and why it is
+unmeasured. Coverage is *derived* from the committed `environment.yaml` files, so adding an
+enforced boundary or a learned Provider turns the matrix red until it is mapped. Each cell has two
+axes, because they fail independently: **resolution** (does it install — offline, checked on every
+commit) and **runtime** (does it run on `sm_120` — needs the hardware).
+
+The five failure modes the live 519-page run produced are matrix entries with their resolutions and
+the file that enforces each: `FM-FLASHINFER-SM120`, `FM-NVRTC-JIT`, `FM-WHEEL-ABI`,
+`FM-MULTIMODAL-OOM`, `FM-TRANSFORMERS-SPLIT`. Dropping any one of them fails the check.
+
+[`full-stack/`](full-stack/) is the composed verification the matrix's `full_stack_run` record
+points at — the only artifact where the served OCR leg and the in-process GPU leg run in ONE
+pipeline:
+
+```bash
+export LATENCE_OCR_BASE_URL=http://<host>:8000
+bash deploy/env/full-stack/verify-full-stack.sh --corpus <dir of scanned pages> --record
+```
+
+Four gates: both environments' offline spec gates, the gpu-learned smoke (placement probe
+included), the composed run, then `assert_full_stack.py` — which FAILS on a skipped Stage, a Stage
+that resolved to `cpu`, an empty export or `document_count: 0`. `--record` prints the evidence
+block to paste back into the matrix, so the measurement is transcribed by the machine that made it
+rather than typed from memory.
 
 ## Model licensing
 
