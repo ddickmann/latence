@@ -675,14 +675,15 @@ def _check_exclusions(
                     f"— re-solve the lock with `-c {spec.constraints_file}`",
                 )
             )
-        owners = declared.get(dist)
-        if owners:
+        requiring = declared.get(dist)
+        if requiring:
             findings.append(
                 Finding(
                     "E-EXCLUSION-CONTRADICTED",
                     f"'{exclusion.package}' is EXCLUDED from this environment, yet it is declared "
-                    f"as a dependency by {', '.join(sorted(set(owners)))} — the exclusion and the "
-                    "dependency set cannot both hold, so this environment cannot be installed",
+                    f"as a dependency by {', '.join(sorted(set(requiring)))} — the exclusion "
+                    "and the dependency set cannot both hold, so this environment cannot be "
+                    "installed",
                 )
             )
     return findings
