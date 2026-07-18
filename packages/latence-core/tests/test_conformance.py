@@ -108,6 +108,8 @@ def _model_profile(
 _EXPECTED_PROVIDERS = frozenset(
     {
         "source.local_folder",
+        # The SharePoint/OneDrive source-SYSTEM connector (#182, latence-source-sharepoint).
+        "source.sharepoint",
         "parser.plaintext",
         "parser.document",
         "parser.pdfplumber",
@@ -189,12 +191,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 53 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 54 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 53
+    assert len(names) == 54
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -232,7 +234,7 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     """The rolled-up report: all pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 53
+    assert report.providers_total == 54
     assert report.providers_failed == 0
     assert report.all_passed
     # The endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
@@ -253,6 +255,9 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
         "embedding.sentence_transformers",
         "sparse.splade",
         "graph_completion.ultra",
+        # source.sharepoint (#182) needs a tenant for live numbers, so it is verified against the
+        # faithful offline Graph fake its package ships — flagged, never passed off as live.
+        "source.sharepoint",
     }
     # The GPU-only Providers (compute="gpu"): the LightOn-OCR + MIT twin GLM-OCR Parsers and the
     # enterprise GLinker Disambiguator (its neural gliner-linker biencoder needs a GPU, ADR-0046)
