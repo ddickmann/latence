@@ -24,6 +24,16 @@ workspace are versioned and released together under one version number.
   contents in one atomic commit) — semantics documented in `docs/iceberg-export.md`. The client
   ships as the `latence-core[iceberg]` extra (pyiceberg, Apache-2.0), never as a core dependency.
 
+- **OpenLineage run events (#185).** The Runner can emit standard OpenLineage
+  `RunEvent`s — START/COMPLETE/FAIL per Stage plus a parent event for the run —
+  with each Stage's input/output datasets and a `schema` facet from its carrier
+  contract, so any OpenLineage consumer (Marquez, Atlan, Collibra, Dataplex) sees
+  a latence run in its lineage graph with no custom integration. Off by default
+  (`LocalRunner(lineage=...)` / `LATENCE_OPENLINEAGE_URL`), stdlib-only on the wire
+  (no `openlineage-python` dependency), counts-only (no content, no PII, no secrets,
+  and deliberately no `errorMessage` facet — only the typed error category), and an
+  emission failure never fails a run. See `docs/observability.md`.
+
 ## [0.1.0] - 2026-07-14
 
 First public, coherent release of the workspace. All publishable distributions
