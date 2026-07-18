@@ -61,9 +61,12 @@ Those tests are the reason this runbook can be short.
 ## Blockers (decide before step 1)
 
 - [ ] **Git history is published too.** Flipping visibility exposes every commit, not just
-      the current tree. `docs/COMPETITIVE-GAP-ANALYSIS.md` — the candid competitor/gap
-      review — was untracked in #189 and is now `.gitignore`d, but it **remains reachable
-      in history at commit `fd0a1c1`**. Decide one of: (a) accept it as public, (b) rewrite
+      the current tree. The candid competitor/gap review — which used to live at
+      docs/COMPETITIVE-GAP-ANALYSIS.md (deliberately written here *without* backticks: this
+      doc set reserves a backticked `docs/….md` for a document that is actually in the
+      tree, and the front-door gate enforces exactly that) — was untracked in #189 and is
+      now `.gitignore`d, but it **remains reachable in history at commit `fd0a1c1`**.
+      Decide one of: (a) accept it as public, (b) rewrite
       history to purge that path before the flip (`git filter-repo --path
       docs/COMPETITIVE-GAP-ANALYSIS.md --invert-paths`), or (c) publish from a fresh,
       squashed history. Do the same audit for any other maintainer-local note.
