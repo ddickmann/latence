@@ -256,7 +256,10 @@ def test_a_constraint_without_a_reason_is_rejected(tmp_path: Path) -> None:
         load_environment(spec)
 
 
-def test_an_environment_without_providers_is_rejected(tmp_path: Path) -> None:
+def test_an_environment_that_installs_packages_without_providers_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """The Provider set is what a CLIENT environment promises; omitting it promises nothing."""
     spec = tmp_path / "environment.yaml"
     spec.write_text(
         "name: x\nsummary: x\npython: '>=3.11'\nplatform: linux-x86_64\n"
@@ -267,9 +270,285 @@ def test_an_environment_without_providers_is_rejected(tmp_path: Path) -> None:
         load_environment(spec)
 
 
+def test_an_environment_that_installs_nothing_at_all_is_rejected(tmp_path: Path) -> None:
+    """Service environments may skip workspace packages — but not by installing nothing."""
+    spec = tmp_path / "environment.yaml"
+    spec.write_text(
+        "name: x\nsummary: x\npython: '>=3.11'\nplatform: linux-x86_64\n"
+        "workspace_packages: []\nproviders: []\nextra_requirements: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="installs nothing"):
+        load_environment(spec)
+
+
+def test_providers_without_a_package_to_register_them_is_rejected(tmp_path: Path) -> None:
+    """A service environment cannot promise Providers: nothing there declares an entry-point."""
+    spec = tmp_path / "environment.yaml"
+    spec.write_text(
+        "name: x\nsummary: x\npython: '>=3.11'\nplatform: linux-x86_64\n"
+        "workspace_packages: []\nproviders: [source.local_folder]\n"
+        "extra_requirements: ['vllm==0.24.0']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="no workspace package"):
+        load_environment(spec)
+
+
+def test_an_exclusion_without_a_reason_is_rejected(tmp_path: Path) -> None:
+    """An unexplained exclusion is the wheel the next person quietly re-adds."""
+    spec = tmp_path / "environment.yaml"
+    spec.write_text(
+        "name: x\nsummary: x\npython: '>=3.11'\nplatform: linux-x86_64\n"
+        "workspace_packages: [packages/latence-core]\nproviders: [source.local_folder]\n"
+        "excluded_packages:\n  - package: flash-attn\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="reason"):
+        load_environment(spec)
+
+
 def test_a_missing_spec_is_a_config_error_not_a_skip(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="not found"):
         load_environment(tmp_path / "nope.yaml")
+
+
+# --------------------------------------------------------------------------------------------
+# EXCLUSIONS — the wheels that must be IMPOSSIBLE to install (issue #196).
+#
+# The live Blackwell/CUDA-13 run lost hours to prebuilt `flash-attn` and `torchcodec` wheels that
+# the serving layer's torch churn (2.8+cu128 -> 2.11+cu130) had ABI-broken. The fix the ticket
+# demands is that they cannot end up installed AT ALL — enforced by pins, never by an instruction
+# to uninstall them afterwards. These tests are what makes that claim checkable.
+# --------------------------------------------------------------------------------------------
+
+_OCR_ENVIRONMENTS = ("served-ocr-server", "served-ocr-client")
+_ABI_BROKEN_WHEELS = ("flash-attn", "torchcodec")
+
+
+@pytest.mark.parametrize("name", _OCR_ENVIRONMENTS)
+def test_the_abi_broken_wheels_are_excluded_from_both_ocr_environments(name: str) -> None:
+    """Both halves of the split exclude both wheels — 'it can't reach us' is not a mechanism."""
+    spec = load_environment(_ENV_ROOT / name / "environment.yaml")
+    excluded = {exclusion.package for exclusion in spec.excluded_packages}
+    assert set(_ABI_BROKEN_WHEELS) <= excluded, f"{name} excludes only {sorted(excluded)}"
+    for exclusion in spec.excluded_packages:
+        assert exclusion.reason.strip(), exclusion.package
+
+
+@pytest.mark.parametrize("name", _OCR_ENVIRONMENTS)
+def test_an_exclusion_is_rendered_as_a_specifier_nothing_can_satisfy(name: str) -> None:
+    """The mechanism, asserted as behaviour: no released version satisfies the rendered pin.
+
+    A specifier that some version DOES satisfy would make the exclusion decorative — the resolver
+    would happily install that version. The check is over the specifier itself rather than over
+    the literal string ``<0``, so a future change of mechanism stays honest.
+    """
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    spec = load_environment(_ENV_ROOT / name / "environment.yaml")
+    rendered = render_constraints(spec, _REPO_ROOT)
+    for exclusion in spec.excluded_packages:
+        assert exclusion.requirement in rendered.splitlines(), exclusion.package
+        specifier = Requirement(exclusion.requirement).specifier
+        for candidate in ("0", "0.0.1", "1.0", "2.8.3", "99999.0", "1.0.0rc1", "0.14"):
+            assert not specifier.contains(Version(candidate), prereleases=True), (
+                f"{exclusion.package}: version {candidate} satisfies '{exclusion.requirement}', "
+                "so the exclusion does not exclude"
+            )
+
+
+def test_an_excluded_wheel_that_reached_the_lock_is_caught(sandbox: Path) -> None:
+    """THE regression: the exclusion holds only because the lock is checked against it.
+
+    Simulates a lock solved WITHOUT `-c constraints.txt` — the exact mistake that put an
+    ABI-broken flash-attn on the pod. Before this check existed the environment verified clean
+    with the excluded wheel sitting in its lockfile.
+    """
+    lock = sandbox / "deploy" / "env" / "served-ocr-server" / "requirements.lock"
+    lock.write_text(
+        lock.read_text(encoding="utf-8") + "flash-attn==2.8.3\n    # via vllm\n", encoding="utf-8"
+    )
+    assert "E-EXCLUSION-VIOLATED" in _codes(sandbox, "served-ocr-server")
+
+
+def test_an_exclusion_contradicted_by_a_package_dependency_is_caught(sandbox: Path) -> None:
+    """An environment that both excludes and requires a distribution cannot be installed.
+
+    Shipping it would hand an adopter a resolve that fails on their machine and 'passed' on ours,
+    because our own check never looked at whether the two claims could both hold.
+    """
+    pyproject = sandbox / "packages" / "latence-parser-lighton" / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace('"torch>=2.1",', '"torch>=2.1",\n    "flash-attn>=2.8",'),
+        encoding="utf-8",
+    )
+    assert "E-EXCLUSION-CONTRADICTED" in _codes(sandbox, "served-ocr-client")
+
+
+def test_an_extra_requirement_absent_from_the_lock_is_caught(sandbox: Path) -> None:
+    """THE regression for a SERVICE environment, whose extras are its whole dependency set.
+
+    ``extra_requirements`` were rendered into requirements.in but never checked against the lock,
+    so ``served-ocr-server`` — which declares nothing else — had a vacuously green lock check.
+    """
+    lock = sandbox / "deploy" / "env" / "served-ocr-server" / "requirements.lock"
+    kept = [
+        line
+        for line in lock.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("vllm==")
+    ]
+    lock.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    assert "E-LOCK-INCOMPLETE" in _codes(sandbox, "served-ocr-server")
+
+
+def test_an_extra_requirement_the_lock_contradicts_is_caught(sandbox: Path) -> None:
+    """The serving environment's identity IS its vLLM pin; a lock that drifts off it is a lie."""
+    env = sandbox / "deploy" / "env" / "served-ocr-server"
+    spec = env / "environment.yaml"
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace('"vllm==0.24.0"', '"vllm==0.25.1"'),
+        encoding="utf-8",
+    )
+    codes = _codes(sandbox, "served-ocr-server")
+    assert "E-LOCK-UNSATISFIED" in codes
+    assert "E-REQUIREMENTS-STALE" in codes
+
+
+# --------------------------------------------------------------------------------------------
+# The two-environment split (issue #196) is structural, not prose.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_ocr_split_is_a_genuine_dependency_conflict() -> None:
+    """The serving and client environments' transformers boundaries CANNOT both be satisfied.
+
+    This is the whole justification for serving OCR behind the ADR-0030 endpoint seam rather than
+    importing it. Asserted from the committed specs, so if somebody ever 'simplifies' the two
+    environments back into one, this test states exactly why that cannot work — and if the
+    conflict genuinely dissolves upstream, this test is the prompt to revisit the topology
+    deliberately rather than discovering it on a pod.
+    """
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    def transformers_specifier(name: str) -> object:
+        spec = load_environment(_ENV_ROOT / name / "environment.yaml")
+        for constraint in spec.constraints:
+            requirement = Requirement(constraint.requirement)
+            if requirement.name == "transformers":
+                return requirement.specifier
+        raise AssertionError(f"{name} declares no enforced transformers boundary")
+
+    server = transformers_specifier("served-ocr-server")
+    client = transformers_specifier("served-ocr-client")
+    # Sweep the real release line either side of the 4/5 break. No version satisfies both.
+    candidates = ["4.45.0", "4.51.3", "4.57.6", "4.99.0", "5.0.0", "5.14.1", "5.99.0"]
+    both = [
+        version
+        for version in candidates
+        if server.contains(Version(version), prereleases=True)  # type: ignore[attr-defined]
+        and client.contains(Version(version), prereleases=True)  # type: ignore[attr-defined]
+    ]
+    assert not both, (
+        f"transformers {both} satisfies BOTH the served-OCR server and client boundaries — the "
+        "conflict that justifies the endpoint seam no longer exists as declared"
+    )
+    # ...and each side is satisfiable on its own, so the split is a real split and not two
+    # environments that are both simply broken.
+    assert server.contains(Version("5.14.1"), prereleases=True)  # type: ignore[attr-defined]
+    assert client.contains(Version("4.57.6"), prereleases=True)  # type: ignore[attr-defined]
+
+
+def test_the_client_never_installs_the_in_process_ocr_provider() -> None:
+    """The served client must not promise ``parser.lighton`` — that would defeat the split.
+
+    The package is installed (for its rasteriser), so nothing structurally stops a stack from
+    naming the in-process 1B vision-language Provider. What the environment PROMISES is the
+    Provider set, and loading a VLM into the CPU client is precisely what the served architecture
+    exists to avoid.
+    """
+    spec = load_environment(_ENV_ROOT / "served-ocr-client" / "environment.yaml")
+    assert "parser.lighton_vllm" in spec.providers
+    assert "parser.lighton" not in spec.providers
+    assert "packages/latence-parser-lighton" in spec.workspace_packages
+
+
+def test_the_served_smoke_stack_cannot_be_satisfied_without_the_endpoint() -> None:
+    """The client's smoke stack has exactly ONE Parse Provider, and it is the served one.
+
+    A second, local Parse Provider (or a text extension on the Source) would let gate 3 go green
+    without the endpoint ever being called — the false green this stack is shaped to prevent.
+    """
+    import yaml
+
+    stack_path = _ENV_ROOT / "served-ocr-client" / "stack.yaml"
+    raw = yaml.safe_load(stack_path.read_text(encoding="utf-8"))
+    parse_stages = [stage for stage in raw["stages"] if stage["capability"] == "parse"]
+    assert [stage["provider"] for stage in parse_stages] == ["parser.lighton_vllm"]
+    assert parse_stages[0]["config"]["base_url"] == "{OCR_BASE_URL}", (
+        "the endpoint must be a placeholder the smoke fills from the environment; a hard-coded "
+        "localhost default would let the smoke pass against whatever is listening"
+    )
+    source = next(stage for stage in raw["stages"] if stage["capability"] == "source")
+    text_extensions = {"txt", "md", "markdown"} & set(source["config"]["extensions"])
+    assert not text_extensions, (
+        f"the served-OCR smoke corpus accepts text extensions {sorted(text_extensions)}, so a "
+        "text Provider could satisfy it without the OCR endpoint doing any work"
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# The serving image enforces the exclusions the way the ticket demands.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_serving_image_bakes_the_constraints_in_rather_than_uninstalling() -> None:
+    """Pins, not "uninstall these afterwards" — the acceptance criterion, read off the Dockerfile.
+
+    Three claims, each a real failure mode: the constraints must bind the install; they must
+    OUTLIVE it (a later ``pip install`` in the running container is bound too); and there must be
+    no uninstall step anywhere, because a step like that runs only when somebody remembers.
+    """
+    dockerfile = (_ENV_ROOT / "served-ocr-server" / "Dockerfile").read_text(encoding="utf-8")
+    assert "--constraint /etc/latence/ocr-constraints.txt" in dockerfile
+    assert "PIP_CONSTRAINT=/etc/latence/ocr-constraints.txt" in dockerfile
+    assert "UV_CONSTRAINT=/etc/latence/ocr-constraints.txt" in dockerfile
+    lowered = dockerfile.lower()
+    for forbidden in ("pip uninstall", "uv pip uninstall"):
+        assert forbidden not in lowered, (
+            f"the serving image contains '{forbidden}': an exclusion enforced by removing the "
+            "wheel after installing it is exactly what this environment must not do"
+        )
+    # A mutable tag is not a reproducible base. The digest is the artifact.
+    base = next(line for line in dockerfile.splitlines() if line.startswith("FROM "))
+    assert "@sha256:" in base, f"base image is not digest-pinned: {base}"
+    assert ":latest" not in base
+
+
+def test_the_image_side_exclusion_check_reads_the_generated_constraints() -> None:
+    """The in-image check derives its list from constraints.txt, so the two cannot drift.
+
+    Drive the real parser over the real generated file: a change to how exclusions are rendered
+    that the script stopped recognising would silently turn the image's build-time proof into a
+    check of nothing.
+    """
+    import importlib.util
+
+    script = _ENV_ROOT / "served-ocr-server" / "verify-exclusions.py"
+    module_spec = importlib.util.spec_from_file_location("_verify_exclusions", script)
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    constraints = (_ENV_ROOT / "served-ocr-server" / "constraints.txt").read_text(encoding="utf-8")
+    found = module.excluded_distributions(constraints)
+    assert set(_ABI_BROKEN_WHEELS) <= set(found), found
+    # And it must not mistake an ENFORCED BOUNDARY for an exclusion — that would make the image
+    # refuse to build over a distribution it is supposed to install.
+    assert "transformers" not in found
+    assert "torch" not in found
 
 
 # --------------------------------------------------------------------------------------------

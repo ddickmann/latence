@@ -27,15 +27,30 @@ drift**:
 * a Provider package raises a floor or drops a cap the lock no longer satisfies
   (``E-LOCK-UNSATISFIED``);
 * an enforced conflict boundary stops holding (``E-CONSTRAINT-VIOLATED``);
+* an EXCLUDED distribution reaches the lock anyway (``E-EXCLUSION-VIOLATED``) or is *required* by
+  a package the environment installs, so the two claims cannot both hold
+  (``E-EXCLUSION-CONTRADICTED``);
 * a Provider is renamed out from under the recipe (``E-PROVIDER-UNREGISTERED``) or the smoke
   stack drifts away from the declared Provider set (``E-STACK-PROVIDER-UNDECLARED``).
 
 Every finding is a *behavioural* fact about the committed environment, never a flag recording
 intent.
 
+**Exclusions** (#196) are the inverse of a boundary: distributions that must be IMPOSSIBLE to
+install, not ones a runbook says to uninstall afterwards. They render into ``constraints.txt`` as
+pins no release satisfies, so the resolver refuses; :func:`verify_environment` then asserts the
+committed lock actually honours that. The live Blackwell/CUDA-13 run lost hours to prebuilt
+``flash-attn`` / ``torchcodec`` wheels the serving layer's torch churn had ABI-broken.
+
+**Two kinds of environment.** A *client* environment installs workspace Provider packages and
+promises a Provider set. A *service* environment (the vLLM OCR server behind the ADR-0030 endpoint
+seam) installs none of them: it owns its requirements directly via ``extra_requirements`` and
+promises no Providers, because nothing of the framework runs in it. Both are checked by the same
+code path; a service environment is exempt only from the checks that have no subject.
+
 The module is reusable by construction: nothing here knows the word "cpu-text". The served-OCR
-(#196) and GPU learned-Provider (#198) environments are additional ``deploy/env/<name>/``
-directories with the same six files and are verified by the same code path.
+server/client (#196) and GPU learned-Provider (#198) environments are additional
+``deploy/env/<name>/`` directories verified by the same code path.
 
 ``packaging`` is the only dependency beyond the core spine and it is imported LAZILY: it ships in
 the optional ``latence-core[envspec]`` extra (ADR-0016 — the core stays near-zero-dep), exactly
