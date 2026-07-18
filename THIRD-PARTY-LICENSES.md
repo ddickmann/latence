@@ -138,7 +138,7 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | urchade/gliner_multi_pii-v1 | Redaction | Apache-2.0 |
 | knowledgator/gliner-linker-large-v1.0 | Disambiguation (L3 linker; `disambiguation.cascade` reference + `disambiguation.glinker` enterprise, ADR-0046) | Apache-2.0 |
 | knowledgator/gliner-linker-rerank-v1.0 | Disambiguation (L4 reranker; `disambiguation.glinker`, ADR-0046) | Apache-2.0 |
-| ibm-granite/granite-embedding-311m-multilingual-r2 | Embedding (default, GPU tier; `embedding.sentence_transformers`) | Apache-2.0 |
+| ibm-granite/granite-embedding-311m-multilingual-r2 | Embedding (default, GPU tier; `embedding.sentence_transformers`, wired in `deploy/env/gpu-learned/stack.yaml`) | Apache-2.0 |
 | ibm-granite/granite-embedding-97m-multilingual-r2 | Embedding (CPU tier) | Apache-2.0 |
 | opensearch-project/opensearch-neural-sparse-encoding-multilingual-v1 | Sparse signal (`sparse.splade`, wired in `deploy/env/cpu-text/stack.yaml`) | Apache-2.0 |
 | intfloat/multilingual-e5-small | Embedding (fallback) | MIT |
@@ -153,6 +153,31 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 | Model | Capability | License | Note |
 |---|---|---|---|
 | google/embeddinggemma-300m | Embedding | Gemma | **Not a default; no Gemma-backed Provider ships in this repo.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). POLICY: the Gemma family is non-default and, were a Gemma Provider offered, it would be an explicitly opt-in Provider carrying the license and its flow-down obligations. Default Embedder is IBM Granite Embedding r2 (Apache-2.0). |
+
+### CUDA runtime wheels — NOT permissive (issue #198)
+
+`deploy/env/gpu-learned/requirements.lock` resolves 15 `nvidia-*` wheels (`nvidia-cuda-runtime`,
+`nvidia-cublas`, `nvidia-cudnn-cu13`, `nvidia-nccl-cu13`, `nvidia-cusparselt-cu13`, …) as
+transitive dependencies of `torch==2.13.0+cu130`. **They are NOT open-source.** They ship NVIDIA's
+proprietary CUDA Toolkit / cuDNN / NCCL end-user licence agreements, not an OSI licence: checked
+against the PyPI JSON API on 2026-07-18, these distributions declare **no** `license`,
+`license_expression` or `License ::` classifier at all — the terms live in the EULA text inside the
+wheel and at <https://docs.nvidia.com/cuda/eula/>.
+
+What that means for this project, stated plainly:
+
+* Nothing changes for the framework's own licence, or for the CPU/text environment — the CUDA
+  wheels are pulled in **only** by the optional `gpu-learned` environment, and only because the
+  operator chose to install a GPU stack. `latence-core` and every Provider package remain
+  permissively licensed and CUDA-free (ADR-0016).
+* An operator installing `deploy/env/gpu-learned/` accepts NVIDIA's terms for those runtime
+  libraries, exactly as they would installing CUDA from NVIDIA directly. This is normal for GPU
+  serving and is called out here so it is a decision, not a surprise.
+* `triton==3.7.1` (also transitive via torch, and required by `flashdeberta`) **is** permissive:
+  MIT, per its PyPI classifier, verified the same day.
+* UNVERIFIED: the precise EULA *version* bound to each pinned wheel was not independently
+  confirmed — NVIDIA does not publish it in the package metadata. Treat the linked CUDA EULA as
+  the governing terms and re-check if a redistribution question ever arises.
 
 Rejected after verification (recorded so the check is not repeated): **naver/splade-v3** —
 `cc-by-nc-sa-4.0` (non-commercial, not OSI open-source) and gated; not wired anywhere.
