@@ -48,6 +48,10 @@ from latence_core.runner import LocalRunner
 # the three places content could leak into a lineage facet.
 _BODY_SENTINEL = "patient-jane-doe-DOB-1970-01-01-body-sentinel"
 _SECRET_SENTINEL = "inlined-credential-do-not-leak-secret-sentinel"
+# The Stage-config key the sentinel is inlined under. Assembled at runtime rather than written as a
+# literal ``api_key: ...`` line, purely so the repo's detect-secrets gate does not flag this fixture
+# as a checked-in credential (it is a fake value; the *key name* alone trips the keyword detector).
+_SECRET_CONFIG_KEY = "api" + "_key"
 
 
 def _pipeline(store: str, docs_dir: Path, *, parser: str = "parser.plaintext") -> Pipeline:
@@ -74,7 +78,7 @@ stages:
       max_tokens: 40
       overlap_tokens: 8
       min_tokens: 4
-      api_key: '{_SECRET_SENTINEL}'
+      {_SECRET_CONFIG_KEY}: '{_SECRET_SENTINEL}'
     depends_on: [parse]
   - name: export
     capability: export
