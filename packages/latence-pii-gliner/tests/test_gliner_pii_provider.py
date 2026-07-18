@@ -404,7 +404,8 @@ def test_skipped_chunks_need_no_model_call(fake_gliner: type[_FakeGLiNER]) -> No
 
 def _model_param_device(provider: GlinerPIIRedactor) -> str:
     """Where the LOADED model's parameters actually live — the only honest "what device ran this"."""
-    return next(iter(provider._model.parameters())).device
+    param: _FakeParam = next(iter(provider._model.parameters()))
+    return param.device
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

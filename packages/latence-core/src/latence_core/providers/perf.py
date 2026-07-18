@@ -196,7 +196,9 @@ def load_with_fa2_fallback(
         return loader(model_id, **kwargs)
 
 
-def place_on_device(model: Any, device: str | None, *, provider_name: str = "provider") -> str | None:
+def place_on_device(
+    model: Any, device: str | None, *, provider_name: str = "provider"
+) -> str | None:
     """Move a plain-``gliner`` model onto the **resolved** device at load, and PROVE it landed.
 
     The plain ``gliner`` library does NOT auto-place: ``GLiNER.from_pretrained`` loads onto CPU
