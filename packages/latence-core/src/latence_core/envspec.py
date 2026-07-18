@@ -86,6 +86,44 @@ def _require_packaging() -> Any:
     return _req, _utils, _ver
 
 
+# The specifier an EXCLUDED distribution is pinned to. No PEP 440 version is negative, so `<0` is
+# satisfied by nothing: a resolver asked for the distribution — directly or transitively — reports
+# "no solution found" instead of installing it. That is the whole point of an exclusion: it must be
+# impossible to end up installed, not something a runbook tells you to uninstall afterwards.
+# (Verified against uv 0.9.5: `uv pip compile` with `flash-attn<0` in the constraints file exits
+# non-zero with "Because only flash-attn>=0.2.0 is available and you require flash-attn<0, we can
+# conclude that your requirements are unsatisfiable.")
+_EXCLUDED_SPECIFIER = "<0"
+
+
+def exclusion_requirement(package: str) -> str:
+    """The PEP 508 requirement string that makes ``package`` uninstallable.
+
+    Public because the exclusion mechanism is a claim other artifacts make too (a container image
+    bakes the generated constraints file in as ``PIP_CONSTRAINT``), and a second hand-written copy
+    of ``"<0"`` somewhere else is exactly how an enforced boundary rots into folklore.
+    """
+    return f"{package}{_EXCLUDED_SPECIFIER}"
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """One distribution that MUST NOT be installable in this environment, plus why.
+
+    An exclusion is the inverse of a :class:`Constraint`: a Constraint says "if this is installed,
+    it must be in this window"; an Exclusion says "this can never be installed at all". It is
+    emitted into ``constraints.txt`` as an unsatisfiable pin, so the *resolver* refuses — never a
+    post-install ``pip uninstall`` step, which only ever runs if somebody remembers to run it.
+    """
+
+    package: str
+    reason: str
+
+    @property
+    def requirement(self) -> str:
+        return exclusion_requirement(self.package)
+
+
 @dataclass(frozen=True)
 class Constraint:
     """One ENFORCED conflict boundary: a PEP 508 requirement plus why it exists.
@@ -116,8 +154,14 @@ class EnvironmentSpec:
     extra_requirements: tuple[str, ...]
     """Third-party requirements no workspace package declares (transitive pins the recipe owns)."""
     constraints: tuple[Constraint, ...]
+    excluded_packages: tuple[Exclusion, ...]
+    """Distributions that must be IMPOSSIBLE to install here (rendered as unsatisfiable pins)."""
     providers: tuple[str, ...]
-    """Provider names the environment must expose (the smoke test's strict assertion)."""
+    """Provider names the environment must expose (the smoke test's strict assertion).
+
+    Empty for a *service* environment (one that installs no framework Provider packages — see
+    :attr:`workspace_packages`), which has no Provider set to promise.
+    """
     gpu_only_providers: frozenset[str]
     """Providers whose *runtime* needs a GPU: installed + registered here, exercised by #198."""
     extra_index_urls: tuple[str, ...]
@@ -218,12 +262,43 @@ def load_environment(spec_path: Path) -> EnvironmentSpec:
             Constraint(requirement=str(entry["requirement"]), reason=str(entry["reason"]))
         )
 
+    exclusions: list[Exclusion] = []
+    raw_exclusions = raw.get("excluded_packages", []) or []
+    if not isinstance(raw_exclusions, list):
+        raise ConfigError(f"Environment spec {spec_path}: 'excluded_packages' must be a list.")
+    for entry in raw_exclusions:
+        if not isinstance(entry, dict) or "package" not in entry or "reason" not in entry:
+            raise ConfigError(
+                f"Environment spec {spec_path}: every excluded package needs 'package' + "
+                "'reason' (an exclusion nobody can explain is the wheel somebody re-adds)."
+            )
+        exclusions.append(Exclusion(package=str(entry["package"]), reason=str(entry["reason"])))
+
     workspace_packages = _strs("workspace_packages")
+    extra_requirements = _strs("extra_requirements")
     providers = _strs("providers")
-    if not workspace_packages:
-        raise ConfigError(f"Environment spec {spec_path}: 'workspace_packages' must be non-empty.")
-    if not providers:
-        raise ConfigError(f"Environment spec {spec_path}: 'providers' must be non-empty.")
+    # An environment stands *something* up. A CLIENT environment installs workspace Provider
+    # packages; a SERVICE environment (a model server behind an endpoint seam — ADR-0030) installs
+    # none of them and owns third-party requirements directly. Declaring neither is not a service
+    # environment, it is an empty file.
+    if not workspace_packages and not extra_requirements:
+        raise ConfigError(
+            f"Environment spec {spec_path}: an environment must declare 'workspace_packages' "
+            "(a client environment) or 'extra_requirements' (a service environment); this one "
+            "declares neither and installs nothing."
+        )
+    # The Provider set is the promise a *client* environment makes. A service environment has no
+    # Providers to promise, and demanding a token one would be the folklore version of the check.
+    if workspace_packages and not providers:
+        raise ConfigError(
+            f"Environment spec {spec_path}: 'providers' must be non-empty for an environment "
+            "that installs workspace packages — the Provider set is what it promises."
+        )
+    if providers and not workspace_packages:
+        raise ConfigError(
+            f"Environment spec {spec_path}: 'providers' is non-empty but no workspace package is "
+            "installed to register them."
+        )
 
     return EnvironmentSpec(
         name=_str("name"),
@@ -233,8 +308,9 @@ def load_environment(spec_path: Path) -> EnvironmentSpec:
         directory=spec_path.parent,
         spec_path=spec_path,
         workspace_packages=workspace_packages,
-        extra_requirements=_strs("extra_requirements"),
+        extra_requirements=extra_requirements,
         constraints=tuple(constraints),
+        excluded_packages=tuple(exclusions),
         providers=providers,
         gpu_only_providers=frozenset(_strs("gpu_only_providers")),
         extra_index_urls=_strs("extra_index_urls"),
@@ -302,6 +378,32 @@ def _third_party_requirements(
     )
 
 
+def _extra_requirements_owner(spec: EnvironmentSpec) -> str:
+    """The provenance label used for requirements the environment owns directly.
+
+    One constant so the rendered ``# via`` comment and the verifier's finding text cannot drift
+    apart — the render is byte-compared, so a second spelling would be a silent stale-file bug.
+    """
+    return f"{spec.name} environment (extra_requirements)"
+
+
+def _declared_requirements(
+    spec: EnvironmentSpec, packages: list[_PackageMeta]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Everything the environment promises to install: package deps + its own extras.
+
+    ``extra_requirements`` used to be rendered into ``requirements.in`` but never checked against
+    the lock, so an extra the lock did not carry produced NO finding. For a SERVICE environment
+    (no workspace packages, ADR-0030's endpoint side) those extras are the entire dependency set,
+    which would have made its lock check vacuous — the definition of a false green.
+    """
+    owner = _extra_requirements_owner(spec)
+    return [
+        *_third_party_requirements(packages),
+        *((requirement, (owner,)) for requirement in spec.extra_requirements),
+    ]
+
+
 # --------------------------------------------------------------------------------------------
 # Rendering the generated files.
 # --------------------------------------------------------------------------------------------
@@ -327,7 +429,7 @@ def render_requirements(spec: EnvironmentSpec, repo_root: Path) -> str:
         lines.append(f"    # via {', '.join(owners)}")
     for requirement in spec.extra_requirements:
         lines.append(requirement)
-        lines.append(f"    # via {spec.name} environment (extra_requirements)")
+        lines.append(f"    # via {_extra_requirements_owner(spec)}")
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -346,6 +448,19 @@ def render_constraints(spec: EnvironmentSpec, repo_root: Path) -> str:
             lines.append(f"# {reason_line}".rstrip())
         lines.append(constraint.requirement)
         lines.append("")
+    if spec.excluded_packages:
+        lines.append(
+            "# --- EXCLUDED distributions -----------------------------------------------------\n"
+            "# Each is pinned to a specifier NO release can satisfy, so the resolver REFUSES the\n"
+            "# install (\"no solution found\") the moment anything asks for it, directly or\n"
+            "# transitively. This is the enforcement: never a post-install uninstall step, which\n"
+            "# only runs if somebody remembers to run it.\n"
+        )
+        for exclusion in spec.excluded_packages:
+            for reason_line in exclusion.reason.strip().splitlines():
+                lines.append(f"# {reason_line}".rstrip())
+            lines.append(exclusion.requirement)
+            lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -455,10 +570,12 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
             continue
         versions[dist] = _ver.Version(exact)
 
-    # Every declared third-party requirement of every package in the set must be (a) present in
-    # the lock and (b) satisfied by the locked version. This is the drift alarm: raise a floor or
-    # drop a cap in any Provider package and the committed lock stops satisfying it.
-    for requirement_str, owners in _third_party_requirements(packages):
+    # Every declared third-party requirement of every package in the set — PLUS the requirements
+    # the environment owns directly (``extra_requirements``, which for a service environment are
+    # the only ones there are) — must be (a) present in the lock and (b) satisfied by the locked
+    # version. This is the drift alarm: raise a floor or drop a cap anywhere and the committed
+    # lock stops satisfying it.
+    for requirement_str, owners in _declared_requirements(spec, packages):
         requirement: Requirement = _req.Requirement(requirement_str)
         dist = _utils.canonicalize_name(requirement.name)
         locked = versions.get(dist)
@@ -503,8 +620,57 @@ def verify_environment(spec: EnvironmentSpec, repo_root: Path) -> EnvironmentRep
                 )
             )
 
+    findings.extend(_check_exclusions(spec, packages, versions))
     findings.extend(_check_providers(spec, packages))
     return EnvironmentReport(spec.name, tuple(findings))
+
+
+def _check_exclusions(
+    spec: EnvironmentSpec,
+    packages: list[_PackageMeta],
+    versions: dict[str, Version],
+) -> list[Finding]:
+    """An excluded distribution must be absent from the lock AND unwanted by the package set.
+
+    Two distinct ways an exclusion can be a lie, both reported:
+
+    * ``E-EXCLUSION-VIOLATED`` — the lock carries the very distribution the recipe swears cannot
+      be installed. The solve was done without the constraints file, or the constraints were
+      hand-edited; either way the environment installs the ABI-broken wheel.
+    * ``E-EXCLUSION-CONTRADICTED`` — a package the environment installs *declares* the excluded
+      distribution as a dependency. That environment cannot resolve at all, so shipping it would
+      hand an adopter an install that fails on their machine and passed on ours.
+    """
+    _req, _utils, _ = _require_packaging()
+    findings: list[Finding] = []
+    declared: dict[str, list[str]] = {}
+    for requirement_str, owners in _declared_requirements(spec, packages):
+        dist = _utils.canonicalize_name(_req.Requirement(requirement_str).name)
+        declared.setdefault(dist, []).extend(owners)
+
+    for exclusion in spec.excluded_packages:
+        dist = _utils.canonicalize_name(exclusion.package)
+        locked = versions.get(dist)
+        if locked is not None:
+            findings.append(
+                Finding(
+                    "E-EXCLUSION-VIOLATED",
+                    f"{spec.lock_file} pins {dist}=={locked}, but '{exclusion.package}' is "
+                    f"EXCLUDED from this environment ({exclusion.reason.strip().splitlines()[0]}) "
+                    f"— re-solve the lock with `-c {spec.constraints_file}`",
+                )
+            )
+        owners = declared.get(dist)
+        if owners:
+            findings.append(
+                Finding(
+                    "E-EXCLUSION-CONTRADICTED",
+                    f"'{exclusion.package}' is EXCLUDED from this environment, yet it is declared "
+                    f"as a dependency by {', '.join(sorted(set(owners)))} — the exclusion and the "
+                    "dependency set cannot both hold, so this environment cannot be installed",
+                )
+            )
+    return findings
 
 
 def _check_generated(
@@ -536,7 +702,15 @@ def _check_generated(
 
 
 def _check_providers(spec: EnvironmentSpec, packages: list[_PackageMeta]) -> list[Finding]:
-    """The Provider set the recipe promises must exist, and the smoke stack must stay inside it."""
+    """The Provider set the recipe promises must exist, and the smoke stack must stay inside it.
+
+    A SERVICE environment (no workspace packages, therefore no Providers — ``load_environment``
+    enforces that pairing) promises no Provider set and ships no smoke stack, so there is nothing
+    here to check. It is not exempt from anything it *does* declare: its requirements, its
+    boundaries and its exclusions are all checked above.
+    """
+    if not spec.providers:
+        return []
     findings: list[Finding] = []
     registered: set[str] = set()
     for pkg in packages:

@@ -1,0 +1,13 @@
+# GENERATED FILE — do not edit by hand.
+# Source of truth: deploy/env/served-ocr-server/environment.yaml + the workspace packages' pyproject.toml.
+# Regenerate:      latence env render deploy/env/served-ocr-server/environment.yaml
+# Verify:          latence env verify deploy/env/served-ocr-server/environment.yaml
+
+#
+# Direct third-party requirements of the 'served-ocr-server' environment.
+# The workspace latence-* packages are installed from source with --no-deps by
+# install.sh, so their intra-workspace requirements never appear here — this file is
+# what actually pins their third-party surface.
+
+vllm==0.24.0
+    # via served-ocr-server environment (extra_requirements)
