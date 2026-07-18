@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from latence_benchmark.metrics import micro
 from latence_benchmark.scoring import SUPPORTED_TYPES
 
 if TYPE_CHECKING:
@@ -90,6 +91,67 @@ def _rate(score: SplitScore) -> str:
     return "n/a" if rate is None else f"{rate * 100:.1f}%"
 
 
+def _pct(value: float | None) -> str:
+    """Render a ratio, or ``n/a`` for an UNDEFINED one — never ``0.0%`` for "no data"."""
+    return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+#: Human-readable heading per metric dimension. An unknown dimension falls back to its own name,
+#: so a new suite's new dimension renders sensibly without touching this module.
+_DIMENSION_TITLES = {
+    "language": "By language",
+    "pii_type": "By PII type",
+    "predicate": "By relation predicate",
+    "match": "By match criterion",
+}
+
+
+def _metric_tables(result: SuiteResult) -> list[str]:
+    """Render one precision/recall/F1 table per metric dimension the suite reported."""
+    if not result.metrics:
+        return []
+    lines: list[str] = ["### Our measurements", ""]
+    headline = result.headline
+    if headline is not None:
+        lines += [
+            f"**Headline (micro over {headline.dimension}):** "
+            f"precision {_pct(headline.precision)} · recall {_pct(headline.recall)} · "
+            f"F1 {_pct(headline.f1)} "
+            f"({headline.true_positives} TP / {headline.false_positives} FP / "
+            f"{headline.false_negatives} FN).",
+            "",
+        ]
+    for dimension in result.dimensions:
+        slices = result.metrics_for(dimension)
+        lines += [
+            f"#### {_DIMENSION_TITLES.get(dimension, dimension)}",
+            "",
+            "| Slice | Precision | Recall | F1 | TP | FP | FN | Gold |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for score in slices:
+            lines.append(
+                f"| `{score.name}` | {_pct(score.precision)} | {_pct(score.recall)} | "
+                f"{_pct(score.f1)} | {score.true_positives} | {score.false_positives} | "
+                f"{score.false_negatives} | {score.gold} |"
+            )
+        total = micro(slices, dimension=dimension)
+        lines += [
+            f"| **MICRO** | **{_pct(total.precision)}** | **{_pct(total.recall)}** | "
+            f"**{_pct(total.f1)}** | {total.true_positives} | {total.false_positives} | "
+            f"{total.false_negatives} | {total.gold} |",
+            "",
+        ]
+    lines += [
+        f"Documents scored: {result.documents_scored}.",
+        "",
+        "A precision or recall with no denominator is reported as `n/a`, never as 0% — an "
+        "undefined ratio is not a measured failure.",
+        "",
+    ]
+    return lines
+
+
 def _reproduce_command(result: SuiteResult) -> str:
     return (
         f"latence-benchmark run --suite {result.suite} "
@@ -116,14 +178,14 @@ def render_markdown(results: Sequence[SuiteResult], *, generated_on: str) -> str
     for result in results:
         licence = result.dataset.license
         lines += [
-            f"## {result.stage.title()} — `{result.suite}` suite",
+            f"## {result.stage.replace('_', ' ').title()} — `{result.suite}` suite",
             "",
             "### Dataset (license verified before inclusion)",
             "",
             "| Field | Value |",
             "| --- | --- |",
             f"| Dataset | [`{result.dataset.repo_id}`]({result.dataset.homepage}) |",
-            f"| Pinned revision | `{result.dataset.revision}` |",
+            f"| Pinned revision ({result.dataset.revision_kind}) | `{result.dataset.revision}` |",
             f"| Corpus license | **{licence.dataset_license}** |",
             f"| Evaluation-toolkit license | **{licence.code_license}** |",
             f"| Commercial use permitted | {'yes' if licence.commercial_use else 'NO'} |",
@@ -143,31 +205,37 @@ def render_markdown(results: Sequence[SuiteResult], *, generated_on: str) -> str
             f"| Config | `{json.dumps(dict(result.stack_pin.config), sort_keys=True)}` |",
             f"| Pin fingerprint | `{result.stack_pin.fingerprint}` |",
             "",
-            "### Our measurements",
-            "",
-            "| Split | Pass rate | Passed | Failed | Scored | Unsupported |",
-            "| --- | --- | --- | --- | --- | --- |",
         ]
-        for split in result.splits:
-            lines.append(
-                f"| `{split.split}` | {_rate(split)} | {split.passed} | {split.failed} | "
-                f"{split.scored} | {split.unsupported} |"
-            )
-        overall = result.overall
-        lines += [
-            f"| **OVERALL** | **{_rate(overall)}** | {overall.passed} | {overall.failed} | "
-            f"{overall.scored} | {overall.unsupported} |",
-            "",
-            f"Documents parsed: {result.documents_scored} "
-            f"(parse failures: {result.document_failures}).",
-            "",
-            f"**Scored test classes:** {supported}. `table` and `math` assertions are counted",
-            "in the *Unsupported* column and excluded from the pass-rate denominator — they are",
-            "neither passes nor failures here. Issue #187 implements them through the same",
-            "suite seam. This is why the OVERALL figure below is **not** directly comparable to",
-            "the vendor claims, which are computed over all five classes.",
-            "",
-        ]
+        lines += _metric_tables(result)
+        if result.splits:
+            lines += [
+                "### Our measurements",
+                "",
+                "| Split | Pass rate | Passed | Failed | Scored | Unsupported |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+            for split in result.splits:
+                lines.append(
+                    f"| `{split.split}` | {_rate(split)} | {split.passed} | {split.failed} | "
+                    f"{split.scored} | {split.unsupported} |"
+                )
+            overall = result.overall
+            lines += [
+                f"| **OVERALL** | **{_rate(overall)}** | {overall.passed} | {overall.failed} | "
+                f"{overall.scored} | {overall.unsupported} |",
+                "",
+                f"Documents parsed: {result.documents_scored} "
+                f"(parse failures: {result.document_failures}).",
+                "",
+                f"**Scored test classes:** {supported}. `table` and `math` assertions are counted",
+                "in the *Unsupported* column and excluded from the pass-rate denominator — they",
+                "are neither passes nor failures here. Scoring them remains UNIMPLEMENTED (issue",
+                "#187 added the Entity/Relation, Disambiguation and Redaction suites through the",
+                "same seam, but did not implement the `table`/`math` assertion classes). This is",
+                "why the OVERALL figure is **not** directly comparable to the vendor claims,",
+                "which are computed over all five classes.",
+                "",
+            ]
         if result.notes:
             lines.append("**Run notes:**")
             lines.append("")
@@ -181,9 +249,12 @@ def render_markdown(results: Sequence[SuiteResult], *, generated_on: str) -> str
             "```",
             "",
             "Determinism: the pinned Provider is CPU-only and deterministic, documents are",
-            "visited in sorted path order and splits in a fixed order, and the dataset is pinned",
-            "to a full commit SHA (branch/tag pins are rejected at construction). Two runs of",
-            "the same revision and pin fingerprint produce identical tallies.",
+            "visited in a fixed order and splits/language slices in a fixed order, and the",
+            "dataset is pinned to a full 40-hex revision — an upstream commit SHA, or a content",
+            "digest for a corpus shipped in this repository (branch/tag pins are rejected at",
+            "construction, and a shipped corpus whose bytes no longer match its digest is",
+            "refused). Two runs of the same revision and pin fingerprint produce identical",
+            "numbers.",
             "",
         ]
 

@@ -17,9 +17,19 @@ To add a suite:
 3. Call :func:`register_suite` on it at import time in ``latence_benchmark.__init__``.
 
 ``latence-benchmark run --suite <name>`` and the published results page then pick it up with no
-further wiring. What a suite must NOT do is invent its own reporting shape: the pass/fail/
-unsupported triple in :class:`SplitScore` is the common currency, and ``unsupported`` exists so
-a partially implemented scorer is visible in the results rather than flattering the pass rate.
+further wiring. What a suite must NOT do is invent its own reporting shape. There are exactly
+two currencies, because there are exactly two kinds of measurement:
+
+* :class:`SplitScore` — pass/fail/unsupported, for a suite scoring **unit tests** (Parse).
+  ``unsupported`` exists so a partially implemented scorer is visible in the results rather than
+  flattering the pass rate.
+* :class:`~latence_benchmark.metrics.MetricScore` — true/false positives and false negatives,
+  for a suite scoring a **labelled set** (Entity/Relation Extraction, Disambiguation,
+  Redaction). A pass rate cannot express these: a system predicting nothing would score a
+  perfect "no false positives".
+
+A suite fills whichever applies (or both) and leaves the other empty; the results page renders
+only what is populated.
 """
 
 from __future__ import annotations
@@ -29,6 +39,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from latence_benchmark.metrics import MetricScore, micro
 from latence_benchmark.scoring import Outcome
 
 if TYPE_CHECKING:
@@ -131,6 +142,29 @@ class SuiteResult:
     document_failures: int = 0
     documents_scored: int = 0
     notes: tuple[str, ...] = ()
+    #: Labelled-set measurements, one per slice (see :class:`~latence_benchmark.metrics.
+    #: MetricScore`). Empty for a unit-test suite.
+    metrics: tuple[MetricScore, ...] = ()
+    #: Which metric dimension carries this suite's headline number, e.g. ``"language"``. The
+    #: micro-average over that dimension is what the CLI prints and the page leads with.
+    headline_dimension: str | None = None
+
+    def metrics_for(self, dimension: str) -> tuple[MetricScore, ...]:
+        """This suite's metric slices along one dimension, in the order the suite emitted them."""
+        return tuple(m for m in self.metrics if m.dimension == dimension)
+
+    @property
+    def dimensions(self) -> tuple[str, ...]:
+        """Metric dimensions present, first-seen order (the order the suite considers useful)."""
+        return tuple(dict.fromkeys(m.dimension for m in self.metrics))
+
+    @property
+    def headline(self) -> MetricScore | None:
+        """Micro-average over :attr:`headline_dimension`, or ``None`` for a unit-test suite."""
+        if self.headline_dimension is None:
+            return None
+        slices = self.metrics_for(self.headline_dimension)
+        return micro(slices, dimension=self.headline_dimension) if slices else None
 
     @property
     def overall(self) -> SplitScore:
@@ -166,6 +200,9 @@ class SuiteResult:
             "documents_scored": self.documents_scored,
             "document_failures": self.document_failures,
             "notes": list(self.notes),
+            "metrics": [m.as_dict() for m in self.metrics],
+            "headline_dimension": self.headline_dimension,
+            "headline": self.headline.as_dict() if self.headline is not None else None,
         }
 
 

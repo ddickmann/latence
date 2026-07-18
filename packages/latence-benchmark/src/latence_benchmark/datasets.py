@@ -8,19 +8,25 @@ of silently scoring fewer tests, and the :class:`~latence_benchmark.licensing.Da
 record that :func:`~latence_benchmark.licensing.require_usable` gates on before a byte is
 fetched.
 
-The acquisition seam has exactly two real implementations, because there are exactly two real
-situations (no speculative third):
+The acquisition seam has one implementation per real situation, and no speculative ones:
 
 * :class:`LocalDatasetSource` — the dataset is already on disk (an air-gapped host, a CI cache,
   a reviewer who downloaded it once). Runs with no network and no extra dependency.
 * :class:`HuggingFaceDatasetSource` — fetch it at the pinned revision. Rides the ``[hub]`` extra
   (ADR-0016), so the base install stays weightless and offline.
+* :class:`ShippedCorpusSource` — the corpus travels **inside this package**, which is the only
+  honest way to benchmark redaction: a PII corpus must be synthetic, and a synthetic corpus has
+  no upstream repository to pin a commit against. Its ``revision`` is therefore a *content*
+  digest (:func:`content_digest`), verified on every run, so editing the corpus without
+  re-pinning fails loudly instead of silently republishing an old number against new data.
 
-Both funnel through :func:`verify_manifest`, so "materialised" means the same thing either way.
+All three funnel through :func:`verify_manifest`, so "materialised" means the same thing however
+the bytes arrived.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+_REVISION_KINDS = frozenset({"commit", "content-digest"})
 
 
 class DatasetUnavailableError(RuntimeError):
@@ -44,8 +51,13 @@ class DatasetSpec:
 
     :param name: Harness-local identifier (``--dataset``).
     :param repo_id: Upstream repository id (e.g. a Hugging Face ``owner/name``).
-    :param revision: Full 40-hex commit SHA. Branch names and tags are rejected — they move,
-        and a moving dataset makes every published number unreproducible.
+    :param revision: Full 40-hex commit SHA — or, for a corpus shipped inside this package, the
+        first 40 hex of its content digest (see ``revision_kind``). Branch names and tags are
+        rejected either way: they move, and a moving dataset makes every published number
+        unreproducible.
+    :param revision_kind: ``"commit"`` (an upstream commit SHA) or ``"content-digest"`` (a
+        digest over the shipped bytes, checked by :class:`ShippedCorpusSource`). Recorded on the
+        results page so a reader knows which kind of pin they are trusting.
     :param homepage: Human-facing page for the dataset.
     :param license: The separately verified corpus + toolkit license record (ADR-0012).
     :param manifest: Repo-relative paths that MUST exist once materialised.
@@ -59,8 +71,15 @@ class DatasetSpec:
     license: DatasetLicense
     manifest: tuple[str, ...]
     citation: str = ""
+    revision_kind: str = "commit"
 
     def __post_init__(self) -> None:
+        if self.revision_kind not in _REVISION_KINDS:
+            msg = (
+                f"Dataset {self.name!r} declares revision_kind {self.revision_kind!r}; expected "
+                f"one of {', '.join(sorted(_REVISION_KINDS))}."
+            )
+            raise ValueError(msg)
         if not _FULL_SHA.match(self.revision):
             msg = (
                 f"Dataset {self.name!r} is pinned to {self.revision!r}, which is not a full "
@@ -88,6 +107,18 @@ def verify_manifest(root: Path, spec: DatasetSpec) -> Path:
         )
         raise DatasetUnavailableError(msg)
     return root
+
+
+def content_digest(root: Path, spec: DatasetSpec) -> str:
+    """First 40 hex of a sha256 over ``spec``'s manifest files, in manifest order.
+
+    The content-addressed counterpart of a commit SHA, for a corpus that has no upstream commit
+    because it ships inside this package.
+    """
+    digest = hashlib.sha256()
+    for entry in spec.manifest:
+        digest.update((root / entry).read_bytes())
+    return digest.hexdigest()[:40]
 
 
 @runtime_checkable
@@ -151,6 +182,37 @@ class HuggingFaceDatasetSource:
             allow_patterns=list(self.allow_patterns) if self.allow_patterns else None,
         )
         return verify_manifest(Path(local), spec)
+
+
+@dataclass(frozen=True)
+class ShippedCorpusSource:
+    """A corpus that travels inside this package, verified against its pinned content digest.
+
+    :param root: Directory holding the corpus files (defaults to ``latence_benchmark/corpora``).
+
+    The digest check is the point. A shipped corpus is trivially editable by anyone with a text
+    editor, so without it a one-character change to the gold set would silently move every
+    published number while the results page still claimed the same "revision".
+    """
+
+    root: Path | None = None
+
+    def materialise(self, spec: DatasetSpec) -> Path:
+        root = self.root if self.root is not None else Path(__file__).parent / "corpora"
+        if not root.is_dir():
+            msg = f"Shipped corpus directory {root} is missing from the installed package."
+            raise DatasetUnavailableError(msg)
+        verify_manifest(root, spec)
+        actual = content_digest(root, spec)
+        if actual != spec.revision:
+            msg = (
+                f"Shipped corpus {spec.name!r} has content digest {actual} but is pinned to "
+                f"{spec.revision}. The corpus on disk is not the corpus the published numbers "
+                "were produced against, so the run is refused. If the change is intended, "
+                "re-pin the DatasetSpec revision and re-publish the results."
+            )
+            raise DatasetUnavailableError(msg)
+        return root
 
 
 # -- The registry ------------------------------------------------------------------------------
@@ -222,11 +284,25 @@ OMNIDOCBENCH = DatasetSpec(
     citation="OmniDocBench (CVPR 2025), OpenDataLab — research use only",
 )
 
-#: Every dataset the harness knows, keyed by ``DatasetSpec.name``.
-DATASETS: Mapping[str, DatasetSpec] = {
+_DATASETS: dict[str, DatasetSpec] = {
     OLMOCR_BENCH.name: OLMOCR_BENCH,
     OMNIDOCBENCH.name: OMNIDOCBENCH,
 }
+
+#: Every dataset the harness knows, keyed by ``DatasetSpec.name``. Datasets defined by a suite
+#: module register themselves here at import time (see :func:`register_dataset`), so the
+#: license/pinning invariants hold over all of them and not just the ones declared above.
+DATASETS: Mapping[str, DatasetSpec] = _DATASETS
+
+
+def register_dataset(spec: DatasetSpec) -> DatasetSpec:
+    """Add ``spec`` to :data:`DATASETS`, refusing to redefine a name with a different spec."""
+    existing = _DATASETS.get(spec.name)
+    if existing is not None and existing != spec:
+        msg = f"A different dataset named {spec.name!r} is already registered."
+        raise ValueError(msg)
+    _DATASETS[spec.name] = spec
+    return spec
 
 
 def dataset_names() -> Sequence[str]:
