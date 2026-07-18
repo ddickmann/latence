@@ -128,6 +128,17 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 | `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
 | `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |
 
+## Security & release integrity
+
+- **Found a vulnerability?** Report it **privately** — see the coordinated-vulnerability-
+  disclosure policy in [`SECURITY.md`](./SECURITY.md) (GitHub Security Advisories, or email
+  the maintainer). Acknowledgement within 3 business days; coordinated disclosure with a
+  90-day target embargo. Please do not open a public issue for a suspected vulnerability.
+- **Every release is verifiable.** Releases are signed with [keyless
+  Sigstore](https://www.sigstore.dev/) and ship a per-release **CycloneDX SBOM**. Two
+  commands verify a download — see [`docs/RELEASING.md`](./docs/RELEASING.md) →
+  *Release integrity*, and [`docs/SBOM.md`](./docs/SBOM.md).
+
 ## Documentation & governance
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary; the canonical language of the project.
@@ -138,7 +149,11 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 - [`docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge`](./docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge) — incremental corpus updates (`latence delta` / `retract` / `purge`).
 - [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.
-- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
+- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, and the **coordinated
+  vulnerability disclosure policy** — how to report a security issue privately, and what
+  response you can expect.
+- [`docs/RELEASING.md`](./docs/RELEASING.md) — how a release is cut, and **how to verify
+  one**: every release is signed with keyless Sigstore and ships a CycloneDX SBOM.
 - [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
 - [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).
 

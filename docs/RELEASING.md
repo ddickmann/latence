@@ -18,10 +18,99 @@ git push origin vX.Y.Z
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
 
 1. **build** — builds a wheel + sdist for every package under `packages/` into `dist/`.
-2. **github-release** — creates the GitHub Release for the tag, auto-generates notes
-   from the merged PRs since the previous tag, and attaches every artifact in `dist/`.
+2. **release-integrity** — runs `scripts/release-integrity.sh`: generates the per-release
+   CycloneDX SBOM, checksums every asset into `SHA256SUMS`, and signs `SHA256SUMS` with
+   keyless Sigstore. See "Release integrity" below.
+3. **github-release** — creates the GitHub Release for the tag, auto-generates notes from
+   the merged PRs since the previous tag, appends the verification instructions and the
+   coordinated-vulnerability-disclosure link, and attaches the **signed asset set**.
 
 PyPI publishing is **not** part of this automatic flow — see "Publishing to PyPI" below.
+
+## Release integrity (signing + SBOM)
+
+Every release carries its own verification evidence, produced automatically. Nothing here
+is a manual step at release time — this section documents what the workflow already does.
+
+### What a release contains
+
+| Asset | What it is |
+| --- | --- |
+| `latence_*.whl`, `latence_*.tar.gz` | the built distributions |
+| `sbom.cdx.json` | **CycloneDX** SBOM for this exact release, generated from `uv.lock` |
+| `SHA256SUMS` | SHA-256 digest of *every* other asset, bare flat filenames |
+| `SHA256SUMS.sigstore.json` | keyless **Sigstore** bundle signing `SHA256SUMS` |
+| `VERIFY.md` | the copy-pasteable verification instructions (also appended to the notes) |
+
+Only `SHA256SUMS` is signed, because it covers every other asset by digest — one signature
+transitively authenticates the whole release, and an adopter runs two commands instead of
+one per file. `VERIFY.md` is written *before* the checksums so it is itself covered: the
+instructions telling you how to verify are not the one file an attacker can rewrite freely.
+
+### How an adopter verifies a release
+
+Download all the assets of a release into one directory, then:
+
+```bash
+# 1. Verify the signature over SHA256SUMS (uvx = uv tool run; `pipx run sigstore` also works)
+uvx sigstore verify identity \
+  --bundle SHA256SUMS.sigstore.json \
+  --cert-identity 'https://github.com/ddickmann/latence-framework/.github/workflows/release.yml@refs/tags/v0.1.0' \
+  --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  SHA256SUMS
+
+# 2. Verify every artifact against the now-trusted SHA256SUMS
+sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
+```
+
+Substitute the tag you downloaded in `--cert-identity`. Both commands must succeed; either
+one failing means the assets are not what this repository's release workflow produced.
+
+### Why keyless
+
+The signing identity is the **release workflow itself** (`release.yml` at the tag ref),
+certified by Sigstore's Fulcio CA from the job's GitHub OIDC token and recorded in the
+Rekor transparency log. There is no long-lived private key to store, rotate, or leak, and
+nothing for a maintainer to do by hand. The trade-off is that a signature can only be
+produced where a Sigstore-trusted OIDC identity exists — in practice, inside the workflow —
+so a **local** run of the script uses `--no-sign` and produces everything except the bundle.
+
+`scripts/release-integrity.sh` deliberately has **no default** for signing: you pass
+`--sign` or `--no-sign` explicitly. A missing `id-token: write` permission therefore fails
+the job loudly instead of quietly shipping an unsigned release, and `github-release` re-checks
+for the bundle before publishing.
+
+### Rehearsing a release (dry run)
+
+Before tagging, rehearse the whole flow — including a **real** signature — without creating
+a release:
+
+```
+Actions → Release → Run workflow
+  tag:     v0.1.0        (an existing tag, or the tag you are about to cut)
+  dry_run: true          (default)
+```
+
+`build` and `release-integrity` run exactly as they would for a real release; the signed
+asset set is uploaded as the `release-assets` workflow artifact and the `github-release` and
+`pypi-publish` jobs are skipped. Download the artifact and run the two verification commands
+above against it. Re-run with `dry_run: false` (or just push the tag) to publish for real.
+
+Locally, everything except the signature can be rehearsed offline:
+
+```bash
+uv build --package latence-core --out-dir dist    # or the full loop from the workflow
+bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets --no-sign
+(cd release-assets && shasum -a 256 -c SHA256SUMS)
+```
+
+### Changing any of this
+
+`scripts/release-integrity.sh` is the single source of truth for the asset set, the SBOM
+stamping, and the verification text — the workflow only calls it, and the release notes are
+generated from its `VERIFY.md`, so the published instructions cannot drift from the published
+assets. `packages/latence-core/tests/test_release_integrity.py` runs the script for real and
+fails if the wiring, the fail-closed checks, or the front-page CVD link regress.
 
 ## Before you tag
 
