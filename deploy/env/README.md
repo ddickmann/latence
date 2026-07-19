@@ -172,9 +172,14 @@ byte-compares them against the render and fails if they drift.
 
 A **GPU** environment adds a gate between 2 and 3:
 
-* **GPU placement** — `latence env placement` drives one real inference through every Provider in
-  `learned_providers` and reads torch's CUDA allocator around the call. A model that silently
-  stayed on the CPU allocates **zero CUDA bytes** however correct its output is. That is the #191
+* **GPU placement** — `latence env placement` drives real inferences through every Provider in
+  `learned_providers` and reads torch's CUDA allocator around the call: a warm-up drive, then
+  `reset_peak_memory_stats()` / `memory_allocated()` / drive / `max_memory_allocated()`, reporting
+  the **delta above the resident baseline**. (The delta is load-bearing: real
+  `reset_peak_memory_stats()` sets the peak to the *current* allocation, so a model whose weights
+  sit on CUDA would otherwise report its whole weight size as "work".) A forward pass that silently
+  ran on the CPU allocates **zero CUDA bytes above the model's footprint** however correct its
+  output is, and however much of the model is resident on the GPU. That is the #191
   signature (`device: cuda` configured, ~11.5 s/chunk, the GPU idle, no warning), and this gate is
   what makes it impossible to reintroduce. No CUDA device is a **failure**, not a skip.
 
@@ -210,7 +215,7 @@ And, for a GPU environment, what `latence env placement` catches:
 
 | Drift | Finding |
 | --- | --- |
-| a learned Provider ran and allocated zero CUDA bytes (**#191**) | `E-PLACEMENT-ON-CPU` |
+| a learned Provider ran and allocated zero CUDA bytes above its resident weights (**#191**) | `E-PLACEMENT-ON-CPU` |
 | no CUDA device (a GPU gate must fail, not narrow itself) | `E-PLACEMENT-NO-CUDA` |
 | a learned Stage pinned to `device: cpu` in a GPU stack | `E-PLACEMENT-DEVICE-NOT-CUDA` |
 | a learned Provider with no driver — unexercised is not passed | `E-PLACEMENT-UNDRIVABLE` |

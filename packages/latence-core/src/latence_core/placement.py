@@ -10,15 +10,26 @@ any backend load failure **by design** — a correct-output, wrong-device run is
 graceful-degradation behaviour, which is precisely the shape #191 wore.
 
 **So the probe does not ask the model where it is. It measures whether the GPU did any work.**
-For each learned component the environment's stack declares, it drives ONE real inference through
-the Provider's *public* Capability method and reads torch's CUDA allocator around the call:
+For each learned component the environment's stack declares, it drives real inferences through the
+Provider's *public* Capability method and reads torch's CUDA allocator around the call:
 
-    reset_peak_memory_stats()  →  drive the Provider  →  max_memory_allocated()
+    drive once (warm-up, UNMEASURED)
+    reset_peak_memory_stats()  →  baseline = memory_allocated()
+    drive again  →  synchronize()  →  max_memory_allocated() - baseline
+
+**Why a delta and not the raw peak.** Real ``torch.cuda.reset_peak_memory_stats()`` does not zero
+the peak — the allocator's ``Stat::reset_peak`` sets ``peak = current``. A Provider that puts its
+weights on CUDA (in ``__init__``, or lazily on its first call) therefore carries its whole weight
+size into any raw ``max_memory_allocated()`` reading, and would pass this gate while every forward
+pass ran on the CPU — the #191 bug wearing the gate's own green. The warm-up drive pushes weight
+placement out of the measured window, and subtracting the resident baseline leaves only what the
+measured forward pass itself allocated.
 
 A model resident on the GPU allocates activation memory on every forward pass. A model that
-silently stayed on the CPU allocates **zero bytes**, no matter what it reports about itself, what
-it logs, or how correct its output is. That number is behaviour, not intent — it cannot be
-satisfied by a flag, a config echo, or a Provider that claims placement it does not have.
+silently stayed on the CPU allocates **zero bytes above its resident footprint**, no matter what it
+reports about itself, what it logs, or how correct its output is. That number is behaviour, not
+intent — it cannot be satisfied by a flag, a config echo, or a Provider that claims placement it
+does not have.
 
 **It fails; it never skips.** No CUDA device, an undrivable component, a Provider that raises —
 each is a *finding*. A GPU smoke test that quietly narrows its own scope when the GPU is missing is
@@ -55,9 +66,10 @@ CUDA = "cuda"
 
 # The smallest CUDA allocation that counts as "the GPU did work". One byte: the assertion is
 # emphatically NOT a throughput threshold (that is #180's job) — it is the binary question #191
-# answered wrong. A real forward pass allocates activations in the megabytes; a CPU-resident model
-# allocates exactly zero. Anything above zero separates them, and a floor of 1 cannot be tuned into
-# a pass.
+# answered wrong. A real forward pass allocates activations in the megabytes ABOVE the model's
+# resident weights; a forward pass that ran on the CPU allocates exactly zero above them. The
+# measurement is that delta (see the module docstring), so a floor of 1 cannot be tuned into a pass
+# and resident weights cannot be mistaken for work.
 CUDA_ALLOCATION_FLOOR_BYTES = 1
 
 
@@ -66,11 +78,14 @@ class CudaAllocator(Protocol):
 
     Mirrors the real module's contract exactly, including its refusals: real
     ``torch.cuda.reset_peak_memory_stats()`` raises when no CUDA device is initialised, so a fake
-    that returns quietly would manufacture a green the real thing cannot produce.
+    that returns quietly would manufacture a green the real thing cannot produce. It also mirrors
+    the semantics that make the delta necessary — ``reset_peak_memory_stats()`` sets the peak to the
+    CURRENT allocation, not to zero — which is why ``memory_allocated()`` is part of this seam.
     """
 
     def is_available(self) -> bool: ...
     def reset_peak_memory_stats(self) -> None: ...
+    def memory_allocated(self) -> int: ...
     def max_memory_allocated(self) -> int: ...
     def synchronize(self) -> None: ...
 
@@ -88,7 +103,11 @@ class Placement:
     provider: str
     capability: str
     cuda_bytes: int
-    """Peak CUDA bytes allocated across the driven inference. Zero means the CPU did the work."""
+    """Peak CUDA bytes the driven inference allocated ABOVE the Provider's resident footprint.
+
+    Weights already on the GPU do not count — only what the measured forward pass itself allocated.
+    Zero means the CPU did the work, however much of the model happens to be resident on CUDA.
+    """
 
     @property
     def on_gpu(self) -> bool:
@@ -242,7 +261,8 @@ def probe_placement(
       passed.
     * ``E-PLACEMENT-FAILED`` — the Provider raised while being driven.
     * ``E-PLACEMENT-ON-CPU`` — **the #191 signature**: the Provider ran, produced output, and
-      allocated zero CUDA bytes doing it.
+      allocated zero CUDA bytes above its resident footprint doing it. Weights parked on the GPU do
+      not rescue it; only the measured forward pass's own allocations count.
     """
     from latence_core.capability import ProviderRegistry  # noqa: PLC0415 - avoids an import cycle
     from latence_core.envspec import stack_components  # noqa: PLC0415 - avoids an import cycle
@@ -320,8 +340,18 @@ def _probe_one(
         )
         return None
 
-    allocator.reset_peak_memory_stats()
     try:
+        # Warm-up, DELIBERATELY UNMEASURED: a Provider may load its weights onto CUDA lazily on its
+        # first call, and weight placement is not evidence that the forward pass ran on the GPU.
+        driver(provider)
+        allocator.synchronize()
+
+        # Real reset_peak_memory_stats() sets peak = CURRENT, so the resident weights (placed in
+        # __init__ or by the warm-up) are inside the peak from the first instant. Subtracting the
+        # baseline is what leaves only the measured forward pass's own allocations.
+        allocator.reset_peak_memory_stats()
+        baseline = int(allocator.memory_allocated())
+
         driver(provider)
         # The allocator's peak is only trustworthy once the queued kernels have actually run.
         allocator.synchronize()
@@ -333,7 +363,7 @@ def _probe_one(
             )
         )
         return None
-    peak = int(allocator.max_memory_allocated())
+    peak = max(int(allocator.max_memory_allocated()) - baseline, 0)
 
     placement = Placement(
         provider=component.provider, capability=component.capability, cuda_bytes=peak
@@ -343,7 +373,8 @@ def _probe_one(
             Finding(
                 "E-PLACEMENT-ON-CPU",
                 f"'{component.provider}' completed a real inference and allocated {peak} CUDA "
-                "bytes doing it — the model is NOT on the GPU. This is the #191 signature: "
+                "bytes above its resident footprint doing it — the forward pass did NOT run on the "
+                "GPU (weights sitting on cuda are not work). This is the #191 signature: "
                 "correct output, configured cuda, and the whole forward pass on the CPU.",
             )
         )

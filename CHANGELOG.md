@@ -98,10 +98,14 @@ workspace are versioned and released together under one version number.
   load.
 
 - **Real GPU-placement proof (#198, closing the #191 class).** New
-  `latence env placement` drives one real inference through every Provider an
+  `latence env placement` drives a real inference through every Provider an
   environment declares in `learned_providers` and reads torch's CUDA allocator
-  around the call. A model that silently stayed on the CPU allocates **zero CUDA
-  bytes** however correct its output is — which is exactly what #191 looked like
+  around the call, reporting the allocation **delta above the Provider's resident
+  footprint** (a warm-up drive plus a baseline subtraction, because real
+  `reset_peak_memory_stats()` resets the peak to the *current* allocation — so
+  weights parked on the GPU can never be counted as work). A forward pass that
+  silently ran on the CPU allocates **zero CUDA
+  bytes** above that baseline however correct its output is — which is exactly what #191 looked like
   on the pod (`device: cuda` configured, ~11.5 s/chunk, ~94 minutes for one
   Stage, the GPU idle, no warning). The assertion is behavioural and cannot be
   satisfied by a flag or a config echo; a missing CUDA device is a **failure**,

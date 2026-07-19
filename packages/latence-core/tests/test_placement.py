@@ -38,13 +38,23 @@ from latence_core.placement import (
 class FakeCuda:
     """A faithful stand-in for the slice of ``torch.cuda`` the probe reads.
 
-    ``allocate_per_call`` is how many bytes a driven Provider is pretended to allocate: a positive
-    number models a GPU-resident model, ``0`` models the #191 silent CPU fallback.
+    ``allocate_per_call`` is how many bytes a driven Provider is pretended to allocate *transiently*
+    (activations): a positive number models a GPU-resident forward pass, ``0`` models the #191
+    silent CPU fallback.
+
+    **The fidelity that matters most is the reset.** Real ``reset_peak_memory_stats()`` does NOT
+    zero the peak — the allocator's ``Stat::reset_peak`` sets ``peak = current``. A fake that zeroed
+    it would be strictly stricter than the dependency and would prove a property torch does not
+    deliver ("a CPU-resident model allocates exactly zero"), hiding the fact that a model whose
+    weights sit on CUDA carries its whole weight size into the peak. So this fake tracks resident
+    bytes (:meth:`allocate_resident`, the weights) separately from transient ones
+    (:meth:`note_forward_pass`, the activations) and resets the peak to the resident total.
     """
 
     def __init__(self, *, available: bool = True, allocate_per_call: int = 4_194_304) -> None:
         self._available = available
         self._allocate_per_call = allocate_per_call
+        self._current = 0
         self._peak = 0
         self.synchronized = 0
 
@@ -60,7 +70,11 @@ class FakeCuda:
 
     def reset_peak_memory_stats(self) -> None:
         self._require_device()
-        self._peak = 0
+        self._peak = self._current  # torch: Stat::reset_peak sets peak = current, NOT zero.
+
+    def memory_allocated(self) -> int:
+        self._require_device()
+        return self._current
 
     def max_memory_allocated(self) -> int:
         self._require_device()
@@ -71,8 +85,14 @@ class FakeCuda:
         self.synchronized += 1
 
     # -- what a driven model does to it ----------------------------------------------------
+    def allocate_resident(self, n_bytes: int) -> None:
+        """Weights land on the GPU and STAY there — e.g. ``model.to('cuda')``."""
+        self._current += n_bytes
+        self._peak = max(self._peak, self._current)
+
     def note_forward_pass(self) -> None:
-        self._peak = max(self._peak, self._allocate_per_call)
+        """Activations: allocated during the pass, freed after it, visible only in the peak."""
+        self._peak = max(self._peak, self._current + self._allocate_per_call)
 
 
 class FakeProvider:
@@ -179,9 +199,85 @@ def test_a_provider_that_ran_on_the_cpu_fails_the_gate(tmp_path: Path) -> None:
     assert not result.ok
     assert [f.code for f in result.report.findings] == ["E-PLACEMENT-ON-CPU"]
     # The Provider really was exercised — this is not a load failure dressed up as a placement one.
-    assert FakeProvider.driven == ["redact"]
+    # Twice: an unmeasured warm-up (which absorbs lazy weight placement) and the measured drive.
+    assert FakeProvider.driven == ["redact", "redact"]
     assert result.placements[0].cuda_bytes == 0
     assert not result.placements[0].on_gpu
+
+
+def test_weights_resident_on_cuda_are_not_mistaken_for_gpu_work(tmp_path: Path) -> None:
+    """THE R2 regression: ``model.to('cuda')`` in ``__init__``, forward pass entirely on the CPU.
+
+    Real ``reset_peak_memory_stats()`` sets peak = CURRENT, so the 1.1 GB of weights placed at
+    construction is already inside the peak before the probe drives anything. Reading the raw
+    ``max_memory_allocated()`` therefore reported 1.1 GB of "GPU work" for a model that did every
+    forward pass on the CPU — the #191 shape passing the gate built to make it unshippable. Only
+    the delta above the resident baseline separates weights from work.
+    """
+
+    class WeightsOnCudaComputeOnCpu(FakeProvider):
+        def __init__(self, config: dict[str, Any]) -> None:
+            super().__init__(config)
+            type(self).cuda.allocate_resident(1_100_000_000)  # type: ignore[attr-defined]
+
+        def redact(self, chunks: Any) -> Any:
+            type(self).driven.append("redact")
+            return list(chunks)  # correct output, computed on the CPU: allocates nothing.
+
+    spec = _write_env(tmp_path, stages=_REDACT_STAGE)
+    cuda = FakeCuda()
+    FakeProvider.cuda = cuda  # type: ignore[attr-defined]
+    result = probe_placement(spec, cuda=cuda, registry=FakeRegistry(WeightsOnCudaComputeOnCpu))
+
+    assert not result.ok, result.describe()
+    assert [f.code for f in result.report.findings] == ["E-PLACEMENT-ON-CPU"]
+    assert result.placements[0].cuda_bytes == 0
+    assert not result.placements[0].on_gpu
+
+
+def test_weights_loaded_lazily_onto_cuda_are_not_mistaken_for_gpu_work(tmp_path: Path) -> None:
+    """The same hole one call later: the model reaches CUDA on its FIRST inference, then computes
+    on the CPU. An unmeasured warm-up drive is what puts that placement outside the measurement.
+    """
+
+    class LazyLoadThenCpu(FakeProvider):
+        def __init__(self, config: dict[str, Any]) -> None:
+            super().__init__(config)
+            self._loaded = False
+
+        def redact(self, chunks: Any) -> Any:
+            type(self).driven.append("redact")
+            if not self._loaded:
+                type(self).cuda.allocate_resident(900_000_000)  # type: ignore[attr-defined]
+                self._loaded = True
+            return list(chunks)
+
+    spec = _write_env(tmp_path, stages=_REDACT_STAGE)
+    cuda = FakeCuda()
+    FakeProvider.cuda = cuda  # type: ignore[attr-defined]
+    result = probe_placement(spec, cuda=cuda, registry=FakeRegistry(LazyLoadThenCpu))
+
+    assert not result.ok, result.describe()
+    assert [f.code for f in result.report.findings] == ["E-PLACEMENT-ON-CPU"]
+    assert result.placements[0].cuda_bytes == 0
+
+
+def test_a_gpu_resident_model_still_passes_when_its_weights_are_on_cuda(tmp_path: Path) -> None:
+    """The delta must not turn the honest case red: weights on CUDA *and* activations per pass."""
+
+    class WeightsAndActivations(FakeProvider):
+        def __init__(self, config: dict[str, Any]) -> None:
+            super().__init__(config)
+            type(self).cuda.allocate_resident(1_100_000_000)  # type: ignore[attr-defined]
+
+    spec = _write_env(tmp_path, stages=_REDACT_STAGE)
+    cuda = FakeCuda(allocate_per_call=8_388_608)
+    FakeProvider.cuda = cuda  # type: ignore[attr-defined]
+    result = probe_placement(spec, cuda=cuda, registry=FakeRegistry(WeightsAndActivations))
+
+    assert result.ok, result.describe()
+    # Exactly the activations, not the weights: the gate reports work, not residency.
+    assert result.placements[0].cuda_bytes == 8_388_608
 
 
 def test_a_provider_that_really_used_the_gpu_passes(tmp_path: Path) -> None:
@@ -338,7 +434,7 @@ def test_each_capability_is_driven_through_its_real_protocol_method(
     result = _probe(spec, FakeCuda())
 
     assert result.ok, result.describe()
-    assert FakeProvider.driven == [method]
+    assert FakeProvider.driven == [method, method]  # warm-up + measured drive
 
 
 def test_generators_are_fully_consumed_so_lazy_providers_really_run(tmp_path: Path) -> None:
@@ -362,7 +458,7 @@ def test_generators_are_fully_consumed_so_lazy_providers_really_run(tmp_path: Pa
     result = probe_placement(spec, cuda=cuda, registry=FakeRegistry(Lazy))
 
     assert result.ok, result.describe()
-    assert FakeProvider.driven == ["redact"]
+    assert FakeProvider.driven == ["redact", "redact"]  # warm-up + measured drive
 
 
 def test_the_fake_allocator_refuses_what_real_torch_refuses() -> None:
@@ -374,9 +470,29 @@ def test_the_fake_allocator_refuses_what_real_torch_refuses() -> None:
     no GPU — the exact conflation this gate must not make.
     """
     cuda = FakeCuda(available=False)
-    for call in (cuda.reset_peak_memory_stats, cuda.max_memory_allocated, cuda.synchronize):
+    for call in (
+        cuda.reset_peak_memory_stats,
+        cuda.memory_allocated,
+        cuda.max_memory_allocated,
+        cuda.synchronize,
+    ):
         with pytest.raises(RuntimeError, match="CUDA"):
             call()
+
+
+def test_the_fake_allocator_resets_the_peak_to_current_like_real_torch() -> None:
+    """Real ``reset_peak_memory_stats()`` sets peak = CURRENT (``Stat::reset_peak``), not zero.
+
+    This is the fidelity the whole gate rests on. A fake that zeroed the peak would be stricter
+    than the dependency and would make every test below prove "a CPU-resident model allocates
+    exactly zero" — which real torch does not deliver for a model whose weights sit on CUDA.
+    """
+    cuda = FakeCuda(allocate_per_call=0)
+    cuda.allocate_resident(1_100_000_000)
+    cuda.reset_peak_memory_stats()
+
+    assert cuda.memory_allocated() == 1_100_000_000
+    assert cuda.max_memory_allocated() == 1_100_000_000  # NOT 0 — the resident weights survive.
 
 
 def test_the_measurement_is_read_after_a_synchronize(tmp_path: Path) -> None:
@@ -384,7 +500,7 @@ def test_the_measurement_is_read_after_a_synchronize(tmp_path: Path) -> None:
     spec = _write_env(tmp_path, stages=_REDACT_STAGE)
     cuda = FakeCuda()
     _probe(spec, cuda)
-    assert cuda.synchronized == 1
+    assert cuda.synchronized == 2  # once after the warm-up, once after the measured drive
 
 
 def test_every_learned_capability_of_the_shipped_gpu_stack_has_a_driver() -> None:
