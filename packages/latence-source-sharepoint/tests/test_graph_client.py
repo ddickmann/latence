@@ -88,29 +88,53 @@ def test_pagination_follows_odata_next_link_across_every_page() -> None:
 
 
 class _UnorderedGraphApi(FakeGraphApi):
-    """A Graph double that returns each folder's children in reverse order.
+    """A Graph double that hands every folder's children back in **descending id** order.
 
     Entirely legal: Graph documents no ordering for a ``driveItem`` children collection unless
     the request carries ``$orderby``, and the connector sends none. Any offline fake that hands
     back its children pre-sorted proves a property the real dependency does not deliver, so the
     ordering the connector promises has to be demonstrated against a fake that does not help.
+
+    The key is stated absolutely (descending id) rather than relatively ("reverse whatever the
+    base fake did"): a relative rule silently cancels out whenever the base fake happens to
+    emit the opposite order, which is exactly how the first version of this double handed the
+    client a perfectly ascending fixture and let the sort under test be deleted with the suite
+    still green.
     """
 
     def _children_of(self, folder: str) -> list[dict[str, object]]:
-        return list(reversed(super()._children_of(folder)))
+        return sorted(
+            super()._children_of(folder), key=lambda child: str(child["id"]), reverse=True
+        )
+
+    def children_ids(self, folder: str) -> list[str]:
+        """The ids this double serves for ``folder``, so a test can prove it does not help."""
+        return [str(child["id"]) for child in self._children_of(folder)]
 
 
 def test_files_are_sorted_by_item_id_even_when_graph_returns_them_unordered() -> None:
+    """The listing order is the **item id** order, not the name order Graph happened to send.
+
+    The ids here are opaque and disagree with the names on purpose (real Graph ids are), so
+    this fails both on a client that does not sort at all and on one that sorts by name — the
+    rename-unstable key the connector deliberately rejects.
+    """
     files = [
-        FakeFile(path="/b.md", content=b"b"),
-        FakeFile(path="/a.md", content=b"a"),
-        FakeFile(path="/d.md", content=b"d"),
-        FakeFile(path="/c.md", content=b"c"),
+        FakeFile(path="/alpha.md", content=b"alpha", item_id="01QQ"),
+        FakeFile(path="/bravo.md", content=b"bravo", item_id="01AA"),
+        FakeFile(path="/charlie.md", content=b"charlie", item_id="01ZZ"),
+        FakeFile(path="/delta.md", content=b"delta", item_id="01MM"),
     ]
-    client, _ = _client(_UnorderedGraphApi(files=files))
-    listed = list(client.list_files())
-    assert [item.name for item in listed] == ["a.md", "b.md", "c.md", "d.md"]
-    assert [item.item_id for item in listed] == sorted(item.item_id for item in listed)
+    api = _UnorderedGraphApi(files=files)
+    # Guard the guard: the double must hand the client an order that is NOT the answer.
+    assert api.children_ids("") == ["01ZZ", "01QQ", "01MM", "01AA"]
+
+    listed = list(_client(api)[0].list_files())
+
+    # Ascending by opaque id — which for this fixture is NOT ascending by name.
+    assert [item.item_id for item in listed] == ["01AA", "01MM", "01QQ", "01ZZ"]
+    assert [item.name for item in listed] == ["bravo.md", "delta.md", "alpha.md", "charlie.md"]
+    assert [item.name for item in listed] != sorted(item.name for item in listed)
 
 
 def test_an_unordered_drive_lists_identically_to_an_ordered_one() -> None:

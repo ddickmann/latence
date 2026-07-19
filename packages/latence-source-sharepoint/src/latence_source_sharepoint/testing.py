@@ -60,11 +60,18 @@ class FakeFile:
     (OneDrive Personal, and the default here because it is the one algorithm the connector can
     reproduce from the bytes), ``"quickXorHash"`` (SharePoint Online), or ``None`` — a drive
     state that really occurs, because Graph computes the facet asynchronously after upload.
+
+    ``item_id`` overrides the fake's path-derived id with an **opaque** one. Real Graph ids
+    carry no relation to a name (``01BYE5RZ...``), so a path-derived default silently ties the
+    two orderings together and lets a test that claims to pin the *id* sort key pass on a
+    client that sorts by *name*. A test that means "ordered by id" sets ids that disagree with
+    the names; everything else keeps the readable default.
     """
 
     path: str
     content: bytes
     hash_algorithm: str | None = "sha256Hash"
+    item_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +124,14 @@ class FakeGraphApi:
     # -- item helpers -------------------------------------------------------
 
     def item_id(self, path: str) -> str:
-        """The stable fake item id for a path (Graph ids are opaque and stable per item)."""
+        """The stable fake item id for a path (Graph ids are opaque and stable per item).
+
+        A :class:`FakeFile` may pin its own opaque id; otherwise the id is derived from the
+        path so fixtures stay readable.
+        """
+        for entry in self.files:
+            if entry.path == path and entry.item_id is not None:
+                return entry.item_id
         return "item-" + path.strip("/").replace("/", "-")
 
     def _folders(self) -> set[str]:
