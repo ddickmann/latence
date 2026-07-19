@@ -106,6 +106,28 @@ class PublishedResultsError(RuntimeError):
     """A previously published measurement cannot be honestly republished as it stands."""
 
 
+def reproduces_offline(suite: str) -> bool:
+    """Whether ``suite``'s published number can be **re-measured** here, with nothing to download.
+
+    A dataset pinned by a ``content-digest`` revision ships inside this package rather than living
+    upstream — it is the criterion :func:`latence_benchmark.cli._source` already uses to reach for
+    :class:`~latence_benchmark.datasets.ShippedCorpusSource`. For such a suite the published number
+    is not merely re-*renderable* from the sidecar, it is re-*runnable* from bytes that are already
+    committed, in well under a second, offline.
+
+    That distinction is the whole reason this predicate exists. :func:`carry_forward` republishes a
+    measurement the current run did not produce, and the validations around it — the dataset
+    revision, and :class:`~latence_benchmark.scoring.ScorerPin` for a unit-test suite — can only
+    check that the *inputs* to a number have not moved. They cannot notice that the number itself
+    has become false, and for a labelled-set suite (whose scoring never goes through the unit-test
+    scorer, so it carries no pin at all) nothing checked the rules either. Where the harness can
+    simply re-run the suite, republishing on trust is a choice, not a constraint — so the gate in
+    ``tests/test_published_offline_numbers_are_remeasured.py`` re-runs every suite this returns
+    ``True`` for and compares the result against what is published.
+    """
+    return get_suite(suite).dataset.revision_kind == "content-digest"
+
+
 def _carried_scorer_pin(measurement: dict[str, Any], *, suite: str) -> ScorerPin | None:
     """Validate a published measurement's scorer pin against the scorer of today.
 
