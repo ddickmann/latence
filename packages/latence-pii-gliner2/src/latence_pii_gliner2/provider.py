@@ -61,6 +61,7 @@ from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.perf import (
     is_compile_backend_failure,
     load_gliner2_optimized,
+    neutralize_torch_jit,
     resolve_gliner2_knob,
     resolve_max_len,
 )
@@ -281,7 +282,17 @@ class Gliner2PIIRedactor(AdapterBase):
         so an unsupported ``gliner2`` is a typed, actionable
         :class:`~latence_core.errors.ProviderError` naming the supported range, never the native
         ``AttributeError``/``TypeError`` the mismatched API would raise later (ADR-0034).
+
+        W9-jit (#190, audit R1): the TorchScript JIT is neutralized FIRST, before the ``gliner2``
+        import — that import transitively pulls in transformers' deberta_v2 modeling module, whose
+        relative-position helpers are compiled by ``@torch.jit.script`` **AT IMPORT**. Neutralizing
+        later (inside ``load_gliner2_optimized``, entered only once this class is resolved) cannot
+        un-script them: the env switch is read by torch only at ITS import, and
+        ``jit._state.disable()`` affects only FUTURE ``script()`` calls — so the scripted helpers
+        would still die in nvrtc (``libnvrtc-builtins.so.13.0``) on the first forward on a
+        Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
         """
+        neutralize_torch_jit(provider_name=self.provider_name)
         try:
             import gliner2
             from gliner2 import GLiNER2

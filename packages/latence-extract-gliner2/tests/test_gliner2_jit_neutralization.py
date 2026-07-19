@@ -12,9 +12,18 @@ Anti-false-green: the fake ``torch`` here mirrors the REAL JIT switch semantics 
 returns the function unchanged only while ``torch.jit._state._enabled.enabled`` is False, and
 otherwise returns a ScriptFunction that dies with the exact nvrtc message when CALLED (the real
 Blackwell behaviour). The fake ``gliner2`` model scripts its relative-position helper at
-``from_pretrained`` and calls it inside every ``extract_entities`` / ``extract_relations`` — exactly
-the mdeberta shape — so with the JIT live this suite reproduces the production crash, and it can
-only pass if the JIT is genuinely neutralized. ``test_output_is_byte_identical_to_the_jit_free_path``
+``from_pretrained`` and calls it inside every ``extract_entities`` / ``extract_relations``, so with
+the JIT live this suite reproduces the production crash and can only pass if the JIT is genuinely
+neutralized by the time the model loads.
+
+**What this suite does NOT cover (audit R1 / #190-4).** Load-time scripting is *later* than the
+real dependency: transformers evaluates its ``@torch.jit.script`` decorators at MODULE IMPORT, i.e.
+at the Provider's ``from gliner2 import GLiNER2`` — before the seam is entered. This suite is
+therefore blind to that ordering and green either way; the ordering is owned by
+``latence-core/tests/test_perf_jit_import_ordering.py`` (behavioural, an import-time-scripting
+fake) and by ``test_perf_fp32_regression_guard.py::
+test_mdeberta_providers_neutralize_the_jit_before_importing_the_backbone`` (structural, every
+Provider source). ``test_output_is_byte_identical_to_the_jit_free_path``
 closes the other half of the ADR-0036 discipline: the neutralization is throughput-only, so the
 emitted mentions/relations must be record-for-record identical to a model that never scripted.
 """
@@ -132,9 +141,19 @@ def fake_torch(monkeypatch: pytest.MonkeyPatch) -> Any:
 class _MdebertaGLiNER2:
     """A ``gliner2.GLiNER2`` double whose encoder behaves like mdeberta-v3 (W9-jit).
 
-    ``from_pretrained`` scripts the relative-position helper — the moment transformers evaluates the
-    ``@torch.jit.script`` decorator on the DeBERTa-v2 modeling module — and every extraction call
-    runs it, so the whole nvrtc failure mode is reproduced end-to-end through the real Provider.
+    ``from_pretrained`` scripts the relative-position helper and every extraction call runs it, so
+    the nvrtc failure mode is reproduced end-to-end through the real Provider.
+
+    **Scope, stated honestly (audit R1 / #190-4).** This scripts at LOAD time, which is *later* than
+    real transformers: transformers evaluates the ``@torch.jit.script`` decorators on the DeBERTa-v2
+    modeling module at **module import**, i.e. when the Provider runs ``from gliner2 import
+    GLiNER2`` — one statement BEFORE it enters the perf seam. So this suite proves the seam
+    neutralizes the JIT for the *load-and-forward* path; it CANNOT distinguish "neutralized before
+    the gliner2 import" from "after", and must never be read as covering that ordering. The
+    import-time shape — the one that decides whether the Blackwell/CUDA-13 crash is really fixed —
+    is owned by ``latence-core/tests/test_perf_jit_import_ordering.py`` (behavioural) and
+    ``latence-core/tests/test_perf_fp32_regression_guard.py::
+    test_mdeberta_providers_neutralize_the_jit_before_importing_the_backbone`` (structural).
     """
 
     #: when False the encoder never scripts (the reference "JIT could not have run" baseline).

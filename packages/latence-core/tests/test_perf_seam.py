@@ -608,8 +608,16 @@ def test_neutralize_torch_jit_is_guarded_on_a_torch_without_jit_state(
 
 
 def _mdeberta_loader(torch: Any) -> Any:
-    """A loader mirroring the mdeberta-v3 encoder: it SCRIPTS its relative-position helper at load
-    and calls it in the forward — the exact shape of the Blackwell crash."""
+    """A loader that SCRIPTS its relative-position helper at load and calls it in the forward.
+
+    Scope (audit R1 / #190-4): this pins the *loader's* contract — a model loaded through the seam
+    must come back un-scripted. It is deliberately NOT the full mdeberta shape: real transformers
+    scripts at MODULE IMPORT (``from gliner2 import GLiNER2``), which happens before any of these
+    loaders is entered, so nothing here can speak to that ordering. That property is covered by
+    ``test_perf_jit_import_ordering.py`` and by the structural guard
+    ``test_perf_fp32_regression_guard.py::
+    test_mdeberta_providers_neutralize_the_jit_before_importing_the_backbone``.
+    """
 
     def loader(model_id: str, **kwargs: Any) -> Any:
         rel_pos = torch.jit.script(_build_relative_position)

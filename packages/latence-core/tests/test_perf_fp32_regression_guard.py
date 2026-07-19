@@ -400,6 +400,135 @@ def test_jit_guard_accepts_the_neutralizing_loaders() -> None:
         assert not jit_seam_offenders(ast.parse(good)), f"must NOT be flagged: {good!r}"
 
 
+# --- #190-4: the JIT must be neutralized BEFORE the gliner import, not merely at the loader -------
+
+#: Import roots whose evaluation transitively pulls in transformers'
+#: ``models.deberta_v2.modeling_deberta_v2`` — the module whose six relative-position helpers carry
+#: ``@torch.jit.script`` and are therefore compiled into real ``ScriptFunction``s **at import**.
+_DEBERTA_IMPORT_ROOTS = ("gliner", "gliner2", "glinker", "transformers")
+
+
+def _imports_deberta_backbone(node: ast.AST) -> TypeGuard[ast.Import | ast.ImportFrom]:
+    """Whether ``node`` is an import statement that pulls in the deberta_v2 modeling module."""
+    if isinstance(node, ast.ImportFrom):
+        root = (node.module or "").split(".")[0]
+        return root in _DEBERTA_IMPORT_ROOTS
+    if isinstance(node, ast.Import):
+        return any(alias.name.split(".")[0] in _DEBERTA_IMPORT_ROOTS for alias in node.names)
+    return False
+
+
+def _calls_neutralize_torch_jit(node: ast.AST) -> TypeGuard[ast.Call]:
+    """Whether ``node`` is a ``neutralize_torch_jit(...)`` call (plain or attribute-qualified)."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "neutralize_torch_jit"
+    return isinstance(func, ast.Attribute) and func.attr == "neutralize_torch_jit"
+
+
+def jit_import_ordering_offenders(tree: ast.Module) -> list[str]:
+    """Every function that imports the deberta backbone **without** first neutralizing the JIT.
+
+    The property the routing guard cannot see. ``load_then_cast`` / ``load_gliner2_optimized`` call
+    ``neutralize_torch_jit`` *inside* themselves, i.e. only once the Provider has already evaluated
+    ``from gliner2 import GLiNER2`` and transformers has already scripted its deberta_v2 helpers.
+    Neither seam lever can undo that (``PYTORCH_JIT`` is read by torch at *torch* import;
+    ``jit._state.disable()`` affects only *future* ``script()`` calls), so a Provider that imports
+    first is still fully exposed to the Blackwell/CUDA-13 nvrtc crash while passing every
+    routing-shaped assertion. This scans each function body for the ordering directly: the earliest
+    ``neutralize_torch_jit(...)`` call must precede the earliest backbone import.
+    """
+    offenders: list[str] = []
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        imports = [n.lineno for n in ast.walk(func) if _imports_deberta_backbone(n)]
+        if not imports:
+            continue
+        first_import = min(imports)
+        neutralizations = [
+            n.lineno for n in ast.walk(func) if _calls_neutralize_torch_jit(n)
+        ]
+        if not neutralizations:
+            offenders.append(
+                f"{func.name}(): imports the deberta backbone at line {first_import} and never "
+                "calls neutralize_torch_jit"
+            )
+        elif min(neutralizations) > first_import:
+            offenders.append(
+                f"{func.name}(): imports the deberta backbone at line {first_import} but only "
+                f"neutralizes the JIT at line {min(neutralizations)} — too late to un-script it"
+            )
+    return offenders
+
+
+@pytest.mark.parametrize("rel_source", _MDEBERTA_PROVIDER_SOURCES)
+def test_mdeberta_providers_neutralize_the_jit_before_importing_the_backbone(
+    rel_source: str,
+) -> None:
+    """REGRESSION (#190-4): every mdeberta Provider kills the JIT BEFORE it imports gliner.
+
+    The teeth the routing guard above lacks. It accepts any load handed to a JIT-neutralizing
+    loader — but the loader runs *after* ``from gliner2 import GLiNER2`` has already let
+    transformers script the deberta_v2 relative-position helpers, which is the instant that
+    matters. ``redaction.gliner_pii2`` passed the routing guard while never neutralizing the JIT at
+    all; this scan bites on that and on any future Provider that imports the backbone first.
+    """
+    path = _packages_root() / rel_source
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    offenders = jit_import_ordering_offenders(tree)
+    assert not offenders, (
+        f"{rel_source}: the deberta backbone is imported while the TorchScript JIT is still live "
+        "— transformers compiles its @torch.jit.script relative-position helpers AT IMPORT, and no "
+        "later neutralization can un-script them, so the Blackwell/CUDA-13 nvrtc crash "
+        "(libnvrtc-builtins.so.13.0) stays open:\n" + "\n".join(offenders)
+    )
+
+
+def test_jit_ordering_guard_flags_a_seam_routed_provider_that_imports_first() -> None:
+    """Meta-test: routing through the neutralizing loader does NOT excuse importing first.
+
+    This is exactly the shape ``latence-pii-gliner2`` had — and exactly what the routing-only guard
+    reports as clean.
+    """
+    bad = (
+        "def _load(self):\n"
+        "    from gliner2 import GLiNER2\n"
+        "    return load_gliner2_optimized(GLiNER2.from_pretrained, mid, dev, cfg)\n"
+    )
+    assert not jit_seam_offenders(ast.parse(bad)), (
+        "precondition: the routing guard considers this source clean — that is the blind spot"
+    )
+    assert jit_import_ordering_offenders(ast.parse(bad)), (
+        "a Provider that imports gliner2 before neutralizing the JIT must be flagged"
+    )
+
+
+def test_jit_ordering_guard_flags_a_provider_that_never_neutralizes() -> None:
+    """Meta-test: no ``neutralize_torch_jit`` call at all in the importing function is an offence."""
+    bad = "def _cls(self):\n    import gliner2\n    return gliner2.GLiNER2\n"
+    assert jit_import_ordering_offenders(ast.parse(bad))
+
+
+def test_jit_ordering_guard_accepts_a_correctly_ordered_provider() -> None:
+    """Meta-test: neutralize-then-import is clean, and a gliner-free function is not scanned."""
+    for good in (
+        "def _cls(self):\n"
+        "    neutralize_torch_jit(provider_name='p')\n"
+        "    from gliner2 import GLiNER2\n"
+        "    return GLiNER2\n",
+        "def _cls(self):\n"
+        "    perf.neutralize_torch_jit()\n"
+        "    from gliner import GLiNER\n"
+        "    return GLiNER\n",
+        "def _helper(self):\n    return self._model.config.max_len\n",
+    ):
+        assert not jit_import_ordering_offenders(ast.parse(good)), f"must NOT be flagged: {good!r}"
+
+
 def test_jit_neutralizing_loaders_constant_matches_the_real_perf_seam() -> None:
     """The accept-set is TRUE of ``perf.py``: each named loader calls ``neutralize_torch_jit``…
 
