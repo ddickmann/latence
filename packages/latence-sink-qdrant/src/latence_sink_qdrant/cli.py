@@ -89,6 +89,14 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", help="Qdrant host (alternative to --url)")
     parser.add_argument("--port", type=int, help="Qdrant HTTP port")
     parser.add_argument("--api-key", help="Qdrant api key")
+    parser.add_argument(
+        "--api-key-env",
+        help=(
+            "name of the environment variable holding the Qdrant api key (preferred over "
+            "--api-key / an inline config value: the secret stays out of the file and the "
+            "shell history). A config file is never shell-expanded, so ${VAR} does not work."
+        ),
+    )
     parser.add_argument("--timeout", type=int, help="per-request timeout in seconds")
 
 
@@ -128,7 +136,15 @@ def _load_config_file(path: Path) -> dict[str, Any]:
 def _config_from(args: argparse.Namespace) -> dict[str, Any]:
     """Merge the config file (if any) with the flags — flags win, unset flags never override."""
     config: dict[str, Any] = _load_config_file(args.config) if args.config else {}
-    for key in ("collection", "basename", "batch_size", "distance", "vector_name", "load_id"):
+    for key in (
+        "collection",
+        "basename",
+        "batch_size",
+        "distance",
+        "vector_name",
+        "load_id",
+        "api_key_env",
+    ):
         value = getattr(args, key, None)
         if value is not None:
             config[key] = value

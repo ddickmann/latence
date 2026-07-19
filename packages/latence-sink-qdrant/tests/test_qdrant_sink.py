@@ -879,3 +879,75 @@ def test_a_duplicated_document_is_still_verifiably_absent_after_retraction(
     assert report.deleted == 1
     assert stored_record_ids(client) == {"c1"}
     assert sink(client).verify_absent([_DUPLICATED]) == []
+
+
+# --- the credential never lives in the config file (R5-docs_truth-7 regression) ------------------
+#
+# The README's only credential example used to be ``api_key: ${QDRANT_API_KEY}``, and nothing in
+# the framework shell-expands a config file — the literal 17 characters were handed to
+# ``QdrantClient`` as the key, and the operator learned about it as an opaque 401 from a secured
+# cluster. These four assert the real path (``api_key_env`` names the VARIABLE) and that the old
+# documented syntax now fails loudly at construction instead of at the store.
+
+
+def test_api_key_env_resolves_the_credential_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("QDRANT_API_KEY", "s3cr3t")
+
+    built = QdrantSink(
+        {"collection": "c", "url": "http://example:6333", "api_key_env": "QDRANT_API_KEY"}
+    )
+
+    kwargs = built._client_kwargs  # noqa: SLF001 - the kwargs are what reaches QdrantClient
+    assert kwargs["api_key"] == "s3cr3t"
+    # The indirection key is a sink key: QdrantClient has no such kwarg and would reject it.
+    assert "api_key_env" not in kwargs
+
+
+def test_an_unexpanded_placeholder_api_key_is_rejected_not_sent_to_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact README-follower's config: a `${VAR}` nothing expands must not become the key."""
+    monkeypatch.setenv("QDRANT_API_KEY", "s3cr3t")
+
+    with pytest.raises(SinkConfigError) as excinfo:
+        QdrantSink(
+            {"collection": "c", "url": "http://example:6333", "api_key": "${QDRANT_API_KEY}"}
+        )
+
+    message = str(excinfo.value)
+    assert "${QDRANT_API_KEY}" in message  # names what it found
+    assert "api_key_env" in message  # and what to write instead
+    assert "s3cr3t" not in message  # never a credential value
+
+
+def test_an_unset_api_key_env_variable_is_a_typed_error_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+    with pytest.raises(SinkConfigError) as excinfo:
+        QdrantSink({"collection": "c", "api_key_env": "QDRANT_API_KEY"})
+
+    assert "QDRANT_API_KEY" in str(excinfo.value)
+
+
+def test_an_explicit_api_key_still_wins_over_api_key_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """So ``--api-key`` keeps overriding a config file that names a variable."""
+    monkeypatch.setenv("QDRANT_API_KEY", "from-env")
+
+    built = QdrantSink(
+        {"collection": "c", "api_key": "from-flag", "api_key_env": "QDRANT_API_KEY"}
+    )
+
+    assert built._client_kwargs["api_key"] == "from-flag"  # noqa: SLF001
+
+
+def test_a_real_key_containing_a_dollar_sign_is_not_mistaken_for_a_placeholder() -> None:
+    """Only the unambiguous braced form is template syntax; refusing a valid key is worse."""
+    built = QdrantSink({"collection": "c", "api_key": "ab$cd12$xy"})
+
+    assert built._client_kwargs["api_key"] == "ab$cd12$xy"  # noqa: SLF001

@@ -272,3 +272,52 @@ def test_a_malformed_json_config_file_exits_two_not_a_traceback(
     assert code == 2
     assert err.startswith("error: ")
     assert "bad.json" in err
+
+
+# --- the credential path through a config file (R5-docs_truth-7 regression) ----------------------
+
+
+def test_a_config_file_naming_the_api_key_env_var_resolves_the_real_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole documented path end to end: file names the VARIABLE, sink gets the VALUE."""
+    monkeypatch.setenv("QDRANT_API_KEY", "s3cr3t")
+    built: list[QdrantSink] = []
+    client = FakeQdrantClient()
+
+    def _factory(config: dict[str, Any]) -> QdrantSink:
+        sink = QdrantSink(config, client=client)
+        built.append(sink)
+        return sink
+
+    monkeypatch.setattr(cli, "QdrantSink", _factory)
+    config = tmp_path / "qdrant.yaml"
+    config.write_text(
+        "collection: corpus\nurl: http://localhost:6333\napi_key_env: QDRANT_API_KEY\n",
+        encoding="utf-8",
+    )
+    export = _export(tmp_path / "export", ["c1"])
+
+    assert cli.main(["load", export, "--config", str(config)]) == 0
+    assert built[-1]._client_kwargs["api_key"] == "s3cr3t"  # noqa: SLF001
+
+
+def test_a_shell_placeholder_in_a_config_file_exits_two_and_says_why(
+    tmp_path: Path,
+    store: FakeQdrantClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A config file is never shell-expanded — the operator learns that here, not from a 401."""
+    monkeypatch.setenv("QDRANT_API_KEY", "s3cr3t")
+    config = tmp_path / "qdrant.yaml"
+    config.write_text(
+        "collection: corpus\nurl: http://localhost:6333\napi_key: ${QDRANT_API_KEY}\n",
+        encoding="utf-8",
+    )
+    export = _export(tmp_path / "export", ["c1"])
+
+    assert cli.main(["load", export, "--config", str(config)]) == 2
+    err = capsys.readouterr().err
+    assert "api_key_env" in err
+    assert "s3cr3t" not in err

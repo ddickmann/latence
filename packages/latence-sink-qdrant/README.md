@@ -125,7 +125,7 @@ Flags override a `--config` YAML/JSON block, so a cluster's connection details l
 ```yaml
 collection: corpus
 url: https://qdrant.internal:6333
-api_key: ${QDRANT_API_KEY}
+api_key_env: QDRANT_API_KEY   # the NAME of the env var, never the key itself
 batch_size: 512
 distance: cosine        # only used when the collection is created
 vector_name: null       # or a named vector
@@ -142,7 +142,18 @@ reconcile: true
 | `reconcile` | `true` | sweep this corpus's points absent from this Export (scoped to `id_namespace`) |
 | `load_id` | none | audit **label** for the run, prefixed onto the per-run sweep marker (`<label>:<nonce>`). It is a label, never the marker itself: the sweep deletes everything *not* stamped with this run's marker, so a marker reused across runs would match nothing and silently keep serving retracted points |
 | `id_namespace` | fixed UUID | point-id derivation namespace **and** the reconciling sweep's ownership scope — two corpora sharing one collection each get their own |
+| `api_key_env` | none | **name** of the environment variable holding the api key, read at construction and resolved into `api_key`. Never passed to `QdrantClient` itself; an explicit `api_key` / `--api-key` wins |
 | `url` / `host` / `port` / `grpc_port` / `prefer_grpc` / `https` / `api_key` / `timeout` / `location` | — | threaded verbatim to `QdrantClient` |
+
+### The credential
+
+A config file is **not** shell-expanded — `api_key: ${QDRANT_API_KEY}` would be sent to Qdrant as
+the literal string and come back as an opaque 401. Name the environment variable instead
+(`api_key_env: QDRANT_API_KEY`, or `--api-key-env QDRANT_API_KEY`) and export it from your secret
+manager; the sink reads it at construction and the key never enters the file. This is the
+framework-wide posture (`SECURITY.md`; the SharePoint Source's `token_env` / `client_secret_env`).
+A variable that is unset or empty, and a `${…}` placeholder left in `api_key`, are both rejected up
+front with a typed `SinkConfigError` (exit `2`) that names the *variable*, never a value.
 
 ## Testing without a Qdrant
 

@@ -71,6 +71,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -121,6 +123,19 @@ _DISTANCES = frozenset({"cosine", "dot", "euclid", "manhattan"})
 _CONNECTION_KEYS = frozenset(
     {"url", "host", "port", "grpc_port", "prefer_grpc", "https", "api_key", "timeout", "location"}
 )
+#: Config key naming the ENVIRONMENT VARIABLE that holds the api key — the framework-wide posture
+#: (SECURITY.md; ``latence-source-sharepoint``'s ``token_env`` / ``client_secret_env``): a config
+#: file names the variable, never the value, so the credential is never in the stack file, in git,
+#: or in a bug report. It is a *sink* key, not a connection key: it is resolved into ``api_key``
+#: here and is never itself threaded to ``QdrantClient``.
+API_KEY_ENV_KEY = "api_key_env"
+
+#: A ``${VAR}`` left verbatim in ``api_key``. Nothing in the framework expands shell syntax in a
+#: config file, so such a value would be sent to the store AS the credential and come back as an
+#: opaque 401/403. Detected and named instead (ADR-0034: the operator sees the cause). Deliberately
+#: only the unambiguous braced form: a bare ``$WORD`` is far more likely to be a character of a
+#: real generated key than a template, and refusing a valid credential is the worse error.
+_UNEXPANDED_PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
 _SINK_KEYS = frozenset(
     {
         "collection",
@@ -131,6 +146,7 @@ _SINK_KEYS = frozenset(
         "reconcile",
         "load_id",
         "id_namespace",
+        API_KEY_ENV_KEY,
     }
 )
 
@@ -240,6 +256,12 @@ class QdrantSink:
         url / host / port / grpc_port / prefer_grpc / https / api_key / timeout / location —
             connection kwargs threaded verbatim to ``QdrantClient`` when it is built lazily.
             Ignored when a ``client`` is injected.
+        api_key_env: str | None — the NAME of an environment variable holding the api key, read at
+            construction. This is the credential path: a config file names the variable, never the
+            value (SECURITY.md), so the secret stays out of the stack file and out of git. It is
+            resolved into ``api_key`` and is itself never passed to ``QdrantClient``. An explicit
+            ``api_key`` wins. A config file is **not** shell-expanded — a literal ``${VAR}`` left
+            in ``api_key`` is rejected with a :class:`SinkConfigError` naming ``api_key_env``.
 
     Dependencies are accepted, never created: pass ``client`` (a pooled ``QdrantClient``, or the
     shipped :class:`~latence_sink_qdrant.testing.FakeQdrantClient`) and/or ``models`` to drive the
@@ -314,6 +336,7 @@ class QdrantSink:
         self._client = client
         self._models = models
         self._client_kwargs = {k: cfg[k] for k in _CONNECTION_KEYS if k in cfg}
+        _resolve_api_key(cfg, self._client_kwargs)
 
     # -- public surface ---------------------------------------------------------------------
 
@@ -817,6 +840,51 @@ def _require_name(value: object, key: str) -> str:
         msg = f"QdrantSink '{key}' must be a non-empty string, got {value!r}."
         raise SinkConfigError(msg)
     return value
+
+
+def _resolve_api_key(cfg: dict[str, Any], client_kwargs: dict[str, Any]) -> None:
+    """Turn ``api_key_env: QDRANT_API_KEY`` into the real key, and refuse an unexpanded ``${VAR}``.
+
+    Mutates ``client_kwargs`` in place; ``api_key_env`` itself is a *sink* key and never reaches
+    ``QdrantClient``. An explicit ``api_key`` (the ``--api-key`` flag, or an inline value) wins, so
+    the flag still overrides a config file that names an env var.
+
+    Two failures are typed rather than deferred to the store (ADR-0034). A named variable that is
+    unset or empty is an operator/deploy fault, and finding it out as a 401 three minutes into a
+    load — after the collection was created — is exactly the "no silent errors" case. A literal
+    ``${...}`` surviving in ``api_key`` means the operator wrote shell syntax the framework never
+    expands; it is named here, pointed at ``api_key_env``, instead of being sent to the store as
+    the credential. No message ever contains a credential value — only variable names.
+    """
+    api_key = cfg.get("api_key")
+    if isinstance(api_key, str) and _UNEXPANDED_PLACEHOLDER.search(api_key):
+        var = _UNEXPANDED_PLACEHOLDER.search(api_key).group(0)  # type: ignore[union-attr]
+        msg = (
+            f"QdrantSink 'api_key' contains the unexpanded placeholder {var!r}: a config file is "
+            "never shell-expanded, so this string would be sent to Qdrant as the credential and "
+            "come back as an opaque 401/403. Name the environment variable instead "
+            f"({API_KEY_ENV_KEY}: {var.strip('${}') or 'QDRANT_API_KEY'}), which the sink reads "
+            "from the process environment at construction."
+        )
+        raise SinkConfigError(msg)
+
+    env_name = cfg.get(API_KEY_ENV_KEY)
+    if env_name is None:
+        return
+    env_name = _require_name(env_name, API_KEY_ENV_KEY)
+    if api_key is not None:
+        return  # an explicit key (or the --api-key flag) wins; nothing to resolve.
+
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        msg = (
+            f"QdrantSink {API_KEY_ENV_KEY}={env_name!r} names an environment variable that is "
+            "unset or empty, so no Qdrant api key is available. Secrets are environment-only — "
+            "export it from your secret manager before running the load; do not put it in the "
+            "config file."
+        )
+        raise SinkConfigError(msg)
+    client_kwargs["api_key"] = value
 
 
 def _require_positive_int(value: object, key: str) -> int:
