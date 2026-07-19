@@ -58,11 +58,26 @@ vllm serve lightonai/LightOnOCR-2-1B --dtype bfloat16 --gpu-memory-utilization 0
   --no-enable-prefix-caching --max-num-seqs 32
 ```
 
-**Blackwell (SM 12.x) caveat.** On bleeding-edge Blackwell, vLLM 0.24's bundled FlashInfer cannot
-JIT the cudagraphs (`FlashInfer requires sm75+`). Add `--enforce-eager` there (a ~perf floor) **or**
-upgrade flashinfer. Mainstream GPUs (Hopper / Ada / Ampere) run cudagraphs fine without it. In the
-compose file and the Helm chart this is one added arg — see the `vllmOcr.extraArgs` value and the
-comment in `deploy/docker-compose.yml`.
+**Blackwell (SM 12.x) caveat.** On bleeding-edge Blackwell, vLLM 0.24's bundled FlashInfer refuses a
+perfectly capable `sm_120` device at startup (`FlashInfer requires sm75+`) — its capability check
+misparses compute capability 12.0 as the integer `12`. The recorded fix is **one environment
+variable**:
+
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
+```
+
+That disables only the FlashInfer *sampler*, so **cudagraphs stay ON**. Do **not** reach for
+`--enforce-eager`: it also clears the abort, but it turns cudagraphs off and floors the throughput
+this served path exists for — the compatibility matrix records it as deliberately *not* the fix
+(`FM-FLASHINFER-SM120` in [the compatibility matrix](compatibility-matrix.md)).
+Upgrading `flashinfer` past the fixed check is the other exit, and it is a deliberate version bump.
+Mainstream GPUs (Hopper / Ada / Ampere) need none of this.
+
+In the compose file this is one uncommented `environment:` line; in the Helm chart it is one
+`vllmOcr.extraEnv` entry (below). On a CUDA-13 / Blackwell host prefer the pinned serving
+environment `deploy/env/served-ocr-server/` outright — its `serve.sh` exports the variable for you,
+alongside the `--gpu-memory-utilization 0.72` / `--max-num-seqs 16` the live 519-page run needed.
 
 An **optional LLM server** (if you enable it) has its own GPU need sized to the model you pick
 (default `Qwen/Qwen2.5-7B-Instruct` → one ~24 GB GPU at bf16).
@@ -119,7 +134,8 @@ Key values (full list in `deploy/helm/latence/values.yaml`):
 | `vllmOcr.enabled` | `true` | The served OCR Deployment+Service. Disable to use an external endpoint. |
 | `vllmOcr.gpu.nodeSelector` / `.tolerations` | `nvidia.com/gpu.present` / `nvidia.com/gpu` | Schedule the OCR pod onto GPU nodes only. Adjust to your cluster's labels/taints. |
 | `vllmOcr.resources.limits."nvidia.com/gpu"` | `1` | GPU request for the OCR pod. |
-| `vllmOcr.extraArgs` | LightOn recipe | Add `--enforce-eager` on Blackwell. |
+| `vllmOcr.extraArgs` | LightOn recipe | The serve flags. On Blackwell lower these to the live-run values (`--gpu-memory-utilization=0.72`, `--max-num-seqs=16`) — **not** `--enforce-eager`, which floors throughput. |
+| `vllmOcr.extraEnv` | `[]` | Extra `{name, value}` env for the OCR container. The Blackwell fix goes here: `VLLM_USE_FLASHINFER_SAMPLER=0` (keeps cudagraphs ON). |
 | `vllmLlm.enabled` | `false` | The optional served LLM Deployment. |
 | `persistence.data` | 20Gi RWO | Corpus in (`/data/corpus`) + artifacts out (`/data/out`). Use `existingClaim` for an RWX/NFS claim your corpus is staged into. |
 | `persistence.hfCache` | 100Gi RWO | The HF model cache the vLLM servers share; **pre-cache here for air-gapped** (below). |

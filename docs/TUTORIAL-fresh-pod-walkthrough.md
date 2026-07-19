@@ -218,10 +218,13 @@ the `model` — are exactly what the parser (and the `latence setup` wizard, §3
 is any placeholder (`EMPTY`); a local vLLM does not check it.
 
 > **Blackwell / FlashInfer caveat (KNOWN).** On bleeding-edge **Blackwell (SM 12.x)** GPUs, vLLM
-> 0.24's bundled FlashInfer cannot JIT the cudagraphs and fails with `FlashInfer requires sm75+`.
-> Either add `--enforce-eager` (you lose the cudagraph speedup; correctness is unaffected) **or**
-> upgrade `flashinfer` to an SM 12.x build and keep cudagraphs on. On mainstream GPUs (Hopper / Ada
-> / Ampere, CUDA ≥ 12.6) do **not** add `--enforce-eager` — it only floors your throughput.
+> 0.24's bundled FlashInfer refuses a capable `sm_120` device at startup with
+> `FlashInfer requires sm75+` (it misparses compute capability 12.0 as `12`). Export
+> **`VLLM_USE_FLASHINFER_SAMPLER=0`** before the serve — that disables only the *sampler*, so
+> cudagraphs stay ON. `--enforce-eager` also clears the abort but kills cudagraphs and floors your
+> throughput; the compatibility matrix records it as deliberately **not** the fix
+> (`FM-FLASHINFER-SM120`). The other exit is upgrading `flashinfer` to an SM 12.x build. Mainstream
+> GPUs (Hopper / Ada / Ampere, CUDA ≥ 12.6) need none of this.
 
 Sanity-check the server is up before running the pipeline:
 
@@ -1048,7 +1051,7 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `parse` produces 0 docs / `openai`-client connection errors | the vLLM OCR endpoint isn't up, or `base_url`/`model` don't match the server | stand up the server (§2); `curl http://localhost:8000/v1/models` and match `parse.config.base_url` + `model` to it; `api_key: EMPTY` is fine. |
-| `FlashInfer requires sm75+` when starting vLLM on Blackwell | vLLM 0.24's bundled FlashInfer can't JIT cudagraphs on SM 12.x | add `--enforce-eager` (loses the cudagraph speedup, correctness unaffected) **or** upgrade `flashinfer` to an SM 12.x build (§2). |
+| `FlashInfer requires sm75+` when starting vLLM on Blackwell | FlashInfer's capability check misparses `sm_120` as `12` and rejects a capable device | `export VLLM_USE_FLASHINFER_SAMPLER=0` before the serve — disables only the *sampler*, cudagraphs stay ON (§2). **Not** `--enforce-eager`: it clears the abort by killing cudagraphs and flooring throughput. |
 | Model downloads hang / error on `hf_xet` (Blackwell pod) | the Hugging Face XET transfer backend is flaky on some SM 12.x pods | `export HF_HUB_DISABLE_XET=1` before downloading (§1.3). |
 | `nvrtc: failed to open libnvrtc-builtins.so.13.0` (GLiNER2/DeBERTa crash) | torch JIT on SM 12.x / cu13x | `export PYTORCH_JIT=0` before running (§1.3). |
 | Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompile-thrashes on varied-length chunks | leave `compile` at its **default OFF**; enable only for a homogeneous / uniform-length workload (§1.3). |

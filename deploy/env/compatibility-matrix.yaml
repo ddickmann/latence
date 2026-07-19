@@ -345,6 +345,10 @@ failure_modes:
       - deploy/env/served-ocr-server/serve.sh
       - deploy/env/served-ocr-server/environment.yaml
       - docs/serving-lighton-vllm.md
+      - docs/deployment.md
+      - docs/TUTORIAL-fresh-pod-walkthrough.md
+      - deploy/docker-compose.yml
+      - deploy/helm/latence/values.yaml
     observation:
       status: verified
       evidence:

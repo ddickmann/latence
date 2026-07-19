@@ -71,7 +71,7 @@ Every row below was produced by a real run, not predicted. The resolution column
 * **Symptom:** vLLM aborts at startup with "FlashInfer requires sm75+" (equivalently "requires sm75 or higher") on a GPU whose compute capability is 12.0 — far above the stated floor.
 * **Cause:** The bundled FlashInfer's architecture check parses compute capability 12.0 as the integer 12 and compares it against 75, so every sm_120 device reads as below an sm75 floor. The device is capable; the check is stale.
 * **Resolution:** Set VLLM_USE_FLASHINFER_SAMPLER=0 for the serve. This disables only the SAMPLER, so cudagraphs stay ON — it is deliberately NOT --enforce-eager, which would cost the throughput the served path exists for. Upgrading flashinfer past the fixed check is the other exit, and it is a deliberate version bump, not a silent one.
-* **Enforced by:** `deploy/env/served-ocr-server/serve.sh`, `deploy/env/served-ocr-server/environment.yaml`, `docs/serving-lighton-vllm.md`
+* **Enforced by:** `deploy/env/served-ocr-server/serve.sh`, `deploy/env/served-ocr-server/environment.yaml`, `docs/serving-lighton-vllm.md`, `docs/deployment.md`, `docs/TUTORIAL-fresh-pod-walkthrough.md`, `deploy/docker-compose.yml`, `deploy/helm/latence/values.yaml`
 * **Observed:** **verified**
     * 2026-07-17, Blackwell (sm_120) / CUDA-13 pod (SKU not recorded in the field report) — `vllm serve lightonai/LightOnOCR-2-1B ... (the LightOn production recipe)` observed: startup aborted: FlashInfer requires sm75+ (docs/adr/0036-provider-ecosystem-and-bakeoff.md (W10-lighton-vllm); deploy/env/served-ocr-server/environment.yaml)
 * **Resolution confirmed:** `UNVERIFIED`

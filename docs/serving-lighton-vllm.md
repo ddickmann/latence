@@ -44,14 +44,29 @@ What each flag buys:
 
 ### The Blackwell / FlashInfer caveat (KNOWN)
 
-On bleeding-edge **Blackwell (SM 12.x)** GPUs, vLLM 0.24's bundled FlashInfer cannot JIT the
-cudagraphs and fails with `FlashInfer requires sm75+`. Two options there:
+On bleeding-edge **Blackwell (SM 12.x)** GPUs, vLLM 0.24's bundled FlashInfer refuses to start on a
+genuinely capable `sm_120` device with `FlashInfer requires sm75+` — its architecture check parses
+compute capability 12.0 as the integer `12`, which compares below 75. The device is fine; the check
+is stale. The fix on record ([`FM-FLASHINFER-SM120`](compatibility-matrix.md), observed on a live
+Blackwell / CUDA-13 pod) is one environment variable, set before the serve:
 
-1. add `--enforce-eager` (a ~perf floor — you lose the cudagraph speedup, correctness is unaffected), or
-2. upgrade `flashinfer` to a build that supports SM 12.x, then keep cudagraphs on.
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
+```
 
-Mainstream GPUs (Hopper / Ada / Ampere, CUDA ≥ 12.6) run cudagraphs fine — **do not** add
-`--enforce-eager` there; it only floors your throughput.
+It disables only the FlashInfer **sampler** — every other FlashInfer path, and crucially the
+cudagraphs, stay on. `deploy/env/served-ocr-server/serve.sh` exports it for you.
+
+> **`--enforce-eager` is NOT the fix here.** It does clear the abort, but by turning cudagraphs off
+> entirely — the exact throughput floor this whole page exists to avoid, and the one the in-process
+> transformers head-to-head was already stuck at. Never reach for it as the Blackwell remedy.
+
+The other legitimate exit is upgrading `flashinfer` to a build whose capability check is fixed, then
+keeping cudagraphs on. That is a deliberate version bump — the pinned
+`flashinfer-python>=0.6,<0.7` boundary in `deploy/env/served-ocr-server/constraints.txt` is what
+keeps it from happening silently.
+
+Mainstream GPUs (Hopper / Ada / Ampere, CUDA ≥ 12.6) run cudagraphs fine and need none of this.
 
 > Infra note (from W8): a pod whose driver is too old for the torch (cu126+) a LightOnOCR-2-supporting
 > vLLM needs cannot stand this server up at all — needs driver ≥ 12.6. That constraint is why the W8

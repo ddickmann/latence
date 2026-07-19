@@ -41,10 +41,15 @@ services:
       - "--mm-processor-cache-gb=0"
       - "--no-enable-prefix-caching"
       - "--max-num-seqs=32"
-      # Blackwell (SM 12.x) note: if vLLM's bundled FlashInfer cannot JIT cudagraphs
-      # ("FlashInfer requires sm75+"), add "--enforce-eager" here (a ~perf floor). Hopper/Ada/
-      # Ampere run cudagraphs fine. See docs/deployment.md.
+      # Blackwell (SM 12.x): the "FlashInfer requires sm75+" abort is fixed by the environment
+      # variable below, NOT by "--enforce-eager" here — that flag clears the abort by turning
+      # cudagraphs off, flooring the throughput this served path exists for (FM-FLASHINFER-SM120).
+      # Hopper/Ada/Ampere run cudagraphs fine. See docs/deployment.md.
     environment:
+      # Blackwell (sm_120) ONLY — uncomment to apply FM-FLASHINFER-SM120's recorded fix. FlashInfer's
+      # capability check misparses 12.0 as 12 and rejects the device; this disables only its SAMPLER,
+      # so cudagraphs stay ON. Leave commented on Hopper/Ada/Ampere.
+      # VLLM_USE_FLASHINFER_SAMPLER: "0"
       # Only used to DOWNLOAD weights on first run; unset in air-gapped mode (pre-cache the model
       # into ./hf-cache and set HF_HUB_OFFLINE=1). See docs/deployment.md.
       HF_TOKEN: "${HF_TOKEN:-}"
