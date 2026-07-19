@@ -20,9 +20,19 @@ import tracemalloc
 from typing import TYPE_CHECKING
 
 import pytest
-from latence_console.artifacts import RunArtifacts
+from latence_console.artifacts import MAX_SCAN_RECORDS, RunArtifacts
 from latence_console.server import ConsoleApp
-from latence_core.contracts import ChunkRecord, Classification, Provenance
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    EntityMention,
+    Evidence,
+    GraphEdge,
+    GraphNode,
+    GraphRecord,
+    GraphScope,
+    Provenance,
+)
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
@@ -213,3 +223,197 @@ def test_read_jsonl_never_reads_a_whole_file(
 
     assert chunk is not None
     assert chunk.index == 11
+
+
+# -- Evidence beyond the scan cap (audit R5) ---------------------------------
+#
+# The list views' scan is capped at MAX_SCAN_RECORDS; the KG views always scan (they need the
+# node/edge maps). A mention the cap dropped is still ON DISK, and the run's Evidence still
+# cites it — so the graph must resolve it, not label it "not in this run's checkpoints".
+# Claiming a checkpointed record was never checkpointed is a false provenance claim
+# (ADR-0021/0031).
+
+MENTION_COUNT = MAX_SCAN_RECORDS + 500
+BEYOND_CAP = MENTION_COUNT - 1
+KG_RUN_ID = "kgbig"
+KG_NODE_A = "node-a"
+KG_NODE_B = "node-b"
+KG_EDGE = "edge-a-b"
+CITED_MENTION = f"{DOC_ID}#mention-{BEYOND_CAP}"
+CITED_TEXT = f"Beyond-cap Entity {BEYOND_CAP}"
+
+
+def _mention_record(index: int) -> EntityMention:
+    return EntityMention(
+        record_id=f"{DOC_ID}#mention-{index}",
+        provenance=_provenance(index),
+        classification=_classification(),
+        document_record_id=DOC_ID,
+        chunk_record_id=f"{DOC_ID}#chunk-{index}",
+        index=0,
+        label="ORG",
+        text=f"Beyond-cap Entity {index}",
+        confidence=0.9,
+    )
+
+
+def _kg_records() -> list[GraphRecord]:
+    provenance = _provenance(0)
+    evidence = Evidence(
+        mention_ids=[CITED_MENTION],
+        document_ids=[DOC_ID],
+        snippet="a relation justified by a mention past the scan cap",
+        confidence=0.8,
+    )
+    nodes = [
+        GraphNode(
+            record_id=node_id,
+            provenance=provenance,
+            classification=_classification(),
+            node_id=node_id,
+            entity_id=f"entity-{node_id}",
+            label="ORG",
+            canonical_name=name,
+            member_mention_ids=[CITED_MENTION],
+            source_document_ids=[DOC_ID],
+            confidence=0.9,
+            evidence=evidence,
+        )
+        for node_id, name in ((KG_NODE_A, "Alpha"), (KG_NODE_B, "Beta"))
+    ]
+    edge = GraphEdge(
+        record_id=KG_EDGE,
+        provenance=provenance,
+        classification=_classification(),
+        edge_id=KG_EDGE,
+        relation_id="relation-a-b",
+        source_node_id=KG_NODE_A,
+        target_node_id=KG_NODE_B,
+        label="partners_with",
+        confidence=0.8,
+        properties={},
+        evidence=evidence,
+    )
+    return [
+        *(
+            GraphRecord(
+                record_id=f"{node.node_id}#record",
+                provenance=provenance,
+                classification=_classification(),
+                scope=GraphScope.NODE,
+                node=node,
+            )
+            for node in nodes
+        ),
+        GraphRecord(
+            record_id=f"{KG_EDGE}#record",
+            provenance=provenance,
+            classification=_classification(),
+            scope=GraphScope.EDGE,
+            edge=edge,
+        ),
+    ]
+
+
+@pytest.fixture(scope="module")
+def kg_storage(tmp_path_factory: pytest.TempPathFactory) -> tuple[Storage, str]:
+    """A run whose entity checkpoint holds more mentions than the scan cap can keep."""
+    root: Path = tmp_path_factory.mktemp("kgcorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/{KG_RUN_ID}"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {
+                    "name": "kgbig",
+                    "stages": [
+                        {"name": "entities", "depends_on": []},
+                        {"name": "graph", "depends_on": ["entities"]},
+                    ],
+                },
+                "run_id": KG_RUN_ID,
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/entities.jsonl",
+        "".join(
+            _mention_record(i).model_dump_json() + "\n" for i in range(MENTION_COUNT)
+        ).encode("utf-8"),
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/graph.jsonl",
+        "".join(r.model_dump_json() + "\n" for r in _kg_records()).encode("utf-8"),
+    )
+    return storage, storage_uri
+
+
+@pytest.fixture(scope="module")
+def kg_app(kg_storage: tuple[Storage, str]) -> ConsoleApp:
+    storage, storage_uri = kg_storage
+    return ConsoleApp.over_storage(storage, storage_uri)
+
+
+def test_graph_resolves_evidence_beyond_the_scan_cap(kg_app: ConsoleApp) -> None:
+    """A cited mention the scan's cap dropped is still resolved — it IS in the checkpoints.
+
+    The graph view scans first (it needs the node/edge maps), and the entity checkpoint holds
+    more mentions than the cap keeps. Answering the Evidence lookup from that truncated map
+    reported a checkpointed mention as absent: a false provenance claim (ADR-0021/0031).
+    """
+    response = kg_app.respond("GET", f"/run/{KG_RUN_ID}/graph")
+
+    assert response.status == 200
+    body = response.body.decode("utf-8")
+    assert "mention not in this run&#x27;s checkpoints" not in body
+    assert "not in this run" not in body
+    assert CITED_TEXT in body
+
+
+def test_entity_page_resolves_evidence_beyond_the_scan_cap(kg_app: ConsoleApp) -> None:
+    """The same holds on the per-entity page, which also always scans."""
+    response = kg_app.respond("GET", f"/run/{KG_RUN_ID}/entity?id={KG_NODE_A}")
+
+    assert response.status == 200
+    body = response.body.decode("utf-8")
+    assert "not in this run" not in body
+    assert CITED_TEXT in body
+
+
+def test_lookup_after_a_truncated_scan_still_finds_the_record(
+    kg_storage: tuple[Storage, str],
+) -> None:
+    """``mention()`` must not become a *worse* lookup once a list view has scanned."""
+    storage, storage_uri = kg_storage
+    artifacts = RunArtifacts(storage, f"{storage_uri}/_latence/runs/{KG_RUN_ID}")
+
+    fresh = artifacts.mention(CITED_MENTION)
+    artifacts.graph_edges()  # forces the capped scan
+    assert artifacts.truncated()
+    after_scan = artifacts.mention(CITED_MENTION)
+
+    assert fresh is not None
+    assert after_scan is not None
+    assert after_scan.text == CITED_TEXT
+
+
+def test_absent_mention_is_still_reported_as_unresolved(
+    kg_storage: tuple[Storage, str],
+) -> None:
+    """The fallback must not invent a record: an id the run never wrote stays ``None``."""
+    storage, storage_uri = kg_storage
+    artifacts = RunArtifacts(storage, f"{storage_uri}/_latence/runs/{KG_RUN_ID}")
+    artifacts.graph_edges()
+
+    assert artifacts.mention(f"{DOC_ID}#mention-999999") is None
+
+
+def test_entity_page_states_a_partial_view(kg_app: ConsoleApp) -> None:
+    """The per-entity page's relations come from the capped scan, so it must say so too."""
+    response = kg_app.respond("GET", f"/run/{KG_RUN_ID}/entity?id={KG_NODE_A}")
+
+    assert response.status == 200
+    assert b"Partial view" in response.body

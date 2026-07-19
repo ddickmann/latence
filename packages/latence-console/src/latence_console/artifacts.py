@@ -35,7 +35,11 @@ on Storage, all of it JSONL, all of it written by the local Runner under the run
   1. every file is *streamed* line by line — never decoded into one ``str`` (:meth:`_read_jsonl`);
   2. the four single-record lookups (:meth:`chunk`, :meth:`document`, :meth:`mention`,
      :meth:`node`) stream the checkpoints **most-downstream first** and retain only the match,
-     so the chunk inspector costs one file pass and O(1) memory instead of the whole run;
+     so the chunk inspector costs one file pass and O(1) memory instead of the whole run. They
+     read a list view's scan only where it is *authoritative*: a capped scan that dropped a
+     record cannot be allowed to answer "the run never checkpointed it" (audit R5), so a miss in
+     a truncated map falls through to the streaming lookup. :meth:`mentions_by_id` settles a
+     whole page's Evidence citations that way in one pass rather than one pass each;
   3. the *list* views' scan retains at most :data:`MAX_SCAN_RECORDS` records of each kind and
      reports :meth:`truncated`. To make that truncation redaction-safe, the scan walks the
      checkpoints in **reverse** dependency order with downstream-wins semantics — so every
@@ -179,21 +183,47 @@ class RunArtifacts:
         run. The id is only ever matched against records already read, never concatenated into a
         Storage URI, so a crafted id cannot address a file, only fail to match a record.
         """
-        if self._scanned is not None:
-            return self._scanned.chunks.get(record_id)
+        answered, record = self._from_scan(lambda s: s.chunks, record_id)
+        if answered:
+            return record
         return self._lookup(ChunkRecord, lambda c: c.record_id, record_id)
 
     def document(self, document_id: str) -> DocumentRecord | None:
         """The parsed document a chunk's Provenance names, or ``None`` if not checkpointed."""
-        if self._scanned is not None:
-            return self._scanned.documents.get(document_id)
+        answered, record = self._from_scan(lambda s: s.documents, document_id)
+        if answered:
+            return record
         return self._lookup(DocumentRecord, lambda d: d.provenance.document_id, document_id)
 
     def mention(self, record_id: str) -> EntityMention | None:
         """One entity mention by ``record_id`` — what a KG edge's Evidence cites."""
-        if self._scanned is not None:
-            return self._scanned.mentions.get(record_id)
+        answered, record = self._from_scan(lambda s: s.mentions, record_id)
+        if answered:
+            return record
         return self._lookup(EntityMention, lambda m: m.record_id, record_id)
+
+    def mentions_by_id(self, record_ids: Iterable[str]) -> dict[str, EntityMention]:
+        """Resolve many cited mentions at once — ``{record_id: mention}``, misses left out.
+
+        The KG views resolve one mention per Evidence entry, and they always scan first (they
+        need the node/edge maps). Whatever a truncated scan could not answer is therefore
+        collected here and settled in **one** streaming pass over the checkpoints instead of one
+        pass per mention (audit R5) — the answer of :meth:`mention` called per id, at the cost of
+        a single read. Peak memory stays O(number of ids asked for), which is what the caller is
+        already holding a rendered row for.
+        """
+        wanted = list(dict.fromkeys(record_ids))
+        resolved: dict[str, EntityMention] = {}
+        missing: list[str] = []
+        for record_id in wanted:
+            answered, record = self._from_scan(lambda s: s.mentions, record_id)
+            if record is not None:
+                resolved[record_id] = record
+            elif not answered:
+                missing.append(record_id)
+        if missing:
+            resolved.update(self._lookup_many(EntityMention, lambda m: m.record_id, missing))
+        return resolved
 
     def graph_nodes(self) -> list[GraphNode]:
         """Every KG node, ordered by canonical name."""
@@ -206,9 +236,31 @@ class RunArtifacts:
         return sorted(self._scan().edges.values(), key=lambda e: (e.label, e.edge_id))
 
     def node(self, node_id: str) -> GraphNode | None:
-        if self._scanned is not None:
-            return self._scanned.nodes.get(node_id)
+        answered, record = self._from_scan(lambda s: s.nodes, node_id)
+        if answered:
+            return record
         return self._lookup_node(node_id)
+
+    def _from_scan(
+        self, select: Callable[[_Scan], _Kept[_R]], key: str
+    ) -> tuple[bool, _R | None]:
+        """``(answered, record)`` — the scan replies only where it is *authoritative*.
+
+        A list view's scan is capped (:data:`MAX_SCAN_RECORDS`), so a miss in its map has two
+        very different meanings: the run never checkpointed that record, or the cap dropped it.
+        Only the first is an answer. Reporting the second as ``None`` made the KG views label a
+        checkpointed Evidence mention "not in this run's checkpoints" — a *false provenance
+        claim* (ADR-0021/0031, audit R5). Where the map is not authoritative the caller falls
+        back to the targeted streaming lookup, which reads what is actually on disk.
+        """
+        scan = self._scanned
+        if scan is None:
+            return False, None
+        kept = select(scan)
+        record = kept.get(key)
+        if record is not None:
+            return True, record
+        return (not kept.truncated) and not scan.stopped_early, None
 
     # -- reading -----------------------------------------------------------
 
@@ -333,6 +385,7 @@ class RunArtifacts:
         scan = _Scan()
         for index, (_stage, uri) in enumerate(reversed(self._checkpoints())):
             if scan.full:
+                scan.stopped_early = True
                 break
             for payload in self._read_jsonl(uri):
                 scan.absorb(_parse_record(payload), index)
@@ -363,6 +416,36 @@ class RunArtifacts:
             if found is not None:
                 return found
         return None
+
+    def _lookup_many(
+        self,
+        wanted: type[_C],
+        key_of: Callable[[_C], str],
+        keys: list[str],
+    ) -> dict[str, _C]:
+        """Many records by key in ONE streaming pass, most-downstream first.
+
+        The batched sibling of :meth:`_lookup`, and it keeps that method's semantics per key:
+        the first checkpoint file supplying a key wins (the most-downstream Stage that wrote it),
+        and within a file a later line still overrides an earlier one. Only the requested keys
+        are retained, so peak memory is O(``len(keys)``) — never the run. No pre-filter is used:
+        one pass answering every key beats one filtered pass per key.
+        """
+        found: dict[str, _C] = {}
+        outstanding = set(keys)
+        for _stage, uri in reversed(self._checkpoints()):
+            if not outstanding:
+                break
+            from_file: dict[str, _C] = {}
+            for payload in self._read_jsonl(uri):
+                record = _parse_record(payload)
+                if isinstance(record, wanted):
+                    key = key_of(record)
+                    if key in outstanding:
+                        from_file[key] = record
+            found.update(from_file)
+            outstanding -= from_file.keys()
+        return found
 
     def _lookup_node(self, node_id: str) -> GraphNode | None:
         """A node lives *inside* a :class:`GraphRecord` carrier, so it needs its own unwrap."""
@@ -434,6 +517,9 @@ class _Scan:
         self.mentions: _Kept[EntityMention] = _Kept()
         self.nodes: _Kept[GraphNode] = _Kept()
         self.edges: _Kept[GraphEdge] = _Kept()
+        #: Did the scan stop before reading every checkpoint (every map already full)? Then a
+        #: miss in *any* map may be a record in a file the scan never opened, not an absence.
+        self.stopped_early = False
 
     @property
     def _maps(self) -> tuple[_Kept[Any], ...]:

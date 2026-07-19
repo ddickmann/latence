@@ -744,9 +744,18 @@ def render_graph(
 
 
 def render_entity(
-    run_id: str, entity: B.EntityView, edges: list[B.EdgeView], *, page: int = 1
+    run_id: str,
+    entity: B.EntityView,
+    edges: list[B.EdgeView],
+    *,
+    page: int = 1,
+    truncated: bool = False,
 ) -> str:
-    """One entity, and every edge touching it — each with its Evidence."""
+    """One entity, and every edge touching it — each with its Evidence.
+
+    Carries the same ``Partial view`` notice as the graph list (audit R5): this page's relations
+    come from the same capped scan, so a truncated run must not be shown here as a whole one.
+    """
     shown_edges, page, edge_pages = _paginate(edges, page)
     parts = [
         _run_head(
@@ -755,6 +764,7 @@ def render_entity(
             "One canonical entity and every relation that touches it.",
             "graph",
         ),
+        _truncation_notice(truncated),
         '<div class="card">'
         + _table(
             ["Measure", "Value"],

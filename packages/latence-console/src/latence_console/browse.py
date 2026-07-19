@@ -37,7 +37,13 @@ from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 
 if TYPE_CHECKING:
-    from latence_core.contracts import GraphEdge, GraphNode, PageMap, RiskMarker
+    from latence_core.contracts import (
+        EntityMention,
+        GraphEdge,
+        GraphNode,
+        PageMap,
+        RiskMarker,
+    )
 
     from latence_console.artifacts import RunArtifacts
 
@@ -428,20 +434,27 @@ def _entity_view(node: GraphNode, degree: int) -> EntityView:
 def edge_views(artifacts: RunArtifacts, node_id: str | None = None) -> list[EdgeView]:
     """Every edge (optionally only those touching ``node_id``), each with its Evidence."""
     names = {node.node_id: node.canonical_name for node in artifacts.graph_nodes()}
-    views: list[EdgeView] = []
-    for edge in artifacts.graph_edges():
-        if node_id is not None and node_id not in (edge.source_node_id, edge.target_node_id):
-            continue
-        views.append(_edge_view(artifacts, edge, names))
-    return views
+    shown = [
+        edge
+        for edge in artifacts.graph_edges()
+        if node_id is None or node_id in (edge.source_node_id, edge.target_node_id)
+    ]
+    # Resolve every cited mention in one read (audit R5). The KG views always scan first, and a
+    # capped scan cannot answer for a mention it dropped; resolving those one at a time would be
+    # one file pass per Evidence entry, so they are settled as a batch.
+    resolved = artifacts.mentions_by_id(
+        mention_id for edge in shown for mention_id in edge.evidence.mention_ids
+    )
+    return [_edge_view(edge, names, resolved) for edge in shown]
 
 
 def _edge_view(
-    artifacts: RunArtifacts, edge: GraphEdge, names: dict[str, str]
+    edge: GraphEdge, names: dict[str, str], resolved: dict[str, EntityMention]
 ) -> EdgeView:
     evidence = edge.evidence
     mentions = [
-        _mention_evidence(artifacts, mention_id) for mention_id in evidence.mention_ids
+        _mention_evidence(mention_id, resolved.get(mention_id))
+        for mention_id in evidence.mention_ids
     ]
     return EdgeView(
         edge_id=edge.edge_id,
@@ -459,14 +472,16 @@ def _edge_view(
     )
 
 
-def _mention_evidence(artifacts: RunArtifacts, mention_id: str) -> MentionEvidence:
+def _mention_evidence(mention_id: str, mention: EntityMention | None) -> MentionEvidence:
     """A cited mention resolved to text + offsets, or an honest 'not checkpointed' row.
 
     An Evidence entry is never dropped for being unresolvable: the point of showing Evidence
     is that the reader learns what the inference rests on, including when the run no longer
-    holds the record it cites.
+    holds the record it cites. ``mention`` comes from
+    :meth:`~latence_console.artifacts.RunArtifacts.mentions_by_id`, which reads the checkpoints
+    rather than a capped scan — so "not checkpointed" here means the run really did not write it
+    (audit R5).
     """
-    mention = artifacts.mention(mention_id)
     if mention is None:
         return MentionEvidence(
             mention_id=mention_id,

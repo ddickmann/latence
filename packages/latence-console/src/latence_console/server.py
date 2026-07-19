@@ -200,6 +200,7 @@ class ConsoleApp:
                 browse.entity_view(artifacts, node),
                 browse.edge_views(artifacts, node.node_id),
                 page=render.parse_page(_param(query, "page")),
+                truncated=artifacts.truncated(),
             ),
         )
 
