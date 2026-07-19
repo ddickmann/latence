@@ -302,7 +302,20 @@ def _redaction_disposition(chunk: ChunkRecord, page_map: PageMap | None) -> Reda
         )
 
     applied = chunk.masked_content is not None
-    if chunk.redaction_disabled_for_sensitive:
+    # The H-C1 §4 no-op flag and a non-empty span list are NOT mutually exclusive since
+    # ADR-0044: the universal financial-PII floor runs wherever redaction runs, whatever the
+    # policy allow-list enables. Reporting "the control was OFF ... an empty PII list" above a
+    # table of spans the floor detected and masked would be a false statement about a redaction
+    # control on the console's own PII-audit surface, so the two states are reported apart.
+    if chunk.redaction_disabled_for_sensitive and spans:
+        summary = (
+            f"This chunk is classified {chunk.classification.sensitivity} and the CONFIGURED "
+            "redaction policy ran no detectors, but the universal financial-PII floor did: it "
+            f"detected and handled the {len(spans)} span(s) below, and the corpus exports the "
+            "masked text. Only the floor's scope was covered — this list is not a clean bill "
+            "of health for any other PII type."
+        )
+    elif chunk.redaction_disabled_for_sensitive:
         summary = (
             f"This chunk is classified {chunk.classification.sensitivity} but the redaction "
             "policy ran no detectors. An empty PII list here means the control was OFF — "

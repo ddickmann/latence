@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from latence_console import browse
-from latence_console.render import external_references
+from latence_console.render import external_references, render_chunk
 from latence_console.server import ConsoleApp
 from latence_core.contracts import ChunkRecord, Classification, PIISpan, RedactionAction
 from latence_core.storage import Storage
@@ -221,6 +221,69 @@ def test_a_chunk_whose_redaction_control_was_off_says_so(app: ConsoleApp) -> Non
     page = _page(app, _chunk_url(app, SENSITIVE_CHUNK_ID))
     assert "the control was OFF" in page
     assert "confidential" in page
+
+
+def _floor_masked_sensitive_chunk() -> ChunkRecord:
+    """A confidential chunk whose POLICY ran no detectors but whose ADR-0044 floor fired.
+
+    The real shape produced by ``latence run`` with ``policies: {confidential: {action: mask,
+    types: [passport_number]}}`` over a document containing an IBAN: the allow-list intersects
+    no enabled detector (so the H-C1 §4 no-op flag is set) yet the universal financial-PII
+    floor detected and masked the IBAN regardless of backend.
+    """
+    content = "Please wire the retainer to IBAN DE44500105175407324931 before the deadline."
+    return ChunkRecord(
+        record_id="sha256:" + "f" * 58,
+        provenance=_provenance(page_start=2, page_end=2, char_start=0, char_end=len(content)),
+        classification=Classification(language="en", category="report", sensitivity="confidential"),
+        document_record_id=DOC_ID,
+        index=1,
+        content=content,
+        token_count=14,
+        page_map=_PAGE_MAP,
+        masked_content="Please wire the retainer to IBAN [IBAN] before the deadline.",
+        pii_spans=[
+            PIISpan(
+                pii_type="iban",
+                detector="floor:iban",
+                char_start=33,
+                char_end=55,
+                action=RedactionAction.MASK,
+                placeholder="[IBAN]",
+                confidence=1.0,
+            )
+        ],
+        redaction_disabled_for_sensitive=True,
+    )
+
+
+def test_a_floor_masked_chunk_is_never_reported_as_a_control_that_was_off() -> None:
+    """R3-console_readonly-11: "the control was OFF" above the IBAN the floor masked.
+
+    ``redaction_disabled_for_sensitive`` and a non-empty ``pii_spans`` are not mutually
+    exclusive since ADR-0044 — the universal financial-PII floor runs wherever redaction runs.
+    The inspector took the no-op branch unconditionally, so the page told an auditor the PII
+    control was OFF and warned about an "empty PII list" directly above a table listing the
+    masked IBAN: a false statement about a redaction control on the PII-audit surface.
+    """
+    chunk = _floor_masked_sensitive_chunk()
+    inspection = browse.inspect_chunk(_NoDocuments(), chunk)
+
+    # The span the floor handled is really there — the premise of the false claim.
+    assert [s.pii_type for s in inspection.redaction.spans] == ["iban"]
+    assert inspection.redaction.spans[0].detector == "floor:iban"
+
+    summary = inspection.redaction.summary
+    assert "the control was OFF" not in summary
+    assert "empty PII list" not in summary
+    # It still says the CONFIGURED policy ran nothing, and that the floor is all that covered it.
+    assert "ran no detectors" in summary
+    assert "handled the 1 span(s)" in summary
+
+    # And the rendered page an auditor actually reads carries the same truth.
+    page = render_chunk(RUN, inspection)
+    assert "the control was OFF" not in page
+    assert "floor:iban" in page
 
 
 def test_a_run_without_redaction_reports_that_rather_than_inventing_a_disposition(
