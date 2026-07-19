@@ -117,7 +117,14 @@ SOTA_DEVICE = "cuda"
 #     whole citation-like graph an enterprise corpus builds, not just local degree.
 #   * BM25 (ADR-0049, #164) — the term-statistics artifact (`bm25-stats.json` +
 #     `bm25-postings.parquet`) the query-side sparse rescorer runs on. `tokenizer.regex` is the
-#     documented reference tokenizer (lowercase alphanumeric runs), matching the retrieval tooling.
+#     documented reference tokenizer (lowercase UNICODE alphanumeric runs), matching the retrieval
+#     tooling's query-side term unit exactly — the agreement the sparse leg depends on.
+#     Scope, stated honestly because this profile is the MULTILINGUAL stack (it emits a
+#     multilingual embedder and a multilingual PII model): the reference tokenizer keeps accented
+#     and non-Latin words WHOLE, but it is not a word SEGMENTER — a script written without word
+#     spacing (Chinese/Japanese/Thai) yields one term per whitespace-delimited run. A corpus in
+#     those scripts should plug its own segmenter in behind the `Tokenizer` seam; the dense leg
+#     (Granite r2, multilingual) is unaffected either way.
 SOTA_GRAPH_FEATURES_PROVIDER = "graph_features.pagerank"
 SOTA_BM25_TOKENIZER = "tokenizer.regex"
 
@@ -464,8 +471,12 @@ def _sota_bm25_block() -> dict[str, object]:
 
     Materializes the term-statistics artifact (``bm25-stats.json`` + ``bm25-postings.parquet``)
     alongside the corpus Export — the index-time sparse signal the query-side BM25 rescorer runs on.
-    ``tokenizer.regex`` is the reference tokenizer (lowercase alphanumeric runs) the retrieval
-    tooling documents. Deterministic, CPU-only, and additive (absent ⇒ no files, byte-identical).
+    ``tokenizer.regex`` is the reference tokenizer (lowercase *Unicode* alphanumeric runs) the
+    retrieval tooling documents, and it is the same term unit the query-side rescorer applies — so
+    accented and non-Latin terms are indexed and matched, not dropped. It is not a word segmenter:
+    an unspaced script (Chinese/Japanese/Thai) yields one term per whitespace-delimited run, and
+    such a corpus should plug its own segmenter in behind the Tokenizer seam.
+    Deterministic, CPU-only, and additive (absent ⇒ no files, byte-identical).
     """
     return {"provider": SOTA_BM25_TOKENIZER, "config": {}}
 

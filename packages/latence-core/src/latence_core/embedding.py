@@ -22,7 +22,11 @@ from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-_TOKEN = re.compile(r"[A-Za-z0-9]+")
+# Unicode alphanumeric runs (underscore excluded), identical to the BM25 reference tokenizer's
+# `_WORD` — `latence_core.bm25` documents the lexical statistics as lining up with this signal, so
+# the two patterns must stay the same. ASCII-identical to the previous `[A-Za-z0-9]+`, so existing
+# vectors are byte-identical; non-ASCII words are now one token instead of single-letter shrapnel.
+_TOKEN = re.compile(r"[^\W_]+")
 _DEFAULT_DIMENSION = 64
 
 

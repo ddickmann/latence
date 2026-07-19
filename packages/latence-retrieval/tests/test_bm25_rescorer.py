@@ -275,3 +275,56 @@ def test_bm25_never_ranks_a_term_bearing_doc_below_a_non_bearing_one_under_suppl
     by_id = {c.id: c.score for c in ranked}
     assert by_id["has"] > 0.0
     assert by_id["hasnot"] == 0.0
+
+
+# --- multilingual queries (R5-wizard_profile-13) -----------------------------------------------
+
+
+def test_non_ascii_query_is_not_a_dead_no_op() -> None:
+    """A Cyrillic/CJK query must actually rescore — pre-fix EVERY candidate scored exactly 0.0.
+
+    The index-side tokenizer the blessed `enterprise-sota` stack emits and this rescorer share one
+    reference tokenisation. While it was ASCII-only (`[a-z0-9]+`) a non-Latin query tokenised to
+    `[]`, so the BM25 sum was empty for every candidate: the sparse leg of the hybrid fuser was a
+    permanent no-op for exactly the multilingual corpora that profile targets.
+    """
+    rescorer = Bm25Rescorer()
+    candidates = [
+        Candidate(id="miss", score=0.9, text="Export control classification code"),
+        Candidate(id="hit", score=0.1, text="Таможенный кодекс и классификация товаров"),
+    ]
+    ranked = rescorer.process("таможенный кодекс", candidates)
+    assert _ids(ranked) == ["hit", "miss"]
+    assert ranked[0].score > 0.0
+    assert ranked[1].score == 0.0
+
+
+def test_accented_terms_are_matched_whole_not_shattered() -> None:
+    """'für'/'Größe' must be single terms — pre-fix they shattered into 'f','r','gr','e'.
+
+    The shrapnel both lost the real term and matched unrelated documents that merely contained the
+    stray letters, so the ranking inverted.
+    """
+    rescorer = Bm25Rescorer()
+    candidates = [
+        Candidate(id="junk", score=0.0, text="e f r m gr ller"),
+        Candidate(id="german", score=0.0, text="Müller GmbH Ausfuhr für Größe"),
+    ]
+    ranked = rescorer.process("für Größe Müller", candidates)
+    assert _ids(ranked) == ["german", "junk"]
+    assert ranked[0].score > 0.0
+    assert ranked[1].score == 0.0
+
+
+def test_ascii_tokenisation_is_unchanged() -> None:
+    """The ASCII term unit is byte-identical to the pre-fix behaviour (punctuation still drops)."""
+    from latence_retrieval.bm25 import _tokenize
+
+    assert _tokenize("Alpha, BETA alpha! v2 foo_bar") == [
+        "alpha",
+        "beta",
+        "alpha",
+        "v2",
+        "foo",
+        "bar",
+    ]

@@ -951,8 +951,11 @@ class Tokenizer(Protocol):
 
     Two in-core reference adapters ship behind it (:mod:`latence_core.bm25`), and they are
     genuinely different tokenisations (not a clone + a rename — the anti-false-green bar for a real
-    seam): ``tokenizer.regex`` folds to lowercase alphanumeric runs (punctuation is a boundary and
-    is dropped, matching the dense/sparse hashing references), while ``tokenizer.whitespace`` splits
+    seam): ``tokenizer.regex`` folds to lowercase *Unicode* alphanumeric runs (punctuation and the
+    underscore are boundaries and are dropped, matching the dense/sparse hashing references — so
+    ``Müller`` and ``Таможенный`` are whole terms, though an unspaced script like Chinese yields one
+    term per whitespace run: the reference is Unicode-aware, not a word segmenter, and a corpus that
+    needs segmentation plugs it in HERE), while ``tokenizer.whitespace`` splits
     only on whitespace and keeps punctuation attached to the token (so ``"foo,"`` and ``"foo"`` are
     distinct terms). A corpus that wants a store's exact analyzer plugs its own Tokenizer in behind
     this same seam. Both references are deterministic, so the emitted BM25 artifact is
