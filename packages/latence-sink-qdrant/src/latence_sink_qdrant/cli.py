@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from latence_sink_qdrant.errors import SinkError
+from latence_sink_qdrant.errors import SinkConfigError, SinkError
 from latence_sink_qdrant.sink import QdrantSink
 
 _CONNECTION_FLAGS = ("url", "host", "port", "api_key", "timeout")
@@ -93,16 +93,35 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 
 
 def _load_config_file(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    if path.suffix in {".yaml", ".yml"}:
-        import yaml
+    """Read one YAML/JSON config block — every way it can fail is a :class:`SinkConfigError`.
 
-        loaded = yaml.safe_load(text) or {}
-    else:
-        loaded = json.loads(text) if text.strip() else {}
+    A missing file and a malformed one are operator typos, not sink faults, and ADR-0034 says the
+    operator sees a typed message (exit ``2``), never ``FileNotFoundError`` /
+    ``yaml.parser.ParserError`` as a traceback with absolute paths. The parser's own text is kept
+    as the *reason* and chained as ``__cause__``, so nothing is swallowed.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"Config file {str(path)!r} could not be read: {exc.strerror or exc}."
+        raise SinkConfigError(msg) from exc
+
+    is_yaml = path.suffix in {".yaml", ".yml"}
+    kind = "YAML" if is_yaml else "JSON"
+    try:
+        if is_yaml:
+            import yaml  # pyyaml arrives with latence-core, so this import cannot be the fault
+
+            loaded = yaml.safe_load(text) or {}
+        else:
+            loaded = json.loads(text) if text.strip() else {}
+    except Exception as exc:  # noqa: BLE001 - normalise ANY parser fault into the typed error
+        msg = f"Config file {str(path)!r} is not valid {kind}: {exc}"
+        raise SinkConfigError(msg) from exc
+
     if not isinstance(loaded, dict):
         msg = f"Config file {str(path)!r} must contain a mapping of sink config keys."
-        raise SinkError(msg)
+        raise SinkConfigError(msg)
     return dict(loaded)
 
 

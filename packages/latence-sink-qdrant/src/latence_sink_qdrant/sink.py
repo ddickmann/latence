@@ -745,14 +745,23 @@ class QdrantSink:
 
     @staticmethod
     def _import_qdrant() -> tuple[Any, Any]:
+        """The real driver, imported lazily — or a **typed** error naming the extra to install.
+
+        ``qdrant-client`` is an optional extra (ADR-0016) while the ``latence-sink-qdrant`` console
+        script ships with the base install, so "the driver is not installed" is this package's most
+        likely first-run failure. It surfaces as a :class:`SinkConfigError` — the one named type
+        every caller (and :func:`latence_sink_qdrant.cli.main`, which exits ``2`` on it) already
+        catches — never as a bare ``ImportError`` traceback at the operator (ADR-0034). The native
+        cause is chained, so a debugger still sees which import failed.
+        """
         try:
             from qdrant_client import QdrantClient, models
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        except ImportError as exc:
             msg = (
                 "The 'qdrant-client' package is required to load into a live Qdrant. Install it "
                 "with: pip install 'latence-sink-qdrant[client]'"
             )
-            raise ImportError(msg) from exc
+            raise SinkConfigError(msg) from exc
         return QdrantClient, models
 
 

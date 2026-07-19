@@ -33,6 +33,12 @@ class SinkConfigError(SinkError, ValueError):
     so a typo in a config file fails in the first second of the command, not after a 40-minute
     upload. It is a :class:`ValueError` as well, matching the framework's convention that a caller
     config mistake stays a ``ValueError`` (only *runtime* faults get their own hierarchy).
+
+    It also carries the two *wiring* faults that are not a config **value** but are still the
+    operator's environment rather than the store's behaviour: an unreadable/malformed ``--config``
+    file, and the optional ``qdrant-client`` extra not being installed
+    (:meth:`~latence_sink_qdrant.sink.QdrantSink._import_qdrant`). Both would otherwise reach the
+    operator as a raw native traceback, which ADR-0034 forbids.
     """
 
 

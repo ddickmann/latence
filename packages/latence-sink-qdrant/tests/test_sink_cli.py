@@ -12,6 +12,7 @@ Exit codes are part of the contract:
 
 from __future__ import annotations
 
+import builtins
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from latence_core.contracts import ChunkRecord, Classification, Provenance
 from latence_core.stages.export import JsonlParquetExport
 from latence_core.storage import Storage
 from latence_sink_qdrant import cli
+from latence_sink_qdrant.errors import SinkError
 from latence_sink_qdrant.sink import QdrantSink
 from latence_sink_qdrant.testing import FakeQdrantClient
 
@@ -182,3 +184,91 @@ def test_a_missing_collection_is_a_clean_error_not_a_traceback(
 def test_the_parser_requires_a_subcommand() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args([])
+
+
+def test_a_missing_qdrant_client_extra_exits_two_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The likeliest first-run failure: the console script ships in the BASE install, the driver
+    is the optional ``[client]`` extra. It must surface as the documented typed exit 2 with the
+    install hint — never as a native ``ImportError`` traceback printing absolute paths (ADR-0034).
+    """
+    real_import = builtins.__import__
+
+    def _no_qdrant(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "qdrant_client" or name.startswith("qdrant_client."):
+            msg = "No module named 'qdrant_client'"
+            raise ImportError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_qdrant)
+
+    code = cli.main(
+        ["verify-absent", "doc-7#chunk-0", "--collection", "corpus", "--url", "http://localhost:6333"]
+    )
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("error: ")
+    assert "latence-sink-qdrant[client]" in err
+    assert "Traceback" not in err
+
+
+def test_import_guard_raises_a_typed_sink_error_for_library_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The typed contract errors.py claims holds for every caller, not only the CLI."""
+    real_import = builtins.__import__
+
+    def _no_qdrant(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "qdrant_client" or name.startswith("qdrant_client."):
+            msg = "No module named 'qdrant_client'"
+            raise ImportError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_qdrant)
+
+    with pytest.raises(SinkError) as excinfo:
+        QdrantSink._import_qdrant()
+
+    assert "latence-sink-qdrant[client]" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ImportError)
+
+
+def test_a_missing_config_file_exits_two_not_a_traceback(
+    tmp_path: Path, store: FakeQdrantClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = cli.main(["verify-absent", "c1", "--config", str(tmp_path / "nope.yaml")])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("error: ")
+    assert "nope.yaml" in err
+
+
+def test_a_malformed_config_file_exits_two_not_a_traceback(
+    tmp_path: Path, store: FakeQdrantClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("a: [1,\n  b: {\n", encoding="utf-8")
+
+    code = cli.main(["verify-absent", "c1", "--config", str(bad)])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("error: ")
+    assert "bad.yaml" in err
+
+
+def test_a_malformed_json_config_file_exits_two_not_a_traceback(
+    tmp_path: Path, store: FakeQdrantClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+
+    code = cli.main(["verify-absent", "c1", "--config", str(bad)])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("error: ")
+    assert "bad.json" in err
