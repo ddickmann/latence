@@ -58,7 +58,9 @@ from typing import TYPE_CHECKING, Any
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.providers.adapter import AdapterBase
+from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
+    ensure_gliner2_on_cuda,
     is_compile_backend_failure,
     load_gliner2_optimized,
     neutralize_torch_jit,
@@ -353,6 +355,17 @@ class Gliner2PIIRedactor(AdapterBase):
                 self._config,
                 provider_name=self.provider_name,
             )
+        # W9-scaling: ``load_gliner2_optimized`` uses ``device`` ONLY to resolve the quantize/
+        # compile knobs — it performs NO placement. So when a GPU is present, ensure the fp16 model
+        # actually on cuda and LOG its device: the defence against the #191 fp16-eager GPU-idle hang
+        # (a fp16-converted model that silently stayed on CPU → a CPU-bound spin at 0% GPU, correct
+        # output, no warning). Best-effort + guarded (never crashes); a model already placed
+        # correctly makes the move a harmless no-op. Mirrors the twin fused_entity_relation.gliner2.
+        ensure_gliner2_on_cuda(
+            self._model,
+            cuda=cuda_available(),
+            provider_name=self.provider_name,
+        )
         # #192: the loaded object must expose the batched-entity API this Provider drives. Checked
         # at LOAD (not at the first flush) so an API mismatch is a typed, actionable ProviderError
         # up front — the field failure was this surface raising a raw native AttributeError.
@@ -385,6 +398,13 @@ class Gliner2PIIRedactor(AdapterBase):
                 cfg,
                 provider_name=self.provider_name,
             )
+        # Keep the uncompiled reload on cuda too (W9-scaling) — this model serves the REST of the
+        # run, so skipping placement here would leave it fp16-on-CPU. Placement is idempotent.
+        ensure_gliner2_on_cuda(
+            self._model,
+            cuda=cuda_available(),
+            provider_name=self.provider_name,
+        )
         return self._model
 
     def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:

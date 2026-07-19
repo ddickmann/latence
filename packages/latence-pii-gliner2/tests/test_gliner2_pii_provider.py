@@ -929,3 +929,109 @@ def test_version_gate_runs_before_any_model_load(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(ProviderError):
         list(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)]))
     assert loaded == []
+
+
+# ---------------------------------------------------------------------------
+# R5 (audit) — cuda placement. The #191 fp16-eager GPU-idle shape: a quantize=True (fp16) model
+# that silently stays on CPU is "pathologically slow and CPU-bound" (ensure_gliner2_on_cuda's own
+# docstring). ``load_gliner2_optimized`` uses ``device`` ONLY to resolve the quantize/compile knobs
+# — it performs NO placement — so a Provider that omits the ``ensure_gliner2_on_cuda`` seam runs
+# fp16 eager on CPU with the GPU at 0%, correct output, and no warning. The twin
+# ``fused_entity_relation.gliner2`` calls the seam at BOTH load sites; #197 made THIS Provider the
+# wizard's blessed default redactor in both profiles.
+# ---------------------------------------------------------------------------
+
+
+class _PlacingGLiNER2(_FakeGLiNER2):
+    """Records ``.to(target)`` calls + exposes a ``device`` so cuda placement is observable."""
+
+    to_calls: list[str] = []
+    device: str = "cpu"
+
+    def to(self, target: str) -> _PlacingGLiNER2:
+        type(self).to_calls.append(target)
+        type(self).device = target
+        return self
+
+
+@pytest.fixture()
+def placing_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_PlacingGLiNER2]:
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_PlacingGLiNER2, _PINNED_GLINER2)
+    )
+    _PlacingGLiNER2.entities = []
+    _PlacingGLiNER2.per_text = None
+    _PlacingGLiNER2.raise_on_extract = False
+    _PlacingGLiNER2.last_kwargs = {}
+    _PlacingGLiNER2.last_max_len = None
+    _PlacingGLiNER2.raise_on_optimized_load = False
+    _PlacingGLiNER2.compiled_forward_raises = False
+    _PlacingGLiNER2.to_calls = []
+    _PlacingGLiNER2.device = "cpu"
+    return _PlacingGLiNER2
+
+
+def test_fp16_model_moved_to_cuda_when_gpu_present(
+    placing_gliner2: type[_PlacingGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5: when a GPU is present the (fp16) redactor model is explicitly moved to cuda.
+
+    A Provider that trusted ``from_pretrained``/``load_gliner2_optimized`` to place it — and left
+    the fp16 model on CPU — FAILS here with ``to_calls == []``.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    a_start = _TEXT.index("Alice")
+    placing_gliner2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95}
+    ]
+    provider = Gliner2PIIRedactor({**_config(), "device": "cuda"})
+    rec = next(iter(provider.redact([_chunk(_TEXT)])))
+    # The knobs that make the CPU-resident model pathological were in fact applied (fp16).
+    assert placing_gliner2.last_kwargs.get("quantize") is True
+    # …and the model is on cuda, so fp16 lands where fp16 belongs.
+    assert placing_gliner2.to_calls == ["cuda"]
+    assert placing_gliner2.device == "cuda"
+    # Placement is throughput-only: the redaction output is unchanged.
+    assert rec.masked_content is not None
+    assert "Alice" not in rec.masked_content
+
+
+def test_no_cuda_no_move(
+    placing_gliner2: type[_PlacingGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On a CPU-only host the model is NOT moved — placement is a cuda-only concern (off-by-default
+    # is byte-identical), and masking is unaffected.
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    a_start = _TEXT.index("Alice")
+    placing_gliner2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95}
+    ]
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)])))
+    assert placing_gliner2.to_calls == []
+    assert placing_gliner2.device == "cpu"
+    assert rec.masked_content is not None
+    assert "Alice" not in rec.masked_content
+
+
+def test_uncompiled_reload_also_placed_on_cuda(
+    placing_gliner2: type[_PlacingGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5: the compile-fault reload path is placed on cuda too.
+
+    ``_reload_uncompiled`` re-enters ``load_gliner2_optimized`` (which never places), so a fix that
+    only patched ``_load_model`` would leave the post-fallback model — the one that serves the REST
+    of the run — fp16 on CPU. Two loads ⇒ two placements.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    placing_gliner2.compiled_forward_raises = True
+    a_start = _TEXT.index("Alice")
+    placing_gliner2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95}
+    ]
+    provider = Gliner2PIIRedactor({**_config(), "quantize": True, "compile": True})
+    rec = next(iter(provider.redact([_chunk(_TEXT)])))
+    assert provider._compile_disabled is True
+    assert placing_gliner2.last_kwargs.get("compile") is False  # the reload happened
+    assert placing_gliner2.to_calls == ["cuda", "cuda"]  # initial load + uncompiled reload
+    assert rec.masked_content is not None
+    assert "Alice" not in rec.masked_content
