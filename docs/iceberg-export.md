@@ -53,6 +53,14 @@ a single record — so a typo in the catalog URL never surfaces after a long run
   `content`, `media_type` — plus exactly whichever optional signal columns this Export was
   configured to write (`embedding`, `sparse_indices`/`sparse_values`, `fde_embedding`, the W13
   context columns). There is no second, drifting schema definition.
+* **Schema drift against an existing table is refused, in both directions.** If the table
+  already exists and this run's columns differ from it — a signal column newly wired *or*
+  newly unwired, or a second, differently-configured Export writing the same table — the run
+  fails with a `ProviderError` naming the differing columns and the table is left untouched.
+  This is not symmetry for its own sake: Iceberg's `add_files` rejects an *extra* column but
+  silently back-fills a *missing* one with NULLs, so without this check an unwired embedder
+  would quietly NULL out the governed table's vectors (in `mode: overwrite`, all of them)
+  while the schema still advertised the column (ADR-0034 — no silent errors).
 * **The version stamp matches the Parquet export.** Both the table properties and every
   snapshot summary carry `latence.contract.schema_version` (the contract version this build
   emits — the same constant the Parquet `schema_version` column carries per row) and

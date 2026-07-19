@@ -275,8 +275,9 @@ class IcebergCorpusTable:
         ``record_id`` / ``schema_version`` / ``provenance`` / ``classification`` / ``content`` /
         ``media_type`` spine, plus exactly whichever optional signal columns (``embedding``,
         ``sparse_*``, ``fde_embedding``, the W13 context columns) this Export was configured to
-        write. A schema drift between an existing table and this run therefore surfaces from
-        Iceberg's own ``add_files`` validation rather than from a guess made here.
+        write. A schema drift between an existing table and this run is therefore REFUSED here, in
+        BOTH directions, by :meth:`_assert_no_drift` — Iceberg's own ``add_files`` validation only
+        catches the widening half (see that method).
 
         A catalog fault anywhere here (an unavailable server, an auth expiry, a rejected create) is
         normalised into a :class:`~latence_core.errors.ProviderError` naming the table and the
@@ -302,11 +303,14 @@ class IcebergCorpusTable:
             )
             raise ProviderError(msg) from exc
         try:
-            return catalog.load_table(self._target.identifier)
+            existing = catalog.load_table(self._target.identifier)
         except NoSuchTableError:
             pass  # Expected on the first run into a fresh catalog: create it below.
         except Exception as exc:  # noqa: BLE001 - normalise catalog failures
             raise self._table_error("loaded", exc) from exc
+        else:
+            self._assert_no_drift(existing, arrow_schema)
+            return existing
         try:
             return catalog.create_table(
                 self._target.identifier,
@@ -318,9 +322,51 @@ class IcebergCorpusTable:
         except Exception as exc:  # noqa: BLE001 - normalise catalog failures
             raise self._table_error("created", exc) from exc
         try:
-            return catalog.load_table(self._target.identifier)
+            raced = catalog.load_table(self._target.identifier)
         except Exception as exc:  # noqa: BLE001 - normalise catalog failures
             raise self._table_error("loaded after a concurrent create", exc) from exc
+        # The race winner may have been a DIFFERENTLY-CONFIGURED Export: its table is authoritative
+        # and this run must be held to it, exactly like any other pre-existing table.
+        self._assert_no_drift(raced, arrow_schema)
+        return raced
+
+    def _assert_no_drift(self, table: Any, arrow_schema: pa.Schema) -> None:
+        """Refuse a run whose columns differ from the existing table's, in EITHER direction.
+
+        ``add_files`` validates only one half of this. A run carrying an EXTRA column is rejected by
+        Iceberg ("PyArrow table contains more columns … use union_by_name"), but a run MISSING a
+        column the table declares is silently ACCEPTED and back-filled with NULLs: unwire the
+        embedder (a config edit, a second pipeline writing the same table, a delta run wired without
+        the signal) and every appended row gets ``embedding = NULL`` while the schema still
+        advertises the column — in ``mode: overwrite`` the whole governed table's vectors become
+        NULL, with exit 0 and no warning. That is a silent error (ADR-0034) and a table that no
+        longer mirrors the consumer contract (#184), so both directions are refused here, BEFORE the
+        transaction, leaving the existing table untouched.
+
+        Compared on column NAMES: that is the contract surface the Export controls (which optional
+        signal columns it writes), and the only drift ``add_files`` fails to catch. Type-level drift
+        stays with Iceberg's own validation, which does catch it.
+        """
+        table_columns = [field.name for field in table.schema().fields]
+        run_columns = list(arrow_schema.names)
+        if table_columns == run_columns:
+            return
+        missing = [name for name in table_columns if name not in run_columns]
+        unexpected = [name for name in run_columns if name not in table_columns]
+        detail = []
+        if missing:
+            detail.append(f"this run does not write {', '.join(missing)}")
+        if unexpected:
+            detail.append(f"this run writes {', '.join(unexpected)}, which the table does not have")
+        if not detail:  # Same names, different order — still not the documented column-for-column.
+            detail.append(f"column order differs: table {table_columns}, run {run_columns}")
+        msg = (
+            f"Iceberg table {'.'.join(self._target.identifier)!r} at {self._target.uri!r} has a "
+            f"different schema than this Export run writes ({'; '.join(detail)}). Registering it "
+            "would silently NULL-fill or reject columns, so the table is left untouched. Configure "
+            "this Export with the same signal columns as the table, or target a different table."
+        )
+        raise ProviderError(msg)
 
     def _table_error(self, verb: str, exc: Exception) -> ProviderError:
         """The one typed error shape for every table-resolution failure (ADR-0034)."""

@@ -291,3 +291,49 @@ def test_a_lost_create_race_reloads_the_table_instead_of_failing(tmp_path: Path)
         rows = _scan(uri)
 
     assert [row["record_id"] for row in rows] == ["c1"]
+
+
+def test_a_run_that_drops_a_signal_column_is_refused_not_null_backfilled(tmp_path: Path) -> None:
+    """Schema drift in the NARROWING direction must fail loudly, not NULL out the table.
+
+    Run 1 writes ``embedding``; run 2 has the embedder unwired (a config edit, a second pipeline
+    writing the same table, a delta run missing the signal). Pre-fix, ``tx.add_files`` accepted the
+    narrower Parquet and back-filled the missing column with NULLs — in ``overwrite`` mode the whole
+    governed table's ``embedding`` column silently became NULL while the schema still advertised it,
+    with exit 0 and no warning (ADR-0034: no silent errors).
+    """
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        config = _iceberg_config(uri, mode="overwrite")
+        config["embedder"] = {"provider": "embedding.hashing", "config": {"dimension": 8}}
+        records = [_chunk("alpha", "c1"), _chunk("beta", "c2")]
+        JsonlParquetExport(config).export(records, Storage(), str(tmp_path / "r1"))
+        assert all(row["embedding"] is not None for row in _scan(uri))
+
+        narrowed = _iceberg_config(uri, mode="overwrite")  # same table, embedder unwired
+        with pytest.raises(ProviderError) as caught:
+            JsonlParquetExport(narrowed).export(records, Storage(), str(tmp_path / "r2"))
+
+        message = str(caught.value)
+        assert "embedding" in message
+        assert _TABLE in message
+        # The governed table is untouched: the previous run's vectors are still there.
+        rows = _scan(uri)
+        assert [row["record_id"] for row in rows] == ["c1", "c2"]
+        assert all(row["embedding"] is not None for row in rows)
+        # ADR-0017: the deliverable itself was still written — the optional table is what refused.
+        assert (tmp_path / "r2" / "records.parquet").exists()
+
+
+def test_a_run_that_adds_a_signal_column_is_refused_with_a_typed_error(tmp_path: Path) -> None:
+    """The mirror direction: widening is refused too, and by OUR typed error, not pyiceberg's."""
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        records = [_chunk("alpha", "c1")]
+        JsonlParquetExport(_iceberg_config(uri)).export(records, Storage(), str(tmp_path / "r1"))
+
+        widened = _iceberg_config(uri)
+        widened["embedder"] = {"provider": "embedding.hashing", "config": {"dimension": 8}}
+        with pytest.raises(ProviderError) as caught:
+            JsonlParquetExport(widened).export(records, Storage(), str(tmp_path / "r2"))
+
+        assert "embedding" in str(caught.value)
+        assert [row["record_id"] for row in _scan(uri)] == ["c1"]
