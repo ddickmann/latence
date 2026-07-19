@@ -147,6 +147,16 @@ is a defect, not a preference. The decision, and why:
   `stacks/schema-induction.yaml` — are unchanged and still valid. This is a decision about what the
   **guided setup blesses**, so the enterprise-sota profile now differs from `gpu-sota-glinker.yaml`
   on exactly this one Stage (a deliberate, recorded delta, noted in `_build_sota_stages`).
+* **The perf knobs must match the blessed extractor (audit R4).** Blessing the gliner2 engine for
+  `redact` also inherits its perf seam, and that seam's generic `compile` default is `auto` → **True
+  on cuda** — so the emitted `device: cuda` redact stage (which carries no `compile` key, by design:
+  the Provider owns the default) silently enabled `torch.compile`. gliner2 compiles with
+  `dynamic=True` and recompile-thrashes on varied-length production chunks (pod-measured: worker at
+  ~290% CPU, GPU 0%, no progress), which is exactly why `fused_entity_relation.gliner2` forces
+  `compile=False` at construction. The redactor streams the same chunk distribution through
+  `batch_extract_entities`, so it now injects the same off-by-default (`quantize` untouched — the
+  fp16 win stays). The inference-time `_reload_uncompiled` latch does **not** cover this: the thrash
+  is silent slowness, not a `BackendCompilerFailed`. The knob stays opt-in, not removed.
 * **Licensing verified separately (ADR-0012).** `gliner2` framework **code** is Apache-2.0
   (github.com/fastino-ai/GLiNER2 LICENSE + the PyPI OSI classifier); the default checkpoint
   `fastino/GLiNER2-Guardrails-PII-Multi` **weights** are Apache-2.0 and ungated (HF model card).

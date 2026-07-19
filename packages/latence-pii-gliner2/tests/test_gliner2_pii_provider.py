@@ -721,6 +721,83 @@ def test_inference_time_compile_fault_degrades_to_uncompiled(
     assert fake_gliner2.last_kwargs.get("quantize") is True
 
 
+# --- W9-scaling (audit R4): compile is OFF by default on cuda too, like the twin extractor -------
+
+
+def test_compile_defaults_off_even_on_cuda(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 regression: compile is defaulted OFF (opt-in) EVEN on cuda — the recompile-thrash guard.
+
+    The redactor drives ``batch_extract_entities`` over the same varied-length production chunk
+    stream the twin ``fused_entity_relation.gliner2`` extractor does, and gliner2 compiles with
+    ``dynamic=True`` — pod-measured to pin the worker at ~290% CPU with the GPU at 0% and no
+    progress. The extractor forces ``compile=False`` at construction for exactly this reason; the
+    redactor must too. Pre-fix this Provider had no default of its own, so the generic
+    ``resolve_gliner2_knob`` default (``auto`` → True on cuda) turned compile ON. ``quantize`` is
+    untouched: the fp16 win still resolves True on cuda.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    cfg = {**_config(), "device": "cuda"}
+    list(Gliner2PIIRedactor(cfg).redact([_chunk("Alice waved.")]))
+    assert fake_gliner2.last_kwargs.get("quantize") is True
+    assert fake_gliner2.last_kwargs.get("compile") is False
+
+
+def test_compile_opt_in_still_enables_on_cuda(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The knob is defaulted off, not removed: an operator who explicitly asks for compile gets it.
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    cfg = {**_config(), "device": "cuda", "compile": True}
+    list(Gliner2PIIRedactor(cfg).redact([_chunk("Alice waved.")]))
+    assert fake_gliner2.last_kwargs.get("compile") is True
+
+
+@pytest.mark.parametrize("profile", ["lite", "enterprise-sota"])
+def test_wizard_blessed_redact_config_never_enables_compile(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
+) -> None:
+    """The REAL emitted config, not a hand-written dict: the blessed redact stage never compiles.
+
+    ``latence setup --profile enterprise-sota --pii`` emits the redact stage with ``device: cuda``
+    and no ``compile`` key, so on the documented GPU pod the knob resolved True and the redact Stage
+    thrashed. The ``_reload_uncompiled`` latch cannot save it — the thrash is silent slowness, not a
+    ``BackendCompilerFailed``. This drives the wizard's own output through the Provider.
+    """
+    from latence_core.pipeline import Pipeline
+    from latence_core.setup.wizard import (
+        BLESSED_REDACT_PROVIDER,
+        SetupAnswers,
+        build_stack_config,
+    )
+
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    src = tmp_path / "corpus"
+    src.mkdir()
+    (src / "a.txt").write_text("Alice waved.", encoding="utf-8")
+    text = build_stack_config(
+        SetupAnswers(
+            source=f"file://{src}",
+            storage=f"file://{tmp_path}/out",
+            parser="parser.render",
+            device="cuda",
+            pii=True,
+            extract_on="unmasked",
+            profile=profile,
+            extensions=("txt",),
+        )
+    )
+    stage = next(s for s in Pipeline.from_yaml_text(text).stages if s.name == "redact")
+    assert stage.provider == BLESSED_REDACT_PROVIDER
+    assert "compile" not in stage.config  # the wizard stays silent; the Provider owns the default
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    list(Gliner2PIIRedactor(dict(stage.config)).redact([_chunk("Alice waved.")]))
+    assert fake_gliner2.last_kwargs.get("compile") is False
+
+
 # ---------------------------------------------------------------------------
 # #192 — gliner2 version/API compatibility. The field failure: a fresh env resolved a
 # gliner2 the Provider cannot drive and the load died with a NATIVE AttributeError, which is

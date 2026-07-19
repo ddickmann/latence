@@ -109,6 +109,11 @@ class _PendingChunk:
 # an mdeberta-v3 encoder via the fastino GLiNER2 framework.
 _DEFAULT_MODEL = "fastino/GLiNER2-Guardrails-PII-Multi"
 
+# W9-scaling: torch.compile is OPT-IN for the gliner2 engine (see __init__) — gliner2's
+# ``dynamic=True`` compile recompile-thrashes on varied-length production chunks. Same default, same
+# reason, as the twin ``fused_entity_relation.gliner2`` extractor.
+_COMPILE_DEFAULT = False
+
 
 class Gliner2PIIRedactor(AdapterBase):
     """Learned PIIDetector Provider backed by the fastino GLiNER2 framework (mdeberta-v3).
@@ -146,7 +151,11 @@ class Gliner2PIIRedactor(AdapterBase):
             default ``auto`` → True on cuda / False on cpu). Pod-measured 2.83× at byte-identical
             PII. Guarded: a quantize fault degrades to a plain load, never a crash.
         compile: bool | 'auto'  — ``torch.compile`` + fused GPU kernels via the gliner2 native
-            ``compile`` kwarg (W9, default ``auto`` → True on cuda / False on cpu). Guarded like
+            ``compile`` kwarg (W9). **OPT-IN: defaulted OFF even on cuda** (W9-scaling), because
+            gliner2 compiles with ``dynamic=True`` and recompile-thrashes on varied-length
+            production chunks (pod-measured: worker at ~290% CPU, GPU 0%, no progress) — the same
+            default the twin ``fused_entity_relation.gliner2`` extractor forces. Set it explicitly
+            to enable it (worth it only for a homogeneous / uniform-length workload). Guarded like
             ``quantize``: a compile/warmup fault degrades to a plain load.
         device: str  — ``auto`` (default) / ``cpu`` / ``cuda``; routed by the device seam.
 
@@ -211,9 +220,11 @@ class Gliner2PIIRedactor(AdapterBase):
             batch=True,
             cost_per_1k=None,
             perf_note=(
-                "gliner2 native quantize (fp16) + compile (torch.compile + fused GPU kernels) on "
-                "cuda, off on cpu (W9; pod-measured 2.83× PII at byte-identical output; guarded → "
-                "plain load on any fault)"
+                "gliner2 native quantize (fp16) on cuda, off on cpu (W9; pod-measured 2.83× PII at "
+                "byte-identical output; guarded → plain load on any fault). compile "
+                "(torch.compile + fused GPU kernels) is OPT-IN, defaulted OFF even on cuda "
+                "(W9-scaling: gliner2's dynamic=True compile recompile-thrashes on varied-length "
+                "production chunks)"
             ),
         )
 
@@ -228,6 +239,19 @@ class Gliner2PIIRedactor(AdapterBase):
             raise ValueError(msg)
         # AdapterBase resolves the device seam (compute="either") against the declared profile.
         super().__init__(config)
+        # W9-scaling (audit R4): default torch.compile OFF for this Provider (opt-in only), exactly
+        # as the twin ``fused_entity_relation.gliner2`` extractor does. gliner2 compiles with
+        # ``dynamic=True``, which recompile-thrashes on the varied-length production chunks this
+        # redactor streams through ``batch_extract_entities`` — pod-measured to pin the worker at
+        # ~290% CPU with the GPU at 0% and no progress. Without this the generic
+        # ``resolve_gliner2_knob`` default (``auto`` → True on cuda) silently turned compile ON for
+        # every GPU stack the wizard emits (it emits ``device: cuda`` and no ``compile`` key), and
+        # the ``_reload_uncompiled`` latch cannot catch it: the thrash is silent slowness, not a
+        # ``BackendCompilerFailed``. ``quantize`` is untouched (the fp16 win stays on for cuda). An
+        # operator who sets ``compile`` explicitly still gets it. Injected into ``self._config`` —
+        # the single source of truth read by BOTH the eager validation below and the lazy load.
+        if "compile" not in self._config:
+            self._config["compile"] = _COMPILE_DEFAULT
         self._labels = [str(label) for label in pii_labels]
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
