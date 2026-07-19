@@ -18,15 +18,19 @@ import pytest
 from latence_console import browse
 from latence_console.render import external_references
 from latence_console.server import ConsoleApp
+from latence_core.contracts import ChunkRecord, Classification, PIISpan, RedactionAction
 from latence_core.storage import Storage
 from reports import (
+    _PAGE_MAP,
     CHUNK_ID,
     DANGLING_MENTION_ID,
+    DOC_ID,
     MASKED_CHUNK_TEXT,
     MENTION_ID,
     NODE_ORG,
     NODE_PERSON,
     SENSITIVE_CHUNK_ID,
+    _provenance,
     write_artifacts,
     write_run,
 )
@@ -138,6 +142,70 @@ def test_chunk_inspector_shows_classification_and_redaction_disposition(
     # resolves to 10–22 in the original markdown through the same offset map).
     assert "0–12" in page
     assert "10–22" in page
+
+
+def _chunk_without_offset_map(char_start: int | None) -> ChunkRecord:
+    """A chunk with PII spans but NO offset map — a third-party or pre-v11 record."""
+    return ChunkRecord(
+        record_id="sha256:" + "c" * 58,
+        provenance=_provenance(char_start=char_start, char_end=120),
+        classification=Classification(language="en", category="report", sensitivity="confidential"),
+        document_record_id=DOC_ID,
+        index=1,
+        content="Ada Lovelace signs the appendix.",
+        token_count=7,
+        page_map=_PAGE_MAP,
+        offset_map=None,
+        masked_content="[PERSON] signs the appendix.",
+        pii_spans=[
+            PIISpan(
+                pii_type="person",
+                detector="regex.person",
+                char_start=0,
+                char_end=12,
+                action=RedactionAction.MASK,
+                placeholder="[PERSON]",
+                confidence=0.9,
+            )
+        ],
+    )
+
+
+class _NoDocuments:
+    """Artifacts that hold no parsed document — the chunk's own page_map is all there is."""
+
+    def document(self, _document_id: str) -> None:
+        return None
+
+
+def test_a_pii_span_without_an_offset_map_is_shifted_by_the_chunks_document_anchor() -> None:
+    """R2-console_readonly-12: chunk-LOCAL offsets must never be shown as document offsets.
+
+    Without an offset map the framework's documented degrade is ``base_char_start + local``
+    (contracts.py, ``redaction_policy._span_for``). Reporting the raw local numbers — and
+    looking THEM up in the document page map — made the inspector contradict itself: the
+    same page reported the enclosing chunk at 91–120 on page 2 while the PII row inside it
+    claimed 0–12 on page 1 (ADR-0021/0031, Provenance is true).
+    """
+    inspection = browse.inspect_chunk(_NoDocuments(), _chunk_without_offset_map(91))
+
+    row = inspection.redaction.spans[0]
+    assert row.chunk_span == "0–12"  # the chunk-local span still reads chunk-local
+    assert row.source_span == "91–103"  # shifted by the chunk's anchor, not the raw local span
+    assert row.pages == "2"  # page 2 holds 50..120 — the local numbers would have said 1
+    # And the enclosing chunk on the very same page agrees.
+    assert inspection.resolved_span == "91–120"
+    assert inspection.resolved_pages == "2"
+
+
+def test_a_pii_span_with_no_document_anchor_at_all_reports_unknown_not_chunk_local() -> None:
+    """No offset map AND no ``provenance.char_start`` = the span cannot be placed at all."""
+    inspection = browse.inspect_chunk(_NoDocuments(), _chunk_without_offset_map(None))
+
+    row = inspection.redaction.spans[0]
+    assert row.chunk_span == "0–12"
+    assert row.source_span == "—"
+    assert row.pages == "—"
 
 
 def test_chunk_inspector_shows_the_pii_safe_text_never_the_raw_content(

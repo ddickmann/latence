@@ -271,12 +271,20 @@ def _resolved_span(chunk: ChunkRecord) -> tuple[int | None, int | None]:
 def _redaction_disposition(chunk: ChunkRecord, page_map: PageMap | None) -> RedactionDisposition:
     """What Redaction did — stated so an empty span list is never read as "clean"."""
     offsets = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
+    # A PII span's ``char_start``/``char_end`` are CHUNK-LOCAL. Without an offset map the
+    # framework's documented degrade is the ``base_char_start + local`` shift (contracts.py,
+    # and redaction_policy._span_for). Emitting the local numbers as document offsets — or
+    # looking them up in the DOCUMENT page map — would be a false Provenance claim
+    # (ADR-0021/0031), so a chunk with no document anchor at all reports "unknown" instead.
+    base = chunk.provenance.char_start
     spans: list[PIISpanView] = []
     for span in chunk.pii_spans:
         if offsets is not None:
             source_start, source_end = offsets.resolve_span(span.char_start, span.char_end)
+        elif base is not None:
+            source_start, source_end = base + span.char_start, base + span.char_end
         else:
-            source_start, source_end = span.char_start, span.char_end
+            source_start, source_end = None, None
         pages = _page_range(span.page_start, span.page_end)
         if pages == "—":
             pages = _pages_for_span(page_map, source_start, source_end)
