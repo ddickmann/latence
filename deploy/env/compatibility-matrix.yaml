@@ -375,11 +375,17 @@ failure_modes:
       bare native RuntimeError on first forward, no load-time try/except and no dynamo-fault
       predicate can see it.
     resolution: >-
-      neutralize_torch_jit() at the SHARED Provider load seam: it sets PYTORCH_JIT=0 (read by torch
-      at import, so module-import-time @torch.jit.script becomes a no-op) AND calls
-      torch.jit._state.disable() for an already-imported torch. Applied inside load_gliner2_optimized
-      and load_then_cast, so every mdeberta-backed Provider inherits it; glinker calls the same
-      function. Throughput-only degradation — output is byte-identical (issue #190).
+      One shared function, neutralize_torch_jit(), called by each Provider BEFORE its own backbone
+      import ("from gliner import GLiNER" / "from gliner2 import GLiNER2" / "from glinker import
+      ProcessorFactory") — the ordering IS the fix. That import pulls in transformers'
+      deberta_v2 modeling module, whose @torch.jit.script-decorated relative-position helpers are
+      compiled into ScriptFunctions at module-import time; afterwards neither lever can un-script
+      them (PYTORCH_JIT is read by torch only at torch import, jit._state.disable() affects only
+      future script() calls), so calling it only inside the shared loaders is TOO LATE and does not
+      fix this. The five mdeberta Providers and the glinker backend therefore each call the same
+      shared function ahead of their import; the calls inside load_then_cast /
+      load_gliner2_optimized remain as defence-in-depth, never as the whole fix. Throughput-only
+      degradation — output is byte-identical (issue #190).
     enforced_by:
       - packages/latence-core/src/latence_core/providers/perf.py
       - deploy/env/gpu-learned/stack.yaml

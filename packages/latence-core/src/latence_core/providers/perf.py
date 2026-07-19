@@ -263,9 +263,12 @@ def load_then_cast(
     cast is skipped (there is nothing to cast to) and the bare model is returned — the seam stays
     torch-free-to-import. ``maybe_compile`` still applies afterwards (guarded), independently.
 
-    W9-jit: the TorchScript JIT is neutralized (:func:`neutralize_torch_jit`) **before** the
-    load, so the mdeberta-v3 encoder this path serves never scripts its relative-position helper
-    and never reaches nvrtc on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
+    W9-jit: the TorchScript JIT is neutralized (:func:`neutralize_torch_jit`) before the load —
+    **defence-in-depth only**. By the time a gliner Provider reaches this loader it has already
+    evaluated ``from gliner import GLiNER``, which scripts transformers' deberta_v2
+    relative-position helpers at module-import time, and nothing here can un-script them. The
+    Provider's own call *ahead of that import* is the fix (ADR-0036 W9-jit); this one covers a
+    caller that arrives with the backbone not yet imported. Throughput-only, byte-identical output.
     """
     neutralize_torch_jit()
     model = loader(model_id)
@@ -521,9 +524,13 @@ def load_gliner2_optimized(
     **W9-jit — the other compiler.** ``compile``/``quantize`` only govern ``torch.compile``; the
     ``gliner2`` backbone is mdeberta-v3, which scripts its relative-position helper with
     ``@torch.jit.script`` and, on a Blackwell/CUDA-13 box, dies in nvrtc on the FIRST forward
-    (``libnvrtc-builtins.so.13.0``) — a crash no load-time guard can catch. So the TorchScript JIT
-    is neutralized (:func:`neutralize_torch_jit`) **before** the load, unconditionally, for EVERY
-    gliner2 load path (optimized or plain): throughput-only, byte-identical output.
+    (``libnvrtc-builtins.so.13.0``) — a crash no load-time guard can catch. The TorchScript JIT is
+    neutralized (:func:`neutralize_torch_jit`) here before the load, unconditionally, for EVERY
+    gliner2 load path (optimized or plain) — but that is **defence-in-depth, not the fix**: the
+    helpers are scripted when ``from gliner2 import GLiNER2`` is evaluated, one statement before
+    this loader is entered, and no lever can un-script them afterwards. The Provider's own call
+    *ahead of its backbone import* is what actually closes #190 (ADR-0036 W9-jit).
+    Throughput-only, byte-identical output.
     """
     quantize = resolve_gliner2_knob("quantize", device, config)
     compile_ = resolve_gliner2_knob("compile", device, config)

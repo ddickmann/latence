@@ -63,10 +63,12 @@ stages:
     provider: screening.content_keyword
     depends_on: [chunk]
 
-  # GLiNER2 fused extraction. Inherits the #190 JIT seam: the shared perf module neutralizes the
-  # TorchScript JIT (PYTORCH_JIT=0) before the load, so the mdeberta-v3 encoder never reaches
-  # nvrtc on CUDA 13 ("failed to open libnvrtc-builtins.so.13.0"). Nothing to configure here —
-  # that is the point of it living at the Provider seam.
+  # GLiNER2 fused extraction. Carries the #190 JIT fix: the Provider calls the shared
+  # neutralize_torch_jit() (PYTORCH_JIT=0) BEFORE it evaluates "from gliner2 import GLiNER2" —
+  # the ordering is the fix, because that import is what scripts the mdeberta-v3 encoder's
+  # relative-position helpers, which then die in nvrtc on CUDA 13 ("failed to open
+  # libnvrtc-builtins.so.13.0") on the first forward. Nothing to configure here — the fix lives in
+  # the Provider's load path, not in this file; see ADR-0036 (W9-jit).
   - name: extract
     capability: fused_entity_relation
     provider: fused_entity_relation.gliner2
