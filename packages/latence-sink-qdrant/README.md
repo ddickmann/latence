@@ -23,7 +23,7 @@ The Export — open Parquet + JSONL on object storage — **stays the source of 
 ([ADR-0017](../../docs/adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md)). A sink is
 an *additional*, optional step, never a replacement. This package is a **one-shot loader**: it holds
 no index, caches nothing, and runs no search
-([ADR-0048](../../docs/adr/0048-retrieval-tooling-is-stateless.md)). Query-time work lives in
+([ADR-0048](../../docs/adr/0048-retrieval-tooling-is-strictly-stateless.md)). Query-time work lives in
 `latence-retrieval`; a `RetrievalBackend` over the collection you just loaded is
 `latence-retrieval[backend-qdrant]`.
 

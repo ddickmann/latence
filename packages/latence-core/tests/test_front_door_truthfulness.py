@@ -20,7 +20,10 @@ Five independent falsifiers, each of which failed on the tree that introduced it
   Decision Log and the go-live runbook all said 52.
 * **Dangling cross-references.** ``docs/retrieval-tooling.md`` and ADR-0048 pointed at a
   ``docs/INTEROP.md`` that was never written. No markdown link and no backticked
-  ``docs/...md`` reference in the front-door set may point at a missing file.
+  ``docs/...md`` reference in the front-door set may point at a missing file. The same rule
+  extends past the docs site to ``CHANGELOG.md`` and every ``packages/*/README.md`` (each a
+  PyPI long_description), where two ADR-0048 links pointed at a near-miss filename that no
+  gate walked.
 * **The install story.** The README advertised a meta-package that is not publishable, and
   every ``pip install`` line must name a distribution that actually exists under
   ``packages/``.
@@ -79,6 +82,94 @@ def _front_door_docs() -> list[Path]:
     out = [p for p in pages if p.is_file() and (tracked is None or p in tracked)]
     assert out, "no front-door documents discovered"
     return out
+
+
+def _published_outside_the_docs_site() -> list[Path]:
+    """Tracked pages that are published but that no docs gate walks (R4-docs_truth-6).
+
+    ``mkdocs build --strict`` only walks ``docs/``, and ``_front_door_docs`` stops at the four
+    root governance pages plus ``docs/**``. That leaves two surfaces an outsider reads first:
+
+    * ``CHANGELOG.md`` — the release notes, rendered on the repository landing view.
+    * ``packages/*/README.md`` — each one is that distribution's ``readme`` in its
+      ``pyproject.toml``, i.e. its **PyPI long_description**. A broken link here ships to the
+      project page and stays there for the life of the release.
+    """
+    pages = [_REPO_ROOT / "CHANGELOG.md", *sorted(_PACKAGES.glob("*/README.md"))]
+    tracked = _tracked_paths()
+    out = [p for p in pages if p.is_file() and (tracked is None or p in tracked)]
+    assert out, "no published-outside-the-docs-site pages discovered"
+    return out
+
+
+def _dangling_links(pages: list[Path]) -> tuple[list[str], int]:
+    """``(problems, links_checked)`` over the relative markdown links in ``pages``."""
+    problems: list[str] = []
+    checked = 0
+    for page in pages:
+        for lineno, line in enumerate(page.read_text().splitlines(), 1):
+            for target in _MD_LINK.findall(line):
+                if target.startswith(("http://", "https://", "mailto:", "#")):
+                    continue
+                checked += 1
+                if not (page.parent / target.split("#", 1)[0]).resolve().exists():
+                    where = (
+                        page.name
+                        if _REPO_ROOT not in page.parents
+                        else page.relative_to(_REPO_ROOT)
+                    )
+                    problems.append(f"{where}:{lineno}: link -> {target}")
+    return problems, checked
+
+
+def test_no_dangling_cross_references_outside_the_docs_site() -> None:
+    """CHANGELOG and every package README must not link at a file that does not exist.
+
+    The falsifier: this stream added ``[ADR-0048](docs/adr/0048-retrieval-tooling-is-stateless.md)``
+    to ``CHANGELOG.md`` and to ``packages/latence-sink-qdrant/README.md``. The ADR on disk is
+    ``0048-retrieval-tooling-is-strictly-stateless.md``, so both 404 — and the Qdrant one would
+    have shipped to PyPI as the long_description's only route to the ADR that constrains the
+    sink ("holds no index, runs no search").
+
+    Markdown links only, deliberately. The neighbouring front-door guard also policies backticked
+    ``docs/...md`` mentions, but a changelog entry legitimately *names* a dead path when the entry
+    is about killing it — ``CHANGELOG.md``'s record of the historic ``docs/INTEROP.md`` fix is
+    prose, not a promise to navigate. A link is always a promise to navigate.
+    """
+    problems, checked = _dangling_links(_published_outside_the_docs_site())
+
+    assert checked, (
+        "no published page outside docs/ carries a relative link any more — this guard is "
+        "inspecting nothing. Restore the cross-references or retire the guard deliberately."
+    )
+    assert not problems, (
+        f"published pages no docs gate walks link at missing files (of {checked} links checked):\n"
+        + "\n".join(problems)
+        + "\nThese 404 on GitHub, and a packages/*/README.md is a PyPI long_description."
+    )
+
+
+def test_link_resolver_rejects_a_near_miss_filename(tmp_path: Path) -> None:
+    """The resolver distinguishes the real ADR filename from the near-miss, on a synthetic tree.
+
+    Keeps the guard above honest: were both links deleted rather than corrected, the tree-wide
+    test would have nothing left to find.
+    """
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "0048-retrieval-tooling-is-strictly-stateless.md").write_text("# ADR\n")
+    page = tmp_path / "CHANGELOG.md"
+
+    page.write_text(
+        "- the sink runs no search ([ADR-0048](docs/0048-retrieval-tooling-is-stateless.md)).\n"
+    )
+    problems, checked = _dangling_links([page])
+    assert checked == 1 and len(problems) == 1, (problems, checked)
+
+    page.write_text(
+        "- the sink runs no search "
+        "([ADR-0048](docs/0048-retrieval-tooling-is-strictly-stateless.md)).\n"
+    )
+    assert _dangling_links([page]) == ([], 1)
 
 
 def _shipped_runner_substrates() -> set[str]:

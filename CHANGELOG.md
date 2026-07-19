@@ -159,7 +159,7 @@ workspace are versioned and released together under one version number.
   - A store fault mid-load aborts **before** the sweep, so a half-uploaded corpus can never delete
     the records it did not reach.
   - The Export stays the source of truth ([ADR-0017](docs/adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md));
-    the sink holds no index and runs no search ([ADR-0048](docs/adr/0048-retrieval-tooling-is-stateless.md)).
+    the sink holds no index and runs no search ([ADR-0048](docs/adr/0048-retrieval-tooling-is-strictly-stateless.md)).
   - `latence-core` takes **no** new dependency: the mapping/idempotency/reconcile core is pure-Python
     over `latence-core`, and `qdrant-client` (Apache-2.0) rides the optional `[client]` extra,
     imported lazily. Ships a faithful `FakeQdrantClient` that rejects what a real Qdrant rejects
