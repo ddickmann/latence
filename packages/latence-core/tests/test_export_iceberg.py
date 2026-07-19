@@ -40,6 +40,7 @@ from latence_core.storage import Storage
 from pyiceberg.catalog.rest import RestCatalog
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _NAMESPACE = "lake.latence"
@@ -166,9 +167,7 @@ def test_disabled_leaves_the_export_byte_identical(tmp_path: Path) -> None:
         assert (plain / name).read_bytes() == (enabled / name).read_bytes(), name
 
 
-def test_disabled_never_imports_pyiceberg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_disabled_never_imports_pyiceberg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Off by default costs nothing: the optional dependency is not even imported."""
     import builtins
 
@@ -229,9 +228,7 @@ def test_the_export_tree_is_byte_identical_across_two_fresh_runs(tmp_path: Path)
     with local_rest_catalog(tmp_path / "catalog") as uri:
         config = _iceberg_config(uri)
         for run in ("run-1", "run-2"):
-            JsonlParquetExport(config).export(
-                records, Storage(), str(tmp_path / run / "export")
-            )
+            JsonlParquetExport(config).export(records, Storage(), str(tmp_path / run / "export"))
         # ``append`` still accumulated a snapshot per run (the documented delta disposition is
         # untouched by content addressing), and both runs' rows scan back.
         assert len(_load_table(uri).history()) == 2
@@ -266,7 +263,9 @@ def test_the_data_file_name_is_content_addressed(tmp_path: Path) -> None:
     assert same_a.rsplit("/", 1)[-1] == same_b.rsplit("/", 1)[-1]
     assert other.rsplit("/", 1)[-1] != same_a.rsplit("/", 1)[-1]
     # And the token really is the digest of the file the catalog points at.
-    published = (tmp_path / "a" / "export" / "iceberg-data" / same_a.rsplit("/", 1)[-1]).read_bytes()
+    published = (
+        tmp_path / "a" / "export" / "iceberg-data" / same_a.rsplit("/", 1)[-1]
+    ).read_bytes()
     digest = hashlib.sha256(published).hexdigest()
     assert same_a.rsplit("/", 1)[-1] == f"records-{digest}.parquet"
 
@@ -396,4 +395,97 @@ def test_a_run_that_adds_a_signal_column_is_refused_with_a_typed_error(tmp_path:
             JsonlParquetExport(widened).export(records, Storage(), str(tmp_path / "r2"))
 
         assert "embedding" in str(caught.value)
+        assert [row["record_id"] for row in _scan(uri)] == ["c1"]
+
+
+def _iceberg_data_files(out_dir: Path) -> list[str]:
+    """Every published Iceberg data file inside one Export deliverable directory."""
+    return sorted(path.name for path in (out_dir / "iceberg-data").glob("*.parquet"))
+
+
+def _commit_fault(status: int) -> Callable[[str, str], int | None]:
+    """Answer the catalog's COMMIT endpoint (and only that) with ``status``.
+
+    The commit route is ``POST /v1/namespaces/<ns>/tables/<table>``; table CREATE is the sibling
+    ``POST .../tables``. Faulting only the former reproduces the operationally common case: the
+    table resolves fine, the corpus copy is published, and the snapshot commit is what fails.
+    """
+
+    def fault(method: str, path: str) -> int | None:
+        if method == "POST" and path.endswith(f"/tables/{_TABLE}"):
+            return status
+        return None
+
+    return fault
+
+
+def test_a_failed_commit_leaves_no_orphan_data_file_in_the_deliverable(tmp_path: Path) -> None:
+    """A commit that definitively did not land must not leave its corpus-sized copy behind.
+
+    ``register`` publishes the data file BEFORE opening the transaction, so a commit failure used
+    to leave a full byte-for-byte copy of the corpus (``content`` included) under
+    ``<out_dir>/iceberg-data/`` that no manifest references. Nothing could ever collect it:
+    ``expire_snapshots`` only deletes files recorded in an expired snapshot's manifests, and
+    ``remove_orphan_files`` scans the TABLE location, not the Export's ``out_dir``.
+    """
+    with local_rest_catalog(tmp_path / "catalog", fault=_commit_fault(503)) as uri:
+        out = tmp_path / "run"
+        with pytest.raises(ProviderError) as caught:
+            JsonlParquetExport(_iceberg_config(uri)).export(
+                [_chunk("alpha", "c1")], Storage(), str(out)
+            )
+
+    # The deliverable is intact (ADR-0017) — only the derived, uncommitted copy is gone.
+    assert (out / "records.parquet").exists()
+    assert _iceberg_data_files(out) == []
+    assert "removed" in str(caught.value)
+
+
+def test_an_unknown_commit_outcome_keeps_the_data_file_on_purpose(tmp_path: Path) -> None:
+    """The one case where the copy must SURVIVE: the commit may actually have landed.
+
+    A 5xx that pyiceberg maps to ``CommitStateUnknownException`` means the catalog may have applied
+    the commit before the response was lost. Deleting a file a live snapshot references would
+    corrupt the table, so the file is kept and the typed error says so.
+    """
+    with local_rest_catalog(tmp_path / "catalog", fault=_commit_fault(500)) as uri:
+        out = tmp_path / "run"
+        with pytest.raises(ProviderError) as caught:
+            JsonlParquetExport(_iceberg_config(uri)).export(
+                [_chunk("alpha", "c1")], Storage(), str(out)
+            )
+
+    assert len(_iceberg_data_files(out)) == 1
+    assert "UNKNOWN" in str(caught.value)
+
+
+def test_a_failed_commit_never_deletes_a_data_file_an_earlier_run_committed(
+    tmp_path: Path,
+) -> None:
+    """Cleanup is scoped to what THIS run published — never to a file a snapshot already points at.
+
+    Two runs of identical bytes into the same ``out_dir`` content-address onto the SAME path. The
+    first run commits it; the second run's commit fails. Removing that path would break the first
+    run's snapshot, so only a file this run actually created may be discarded.
+    """
+    faulting = {"on": False}
+
+    def fault(method: str, path: str) -> int | None:
+        if faulting["on"]:
+            return _commit_fault(503)(method, path)
+        return None
+
+    records = [_chunk("alpha", "c1")]
+    out = tmp_path / "run"
+    with local_rest_catalog(tmp_path / "catalog", fault=fault) as uri:
+        export = JsonlParquetExport(_iceberg_config(uri))
+        export.export(records, Storage(), str(out))
+        committed = _iceberg_data_files(out)
+        assert len(committed) == 1
+
+        faulting["on"] = True
+        with pytest.raises(ProviderError):
+            export.export(records, Storage(), str(out))
+
+        assert _iceberg_data_files(out) == committed
         assert [row["record_id"] for row in _scan(uri)] == ["c1"]

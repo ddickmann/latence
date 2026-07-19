@@ -115,6 +115,22 @@ exception never reaches your pipeline. The one catalog "failure" that is *not* a
 create race: if a concurrent Export creates the table first, this run simply loads that table and
 registers into it.
 
+**A failed registration leaves no orphan copy.** The data file has to exist before `add_files` can
+reference it, so it is published *before* the commit — and if the commit then fails, the Export
+deletes it again. That matters because a never-committed file is unreachable by every cleanup you
+would reach for: `expire_snapshots` only deletes files recorded in an expired snapshot's manifests,
+and `remove_orphan_files` scans the *table* location in your warehouse, not the Export's `out_dir`.
+Left behind, each failed run against a flaky catalog would drop another full corpus-sized Parquet
+(chunk `content` and all) into `<out_dir>/iceberg-data/`. The error message names the file and says
+whether it was removed.
+
+The one deliberate exception is an **unknown commit outcome** (a 500/502/504 on the commit endpoint,
+which pyiceberg surfaces as `CommitStateUnknownException`): the catalog may have applied the commit
+before the response was lost, and deleting a file a live snapshot references would corrupt the
+table. That file is kept, and the `ProviderError` says so — check the table's latest snapshot, then
+let your catalog's orphan-file policy decide. Likewise, a file an *earlier* run already committed is
+never touched: only a copy this run created is eligible for cleanup.
+
 ## Verified against a real catalog
 
 The offline test suite (`packages/latence-core/tests/test_export_iceberg.py`) drives the real

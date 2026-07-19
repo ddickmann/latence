@@ -232,12 +232,21 @@ class IcebergCorpusTable:
         Every failure on this path — catalog construction, namespace/table resolution, the data-file
         copy, the commit — surfaces as a typed :class:`~latence_core.errors.ProviderError` naming
         the table and the catalog (ADR-0034). A raw ``pyiceberg`` exception never escapes.
+
+        A failure AFTER the copy is published also cleans the copy up (see
+        :meth:`_discard_unreferenced`): the file is published before the transaction opens because
+        ``add_files`` can only reference a file that already exists, so a commit that never lands
+        would otherwise leave a full corpus-sized Parquet inside the deliverable directory that no
+        manifest references and no catalog-side tool can reach.
         """
         data_uri = "<not yet published>"
+        published_here = False
         try:
             catalog = self._catalog()
             table = self._ensure_table(catalog, arrow_schema)
-            data_uri = self._publish_data_file(storage, parquet_uri, out_dir, basename)
+            data_uri, published_here = self._publish_data_file(
+                storage, parquet_uri, out_dir, basename
+            )
             stamps = self._stamps(parquet_uri, contract_version, record_versions)
             with table.transaction() as tx:
                 if self._target.mode == _OVERWRITE and table.current_snapshot() is not None:
@@ -266,14 +275,65 @@ class IcebergCorpusTable:
         except (ConfigError, ProviderError):
             # Already typed and already specific (the install hint, the unreachable catalog, the
             # namespace/table failures below). Re-wrapping would only bury the precise message.
+            # Every one of these is raised BEFORE the data file is published (catalog construction,
+            # namespace creation, table load/create, drift refusal), so there is nothing to clean.
             raise
         except Exception as exc:  # noqa: BLE001 - normalise any catalog/commit failure
+            cleanup = self._discard_unreferenced(storage, data_uri, exc) if published_here else ""
             msg = (
                 f"Iceberg registration of {data_uri!r} into "
                 f"{'.'.join(self._target.identifier)} via {self._target.uri!r} failed: {exc}"
+                f"{cleanup}"
             )
             raise ProviderError(msg) from exc
         return data_uri
+
+    @staticmethod
+    def _discard_unreferenced(storage: Storage, data_uri: str, exc: BaseException) -> str:
+        """Delete the data file THIS run published when its commit did not land; return the note.
+
+        The published copy is the whole corpus, ``content`` included. Once the transaction has
+        failed no snapshot references it, ``expire_snapshots`` can never collect it (it only
+        deletes files recorded in an expired snapshot's manifests) and ``remove_orphan_files``
+        cannot see it (it scans the TABLE location in the warehouse, not the Export's ``out_dir``).
+        Left alone it is an unreachable full-corpus copy inside a deliverable directory — so a
+        registration that failed cleans up after itself, and the deliverable is exactly what it
+        would have been had the optional block never been configured.
+
+        Two deliberate exceptions to that:
+
+        * **Unknown commit state.** ``CommitStateUnknownException`` is pyiceberg's signal that the
+          catalog may have APPLIED the commit before the response was lost (a 500/502/504 on the
+          commit endpoint). Deleting a file a live snapshot references would corrupt the table, so
+          the file is kept and the typed error says so — the same discipline every other Iceberg
+          engine follows for this case. This one path can still leave a file behind; that is the
+          safe side of a genuinely ambiguous outcome, not an oversight.
+        * **A file this run did not create.** Only a copy :meth:`_publish_data_file` actually
+          finalized is eligible; when content addressing mapped this run onto a file an EARLIER run
+          already committed, that file belongs to that run's snapshot and is never touched (the
+          caller gates on ``published_here``).
+
+        The removal is best-effort and never masks the original failure: a failure to delete is
+        appended to the same typed error, so the operator learns the path to sweep (ADR-0034 — no
+        silent errors, and no second exception hiding the first).
+        """
+        from pyiceberg.exceptions import CommitStateUnknownException
+
+        if isinstance(exc, CommitStateUnknownException):
+            return (
+                f" The commit's outcome is UNKNOWN, so the data file {data_uri!r} was KEPT on "
+                "purpose: the catalog may have applied the commit, and deleting a file a snapshot "
+                "references would corrupt the table. Verify the table's latest snapshot, then let "
+                "the catalog's own orphan-file policy remove it if the commit did not land."
+            )
+        try:
+            storage.remove(data_uri)
+        except Exception as cleanup_exc:  # noqa: BLE001 - never mask the failure being reported
+            return (
+                f" The data file {data_uri!r} this run published is referenced by no snapshot but "
+                f"could not be removed ({cleanup_exc}); delete it manually."
+            )
+        return f" The data file {data_uri!r} this run published was removed (no snapshot uses it)."
 
     def _catalog(self) -> Any:
         """The real ``pyiceberg`` REST catalog client for the configured endpoint."""
@@ -423,8 +483,12 @@ class IcebergCorpusTable:
     @staticmethod
     def _publish_data_file(
         storage: Storage, parquet_uri: str, out_dir: str, basename: str
-    ) -> str:
+    ) -> tuple[str, bool]:
         """Stream-copy the deliverable to an immutable, CONTENT-ADDRESSED Iceberg data file.
+
+        Returns the published URI and whether THIS call created it — the second half is what lets
+        :meth:`_discard_unreferenced` clean up after a failed commit without ever deleting a file
+        an earlier run's snapshot already points at.
 
         Streamed through the Storage seam in fixed-size chunks, so the Export's O(batch) memory
         bound (ADR-0033) survives the optional output, and published with the same
@@ -464,9 +528,9 @@ class IcebergCorpusTable:
         data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
         if storage.exists(data_uri):
             storage.remove(tmp_uri)
-        else:
-            storage.finalize_atomic(tmp_uri, data_uri)
-        return data_uri
+            return data_uri, False
+        storage.finalize_atomic(tmp_uri, data_uri)
+        return data_uri, True
 
 
 def _absolute_uri(uri: str) -> str:
