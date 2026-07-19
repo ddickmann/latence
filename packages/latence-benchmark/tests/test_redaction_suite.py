@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 from latence_benchmark.corpora.build_synthetic_pii import build_corpus
 from latence_benchmark.datasets import DatasetUnavailableError, ShippedCorpusSource, content_digest
-from latence_benchmark.metrics import micro
+from latence_benchmark.metrics import micro, total
 from latence_benchmark.redaction_suite import (
     CORPUS_FILE,
     SYNTHETIC_PII,
@@ -205,6 +205,62 @@ def test_person_names_are_reported_as_the_residual_not_hidden(corpus_root: Path)
     assert by_type["email"].recall == 1.0
     assert by_type["iban"].recall == 1.0
     assert by_type["aws_key"].recall == 1.0
+
+
+def test_a_detected_type_outside_the_gold_inventory_is_still_charged_as_a_false_positive(
+    tmp_path: Path,
+) -> None:
+    """The `pii_type` dimension is rendered with a bold **MICRO** aggregate, so it must charge
+    EVERY detection the run emitted — including one labelled with a type the gold set never
+    names. Slicing only over the gold types drops those detections out of the table entirely and
+    publishes a precision that no run reproduces.
+
+    The corpus here is one document whose gold set holds a single `email`, in text that also
+    contains an RFC 5737 TEST-NET address. The pinned Provider emits both, `ip` is not a gold
+    type, and the over-redaction must survive into the aggregate exactly as the `language`
+    dimension already reports it.
+    """
+    value = "erika@example.com"
+    text = f"Contact {value} from host 192.0.2.44 today."
+    start = text.index(value)
+    (tmp_path / CORPUS_FILE).write_text(
+        json.dumps(
+            {
+                "doc_id": "type-fp-1",
+                "language": "en",
+                "sensitivity": "internal",
+                "text": text,
+                "pii": [
+                    {
+                        "pii_type": "email",
+                        "value": value,
+                        "start": start,
+                        "end": start + len(value),
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = RedactionSuite().run(tmp_path)
+
+    # What the run really did, per the dimension that was never type-scoped:
+    (language,) = result.metrics_for("language")
+    assert (language.true_positives, language.false_positives) == (1, 1)
+
+    by_type = {m.name: m for m in result.metrics_for("pii_type")}
+    # The out-of-inventory detection gets its own slice: nothing to recall, one false alarm.
+    assert "ip" in by_type, "a detected type absent from the gold set vanished from the table"
+    assert (by_type["ip"].true_positives, by_type["ip"].false_positives) == (0, 1)
+    assert by_type["ip"].precision == 0.0
+    # An undefined ratio is reported as undefined, never as a measured 0%.
+    assert by_type["ip"].recall is None
+
+    # And the published aggregate agrees with the run instead of flattering it.
+    aggregate = total(result.metrics_for("pii_type"), dimension="pii_type")
+    assert (aggregate.true_positives, aggregate.false_positives) == (1, 1)
+    assert aggregate.precision == 0.5
 
 
 def test_a_value_masked_under_the_wrong_label_is_visible_as_such(corpus_root: Path) -> None:

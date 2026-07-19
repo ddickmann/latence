@@ -301,7 +301,14 @@ class RedactionSuite:
             coverage("language", language, gold=g, detected=d)
             for language, (g, d) in by_language.items()
         ]
-        gold_types = sorted({item[1] for item in gold})
+        # The union, NOT just the gold types: `pii_type` is a partition dimension, so
+        # `results._metric_tables` renders a bold **MICRO** aggregate over these slices. Slicing
+        # only over the gold inventory would give a detection labelled with a type the gold set
+        # never names no slice to belong to — it would vanish from the table instead of being
+        # charged, and the published aggregate would report a precision the run did not earn.
+        # Rule-based defaults happen to stay inside the inventory; a re-pin (`gliner_pii` emits
+        # URL, DATE_TIME, LOCATION, NRP...) does not.
+        scored_types = sorted({item[1] for item in gold} | {item[1] for item in detected})
         per_type = [
             coverage(
                 "pii_type",
@@ -309,7 +316,7 @@ class RedactionSuite:
                 gold=[g for g in gold if g[1] == pii_type],
                 detected=[d for d in detected if d[1] == pii_type],
             )
-            for pii_type in gold_types
+            for pii_type in scored_types
         ]
         untyped_gold = [(g[0], "", g[2], g[3]) for g in gold]
         untyped_detected = [(d[0], "", d[2], d[3]) for d in detected]
