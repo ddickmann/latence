@@ -144,10 +144,14 @@ class FakeGraphApi:
                         "webUrl": f"https://contoso.sharepoint.com{sub}",
                     }
                 )
-        for entry in sorted(self.files, key=lambda f: f.path):
+        for entry in sorted(self.files, key=lambda f: f.path, reverse=True):
             parent = entry.path.rsplit("/", 1)[0]
             if parent == normalized:
                 children.append(self._file_entry(entry))
+        # Deliberately NOT in ascending order: Graph specifies no ordering for a children
+        # collection absent ``$orderby``, which the connector does not send. A fake that handed
+        # its children back pre-sorted would prove a property the real dependency does not
+        # deliver, and every determinism test above it would pass on a client that never sorts.
         return children
 
     def _file_entry(self, entry: FakeFile) -> dict[str, Any]:

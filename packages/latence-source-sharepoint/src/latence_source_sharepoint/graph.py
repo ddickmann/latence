@@ -26,8 +26,12 @@ What it handles, and what the shipped faithful fake therefore also enforces:
   verifies the byte count against the size Graph reported, so a truncated body is a typed
   error rather than a silently short document.
 
-Determinism: children of a folder are sorted by item id before being walked, so two runs over
-an unchanged drive produce identical documents in an identical order.
+Determinism: Graph documents **no** ordering for a ``driveItem`` children collection unless the
+request carries ``$orderby``, which is not supported for every drive and is not sent here. The
+client therefore imposes the order itself — each folder's files are sorted by item id before
+they are yielded, and subfolders are recursed in ascending drive-path order — so two runs over
+an unchanged drive produce identical documents in an identical order regardless of the order
+Graph happened to return them in.
 """
 
 from __future__ import annotations
@@ -149,14 +153,22 @@ class GraphClient:
         """Yield every file under ``root_path``, recursing into folders, deterministically.
 
         ``root_path`` is drive-relative (``""``/``"/"`` = the drive root, ``"/Contracts"`` a
-        subfolder). Folders are walked depth-first in sorted item-id order and each folder's
-        children are fully paginated, so the yielded sequence is stable across runs.
+        subfolder). Subfolders are walked depth-first in ascending drive-path order, each
+        folder's children are fully paginated, and that folder's files are sorted by item id
+        before any of them is yielded — Graph itself guarantees no ordering, so the client
+        imposes one. The yielded sequence is therefore stable across runs, which is what backs
+        ``SharePointSource.profile().deterministic``.
+
+        The per-folder sort buffers one folder's *metadata* (never a document's bytes, which are
+        fetched later, one at a time), so memory stays bounded by the widest folder rather than
+        by the drive — the same bound the folder recursion stack already carries (ADR-0033).
         """
         normalized = "/" + root_path.strip("/") if root_path.strip("/") else ""
         pending: list[tuple[str, str]] = [(self._children_url(normalized), normalized)]
         while pending:
             url, folder_path = pending.pop()
             folders: list[tuple[str, str]] = []
+            files: list[GraphItem] = []
             for entry in self._paginate(url):
                 item_path = folder_path or ""
                 if _is_folder(entry):
@@ -172,9 +184,14 @@ class GraphClient:
                             )
                         )
                 elif _is_file(entry):
-                    yield _to_item(entry, item_path)
+                    files.append(_to_item(entry, item_path))
+            # Graph returns a children collection in an unspecified order, so the pages are
+            # collected and ordered here. The item id is the sort key because it is opaque,
+            # unique and stable for the life of the item — a rename reorders names, not ids.
+            files.sort(key=lambda item: item.item_id)
+            yield from files
             # Sorted, then reversed onto a LIFO stack, so the walk visits folders in
-            # ascending name order — a stable, reproducible traversal.
+            # ascending drive-path order — a stable, reproducible traversal.
             for folder in sorted(folders, key=lambda pair: pair[1], reverse=True):
                 pending.append(folder)
 

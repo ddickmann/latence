@@ -197,8 +197,10 @@ class SharePointSource:
         and ``latence-core`` takes no new dependency (ADR-0016).
 
         ``compute="cpu"`` (no accelerator), ``batch=False`` (Graph is fetched per item), and
-        ``deterministic=True``: for a fixed drive state the listing is walked in sorted order
-        and every document id is content-addressed, so two runs produce identical output. It is
+        ``deterministic=True``: Graph guarantees no ordering for a children collection, so
+        :meth:`~latence_source_sharepoint.graph.GraphClient.list_files` imposes one itself
+        (files sorted by item id, subfolders recursed in drive-path order) and every document id
+        is content-addressed — for a fixed drive state two runs produce identical output. It is
         network-bound rather than compute-bound, hence a small declared footprint and no
         ``cost_per_1k`` (Graph is billed by tenant licensing, not per call).
         """

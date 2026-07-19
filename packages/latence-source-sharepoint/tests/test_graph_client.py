@@ -87,6 +87,47 @@ def test_pagination_follows_odata_next_link_across_every_page() -> None:
     assert sum(1 for call in transport.calls if "children" in call.url) == 7
 
 
+class _UnorderedGraphApi(FakeGraphApi):
+    """A Graph double that returns each folder's children in reverse order.
+
+    Entirely legal: Graph documents no ordering for a ``driveItem`` children collection unless
+    the request carries ``$orderby``, and the connector sends none. Any offline fake that hands
+    back its children pre-sorted proves a property the real dependency does not deliver, so the
+    ordering the connector promises has to be demonstrated against a fake that does not help.
+    """
+
+    def _children_of(self, folder: str) -> list[dict[str, object]]:
+        return list(reversed(super()._children_of(folder)))
+
+
+def test_files_are_sorted_by_item_id_even_when_graph_returns_them_unordered() -> None:
+    files = [
+        FakeFile(path="/b.md", content=b"b"),
+        FakeFile(path="/a.md", content=b"a"),
+        FakeFile(path="/d.md", content=b"d"),
+        FakeFile(path="/c.md", content=b"c"),
+    ]
+    client, _ = _client(_UnorderedGraphApi(files=files))
+    listed = list(client.list_files())
+    assert [item.name for item in listed] == ["a.md", "b.md", "c.md", "d.md"]
+    assert [item.item_id for item in listed] == sorted(item.item_id for item in listed)
+
+
+def test_an_unordered_drive_lists_identically_to_an_ordered_one() -> None:
+    """Two Graph servers disagreeing only on child order must produce one identical listing."""
+    files = [
+        FakeFile(path="/Contracts/nda.md", content=b"nda"),
+        FakeFile(path="/Contracts/msa.md", content=b"msa"),
+        FakeFile(path="/Reports/q1.md", content=b"q1"),
+        FakeFile(path="/root.md", content=b"root"),
+    ]
+    ordered, _ = _client(FakeGraphApi(files=files))
+    unordered, _ = _client(_UnorderedGraphApi(files=files))
+    assert [item.drive_path for item in ordered.list_files()] == [
+        item.drive_path for item in unordered.list_files()
+    ]
+
+
 def test_the_fake_rejects_skip_paging_the_way_graph_does() -> None:
     """Guards the fake's faithfulness: Graph does not support $skip on driveItem children."""
     api = FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")])
