@@ -35,6 +35,16 @@
         "split": "OVERALL",
         "unsupported": 4405
       },
+      "scorer_pin": {
+        "algorithm_digest": "b2221b17e5b69df4",
+        "baseline_min_chars": 1,
+        "supported_types": [
+          "absent",
+          "baseline",
+          "order",
+          "present"
+        ]
+      },
       "splits": [
         {
           "failed": 0,
@@ -380,6 +390,7 @@
         "split": "OVERALL",
         "unsupported": 0
       },
+      "scorer_pin": null,
       "splits": [],
       "stack_pin": {
         "config": {},

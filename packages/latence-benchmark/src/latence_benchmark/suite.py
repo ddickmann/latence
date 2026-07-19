@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from latence_benchmark.metrics import MetricScore, total
-from latence_benchmark.scoring import Outcome
+from latence_benchmark.scoring import Outcome, ScorerPin
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -148,6 +148,11 @@ class SuiteResult:
     #: Which metric dimension carries this suite's headline number, e.g. ``"language"``. The
     #: micro-average over that dimension is what the CLI prints and the page leads with.
     headline_dimension: str | None = None
+    #: What the unit-test scorer was when these numbers were produced (see
+    #: :class:`~latence_benchmark.scoring.ScorerPin`). Required for a suite reporting
+    #: :attr:`splits`, because a pass rate means nothing without the rules behind it; ``None``
+    #: for a labelled-set suite, whose currency does not go through the unit-test scorer.
+    scorer_pin: ScorerPin | None = None
     #: ISO date this measurement was produced. The results page is assembled from however many
     #: runs it took to cover every Stage (see :func:`~latence_benchmark.results.carry_forward`),
     #: so each measurement states its own date rather than inheriting the page's.
@@ -206,6 +211,7 @@ class SuiteResult:
                 },
             },
             "stack_pin": self.stack_pin.as_dict(),
+            "scorer_pin": self.scorer_pin.as_dict() if self.scorer_pin is not None else None,
             "splits": [s.as_dict() for s in self.splits],
             "overall": self.overall.as_dict(),
             "documents_scored": self.documents_scored,

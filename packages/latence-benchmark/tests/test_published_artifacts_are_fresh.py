@@ -33,8 +33,15 @@ import re
 from pathlib import Path
 
 import pytest
-from latence_benchmark.results import carry_forward, render_json, render_markdown
+from latence_benchmark import scoring
+from latence_benchmark.results import (
+    PublishedResultsError,
+    carry_forward,
+    render_json,
+    render_markdown,
+)
 from latence_benchmark.suite import SuiteResult
+from latence_benchmark.unittests import UnitTestType
 
 # tests/  ->  latence-benchmark/  ->  packages/  ->  repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -115,6 +122,53 @@ def test_the_published_json_sidecar_is_what_the_renderer_emits_today() -> None:
     committed = _read(_SIDECAR)
     rendered = render_json(results, generated_on=generated_on)
     assert rendered == committed, _diff(committed, rendered, "docs/benchmarks/results.json")
+
+
+def test_a_scorer_change_invalidates_a_carried_measurement_rather_than_re_labelling_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A future commit that scores another test class must force a re-run, not a re-label.
+
+    Freshness alone cannot see this: re-rendering the same sidecar with the changed scorer
+    produces a page whose OVERALL row is the *old* scorer's arithmetic while its prose describes
+    the *new* scorer's rules — and the freshness gate would then demand that self-contradiction
+    be committed. So the scorer is pinned per measurement and validated like the dataset
+    revision.
+    """
+    monkeypatch.setattr(
+        scoring, "SUPPORTED_TYPES", frozenset(scoring.SUPPORTED_TYPES | {UnitTestType.TABLE})
+    )
+    with pytest.raises(PublishedResultsError, match="scored classes"):
+        carry_forward([], json_path=_SIDECAR)
+
+
+def test_a_published_pass_rate_without_a_scorer_pin_is_refused(tmp_path: Path) -> None:
+    """A sidecar predating the scorer pin cannot be vouched for, so it is re-run, not republished."""
+    payload = json.loads(_read(_SIDECAR))
+    stripped = [m for m in payload["measurements"] if m.get("splits")]
+    assert stripped, "the committed sidecar publishes no unit-test measurement to strip"
+    for measurement in stripped:
+        measurement.pop("scorer_pin")
+    sidecar = tmp_path / "results.json"
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(PublishedResultsError, match="records no scorer pin"):
+        carry_forward([], json_path=sidecar)
+
+
+def test_the_page_describes_each_measurement_by_its_own_scorer_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scored/unsupported classes come from the carried pin, not the scorer imported today."""
+    results, generated_on = _published()
+    scored = [r for r in results if r.splits]
+    assert scored, "no unit-test measurement is published, so this assertion would be vacuous"
+    baseline = render_markdown(results, generated_on=generated_on)
+    monkeypatch.setattr(
+        scoring, "SUPPORTED_TYPES", frozenset(scoring.SUPPORTED_TYPES | {UnitTestType.TABLE})
+    )
+    assert render_markdown(results, generated_on=generated_on) == baseline, (
+        "changing today's scorer changed how an already-measured number is described"
+    )
 
 
 @pytest.mark.parametrize("artifact", [_PAGE, _SIDECAR])

@@ -24,14 +24,22 @@ read as a better score than a complete one.
 
 from __future__ import annotations
 
+import ast
+import functools
+import hashlib
+import inspect
+import json
 import re
+import textwrap
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from latence_benchmark.unittests import BenchmarkDataError, UnitTestType
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from latence_benchmark.unittests import UnitTest
 
 _WHITESPACE = re.compile(r"\s+")
@@ -223,4 +231,120 @@ def score(test: UnitTest, output: str, *, split: str) -> TestResult:
         test.type,
         Outcome.FAILED,
         "the two passages appear in the wrong reading order",
+    )
+
+
+#: The functions whose semantics *are* the unit-test metric. A change to any of them changes
+#: what a published pass rate means, so their bodies feed the scorer fingerprint below.
+_SCORING_BEHAVIOUR: tuple[Callable[..., Any], ...] = (
+    normalise,
+    fuzzy_find,
+    fuzzy_contains,
+    _score_baseline,
+    score,
+)
+
+
+class ScorerSourceUnavailableError(RuntimeError):
+    """The scorer's own source cannot be read, so its fingerprint cannot be computed."""
+
+
+def _semantic_source(function: Callable[..., Any]) -> str:
+    """Return ``function``'s source with docstrings, comments and formatting normalised away.
+
+    The fingerprint must move when the *behaviour* moves and stay still when someone rewrites a
+    docstring, so the source is round-tripped through the AST (which drops comments and
+    canonicalises layout) with every docstring node removed.
+    """
+    try:
+        source = textwrap.dedent(inspect.getsource(function))
+    except (OSError, TypeError) as exc:  # pragma: no cover - source always ships in this package
+        msg = (
+            f"the source of {function.__qualname__!r} is unavailable, so the scorer fingerprint "
+            "that stamps every published measurement cannot be computed"
+        )
+        raise ScorerSourceUnavailableError(msg) from exc
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Module):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+@dataclass(frozen=True)
+class ScorerPin:
+    """What the unit-test scorer **was** when a measurement was produced.
+
+    A pass rate is only meaningful together with the rules that produced it: which test classes
+    were scored at all, what ``baseline`` asserted, and how fuzzy matching worked. Those live in
+    module-level code, so without this record a later edit to the scorer silently re-describes
+    numbers it never computed — the scoring-side twin of republishing a number against a
+    re-pinned dataset. Every unit-test measurement carries one, and
+    :func:`~latence_benchmark.results.carry_forward` refuses to republish a measurement whose pin
+    no longer matches today's scorer.
+    """
+
+    #: Test classes this scorer scored, sorted. Everything else was reported UNSUPPORTED.
+    supported_types: tuple[str, ...]
+    baseline_min_chars: int
+    #: sha256 over the docstring-free ASTs of :data:`_SCORING_BEHAVIOUR`.
+    algorithm_digest: str
+
+    @property
+    def fingerprint(self) -> str:
+        """Short, stable sha256 digest over the canonicalised pin."""
+        canonical = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    @property
+    def unsupported_types(self) -> tuple[str, ...]:
+        """Test classes this scorer did NOT score — what the *Unsupported* column counted.
+
+        In :class:`~latence_benchmark.unittests.UnitTestType` declaration order, which is fixed
+        and therefore deterministic; the published page is byte-stable for a given pin.
+        """
+        return tuple(t.value for t in UnitTestType if t.value not in self.supported_types)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "supported_types": list(self.supported_types),
+            "baseline_min_chars": self.baseline_min_chars,
+            "algorithm_digest": self.algorithm_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ScorerPin:
+        """Rebuild a pin from a published sidecar record. A missing key is a hard ``KeyError``."""
+        return cls(
+            supported_types=tuple(payload["supported_types"]),
+            baseline_min_chars=payload["baseline_min_chars"],
+            algorithm_digest=payload["algorithm_digest"],
+        )
+
+
+@functools.cache
+def _algorithm_digest() -> str:
+    """Digest over the scoring functions' semantics. Cached — source cannot change in-process."""
+    return hashlib.sha256(
+        "\n".join(_semantic_source(function) for function in _SCORING_BEHAVIOUR).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def scorer_pin() -> ScorerPin:
+    """The pin describing *this* scorer.
+
+    The constants are read on every call rather than frozen at import, so a slice of the scorer
+    that is swapped out (a test, or a future build flag) is described by what it actually is.
+    """
+    return ScorerPin(
+        supported_types=tuple(sorted(t.value for t in SUPPORTED_TYPES)),
+        baseline_min_chars=BASELINE_MIN_CHARS,
+        algorithm_digest=_algorithm_digest(),
     )

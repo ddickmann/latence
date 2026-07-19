@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
-from latence_benchmark.scoring import Outcome, fuzzy_contains, fuzzy_find, normalise, score
+from latence_benchmark import scoring
+from latence_benchmark.scoring import (
+    Outcome,
+    _semantic_source,
+    fuzzy_contains,
+    fuzzy_find,
+    normalise,
+    score,
+    scorer_pin,
+)
 from latence_benchmark.unittests import UnitTest, UnitTestType
 
 
@@ -177,3 +187,55 @@ def test_a_baseline_row_needs_no_assertion_payload() -> None:
         }
     )
     assert row.type is UnitTestType.BASELINE
+
+
+# -- the scorer pin ------------------------------------------------------------------------
+
+
+def test_the_pin_records_which_classes_this_scorer_actually_scores() -> None:
+    pin = scorer_pin()
+    assert pin.supported_types == ("absent", "baseline", "order", "present")
+    assert pin.unsupported_types == ("table", "math")
+    assert set(pin.supported_types) | set(pin.unsupported_types) == {t.value for t in UnitTestType}
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [("SUPPORTED_TYPES", frozenset(UnitTestType)), ("BASELINE_MIN_CHARS", 25)],
+)
+def test_changing_what_the_scorer_does_moves_its_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, attribute: str, value: Any
+) -> None:
+    """Otherwise a published pass rate could be re-described by rules that never produced it."""
+    before = scorer_pin().fingerprint
+    monkeypatch.setattr(scoring, attribute, value)
+    assert scorer_pin().fingerprint != before
+
+
+def test_the_fingerprint_ignores_docstrings_comments_and_formatting() -> None:
+    """A prose rewrite must not invalidate a measurement; only changed behaviour may."""
+
+    def original() -> Callable[[str], str]:
+        def probe(text: str) -> str:
+            """Original wording."""
+            # a comment
+            return text.strip()
+
+        return probe
+
+    def reworded() -> Callable[[str], str]:
+        def probe(text: str) -> str:
+            """Completely different wording, several sentences — same behaviour."""
+            return text.strip()
+
+        return probe
+
+    def rebehaved() -> Callable[[str], str]:
+        def probe(text: str) -> str:
+            """Original wording."""
+            return text.strip().casefold()
+
+        return probe
+
+    assert _semantic_source(original()) == _semantic_source(reworded())
+    assert _semantic_source(original()) != _semantic_source(rebehaved())

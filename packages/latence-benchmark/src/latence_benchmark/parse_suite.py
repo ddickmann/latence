@@ -34,7 +34,7 @@ from latence_core.pipeline import CapabilityKind
 
 from latence_benchmark.datasets import OLMOCR_BENCH, DatasetSpec
 from latence_benchmark.providers import ProviderUnavailableError, load_provider
-from latence_benchmark.scoring import Outcome, TestResult, score
+from latence_benchmark.scoring import Outcome, TestResult, score, scorer_pin
 from latence_benchmark.suite import SplitScore, StackPin, SuiteResult
 from latence_benchmark.unittests import load_split
 
@@ -208,6 +208,7 @@ class ParseSuite:
             stage=self.stage,
             dataset=self.dataset,
             stack_pin=self.stack_pin,
+            scorer_pin=scorer_pin(),
             splits=tuple(split_scores),
             document_failures=document_failures,
             documents_scored=documents_scored,

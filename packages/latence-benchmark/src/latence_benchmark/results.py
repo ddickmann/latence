@@ -19,6 +19,14 @@ produced, so an assembled page never implies that a carried number was measured 
 number is validated against the registry first: if its dataset has since been re-pinned, the run
 is refused, because republishing a number produced against different data is exactly the kind of
 quiet fiction this module exists to prevent.
+
+The same holds for the *rules* a number was produced under. A pass rate is a statement about a
+scorer — which test classes it scored at all, what ``baseline`` asserted, how fuzzy matching
+worked — so every unit-test measurement records a
+:class:`~latence_benchmark.scoring.ScorerPin`, that pin is validated exactly like the dataset
+revision, and the page describes each measurement using **its own** pin. Without that, a later
+commit implementing another test class would re-label a stale number instead of invalidating it,
+and the freshness gate would demand the self-contradiction be committed.
 """
 
 from __future__ import annotations
@@ -28,7 +36,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_benchmark.metrics import MetricScore, is_partition, total
-from latence_benchmark.scoring import SUPPORTED_TYPES
+from latence_benchmark.scoring import ScorerPin, scorer_pin
 from latence_benchmark.suite import SplitScore, StackPin, SuiteResult, get_suite, suite_names
 
 if TYPE_CHECKING:
@@ -98,6 +106,48 @@ class PublishedResultsError(RuntimeError):
     """A previously published measurement cannot be honestly republished as it stands."""
 
 
+def _carried_scorer_pin(measurement: dict[str, Any], *, suite: str) -> ScorerPin | None:
+    """Validate a published measurement's scorer pin against the scorer of today.
+
+    A pass rate is a statement *about a set of rules*: which test classes were scored at all,
+    what ``baseline`` asserted, how fuzzy matching worked. Republishing an old pass rate under a
+    changed scorer re-describes a number nobody recomputed — the scoring-side twin of
+    republishing against a re-pinned dataset, and refused for the same reason. A measurement with
+    no unit-test splits never went through the scorer and carries no pin.
+    """
+    published = measurement.get("scorer_pin")
+    if not measurement.get("splits"):
+        return None
+    if published is None:
+        msg = (
+            f"Suite {suite!r} publishes unit-test splits but records no scorer pin, so what its "
+            "pass rate counted cannot be established. It predates the scorer pin and must be "
+            f"re-measured: re-run it (--suite {suite}), or drop it with --no-carry-forward."
+        )
+        raise PublishedResultsError(msg)
+    try:
+        carried = ScorerPin.from_dict(published)
+    except (KeyError, TypeError) as exc:
+        msg = (
+            f"The published scorer pin for suite {suite!r} is missing or malformed field {exc} "
+            f"and cannot be republished. Re-run it (--suite {suite}), or drop it with "
+            "--no-carry-forward."
+        )
+        raise PublishedResultsError(msg) from exc
+    current = scorer_pin()
+    if carried.fingerprint != current.fingerprint:
+        msg = (
+            f"Suite {suite!r} was published by scorer {carried.fingerprint!r} (scored classes: "
+            f"{', '.join(carried.supported_types)}) but this harness scores as "
+            f"{current.fingerprint!r} (scored classes: {', '.join(current.supported_types)}). "
+            "Republishing it would describe an old number in terms of rules that never produced "
+            f"it, so this is refused: re-run it (--suite {suite}), or drop it with "
+            "--no-carry-forward."
+        )
+        raise PublishedResultsError(msg)
+    return carried
+
+
 def _carried(measurement: dict[str, Any], *, fallback_date: str) -> SuiteResult:
     """Rebuild one previously published measurement as a :class:`SuiteResult`.
 
@@ -123,6 +173,7 @@ def _carried(measurement: dict[str, Any], *, fallback_date: str) -> SuiteResult:
             "--no-carry-forward."
         )
         raise PublishedResultsError(msg)
+    scorer = _carried_scorer_pin(measurement, suite=name)
     # A sidecar written by an older version of this harness has fewer keys (the labelled-set
     # currency arrived with #187), so absent *collections* mean "this suite reported none" —
     # while a missing structural key is a corrupt record and is refused, never guessed at.
@@ -135,6 +186,7 @@ def _carried(measurement: dict[str, Any], *, fallback_date: str) -> SuiteResult:
             stack_pin=StackPin(
                 stage=pin["stage"], provider=pin["provider"], config=dict(pin["config"])
             ),
+            scorer_pin=scorer,
             splits=tuple(
                 SplitScore(
                     split=split["split"],
@@ -278,7 +330,6 @@ def _reproduce_command(result: SuiteResult) -> str:
 
 def render_markdown(results: Sequence[SuiteResult], *, generated_on: str) -> str:
     """Render the published results page for one or more suite results."""
-    supported = ", ".join(sorted(t.value for t in SUPPORTED_TYPES))
     lines: list[str] = [
         "# Public benchmarks",
         "",
@@ -332,6 +383,20 @@ def render_markdown(results: Sequence[SuiteResult], *, generated_on: str) -> str
         ]
         lines += _metric_tables(result)
         if result.splits:
+            scorer = result.scorer_pin
+            if scorer is None:
+                msg = (
+                    f"Suite {result.suite!r} reports unit-test splits without a scorer pin, so "
+                    "the page cannot state which test classes its pass rate counted. Rendering it "
+                    "would describe the number in terms of whatever scorer happens to be imported "
+                    "today, which is exactly the fiction this module refuses."
+                )
+                raise PublishedResultsError(msg)
+            # Stated from *this measurement's own* pin, never from the scorer imported at render
+            # time: a later commit that implements another test class must not re-label a number
+            # produced while that class was unsupported.
+            supported = ", ".join(scorer.supported_types)
+            unsupported = " and ".join(f"`{name}`" for name in scorer.unsupported_types)
             lines += [
                 "### Our measurements",
                 "",
@@ -351,7 +416,7 @@ def render_markdown(results: Sequence[SuiteResult], *, generated_on: str) -> str
                 f"Documents parsed: {result.documents_scored} "
                 f"(parse failures: {result.document_failures}).",
                 "",
-                f"**Scored test classes:** {supported}. `table` and `math` assertions are counted",
+                f"**Scored test classes:** {supported}. {unsupported} assertions are counted",
                 "in the *Unsupported* column and excluded from the pass-rate denominator — they",
                 "are neither passes nor failures here. Scoring them remains UNIMPLEMENTED (issue",
                 "#187 added the Entity/Relation, Disambiguation and Redaction suites through the",
