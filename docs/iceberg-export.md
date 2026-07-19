@@ -91,7 +91,11 @@ Two consequences worth stating plainly:
 The registration runs **last**, only after the Parquet deliverable has been atomically
 published. A crash or an unreachable catalog therefore leaves the normal deliverable complete
 and simply no table; the failure surfaces as a `ProviderError` naming the catalog URI, never as
-a silent skip.
+a silent skip. That covers every step of the registration — building the catalog client, creating
+the namespace, loading or creating the table, and the commit itself — so a raw `pyiceberg`
+exception never reaches your pipeline. The one catalog "failure" that is *not* an error is a lost
+create race: if a concurrent Export creates the table first, this run simply loads that table and
+registers into it.
 
 ## Verified against a real catalog
 

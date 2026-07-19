@@ -54,9 +54,25 @@ class _IcebergRestHandler(BaseHTTPRequestHandler):
     """Maps Iceberg REST routes onto a real ``SqlCatalog``."""
 
     catalog: SqlCatalog
+    # Optional fault injection (see ``local_rest_catalog``). ``fault(method, path)`` returns an
+    # HTTP status to answer with INSTEAD of routing the request — how a real catalog behaves when
+    # it is briefly unavailable. ``lose_create`` makes the FIRST create-table request perform the
+    # create and then answer 409, which is exactly what a writer sees when it loses a create race.
+    fault: Any = None
+    lose_create: list[bool] = []  # noqa: RUF012 - per-server flag box, bound in local_rest_catalog
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Silence the stdlib access log so a test run stays readable."""
+
+    def _injected(self) -> bool:
+        """Answer this request from the fault hook instead of the catalog, if it says so."""
+        if self.fault is None:
+            return False
+        status = self.fault(self.command, urlparse(self.path).path)
+        if status is None:
+            return False
+        self._error(status, f"injected fault for {self.command} {self.path}")
+        return True
 
     # -- plumbing -------------------------------------------------------------------------
 
@@ -94,6 +110,8 @@ class _IcebergRestHandler(BaseHTTPRequestHandler):
     # -- routes ---------------------------------------------------------------------------
 
     def do_HEAD(self) -> None:  # noqa: N802 - stdlib dispatch name
+        if self._injected():
+            return
         parts = self._segments()
         try:
             if len(parts) == 3 and parts[1] == "namespaces":
@@ -110,6 +128,8 @@ class _IcebergRestHandler(BaseHTTPRequestHandler):
         self._send(404)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib dispatch name
+        if self._injected():
+            return
         parts = self._segments()
         try:
             if parts == ["v1", "config"]:
@@ -145,6 +165,8 @@ class _IcebergRestHandler(BaseHTTPRequestHandler):
         self._error(404, f"no route for GET {self.path}")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib dispatch name
+        if self._injected():
+            return
         parts = self._segments()
         raw = self._read_body()
         try:
@@ -190,6 +212,12 @@ class _IcebergRestHandler(BaseHTTPRequestHandler):
             location=request.location,
             properties=request.properties,
         )
+        if self.lose_create and self.lose_create[0]:
+            # The create really did land (another writer's identical create would have landed the
+            # same way); this client simply loses the race and is told the table already exists.
+            self.lose_create[0] = False
+            self._error(409, f"Table already exists: {request.name}")
+            return
         self._send(200, self._table_response(table))
 
     def _commit_table(self, parts: list[str], raw: bytes) -> None:
@@ -202,11 +230,24 @@ class _IcebergRestHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def local_rest_catalog(root: Path) -> Iterator[str]:
+def local_rest_catalog(
+    root: Path,
+    *,
+    fault: Any = None,
+    lose_first_create: bool = False,
+) -> Iterator[str]:
     """Run a local Iceberg REST catalog over ``root``; yield its base URL.
 
     ``root`` holds both the catalog's SQLite metastore and its warehouse directory, so the whole
     catalog is a throwaway temp tree — offline, deterministic, and gone with the test.
+
+    Two optional, deliberately-real fault modes let a test pin down how catalog trouble surfaces:
+
+    * ``fault(method, path) -> int | None`` answers the matching request with that HTTP status
+      instead of routing it — a catalog that is briefly unavailable (503), rate-limited, or down.
+    * ``lose_first_create`` makes the first ``POST .../tables`` perform its create and *then*
+      answer 409, which is exactly what a client sees when a concurrent writer wins the create
+      race: the table now exists, but this client's own create was rejected.
     """
     warehouse = root / "warehouse"
     warehouse.mkdir(parents=True, exist_ok=True)
@@ -215,7 +256,15 @@ def local_rest_catalog(root: Path) -> Iterator[str]:
         uri=f"sqlite:///{root / 'catalog.db'}",
         warehouse=f"file://{warehouse}",
     )
-    handler = type("_BoundHandler", (_IcebergRestHandler,), {"catalog": catalog})
+    handler = type(
+        "_BoundHandler",
+        (_IcebergRestHandler,),
+        {
+            "catalog": catalog,
+            "fault": staticmethod(fault) if fault is not None else None,
+            "lose_create": [lose_first_create],
+        },
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

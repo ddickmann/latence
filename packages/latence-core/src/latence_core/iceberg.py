@@ -216,12 +216,17 @@ class IcebergCorpusTable:
         never buffered — to an immutable, run-stamped sibling under ``<out_dir>/iceberg-data/``,
         and THAT path is what the catalog references (see the module docstring on why the
         deliverable's own, rewritten-every-run path must not be handed to Iceberg).
+
+        Every failure on this path — catalog construction, namespace/table resolution, the data-file
+        copy, the commit — surfaces as a typed :class:`~latence_core.errors.ProviderError` naming
+        the table and the catalog (ADR-0034). A raw ``pyiceberg`` exception never escapes.
         """
-        catalog = self._catalog()
-        table = self._ensure_table(catalog, arrow_schema)
-        data_uri = self._publish_data_file(storage, parquet_uri, out_dir, basename)
-        stamps = self._stamps(parquet_uri, contract_version, record_versions)
+        data_uri = "<not yet published>"
         try:
+            catalog = self._catalog()
+            table = self._ensure_table(catalog, arrow_schema)
+            data_uri = self._publish_data_file(storage, parquet_uri, out_dir, basename)
+            stamps = self._stamps(parquet_uri, contract_version, record_versions)
             with table.transaction() as tx:
                 if self._target.mode == _OVERWRITE and table.current_snapshot() is not None:
                     # Delete-all + add in ONE transaction ⇒ one atomic catalog commit: a concurrent
@@ -234,6 +239,10 @@ class IcebergCorpusTable:
                     tx.delete(AlwaysTrue(), snapshot_properties=stamps)
                 tx.set_properties(**stamps)
                 tx.add_files([_absolute_uri(data_uri)], snapshot_properties=stamps)
+        except (ConfigError, ProviderError):
+            # Already typed and already specific (the install hint, the unreachable catalog, the
+            # namespace/table failures below). Re-wrapping would only bury the precise message.
+            raise
         except Exception as exc:  # noqa: BLE001 - normalise any catalog/commit failure
             msg = (
                 f"Iceberg registration of {data_uri!r} into "
@@ -268,8 +277,19 @@ class IcebergCorpusTable:
         ``sparse_*``, ``fde_embedding``, the W13 context columns) this Export was configured to
         write. A schema drift between an existing table and this run therefore surfaces from
         Iceberg's own ``add_files`` validation rather than from a guess made here.
+
+        A catalog fault anywhere here (an unavailable server, an auth expiry, a rejected create) is
+        normalised into a :class:`~latence_core.errors.ProviderError` naming the table and the
+        catalog URI, never re-raised as a raw ``pyiceberg`` exception (ADR-0034). The one fault that
+        is not an error is a LOST CREATE RACE: a concurrent Export creating the same table between
+        this run's load and its create earns ``TableAlreadyExistsError``, and the right response is
+        to load the table it just created and carry on.
         """
-        from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
+        from pyiceberg.exceptions import (
+            NamespaceAlreadyExistsError,
+            NoSuchTableError,
+            TableAlreadyExistsError,
+        )
 
         try:
             catalog.create_namespace(self._target.namespace)
@@ -284,11 +304,31 @@ class IcebergCorpusTable:
         try:
             return catalog.load_table(self._target.identifier)
         except NoSuchTableError:
+            pass  # Expected on the first run into a fresh catalog: create it below.
+        except Exception as exc:  # noqa: BLE001 - normalise catalog failures
+            raise self._table_error("loaded", exc) from exc
+        try:
             return catalog.create_table(
                 self._target.identifier,
                 schema=arrow_schema,
                 properties=dict(self._target.table_properties),
             )
+        except TableAlreadyExistsError:
+            pass  # Lost create race — a concurrent writer got there first; load THEIR table.
+        except Exception as exc:  # noqa: BLE001 - normalise catalog failures
+            raise self._table_error("created", exc) from exc
+        try:
+            return catalog.load_table(self._target.identifier)
+        except Exception as exc:  # noqa: BLE001 - normalise catalog failures
+            raise self._table_error("loaded after a concurrent create", exc) from exc
+
+    def _table_error(self, verb: str, exc: Exception) -> ProviderError:
+        """The one typed error shape for every table-resolution failure (ADR-0034)."""
+        msg = (
+            f"Iceberg table {'.'.join(self._target.identifier)!r} could not be {verb} via "
+            f"{self._target.uri!r}: {exc}"
+        )
+        return ProviderError(msg)
 
     def _stamps(
         self, parquet_uri: str, contract_version: int, record_versions: Iterable[int]

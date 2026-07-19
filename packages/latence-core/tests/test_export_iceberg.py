@@ -28,7 +28,7 @@ import pyarrow.parquet as pq
 import pytest
 from _iceberg_rest import local_rest_catalog
 from latence_core.contracts import SCHEMA_VERSION, ChunkRecord, Classification, Provenance
-from latence_core.errors import ConfigError
+from latence_core.errors import ConfigError, ProviderError
 from latence_core.iceberg import (
     PROP_CONTRACT_VERSION,
     PROP_MODE,
@@ -242,3 +242,52 @@ def test_malformed_config_fails_at_wiring_time(block: Any) -> None:
     """A bad catalog config is caught before a single record is read, never mid-pipeline."""
     with pytest.raises(ConfigError):
         JsonlParquetExport({"iceberg": block})
+
+
+def test_a_catalog_fault_on_table_load_surfaces_as_a_typed_provider_error(tmp_path: Path) -> None:
+    """ADR-0034: a transient catalog fault is a ProviderError, never a raw pyiceberg traceback.
+
+    A second run loads the table the first run created; the catalog answers 503 (a routine
+    transient server fault). Pre-fix, ``pyiceberg.exceptions.ServiceUnavailableError`` escaped
+    ``JsonlParquetExport.export`` unwrapped, because the ``_catalog()`` / ``_ensure_table()`` calls
+    sat outside ``register``'s normalising ``except``.
+    """
+    faulting = {"on": False}
+
+    def fault(method: str, path: str) -> int | None:
+        if faulting["on"] and method == "GET" and path.endswith(f"/tables/{_TABLE}"):
+            return 503
+        return None
+
+    with local_rest_catalog(tmp_path / "catalog", fault=fault) as uri:
+        export = JsonlParquetExport(_iceberg_config(uri))
+        export.export([_chunk("alpha", "c1")], Storage(), str(tmp_path / "export1"))
+
+        faulting["on"] = True
+        with pytest.raises(ProviderError) as caught:
+            export.export([_chunk("beta", "c2")], Storage(), str(tmp_path / "export2"))
+
+    message = str(caught.value)
+    assert uri in message
+    assert _TABLE in message
+    # The native cause is preserved (diagnosable), not the surfaced type (ADR-0034).
+    assert type(caught.value.__cause__).__module__.startswith("pyiceberg")
+    # The deliverable itself is complete — the optional table is what failed.
+    assert (tmp_path / "export2" / "records.parquet").exists()
+
+
+def test_a_lost_create_race_reloads_the_table_instead_of_failing(tmp_path: Path) -> None:
+    """A concurrent writer winning the create race must not fail this export.
+
+    The catalog performs this client's create and then answers 409, exactly as it would if another
+    exporter had created the table a moment earlier. Pre-fix, the raw
+    ``pyiceberg.exceptions.TableAlreadyExistsError`` escaped ``JsonlParquetExport.export``.
+    """
+    with local_rest_catalog(tmp_path / "catalog", lose_first_create=True) as uri:
+        out = tmp_path / "export"
+        JsonlParquetExport(_iceberg_config(uri)).export(
+            [_chunk("alpha", "c1")], Storage(), str(out)
+        )
+        rows = _scan(uri)
+
+    assert [row["record_id"] for row in rows] == ["c1"]
