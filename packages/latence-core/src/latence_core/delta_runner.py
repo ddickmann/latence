@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from latence_core.capability import DeltaProcessor, ProviderRegistry
+from latence_core.capability import DeltaProcessor, DocumentEnumerator, ProviderRegistry
 from latence_core.contracts import (
     ChunkRecord,
     DeletionMode,
@@ -70,6 +70,8 @@ from latence_core.state.incremental import compute_drift
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from latence_core.contracts import Record
     from latence_core.quality import QualityReport
 
@@ -525,26 +527,40 @@ class DeltaRunner:
     def _current_document_ids(self, pipeline: Pipeline, excluded: list[str]) -> set[str]:
         """The content-addressed ids of the current live source documents (minus ``excluded``).
 
-        Enumerates each Source Stage (reading + hashing the source bytes, the cheap content-address
-        pass — NOT the expensive per-document extraction the reuse skips) and collects every
-        ``provenance.document_id`` the Source would emit, dropping the durably-deleted ids in
-        ``excluded``. Content-addressing makes an id match a byte-identical match, so intersecting
-        these with a prior Version's committed doc ids yields exactly the UNCHANGED (reusable)
-        documents; the rest are new/changed and get re-extracted.
+        Enumerates each Source Stage and collects every ``provenance.document_id`` the Source
+        would emit, dropping the durably-deleted ids in ``excluded``. Content-addressing makes an
+        id match a byte-identical match, so intersecting these with a prior Version's committed
+        doc ids yields exactly the UNCHANGED (reusable) documents; the rest are new/changed and
+        get re-extracted.
+
+        **This pass must not fetch content.** It runs BEFORE the reuse exclusions are known, so
+        anything it transfers is transferred unconditionally — a discovery pass that downloaded
+        every document would make a delta run over an unchanged remote library cost a full run
+        (in fact more: the changed documents would then be fetched a second time by the run
+        itself), erasing the whole saving ADR-0018 promises. A Source that can name its documents
+        without fetching them therefore implements
+        :class:`~latence_core.capability.DocumentEnumerator` and that is used here; only a Source
+        that cannot falls back to ``produce`` — correct, just not free. Either way the durable
+        deletions are pushed into the Source's ``exclude_document_ids`` first, so even the
+        fallback never re-fetches a document this run is going to drop anyway.
         """
         storage = Storage.for_uri(pipeline.storage_uri)
         excluded_set = set(excluded)
+        enumeration_pipeline = self._with_source_exclusions(pipeline, sorted(excluded_set))
         ids: set[str] = set()
-        for stage in pipeline.stages:
+        for stage in enumeration_pipeline.stages:
             if stage.capability is not CapabilityKind.SOURCE:
                 continue
             provider_cls = self._registry.load(stage.provider)
             provider = provider_cls(stage.config or {})
-            produce = getattr(provider, "produce", None)
-            if produce is None:  # pragma: no cover - a Source always produces
-                continue
-            for parser_input in produce(storage):
-                doc_id = parser_input.provenance.document_id
+            if isinstance(provider, DocumentEnumerator):
+                candidates: Iterator[str] = provider.document_ids(storage)
+            else:
+                produce = getattr(provider, "produce", None)
+                if produce is None:  # pragma: no cover - a Source always produces
+                    continue
+                candidates = (i.provenance.document_id for i in produce(storage))
+            for doc_id in candidates:
                 if doc_id not in excluded_set:
                     ids.add(doc_id)
         return ids

@@ -101,6 +101,14 @@ Graph reports a content hash for every `driveItem` (`quickXorHash` on SharePoint
   injects the id into this Provider's `exclude_document_ids` — and the connector then **skips it
   without transferring a byte**. On a large library that is the difference between an
   incremental run and a full re-download;
+
+  The runner has to enumerate the library's ids *before* it knows which are unchanged, so that
+  discovery pass must not fetch content either — or the saving would be zero no matter what the
+  run itself skips. The connector therefore implements the optional
+  `latence_core.capability.DocumentEnumerator` seam (`document_ids(storage)`), answering it from
+  the **listing alone**. `tests/test_sharepoint_delta_transfer.py` drives the real `DeltaRunner`
+  twice over one shared fake transport and asserts the second run transfers **zero** bytes;
+
 - a changed document gets a new id (`ADDED`, retiring the old one as `DELETED`) and is
   re-fetched;
 - a document removed from the library stops appearing in the listing, so the manifest diff

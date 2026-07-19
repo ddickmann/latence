@@ -78,6 +78,30 @@ class Source(Protocol):
 
 
 @runtime_checkable
+class DocumentEnumerator(Protocol):
+    """OPTIONAL Source refinement: enumerate document ids WITHOUT fetching content.
+
+    A delta run has to know which documents the source currently holds *before* it can decide
+    which of them are unchanged and can therefore be skipped (ADR-0018/0043). Deriving that set
+    from :meth:`Source.produce` is correct but pays the full fetch cost for every document — for
+    a remote Source (a SharePoint library, an object store) that means the whole corpus crosses
+    the network on every delta, which is precisely the cost the delta exists to avoid, and it
+    happens *before* the exclusions are known, so no ``exclude_document_ids`` can prevent it.
+
+    A Source that can name its documents more cheaply than it can fetch them implements this:
+    SharePoint reads the content hash Graph reports in the *listing*, so a delta run over an
+    unchanged library transfers zero bytes. The ids MUST be the same content-addressed ids
+    :meth:`Source.produce` stamps on ``Provenance.document_id`` — an id that disagreed would
+    silently mis-classify documents as new. A Source that cannot do better simply does not
+    implement it, and the runner falls back to ``produce`` (correct, just not free).
+    """
+
+    def document_ids(self, storage: Storage) -> Iterator[str]:
+        """Yield the ``Provenance.document_id`` of every document currently in the source."""
+        ...
+
+
+@runtime_checkable
 class Parser(Protocol):
     """Turns raw source documents into parsed markdown records."""
 

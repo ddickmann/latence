@@ -25,10 +25,16 @@ OneDrive Personal) in the *listing*, before any download. The connector mints
   intersects ids with the parent Corpus Version, marks it UNCHANGED, and injects it into this
   Provider's ``exclude_document_ids``;
 * **and this Provider then skips it without downloading it.** The exclusion is checked against
-  the id derived from the *listing*, before the download call is ever made. That is the whole
-  point: an incremental run over a 50k-document library
+  the id derived from the *listing*, before the download call is ever made. The runner's
+  *discovery* pass — which enumerates the current ids before any exclusion exists — is answered
+  from the listing too, via the optional
+  :class:`~latence_core.capability.DocumentEnumerator` seam (:meth:`SharePointSource.document_ids`);
+  without that, discovery would pull the whole library on every delta and the saving would be
+  zero. Together that is the whole point: an incremental run over a 50k-document library
   transfers only the documents that actually changed. The offline suite asserts it by counting
-  the fake transport's download calls, not by reading a flag.
+  the fake transport's download calls through the REAL DeltaRunner
+  (``tests/test_sharepoint_delta_transfer.py``), not by reading a flag and not by hand-injecting
+  the exclusions.
 * a document that changed gets a new id (ADDED) and retires the old one (DELETED); a document
   removed from the library simply stops appearing in the listing, so the manifest diff surfaces
   it as DELETED. This is exactly the reference ``source.local_folder`` semantics — content
@@ -292,6 +298,30 @@ class SharePointSource:
                 ),
                 content=data,
             )
+
+    def document_ids(self, storage: Storage) -> Iterator[str]:
+        """Yield each current document's content address **from the listing** — no download.
+
+        The :class:`~latence_core.capability.DocumentEnumerator` half of the Delta win. The
+        DeltaRunner has to enumerate the library's document ids before it can work out which ones
+        are unchanged, and that pass runs before any exclusion is known — so if it went through
+        :meth:`produce` it would pull every document's bytes on every delta run and the saving
+        would be zero. Graph reports a content hash per ``driveItem`` in the listing, so the id is
+        computable from metadata alone; the ids are byte-for-byte the ones :meth:`produce` stamps
+        on ``Provenance.document_id``, which is what makes the intersection sound.
+
+        Only an item whose drive reports NO hash still has to be fetched (and hashed) here — the
+        same unavoidable fallback :meth:`produce` makes.
+        """
+        for item in self._client.list_files(self._root_path):
+            extension = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
+            if extension not in self._extensions:
+                continue
+            listed_id = _listed_document_id(item)
+            if listed_id is None:
+                listed_id = "sha256:" + hashlib.sha256(self._client.download(item)).hexdigest()
+            if listed_id not in self._excluded:
+                yield listed_id
 
     def _file_name(self, item: GraphItem) -> str:
         if self._name_strategy == "path":
