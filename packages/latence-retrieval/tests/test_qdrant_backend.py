@@ -41,6 +41,7 @@ from latence_retrieval import (
     RetrievalBackend,
     RetrievalQuery,
 )
+from latence_retrieval.qdrant import DEFAULT_TEXT_KEY
 
 # --- the faithful fake qdrant_client module ---------------------------------------------------
 
@@ -149,11 +150,15 @@ def _install_fake_qdrant(
     return constructed
 
 
+# The payload key carrying the chunk text is ``content`` — the Export column name that
+# ``latence-sink-qdrant`` writes into every point it loads, and this adapter's default
+# ``text_key``. A collection built by somebody else keys it differently; that is the
+# ``text_key`` override, covered below.
 _CORPUS = {
     "docs": [
-        _ScoredPoint(id=1, score=0.9, payload={"text": "alpha", "tenant": "acme", "year": 2024}),
-        _ScoredPoint(id=2, score=0.5, payload={"text": "bravo", "tenant": "acme", "year": 2023}),
-        _ScoredPoint(id=3, score=0.7, payload={"text": "charlie", "tenant": "globex"}),
+        _ScoredPoint(id=1, score=0.9, payload={"content": "alpha", "tenant": "acme", "year": 2024}),
+        _ScoredPoint(id=2, score=0.5, payload={"content": "bravo", "tenant": "acme", "year": 2023}),
+        _ScoredPoint(id=3, score=0.7, payload={"content": "charlie", "tenant": "globex"}),
     ]
 }
 
@@ -312,6 +317,38 @@ def test_dense_search_passes_the_configured_vector_name(monkeypatch: pytest.Monk
     assert call["using"] == "dense_vec"
     assert call["query"] == [0.0, 0.0, 0.0]  # the raw dense vector
     assert call["with_payload"] is True
+
+
+def test_the_default_text_key_is_the_key_the_shipped_sink_writes() -> None:
+    # The sink (#183) writes the Export's own `content` column into the payload; this adapter reads
+    # the same collection. Mismatched defaults would return every Candidate with text == "".
+    assert DEFAULT_TEXT_KEY == "content"
+
+
+def test_text_key_override_reads_a_foreign_collections_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = {
+        "docs": [_ScoredPoint(id="x", score=1.0, payload={"body": "delta", "tenant": "acme"})]
+    }
+    _install_fake_qdrant(monkeypatch, store)
+    (only,) = _dense_backend(text_key="body").search(
+        RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0))
+    )
+    assert only.text == "delta"
+    assert only.metadata == {"tenant": "acme"}
+
+
+def test_a_payload_without_the_text_key_is_a_typed_error_not_empty_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0034: a mis-keyed backend must not hand the pipeline a page of text-less Candidates and
+    # call it a green retrieval — it says which key it looked for and which keys the point has.
+    store = {"docs": [_ScoredPoint(id="x", score=1.0, payload={"body": "delta"})]}
+    _install_fake_qdrant(monkeypatch, store)
+    with pytest.raises(BackendSearchError, match="text_key") as excinfo:
+        _dense_backend().search(RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0)))
+    assert "'content'" in str(excinfo.value)
+    assert "'body'" in str(excinfo.value)
+    assert "delta" not in str(excinfo.value)  # keys are schema; VALUES are content — never leaked
 
 
 def test_missing_payload_yields_empty_text_and_metadata(monkeypatch: pytest.MonkeyPatch) -> None:

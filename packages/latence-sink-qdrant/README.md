@@ -27,6 +27,13 @@ no index, caches nothing, and runs no search
 `latence-retrieval`; a `RetrievalBackend` over the collection you just loaded is
 `latence-retrieval[backend-qdrant]`.
 
+**Querying what you loaded.** Every exported column rides through as payload under its **Export
+column name**, so the chunk text is the payload field **`content`** (and `record_id`, `provenance`,
+`classification`, `media_type` are filterable beside it). That is exactly the default `text_key` of
+`latence-retrieval`'s `QdrantBackend`, so a collection this sink loaded is queryable with no
+override — `Candidate.text` is the chunk text. (A backend pointed at a key the payload lacks raises
+`BackendSearchError` rather than returning empty text.)
+
 Out of scope on purpose: sparse/named-sparse vector wiring (the Export's `sparse_indices` /
 `sparse_values` columns ride through as payload — see [#156](https://github.com/ddickmann/latence-framework/issues/156)),
 and the KG (`graph.ttl` / `graph.graphml`), which is a different store's problem.

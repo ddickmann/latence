@@ -63,6 +63,14 @@ _CONNECTION_KEYS: frozenset[str] = frozenset(
 _ADAPTER_KEYS: frozenset[str] = frozenset(
     {"collection", "capabilities", "dimension", "vector_name", "sparse_vector_name", "text_key"}
 )
+#: The payload field the chunk text lives under, by default. This is the framework's OWN Export
+#: column name (``content`` — ``latence_core.stages.export``), which ``latence-sink-qdrant``
+#: (#183) writes verbatim into the payload of every point it loads. The default therefore makes
+#: the two shipped halves — the sink that writes a collection and this backend that reads it —
+#: agree with no configuration at all. Point this adapter at a collection somebody else built and
+#: set ``text_key`` to whatever key *they* used; a key the payload does not carry is a loud
+#: :class:`~latence_retrieval.errors.BackendSearchError`, never a silent empty ``Candidate.text``.
+DEFAULT_TEXT_KEY = "content"
 
 
 class QdrantBackend:
@@ -87,8 +95,12 @@ class QdrantBackend:
         vector_name: str | None — the named dense vector to query (``using=``). ``None`` ⇒ the
             collection's single unnamed vector.
         sparse_vector_name: str | None — the named sparse vector to query for a sparse mode.
-        text_key: str — the payload field holding the chunk text (default ``"text"``); it becomes
-            :attr:`Candidate.text` and is dropped from :attr:`Candidate.metadata` (no duplication).
+        text_key: str — the payload field holding the chunk text (default
+            :data:`DEFAULT_TEXT_KEY` = ``"content"``, the Export column name that
+            ``latence-sink-qdrant`` writes, so a collection this framework loaded needs no
+            override); it becomes :attr:`Candidate.text` and is dropped from
+            :attr:`Candidate.metadata` (no duplication). A non-empty payload missing this key is a
+            :class:`~latence_retrieval.errors.BackendSearchError`, never a silent empty text.
         url / host / port / grpc_port / prefer_grpc / https / api_key / timeout / location —
             connection kwargs threaded verbatim to ``QdrantClient`` when it is built lazily. Ignored
             when a ``client`` is injected.
@@ -131,7 +143,7 @@ class QdrantBackend:
         self._sparse_vector_name = self._optional_str(
             cfg.get("sparse_vector_name"), "sparse_vector_name"
         )
-        text_key = cfg.get("text_key", "text")
+        text_key = cfg.get("text_key", DEFAULT_TEXT_KEY)
         if not isinstance(text_key, str) or not text_key:
             msg = f"QdrantBackend 'text_key' must be a non-empty string, got {text_key!r}."
             raise ValueError(msg)
@@ -274,8 +286,25 @@ class QdrantBackend:
         The payload's ``text_key`` becomes the candidate ``text`` and is dropped from ``metadata``
         (no duplication); every other payload field is carried through as opaque provenance. A point
         id (Qdrant allows ``int`` or UUID ``str``) is stringified to the seam's string ``id``.
+
+        A **non-empty** payload that does not carry ``text_key`` is a configuration fault, not a
+        result: silently returning ``text=""`` would hand the pipeline a full page of Candidates
+        with no text at all — the reranker would score nothing, the Packer would pack nothing, and
+        the run would report a green retrieval over a collection that carries the text perfectly
+        well. So it raises a typed :class:`~latence_retrieval.errors.BackendSearchError` naming the
+        key it looked for and the keys the point actually has (ADR-0034: no silent errors; payload
+        *keys* are schema, never content). A point with no payload at all is a different thing —
+        the store returned nothing to map — and stays an empty candidate.
         """
         payload = dict(point.payload or {})
+        if payload and self._text_key not in payload:
+            msg = (
+                f"qdrant collection {self._collection!r} has no {self._text_key!r} field in its "
+                f"point payload (keys present: {sorted(payload)}); set 'text_key' to the payload "
+                f"field holding the chunk text. Collections loaded by latence-sink-qdrant use the "
+                f"Export's own column name, {DEFAULT_TEXT_KEY!r} (the default)."
+            )
+            raise BackendSearchError(msg)
         text = payload.pop(self._text_key, "")
         return Candidate(
             id=str(point.id),
@@ -315,4 +344,4 @@ class QdrantBackend:
         return QdrantClient, models
 
 
-__all__ = ["QdrantBackend"]
+__all__ = ["DEFAULT_TEXT_KEY", "QdrantBackend"]
