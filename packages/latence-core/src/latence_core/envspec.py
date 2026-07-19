@@ -437,12 +437,61 @@ def load_environment(spec_path: Path) -> EnvironmentSpec:
 # --------------------------------------------------------------------------------------------
 
 
+# The runtime distributions that mean "this package LOADS A MODEL". A Provider package that
+# declares one of these does inference with weights, which is exactly the surface a compatibility
+# matrix has to speak for (a torch/transformers/CUDA combination is where these break). Deliberately
+# a list of *runtime* distributions, never of MODELS (ADR-0004): the framework still names no model
+# in core. Matched against a package's DECLARED dependencies, so the derivation stays offline and
+# import-free — the same posture as every other check in this module.
+#
+# RESIDUAL, stated rather than hidden: a Provider package that loads weights through some other
+# loader distribution must add it here. `test_the_model_runtime_markers_cover_the_committed_
+# workspace` asserts this set against the committed workspace — including the complement, the
+# Providers classified as owning no model runtime — so the omission is a red test and a one-line
+# fix, not a silently empty derivation.
+_MODEL_RUNTIME_DISTRIBUTIONS = frozenset(
+    {
+        "torch",
+        "transformers",
+        "sentence-transformers",
+        "gliner",
+        "gliner2",
+        "glinker",
+        "flashdeberta",
+        "peft",
+        "accelerate",
+        "optimum",
+        "onnxruntime",
+        "onnxruntime-gpu",
+        "timm",
+        "vllm",
+        "model2vec",
+        "fastembed",
+        "open-clip-torch",
+        "spacy",
+    }
+)
+
+
 @dataclass(frozen=True)
 class _PackageMeta:
     rel_path: str
     name: str
     dependencies: tuple[str, ...]
     provider_entry_points: frozenset[str]
+
+    @property
+    def loads_a_model(self) -> bool:
+        """Whether installing this package brings a model RUNTIME with it.
+
+        Read from the package's own declared dependencies against
+        :data:`_MODEL_RUNTIME_DISTRIBUTIONS`. ``latence-core`` and the deterministic Providers
+        (source, chunker, export, the pdfplumber Parser, the endpoint client, the disambiguator
+        that takes an *injected* embedder) declare none of them and are correctly excluded.
+        """
+        return any(
+            _distribution_of(dep) in _MODEL_RUNTIME_DISTRIBUTIONS for dep in self.dependencies
+        )
 
     @property
     def workspace_dependencies(self) -> frozenset[str]:
@@ -452,17 +501,24 @@ class _PackageMeta:
         transitive closure over them — which is what makes an excluded package reachable
         indirectly (``latence-parser-lighton-vllm`` → ``latence-parser-lighton``).
         """
-        names: set[str] = set()
-        for dep in self.dependencies:
-            # Strip the version specifier / extras / marker without needing ``packaging``: the
-            # distribution name is the leading run of name characters.
-            head = dep.strip().split(";")[0].split("[")[0]
-            for stop in ("<", ">", "=", "!", "~", " ", "("):
-                head = head.split(stop)[0]
-            head = head.strip().lower().replace("_", "-")
-            if head.startswith(_WORKSPACE_PREFIX):
-                names.add(head)
-        return frozenset(names)
+        return frozenset(
+            name
+            for name in (_distribution_of(dep) for dep in self.dependencies)
+            if name.startswith(_WORKSPACE_PREFIX)
+        )
+
+
+def _distribution_of(requirement: str) -> str:
+    """The canonical distribution name of a requirement string, without needing ``packaging``.
+
+    The distribution name is the leading run of name characters, before any extras, version
+    specifier or environment marker. Kept as one function because two spellings of this parse is
+    how ``gliner2[local]>=1.0,<2`` gets recognised by one caller and missed by the next.
+    """
+    head = requirement.strip().split(";")[0].split("[")[0]
+    for stop in ("<", ">", "=", "!", "~", " ", "("):
+        head = head.split(stop)[0]
+    return head.strip().lower().replace("_", "-")
 
 
 def _read_package(repo_root: Path, rel_path: str) -> _PackageMeta:
@@ -483,6 +539,42 @@ def _read_package(repo_root: Path, rel_path: str) -> _PackageMeta:
         dependencies=tuple(str(d) for d in project.get("dependencies", []) or []),
         provider_entry_points=frozenset(str(k) for k in entry_points),
     )
+
+
+def model_loading_providers(spec: EnvironmentSpec, repo_root: Path) -> frozenset[str]:
+    """The Providers this environment installs that LOAD A MODEL — DERIVED, never declared.
+
+    The half of the compatibility matrix's coverage that used to rest on
+    :attr:`EnvironmentSpec.learned_providers`, an optional hand-written field. An environment that
+    simply omitted it obliged the matrix to nothing, so the file's own promise — "a new learned
+    Provider turns this file red until it is mapped" — was false for exactly the environments that
+    forgot to declare (issue #199 / R3-env_reproducibility-1).
+
+    Derived instead from the workspace packages' own ``pyproject.toml``: a Provider whose declaring
+    package depends on a model runtime (:data:`_MODEL_RUNTIME_DISTRIBUTIONS`) loads weights, and a
+    combination that loads weights is precisely what a torch/transformers/CUDA matrix exists to
+    speak for. Only Providers the environment actually declares under ``providers`` are returned —
+    a package may register more entry points than the recipe promises.
+
+    Offline and import-free (metadata only), so it runs in the same gate as every other check here.
+    A missing package is skipped rather than raised: ``verify_environment`` reports that separately
+    as ``E-PACKAGE-MISSING``, and one missing package must not blind the whole derivation.
+
+    Distinct from :attr:`EnvironmentSpec.learned_providers`, which stays the narrower
+    ``latence env placement`` GPU-probe set: a CPU environment proves no GPU placement, yet its
+    model-loading Providers still need a matrix cell.
+    """
+    declared = set(spec.providers)
+    if not declared:
+        return frozenset()
+    found: set[str] = set()
+    for rel_path in spec.workspace_packages:
+        if not (repo_root / rel_path / "pyproject.toml").is_file():
+            continue
+        meta = _read_package(repo_root, rel_path)
+        if meta.loads_a_model:
+            found |= meta.provider_entry_points & declared
+    return frozenset(found)
 
 
 def _third_party_requirements(

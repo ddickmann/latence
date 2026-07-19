@@ -72,6 +72,7 @@ from latence_core.envspec import (
     Finding,
     distribution_name,
     load_environment,
+    model_loading_providers,
     parse_lock,
 )
 from latence_core.errors import ConfigError
@@ -427,15 +428,22 @@ def load_matrix(path: Path) -> CompatibilityMatrix:
 # --------------------------------------------------------------------------------------------
 
 
-def required_components(spec: EnvironmentSpec) -> dict[str, str]:
+def required_components(spec: EnvironmentSpec, repo_root: Path) -> dict[str, str]:
     """The components an environment obliges the matrix to have a cell for: ``{name: kind}``.
 
-    Derived from the committed ``environment.yaml``: every learned Provider it promises to place on
-    the GPU, and every distribution it names in an enforced boundary, an exclusion or its own
-    ``extra_requirements`` — which is exactly the serving surface (``vllm``,
-    ``flashinfer-python``, ``torch``, ``transformers``, the ABI-broken wheels). Because the set is
-    derived, *adding* a boundary or a learned Provider to an environment turns the matrix red until
-    somebody maps the new combination.
+    Derived from the committed ``environment.yaml`` **and the workspace metadata behind it**: every
+    distribution it names in an enforced boundary, an exclusion or its own ``extra_requirements``
+    — which is exactly the serving surface (``vllm``, ``flashinfer-python``, ``torch``,
+    ``transformers``, the ABI-broken wheels) — plus every Provider it installs that LOADS A MODEL.
+
+    The learned-Provider half is deliberately NOT read off ``spec.learned_providers`` alone. That
+    field is optional and means something narrower (the ``latence env placement`` GPU-probe set), so
+    an environment that omitted it — ``cpu-text`` did — obliged the matrix to nothing and its
+    model-loading Providers simply vanished from the map with no finding
+    (R3-env_reproducibility-1). :func:`~latence_core.envspec.model_loading_providers` derives the
+    set from the declaring packages' own dependencies instead, so coverage no longer depends on a
+    spec's willingness to declare; the declared set is still unioned in, because a spec is entitled
+    to oblige the matrix to *more* than the derivation found.
     """
     components: dict[str, str] = {}
     for constraint in spec.constraints:
@@ -444,7 +452,7 @@ def required_components(spec: EnvironmentSpec) -> dict[str, str]:
         components[distribution_name(exclusion.package)] = _KIND_EXCLUDED
     for requirement in spec.extra_requirements:
         components[distribution_name(requirement)] = _KIND_DISTRIBUTION
-    for provider in sorted(spec.learned_providers):
+    for provider in sorted(spec.learned_providers | model_loading_providers(spec, repo_root)):
         components[provider] = _KIND_LEARNED_PROVIDER
     return components
 
@@ -528,7 +536,7 @@ def _check_referenced_paths(command: str, repo_root: Path, label: str) -> list[F
 
 
 def _check_coverage(
-    matrix: CompatibilityMatrix, specs: dict[str, EnvironmentSpec]
+    matrix: CompatibilityMatrix, specs: dict[str, EnvironmentSpec], repo_root: Path
 ) -> list[Finding]:
     findings: list[Finding] = []
     by_key = {cell.key: cell for cell in matrix.cells}
@@ -562,7 +570,7 @@ def _check_coverage(
                     "at all. Every shipped environment is somebody's install target.",
                 )
             )
-        for component, kind in required_components(spec).items():
+        for component, kind in required_components(spec, repo_root).items():
             mapped = by_key.get((name, component))
             if mapped is None:
                 findings.append(
@@ -586,7 +594,7 @@ def _check_coverage(
         declaring = specs.get(cell.environment)
         if declaring is None or cell.kind == _KIND_SERVED_MODEL:
             continue
-        if cell.component not in required_components(declaring):
+        if cell.component not in required_components(declaring, repo_root):
             findings.append(
                 Finding(
                     "E-MATRIX-CELL-UNKNOWN",
@@ -915,7 +923,7 @@ def verify_matrix(
     """
     specs = _environment_specs(repo_root)
     findings: list[Finding] = []
-    findings.extend(_check_coverage(matrix, specs))
+    findings.extend(_check_coverage(matrix, specs, repo_root))
     findings.extend(_check_versions(matrix, specs))
     findings.extend(_check_licenses(matrix))
     findings.extend(_check_disclosure(matrix, specs, repo_root))

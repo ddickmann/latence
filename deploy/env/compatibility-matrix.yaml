@@ -8,7 +8,9 @@
 # and the verifier enforces both halves — a `verified` cell without date/hardware/command/observed
 # is E-MATRIX-EVIDENCE-MISSING, and an `UNVERIFIED` cell without a runnable reproduce command is
 # E-MATRIX-REPRODUCE-MISSING. Coverage is DERIVED from the committed deploy/env/*/environment.yaml
-# specs, so a new enforced boundary or learned Provider turns this file red until it is mapped.
+# specs AND from the workspace metadata behind them — a Provider whose package depends on a model
+# runtime owes this file a cell whether or not its spec declares `learned_providers` — so a new
+# enforced boundary or model-loading Provider turns this file red until it is mapped.
 #
 # TWO AXES per cell, because they fail differently and independently:
 #   resolution — does the combination INSTALL from the pinned environment? Offline, import-free,
@@ -139,6 +141,60 @@ cells:
       Held below 1.x, which transformers 4.x cannot use. Blackwell-specific operational note from
       the pod walkthrough: the hub's XET transfer backend has hung on fresh Blackwell pods —
       HF_HUB_DISABLE_XET=1 is the documented workaround (docs/TUTORIAL-fresh-pod-walkthrough.md).
+  # The model-loading Providers this environment installs. They are here because coverage is
+  # DERIVED from the workspace metadata behind the spec (a Provider whose package depends on a
+  # model runtime), not from an optional `learned_providers:` field — cpu-text declares none, and
+  # for a CPU environment that is correct: `learned_providers` is the GPU-placement probe set, and
+  # a CPU host proves no GPU placement. It still ships weights, so it still owes the map a cell
+  # (R3-env_reproducibility-1).
+  - component: fused_entity_relation.gliner2
+    kind: learned_provider
+    environment: cpu-text
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      The same mdeberta-v3 backbone as the GPU cell below, on CPU-only wheels: no CUDA, therefore
+      no FM-NVRTC-JIT: this is the leg that keeps working when the GPU legs are unavailable.
+  - component: redaction.gliner_pii
+    kind: learned_provider
+    environment: cpu-text
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      The ADR-0044 redaction floor on CPU. #191 (a configured cuda with the model silently on the
+      CPU) cannot arise here — this environment configures no CUDA device at all.
+  - component: disambiguation.glinker
+    kind: learned_provider
+    environment: cpu-text
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      INSTALLED and REGISTERED here, but declared gpu_only_providers by the spec: its ProviderProfile
+      is compute="gpu", so the Runner skips it with a flag on a CPU host rather than faking it. Its
+      pinned wheels (flashdeberta + triton, Linux/x86-64 only) are what the resolution axis covers;
+      its runtime slice belongs to the gpu-learned cell below.
+  - component: embedding.sentence_transformers
+    kind: learned_provider
+    environment: cpu-text
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      The CPU tier of the Granite r2 dense leg (ADR-0045):
+      ibm-granite/granite-embedding-97m-multilingual-r2 — WEIGHTS Apache-2.0 (IBM model card),
+      CODE Apache-2.0 (sentence-transformers / transformers loader), verified separately
+      2026-07-18 per ADR-0012. The 311m sibling runs in gpu-learned.
+  - component: sparse.splade
+    kind: learned_provider
+    environment: cpu-text
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      The ADR-0053 sparse leg, and the only learned Provider with NO GPU environment — it is
+      CPU-only by design. The Provider pins no default checkpoint; the committed stack wires
+      opensearch-project/opensearch-neural-sparse-encoding-multilingual-v1 (a genuine multilingual
+      SPLADE MLM) — WEIGHTS Apache-2.0, CODE Apache-2.0 via transformers, verified separately
+      2026-07-18 per ADR-0012. NOT BAAI/bge-m3 (no MLM head) and NOT naver/splade-v3
+      (cc-by-nc-sa-4.0, gated); both recorded as rejected in THIRD-PARTY-LICENSES.md.
 
   # --- deploy/env/served-ocr-server/ ----------------------------------------------------------
   - component: vllm

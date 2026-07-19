@@ -40,9 +40,10 @@ from latence_core.compat import (
     Evidence,
     load_matrix,
     render_matrix,
+    required_components,
     verify_matrix,
 )
-from latence_core.envspec import stack_providers
+from latence_core.envspec import load_environment, model_loading_providers, stack_providers
 from latence_core.errors import ConfigError
 
 # packages/latence-core/tests/ -> repo root is three parents up.
@@ -119,6 +120,106 @@ def test_every_environment_and_component_of_the_committed_specs_has_a_cell(
         "embedding.sentence_transformers",
     ):
         assert provider in covered
+
+
+def test_a_model_loading_provider_is_covered_even_when_the_spec_declares_none(
+    matrix: CompatibilityMatrix,
+) -> None:
+    """R3-env_reproducibility-1: coverage must not rest on an OPTIONAL hand-written field.
+
+    ``deploy/env/cpu-text/environment.yaml`` declares no ``learned_providers`` at all (correctly —
+    that field is the GPU-placement probe set and this is a CPU environment), yet it installs five
+    Providers whose packages pull a model runtime. Before the fix the derivation read that field
+    alone, so ``required_components`` returned zero learned-Provider cells for cpu-text and
+    ``verify_matrix`` was silent about all five: the matrix's own "a new learned Provider turns
+    this file red" promise was false for any spec that omits the field.
+    """
+    spec = load_environment(_REPO_ROOT / "deploy" / "env" / "cpu-text" / "environment.yaml")
+    assert spec.learned_providers == frozenset()  # the silence this test exists to survive
+
+    shipped = {
+        "fused_entity_relation.gliner2",
+        "redaction.gliner_pii",
+        "disambiguation.glinker",
+        "embedding.sentence_transformers",
+        "sparse.splade",
+    }
+    derived = required_components(spec, _REPO_ROOT)
+    assert {name for name, kind in derived.items() if kind == "learned_provider"} == shipped
+
+    # A Provider that owns NO model runtime of its own is NOT demanded a cell: latence-disambig-
+    # embedding declares only latence-core and takes its vectors from an injected embedder. Without
+    # this the derivation would be "everything in providers", which is not coverage, it is noise.
+    assert "disambiguation.embedding" in spec.providers
+    assert "disambiguation.embedding" not in derived
+
+    # And the committed matrix really carries them — asserted through the public verify path, one
+    # cell at a time, so a future refactor cannot pass this vacuously.
+    assert not _codes(matrix) & {"E-MATRIX-CELL-UNCOVERED"}
+    for provider in sorted(shipped):
+        target = next(c for c in matrix.cells if c.key == ("cpu-text", provider))
+        remaining = tuple(c for c in matrix.cells if c is not target)
+        assert "E-MATRIX-CELL-UNCOVERED" in _codes(_with_cells(matrix, remaining))
+
+
+def test_the_model_runtime_markers_cover_the_committed_workspace() -> None:
+    """The derivation's one residual, pinned: every model-loading package IS recognised.
+
+    ``model_loading_providers`` matches declared dependencies against a curated set of runtime
+    distributions, so a Provider package that loads weights through some *other* loader would slip
+    through. This test names the committed model-loading packages explicitly, so adding one whose
+    runtime the set does not know is a red test and a one-line fix — never a silently empty
+    derivation.
+    """
+    loads_weights = {
+        "cpu-text": {
+            "fused_entity_relation.gliner2",
+            "redaction.gliner_pii",
+            "disambiguation.glinker",
+            "embedding.sentence_transformers",
+            "sparse.splade",
+        },
+        "gpu-learned": {
+            "fused_entity_relation.gliner2",
+            "redaction.gliner_pii",
+            "redaction.gliner2",
+            "disambiguation.glinker",
+            "embedding.sentence_transformers",
+        },
+        "served-ocr-client": set(),
+        "served-ocr-server": set(),
+    }
+    # Classified as owning NO model runtime of their own. Hard-coded on purpose: it is the half
+    # that makes this test bite. A Provider added to an environment lands in this complement, so
+    # if its loader distribution is not in `_MODEL_RUNTIME_DISTRIBUTIONS` the omission surfaces
+    # HERE rather than as an empty derivation nobody notices.
+    deterministic = {
+        "source.local_folder",
+        "screening.intake_signature",
+        "screening.content_keyword",
+        "parser.pdfplumber",
+        "parser.plaintext",
+        "parser.endpoint",
+        # Both are CLIENTS of a served model, not loaders of one (ADR-0030): their packages depend
+        # on `openai`, and the model they talk to is mapped as its own `served_model` cell. The
+        # in-process `parser.lighton` — which does load a 1B VLM — is deliberately absent from the
+        # served-ocr-client Provider set, so the derivation correctly never sees it.
+        "parser.lighton_vllm",
+        "chunk.markdown",
+        "profiling.statistical",
+        "disambiguation.embedding",
+        "graph.canonical",
+        "export.knowledge_graph",
+        "export.jsonl_parquet",
+    }
+    seen = set()
+    for path in sorted((_REPO_ROOT / "deploy" / "env").glob("*/environment.yaml")):
+        spec = load_environment(path)
+        seen.add(spec.name)
+        derived = model_loading_providers(spec, _REPO_ROOT)
+        assert derived == loads_weights[spec.name], spec.name
+        assert set(spec.providers) - derived <= deterministic, spec.name
+    assert seen == set(loads_weights)
 
 
 def test_no_cell_is_left_without_a_verdict(matrix: CompatibilityMatrix) -> None:
