@@ -500,6 +500,43 @@ def _calls_neutralize_torch_jit(node: ast.AST) -> TypeGuard[ast.Call]:
     return isinstance(func, ast.Attribute) and func.attr == "neutralize_torch_jit"
 
 
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """Whether ``test`` is the ``TYPE_CHECKING`` / ``typing.TYPE_CHECKING`` constant."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
+def _collect_module_scope_backbone_imports(
+    node: ast.AST, found: list[ast.Import | ast.ImportFrom]
+) -> None:
+    """Gather backbone imports **evaluated at module import** (see :func:`_module_scope_...`)."""
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        return  # a function body runs on call, not at import — the ordering scan owns it
+    if isinstance(node, ast.If) and _is_type_checking_guard(node.test):
+        for stmt in node.orelse:  # the ELSE branch is the one that actually runs at import
+            _collect_module_scope_backbone_imports(stmt, found)
+        return
+    if _imports_deberta_backbone(node):
+        found.append(node)
+        return
+    for child in ast.iter_child_nodes(node):
+        _collect_module_scope_backbone_imports(child, found)
+
+
+def _module_scope_backbone_imports(tree: ast.Module) -> list[ast.Import | ast.ImportFrom]:
+    """Backbone imports that run at MODULE import: outside every function, outside TYPE_CHECKING.
+
+    Class bodies count — they are executed at module import like any other top-level statement.
+    ``if TYPE_CHECKING:`` bodies do NOT: they are never evaluated at runtime (and every in-tree
+    gliner-family Provider annotates against its backbone that way), so exempting them is what keeps
+    this guard from being a false positive that forces the annotations out.
+    """
+    found: list[ast.Import | ast.ImportFrom] = []
+    _collect_module_scope_backbone_imports(tree, found)
+    return found
+
+
 def jit_import_ordering_offenders(tree: ast.Module) -> list[str]:
     """Every function that imports the deberta backbone **without** first neutralizing the JIT.
 
@@ -511,8 +548,24 @@ def jit_import_ordering_offenders(tree: ast.Module) -> list[str]:
     first is still fully exposed to the Blackwell/CUDA-13 nvrtc crash while passing every
     routing-shaped assertion. This scans each function body for the ordering directly: the earliest
     ``neutralize_torch_jit(...)`` call must precede the earliest backbone import.
+
+    **R3/#190-0 — module scope is scanned too, and admits no ordering repair.** This used to walk
+    ``FunctionDef`` bodies ONLY, so the WORST shape was invisible: a backbone import at module level
+    lives in no function, produced zero offenders, and passed every #190 guard clean. That import is
+    evaluated at **provider-module / entry-point import**, i.e. before any Provider code — hence
+    before any ``neutralize_torch_jit()`` call — can run, so the deberta_v2 helpers are already
+    ``ScriptFunction``s and neither lever can un-script them. There is no "neutralize first" fix for
+    it; the import must be DEFERRED into the loading function (which is also the ADR-0016
+    lazy-heavy-dep discipline every in-tree Provider already follows), so it is flagged
+    unconditionally.
     """
-    offenders: list[str] = []
+    offenders: list[str] = [
+        f"<module>: imports the deberta backbone at line {node.lineno} at MODULE level "
+        f"({ast.unparse(node)}) — evaluated at provider-module/entry-point import, before any "
+        "Provider code and therefore before any neutralize_torch_jit() call can run; defer it into "
+        "the loading function that neutralizes the JIT first (ADR-0016)"
+        for node in _module_scope_backbone_imports(tree)
+    ]
     for func in ast.walk(tree):
         if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
@@ -553,6 +606,11 @@ def test_every_in_tree_deberta_backed_source_is_scanned_by_the_jit_ordering_guar
     mutated (imports-first) version of that file; nothing ever handed it the file. Reordering the
     imports there would have shipped fully green and died with ``libnvrtc-builtins.so.13.0`` on the
     first ``link_mentions`` forward on an sm_120 pod.
+
+    Completeness here is over the SOURCE SET only. The scan's other completeness axis — the SCOPES
+    within a source — was the R3/#190-0 defect: module-level imports were not examined at all. That
+    is fixed in :func:`jit_import_ordering_offenders` and covered by
+    ``test_jit_ordering_guard_flags_a_module_level_backbone_import``.
     """
     discovered = set(_DEBERTA_BACKED_SOURCES)
     assert discovered >= _KNOWN_DEBERTA_BACKED_SOURCES, (
@@ -601,6 +659,9 @@ def test_mdeberta_providers_neutralize_the_jit_before_importing_the_backbone(
     transformers script the deberta_v2 relative-position helpers, which is the instant that
     matters. ``redaction.gliner_pii2`` passed the routing guard while never neutralizing the JIT at
     all; this scan bites on that and on any future Provider that imports the backbone first.
+
+    R3/#190-0: it also bites a MODULE-level backbone import — the shape that used to escape the
+    scan entirely because it lives in no function body, and the one shape no ordering can repair.
     """
     path = _packages_root() / rel_source
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -631,6 +692,69 @@ def test_jit_ordering_guard_flags_a_seam_routed_provider_that_imports_first() ->
     assert jit_import_ordering_offenders(ast.parse(bad)), (
         "a Provider that imports gliner2 before neutralizing the JIT must be flagged"
     )
+
+
+def test_jit_ordering_guard_flags_a_module_level_backbone_import() -> None:
+    """REGRESSION (R3/#190-0): a MODULE-level backbone import is an offence, seam-routed or not.
+
+    The blind spot this bites: the ordering scan only walked ``FunctionDef`` bodies, so an import
+    evaluated at **provider-module / entry-point import** — the one ordering
+    ``neutralize_torch_jit()`` can never repair, because transformers has already compiled the six
+    ``deberta_v2`` relative-position helpers into real ``ScriptFunction``s before any Provider code
+    runs — lived in no function and was never examined. Such a source produced ZERO offenders and
+    passed every #190 guard clean while dying with ``libnvrtc-builtins.so.13.0`` on its first
+    forward on a Blackwell/CUDA-13 pod.
+    """
+    bad = (
+        "from gliner2 import GLiNER2\n"
+        "\n"
+        "class NewProvider:\n"
+        "    def _load_model(self):\n"
+        "        neutralize_torch_jit(provider_name='x.new')\n"
+        "        return load_gliner2_optimized(GLiNER2.from_pretrained, mid, dev, cfg)\n"
+    )
+    assert not jit_seam_offenders(ast.parse(bad)), (
+        "precondition: the routing guard considers this source clean (the load IS handed to a "
+        "JIT-neutralizing loader) — the module-level import is the blind spot"
+    )
+    offenders = jit_import_ordering_offenders(ast.parse(bad))
+    assert offenders, (
+        "a Provider that imports its DeBERTa backbone at MODULE level must be flagged: the import "
+        "runs at entry-point discovery, before any neutralize_torch_jit() call can execute"
+    )
+    assert any("module" in o for o in offenders), (
+        f"the offender message must name module scope so the fix is obvious: {offenders}"
+    )
+
+
+def test_jit_ordering_guard_flags_a_class_body_backbone_import() -> None:
+    """A class body is module-scope code too — an import there is evaluated at module import."""
+    bad = "class P:\n    from gliner import GLiNER\n"
+    assert jit_import_ordering_offenders(ast.parse(bad))
+
+
+def test_jit_ordering_guard_does_not_flag_a_type_checking_only_import() -> None:
+    """No false positive: ``if TYPE_CHECKING:`` bodies are never evaluated at runtime.
+
+    Every in-tree gliner-family Provider annotates against its backbone this way; flagging it would
+    force the guard to be weakened or the annotations dropped.
+    """
+    for good in (
+        "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from gliner import GLiNER\n",
+        "import typing\n\nif typing.TYPE_CHECKING:\n    from gliner2 import GLiNER2\n",
+    ):
+        assert not jit_import_ordering_offenders(ast.parse(good)), f"must NOT be flagged: {good!r}"
+
+    # …but the else-branch of that same guard DOES run at import, so it is still scanned.
+    bad = (
+        "from typing import TYPE_CHECKING\n"
+        "\n"
+        "if TYPE_CHECKING:\n"
+        "    from gliner import GLiNER\n"
+        "else:\n"
+        "    from gliner import GLiNER\n"
+    )
+    assert jit_import_ordering_offenders(ast.parse(bad))
 
 
 def test_jit_ordering_guard_flags_a_provider_that_never_neutralizes() -> None:
