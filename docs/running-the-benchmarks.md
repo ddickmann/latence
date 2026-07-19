@@ -170,6 +170,16 @@ precision, recall and F1 are derived) for a suite scoring a labelled set. A pass
 express a labelled set — a system that predicts nothing would score a perfect "no false
 positives" — and an undefined ratio is reported as `n/a`, never as 0%.
 
+The mirror of that hazard is just as real, and a `MetricScore` only defends against it if the
+suite counts both halves in the same unit. The redaction suite scores *containment* rather than
+boundary equality, so a wider mask still counts as having masked the value; if it also credited
+one true positive per value swallowed while charging false positives per emitted span, a Provider
+that masked whole documents — destroying every ounce of corpus utility — would post perfect
+recall for free and outrank a real redactor. `coverage` therefore aligns detections to values
+**one-to-one** (a maximum matching under containment, the same multiset rule `confusion` applies
+to exact spans): a mask is credited for at most one value and answers for every span it emits, so
+predicting everything is as visible a failure as predicting nothing.
+
 Two rules for a new dataset: pin a full commit SHA, and verify the corpus and toolkit licenses
 separately, recording both on the `DatasetSpec`. If you cannot verify one, record it as
 `UNVERIFIED` — the gate will then refuse the dataset, which is the correct outcome. This is not

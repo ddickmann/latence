@@ -369,6 +369,7 @@
         "Scored with Provider 'redaction.hybrid_rule' at its DEFAULT config: no `detectors` key, which selects the comprehensive built-in recogniser set. Narrowing that default would show up here as a recall drop.",
         "The corpus is SYNTHETIC \u2014 no real personal data is in this repository. Every value is a reserved or published example (see the DatasetSpec license notes).",
         "The gold set deliberately includes person names and postal addresses, which a rule-based redactor structurally cannot detect. The recall below is therefore NOT expected to be 1.0, and the per-type table shows exactly where the residual is. The learned re-pin for names is `--provider redaction.gliner_pii`.",
+        "OVER-redaction is charged, not only under-redaction: `coverage` credits ONE detection per gold value (a maximum one-to-one alignment under containment), so a Provider cannot buy recall by widening its masks \u2014 every span it emits that is not matched to a value is a false positive. Masking everything and masking nothing are both visible failures here.",
         "Per-type slices count a detected span as a false positive for its own type when it covers no gold value; a value masked under a different label counts as a miss for its gold type (and appears under the `exact span+type` criterion), because a type-scoped redaction policy would not have covered it."
       ],
       "overall": {

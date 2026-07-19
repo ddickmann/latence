@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING
 import pytest
 from latence_benchmark.corpora.build_synthetic_pii import build_corpus
 from latence_benchmark.datasets import DatasetUnavailableError, ShippedCorpusSource, content_digest
+from latence_benchmark.metrics import micro
 from latence_benchmark.redaction_suite import (
     CORPUS_FILE,
     SYNTHETIC_PII,
     RedactionSuite,
+    _covers,
     coverage,
     load_corpus,
 )
@@ -139,6 +141,45 @@ def test_a_boundary_disagreement_is_not_also_charged_as_a_false_alarm() -> None:
     understate precision on exactly the cases where the value WAS masked."""
     score = coverage("match", "c", gold=[("d", "ssn", 10, 21)], detected=[("d", "ssn", 8, 25)])
     assert (score.true_positives, score.false_positives) == (1, 0)
+
+
+def test_one_mask_cannot_claim_more_than_one_gold_value() -> None:
+    """The mixed-basis hole: crediting a detection once per value it happens to swallow means
+    a wider mask is credited without ever being charged, so over-masking costs nothing."""
+    gold = [("d", "ssn", 10, 21), ("d", "email", 40, 55), ("d", "phone", 70, 82)]
+    one_big_mask = coverage("match", "c", gold=gold, detected=[("d", "person_name", 0, 200)])
+    assert one_big_mask.true_positives == 1
+    assert one_big_mask.false_negatives == 2
+    # ...while a redactor that actually localises the three values is fully credited.
+    precise = coverage("match", "c", gold=gold, detected=list(gold))
+    assert (precise.true_positives, precise.false_positives, precise.false_negatives) == (3, 0, 0)
+
+
+def test_masking_the_whole_document_scores_worse_than_the_real_redactor(
+    corpus_root: Path,
+) -> None:
+    """The headline must be able to see over-redaction — the largest failure mode of a redactor.
+
+    A detector that masks every document in full destroys 100% of corpus utility. If it can
+    outrank the pinned Provider on the published number, the benchmark backing the framework's
+    central privacy claim is measuring nothing.
+    """
+    documents = load_corpus(corpus_root)
+    languages = dict.fromkeys(document.language for document in documents)
+    slices = []
+    for language in languages:
+        in_language = [d for d in documents if d.language == language]
+        gold = [(d.doc_id, s.pii_type, s.start, s.end) for d in in_language for s in d.pii]
+        detected = [(d.doc_id, "person_name", 0, len(d.text)) for d in in_language]
+        # The temptation, stated structurally: every planted value physically IS inside a mask.
+        assert all(any(_covers(d, g) for d in detected) for g in gold)
+        slices.append(coverage("language", language, gold=gold, detected=detected))
+    mask_everything = micro(slices, dimension="language")
+
+    real = RedactionSuite().run(corpus_root).headline
+    assert real is not None and real.f1 is not None
+    assert mask_everything.f1 is not None
+    assert mask_everything.f1 < real.f1
 
 
 # -- the suite end-to-end ----------------------------------------------------------------------

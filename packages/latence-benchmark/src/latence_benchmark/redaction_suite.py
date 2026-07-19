@@ -176,6 +176,35 @@ def _covers(detected: _Detected, gold: _Gold) -> bool:
     return detected[0] == gold[0] and detected[2] <= gold[2] and detected[3] >= gold[3]
 
 
+def _alignment(gold: Sequence[_Gold], detected: Sequence[_Detected]) -> int:
+    """Size of a maximum one-to-one pairing of gold values to detections that contain them.
+
+    Kuhn's augmenting-path algorithm, run per document (``_covers`` can only hold within one
+    document, so the matching decomposes and recursion stays bounded by the detections in a
+    single document). Iteration follows input order throughout, so the result is deterministic;
+    the *size* of a maximum matching is in any case independent of the order chosen.
+    """
+    by_document: dict[str, list[int]] = {}
+    for index, span in enumerate(detected):
+        by_document.setdefault(span[0], []).append(index)
+
+    claimed_by: dict[int, int] = {}
+
+    def augment(gold_index: int, visited: set[int]) -> bool:
+        item = gold[gold_index]
+        for detected_index in by_document.get(item[0], ()):
+            if detected_index in visited or not _covers(detected[detected_index], item):
+                continue
+            visited.add(detected_index)
+            holder = claimed_by.get(detected_index)
+            if holder is None or augment(holder, visited):
+                claimed_by[detected_index] = gold_index
+                return True
+        return False
+
+    return sum(augment(gold_index, set()) for gold_index in range(len(gold)))
+
+
 def coverage(
     dimension: str,
     name: str,
@@ -185,18 +214,32 @@ def coverage(
 ) -> MetricScore:
     """Score containment rather than boundary equality — the privacy question.
 
-    A gold value is a true positive when some detected span contains it. A detected span that
-    contains no gold value at all is a false positive (a false alarm on clean text); a detected
-    span that merely disagrees about boundaries with a value it *does* cover is not.
+    A gold value is a true positive when a detected span contains it, and boundary disagreement
+    costs nothing: masking ``[8, 25)`` where the value sits at ``[10, 21)`` still masked the
+    value, which is what a privacy claim is about.
+
+    The credit is nevertheless **one detection per value**. Both halves of the score are counted
+    over the same alignment — true positives are matched pairs, false negatives are gold values
+    left unmatched, false positives are detections left unmatched — which is precisely the
+    multiset rule :func:`~latence_benchmark.metrics.confusion` applies, with containment
+    substituted for boundary equality.
+
+    Counting covered *gold values* against unmatched *detected spans* instead would mix two
+    measurement bases, and the gap is not academic: one span over the whole document would be
+    credited for every value it swallowed while being charged nothing, so a redactor that masks
+    the entire corpus — destroying all of its utility — would outrank a real one on this,
+    the published headline. Over-redaction is the largest failure mode of a redactor, and a
+    metric that cannot see it is not measuring redaction. Under the alignment it is charged in
+    full: the mask-everything detector claims one value per document and answers for every
+    other detection it emitted.
     """
-    covered = [g for g in gold if any(_covers(d, g) for d in detected)]
-    false_alarms = [d for d in detected if not any(_covers(d, g) for g in gold)]
+    matched = _alignment(gold, detected)
     return MetricScore(
         dimension=dimension,
         name=name,
-        true_positives=len(covered),
-        false_positives=len(false_alarms),
-        false_negatives=len(gold) - len(covered),
+        true_positives=matched,
+        false_positives=len(detected) - matched,
+        false_negatives=len(gold) - matched,
     )
 
 
@@ -286,6 +329,11 @@ class RedactionSuite:
             "rule-based redactor structurally cannot detect. The recall below is therefore NOT "
             "expected to be 1.0, and the per-type table shows exactly where the residual is. "
             "The learned re-pin for names is `--provider redaction.gliner_pii`.",
+            "OVER-redaction is charged, not only under-redaction: `coverage` credits ONE "
+            "detection per gold value (a maximum one-to-one alignment under containment), so a "
+            "Provider cannot buy recall by widening its masks — every span it emits that is not "
+            "matched to a value is a false positive. Masking everything and masking nothing are "
+            "both visible failures here.",
             "Per-type slices count a detected span as a false positive for its own type when it "
             "covers no gold value; a value masked under a different label counts as a miss for "
             "its gold type (and appears under the `exact span+type` criterion), because a "
