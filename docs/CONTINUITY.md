@@ -183,9 +183,11 @@ says so.
 - **Signing cannot be skipped by accident.** `--sign`/`--no-sign` is required and explicit,
   with no default: a missing `id-token: write` permission fails the job loudly rather than
   quietly shipping an unverifiable release.
-- **Adopters verify in two commands.** A generated VERIFY.md ships inside the asset set with
-  copy-pasteable instructions (verify the Sigstore bundle over `SHA256SUMS`, then
-  `sha256sum -c SHA256SUMS`).
+- **Adopters verify in three commands.** A generated VERIFY.md ships inside the asset set with
+  copy-pasteable instructions: verify the Sigstore bundle over `SHA256SUMS`, run
+  `sha256sum -c SHA256SUMS`, then diff the asset directory against the manifest — because
+  `sha256sum -c` checks only the files listed and would not notice an asset *added* to the
+  published release.
 - **PyPI publication remains gated.** The `pypi-publish` job is written against **PyPI
   Trusted Publishing (OIDC)** — no long-lived API token is ever stored — and is still
   disabled behind a `false &&` short-circuit on its `if:` condition plus a protected `pypi`

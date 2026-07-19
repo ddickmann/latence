@@ -12,7 +12,11 @@
 #     VERIFY.md                 <- the copy-pasteable verification instructions
 #
 # Why only SHA256SUMS is signed: it covers every other asset by digest, so ONE signature
-# transitively authenticates the whole release. An adopter runs two commands (see VERIFY.md).
+# transitively authenticates the whole release. It does NOT, on its own, say that the release
+# carries nothing else: `sha256sum -c` checks the files the manifest lists and never looks at
+# the directory, so an attacker with release-write but no Sigstore identity could add an extra
+# distribution and still pass. VERIFY.md therefore ships a third step that diffs the directory
+# against the manifest, which is what actually makes "every asset is covered" checkable.
 #
 # Signing is keyless Sigstore (sigstore-python): the signing identity is the GitHub Actions
 # workflow itself, certified by Fulcio and logged in Rekor. There is no long-lived private
@@ -245,7 +249,7 @@ fi
 cat >> "$OUT/VERIFY.md" <<EOF
 ## Verifying this release
 
-Every asset of \`${TAG}\` is covered by \`SHA256SUMS\`, and \`SHA256SUMS\` is signed with
+\`SHA256SUMS\` records a digest for every other asset of \`${TAG}\`, and \`SHA256SUMS\` is signed with
 [keyless Sigstore](https://www.sigstore.dev/) — the signing identity is this repository's
 release workflow, certified by Fulcio and recorded in the Rekor transparency log. There is
 no long-lived key to trust or to leak.
@@ -262,10 +266,19 @@ uvx sigstore verify identity \\
 
 # 2. Verify every artifact against the now-trusted SHA256SUMS
 sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
+
+# 3. Reject any asset SHA256SUMS does NOT list. Step 2 only checks the files the manifest
+#    names, so on its own it cannot see an EXTRA distribution added to the release.
+diff \\
+  <(find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -exec basename {} \\; | sort) \\
+  <(cut -c 67- SHA256SUMS | sort)
 \`\`\`
 
 Step 1 failing means the checksum file is not the one this workflow produced — stop.
 Step 2 failing means an artifact does not match its recorded digest — stop.
+Step 3 printing anything means the directory holds a file this release never signed (a
+\`>\` line) or is missing one (a \`<\` line) — stop, and do not install from that directory.
+Only after all three pass is *every* file in the directory an asset of \`${TAG}\`.
 
 ### Software Bill of Materials
 

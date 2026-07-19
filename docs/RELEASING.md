@@ -43,9 +43,16 @@ is a manual step at release time — this section documents what the workflow al
 | `VERIFY.md` | the copy-pasteable verification instructions (also appended to the notes) |
 
 Only `SHA256SUMS` is signed, because it covers every other asset by digest — one signature
-transitively authenticates the whole release, and an adopter runs two commands instead of
-one per file. `VERIFY.md` is written *before* the checksums so it is itself covered: the
-instructions telling you how to verify are not the one file an attacker can rewrite freely.
+transitively authenticates the whole release, instead of one per file. `VERIFY.md` is written
+*before* the checksums so it is itself covered: the instructions telling you how to verify are
+not the one file an attacker can rewrite freely.
+
+What that signature does *not* say by itself is that the release carries nothing else.
+`sha256sum -c` checks the files the manifest lists and never enumerates the directory, so an
+attacker with release-write but no Sigstore identity could leave `SHA256SUMS` and its bundle
+untouched and simply **add** a wheel. That is why the procedure has a third step that diffs the
+directory against the manifest — it is the step that makes "every asset is covered" checkable
+rather than assumed.
 
 ### How an adopter verifies a release
 
@@ -61,10 +68,17 @@ uvx sigstore verify identity \
 
 # 2. Verify every artifact against the now-trusted SHA256SUMS
 sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
+
+# 3. Reject any asset SHA256SUMS does NOT list. Step 2 only checks the files the manifest
+#    names, so on its own it cannot see an EXTRA distribution added to the release.
+diff \
+  <(find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -exec basename {} \; | sort) \
+  <(cut -c 67- SHA256SUMS | sort)
 ```
 
-Substitute the tag you downloaded in `--cert-identity`. Both commands must succeed; either
-one failing means the assets are not what this repository's release workflow produced.
+Substitute the tag you downloaded in `--cert-identity`. All three steps must succeed, and step
+3 must print nothing; any of them failing means the directory does not hold exactly what this
+repository's release workflow produced.
 
 ### Why keyless
 
@@ -102,7 +116,7 @@ commands still pass and nothing can be mistaken for a release.
 
 `build` and `release-integrity` run exactly as they would for a real release; the signed
 asset set is uploaded as the `release-assets` workflow artifact and the `github-release` and
-`pypi-publish` jobs are skipped. Download the artifact and run the two verification commands
+`pypi-publish` jobs are skipped. Download the artifact and run the three verification commands
 from its `VERIFY.md` against it.
 
 To publish for real, push the tag (or re-dispatch with the tag selected as the ref and

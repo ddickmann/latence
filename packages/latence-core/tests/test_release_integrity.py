@@ -81,6 +81,31 @@ def _sha256sum_check(directory: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _shipped_coverage_check(directory: Path) -> subprocess.CompletedProcess[str]:
+    """Run the coverage step **as shipped in the generated VERIFY.md**, not a re-implementation.
+
+    The commands are extracted from VERIFY.md's bash block so this test can only pass if the
+    instructions an adopter actually copy-pastes detect the problem. Steps 1 and 2 are left
+    out: step 1 needs network + an OIDC identity, and step 2 is already covered by
+    ``_sha256sum_check`` (which also picks the right tool for this host).
+    """
+    block = re.search(r"```bash\n(.*?)```", (directory / "VERIFY.md").read_text(), re.S)
+    assert block, "VERIFY.md ships no bash block"
+    lines = block.group(1).splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("# 3.")]
+    assert starts, (
+        "VERIFY.md's procedure has no step 3 — `sha256sum -c` alone cannot detect an asset "
+        "the manifest does not list, so the shipped procedure cannot back its own claim"
+    )
+    return subprocess.run(
+        ["bash", "-c", "\n".join(lines[starts[0] :])],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _run(
     tmp_path: Path,
     *,
@@ -188,6 +213,41 @@ def test_checksum_verification_rejects_a_tampered_asset(tmp_path: Path, victim: 
     check = _sha256sum_check(out)
     assert check.returncode != 0, f"a tampered {victim} passed verification"
     assert victim in check.stdout
+
+
+def test_verify_procedure_rejects_an_asset_the_manifest_does_not_list(tmp_path: Path) -> None:
+    """An ADDED file must fail the shipped procedure — the threat the signature exists to stop.
+
+    An attacker with release-write but no Sigstore identity cannot alter SHA256SUMS or its
+    bundle, so their only move is to *add* an asset: one extra wheel next to the real ones.
+    `sha256sum -c` verifies only the names the manifest lists and never enumerates the
+    directory, so on its own it passes — and an adopter who was just told verification
+    succeeded runs `pip install ./*.whl`. VERIFY.md's procedure must catch this itself.
+    """
+    _, out = _run(tmp_path, extra=("--no-sign",))
+    assert _sha256sum_check(out).returncode == 0
+    assert _shipped_coverage_check(out).returncode == 0, (
+        "clean asset set flagged as covered-mismatch"
+    )
+
+    (out / "latence_core-0.1.1-py3-none-any.whl").write_bytes(b"attacker wheel")
+
+    # The digest step alone is blind to this: that is precisely why step 3 has to exist.
+    assert _sha256sum_check(out).returncode == 0
+
+    check = _shipped_coverage_check(out)
+    assert check.returncode != 0, "an unsigned, unlisted wheel passed the shipped procedure"
+    assert "latence_core-0.1.1-py3-none-any.whl" in check.stdout
+
+
+def test_verify_procedure_rejects_a_missing_asset(tmp_path: Path) -> None:
+    """A deleted asset is reported too — coverage is a set equality, not a one-way check."""
+    _, out = _run(tmp_path, extra=("--no-sign",))
+    (out / "sbom.cdx.json").unlink()
+
+    check = _shipped_coverage_check(out)
+    assert check.returncode != 0
+    assert "sbom.cdx.json" in check.stdout
 
 
 def test_sbom_is_stamped_with_the_release_identity(tmp_path: Path) -> None:
