@@ -75,6 +75,11 @@ with no Redaction Stage gets **no** reassuring "no personal data found" line.
 - **It never phones home.** Pages are single self-contained HTML documents with inlined CSS —
   no CDN, no font host, no script, no analytics. It works with the network cable pulled out,
   and it binds the loopback interface only (it refuses any other bind address).
+- **It answers only this machine.** A request is refused with `403` unless its `Host` names
+  loopback (`localhost`, `127.0.0.1`, `[::1]`) on the port the console was started on, and any
+  `Origin` it carries is a loopback origin too. Binding to loopback alone would not stop DNS
+  rebinding — a page in another tab re-resolving its own domain to `127.0.0.1` reaches the
+  socket from your own browser, and only the `Host` header gives it away.
 - **It is not a JSON dump.** The machine-readable `quality-report.json` is still on Storage
   for anyone who wants it; the console is the human half.
 

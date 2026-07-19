@@ -8,7 +8,9 @@ promise: there is nowhere for state to live.
 
 :func:`serve` is the socket half — twenty lines of :mod:`http.server` that hand each request
 to the app. It refuses to bind anywhere but the loopback interface, so the console is never
-accidentally exposed on a network.
+accidentally exposed on a network, and it refuses any request whose ``Host`` (or ``Origin``)
+does not name this machine on the bound port, so a DNS-rebound browser page cannot read the
+corpus through the loopback socket the operator opened.
 """
 
 from __future__ import annotations
@@ -208,6 +210,73 @@ def _require_loopback(host: str) -> str:
     raise NotLoopbackError(msg)
 
 
+def _is_loopback_name(host: str) -> bool:
+    """Is ``host`` a name for this machine? (``localhost`` or any loopback IP literal.)"""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _split_authority(value: str) -> tuple[str, int | None]:
+    """Split ``host[:port]`` — bracketed IPv6 included — into a host and an explicit port.
+
+    A malformed authority yields ``("", None)``, which no check accepts.
+    """
+    if value.startswith("["):
+        end = value.find("]")
+        if end < 0:
+            return "", None
+        host, rest = value[1:end], value[end + 1 :]
+        if not rest:
+            return host, None
+        if not rest.startswith(":"):
+            return "", None
+        port_text = rest[1:]
+    elif value.count(":") > 1:
+        # An unbracketed IPv6 literal carries no port; the colons are all address.
+        return value, None
+    elif ":" in value:
+        host, _, port_text = value.partition(":")
+    else:
+        return value, None
+    if not port_text.isdigit():
+        return "", None
+    return host, int(port_text)
+
+
+def is_local_host_header(value: str | None, bound_port: int) -> bool:
+    """Does this ``Host`` header actually address the console on this machine?
+
+    Binding to loopback is a *network*-layer control, and DNS rebinding defeats it: the victim's
+    own browser reaches the socket over loopback while still calling it ``attacker.example.com``,
+    so the same-origin policy lets the attacker's page read the answer. The ``Host`` header is the
+    only place that attack is visible, which is why an unrecognised one is refused here.
+    """
+    if not value:
+        return False
+    host, port = _split_authority(value.strip())
+    if not host or not _is_loopback_name(host):
+        return False
+    return (port if port is not None else 80) == bound_port
+
+
+def is_local_origin_header(value: str | None, bound_port: int) -> bool:
+    """Is this ``Origin`` one the console may answer? Absent is fine; cross-site is not."""
+    if not value:
+        return True
+    origin = urlsplit(value.strip())
+    if origin.scheme not in ("http", "https") or not origin.netloc:
+        return False
+    host, port = _split_authority(origin.netloc)
+    if not host or not _is_loopback_name(host):
+        return False
+    default = 443 if origin.scheme == "https" else 80
+    return (port if port is not None else default) == bound_port
+
+
 def build_server(
     app: ConsoleApp, host: str = "127.0.0.1", port: int = 8787
 ) -> ThreadingHTTPServer:
@@ -217,9 +286,20 @@ def build_server(
     class Handler(BaseHTTPRequestHandler):
         server_version = "latence-console"
         sys_version = ""
+        # Set once the socket is bound below (port 0 means "pick one", so it is not known here).
+        bound_port: ClassVar[int] = port
+
+        def _addresses_this_machine(self) -> bool:
+            return is_local_host_header(
+                self.headers.get("Host"), self.bound_port
+            ) and is_local_origin_header(self.headers.get("Origin"), self.bound_port)
 
         def _answer(self, *, with_body: bool) -> None:
-            response = app.respond(self.command or "GET", self.path)
+            # Refused BEFORE the app is asked anything, so a rebound request reads no file.
+            if not self._addresses_this_machine():
+                response = Response.html(403, render.render_wrong_host())
+            else:
+                response = app.respond(self.command or "GET", self.path)
             self.send_response(response.status)
             self.send_header("Content-Type", response.content_type)
             self.send_header("Content-Length", str(len(response.body)))
@@ -254,7 +334,9 @@ def build_server(
         def log_message(self, format: str, *args: object) -> None:
             """Silence the per-request stderr chatter; the CLI prints what matters."""
 
-    return ThreadingHTTPServer((host, port), Handler)
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    Handler.bound_port = int(httpd.server_address[1])
+    return httpd
 
 
 def serve(

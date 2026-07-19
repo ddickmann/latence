@@ -628,6 +628,17 @@ def render_method_not_allowed() -> str:
     return _page("Read-only", body)
 
 
+def render_wrong_host() -> str:
+    body = (
+        "<h1>Not this machine</h1>"
+        '<div class="card"><p>This console answers only requests addressed to this machine '
+        "(<code>localhost</code> or <code>127.0.0.1</code>, on the port it was started on). "
+        "The request that reached it named a different host, so it was refused before anything "
+        "was read.</p></div>"
+    )
+    return _page("Not this machine", body)
+
+
 def _tone_for(status: RunStatus) -> str:
     return {
         RunStatus.PASSED: "good",
