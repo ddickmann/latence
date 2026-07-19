@@ -201,7 +201,7 @@ says so.
 | --- | --- |
 | Pinned dependency resolution | committed `uv.lock`; `uv export --frozen` is hash-pinned |
 | Weekly dependency updates | `.github/dependabot.yml` — `pip` + `github-actions`, minor/patch grouped, majors reviewed alone |
-| GitHub Actions pinned to commit SHAs | `.github/workflows/*.yml` (e.g. `actions/checkout@93cb6ef…`) — a moved tag cannot change what runs |
+| GitHub Actions pinned to commit SHAs | **every** external `uses:` in `.github/workflows/*.yml` and `.github/actions/*/action.yml` (e.g. `actions/checkout@93cb6ef…`), each with a `# vX.Y.Z` comment — a moved tag cannot change what runs. Enforced, not asserted: `packages/latence-core/tests/test_continuity_statement.py` fails the build on any tag-pinned action |
 | Least-privilege workflow tokens | `permissions: contents: read` at workflow top level; jobs elevate only what they need |
 | SAST | `.github/workflows/codeql.yml` (CodeQL over the Python sources) |
 | Supply-chain posture scoring | `.github/workflows/scorecard.yml` (OpenSSF Scorecard, default branch + weekly, never on fork PRs) |

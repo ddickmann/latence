@@ -241,3 +241,71 @@ def test_cra_section_carries_the_dates_and_the_not_legal_advice_framing() -> Non
     assert "2024/2847" in text, "the CRA section must cite Regulation (EU) 2024/2847"
     assert "11 September 2026" in text, "the CRA section must state the Art. 14 reporting date"
     assert "not legal advice" in text.lower(), "the CRA section must disclaim legal advice"
+
+
+# --- §5.5: "GitHub Actions pinned to commit SHAs" (issue R3-docs_truth-6) ---------------
+#
+# The §5.5 supply-chain table scopes this claim to `.github/workflows/*.yml` — every
+# workflow, not the three that happened to be pinned. It was false for codeql.yml,
+# scorecard.yml and docs.yml, i.e. for both of the security workflows the same table
+# cites as the SAST and Scorecard controls. `_claimed_repo_paths` cannot catch it: it
+# skips any backticked token containing `*`, so the glob in that row is never read.
+#
+# A `uses:` value is either a *local* composite action (`./.github/actions/...`, which has
+# no SHA to pin), a Docker reference (`docker://...`), or an external `owner/repo[/path]@ref`
+# — and every external ref must be a 40-hex commit SHA.
+
+_USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(?P<ref>\S+)", re.MULTILINE)
+_SHA_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+
+
+def _action_definition_files() -> list[Path]:
+    """Every file in the repo that can carry a `uses:` step."""
+    github = _REPO_ROOT / ".github"
+    workflows = sorted((github / "workflows").glob("*.yml"))
+    composites = sorted(github.glob("actions/*/action.yml"))
+    return workflows + composites
+
+
+def test_every_external_github_action_is_pinned_to_a_commit_sha() -> None:
+    """§5.5's "a moved tag cannot change what runs" must hold for *every* workflow."""
+    files = _action_definition_files()
+    # Self-guarding: deleting the workflows must not make this test vacuously green.
+    assert len(files) >= 4, f"expected the workflow set to be discoverable, found {files}"
+
+    external = 0
+    unpinned: list[str] = []
+    for path in files:
+        for match in _USES.finditer(path.read_text()):
+            ref = match.group("ref").strip("\"'")
+            if ref.startswith("./") or ref.startswith("docker://"):
+                continue  # local composite action / Docker ref — no upstream tag to move
+            external += 1
+            if not _SHA_PIN.match(ref):
+                line = path.read_text()[: match.start()].count("\n") + 1
+                unpinned.append(f"{path.relative_to(_REPO_ROOT)}:{line} uses: {ref}")
+
+    assert external >= 10, (
+        f"only {external} external action references found — the guard has lost its subject"
+    )
+    assert not unpinned, (
+        "docs/CONTINUITY.md §5.5 claims every action in `.github/workflows/*.yml` is pinned "
+        "to a commit SHA so 'a moved tag cannot change what runs'. These are pinned to a "
+        "MUTABLE TAG:\n  " + "\n  ".join(unpinned)
+    )
+
+
+def test_every_sha_pinned_action_records_the_version_it_pins() -> None:
+    """A bare 40-hex SHA is unreviewable; each pin carries a `# vX.Y.Z` comment."""
+    missing: list[str] = []
+    for path in _action_definition_files():
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            match = _USES.match(line)
+            if match is None or not _SHA_PIN.match(match.group("ref").strip("\"'")):
+                continue
+            if not re.search(r"#\s*v?\d", line):
+                missing.append(f"{path.relative_to(_REPO_ROOT)}:{lineno} {line.strip()}")
+    assert not missing, (
+        "SHA-pinned actions must record the version they pin in a trailing comment "
+        "(so a reviewer can tell what is being upgraded):\n  " + "\n  ".join(missing)
+    )
