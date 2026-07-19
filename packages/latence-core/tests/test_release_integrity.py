@@ -195,6 +195,61 @@ def test_verify_instructions_pin_the_tag_and_link_the_cvd_policy(tmp_path: Path)
     assert "SECURITY.md" in text and "vulnerability" in text.lower()
 
 
+_TAG_IDENTITY = (
+    "https://github.com/ddickmann/latence-framework/.github/workflows/release.yml@refs/tags/v9.9.9"
+)
+
+
+def test_verify_identity_is_the_ref_the_run_actually_signs_under(tmp_path: Path) -> None:
+    """VERIFY.md quotes the REAL Fulcio SAN, not a guess derived from the tag input.
+
+    Keyless Sigstore certifies the ``job_workflow_ref`` of the running workflow. This workflow
+    is dispatchable from a branch with the tag passed as an input, so the signing identity is
+    then ``…/release.yml@refs/heads/<branch>``. Hardcoding ``refs/tags/<tag>`` shipped a signed
+    VERIFY.md whose own ``sigstore verify identity`` command fails on a perfectly good bundle —
+    which an adopter cannot distinguish from tampering.
+    """
+    branch_ref = "ddickmann/latence-framework/.github/workflows/release.yml@refs/heads/main"
+    _, out = _run(tmp_path, tag="v9.9.9", extra=("--no-sign", "--workflow-ref", branch_ref))
+    text = (out / "VERIFY.md").read_text()
+
+    assert f"--cert-identity 'https://github.com/{branch_ref}'" in text, text
+    assert _TAG_IDENTITY not in text, (
+        "VERIFY.md still pins the tag identity for a run signed under a branch ref — the "
+        "shipped verification command cannot verify the shipped signature"
+    )
+    # An asset set that cannot carry the published identity must say so, in the signed file.
+    assert "Rehearsal" in text and "do not publish" in text.lower()
+
+
+def test_rejects_a_malformed_workflow_ref(tmp_path: Path) -> None:
+    """A garbled ref would silently become a nonsense --cert-identity nobody can verify."""
+    result, _ = _run(tmp_path, extra=("--no-sign", "--workflow-ref", "refs/heads/main"))
+    assert result.returncode != 0
+    assert "github.workflow_ref form" in result.stderr, result.stderr
+
+
+def test_tag_path_identity_is_unchanged_without_a_workflow_ref(tmp_path: Path) -> None:
+    """Off by default is byte-identical: no --workflow-ref reproduces the tag-push identity."""
+    _, out = _run(tmp_path, tag="v9.9.9", extra=("--no-sign",))
+    text = (out / "VERIFY.md").read_text()
+    assert f"--cert-identity '{_TAG_IDENTITY}'" in text
+    assert "Rehearsal" not in text
+    # A tag-ref run must produce exactly the same instructions as the implicit default.
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    _, tag_run = _run(
+        explicit,
+        tag="v9.9.9",
+        extra=(
+            "--no-sign",
+            "--workflow-ref",
+            "ddickmann/latence-framework/.github/workflows/release.yml@refs/tags/v9.9.9",
+        ),
+    )
+    assert (tag_run / "VERIFY.md").read_text() == text
+
+
 # --------------------------------------------------------------------------------------
 # Fail-closed: what the script REFUSES to release
 # --------------------------------------------------------------------------------------
@@ -353,6 +408,34 @@ def test_dry_run_rehearses_without_publishing_anything() -> None:
     assert "dry_run" not in str(jobs["release-integrity"].get("if", ""))
 
 
+def test_workflow_hands_the_script_the_real_signing_ref() -> None:
+    """The script is told the run's github.workflow_ref, so VERIFY.md cannot guess wrong."""
+    integrity = _workflow()["jobs"]["release-integrity"]
+    run_steps = "\n".join(str(step.get("run", "")) for step in integrity["steps"])
+    assert "--workflow-ref" in run_steps and "github.workflow_ref" in run_steps, (
+        "release-integrity.sh must be given the ref the run actually signs under; deriving the "
+        "cert identity from the tag input alone ships unverifiable instructions"
+    )
+
+
+def test_a_real_release_refuses_a_non_tag_signing_identity() -> None:
+    """A non-dry run on a branch ref is blocked before it can publish a mis-signed release."""
+    integrity = _workflow()["jobs"]["release-integrity"]
+    guards = [
+        step
+        for step in integrity["steps"]
+        if "workflow_ref" in str(step.get("env", "")) and "dry_run" in str(step.get("if", ""))
+    ]
+    assert guards, (
+        "no step refuses a non-dry run whose workflow ref is not the tag — such a run creates "
+        "a real Release whose signed VERIFY.md cannot verify its own signature"
+    )
+    assert "refs/tags/" in "\n".join(str(step.get("run", "")) for step in guards)
+    assert any("exit 1" in str(step.get("run", "")) for step in guards), (
+        "the guard must fail the job, not just warn"
+    )
+
+
 def test_front_page_and_docs_route_a_reporter_to_the_cvd_policy() -> None:
     """README links the disclosure policy and the release-verification procedure."""
     readme = (_REPO_ROOT / "README.md").read_text()
@@ -482,7 +565,7 @@ def test_releasing_dry_run_evidence_matches_the_tree() -> None:
     # release-integrity.sh stages the distributions flat and adds exactly two more assets
     # before writing SHA256SUMS, which covers every file except SHA256SUMS* itself.
     script = _SCRIPT.read_text()
-    assert 'SBOM="$OUT/sbom.cdx.json"' in script and 'cat > "$OUT/VERIFY.md"' in script, (
+    assert 'SBOM="$OUT/sbom.cdx.json"' in script and 'cat >> "$OUT/VERIFY.md"' in script, (
         "the '+2 assets' derivation assumes release-integrity.sh stages sbom.cdx.json and "
         "VERIFY.md alongside the distributions — it no longer does"
     )

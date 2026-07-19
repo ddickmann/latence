@@ -35,6 +35,10 @@
 #                       caused by a missing OIDC permission.
 #   --identity-token T  Pass an explicit OIDC token to sigstore (otherwise ambient detection).
 #   --repo OWNER/NAME   Repo slug used in the verification identity (default: ddickmann/latence-framework).
+#   --workflow-ref REF  The workflow ref this run signs under, in GitHub's `github.workflow_ref`
+#                       form: OWNER/REPO/.github/workflows/FILE.yml@REF. Fulcio stamps exactly
+#                       this string into the certificate SAN, so VERIFY.md must quote it rather
+#                       than guess. Defaults to the tag-derived identity (the `push: tags` path).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,6 +49,7 @@ SBOM_IN=""
 SIGN=""
 IDENTITY_TOKEN=""
 REPO_SLUG="${GITHUB_REPOSITORY:-ddickmann/latence-framework}"
+WORKFLOW_REF=""
 
 die() {
   echo "release-integrity: $*" >&2
@@ -61,6 +66,7 @@ while [ $# -gt 0 ]; do
     --no-sign) SIGN="no"; shift ;;
     --identity-token) IDENTITY_TOKEN="${2:-}"; shift 2 ;;
     --repo) REPO_SLUG="${2:-}"; shift 2 ;;
+    --workflow-ref) WORKFLOW_REF="${2:-}"; shift 2 ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) die "unknown argument: $1 (try --help)" ;;
   esac
@@ -154,8 +160,44 @@ PY
 # ---- 2. Verification instructions (shipped WITH the assets, and reused as release notes) --
 # Written BEFORE the checksums so VERIFY.md is itself covered by SHA256SUMS: the instructions
 # telling an adopter how to verify must not be the one asset an attacker can rewrite freely.
-CERT_IDENTITY="https://github.com/${REPO_SLUG}/.github/workflows/release.yml@refs/tags/${TAG}"
-cat > "$OUT/VERIFY.md" <<EOF
+#
+# The identity an adopter pins must be the identity we ACTUALLY signed under. Keyless Sigstore
+# certifies the `job_workflow_ref` of the RUNNING workflow — the ref the run was triggered on —
+# which is not necessarily `refs/tags/$TAG`: this workflow can be dispatched from a branch with
+# the tag passed as an input. Quoting a guessed `refs/tags/$TAG` identity there ships assets
+# whose own instructions fail on a perfectly good bundle, which an adopter cannot tell apart
+# from tampering. So take the real ref when the caller knows it, and derive the tag identity
+# only as the default (the `push: tags` path, where the two coincide).
+TAG_WORKFLOW_REF="${REPO_SLUG}/.github/workflows/release.yml@refs/tags/${TAG}"
+if [ -n "$WORKFLOW_REF" ]; then
+  # GitHub's github.workflow_ref form: OWNER/REPO/.github/workflows/FILE@REF.
+  if ! printf '%s' "$WORKFLOW_REF" | grep -Eq '^[^/]+/[^/]+/\.github/workflows/[^@]+@.+$'; then
+    die "--workflow-ref '$WORKFLOW_REF' is not in github.workflow_ref form (OWNER/REPO/.github/workflows/FILE@REF)"
+  fi
+else
+  WORKFLOW_REF="$TAG_WORKFLOW_REF"
+fi
+CERT_IDENTITY="https://github.com/${WORKFLOW_REF}"
+
+# A set signed under anything but the release tag is a rehearsal: its identity will not match
+# what a published release's instructions pin, so say so IN the signed instructions rather than
+# letting it masquerade as a release.
+REHEARSAL_BANNER=""
+if [ "$WORKFLOW_REF" != "$TAG_WORKFLOW_REF" ]; then
+  REHEARSAL_BANNER="> **Rehearsal — do not publish.** This asset set was signed under
+> \`${WORKFLOW_REF}\`, not the release tag \`${TAG}\`, so its signing identity is not the one a
+> published \`${TAG}\` release pins. Re-run the workflow with \`${TAG}\` selected as the ref (or
+> push the tag) to produce a publishable set.
+"
+fi
+
+# The banner is written separately so that with no banner VERIFY.md is byte-identical to what
+# the tag path has always produced.
+: > "$OUT/VERIFY.md"
+if [ -n "$REHEARSAL_BANNER" ]; then
+  printf '%s\n' "$REHEARSAL_BANNER" >> "$OUT/VERIFY.md"
+fi
+cat >> "$OUT/VERIFY.md" <<EOF
 ## Verifying this release
 
 Every asset of \`${TAG}\` is covered by \`SHA256SUMS\`, and \`SHA256SUMS\` is signed with

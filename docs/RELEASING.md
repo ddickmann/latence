@@ -87,14 +87,27 @@ a release:
 
 ```
 Actions → Release → Run workflow
-  tag:     v0.1.0        (an existing tag, or the tag you are about to cut)
-  dry_run: true          (default)
+  Use workflow from:  Tag: v0.1.0   ← select the TAG, not a branch
+  tag:                v0.1.0        (the same existing tag)
+  dry_run:            true          (default)
 ```
+
+**Select the tag as the ref.** Keyless Sigstore certifies the ref the *run* is on
+(`github.workflow_ref`), not the `tag` input — so only a run on the tag signs under
+`…/release.yml@refs/tags/v0.1.0`, the identity a published release's `VERIFY.md` pins. A
+rehearsal dispatched from a branch is still signed and still valid, but its identity is
+`…/release.yml@refs/heads/<branch>`; `release-integrity.sh` then quotes *that* identity in
+`VERIFY.md` and stamps the set with a "Rehearsal — do not publish" banner, so the verification
+commands still pass and nothing can be mistaken for a release.
 
 `build` and `release-integrity` run exactly as they would for a real release; the signed
 asset set is uploaded as the `release-assets` workflow artifact and the `github-release` and
 `pypi-publish` jobs are skipped. Download the artifact and run the two verification commands
-above against it. Re-run with `dry_run: false` (or just push the tag) to publish for real.
+from its `VERIFY.md` against it.
+
+To publish for real, push the tag (or re-dispatch with the tag selected as the ref and
+`dry_run: false`). A non-dry run on a non-tag ref is **refused** by the `release-integrity`
+job: it would create a Release whose own signed instructions could not verify its signature.
 
 Locally, everything except the signature can be rehearsed offline:
 

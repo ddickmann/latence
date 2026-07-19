@@ -18,6 +18,11 @@ name: Release
 # DRY RUN: `workflow_dispatch` with dry_run=true runs build + release-integrity (signing
 # included, because the OIDC identity is real) and uploads the asset set as a workflow
 # artifact WITHOUT creating or touching a GitHub Release. See docs/RELEASING.md.
+#
+# Select the TAG under "Use workflow from": Sigstore certifies the ref the run is on, so only
+# a run on the tag rehearses the identity a published release actually pins. A rehearsal from a
+# branch is still signed and still valid — VERIFY.md then quotes that branch identity and marks
+# the set as a rehearsal — but a non-dry run on a non-tag ref is refused outright.
 on:
   push:
     tags:
@@ -103,6 +108,28 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # Keyless Sigstore certifies the job_workflow_ref of THIS RUN, not the `tag` input. A
+      # run dispatched from a branch therefore signs under `release.yml@refs/heads/<branch>`,
+      # which is NOT the identity a published release's VERIFY.md pins — so a release cut that
+      # way would ship instructions that cannot verify its own signature, indistinguishable to
+      # an adopter from tampering. Fail closed: a real release must run on the tag ref (push the
+      # tag, or select the tag under "Use workflow from"). Dry runs may rehearse from anywhere;
+      # release-integrity.sh then states the branch identity truthfully and marks the set as a
+      # rehearsal.
+      - name: Refuse to publish under a non-tag signing identity
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          case "$WORKFLOW_REF" in
+            *"@refs/tags/${TAG}") echo "signing identity: ${WORKFLOW_REF}" ;;
+            *)
+              echo "::error::this run signs under '${WORKFLOW_REF}', but a published ${TAG} release must be signed under '...@refs/tags/${TAG}'. Push the tag, or re-dispatch with ${TAG} selected as the ref."
+              exit 1
+              ;;
+          esac
+
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
@@ -126,6 +153,7 @@ jobs:
             --dist dist \
             --out release-assets \
             --repo "${{ github.repository }}" \
+            --workflow-ref "${{ github.workflow_ref }}" \
             --sign
 
       - name: Summarise
