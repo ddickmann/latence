@@ -24,6 +24,7 @@ forward, which is why no load-time try/except can see it).
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import sys
 import types
@@ -76,6 +77,10 @@ def live_jit_torch(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     def script(fn: Callable[..., Any]) -> Any:
         return _ScriptFunction(fn) if enabled.enabled else fn
 
+    def set_float32_matmul_precision(precision: str) -> None:  # noqa: ARG001 - throughput-only knob
+        """``disambiguation.glinker`` sets this right after the (post-neutralization) torch import."""
+
+    torch.set_float32_matmul_precision = set_float32_matmul_precision  # type: ignore[attr-defined]
     state._enabled = enabled  # type: ignore[attr-defined]
     state.disable = disable  # type: ignore[attr-defined]
     jit._state = state  # type: ignore[attr-defined]
@@ -120,9 +125,15 @@ class _ImportTimeScriptingFinder:
     instant: the property under test.
     """
 
-    def __init__(self, module_name: str, attr: str) -> None:
+    def __init__(
+        self, module_name: str, attr: str, extra: dict[str, Any] | None = None
+    ) -> None:
         self.module_name = module_name
         self.attr = attr
+        #: Additional module attributes the importer needs. ``glinker`` is consumed as
+        #: ``from glinker import ProcessorFactory`` (a DAG builder), not as a ``from_pretrained``
+        #: model class, so its shim is injected here rather than synthesised as ``attr``.
+        self.extra = extra or {}
         self.jit_enabled_at_import: bool | None = None
         self.scripted: Any = None
 
@@ -148,6 +159,8 @@ class _ImportTimeScriptingFinder:
             {"from_pretrained": staticmethod(_MdebertaModel._from_pretrained_factory(self.scripted))},  # noqa: SLF001
         )
         setattr(module, self.attr, model_cls)
+        for name, value in self.extra.items():
+            setattr(module, name, value)
 
 
 @pytest.fixture()
@@ -155,8 +168,8 @@ def scripting_gliner(
     request: pytest.FixtureRequest, live_jit_torch: types.ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[_ImportTimeScriptingFinder]:
     """Install a ``gliner``/``gliner2`` that scripts the mdeberta helper at IMPORT time."""
-    module_name, attr = request.param
-    finder = _ImportTimeScriptingFinder(module_name, attr)
+    module_name, attr, *rest = request.param
+    finder = _ImportTimeScriptingFinder(module_name, attr, rest[0] if rest else None)
     monkeypatch.delitem(sys.modules, module_name, raising=False)
     monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
     try:
@@ -165,44 +178,78 @@ def scripting_gliner(
         sys.modules.pop(module_name, None)
 
 
-def _entity_extractor() -> Any:
+class _FakeProcessorFactory:
+    """The one thing ``disambiguation.glinker`` consumes from the ``glinker`` library."""
+
+    @staticmethod
+    def create_from_dict(config: dict[str, Any]) -> Any:
+        assert config["nodes"], "the DAG must carry its L2/L3/L0 nodes"
+        return types.SimpleNamespace(config=config)
+
+
+# Each entry LOADS its Provider: constructing is not enough — the backbone import happens inside the
+# lazy load path (``_load_model`` for the gliner family, ``_init_executor`` for glinker).
+def _load_entity_extractor(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
     from latence_ner_gliner import GlinerEntityExtractor
 
-    return GlinerEntityExtractor({"labels": ["person"], "device": "cpu"})
+    GlinerEntityExtractor({"labels": ["person"], "device": "cpu"})._load_model()  # noqa: SLF001
 
 
-def _pii_redactor() -> Any:
+def _load_pii_redactor(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
     from latence_pii_gliner import GlinerPIIRedactor
 
-    return GlinerPIIRedactor({"pii_labels": ["person"], "device": "cpu"})
+    GlinerPIIRedactor({"pii_labels": ["person"], "device": "cpu"})._load_model()  # noqa: SLF001
 
 
-def _relation_extractor() -> Any:
+def _load_relation_extractor(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
     from latence_relation_gliner import GlinerRelexExtractor
 
-    return GlinerRelexExtractor(
+    GlinerRelexExtractor(
         {"labels": ["person"], "relation_labels": ["employs"], "device": "cpu"}
-    )
+    )._load_model()  # noqa: SLF001
 
 
-def _fused_extractor() -> Any:
+def _load_fused_extractor(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
     from latence_extract_gliner2 import Gliner2FusedExtractor
 
-    return Gliner2FusedExtractor({"labels": ["person"], "relation_labels": ["employs"]})
+    Gliner2FusedExtractor(
+        {"labels": ["person"], "relation_labels": ["employs"]}
+    )._load_model()  # noqa: SLF001
+
+
+def _load_glinker_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R2/#190-5: the sixth DeBERTa-backed Provider, previously absent from every #190 suite.
+
+    ``GLinkerBackend._init_executor`` is the load path: it calls the shared
+    ``neutralize_torch_jit`` seam and only then evaluates ``import torch`` /
+    ``from glinker import ProcessorFactory``. The tokenizer-config patch is stubbed out because it
+    reaches the Hugging Face hub cache, which is orthogonal to the ordering property under test.
+    """
+    from latence_disambig_glinker.backends import GLinkerBackend
+
+    monkeypatch.setattr(GLinkerBackend, "_patch_tokenizer_config", staticmethod(lambda _name: None))
+    GLinkerBackend(device="cpu", reranker_model=None)._init_executor()  # noqa: SLF001
 
 
 _PROVIDERS = [
-    pytest.param(("gliner", "GLiNER"), _entity_extractor, id="entity.gliner"),
-    pytest.param(("gliner", "GLiNER"), _pii_redactor, id="redaction.gliner_pii"),
-    pytest.param(("gliner", "GLiNER"), _relation_extractor, id="relation.gliner_relex"),
-    pytest.param(("gliner2", "GLiNER2"), _fused_extractor, id="fused_entity_relation.gliner2"),
+    pytest.param(("gliner", "GLiNER"), _load_entity_extractor, id="entity.gliner"),
+    pytest.param(("gliner", "GLiNER"), _load_pii_redactor, id="redaction.gliner_pii"),
+    pytest.param(("gliner", "GLiNER"), _load_relation_extractor, id="relation.gliner_relex"),
+    pytest.param(("gliner2", "GLiNER2"), _load_fused_extractor, id="fused_entity_relation.gliner2"),
+    pytest.param(
+        ("glinker", "GLinkerModel", {"ProcessorFactory": _FakeProcessorFactory}),
+        _load_glinker_backend,
+        id="disambiguation.glinker",
+    ),
 ]
 
 
-@pytest.mark.parametrize(("scripting_gliner", "make_provider"), _PROVIDERS, indirect=["scripting_gliner"])
+@pytest.mark.parametrize(
+    ("scripting_gliner", "load_provider"), _PROVIDERS, indirect=["scripting_gliner"]
+)
 def test_jit_is_neutralized_before_the_gliner_import(
     scripting_gliner: _ImportTimeScriptingFinder,
-    make_provider: Callable[[], Any],
+    load_provider: Callable[[pytest.MonkeyPatch], None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """REGRESSION (audit R1 / #190): the JIT is already OFF when gliner is imported.
@@ -212,9 +259,8 @@ def test_jit_is_neutralized_before_the_gliner_import(
     ``ScriptFunction``, and the first forward raises the nvrtc error — the #190 crash, unfixed.
     """
     monkeypatch.setenv("LATENCE_CUDA", "0")
-    provider = make_provider()
 
-    provider._load_model()  # noqa: SLF001 - the load path is the unit under test
+    load_provider(monkeypatch)  # the lazy load path is the unit under test
 
     assert scripting_gliner.jit_enabled_at_import is False, (
         "the torch JIT was still LIVE when the gliner module was imported — every "
@@ -228,21 +274,25 @@ def test_jit_is_neutralized_before_the_gliner_import(
 
 
 @pytest.mark.parametrize(
-    ("scripting_gliner", "make_provider"), _PROVIDERS[:1], indirect=["scripting_gliner"]
+    ("scripting_gliner", "load_provider"),
+    [_PROVIDERS[0], _PROVIDERS[-1]],
+    indirect=["scripting_gliner"],
 )
 def test_a_live_jit_at_import_reproduces_the_blackwell_crash(
     scripting_gliner: _ImportTimeScriptingFinder,
-    make_provider: Callable[[], Any],  # noqa: ARG001 - not loaded: this is the fake's own guard
+    load_provider: Callable[..., None],  # noqa: ARG001 - not loaded: this is the fake's own guard
     live_jit_torch: types.ModuleType,
 ) -> None:
     """Anti-false-green: with the JIT live at import, the fake DOES reproduce the nvrtc crash.
 
     Without this, the assertions above could pass against a fake that never fails.
     """
-    import gliner  # the finder's module, imported here with the JIT untouched
+    # The finder's module, imported here with the JIT untouched. Parametrized over the gliner AND
+    # the glinker shapes, so the glinker fake is proven capable of failing too (R2/#190-5).
+    backbone = importlib.import_module(scripting_gliner.module_name)
 
     assert scripting_gliner.jit_enabled_at_import is True
-    model = gliner.GLiNER.from_pretrained("m")
+    model = getattr(backbone, scripting_gliner.attr).from_pretrained("m")
     with pytest.raises(RuntimeError, match=NVRTC_MESSAGE):
         model.forward("Ada Lovelace")
     assert live_jit_torch.jit._state._enabled.enabled is True  # noqa: SLF001

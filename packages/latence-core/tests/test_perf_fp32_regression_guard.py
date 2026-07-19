@@ -10,8 +10,13 @@ attn_implementation). Concretely, a learned model load must go through the share
 It is deliberately robust against false negatives (a bare fp32 load it would miss) AND false
 positives (a processor/tokenizer load, which takes no perf kwargs):
 
-* it scans the REAL provider sources in-tree (resolved from this test's location), so a new learned
-  provider that loads a model bare is caught the moment its source lands;
+* it scans the REAL provider sources in-tree (resolved from this test's location), never installed
+  copies. Note the two scopes differ in how their file set is obtained: the W8 fp32 scan below
+  parametrizes over the curated ``_LEARNED_PROVIDER_SOURCES`` list (a new learned provider must be
+  added to it), whereas the #190 JIT guards parametrize over ``_DEBERTA_BACKED_SOURCES``, which is
+  DISCOVERED by globbing ``packages/*/src`` — so for #190 a new backbone importer really is caught
+  the moment its source lands, with no list to edit (R2/#190-5; before that fix the #190 guards used
+  a hardcoded 5-tuple and missed ``disambiguation.glinker`` entirely);
 * it targets MODEL loads only — a callee whose class name matches a model pattern
   (``GLiNER``/``GLiNER2``/``*ForConditionalGeneration``/``AutoModel*``) — so a bare
   ``AutoProcessor.from_pretrained`` / ``LightOnOcrProcessor.from_pretrained`` (no perf kwargs by
@@ -288,16 +293,62 @@ def test_guard_accepts_both_seam_routed_loads() -> None:
 
 # --- #190: the mdeberta JIT-neutralization is a SHARED seam, never a per-Provider copy ------------
 
-# The mdeberta-v3-backed Providers. Their encoder scripts ``build_relative_position`` with
-# ``@torch.jit.script``, which dies in nvrtc on Blackwell/CUDA-13 (``libnvrtc-builtins.so.13.0``) on
-# the FIRST forward. Every one of them must inherit the fix from the shared perf seam by loading
-# through a JIT-neutralizing loader — none may hand-roll the env-var workaround locally.
-_MDEBERTA_PROVIDER_SOURCES = (
-    "latence-ner-gliner/src/latence_ner_gliner/provider.py",
-    "latence-relation-gliner/src/latence_relation_gliner/provider.py",
-    "latence-pii-gliner/src/latence_pii_gliner/provider.py",
-    "latence-pii-gliner2/src/latence_pii_gliner2/provider.py",
-    "latence-extract-gliner2/src/latence_extract_gliner2/provider.py",
+# The DeBERTa backbone roots. Importing ANY of them transitively evaluates transformers'
+# ``models.deberta_v2.modeling_deberta_v2``, whose six relative-position helpers carry
+# ``@torch.jit.script`` and are therefore compiled into real ``ScriptFunction``s AT IMPORT — the
+# instant that decides the Blackwell/CUDA-13 nvrtc crash (``libnvrtc-builtins.so.13.0``, #190).
+_DEBERTA_BACKBONE_ROOTS = ("gliner", "gliner2", "glinker")
+
+
+def _imports_a_deberta_backbone_root(tree: ast.Module) -> bool:
+    """Whether ``tree`` contains an import of a DeBERTa backbone library (at any nesting depth)."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] in _DEBERTA_BACKBONE_ROOTS:
+                return True
+        elif isinstance(node, ast.Import) and any(
+            alias.name.split(".")[0] in _DEBERTA_BACKBONE_ROOTS for alias in node.names
+        ):
+            return True
+    return False
+
+
+def _discover_deberta_backed_sources() -> tuple[str, ...]:
+    """Every in-tree package source that imports a DeBERTa backbone — DISCOVERED, never listed.
+
+    R2/#190-5: this used to be a hardcoded 5-path tuple, and the sixth in-tree DeBERTa-backed
+    Provider (``disambiguation.glinker``, whose ``GLinkerBackend._init_executor`` imports
+    ``glinker``) was simply absent — so it had ZERO #190 coverage while this file's docstring
+    claimed "a new learned provider … is caught the moment its source lands". Discovery makes that
+    claim true: a seventh backbone importer is scanned by the guards below without editing a list.
+    """
+    root = _packages_root()
+    found = [
+        path.relative_to(root).as_posix()
+        for path in sorted(root.glob("*/src/**/*.py"))
+        if _imports_a_deberta_backbone_root(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        )
+    ]
+    return tuple(found)
+
+
+#: Every in-tree source that imports a DeBERTa backbone. The ordering guard (#190-4) and the
+#: no-hand-rolled-``PYTORCH_JIT`` guard apply to ALL of them: each must kill the TorchScript JIT via
+#: the SHARED seam (``latence_core.providers.perf.neutralize_torch_jit``) before that import runs.
+_DEBERTA_BACKED_SOURCES = _discover_deberta_backed_sources()
+
+#: The DeBERTa-backed sources known to exist when this guard was written. Discovery must never
+#: return LESS than this — a shrinking scan is how a Provider silently falls out of coverage.
+_KNOWN_DEBERTA_BACKED_SOURCES = frozenset(
+    {
+        "latence-ner-gliner/src/latence_ner_gliner/provider.py",
+        "latence-relation-gliner/src/latence_relation_gliner/provider.py",
+        "latence-pii-gliner/src/latence_pii_gliner/provider.py",
+        "latence-pii-gliner2/src/latence_pii_gliner2/provider.py",
+        "latence-extract-gliner2/src/latence_extract_gliner2/provider.py",
+        "latence-disambig-glinker/src/latence_disambig_glinker/backends.py",
+    }
 )
 
 # The shared perf-seam loaders that neutralize the TorchScript JIT before calling the native loader.
@@ -318,6 +369,26 @@ def _is_mdeberta_model_from_pretrained_ref(node: ast.AST) -> TypeGuard[ast.Attri
         return False
     root = ast.unparse(node).lower()
     return any(hint in root for hint in _MDEBERTA_MODEL_HINTS)
+
+
+def _loads_an_mdeberta_model(tree: ast.Module) -> bool:
+    """Whether ``tree`` carries at least one ``<mdeberta model>.from_pretrained`` reference."""
+    return any(_is_mdeberta_model_from_pretrained_ref(node) for node in ast.walk(tree))
+
+
+#: The subset of :data:`_DEBERTA_BACKED_SOURCES` that actually LOADS an mdeberta checkpoint via
+#: ``<Model>.from_pretrained`` — DERIVED, not listed, so it cannot drift either. Only these can be
+#: held to the routing contract ("the load goes through a JIT-neutralizing shared loader"): a
+#: backbone importer that owns no ``from_pretrained`` (``disambiguation.glinker``, which hands the
+#: checkpoint to the glinker library's own DAG and calls the shared seam directly) has no load to
+#: route, and is covered by the ORDERING guard instead.
+_MDEBERTA_PROVIDER_SOURCES = tuple(
+    rel
+    for rel in _DEBERTA_BACKED_SOURCES
+    if _loads_an_mdeberta_model(
+        ast.parse((_packages_root() / rel).read_text(encoding="utf-8"), filename=rel)
+    )
+)
 
 
 def jit_seam_offenders(tree: ast.Module) -> list[str]:
@@ -342,10 +413,11 @@ def jit_seam_offenders(tree: ast.Module) -> list[str]:
 def test_mdeberta_providers_load_through_a_jit_neutralizing_seam(rel_source: str) -> None:
     """Every mdeberta-backed Provider's model load routes through the shared JIT-neutralizing seam.
 
-    The teeth for #190's "shared seam, not a per-Provider copy": a sixth mdeberta Provider that
+    The teeth for #190's "shared seam, not a per-Provider copy": a further mdeberta Provider that
     calls ``GLiNER2.from_pretrained`` directly — **or** routes it through ``load_with_fa2_fallback``,
     which spreads the perf kwargs but does NOT neutralize the JIT — re-opens the Blackwell nvrtc
-    crash, and this scan bites the moment its source lands.
+    crash. Its parametrization is DERIVED from :data:`_DEBERTA_BACKED_SOURCES` (R2/#190-5), so that
+    claim is true of the code: the scan bites the moment such a source lands, with no list to edit.
     """
     path = _packages_root() / rel_source
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -464,7 +536,61 @@ def jit_import_ordering_offenders(tree: ast.Module) -> list[str]:
     return offenders
 
 
-@pytest.mark.parametrize("rel_source", _MDEBERTA_PROVIDER_SOURCES)
+#: What the ordering guard + the no-hand-rolled-``PYTORCH_JIT`` guard are parametrized over.
+#: PRE-FIX this was ``_MDEBERTA_PROVIDER_SOURCES`` (a hardcoded 5-tuple); R2/#190-5 widened it to
+#: every DISCOVERED backbone importer, which is what makes the docstrings' "caught the moment its
+#: source lands" true rather than aspirational.
+_JIT_ORDERING_SCANNED_SOURCES = _DEBERTA_BACKED_SOURCES
+
+
+def test_every_in_tree_deberta_backed_source_is_scanned_by_the_jit_ordering_guard() -> None:
+    """REGRESSION (R2/#190-5): no in-tree DeBERTa backbone importer escapes the #190 ordering scan.
+
+    The defect this bites: ``_MDEBERTA_PROVIDER_SOURCES`` was a literal 5-entry tuple with no
+    discovery and no completeness check, so ``latence-disambig-glinker``'s ``backends.py`` — a
+    DeBERTa-backed Provider by its own code comment, which imports ``glinker`` inside
+    ``_init_executor`` — had ZERO #190 coverage. ``jit_import_ordering_offenders()`` DOES catch a
+    mutated (imports-first) version of that file; nothing ever handed it the file. Reordering the
+    imports there would have shipped fully green and died with ``libnvrtc-builtins.so.13.0`` on the
+    first ``link_mentions`` forward on an sm_120 pod.
+    """
+    discovered = set(_DEBERTA_BACKED_SOURCES)
+    assert discovered >= _KNOWN_DEBERTA_BACKED_SOURCES, (
+        "the in-tree scan no longer finds DeBERTa-backed sources it used to — a Provider has "
+        "silently fallen out of #190 coverage: "
+        f"{sorted(_KNOWN_DEBERTA_BACKED_SOURCES - discovered)}"
+    )
+    unscanned = discovered - set(_JIT_ORDERING_SCANNED_SOURCES)
+    assert not unscanned, (
+        "these in-tree sources import a DeBERTa backbone but are NOT scanned by the #190 "
+        "import-ordering guard, so a neutralize-after-import regression in them ships green and "
+        "re-opens the Blackwell/CUDA-13 nvrtc crash:\n" + "\n".join(sorted(unscanned))
+    )
+
+
+def test_deberta_backed_discovery_picks_up_a_newly_landed_source(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Meta-test: discovery is NON-VACUOUS — a fresh backbone importer is found with no list edit.
+
+    Anti-false-green for the completeness test above: without this, ``_discover_...`` could return a
+    frozen/empty set and the assertions would still pass.
+    """
+    fake_root = tmp_path / "packages"
+    src = fake_root / "latence-new-thing/src/latence_new_thing"
+    src.mkdir(parents=True)
+    (src / "provider.py").write_text(
+        "def _load(self):\n    from gliner2 import GLiNER2\n    return GLiNER2\n", encoding="utf-8"
+    )
+    (src / "unrelated.py").write_text("import json\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "_packages_root", lambda: fake_root)
+
+    assert _discover_deberta_backed_sources() == (
+        "latence-new-thing/src/latence_new_thing/provider.py",
+    )
+
+
+@pytest.mark.parametrize("rel_source", _JIT_ORDERING_SCANNED_SOURCES)
 def test_mdeberta_providers_neutralize_the_jit_before_importing_the_backbone(
     rel_source: str,
 ) -> None:
@@ -569,7 +695,7 @@ def test_jit_neutralizing_loaders_constant_matches_the_real_perf_seam() -> None:
         )
 
 
-@pytest.mark.parametrize("rel_source", _MDEBERTA_PROVIDER_SOURCES)
+@pytest.mark.parametrize("rel_source", _JIT_ORDERING_SCANNED_SOURCES)
 def test_no_provider_hand_rolls_the_pytorch_jit_workaround(rel_source: str) -> None:
     """No Provider sets ``PYTORCH_JIT`` itself — the neutralization lives ONCE, in the perf seam."""
     src = (_packages_root() / rel_source).read_text(encoding="utf-8")
