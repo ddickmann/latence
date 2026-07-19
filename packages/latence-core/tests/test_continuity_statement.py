@@ -30,6 +30,35 @@ _DOC = _REPO_ROOT / _DOC_RELPATH
 # Tokens that would indicate a real signing/attestation step in the release workflow.
 _SIGNING_TOKENS = ("cosign", "sigstore", "attestations:", "gpg --sign", "minisign")
 
+# Ways the document can *assert an unsigned posture*. Keyed on the claim, not on a single
+# keyword: the whole failure mode here was §6/§7 asserting "no release signing" while the
+# word "unsigned" appeared nowhere, so a `"unsigned" in text` guard stayed green on a lie.
+_NEGATIVE_SIGNING_CLAIMS: tuple[tuple[str, str], ...] = (
+    ("unsigned releases", r"\bunsigned\b"),
+    ("no release signing", r"\bno\s+release\s+signing\b"),
+    ("releases are not signed", r"\b(?:releases?|artifacts?)\b[^.]{0,40}?\bnot\s+signed\b"),
+    ("no signing step in the workflow", r"absence of any[^.]{0,60}?(?:cosign|sigstore|attestation)"),
+    (
+        "a signed release chain listed as not provided",
+        r"(?:does not give you|do(?:es)? not provide|you must cover yourself)[^.]{0,200}?"
+        r"signed release chain",
+    ),
+)
+
+# When the workflow really signs, the statement must name the concrete signing artifact
+# rather than gesturing at "integrity" — this is what an evaluator is told to go verify.
+_POSITIVE_SIGNING_ARTIFACTS = ("sigstore", "scripts/release-integrity.sh")
+
+
+def _negative_signing_claims(text: str) -> list[str]:
+    """Every 'releases are not signed' assertion the document makes, by label."""
+    lowered = text.lower()
+    return [
+        label
+        for label, pattern in _NEGATIVE_SIGNING_CLAIMS
+        if re.search(pattern, lowered, flags=re.DOTALL)
+    ]
+
 # A backticked token is treated as a repo-path claim when it looks like one: it
 # contains a "/" or a known-file suffix, and no shell/YAML noise.
 _BACKTICK = re.compile(r"`([^`\n]+)`")
@@ -111,25 +140,60 @@ def test_every_artifact_the_statement_cites_actually_exists() -> None:
     )
 
 
-def test_signing_claim_matches_the_release_workflow() -> None:
-    """The 'releases are unsigned' claim is checked against release.yml, both ways.
+def test_negative_signing_claim_detector_is_not_keyword_hollow() -> None:
+    """The detector must catch the *claim*, however it is phrased — not one keyword.
 
-    If someone adds cosign/sigstore/PEP-740 attestations to the release workflow, the
-    statement's 'currently unsigned' paragraph becomes a false *understatement* and must
-    be updated; if someone claims releases are signed while the workflow has no signing
-    step, that is the false-green this test exists to stop.
+    Guards the guard: the original check was ``"unsigned" in text``, which a document
+    asserting "No release signing" or listing "a signed release chain" under *what it does
+    not give you* passes trivially. Each phrasing below is one that really appeared (or
+    plausibly appears) in a buyer-facing statement and means "we do not sign releases".
+    """
+    for phrasing in (
+        "Release artifacts are currently unsigned.",
+        "| No release signing | absence of any cosign/sigstore/attestation step in `x.yml` |",
+        "Releases are not signed today.",
+        "**What it does not give you**, and you must cover yourself: a signed release chain\n(§5.4), automated dependency-CVE gating (§5.5).",
+    ):
+        assert _negative_signing_claims(phrasing), f"detector missed a denial of signing: {phrasing!r}"
+
+    # ...and must not fire on the *affirmative* posture, or §5.4 itself would be unwritable.
+    for phrasing in (
+        "Release artifacts are signed with keyless Sigstore, producing SHA256SUMS.sigstore.json.",
+        "a missing `id-token: write` permission fails the job loudly rather than quietly "
+        "shipping an unverifiable release.",
+        "| Signed release chain | `scripts/release-integrity.sh`, the `release-integrity` job |",
+    ):
+        assert not _negative_signing_claims(phrasing), f"detector false-positived on: {phrasing!r}"
+
+
+def test_signing_claim_matches_the_release_workflow() -> None:
+    """The signing posture is checked against release.yml, both ways.
+
+    If someone adds cosign/sigstore/PEP-740 attestations to the release workflow, every
+    'releases are unsigned' paragraph becomes a false *understatement* and must be updated —
+    including the ones that never use the word "unsigned" (§6's "what it does not give you"
+    list and §7's verification appendix). If someone claims releases are signed while the
+    workflow has no signing step, that is the false-green this test exists to stop.
     """
     workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text().lower()
     workflow_signs = any(tok in workflow for tok in _SIGNING_TOKENS)
-    doc_claims_unsigned = "unsigned" in _doc_text().lower()
+    doc = _doc_text()
+    denials = _negative_signing_claims(doc)
 
     if workflow_signs:
-        assert not doc_claims_unsigned, (
-            "release.yml now has a signing/attestation step — docs/CONTINUITY.md §5.4 "
-            "still says releases are unsigned. Update the statement."
+        assert not denials, (
+            f"release.yml has a signing/attestation step, but {_DOC_RELPATH} still asserts "
+            f"an unsigned posture: {denials}. Every section must agree with §5.4 — a "
+            "buyer-facing statement that contradicts itself on release integrity is a defect."
+        )
+        lowered = doc.lower()
+        missing = [a for a in _POSITIVE_SIGNING_ARTIFACTS if a not in lowered]
+        assert not missing, (
+            f"{_DOC_RELPATH} must name the artifacts an adopter verifies against when the "
+            f"release chain is signed; missing: {missing}"
         )
     else:
-        assert doc_claims_unsigned, (
+        assert denials, (
             "release.yml has no signing/attestation step, so docs/CONTINUITY.md must say "
             "release artifacts are unsigned rather than implying a signed release chain."
         )

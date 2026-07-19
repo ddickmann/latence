@@ -249,13 +249,14 @@ you will be asked for:
 | Coordinated-disclosure policy | `SECURITY.md` — private advisories, 90-day embargo target |
 | Documented security risk assessment | [`docs/THREAT-MODEL.md`](THREAT-MODEL.md) — trust boundaries, mitigations, residual risks |
 | Secure-by-default configuration | scheme allowlist denying `http`/`ftp`/`sftp` by default, two Screening checkpoints, universal redaction floor ([ADR-0044](adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)) |
+| Integrity & authenticity of the delivered artifact | keyless Sigstore signature over `SHA256SUMS` + the VERIFY.md instruction sheet, produced by `scripts/release-integrity.sh` (§5.4) |
 | Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `issues/gate/G1-RESULTS.md` |
 | Ability to remediate independently of the supplier | Apache-2.0 + reproducible local gate (§2) |
 
-**What it does not give you**, and you must cover yourself: a signed release chain
-(§5.4), automated dependency-CVE gating (§5.5), a supported-version lifetime with
-backports (§4), and any contractual response time (§5.1). Plan for a vendored or
-forked copy if your CRA evidence pack needs those.
+**What it does not give you**, and you must cover yourself: automated dependency-CVE
+gating (§5.5), a supported-version lifetime with backports (§4), and any contractual
+response time (§5.1). Plan for a vendored or forked copy if your CRA evidence pack
+needs those.
 
 ## 7. Verification appendix
 
@@ -276,7 +277,7 @@ goes red — so this page cannot quietly become aspirational.
 | Threat model with residual risks | [`docs/THREAT-MODEL.md`](THREAT-MODEL.md) |
 | Release mechanics | `.github/workflows/release.yml`, `docs/RELEASING.md`, `CHANGELOG.md` |
 | PyPI auto-publish disabled | `if: false` on `pypi-publish` in `.github/workflows/release.yml` |
-| No release signing | absence of any cosign/sigstore/attestation step in `.github/workflows/release.yml` |
+| Signed release chain, keyless Sigstore | `scripts/release-integrity.sh` (signs `SHA256SUMS`, emits the bundle + VERIFY.md); the `release-integrity` job in `.github/workflows/release.yml`, whose publish step refuses a release without the bundle |
 | SBOM on demand, release-time | `scripts/generate-sbom.sh`, [`docs/SBOM.md`](SBOM.md) |
 | Supply-chain controls | `.github/dependabot.yml`, `.github/workflows/codeql.yml`, `.github/workflows/scorecard.yml`, `scripts/secret_scan_gate.py`, `.secrets.baseline` |
 | Reproducible merge gate without CI | `scripts/verify-local.sh` |
