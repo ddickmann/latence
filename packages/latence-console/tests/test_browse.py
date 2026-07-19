@@ -13,9 +13,11 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import cast
 
 import pytest
 from latence_console import browse
+from latence_console.artifacts import RunArtifacts
 from latence_console.render import external_references, render_chunk
 from latence_console.server import ConsoleApp
 from latence_core.contracts import ChunkRecord, Classification, PIISpan, RedactionAction
@@ -178,6 +180,16 @@ class _NoDocuments:
         return None
 
 
+def _no_documents() -> RunArtifacts:
+    """The double, as the parameter type ``inspect_chunk`` declares.
+
+    ``inspect_chunk`` reaches exactly one method on its artifacts (``document``), which is all
+    this double provides; the cast states that narrowness rather than widening the real
+    signature to a structural type nothing else needs.
+    """
+    return cast("RunArtifacts", _NoDocuments())
+
+
 def test_a_pii_span_without_an_offset_map_is_shifted_by_the_chunks_document_anchor() -> None:
     """R2-console_readonly-12: chunk-LOCAL offsets must never be shown as document offsets.
 
@@ -187,7 +199,7 @@ def test_a_pii_span_without_an_offset_map_is_shifted_by_the_chunks_document_anch
     same page reported the enclosing chunk at 91–120 on page 2 while the PII row inside it
     claimed 0–12 on page 1 (ADR-0021/0031, Provenance is true).
     """
-    inspection = browse.inspect_chunk(_NoDocuments(), _chunk_without_offset_map(91))
+    inspection = browse.inspect_chunk(_no_documents(), _chunk_without_offset_map(91))
 
     row = inspection.redaction.spans[0]
     assert row.chunk_span == "0–12"  # the chunk-local span still reads chunk-local
@@ -200,7 +212,7 @@ def test_a_pii_span_without_an_offset_map_is_shifted_by_the_chunks_document_anch
 
 def test_a_pii_span_with_no_document_anchor_at_all_reports_unknown_not_chunk_local() -> None:
     """No offset map AND no ``provenance.char_start`` = the span cannot be placed at all."""
-    inspection = browse.inspect_chunk(_NoDocuments(), _chunk_without_offset_map(None))
+    inspection = browse.inspect_chunk(_no_documents(), _chunk_without_offset_map(None))
 
     row = inspection.redaction.spans[0]
     assert row.chunk_span == "0–12"
@@ -267,7 +279,7 @@ def test_a_floor_masked_chunk_is_never_reported_as_a_control_that_was_off() -> N
     masked IBAN: a false statement about a redaction control on the PII-audit surface.
     """
     chunk = _floor_masked_sensitive_chunk()
-    inspection = browse.inspect_chunk(_NoDocuments(), chunk)
+    inspection = browse.inspect_chunk(_no_documents(), chunk)
 
     # The span the floor handled is really there — the premise of the false claim.
     assert [s.pii_type for s in inspection.redaction.spans] == ["iban"]

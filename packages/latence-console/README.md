@@ -42,8 +42,9 @@ produced one, and never the parent document's raw markdown.
 
 ## What it deliberately is not
 
-- **Not a writer.** It reaches only `exists` / `ls` / `read_text` / `modified` on the Storage seam.
-  `POST`, `PUT`, `PATCH` and `DELETE` are refused with `405` before a path is even parsed.
+- **Not a writer.** It reaches only `exists` / `ls` / `read_text` / `open(uri, "rb")` / `modified`
+  on the Storage seam. `POST`, `PUT`, `PATCH` and `DELETE` are refused with `405` before a path is
+  even parsed.
 - **Not stateful.** `ConsoleApp` holds nothing between requests — no session, no cache, no index it
   builds and persists. Every page is re-derived from the files at request time, which is why
   "no new state" is structural here rather than a promise (ADR-0010, ADR-0017).
@@ -52,6 +53,24 @@ produced one, and never the parent document's raw markdown.
   other bind address. It works with the network cable pulled out.
 - **Not a JSON dump.** The Quality Report's nineteen schema versions of counts are translated into
   sentences with a verdict attached. The raw report is still on Storage for anyone who wants it.
+
+## On a large run
+
+A real run's checkpoints are hundreds of megabytes, and the console re-reads them on every request
+(it caches nothing, by design). So it is **bounded**, not exhaustive:
+
+- Checkpoints are **streamed** line by line — never decoded into memory whole — and a single-record
+  view (the chunk inspector, an entity page) is a targeted lookup that costs one file pass, not the
+  whole run.
+- A **list** view reads at most `MAX_SCAN_RECORDS` (2000) records of each kind. Past that the page
+  says so, in a *Partial view* banner — it never presents a prefix as if it were the whole run.
+  Every record it does list is the most-downstream (post-Redaction) version, so a truncated list can
+  never show text that a Redaction Stage had already rewritten.
+- Every list view **paginates** at `PAGE_ROWS` (200) rows per page (`?page=`), so page size does not
+  grow with the run.
+
+For an exhaustive audit of a large run, read the corpus and checkpoint files directly — they are the
+source of truth (ADR-0017), and the console is a viewer over them.
 
 ## Scope
 

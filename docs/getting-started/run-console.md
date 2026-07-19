@@ -66,9 +66,9 @@ with no Redaction Stage gets **no** reassuring "no personal data found" line.
 
 ## What it deliberately does not do
 
-- **It never writes.** It reaches only `exists` / `ls` / `read_text` / `modified` on the
-  Storage seam. `POST`, `PUT`, `PATCH` and `DELETE` are refused with `405`. Browsing every
-  page leaves the storage tree byte-identical.
+- **It never writes.** It reaches only `exists` / `ls` / `read_text` / `open(uri, "rb")` /
+  `modified` on the Storage seam. `POST`, `PUT`, `PATCH` and `DELETE` are refused with `405`.
+  Browsing every page leaves the storage tree byte-identical.
 - **It holds no state.** There is no database, no cache, no index it builds and persists.
   Every page is re-derived from the files at request time, so a run that lands while the
   console is open shows up on the next reload.
@@ -82,6 +82,23 @@ with no Redaction Stage gets **no** reassuring "no personal data found" line.
   socket from your own browser, and only the `Host` header gives it away.
 - **It is not a JSON dump.** The machine-readable `quality-report.json` is still on Storage
   for anyone who wants it; the console is the human half.
+
+## On a large run
+
+The console holds no cache, so it re-reads a run's files on every request. On a run with hundreds
+of megabytes of checkpoints that has to be bounded, and it is:
+
+- checkpoints are **streamed**, never read into memory whole, and opening one chunk is a targeted
+  lookup that costs one file pass — not the whole run;
+- a **list** view reads at most 2000 records of each kind, and says so in a *Partial view* banner
+  when it stopped short. Every record it lists is the most-downstream (post-Redaction) version, so
+  a truncated list can never show text a Redaction Stage had already rewritten;
+- every list view **paginates** at 200 rows per page (`?page=`).
+
+To audit a large run exhaustively, read the corpus and checkpoint files directly — they are the
+source of truth
+([ADR-0017](../adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md)); the console is a viewer
+over them.
 
 ## Options
 

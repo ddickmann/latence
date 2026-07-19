@@ -116,26 +116,41 @@ class ConsoleApp:
                 404, render.render_not_found(f"There is no {view!r} view of a run.")
             )
         # One fresh reader per request: the console holds no index between answers.
-        return handler(self, run_id, self._index.artifacts(run_id), _param(query, "id"))
+        return handler(self, run_id, self._index.artifacts(run_id), query)
 
     # -- the #188 views ----------------------------------------------------
 
-    def _quarantine_view(
-        self, run_id: str, artifacts: RunArtifacts, _id: str | None
-    ) -> Response:
+    def _quarantine_view(self, run_id: str, artifacts: RunArtifacts, query: str) -> Response:
+        # Both lists are derived before rendering, so ``truncated()`` is asked AFTER the scan
+        # that would set it — the page never claims completeness the reader did not deliver.
+        held = browse.quarantine_entries(artifacts)
+        flagged = browse.flag_entries(artifacts)
         return Response.html(
             200,
             render.render_quarantine(
-                run_id, browse.quarantine_entries(artifacts), browse.flag_entries(artifacts)
+                run_id,
+                held,
+                flagged,
+                page=render.parse_page(_param(query, "page")),
+                held_page=render.parse_page(_param(query, "held")),
+                truncated=artifacts.truncated(),
             ),
         )
 
-    def _chunks_view(self, run_id: str, artifacts: RunArtifacts, _id: str | None) -> Response:
-        return Response.html(200, render.render_chunks(run_id, browse.chunk_rows(artifacts)))
+    def _chunks_view(self, run_id: str, artifacts: RunArtifacts, query: str) -> Response:
+        rows = browse.chunk_rows(artifacts)
+        return Response.html(
+            200,
+            render.render_chunks(
+                run_id,
+                rows,
+                page=render.parse_page(_param(query, "page")),
+                truncated=artifacts.truncated(),
+            ),
+        )
 
-    def _chunk_view(
-        self, run_id: str, artifacts: RunArtifacts, record_id: str | None
-    ) -> Response:
+    def _chunk_view(self, run_id: str, artifacts: RunArtifacts, query: str) -> Response:
+        record_id = _param(query, "id")
         # The id is MATCHED against records already read — never concatenated into a Storage
         # URI — so a crafted id can only fail to match, not address a file.
         chunk = artifacts.chunk(record_id) if record_id else None
@@ -151,17 +166,23 @@ class ConsoleApp:
         inspection = browse.inspect_chunk(artifacts, chunk)
         return Response.html(200, render.render_chunk(run_id, inspection))
 
-    def _graph_view(self, run_id: str, artifacts: RunArtifacts, _id: str | None) -> Response:
+    def _graph_view(self, run_id: str, artifacts: RunArtifacts, query: str) -> Response:
+        entities = browse.entity_views(artifacts)
+        edges = browse.edge_views(artifacts)
         return Response.html(
             200,
             render.render_graph(
-                run_id, browse.entity_views(artifacts), browse.edge_views(artifacts)
+                run_id,
+                entities,
+                edges,
+                page=render.parse_page(_param(query, "page")),
+                entity_page=render.parse_page(_param(query, "entities")),
+                truncated=artifacts.truncated(),
             ),
         )
 
-    def _entity_view(
-        self, run_id: str, artifacts: RunArtifacts, node_id: str | None
-    ) -> Response:
+    def _entity_view(self, run_id: str, artifacts: RunArtifacts, query: str) -> Response:
+        node_id = _param(query, "id")
         node = artifacts.node(node_id) if node_id else None
         if node is None:
             return Response.html(
@@ -178,10 +199,11 @@ class ConsoleApp:
                 run_id,
                 browse.entity_view(artifacts, node),
                 browse.edge_views(artifacts, node.node_id),
+                page=render.parse_page(_param(query, "page")),
             ),
         )
 
-    _VIEWS: ClassVar[dict[str, Callable[[ConsoleApp, str, RunArtifacts, str | None], Response]]] = {
+    _VIEWS: ClassVar[dict[str, Callable[[ConsoleApp, str, RunArtifacts, str], Response]]] = {
         "quarantine": _quarantine_view,
         "chunks": _chunks_view,
         "chunk": _chunk_view,

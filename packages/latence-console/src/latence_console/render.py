@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from html import escape
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import quote, urlencode
 
 from latence_console import verdicts as V
@@ -273,10 +273,97 @@ def _empty(message: str) -> str:
     return f'<div class="card"><p>{escape(message)}</p></div>'
 
 
+# -- pagination (audit R4) ---------------------------------------------------
+#
+# A run is unbounded; a browse page is not. Before this, every list view emitted one row per
+# record into a single HTML document, so a realistically-sized run produced a multi-megabyte page
+# the browser had to lay out in one go. Every list view now renders at most PAGE_ROWS rows and
+# carries a pager, so the page size is a function of PAGE_ROWS and nothing else.
+
+#: Rows (or edge cards) a single browse page renders.
+PAGE_ROWS = 200
+
+_T = TypeVar("_T")
+
+
+def parse_page(raw: str | None) -> int:
+    """A ``?page=`` value as a page number — anything unreadable is page 1, never an error."""
+    if raw is None:
+        return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _paginate(items: list[_T], page: int) -> tuple[list[_T], int, int]:
+    """``(this page's items, the clamped page number, the total page count)``."""
+    total_pages = max(1, (len(items) + PAGE_ROWS - 1) // PAGE_ROWS)
+    page = min(max(page, 1), total_pages)
+    start = (page - 1) * PAGE_ROWS
+    return items[start : start + PAGE_ROWS], page, total_pages
+
+
+def _pager(
+    run_id: str,
+    suffix: str,
+    *,
+    param: str,
+    page: int,
+    total_pages: int,
+    total_items: int,
+    noun: str,
+    other: dict[str, str] | None = None,
+) -> str:
+    """The "showing X–Y of Z" line plus previous/next links, or just the count on one page."""
+    first = 0 if total_items == 0 else (page - 1) * PAGE_ROWS + 1
+    last = min(page * PAGE_ROWS, total_items)
+    shown = (
+        f"{total_items} {noun}."
+        if total_pages == 1
+        else f"Showing {first}–{last} of {total_items} {noun} (page {page} of {total_pages})."
+    )
+    if total_pages == 1:
+        return f'<p class="sub">{escape(shown)}</p>'
+
+    def link(target: int, label: str) -> str:
+        params = dict(other or {})
+        params[param] = str(target)
+        return f'<a class="navlink" href="{escape(run_href(run_id, suffix, **params))}">{label}</a>'
+
+    links = []
+    if page > 1:
+        links.append(link(page - 1, "← Previous"))
+    if page < total_pages:
+        links.append(link(page + 1, "Next →"))
+    return f'<p class="sub">{escape(shown)}</p><p class="nav">{"".join(links)}</p>'
+
+
+def _truncation_notice(truncated: bool) -> str:
+    """Say it when the reader stopped short — a partial list is never shown as a whole one."""
+    if not truncated:
+        return ""
+    return (
+        '<div class="card verdict warn"><div class="t">Partial view</div>'
+        '<p class="h">This run holds more records than the console reads into one view.</p>'
+        '<p class="e">The rows below are a prefix of the run, not all of it — every one of them '
+        "is the most-downstream (post-Redaction) version, but records beyond the reader's limit "
+        "are not listed. Query the corpus files directly to audit the run exhaustively.</p></div>"
+    )
+
+
 def render_quarantine(
-    run_id: str, quarantined: list[B.QuarantineEntry], flagged: list[B.FlagEntry]
+    run_id: str,
+    quarantined: list[B.QuarantineEntry],
+    flagged: list[B.FlagEntry],
+    *,
+    page: int = 1,
+    held_page: int = 1,
+    truncated: bool = False,
 ) -> str:
     """What Screening held back, and what it let through carrying a risk marker."""
+    shown_held, held_page, held_pages = _paginate(quarantined, held_page)
+    shown_flagged, page, flag_pages = _paginate(flagged, page)
     parts = [
         _run_head(
             run_id,
@@ -287,9 +374,22 @@ def render_quarantine(
             "reason the run recorded.",
             "quarantine",
         ),
+        _truncation_notice(truncated),
         f"<h2>Quarantined — removed from the pipeline ({len(quarantined)})</h2>",
     ]
     if quarantined:
+        parts.append(
+            _pager(
+                run_id,
+                "/quarantine",
+                param="held",
+                page=held_page,
+                total_pages=held_pages,
+                total_items=len(quarantined),
+                noun="record(s)",
+                other={"page": str(page)},
+            )
+        )
         parts.append(
             '<div class="card">'
             + _table(
@@ -304,7 +404,7 @@ def render_quarantine(
                         e.category,
                         e.reason,
                     ]
-                    for e in quarantined
+                    for e in shown_held
                 ],
             )
             + "</div>"
@@ -314,8 +414,20 @@ def render_quarantine(
 
     parts.append(f"<h2>Flagged — kept, with a risk marker in the corpus ({len(flagged)})</h2>")
     if flagged:
+        parts.append(
+            _pager(
+                run_id,
+                "/quarantine",
+                param="page",
+                page=page,
+                total_pages=flag_pages,
+                total_items=len(flagged),
+                noun="marker(s)",
+                other={"held": str(held_page)},
+            )
+        )
         rows = []
-        for e in flagged:
+        for e in shown_flagged:
             link = (
                 f'<a href="{escape(run_href(run_id, "/chunk", id=e.chunk_id))}">'
                 f"{escape(e.file_name)}</a>"
@@ -340,8 +452,10 @@ def render_quarantine(
     return _page(f"Held back & flagged — {run_id}", "".join(parts))
 
 
-def render_chunks(run_id: str, rows: list[B.ChunkRow]) -> str:
-    """The chunk list: find the chunk you want to interrogate."""
+def render_chunks(
+    run_id: str, rows: list[B.ChunkRow], *, page: int = 1, truncated: bool = False
+) -> str:
+    """The chunk list: find the chunk you want to interrogate. Paginated (audit R4)."""
     parts = [
         _run_head(
             run_id,
@@ -350,13 +464,15 @@ def render_chunks(run_id: str, rows: list[B.ChunkRow]) -> str:
             "character offsets it occupies in its source document. Open one to see how it "
             "resolves back through Provenance.",
             "chunks",
-        )
+        ),
+        _truncation_notice(truncated),
     ]
     if not rows:
         parts.append(_empty("This run checkpointed no chunks."))
         return _page(f"Chunks — {run_id}", "".join(parts))
+    shown, page, total_pages = _paginate(rows, page)
     body = []
-    for row in rows:
+    for row in shown:
         marks = []
         if row.flagged:
             marks.append('<span class="pill attention">flagged</span>')
@@ -373,10 +489,19 @@ def render_chunks(run_id: str, rows: list[B.ChunkRow]) -> str:
             f"<td>{' '.join(marks)}</td>"
             "</tr>"
         )
+    pager = _pager(
+        run_id,
+        "/chunks",
+        param="page",
+        page=page,
+        total_pages=total_pages,
+        total_items=len(rows),
+        noun="chunk(s)",
+    )
     parts.append(
-        f'<p class="sub">{len(rows)} chunk(s).</p><div class="card"><table><thead><tr>'
+        f'{pager}<div class="card"><table><thead><tr>'
         "<th>Source file</th><th>#</th><th>Page(s)</th><th>Characters</th><th>Tokens</th>"
-        f"<th></th></tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+        f"<th></th></tr></thead><tbody>{''.join(body)}</tbody></table></div>{pager}"
     )
     return _page(f"Chunks — {run_id}", "".join(parts))
 
@@ -535,8 +660,23 @@ def _edge_card(run_id: str, edge: B.EdgeView) -> str:
     )
 
 
-def render_graph(run_id: str, entities: list[B.EntityView], edges: list[B.EdgeView]) -> str:
-    """The KG browser: entities to navigate, and every edge with its Evidence."""
+def render_graph(
+    run_id: str,
+    entities: list[B.EntityView],
+    edges: list[B.EdgeView],
+    *,
+    page: int = 1,
+    entity_page: int = 1,
+    truncated: bool = False,
+) -> str:
+    """The KG browser: entities to navigate, and every edge with its Evidence.
+
+    The two lists paginate independently (``?entities=`` and ``?page=``) because an edge card is
+    an order of magnitude larger than an entity row — one shared pager would make the page size
+    depend on which of the two happened to be long.
+    """
+    shown_entities, entity_page, entity_pages = _paginate(entities, entity_page)
+    shown_edges, page, edge_pages = _paginate(edges, page)
     parts = [
         _run_head(
             run_id,
@@ -546,7 +686,20 @@ def render_graph(run_id: str, entities: list[B.EntityView], edges: list[B.EdgeVi
             "where they sit in their documents, and how strongly.",
             "graph",
         ),
+        _truncation_notice(truncated),
         f"<h2>Entities ({len(entities)})</h2>",
+        _pager(
+            run_id,
+            "/graph",
+            param="entities",
+            page=entity_page,
+            total_pages=entity_pages,
+            total_items=len(entities),
+            noun="entities",
+            other={"page": str(page)},
+        )
+        if entities
+        else "",
     ]
     if entities:
         rows = "".join(
@@ -560,7 +713,7 @@ def render_graph(run_id: str, entities: list[B.EntityView], edges: list[B.EdgeVi
             f"<td>{e.document_count}</td>"
             f"<td>{e.edge_count}</td>"
             "</tr>"
-            for e in entities
+            for e in shown_entities
         )
         parts.append(
             '<div class="card"><table><thead><tr><th>Entity</th><th>Type</th><th>KB link</th>'
@@ -572,14 +725,29 @@ def render_graph(run_id: str, entities: list[B.EntityView], edges: list[B.EdgeVi
 
     parts.append(f"<h2>Relations ({len(edges)})</h2>")
     if edges:
-        parts.extend(_edge_card(run_id, edge) for edge in edges)
+        edge_pager = _pager(
+            run_id,
+            "/graph",
+            param="page",
+            page=page,
+            total_pages=edge_pages,
+            total_items=len(edges),
+            noun="relation(s)",
+            other={"entities": str(entity_page)},
+        )
+        parts.append(edge_pager)
+        parts.extend(_edge_card(run_id, edge) for edge in shown_edges)
+        parts.append(edge_pager)
     else:
         parts.append(_empty("This run assembled no graph edges."))
     return _page(f"Knowledge graph — {run_id}", "".join(parts))
 
 
-def render_entity(run_id: str, entity: B.EntityView, edges: list[B.EdgeView]) -> str:
+def render_entity(
+    run_id: str, entity: B.EntityView, edges: list[B.EdgeView], *, page: int = 1
+) -> str:
     """One entity, and every edge touching it — each with its Evidence."""
+    shown_edges, page, edge_pages = _paginate(edges, page)
     parts = [
         _run_head(
             run_id,
@@ -603,7 +771,19 @@ def render_entity(run_id: str, entity: B.EntityView, edges: list[B.EdgeView]) ->
         f"<h2>Relations ({len(edges)})</h2>",
     ]
     if edges:
-        parts.extend(_edge_card(run_id, edge) for edge in edges)
+        pager = _pager(
+            run_id,
+            "/entity",
+            param="page",
+            page=page,
+            total_pages=edge_pages,
+            total_items=len(edges),
+            noun="relation(s)",
+            other={"id": entity.node_id},
+        )
+        parts.append(pager)
+        parts.extend(_edge_card(run_id, edge) for edge in shown_edges)
+        parts.append(pager)
     else:
         parts.append(_empty("No relation in this graph touches this entity."))
     return _page(f"{entity.canonical_name} — {run_id}", "".join(parts))
