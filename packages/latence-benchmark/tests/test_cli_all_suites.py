@@ -119,6 +119,86 @@ def test_the_shipped_corpus_needs_no_dataset_root(
     assert payload["measurements"][0]["dataset"]["name"] == "synthetic-pii"
 
 
+def test_a_partial_run_republishes_the_other_stages_instead_of_deleting_them(
+    roots: tuple[Path, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One page, every Stage — even though no one host runs every suite (audit R1-docs_truth-9).
+
+    Publishing the redaction number used to *delete* the Parse numbers, which is why the shipped
+    page carried one suite while the guide described five.
+    """
+    olmocr, _ = roots
+    markdown = tmp_path / "BENCHMARKS.md"
+    sidecar = tmp_path / "results.json"
+    common = ["--markdown-out", str(markdown), "--json-out", str(sidecar)]
+
+    assert cli.main(["run", "--suite", "parse", "--dataset-root", str(olmocr), *common]) == 0
+    parse_before = json.loads(sidecar.read_text(encoding="utf-8"))["measurements"][0]
+
+    assert cli.main(["run", "--suite", "redaction", *common]) == 0
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    published = {m["suite"]: m for m in payload["measurements"]}
+    assert set(published) == {"parse", "redaction"}
+    # Republished byte-for-byte: a carried number must never drift as a side effect.
+    assert published["parse"] == parse_before
+    page = markdown.read_text(encoding="utf-8")
+    assert "`parse` suite" in page and "`redaction` suite" in page
+    assert f"Measured {published['parse']['measured_on']}" in page
+    assert "Republished previously measured suites unchanged: parse." in capsys.readouterr().out
+
+
+def test_no_carry_forward_writes_a_single_suite_page(
+    roots: tuple[Path, Path], tmp_path: Path
+) -> None:
+    olmocr, _ = roots
+    sidecar = tmp_path / "results.json"
+    common = ["--markdown-out", str(tmp_path / "m.md"), "--json-out", str(sidecar)]
+    assert cli.main(["run", "--suite", "parse", "--dataset-root", str(olmocr), *common]) == 0
+    assert cli.main(["run", "--suite", "redaction", "--no-carry-forward", *common]) == 0
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert [m["suite"] for m in payload["measurements"]] == ["redaction"]
+
+
+def test_republishing_a_number_against_a_re_pinned_dataset_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A carried number is validated against the registry, not trusted because it was on disk."""
+    sidecar = tmp_path / "results.json"
+    stale = {
+        "generated_on": "2020-01-01",
+        "measurements": [
+            {
+                "suite": "parse",
+                "stage": "parse",
+                "measured_on": "2020-01-01",
+                "dataset": {"name": "olmocr-bench", "revision": "0" * 40},
+                "stack_pin": {"stage": "parse", "provider": "parser.pdfplumber", "config": {}},
+                "splits": [],
+                "metrics": [],
+                "notes": [],
+            }
+        ],
+        "vendor_claims": [],
+    }
+    sidecar.write_text(json.dumps(stale), encoding="utf-8")
+    code = cli.main(
+        [
+            "run",
+            "--suite",
+            "redaction",
+            "--markdown-out",
+            str(tmp_path / "m.md"),
+            "--json-out",
+            str(sidecar),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "was published against dataset revision" in err
+    # Refused, not silently rewritten: the stale sidecar is left exactly as it was.
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == stale
+
+
 def test_repinning_a_provider_is_refused_for_a_multi_suite_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1,7 +1,8 @@
 # Run the public benchmarks
 
 The published numbers in [Public benchmark results](BENCHMARKS.md) are not something you have to
-take on faith. This page is how you reproduce them, and how you add a suite for another Stage.
+take on faith. This page is how you reproduce them, how you produce the ones that are [not yet
+measured](#not-yet-measured), and how you add a suite for another Stage.
 
 ## One command
 
@@ -14,13 +15,21 @@ That does the whole loop for **every** suite: check each dataset's license, fetc
 pinned revision, run the Stage through its pinned Provider, score it, and rewrite
 `docs/BENCHMARKS.md` + `docs/benchmarks/results.json` — one page, every Stage.
 
-| Suite | Stage | Dataset | What it reports |
-| --- | --- | --- | --- |
-| `parse` | Parse | olmOCR-bench | Unit-test pass rate per split |
-| `entity_extraction` | Entity Extraction | RED^FM (7 languages) | Precision/recall/F1 per language, on two match criteria |
-| `relation_extraction` | Relation Extraction | RED^FM (7 languages) | Precision/recall/F1 per language and per predicate, from GOLD mentions |
-| `disambiguation` | Disambiguation | RED^FM (7 languages) | Pairwise precision/recall against gold Wikidata identity |
-| `redaction` | Redaction | Shipped synthetic PII corpus (en + de) | Redaction recall (and precision) per language and per PII type |
+| Suite | Stage | Dataset | What it reports | Published today |
+| --- | --- | --- | --- | --- |
+| `parse` | Parse | olmOCR-bench | Unit-test pass rate per split | **yes** |
+| `redaction` | Redaction | Shipped synthetic PII corpus (en + de) | Redaction recall (and precision) per language and per PII type, on three match criteria | **yes** |
+| `entity_extraction` | Entity Extraction | RED^FM (7 languages) | Precision/recall/F1 per language, on two match criteria | no — [not yet measured](#not-yet-measured) |
+| `relation_extraction` | Relation Extraction | RED^FM (7 languages) | Precision/recall/F1 per language and per predicate, from GOLD mentions | no — [not yet measured](#not-yet-measured) |
+| `disambiguation` | Disambiguation | RED^FM (7 languages) | Pairwise precision/recall against gold Wikidata identity | no — [not yet measured](#not-yet-measured) |
+
+"What it reports" is what the suite *computes when you run it*. Only the rows marked **yes**
+have numbers on [Public benchmark results](BENCHMARKS.md) right now; the rest are declared under
+[Not yet measured](#not-yet-measured) rather than implied. Every section of the results page
+states the date its own numbers were measured, because covering every Stage takes more than one
+run — a run that scores a subset republishes the other Stages' published numbers unchanged
+rather than deleting them (`--no-carry-forward` opts out), and refuses to republish any number
+whose dataset has since been re-pinned.
 
 Remote acquisition needs the `[hub]` extra (`uv pip install 'latence-benchmark[hub]'`). If you
 already have the datasets — or you are on an air-gapped host — skip acquisition entirely. The
@@ -42,6 +51,7 @@ Useful flags:
 | `--limit 25` | Cap documents per split for a fast smoke run. The result is labelled `SUBSET RUN` and must not be compared against full-benchmark numbers. |
 | `--accept-non-commercial` | Acknowledge a research-only dataset license. Never lifts an `UNVERIFIED` license. |
 | `--markdown-out` / `--json-out` | Write the artifacts somewhere other than `docs/`. |
+| `--no-carry-forward` | Write a page containing only the suites this run scored. By default a partial run republishes the other Stages' published numbers unchanged, each with the date it was measured — and refuses to republish one whose dataset has since been re-pinned. |
 
 ## What the harness refuses to do
 
@@ -71,17 +81,43 @@ number with its pin attached: it measures the CPU-first default an adopter gets 
 and the way to measure an OCR path is to re-pin (`--provider parser.lighton`, GPU) and publish
 that alongside — not to quietly swap the Provider behind the same headline figure.
 
+## Not yet measured
+
+The three RED^FM suites — `entity_extraction`, `relation_extraction`, `disambiguation` — are
+**implemented and runnable, but their numbers are not published yet**. They score the RED^FM
+corpus, which has to be downloaded (it does not ship in this repository), so nobody has run them
+on a host that had it. There is no partial result hiding behind that sentence: the results page
+has no section for them, and the JSON sidecar has no measurement for them.
+
+Produce them yourself — the run publishes onto the same page, next to Parse and Redaction, and
+leaves those two untouched:
+
+```bash
+uv pip install 'latence-benchmark[hub]'
+uv run latence-benchmark run --suite entity_extraction
+uv run latence-benchmark run --suite relation_extraction
+uv run latence-benchmark run --suite disambiguation
+# or, with every dataset already on disk:
+uv run latence-benchmark run --suite all \
+  --dataset-root olmocr-bench=/path/to/olmOCR-bench \
+  --dataset-root redfm=/path/to/REDFM
+```
+
+The section below says what those numbers will look like and why — read it *before* you read the
+numbers, not after.
+
 ## Reading the extraction and disambiguation results honestly
 
 All three RED^FM suites pin the framework's **dependency-free CPU built-ins**, for the same
-reason Parse pins `parser.pdfplumber`: the published number must be the one you reproduce from a
-clean clone. That has consequences you should read off the tables rather than be surprised by.
+reason Parse pins `parser.pdfplumber`: a published number must be the one you reproduce from a
+clean clone. That has consequences you should read off the tables the run writes rather than be
+surprised by.
 
 * **Entity Extraction** pins `entity.gazetteer` with a capitalisation + numeric recogniser. It is
   an entity *detection* baseline: it has no notion of RED^FM's label inventory beyond `NUMBER`,
   so `span+type` sits far below `span`, and Arabic and Chinese — which have no case distinction —
-  score near zero **by construction**. That is why the per-language slices are published. The
-  learned re-pin is `--provider ner.gliner`.
+  score near zero **by construction**. That is why the suite reports a per-language slice rather
+  than one aggregate. The learned re-pin is `--provider ner.gliner`.
 * **Relation Extraction** pins `relation.pattern` with five type-prior co-occurrence rules whose
   head/tail signatures were derived from RED^FM's **train** split (never the scored `test`
   split). A co-occurrence rule fires on every in-window type pair, so recall is respectable and

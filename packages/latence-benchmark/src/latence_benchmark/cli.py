@@ -9,6 +9,10 @@ identical pipeline against an already-downloaded copy, which is what CI and air-
 use; with ``--suite all`` it may be repeated as ``--dataset-root <dataset>=<path>`` because the
 suites do not share one corpus.
 
+No single host usually has every dataset, so a run covering a subset of the suites republishes
+the previously published measurements for the Stages it did not score instead of deleting them
+(``--no-carry-forward`` opts out). Each measurement records the date it was produced.
+
 Stdlib ``argparse`` deliberately: the harness must be runnable straight from a clone with the
 framework installed and nothing else.
 """
@@ -30,7 +34,7 @@ from latence_benchmark.datasets import (
 )
 from latence_benchmark.licensing import LicenseGateError, require_usable
 from latence_benchmark.providers import ProviderUnavailableError
-from latence_benchmark.results import write_results
+from latence_benchmark.results import PublishedResultsError, carry_forward, write_results
 from latence_benchmark.suite import StackPin, get_suite, suite_names
 from latence_benchmark.unittests import BenchmarkDataError
 
@@ -87,6 +91,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--accept-non-commercial",
         action="store_true",
         help="Acknowledge a research-only dataset license. Never lifts an UNVERIFIED license.",
+    )
+    run.add_argument(
+        "--no-carry-forward",
+        dest="carry_forward",
+        action="store_false",
+        help=(
+            "Write a page containing ONLY the suites this run scored, dropping the previously "
+            "published measurements for every other Stage. Off by default: a partial run "
+            "republishes the other Stages rather than deleting them."
+        ),
     )
     run.add_argument("--markdown-out", type=Path, default=DEFAULT_MARKDOWN)
     run.add_argument("--json-out", type=Path, default=DEFAULT_JSON)
@@ -194,14 +208,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 3
 
     generated_on = datetime.now(UTC).date().isoformat()
+    # Every number carries the date it was produced, so a page assembled from several runs
+    # never implies that a carried-forward measurement was measured today.
+    measured = [dataclasses.replace(result, measured_on=generated_on) for result in results]
+    published: Sequence[SuiteResult] = measured
+    if args.carry_forward:
+        try:
+            published = carry_forward(measured, json_path=args.json_out)
+        except PublishedResultsError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     write_results(
-        results,
+        published,
         markdown_path=args.markdown_out,
         json_path=args.json_out,
         generated_on=generated_on,
     )
     for result in results:
         print(_summarise(result))
+    republished = [r.suite for r in published if r.suite not in {x.suite for x in results}]
+    if republished:
+        print(f"Republished previously measured suites unchanged: {', '.join(republished)}.")
     print(f"Wrote {args.markdown_out} and {args.json_out}.")
     return 0
 

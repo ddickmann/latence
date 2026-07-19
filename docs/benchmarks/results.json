@@ -1,5 +1,5 @@
 {
-  "generated_on": "2026-07-18",
+  "generated_on": "2026-07-19",
   "measurements": [
     {
       "dataset": {
@@ -15,10 +15,15 @@
         },
         "name": "olmocr-bench",
         "repo_id": "allenai/olmOCR-bench",
-        "revision": "54a96a6fb6a2bd3b297e59869491db4d3625b711"
+        "revision": "54a96a6fb6a2bd3b297e59869491db4d3625b711",
+        "revision_kind": "commit"
       },
       "document_failures": 7,
       "documents_scored": 1403,
+      "headline": null,
+      "headline_dimension": null,
+      "measured_on": "2026-07-18",
+      "metrics": [],
       "notes": [
         "Scored with Provider 'parser.pdfplumber' exactly as pinned. A text-layer PDF parser cannot recover text from a scanned page, and much of olmOCR-bench (old_scans, long_tiny_text) is photographed or scanned material with no text layer \u2014 those tests fail by construction, not by defect. Comparing an OCR Provider means re-pinning: `--provider parser.lighton` (GPU)."
       ],
@@ -96,6 +101,293 @@
       },
       "stage": "parse",
       "suite": "parse"
+    },
+    {
+      "dataset": {
+        "citation": "Latence synthetic PII corpus (Apache-2.0) \u2014 part of the latence-framework repo.",
+        "homepage": "https://github.com/ddickmann/latence-framework",
+        "license": {
+          "attribution_required": true,
+          "code_license": "Apache-2.0",
+          "commercial_use": true,
+          "dataset_license": "Apache-2.0",
+          "source_url": "https://github.com/ddickmann/latence-framework/blob/main/LICENSE",
+          "verified_on": "2026-07-18"
+        },
+        "name": "synthetic-pii",
+        "repo_id": "latence-framework/latence_benchmark.corpora",
+        "revision": "74c22ebeb6a98e7c8c057b065c1cb4fe31d69ef0",
+        "revision_kind": "content-digest"
+      },
+      "document_failures": 0,
+      "documents_scored": 20,
+      "headline": {
+        "dimension": "language",
+        "f1": 0.870967741935484,
+        "false_negatives": 8,
+        "false_positives": 0,
+        "gold": 35,
+        "name": "MICRO",
+        "precision": 1.0,
+        "predicted": 27,
+        "recall": 0.7714285714285715,
+        "true_positives": 27
+      },
+      "headline_dimension": "language",
+      "measured_on": "2026-07-19",
+      "metrics": [
+        {
+          "dimension": "language",
+          "f1": 0.8750000000000001,
+          "false_negatives": 4,
+          "false_positives": 0,
+          "gold": 18,
+          "name": "en",
+          "precision": 1.0,
+          "predicted": 14,
+          "recall": 0.7777777777777778,
+          "true_positives": 14
+        },
+        {
+          "dimension": "language",
+          "f1": 0.8666666666666666,
+          "false_negatives": 4,
+          "false_positives": 0,
+          "gold": 17,
+          "name": "de",
+          "precision": 1.0,
+          "predicted": 13,
+          "recall": 0.7647058823529411,
+          "true_positives": 13
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "api_key",
+          "precision": 1.0,
+          "predicted": 2,
+          "recall": 1.0,
+          "true_positives": 2
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "aws_key",
+          "precision": 1.0,
+          "predicted": 2,
+          "recall": 1.0,
+          "true_positives": 2
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "credit_card",
+          "precision": 1.0,
+          "predicted": 2,
+          "recall": 1.0,
+          "true_positives": 2
+        },
+        {
+          "dimension": "pii_type",
+          "f1": null,
+          "false_negatives": 2,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "date_of_birth",
+          "precision": null,
+          "predicted": 0,
+          "recall": 0.0,
+          "true_positives": 0
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 5,
+          "name": "email",
+          "precision": 1.0,
+          "predicted": 5,
+          "recall": 1.0,
+          "true_positives": 5
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 3,
+          "name": "iban",
+          "precision": 1.0,
+          "predicted": 3,
+          "recall": 1.0,
+          "true_positives": 3
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "ip",
+          "precision": 1.0,
+          "predicted": 2,
+          "recall": 1.0,
+          "true_positives": 2
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "jwt",
+          "precision": 1.0,
+          "predicted": 2,
+          "recall": 1.0,
+          "true_positives": 2
+        },
+        {
+          "dimension": "pii_type",
+          "f1": null,
+          "false_negatives": 1,
+          "false_positives": 0,
+          "gold": 1,
+          "name": "national_id",
+          "precision": null,
+          "predicted": 0,
+          "recall": 0.0,
+          "true_positives": 0
+        },
+        {
+          "dimension": "pii_type",
+          "f1": null,
+          "false_negatives": 6,
+          "false_positives": 0,
+          "gold": 6,
+          "name": "person_name",
+          "precision": null,
+          "predicted": 0,
+          "recall": 0.0,
+          "true_positives": 0
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 0.6666666666666666,
+          "false_negatives": 0,
+          "false_positives": 3,
+          "gold": 3,
+          "name": "phone",
+          "precision": 0.5,
+          "predicted": 6,
+          "recall": 1.0,
+          "true_positives": 3
+        },
+        {
+          "dimension": "pii_type",
+          "f1": null,
+          "false_negatives": 2,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "postal_address",
+          "precision": null,
+          "predicted": 0,
+          "recall": 0.0,
+          "true_positives": 0
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 2,
+          "name": "secret",
+          "precision": 1.0,
+          "predicted": 2,
+          "recall": 1.0,
+          "true_positives": 2
+        },
+        {
+          "dimension": "pii_type",
+          "f1": 1.0,
+          "false_negatives": 0,
+          "false_positives": 0,
+          "gold": 1,
+          "name": "ssn",
+          "precision": 1.0,
+          "predicted": 1,
+          "recall": 1.0,
+          "true_positives": 1
+        },
+        {
+          "dimension": "match",
+          "f1": 0.870967741935484,
+          "false_negatives": 8,
+          "false_positives": 0,
+          "gold": 35,
+          "name": "coverage (value fully masked)",
+          "precision": 1.0,
+          "predicted": 27,
+          "recall": 0.7714285714285715,
+          "true_positives": 27
+        },
+        {
+          "dimension": "match",
+          "f1": 0.8064516129032259,
+          "false_negatives": 10,
+          "false_positives": 2,
+          "gold": 35,
+          "name": "exact span",
+          "precision": 0.9259259259259259,
+          "predicted": 27,
+          "recall": 0.7142857142857143,
+          "true_positives": 25
+        },
+        {
+          "dimension": "match",
+          "f1": 0.7096774193548386,
+          "false_negatives": 13,
+          "false_positives": 5,
+          "gold": 35,
+          "name": "exact span+type",
+          "precision": 0.8148148148148148,
+          "predicted": 27,
+          "recall": 0.6285714285714286,
+          "true_positives": 22
+        }
+      ],
+      "notes": [
+        "Scored with Provider 'redaction.hybrid_rule' at its DEFAULT config: no `detectors` key, which selects the comprehensive built-in recogniser set. Narrowing that default would show up here as a recall drop.",
+        "The corpus is SYNTHETIC \u2014 no real personal data is in this repository. Every value is a reserved or published example (see the DatasetSpec license notes).",
+        "The gold set deliberately includes person names and postal addresses, which a rule-based redactor structurally cannot detect. The recall below is therefore NOT expected to be 1.0, and the per-type table shows exactly where the residual is. The learned re-pin for names is `--provider pii.gliner`.",
+        "Per-type slices count a detected span as a false positive for its own type when it covers no gold value; a value masked under a different label counts as a miss for its gold type (and appears under the `exact span+type` criterion), because a type-scoped redaction policy would not have covered it."
+      ],
+      "overall": {
+        "failed": 0,
+        "pass_rate": null,
+        "passed": 0,
+        "scored": 0,
+        "split": "OVERALL",
+        "unsupported": 0
+      },
+      "splits": [],
+      "stack_pin": {
+        "config": {},
+        "fingerprint": "ea1d8b03b23d9a0d",
+        "provider": "redaction.hybrid_rule",
+        "stage": "redaction"
+      },
+      "stage": "redaction",
+      "suite": "redaction"
     }
   ],
   "vendor_claims": [

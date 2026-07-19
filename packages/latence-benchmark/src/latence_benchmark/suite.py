@@ -148,6 +148,10 @@ class SuiteResult:
     #: Which metric dimension carries this suite's headline number, e.g. ``"language"``. The
     #: micro-average over that dimension is what the CLI prints and the page leads with.
     headline_dimension: str | None = None
+    #: ISO date this measurement was produced. The results page is assembled from however many
+    #: runs it took to cover every Stage (see :func:`~latence_benchmark.results.carry_forward`),
+    #: so each measurement states its own date rather than inheriting the page's.
+    measured_on: str = ""
 
     def metrics_for(self, dimension: str) -> tuple[MetricScore, ...]:
         """This suite's metric slices along one dimension, in the order the suite emitted them."""
@@ -179,10 +183,12 @@ class SuiteResult:
         return {
             "suite": self.suite,
             "stage": self.stage,
+            "measured_on": self.measured_on,
             "dataset": {
                 "name": self.dataset.name,
                 "repo_id": self.dataset.repo_id,
                 "revision": self.dataset.revision,
+                "revision_kind": self.dataset.revision_kind,
                 "homepage": self.dataset.homepage,
                 "citation": self.dataset.citation,
                 "license": {
