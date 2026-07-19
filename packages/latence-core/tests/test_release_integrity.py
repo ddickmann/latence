@@ -597,3 +597,148 @@ def test_releasing_sbom_component_arithmetic_is_consistent() -> None:
         f"SBOM component arithmetic does not add up: {total.group(1)} != "
         f"{third_party.group(1)} + {workspace.group(1)}"
     )
+    # Arithmetic alone is hollow: 54 + 12 == 66 also "adds up", and that was the number the
+    # block recorded while the SBOM covered 12 of the 32 distributions the release ships.
+    # There is exactly one `./packages/<name>` path entry per resolved workspace member, so
+    # the workspace-path count must equal the package count derived from the tree.
+    assert int(workspace.group(1)) == len(_package_dirs()), (
+        f"the SBOM evidence block records {workspace.group(1)} workspace path entries but the "
+        f"tree has {len(_package_dirs())} packages — the SBOM does not cover every "
+        "distribution the release ships (a missing `uv export --all-packages`?)"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# SBOM SCOPE — the document must cover what the release actually ships (R4-security_secrets-3)
+#
+# `uv export` without `--all-packages` resolves only the root `latence-framework-dev`
+# meta-project, which by design (ADR-0016, thin core) depends on none of the heavy Provider
+# packages. The SBOM built from it omitted torch, transformers, gliner, openai,
+# presidio-analyzer, sentence-transformers … while still being stamped, digest-recorded in
+# SHA256SUMS and Sigstore-signed. `grype sbom:sbom.cdx.json` then reports CLEAN for a CVE
+# the adopter is exposed to. So: run the export the script actually performs, and check it
+# against every required dependency the workspace declares.
+# --------------------------------------------------------------------------------------
+
+
+def _uv_export_flags() -> list[str]:
+    """The flags generate-sbom.sh actually passes to `uv export`, read out of the script.
+
+    Read from the script rather than restated here: a test that hard-codes the flags proves
+    nothing about the command the release runs.
+    """
+    lines = _GENERATE_SBOM.read_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.strip().startswith("uv export")]
+    assert len(starts) == 1, f"expected exactly one `uv export` invocation, found {len(starts)}"
+    collected: list[str] = []
+    for line in lines[starts[0] :]:
+        collected.append(line.rstrip().removesuffix("\\"))
+        if not line.rstrip().endswith("\\"):
+            break
+    flags = " ".join(collected).split()[2:]  # drop "uv" "export"
+    assert flags[-2:] == ["-o", '"$REQ"'], f"unexpected output flag in generate-sbom.sh: {flags}"
+    return flags
+
+
+def _exported_requirement_names(destination: Path) -> set[str]:
+    """Run the EXACT `uv export` invocation generate-sbom.sh performs; return pinned names."""
+    flags = _uv_export_flags()
+    result = subprocess.run(
+        ["uv", "export", *flags[:-2], "-o", str(destination)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"uv export failed: {result.stderr}"
+    return {
+        _normalise(m.group(1))
+        for m in re.finditer(
+            r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", destination.read_text(encoding="utf-8"), re.MULTILINE
+        )
+    }
+
+
+def _normalise(name: str) -> str:
+    """PEP 503 name normalisation, so `python_docx` and `python-docx` compare equal."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _required_third_party_dependencies() -> dict[str, set[str]]:
+    """{package: {required third-party dependency names}} from every packages/*/pyproject.toml.
+
+    Only ``project.dependencies`` — the REQUIRED runtime set. Optional extras are excluded on
+    purpose: an adopter who did not install an extra is not exposed through it. Sibling
+    workspace packages are excluded (they are the path entries, not third-party components).
+    """
+    tomllib = pytest.importorskip("tomllib")
+    required: dict[str, set[str]] = {}
+    for pyproject in sorted((_REPO_ROOT / "packages").glob("*/pyproject.toml")):
+        declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"].get(
+            "dependencies", []
+        )
+        names = {
+            _normalise(match.group(1))
+            for dep in declared
+            if (match := re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", dep))
+        }
+        required[pyproject.parent.name] = {n for n in names if not n.startswith("latence-")}
+    return required
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to resolve uv.lock")
+def test_sbom_export_covers_every_released_package_dependency(tmp_path: Path) -> None:
+    """Every REQUIRED dependency of every released package is in the document an adopter scans.
+
+    This is the CVE question the SBOM exists to answer. Without ``--all-packages`` the export
+    resolves only the root meta-project and 18 of the 32 distributions have at least one
+    required dependency missing from the SBOM entirely.
+    """
+    exported = _exported_requirement_names(tmp_path / "requirements.txt")
+
+    uncovered = {
+        package: sorted(deps - exported)
+        for package, deps in _required_third_party_dependencies().items()
+        if deps - exported
+    }
+    assert not uncovered, (
+        f"{len(uncovered)} released package(s) declare REQUIRED dependencies that the release "
+        f"SBOM does not contain, so `grype sbom:sbom.cdx.json` reports CLEAN for a CVE in them: "
+        f"{uncovered}"
+    )
+
+    # Named canaries: the heavy Provider dependencies the meta-project deliberately excludes.
+    # If the resolution scope silently narrows again, these are the first to vanish.
+    for canary in ("torch", "transformers", "gliner", "openai", "presidio-analyzer"):
+        assert canary in exported, f"{canary} is missing from the release SBOM's dependency set"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to resolve uv.lock")
+def test_sbom_generator_fails_closed_when_the_export_misses_a_package(tmp_path: Path) -> None:
+    """The generator refuses to build an SBOM from an export that misses workspace packages.
+
+    A dropped ``--all-packages`` must break the release loudly rather than publish a signed
+    document that understates the dependency surface. Simulated by running the generator in a
+    worktree-shaped copy that declares one more package than the export can cover.
+    """
+    original = _GENERATE_SBOM.read_text()
+    assert "--all-packages" in _uv_export_flags(), "generate-sbom.sh no longer passes --all-packages"
+    # Drop the flag, and pin the working directory (the script normally derives it from $0,
+    # which would point at tmp_path here).
+    script = original.replace("--all-packages \\\n", "").replace(
+        'cd "$(dirname "$0")/.."', f'cd "{_REPO_ROOT}"'
+    )
+    assert script != original
+    stunted = tmp_path / "generate-sbom-without-all-packages.sh"
+    stunted.write_text(script, encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(stunted), str(tmp_path / "sbom.cdx.json")],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, "an SBOM was generated from an export missing packages"
+    assert "workspace packages" in result.stderr, result.stderr
+    assert not (tmp_path / "sbom.cdx.json").exists(), "a hollow SBOM was written anyway"

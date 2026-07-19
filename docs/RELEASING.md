@@ -129,16 +129,25 @@ claimed 25 packages / 56 distributions / 58 assets against a tree that had none 
 | assets checksummed | 66 | the 64 distributions + `sbom.cdx.json` + `VERIFY.md` |
 
 `shasum -a 256 -c SHA256SUMS` verified all 66. The CycloneDX 1.6 SBOM was generated from
-`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 66 components — 54 pinned
-third-party requirements plus 12 workspace path entries (see below). Running
+`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 179 components — 147 pinned
+third-party requirements plus 32 workspace path entries (see below). Running
 `scripts/generate-sbom.sh` twice produced a byte-identical `sbom.cdx.json`
 (`--output-reproducible`), so the release is reproducible from the same lockfile.
 
-> Those 12 components are emitted as `unknown`: they are the `./packages/...` path
+> Those 32 components are emitted as `unknown`: they are the `./packages/...` path
 > requirements that `uv export --no-emit-project` does not strip and that `cyclonedx-py`
 > cannot resolve to a name or version. They are inert for CVE matching — the third-party
-> surface an adopter scans is the 54 pinned components — but they do pad the component
+> surface an adopter scans is the 147 pinned components — but they do pad the component
 > count. Recorded in `issues/audit/R2-docs_truth-7.md`.
+>
+> There is one such entry per package built, and that is the point: `generate-sbom.sh`
+> exports with `--all-packages` and **fails closed** if the export covers fewer packages
+> than `packages/` contains. Without that flag `uv export` resolves only the root
+> `latence-framework-dev` meta-project, which by design (ADR-0016, thin core) depends on
+> none of the heavy Providers — the SBOM then covered 12 of the 32 distributions and
+> omitted `torch`, `transformers`, `gliner`, `openai`, `presidio-analyzer`,
+> `sentence-transformers` and the rest, while still being stamped, checksummed and
+> Sigstore-signed as evidence. Recorded in `issues/audit/R4-security_secrets-3.md`.
 
 > The SBOM generator is version-pinned (`cyclonedx-bom>=7,<8`) on purpose. It had silently
 > stopped working: `cyclonedx-py` 7 removed the `--outfile` flag the script passed, so the

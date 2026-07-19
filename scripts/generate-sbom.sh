@@ -7,9 +7,11 @@
 # effect on the merge gate.
 #
 # What it does:
-#   1. `uv export` resolves the workspace lockfile (uv.lock) to a fully-pinned,
-#      hashed requirements list (dev + all workspace members, no editable installs).
-#   2. `cyclonedx-py requirements` converts that into a CycloneDX 1.6 SBOM.
+#   1. `uv export --all-packages` resolves the workspace lockfile (uv.lock) to a
+#      fully-pinned, hashed requirements list covering the root dev project AND every
+#      workspace member (no editable installs).
+#   2. It fails closed if that export does not cover every package in `packages/`.
+#   3. `cyclonedx-py requirements` converts that into a CycloneDX 1.6 SBOM.
 #
 # Both tools are invoked via `uv run --with ... --no-project` so nothing is added to
 # the workspace's own dependency set.
@@ -28,13 +30,51 @@ echo "==> Exporting fully-pinned requirements from uv.lock"
 # --frozen: do not re-resolve; use the committed lockfile exactly.
 # --no-emit-project / --no-editable: describe installed third-party deps, not the
 # local editable workspace packages themselves.
+# --all-packages: resolve EVERY workspace member, not just the root `latence-framework-dev`
+#   meta-project. This is load-bearing, not a nicety: the root project deliberately does not
+#   depend on the heavy Provider packages (ADR-0016, thin core), so without this flag the
+#   export covers 12 of the 32 distributions the release ships and the SBOM silently omits
+#   torch, transformers, gliner, openai, presidio-analyzer, sentence-transformers and the
+#   rest — while still being stamped, checksummed and Sigstore-signed as evidence.
 uv export \
   --quiet \
   --frozen \
   --no-editable \
   --no-emit-project \
+  --all-packages \
   --format requirements-txt \
   -o "$REQ"
+
+echo "==> Checking the export covers every workspace package"
+# Fail closed BEFORE writing an SBOM. `uv export --no-emit-project` leaves one
+# `./packages/<name>` path requirement per resolved workspace member, so the export's own
+# coverage is directly observable. If it covers fewer packages than `packages/` contains,
+# the resolution scope is wrong (a dropped --all-packages, a member missing from the
+# workspace globs) and the document would understate the release's dependency surface.
+# An SBOM nobody can answer "am I affected by CVE-X?" from is worse than none, because it
+# looks like evidence.
+REQ="$REQ" python3 - <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+req = pathlib.Path(os.environ["REQ"]).read_text(encoding="utf-8")
+exported = {
+    m.group(1) for m in re.finditer(r"^\./packages/([^\s;\\]+)", req, flags=re.MULTILINE)
+}
+tree = {p.parent.name for p in pathlib.Path("packages").glob("*/pyproject.toml")}
+
+missing = sorted(tree - exported)
+if missing:
+    sys.exit(
+        "generate-sbom: the uv export covers "
+        f"{len(exported)} of the {len(tree)} workspace packages — an SBOM built from it "
+        "would omit the dependencies of the distributions the release ships. "
+        f"Missing: {', '.join(missing)}"
+    )
+print(f"    {len(exported)} workspace packages covered")
+PY
 
 echo "==> Building CycloneDX SBOM -> $OUT"
 # cyclonedx-bom is PINNED to a major range on purpose: this is release machinery, and an

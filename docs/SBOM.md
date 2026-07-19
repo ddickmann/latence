@@ -19,10 +19,29 @@ bash scripts/generate-sbom.sh out.json   # custom output path
 
 The script (`scripts/generate-sbom.sh`):
 
-1. runs `uv export --frozen` to resolve `uv.lock` into a fully-pinned, hashed
-   requirements list, then
-2. runs `cyclonedx-py requirements` (from `cyclonedx-bom`) to emit a **CycloneDX
+1. runs `uv export --frozen --all-packages` to resolve `uv.lock` into a fully-pinned,
+   hashed requirements list covering **every workspace package**, not just the root dev
+   project, then
+2. checks that the export really covers every package in `packages/` — and **fails
+   closed** if it does not, before any SBOM is written (see *Scope* below), then
+3. runs `cyclonedx-py requirements` (from `cyclonedx-bom`) to emit a **CycloneDX
    1.6** SBOM in JSON.
+
+## Scope — why `--all-packages` is load-bearing
+
+The root `latence-framework-dev` project deliberately does **not** depend on the heavy
+Provider packages (ADR-0016, thin core). So a plain `uv export` resolves only that
+meta-project and yields a requirements list covering a fraction of what a release ships:
+on this tree, 12 of the 32 distributions, with `torch`, `transformers`, `gliner`,
+`openai`, `presidio-analyzer`, `sentence-transformers`, `peft`, `huggingface-hub` and
+others absent — even though they are **required** runtime dependencies of released
+packages. An adopter scanning that document with `grype` or Dependency-Track would get a
+clean report for a CVE they are in fact exposed to.
+
+`--all-packages` fixes the scope; the coverage check makes the omission impossible to
+reintroduce silently. `uv export --no-emit-project` leaves one `./packages/<name>` path
+requirement per resolved member, so the script compares that set against
+`packages/*/pyproject.toml` and aborts on any shortfall.
 
 Both tools run via `uv run --with … --no-project`, so nothing is added to the
 workspace's own dependency set.
