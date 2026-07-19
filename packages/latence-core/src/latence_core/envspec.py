@@ -577,6 +577,40 @@ def model_loading_providers(spec: EnvironmentSpec, repo_root: Path) -> frozenset
     return frozenset(found)
 
 
+def placement_probe_providers(spec: EnvironmentSpec, repo_root: Path) -> frozenset[str]:
+    """Every Provider the GPU-placement probe must drive — DERIVED, then unioned with the declared.
+
+    The probe set of :func:`latence_core.placement.probe_placement`. It used to be
+    :attr:`EnvironmentSpec.learned_providers` alone, which made the #191 guard ask the spec's
+    author whether to guard: a model-loading Provider added to a GPU stack with ``device: cuda``
+    but not added to that optional field was silently skipped, produced no finding in any of the
+    four smoke gates, and shipped unmeasured (R5-env_reproducibility-3). Deleting one line from the
+    field had the same effect, and ``learned_providers: []`` made the gate report green having
+    measured nothing.
+
+    That is the same mechanism R3-env_reproducibility-1 closed for the compatibility matrix, so it
+    is closed the same way and by the same derivation: :func:`model_loading_providers` reads the
+    declaring packages' own dependencies. The declared set is still unioned in, because a spec is
+    entitled to oblige the probe to *more* than the derivation found — and because that is what
+    lets ``learned_providers`` keep meaning "prove GPU placement for this one" rather than becoming
+    the only thing the gate can see.
+
+    One function rather than two call sites, so the placement gate and the matrix gate cannot drift
+    apart on what "a Provider that loads a model" means.
+    """
+    return spec.learned_providers | model_loading_providers(spec, repo_root)
+
+
+def repo_root_for(spec_path: Path) -> Path:
+    """The repo root a ``deploy/env/<name>/environment.yaml`` belongs to (three parents up).
+
+    The default both ``latence env verify`` and ``latence env placement`` fall back to when no
+    ``--repo-root`` is given. Shared so the two gates cannot resolve the same spec against
+    different workspaces.
+    """
+    return spec_path.resolve().parents[3]
+
+
 def _third_party_requirements(
     packages: list[_PackageMeta],
 ) -> list[tuple[str, tuple[str, ...]]]:

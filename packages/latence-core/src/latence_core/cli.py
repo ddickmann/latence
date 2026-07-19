@@ -1063,7 +1063,9 @@ def purge(
 
 def _repo_root_for(spec_path: Path) -> Path:
     """The repo root a ``deploy/env/<name>/environment.yaml`` belongs to (three parents up)."""
-    return spec_path.resolve().parents[3]
+    from latence_core.envspec import repo_root_for  # noqa: PLC0415 - keeps the CLI import lazy
+
+    return repo_root_for(spec_path)
 
 
 @env_app.command("verify")
@@ -1113,21 +1115,28 @@ def env_placement(
     spec_path: Annotated[
         Path, typer.Argument(help="Path to a deploy/env/<name>/environment.yaml.")
     ],
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: three parents up from spec)."),
+    ] = None,
 ) -> None:
-    """PROVE every learned Provider of a GPU environment really runs on the GPU (issue #198).
+    """PROVE every model-loading Provider of a GPU environment really runs on the GPU (issue #198).
 
-    Drives one real inference through each learned Provider the environment's stack declares and
+    Drives one real inference through each such Provider the environment's stack instantiates and
     reads torch's CUDA allocator around the call. A model that silently stayed on the CPU allocates
     zero CUDA bytes no matter how correct its output is — which is exactly the #191 failure this
     gate makes impossible to reintroduce. Meaningful only inside an installed GPU environment; a
     missing CUDA device is a FAILURE, never a skip.
+
+    The probe set is derived from the workspace packages the environment installs (which is why
+    ``--repo-root`` matters), unioned with its declared ``learned_providers``.
     """
     from latence_core.envspec import load_environment
     from latence_core.placement import probe_placement
 
     try:
         spec = load_environment(spec_path)
-        result = probe_placement(spec)
+        result = probe_placement(spec, repo_root=repo_root or _repo_root_for(spec_path))
     except (LatenceError, OSError, ImportError) as exc:
         typer.echo(f"env placement failed [{error_category(exc)}]: {exc}", err=True)
         raise typer.Exit(code=2) from exc

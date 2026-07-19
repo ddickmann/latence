@@ -154,11 +154,16 @@ providers:
 gpu_only_providers: []
 
 # --- The learned Providers that must PROVE GPU placement -------------------------------------
-# The probe set of `latence env placement`. Each is driven through one real inference and must
-# allocate CUDA memory doing it; zero bytes is the #191 signature (correct output, configured cuda,
-# the entire forward pass on the CPU) and fails the gate. `latence env verify` additionally
+# Part of the probe set of `latence env placement`. Each is driven through one real inference and
+# must allocate CUDA memory doing it; zero bytes is the #191 signature (correct output, configured
+# cuda, the entire forward pass on the CPU) and fails the gate. `latence env verify` additionally
 # refuses this spec if any name here is missing from `providers` or never appears in stack.yaml —
 # a learned Provider the stack never instantiates is one the gate can never speak for.
+#
+# This list can only ADD to the probe set, never shrink it: the probe also DERIVES the model-loading
+# Providers from the workspace packages' own dependencies and takes the union
+# (R5-env_reproducibility-3), so a CUDA Provider added to stack.yaml without a line here is still
+# measured. Today the two sets are identical, and a test asserts that.
 learned_providers:
   - fused_entity_relation.gliner2
   - redaction.gliner_pii

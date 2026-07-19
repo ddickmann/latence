@@ -220,8 +220,11 @@ endpoint boundary: the GLiNER/mdeberta family in-process on `transformers` 4.x, 
 served on 5.x and reached over HTTP through `parser.endpoint`. Naming an in-process OCR package in
 that environment fails **gate 1**, i.e. at dependency resolution, before anything installs.
 
-Its extra gate is `latence env placement`: every learned Provider is driven through a real
-inference and must allocate CUDA memory **above its resident footprint** doing it (a warm-up drive
+Its extra gate is `latence env placement`: every model-loading Provider the stack instantiates —
+derived from the packages the environment installs, then unioned with the declared
+`learned_providers`, so omitting that optional field cannot silence the gate — is driven through a
+real inference and must allocate CUDA memory **above its resident footprint** doing it (a warm-up
+drive
 and a baseline subtraction keep weights parked on the GPU from being counted as work — real
 `reset_peak_memory_stats()` resets the peak to the current allocation, not to zero). A forward pass
 that silently ran on the CPU allocates zero such bytes however correct its output is — the #191

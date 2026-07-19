@@ -10,8 +10,12 @@ any backend load failure **by design** — a correct-output, wrong-device run is
 graceful-degradation behaviour, which is precisely the shape #191 wore.
 
 **So the probe does not ask the model where it is. It measures whether the GPU did any work.**
-For each learned component the environment's stack declares, it drives real inferences through the
-Provider's *public* Capability method and reads torch's CUDA allocator around the call:
+Nor does it ask the spec *which* components to measure: the probe set is derived from the workspace
+packages' own dependencies and only then unioned with the optional ``learned_providers:``
+declaration (:func:`~latence_core.envspec.placement_probe_providers`), so a model-loading Provider
+cannot be dropped out of the gate by omitting a line of YAML (R5-env_reproducibility-3). For each
+such component, it drives real inferences through the Provider's *public* Capability method and
+reads torch's CUDA allocator around the call:
 
     drive once (warm-up, UNMEASURED)
     reset_peak_memory_stats()  →  baseline = memory_allocated()
@@ -59,6 +63,7 @@ from latence_core.envspec import EnvironmentReport, EnvironmentSpec, Finding, St
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
+    from pathlib import Path
 
 # The device the probe demands. A learned component pinned to anything else in a GPU environment is
 # a finding, not a preference: the environment exists to run these models on the GPU.
@@ -242,19 +247,32 @@ def _cuda_module() -> CudaAllocator:
 def probe_placement(
     spec: EnvironmentSpec,
     *,
+    repo_root: Path | None = None,
     cuda: CudaAllocator | None = None,
     registry: ProviderLoader | None = None,
 ) -> PlacementReport:
-    """Drive every learned component of ``spec``'s stack and PROVE the GPU did the work.
+    """Drive every model-loading component of ``spec``'s stack and PROVE the GPU did the work.
 
-    Only components the spec marks as GPU-bearing are probed — a stack's ``source`` /
-    ``chunk`` / ``export`` Stages own no model, so demanding CUDA allocation from them would be
-    noise. Everything that *is* probed must produce a non-zero CUDA allocation or it is a finding.
+    Only components that own a model are probed — a stack's ``source`` / ``chunk`` / ``export``
+    Stages own none, so demanding CUDA allocation from them would be noise. Everything that *is*
+    probed must produce a non-zero CUDA allocation or it is a finding.
+
+    **Which components those are is DERIVED, not asked for.** The probe set is
+    :func:`~latence_core.envspec.placement_probe_providers`: the optional, hand-written
+    ``learned_providers:`` field UNIONED with the set derived from the declaring packages' own
+    dependencies. Reading the field alone (as this did until R5-env_reproducibility-3) made the
+    #191 guard ask the spec's author whether to guard — a model-loading Provider added to a GPU
+    stack with ``device: cuda`` and not added to the field was silently skipped and emitted no
+    finding in any of the four smoke gates. ``repo_root`` is where the derivation reads the
+    workspace packages' metadata; it defaults to the same three-parents-up rule ``latence env
+    verify`` uses.
 
     Findings:
 
     * ``E-PLACEMENT-NO-CUDA`` — no CUDA device. The probe FAILS rather than skipping; a GPU smoke
       that reports success on a CPU host is the false green this ticket exists to prevent.
+    * ``E-PLACEMENT-NONE`` — the probe set is empty, so the gate would report green having measured
+      nothing. Also a failure, for the same reason.
     * ``E-PLACEMENT-DEVICE-NOT-CUDA`` — a learned component is pinned to ``cpu`` in a GPU
       environment's stack, so the run would prove nothing.
     * ``E-PLACEMENT-UNDRIVABLE`` — no driver for the component's capability. Unexercised is not
@@ -265,7 +283,11 @@ def probe_placement(
       not rescue it; only the measured forward pass's own allocations count.
     """
     from latence_core.capability import ProviderRegistry  # noqa: PLC0415 - avoids an import cycle
-    from latence_core.envspec import stack_components  # noqa: PLC0415 - avoids an import cycle
+    from latence_core.envspec import (  # noqa: PLC0415 - avoids an import cycle
+        placement_probe_providers,
+        repo_root_for,
+        stack_components,
+    )
 
     allocator = cuda if cuda is not None else _cuda_module()
     loader: ProviderLoader = registry if registry is not None else ProviderRegistry()
@@ -286,10 +308,29 @@ def probe_placement(
             (),
         )
 
+    root = repo_root if repo_root is not None else repo_root_for(spec.spec_path)
+    probe_set = placement_probe_providers(spec, root)
+    if not probe_set:
+        return PlacementReport(
+            EnvironmentReport(
+                spec.name,
+                (
+                    Finding(
+                        "E-PLACEMENT-NONE",
+                        "this environment declares no learned Provider and none of the packages it "
+                        "installs loads a model, so there is nothing for the GPU-placement gate to "
+                        "measure. Reporting success here would be a green earned by measuring "
+                        "nothing — the exact shape of #191 — so it is a failure instead.",
+                    ),
+                ),
+            ),
+            (),
+        )
+
     findings: list[Finding] = []
     placements: list[Placement] = []
     for component in stack_components(spec.stack_path):
-        if component.provider not in spec.learned_providers:
+        if component.provider not in probe_set:
             continue
         placement = _probe_one(component, allocator, loader, findings)
         if placement is not None:

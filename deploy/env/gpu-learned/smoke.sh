@@ -100,7 +100,7 @@ step "gate 3/4 — GPU PLACEMENT (every learned Provider must allocate CUDA memo
 # No LATENCE_CUDA override here, deliberately. This gate must read the REAL device situation: an
 # override that forced the seam's answer would be the environment telling itself what it wants to
 # hear, which is the whole failure mode being guarded against.
-"$VENV/bin/latence" env placement "$SPEC"
+"$VENV/bin/latence" env placement "$SPEC" --repo-root "$REPO_ROOT"
 
 # --- Gate 4: the end-to-end slice ------------------------------------------------------------
 step "gate 4/4 — tiny end-to-end slice through the installed GPU stack"

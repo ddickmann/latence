@@ -172,8 +172,9 @@ byte-compares them against the render and fails if they drift.
 
 A **GPU** environment adds a gate between 2 and 3:
 
-* **GPU placement** — `latence env placement` drives real inferences through every Provider in
-  `learned_providers` and reads torch's CUDA allocator around the call: a warm-up drive, then
+* **GPU placement** — `latence env placement` drives real inferences through every **model-loading**
+  Provider the stack instantiates and reads torch's CUDA allocator around the call: a warm-up drive,
+  then
   `reset_peak_memory_stats()` / `memory_allocated()` / drive / `max_memory_allocated()`, reporting
   the **delta above the resident baseline**. (The delta is load-bearing: real
   `reset_peak_memory_stats()` sets the peak to the *current* allocation, so a model whose weights
@@ -220,6 +221,13 @@ And, for a GPU environment, what `latence env placement` catches:
 | a learned Stage pinned to `device: cpu` in a GPU stack | `E-PLACEMENT-DEVICE-NOT-CUDA` |
 | a learned Provider with no driver — unexercised is not passed | `E-PLACEMENT-UNDRIVABLE` |
 | the Provider could not be constructed or raised while driven | `E-PLACEMENT-FAILED` |
+| the probe set is empty — a gate that measured nothing must not report green | `E-PLACEMENT-NONE` |
+
+The probe set is **derived, not declared**: it is the model-loading Providers the environment
+installs (read off the packages' own dependencies, the same derivation the compatibility matrix
+uses) **unioned** with `learned_providers`. Adding a CUDA Provider to the stack without adding it to
+that optional field — or deleting a line from it — therefore cannot drop it out of the gate
+(R5-env_reproducibility-3). `learned_providers` can only ever oblige the probe to *more*.
 
 ## Adding an environment (#198)
 

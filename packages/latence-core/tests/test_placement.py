@@ -512,3 +512,139 @@ def test_every_learned_capability_of_the_shipped_gpu_stack_has_a_driver() -> Non
     for component in stack_components(spec.stack_path):
         if component.provider in spec.learned_providers:
             assert component.capability in DRIVERS, component.provider
+
+
+# --------------------------------------------------------------------------------------------
+# R5-env_reproducibility-3 — the probe set is DERIVED, so omitting a line of YAML cannot
+# silently drop a model-loading Provider out of the #191 guard.
+# --------------------------------------------------------------------------------------------
+
+_SPARSE_STAGE = (
+    "  - name: sparse\n"
+    "    capability: sparse\n"
+    "    provider: sparse.splade\n"
+    "    config: {device: cuda}\n"
+)
+
+
+def _write_workspace(tmp_path: Path) -> Path:
+    """A minimal repo root whose `latence-splade` package declares a MODEL RUNTIME dependency.
+
+    Nothing here is a fake of the derivation: `model_loading_providers` reads exactly this
+    metadata — the package's own `dependencies` and its `latence.providers` entry points — off a
+    real `pyproject.toml`, which is what makes the probe set structural rather than declared.
+    """
+    repo_root = tmp_path / "repo"
+    pkg = repo_root / "packages" / "latence-splade"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "latence-splade"\n'
+        'dependencies = ["latence-core", "transformers>=4.44"]\n'
+        '[project.entry-points."latence.providers"]\n'
+        '"sparse.splade" = "latence_splade:Splade"\n',
+        encoding="utf-8",
+    )
+    return repo_root
+
+
+def _write_derived_env(
+    tmp_path: Path, *, learned: tuple[str, ...], stages: str = _SPARSE_STAGE
+) -> EnvironmentSpec:
+    """An environment that INSTALLS `latence-splade` and drives it, with `learned` as declared."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "stack.yaml").write_text(f"name: s\nstages:\n{stages}", encoding="utf-8")
+    (env_dir / "environment.yaml").write_text(
+        "name: probe-env\nsummary: s\npython: '>=3.11'\nplatform: linux-x86_64\n"
+        "workspace_packages: [packages/latence-splade]\n"
+        "providers:\n  - sparse.splade\n"
+        "learned_providers:\n" + "".join(f"  - {p}\n" for p in learned),
+        encoding="utf-8",
+    )
+    return load_environment(env_dir / "environment.yaml")
+
+
+def _probe_root(spec: EnvironmentSpec, repo_root: Path, cuda: FakeCuda) -> Any:
+    FakeProvider.cuda = cuda  # type: ignore[attr-defined]
+    return probe_placement(
+        spec, repo_root=repo_root, cuda=cuda, registry=FakeRegistry(FakeProvider)
+    )
+
+
+def test_a_model_loading_provider_absent_from_learned_providers_is_still_probed(
+    tmp_path: Path,
+) -> None:
+    """THE R5 regression: adding a CUDA Provider WITHOUT touching `learned_providers`.
+
+    A routine change — new package in `workspace_packages`, new name under `providers`, new stage
+    with `device: cuda` — and the one optional field left alone. Pre-fix the probe read that field
+    alone, so `sparse.splade` was never loaded, never driven, never measured, and emitted NO
+    finding: the gate that exists to make #191 unshippable reported green over an unmeasured CUDA
+    Provider. The derivation reads the package's `transformers` dependency instead, so the omission
+    can no longer buy silence.
+    """
+    repo_root = _write_workspace(tmp_path)
+    spec = _write_derived_env(tmp_path, learned=())
+    assert spec.learned_providers == frozenset()  # the silence this test exists to survive
+
+    # A forward pass that allocated nothing: the #191 shape, which must now be REPORTED.
+    result = _probe_root(spec, repo_root, FakeCuda(allocate_per_call=0))
+
+    assert [p.provider for p in result.placements] == ["sparse.splade"]
+    assert FakeProvider.driven == ["encode_sparse", "encode_sparse"]
+    assert not result.ok
+    assert [f.code for f in result.report.findings] == ["E-PLACEMENT-ON-CPU"]
+
+
+def test_deleting_a_learned_providers_entry_cannot_drop_it_from_the_probe_set(
+    tmp_path: Path,
+) -> None:
+    """Removal is the same hole as addition: the declaration may only ADD to the probe set.
+
+    Pre-fix, deleting one line from `learned_providers` silently removed that Provider from the
+    gate while `latence env verify` stayed OK — `E-LEARNED-UNKNOWN` and `E-LEARNED-UNDRIVEN` both
+    key off the very field that was emptied.
+    """
+    repo_root = _write_workspace(tmp_path)
+    declared = _write_derived_env(tmp_path, learned=("sparse.splade",))
+    undeclared = _write_derived_env(tmp_path, learned=())
+
+    with_declaration = _probe_root(declared, repo_root, FakeCuda())
+    FakeProvider.driven = []
+    without_declaration = _probe_root(undeclared, repo_root, FakeCuda())
+
+    assert [p.provider for p in with_declaration.placements] == ["sparse.splade"]
+    assert [p.provider for p in without_declaration.placements] == ["sparse.splade"]
+    assert with_declaration.ok and without_declaration.ok
+
+
+def test_an_empty_probe_set_is_a_finding_not_a_green(tmp_path: Path) -> None:
+    """A placement gate that measured nothing must never report success.
+
+    With `learned_providers: []` and no model-loading package, the probe used to return `ok=True`
+    with zero placements and zero findings — green earned by measuring nothing, which is the exact
+    shape of the bug the gate exists to catch.
+    """
+    repo_root = tmp_path / "repo"  # no packages at all: nothing loads a model here
+    spec = _write_derived_env(tmp_path, learned=())
+    result = _probe_root(spec, repo_root, FakeCuda())
+
+    assert not result.ok
+    assert [f.code for f in result.report.findings] == ["E-PLACEMENT-NONE"]
+    assert result.placements == ()
+
+
+def test_the_shipped_gpu_probe_set_is_unchanged_by_the_derivation() -> None:
+    """The committed GPU environment's derived set EQUALS its declared set — today.
+
+    The fix removes the ability to lose a Provider from the gate; it must not quietly change what
+    the shipped gate measures. If these ever diverge, `deploy/env/gpu-learned` has grown a
+    model-loading Provider its `learned_providers` never mentioned — which is precisely the case
+    this ticket makes visible rather than silent.
+    """
+    from latence_core.envspec import placement_probe_providers
+
+    repo_root = Path(__file__).resolve().parents[3]
+    spec = load_environment(repo_root / "deploy" / "env" / "gpu-learned" / "environment.yaml")
+    assert placement_probe_providers(spec, repo_root) == spec.learned_providers
