@@ -51,7 +51,7 @@ on Storage, all of it JSONL, all of it written by the local Runner under the run
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from latence_core.contracts import (
     ChunkRecord,
@@ -91,8 +91,27 @@ Carrier = GraphRecord | EntityMention | ChunkRecord | DocumentRecord
 
 #: A record a capped map holds.
 _R = TypeVar("_R")
+#: The record a *read-only* view of a capped map yields. Covariant: a reader that only ever
+#: takes records out of the map is safe to hand a map of a narrower record type.
+_R_co = TypeVar("_R_co", covariant=True)
 #: The carrier subtype :meth:`RunArtifacts._lookup` is asked for.
 _C = TypeVar("_C", bound=Carrier)
+
+
+class _KeptView(Protocol[_R_co]):
+    """The read-only face of :class:`_Kept` — exactly what :meth:`RunArtifacts._from_scan` needs.
+
+    :class:`_Kept` itself is **invariant** (it has :meth:`_Kept.put`, which consumes an ``_R``),
+    so a selector returning ``_Kept[ChunkRecord]`` cannot satisfy a parameter written in terms of
+    the optional ``ChunkRecord | None`` that ``_from_scan``'s own return type introduces. This
+    view drops ``put`` and is therefore genuinely covariant, which both type-checks and states
+    the real contract: ``_from_scan`` only ever *reads* the scan's maps and never writes one.
+    """
+
+    @property
+    def truncated(self) -> bool: ...
+
+    def get(self, key: str) -> _R_co | None: ...
 
 # Order matters only as a tie-break: ``extra="forbid"`` on every contract makes the carriers
 # mutually exclusive, so at most one of them accepts a given line. A line no carrier accepts
@@ -242,7 +261,7 @@ class RunArtifacts:
         return self._lookup_node(node_id)
 
     def _from_scan(
-        self, select: Callable[[_Scan], _Kept[_R]], key: str
+        self, select: Callable[[_Scan], _KeptView[_R]], key: str
     ) -> tuple[bool, _R | None]:
         """``(answered, record)`` — the scan replies only where it is *authoritative*.
 

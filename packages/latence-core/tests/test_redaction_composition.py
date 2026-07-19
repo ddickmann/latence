@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -182,12 +183,12 @@ stages:
     assert {sp.pii_type for sp in memo.pii_spans} == {"email", "iban"}
 
 
-def _stage_map(stack_path: Path) -> dict[str, dict]:
+def _stage_map(stack_path: Path) -> dict[str, dict[str, Any]]:
     doc = yaml.safe_load(stack_path.read_text(encoding="utf-8"))
     return {s["name"]: s for s in doc.get("stages", [])}
 
 
-def _ancestors(stages: dict[str, dict], start: str) -> set[str]:
+def _ancestors(stages: dict[str, dict[str, Any]], start: str) -> set[str]:
     seen: set[str] = set()
     frontier = list(stages[start].get("depends_on") or [])
     while frontier:
