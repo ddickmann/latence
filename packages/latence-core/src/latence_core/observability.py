@@ -45,6 +45,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -697,6 +698,32 @@ class CollectingLineageTransport:
         self.events.append(dict(event))
 
 
+_LINEAGE_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+class _NoRedirectLineageHandler(urllib.request.HTTPRedirectHandler):
+    """Turn every redirect into an ``HTTPError`` instead of a followed request.
+
+    Returning ``None`` from ``redirect_request`` makes ``urllib`` raise for the ``3xx`` rather
+    than re-issuing the request against the ``Location`` host. That matters because urllib's
+    *default* opener replays the original headers — including ``Authorization: Bearer <api key>``
+    — to whatever host the redirect names, so a compromised, misconfigured or MITM'd collector
+    could harvest the hosted-catalog credential. Same defence, same reason as the SharePoint
+    connector's ``_NoRedirectHandler``.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        return None
+
+
 class HttpLineageTransport:
     """POSTs events to an OpenLineage HTTP endpoint (Marquez, Atlan, Collibra, Dataplex, …).
 
@@ -705,6 +732,13 @@ class HttpLineageTransport:
     ``/api/v1/lineage`` path is appended unless the URL already names a path. An optional
     ``api_key`` rides as a ``Bearer`` header. A non-2xx response or a transport error raises — the
     *emitter* is what swallows it, so this class stays honest about failure and remains reusable.
+
+    **The API key never leaves the configured collector.** Redirects are refused rather than
+    followed (urllib's default opener would replay the ``Authorization`` header to the redirect
+    target, including a different host), and a key may only travel over ``https`` — plain ``http``
+    stays available for a keyless local Marquez and for a loopback emulator. Because the emitter
+    swallows every transport exception, a leak here would be silent, so it is prevented rather
+    than reported.
     """
 
     def __init__(self, url: str, *, api_key: str | None = None, timeout: float = 5.0) -> None:
@@ -713,10 +747,21 @@ class HttpLineageTransport:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https"):
             raise ConfigError(f"OpenLineage endpoint must be http(s), got {url!r}")
+        if (
+            api_key
+            and parsed.scheme == "http"
+            and (parsed.hostname or "") not in _LINEAGE_LOOPBACK_HOSTS
+        ):
+            raise ConfigError(
+                "Refusing to send the OpenLineage API key over plaintext http to "
+                f"{parsed.hostname!r}: a bearer token may only travel over https (loopback http "
+                "is allowed for a local collector). Use an https LATENCE_OPENLINEAGE_URL."
+            )
         path = parsed.path.rstrip("/")
         self.url = url.rstrip("/") + ("" if path else "/api/v1/lineage")
         self._api_key = api_key
         self._timeout = timeout
+        self._opener = urllib.request.build_opener(_NoRedirectLineageHandler)
 
     def send(self, event: Mapping[str, Any]) -> None:
         body = json.dumps(event, sort_keys=True).encode("utf-8")
@@ -726,8 +771,13 @@ class HttpLineageTransport:
         request = urllib.request.Request(  # noqa: S310 - scheme is validated to http(s) above
             self.url, data=body, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
-            status = int(getattr(response, "status", 200))
+        try:
+            with self._opener.open(request, timeout=self._timeout) as response:
+                status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as exc:
+            # Includes the 3xx the no-redirect handler surfaces: a status the collector really
+            # returned, reported as a typed error rather than a raw urllib traceback (ADR-0034).
+            raise ProviderLineageError(f"lineage endpoint returned HTTP {exc.code}") from None
         if status >= 300:
             raise ProviderLineageError(f"lineage endpoint returned HTTP {status}")
 

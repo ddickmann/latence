@@ -267,7 +267,9 @@ def _lineage_emitter_from_env() -> OpenLineageEmitter | None:
     opens no socket, and behaves exactly as before. Set it to an OpenLineage endpoint
     (``http://localhost:5000`` for a local Marquez) to have each Stage show up in the catalog;
     ``LATENCE_OPENLINEAGE_NAMESPACE`` names the catalog namespace and
-    ``LATENCE_OPENLINEAGE_API_KEY`` supplies a bearer token for a hosted collector. A misconfigured
+    ``LATENCE_OPENLINEAGE_API_KEY`` supplies a bearer token for a hosted collector — that token
+    may only travel over ``https`` (or to loopback), and is never replayed to a redirect target. A
+    misconfigured
     endpoint never breaks a run: the ConfigError is logged and lineage stays off.
     """
     url = os.environ.get("LATENCE_OPENLINEAGE_URL", "")

@@ -333,7 +333,7 @@ class _ExplodingOpener:
 def test_a_transport_failure_never_echoes_the_preauthenticated_download_token() -> None:
     url = f"https://contoso.sharepoint.com{_PREAUTH_PATH}?{_PREAUTH_QUERY}"
     transport = UrllibTransport()
-    transport._opener = _ExplodingOpener()  # noqa: SLF001 - the socket is the thing being faked
+    transport._opener = _ExplodingOpener()  # type: ignore[assignment]  # noqa: SLF001 - the socket is the thing being faked
 
     with pytest.raises(ProviderError) as raised:
         transport.request("GET", url, headers={})
@@ -366,7 +366,7 @@ def test_a_non_tls_download_redirect_never_echoes_its_token() -> None:
     [
         ("https://host/path?a=b", "https://host/path?<redacted>"),
         ("https://host/path", "https://host/path"),
-        ("https://user:pw@host/path", "https://host/path"),
+        ("https://user:pw@host/path", "https://host/path"),  # pragma: allowlist secret
         ("https://host:8443/p#frag", "https://host:8443/p#<redacted>"),
         ("http://[::1]:8080/p?t=1", "http://[::1]:8080/p?<redacted>"),
         ("graph/v1.0", "graph/v1.0"),

@@ -21,7 +21,9 @@ What a revert of the #185 wiring must break, in the order the acceptance criteri
 
 from __future__ import annotations
 
+import http.server
 import json
+import threading
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,7 @@ from latence_core.observability import (
     HttpLineageTransport,
     LineageDataset,
     OpenLineageEmitter,
+    ProviderLineageError,
     build_lineage_emitter,
     dataset_for_uri,
     lineage_run_uuid,
@@ -375,3 +378,76 @@ def test_dataset_equality_is_by_value() -> None:
     a = LineageDataset(namespace="file", name="/x", fields=(("id", "string"),))
     b = LineageDataset(namespace="file", name="/x", fields=(("id", "string"),))
     assert a == b and a.to_json() == b.to_json()
+
+
+def _serve_once(handler_factory: Any) -> Any:
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_factory)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_http_transport_never_replays_the_api_key_to_a_redirect_target() -> None:
+    """A 3xx from the collector must NOT leak the bearer token to the redirect host (audit R2).
+
+    ``urllib``'s default opener follows a redirect and re-sends the original ``Authorization``
+    header to whatever host the ``Location`` names — a compromised, misconfigured or MITM'd
+    collector would harvest the hosted-catalog credential, and the emitter's blanket
+    ``except Exception`` would make the exfiltration silent. The transport therefore refuses to
+    follow redirects at all; the 3xx surfaces as a typed :class:`ProviderLineageError`.
+    """
+    stolen: list[str | None] = []
+
+    class _Attacker(http.server.BaseHTTPRequestHandler):
+        # Both verbs: urllib rewrites a 302'd POST into a GET, and the leak is the header, not
+        # the method — recording only POST would hide the exfiltration behind a 501.
+        def _record(self) -> None:
+            stolen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        do_POST = _record  # noqa: N815 - BaseHTTPRequestHandler API
+        do_GET = _record  # noqa: N815 - BaseHTTPRequestHandler API
+
+        def log_message(self, *args: Any) -> None:  # noqa: D102
+            pass
+
+    attacker = _serve_once(_Attacker)
+    attacker_url = f"http://127.0.0.1:{attacker.server_address[1]}/steal"
+
+    class _Collector(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self.send_response(302)
+            self.send_header("Location", attacker_url)
+            self.end_headers()
+
+        def log_message(self, *args: Any) -> None:  # noqa: D102
+            pass
+
+    collector = _serve_once(_Collector)
+    try:
+        transport = HttpLineageTransport(
+            f"http://127.0.0.1:{collector.server_address[1]}",
+            api_key="SUPER-SECRET-LINEAGE-KEY",  # pragma: allowlist secret (synthetic fixture)
+        )
+        raised: BaseException | None = None
+        try:
+            transport.send({"eventType": "START"})
+        except BaseException as exc:  # noqa: BLE001 - the assertion below types it
+            raised = exc
+    finally:
+        collector.shutdown()
+        attacker.shutdown()
+
+    assert stolen == [], f"bearer token replayed to the redirect host: {stolen!r}"
+    assert isinstance(raised, ProviderLineageError), f"3xx must surface typed, got {raised!r}"
+
+
+def test_http_transport_refuses_an_api_key_over_plaintext_to_a_remote_host() -> None:
+    """A bearer token may only travel over https (loopback http stays usable for a local Marquez)."""
+    with pytest.raises(ConfigError):
+        HttpLineageTransport("http://collector.example", api_key="SUPER-SECRET-LINEAGE-KEY")  # pragma: allowlist secret
+    # No key: plain http to any host is still fine, and https + key is fine.
+    assert HttpLineageTransport("http://collector.example").url.endswith("/api/v1/lineage")
+    assert HttpLineageTransport("http://localhost:5000", api_key="k").url.startswith("http://")  # pragma: allowlist secret
+    assert HttpLineageTransport("https://collector.example", api_key="k").url.startswith("https://")  # pragma: allowlist secret
