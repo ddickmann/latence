@@ -269,8 +269,27 @@ def _run_head(run_id: str, title: str, blurb: str, active: str) -> str:
     )
 
 
-def _empty(message: str) -> str:
-    return f'<div class="card"><p>{escape(message)}</p></div>'
+def _empty(message: str, *, partial: str | None = None, truncated: bool = False) -> str:
+    """The "nothing here" card.
+
+    ``message`` asserts something about the WHOLE run ("no relation touches this entity"), and
+    that claim is only true when the reader actually read the whole run. The list views' scan is
+    capped (:data:`~latence_console.artifacts.MAX_SCAN_RECORDS`), so on a capped read an empty
+    list means "none in the prefix the reader kept" — a different, much weaker statement. Where a
+    call site supplies ``partial``, a capped read shows that instead: the same emptiness, without
+    the affirmative claim the files on Storage may contradict (audit R5, ADR-0021/0031).
+    """
+    text = partial if truncated and partial is not None else message
+    return f'<div class="card"><p>{escape(text)}</p></div>'
+
+
+def _count(total: int, truncated: bool) -> str:
+    """A heading's count, marked as a partial tally when the scan stopped short (audit R5).
+
+    ``(0)`` reads as "there are none"; on a capped read the honest reading is "none among the
+    records this view read", so the number is never left standing bare.
+    """
+    return f"{total} read so far" if truncated else str(total)
 
 
 # -- pagination (audit R4) ---------------------------------------------------
@@ -468,7 +487,17 @@ def render_chunks(
         _truncation_notice(truncated),
     ]
     if not rows:
-        parts.append(_empty("This run checkpointed no chunks."))
+        parts.append(
+            _empty(
+                "This run checkpointed no chunks.",
+                partial=(
+                    "No chunk was among the records this view read — the run holds more than "
+                    "the console reads into one view, so this is not a statement that the run "
+                    "checkpointed none."
+                ),
+                truncated=truncated,
+            )
+        )
         return _page(f"Chunks — {run_id}", "".join(parts))
     shown, page, total_pages = _paginate(rows, page)
     body = []
@@ -687,7 +716,7 @@ def render_graph(
             "graph",
         ),
         _truncation_notice(truncated),
-        f"<h2>Entities ({len(entities)})</h2>",
+        f"<h2>Entities ({_count(len(entities), truncated)})</h2>",
         _pager(
             run_id,
             "/graph",
@@ -721,9 +750,19 @@ def render_graph(
             f"<tbody>{rows}</tbody></table></div>"
         )
     else:
-        parts.append(_empty("This run assembled no graph nodes."))
+        parts.append(
+            _empty(
+                "This run assembled no graph nodes.",
+                partial=(
+                    "No graph node was among the records this view read — the run holds more "
+                    "than the console reads into one view, so this is not a statement that the "
+                    "run assembled none."
+                ),
+                truncated=truncated,
+            )
+        )
 
-    parts.append(f"<h2>Relations ({len(edges)})</h2>")
+    parts.append(f"<h2>Relations ({_count(len(edges), truncated)})</h2>")
     if edges:
         edge_pager = _pager(
             run_id,
@@ -739,7 +778,17 @@ def render_graph(
         parts.extend(_edge_card(run_id, edge) for edge in shown_edges)
         parts.append(edge_pager)
     else:
-        parts.append(_empty("This run assembled no graph edges."))
+        parts.append(
+            _empty(
+                "This run assembled no graph edges.",
+                partial=(
+                    "No graph edge was among the records this view read — the run holds more "
+                    "than the console reads into one view, so this is not a statement that the "
+                    "run assembled none."
+                ),
+                truncated=truncated,
+            )
+        )
     return _page(f"Knowledge graph — {run_id}", "".join(parts))
 
 
@@ -755,6 +804,11 @@ def render_entity(
 
     Carries the same ``Partial view`` notice as the graph list (audit R5): this page's relations
     come from the same capped scan, so a truncated run must not be shown here as a whole one.
+
+    The notice alone was not enough. Under a capped scan an entity whose every edge sits beyond
+    the cap still rendered ``Relations (0)`` over the flat sentence "No relation in this graph
+    touches this entity" — an affirmative claim of isolation that the graph checkpoints
+    contradict. Both the tally and the empty state are now qualified when ``truncated``.
     """
     shown_edges, page, edge_pages = _paginate(edges, page)
     parts = [
@@ -778,7 +832,7 @@ def render_entity(
             ],
         )
         + "</div>",
-        f"<h2>Relations ({len(edges)})</h2>",
+        f"<h2>Relations ({_count(len(edges), truncated)})</h2>",
     ]
     if edges:
         pager = _pager(
@@ -795,7 +849,19 @@ def render_entity(
         parts.extend(_edge_card(run_id, edge) for edge in shown_edges)
         parts.append(pager)
     else:
-        parts.append(_empty("No relation in this graph touches this entity."))
+        parts.append(
+            _empty(
+                "No relation in this graph touches this entity.",
+                partial=(
+                    "No relation touching this entity was among the relations this view read. "
+                    "The run holds more graph records than the console reads into one view, so "
+                    "this is NOT a statement that the entity is isolated — relations beyond the "
+                    "reader's limit are not listed. Query the graph checkpoints directly to "
+                    "settle it."
+                ),
+                truncated=truncated,
+            )
+        )
     return _page(f"{entity.canonical_name} — {run_id}", "".join(parts))
 
 

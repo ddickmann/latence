@@ -417,3 +417,244 @@ def test_entity_page_states_a_partial_view(kg_app: ConsoleApp) -> None:
 
     assert response.status == 200
     assert b"Partial view" in response.body
+
+
+# -- an empty list must not assert emptiness of the run (audit R5) ------------
+#
+# The scan keeps at most MAX_SCAN_RECORDS graph records. A run whose graph is bigger than that
+# has entities whose every edge sits beyond the cap — and the entity page rendered
+# "Relations (0)" over the flat sentence "No relation in this graph touches this entity" for
+# exactly those. That is an affirmative claim of isolation the graph checkpoints contradict:
+# the operator auditing why the KG connected two entities is told the entity is isolated.
+
+BIG_GRAPH_RUN_ID = "kghuge"
+BIG_GRAPH_NODES = MAX_SCAN_RECORDS + 501
+BIG_GRAPH_EDGES = MAX_SCAN_RECORDS + 500
+
+
+def _plain_evidence() -> Evidence:
+    return Evidence(
+        mention_ids=[], document_ids=[DOC_ID], snippet="a relation past the cap", confidence=0.8
+    )
+
+
+def _big_graph_records() -> list[GraphRecord]:
+    provenance = _provenance(0)
+    evidence = _plain_evidence()
+    records: list[GraphRecord] = []
+    for i in range(BIG_GRAPH_NODES):
+        node = GraphNode(
+            record_id=f"n{i}",
+            provenance=provenance,
+            classification=_classification(),
+            node_id=f"n{i}",
+            entity_id=f"entity-{i}",
+            label="ORG",
+            canonical_name=f"Node {i:05d}",
+            member_mention_ids=[],
+            source_document_ids=[DOC_ID],
+            confidence=0.9,
+            evidence=evidence,
+        )
+        records.append(
+            GraphRecord(
+                record_id=f"n{i}#record",
+                provenance=provenance,
+                classification=_classification(),
+                scope=GraphScope.NODE,
+                node=node,
+            )
+        )
+    for i in range(BIG_GRAPH_EDGES):
+        edge = GraphEdge(
+            record_id=f"e{i}",
+            provenance=provenance,
+            classification=_classification(),
+            edge_id=f"e{i}",
+            relation_id=f"relation-{i}",
+            source_node_id=f"n{i}",
+            target_node_id=f"n{i + 1}",
+            label=f"rel_{i:05d}",
+            confidence=0.8,
+            properties={},
+            evidence=evidence,
+        )
+        records.append(
+            GraphRecord(
+                record_id=f"e{i}#record",
+                provenance=provenance,
+                classification=_classification(),
+                scope=GraphScope.EDGE,
+                edge=edge,
+            )
+        )
+    return records
+
+
+@pytest.fixture(scope="module")
+def big_graph_storage(tmp_path_factory: pytest.TempPathFactory) -> tuple[Storage, str]:
+    """A run whose graph checkpoint holds more nodes AND edges than the scan cap can keep."""
+    root: Path = tmp_path_factory.mktemp("kghugecorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/{BIG_GRAPH_RUN_ID}"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "kghuge", "stages": [{"name": "graph", "depends_on": []}]},
+                "run_id": BIG_GRAPH_RUN_ID,
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/graph.jsonl",
+        "".join(r.model_dump_json() + "\n" for r in _big_graph_records()).encode("utf-8"),
+    )
+    return storage, storage_uri
+
+
+@pytest.fixture(scope="module")
+def big_graph_app(big_graph_storage: tuple[Storage, str]) -> ConsoleApp:
+    storage, storage_uri = big_graph_storage
+    return ConsoleApp.over_storage(storage, storage_uri)
+
+
+def _edges_on_disk_touching(storage: Storage, run_dir: str, node_id: str) -> list[str]:
+    """Every edge id in the run's graph checkpoint with ``node_id`` as an endpoint.
+
+    Read straight off Storage, bypassing the console entirely: ADR-0017 makes the files the
+    source of truth, so the ground the page is judged against must come from the files, never
+    from the reader under test.
+    """
+    found = []
+    with storage.open(f"{run_dir}/checkpoints/graph.jsonl") as handle:
+        for line in handle:
+            record = json.loads(line)
+            edge = record.get("edge")
+            if edge and node_id in (edge["source_node_id"], edge["target_node_id"]):
+                found.append(edge["edge_id"])
+    return found
+
+
+def test_entity_page_never_claims_isolation_on_a_capped_read(
+    big_graph_app: ConsoleApp,
+    big_graph_storage: tuple[Storage, str],
+) -> None:
+    """An entity whose edges the cap dropped must not be reported as touched by no relation.
+
+    ``e{i}`` connects ``n{i}`` to ``n{i+1}``, so every node here is an endpoint of at least one
+    edge on Storage — asserted against the checkpoint file itself, not assumed. Rendering the
+    flat sentence "No relation in this graph touches this entity" for such a node states as
+    fact the opposite of what the files say (ADR-0017: the files are the source of truth;
+    ADR-0021/0031: provenance is true).
+    """
+    storage, storage_uri = big_graph_storage
+    run_dir = f"{storage_uri}/_latence/runs/{BIG_GRAPH_RUN_ID}"
+    # A node deep enough that both its edges sit past the cap the scan stops at.
+    node_id = f"n{BIG_GRAPH_EDGES - 1}"
+    on_disk = _edges_on_disk_touching(storage, run_dir, node_id)
+    assert on_disk, f"fixture is wrong: {node_id} has no edge on Storage to be lied about"
+
+    body = big_graph_app.respond(
+        "GET", f"/run/{BIG_GRAPH_RUN_ID}/entity?id={node_id}"
+    ).body.decode("utf-8")
+
+    assert "Relations (0" in body, (
+        f"the cap no longer drops {node_id}'s edges ({on_disk}) — the fixture must outgrow "
+        "MAX_SCAN_RECORDS for this regression to mean anything"
+    )
+    assert "Partial view" in body, f"{node_id} lost its edges to the cap without saying so"
+    assert "No relation in this graph touches this entity." not in body, (
+        f"the entity page told the reader {node_id} is isolated, but the run's graph "
+        f"checkpoint holds an edge with {node_id} as an endpoint"
+    )
+    # The weaker, true statement is made in its place — the page still says it found nothing.
+    assert "was among the relations this view read" in body
+    # And the tally is not left standing as a bare count of the whole run.
+    assert "Relations (0)" not in body
+    assert "Relations (0 read so far)" in body
+
+
+SMALL_RUN_ID = "kgsmall"
+
+
+@pytest.fixture(scope="module")
+def small_kg_app(tmp_path_factory: pytest.TempPathFactory) -> ConsoleApp:
+    """The same two-node, one-edge graph, on a run that fits entirely under the cap."""
+    root: Path = tmp_path_factory.mktemp("kgsmallcorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/{SMALL_RUN_ID}"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {
+                    "name": "kgsmall",
+                    "stages": [
+                        {"name": "entities", "depends_on": []},
+                        {"name": "graph", "depends_on": ["entities"]},
+                    ],
+                },
+                "run_id": SMALL_RUN_ID,
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/entities.jsonl",
+        (_mention_record(BEYOND_CAP).model_dump_json() + "\n").encode("utf-8"),
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/graph.jsonl",
+        "".join(r.model_dump_json() + "\n" for r in _kg_records()).encode("utf-8"),
+    )
+    return ConsoleApp.over_storage(storage, storage_uri)
+
+
+def test_entity_page_speaks_plainly_when_the_read_was_complete(
+    small_kg_app: ConsoleApp,
+) -> None:
+    """The qualification is scoped to a capped read; a whole read still speaks plainly.
+
+    Guards against "fixing" the false claim by hedging everywhere — a page that hedges even when
+    it read the whole run teaches the reader to ignore the hedge, which costs the fix its value.
+    ``node-b`` is the target of ``edge-a-b`` and this run holds four records in total.
+    """
+    response = small_kg_app.respond("GET", f"/run/{SMALL_RUN_ID}/entity?id={KG_NODE_B}")
+    body = response.body.decode("utf-8")
+
+    assert response.status == 200
+    assert "Partial view" not in body
+    assert "Relations (1)" in body
+    assert "read so far" not in body
+
+
+def test_complete_graph_with_no_edges_still_states_it_plainly(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A run that really assembled nothing must keep saying so — the true claim survives."""
+    root: Path = tmp_path_factory.mktemp("kgemptycorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/empty"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "empty", "stages": [{"name": "graph", "depends_on": []}]},
+                "run_id": "empty",
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    storage.write_atomic(f"{run_dir}/checkpoints/graph.jsonl", b"")
+    app = ConsoleApp.over_storage(storage, storage_uri)
+
+    body = app.respond("GET", "/run/empty/graph").body.decode("utf-8")
+
+    assert "This run assembled no graph nodes." in body
+    assert "This run assembled no graph edges." in body
+    assert "Partial view" not in body
