@@ -67,13 +67,23 @@ a single record — so a typo in the catalog URL never surfaces after a long run
   `latence.record.schema_versions` (what the rows of *this run* actually carried, so the table
   never claims a version its own rows do not have), plus `latence.export.source` and
   `latence.export.mode`.
-* **The data file is an immutable copy, not `records.parquet` itself.** Each run publishes
-  `<out_dir>/iceberg-data/<basename>-<token>.parquet` — a streamed byte copy of the
-  deliverable — and registers *that* with Iceberg's `add_files`. This is deliberate:
-  `records.parquet` is rewritten by every run, and an Iceberg data file must never change
-  under a snapshot that references it. The copy is streamed, so the Export's memory stays
-  O(batch) (ADR-0033), and it is published temp-then-rename like every other artifact
-  (ADR-0010). Its URI is returned in the Export's output URI list.
+* **The data file is an immutable, content-addressed copy, not `records.parquet` itself.** Each
+  run publishes `<out_dir>/iceberg-data/<basename>-<sha256>.parquet` — a streamed byte copy of
+  the deliverable, named after the digest of its own bytes — and registers *that* with Iceberg's
+  `add_files`. This is deliberate: `records.parquet` is rewritten by every run, and an Iceberg
+  data file must never change under a snapshot that references it. A content-addressed path
+  *cannot*, by construction, ever hold different bytes.
+
+  Naming it by content rather than by a random per-run token also keeps the export deliverable
+  **reproducible**: `latence stack validate`'s determinism check walks `export/` recursively and
+  compares two fresh runs key-for-key, so a random filename would report `export diverged` on a
+  perfectly deterministic pipeline. A consequence worth knowing: re-running an identical export
+  into the same `out_dir` reuses the one existing data file instead of accumulating a full-corpus
+  copy per run (the delta semantics below are unchanged — `append` still adds a snapshot).
+
+  The copy is streamed, so the Export's memory stays O(batch) (ADR-0033), and it is published
+  temp-then-rename like every other artifact (ADR-0010). Its URI is returned in the Export's
+  output URI list.
 * **Nothing is re-serialised.** Iceberg reads the very bytes the Parquet writer produced.
 
 ## Delta runs — the honest semantics
@@ -128,7 +138,7 @@ with `iceberg.uri: http://localhost:8181`. Observed:
 export outputs:
    /private/tmp/iceberg-wh/export/records.jsonl
    /private/tmp/iceberg-wh/export/records.parquet
-   /private/tmp/iceberg-wh/export/iceberg-data/records-1026d87e84fd4315917cbcf80b65fcf8.parquet
+   /private/tmp/iceberg-wh/export/iceberg-data/records-<sha256>.parquet
 metadata_location: file:/tmp/iceberg-wh/lake/corpus/metadata/00001-....metadata.json
 schema: ['record_id', 'schema_version', 'provenance', 'classification', 'content', 'media_type']
 properties: {'latence.contract.schema_version': '16', 'latence.record.schema_versions': '16',

@@ -211,6 +211,66 @@ def test_overwrite_mode_replaces_the_table_contents(tmp_path: Path) -> None:
         assert len(_load_table(uri).history()) >= 2
 
 
+def test_the_export_tree_is_byte_identical_across_two_fresh_runs(tmp_path: Path) -> None:
+    """DETERMINISM: enabling Iceberg must not make the export deliverable non-reproducible.
+
+    The exact scenario ``latence stack validate`` runs: two fresh runs over identical records into
+    two independent run roots, compared with the REAL harness comparator
+    (``stacks.validate._export_artifacts``, which walks ``export/`` RECURSIVELY and keys by the
+    run-relative path) under the REAL check (``_check_determinism`` is a plain ``==``).
+
+    Pre-fix the data file was named ``records-<uuid4>.parquet``, so the two runs produced
+    disjoint keys and the harness reported ``export diverged`` on a perfectly deterministic
+    pipeline. The name is content-addressed now, so identical corpus bytes ⇒ identical key.
+    """
+    from latence_core.stacks.validate import _export_artifacts
+
+    records = [_chunk("alpha text", "c1"), _chunk("beta text", "c2")]
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        config = _iceberg_config(uri)
+        for run in ("run-1", "run-2"):
+            JsonlParquetExport(config).export(
+                records, Storage(), str(tmp_path / run / "export")
+            )
+        # ``append`` still accumulated a snapshot per run (the documented delta disposition is
+        # untouched by content addressing), and both runs' rows scan back.
+        assert len(_load_table(uri).history()) == 2
+
+    primary = _export_artifacts(Storage(), str(tmp_path / "run-1"))
+    second = _export_artifacts(Storage(), str(tmp_path / "run-2"))
+    # The Iceberg data file is genuinely part of what is compared — not an empty-vs-empty pass.
+    iceberg_keys = [key for key in primary if key.startswith("iceberg-data/")]
+    assert len(iceberg_keys) == 1, sorted(primary)
+    assert primary == second, (
+        f"export diverged — primary_only={sorted(set(primary) - set(second))}, "
+        f"second_only={sorted(set(second) - set(primary))}"
+    )
+
+
+def test_the_data_file_name_is_content_addressed(tmp_path: Path) -> None:
+    """The name IS the sha256 of the published bytes: stable for equal content, distinct else."""
+    import hashlib
+
+    def publish(run: str, text: str) -> str:
+        with local_rest_catalog(tmp_path / f"catalog-{run}") as uri:
+            out = tmp_path / run / "export"
+            uris = JsonlParquetExport(_iceberg_config(uri)).export(
+                [_chunk(text, "c1")], Storage(), str(out)
+            )
+        return next(u for u in uris if "/iceberg-data/" in u)
+
+    same_a = publish("a", "alpha text")
+    same_b = publish("b", "alpha text")
+    other = publish("c", "a completely different body of text")
+
+    assert same_a.rsplit("/", 1)[-1] == same_b.rsplit("/", 1)[-1]
+    assert other.rsplit("/", 1)[-1] != same_a.rsplit("/", 1)[-1]
+    # And the token really is the digest of the file the catalog points at.
+    published = (tmp_path / "a" / "export" / "iceberg-data" / same_a.rsplit("/", 1)[-1]).read_bytes()
+    digest = hashlib.sha256(published).hexdigest()
+    assert same_a.rsplit("/", 1)[-1] == f"records-{digest}.parquet"
+
+
 def test_the_jsonl_deliverable_matches_the_registered_table(tmp_path: Path) -> None:
     """Same data, two faces: every JSONL record_id is in the table and vice versa."""
     with local_rest_catalog(tmp_path / "catalog") as uri:

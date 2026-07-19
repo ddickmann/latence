@@ -125,8 +125,9 @@ workspace are versioned and released together under one version number.
   `export.jsonl_parquet`; **off by default**, and with it off `pyiceberg` is never imported and
   `records.jsonl` / `records.parquet` are byte-identical. The Iceberg schema *is* the Parquet
   schema (including opt-in signal columns) and carries the same contract version stamp; the
-  registered data file is an immutable per-run copy under `<out_dir>/iceberg-data/`, so a
-  snapshot never points at a path a later run rewrites. Delta runs pick `mode: append` (a delta
+  registered data file is an immutable, content-addressed copy under `<out_dir>/iceberg-data/`
+  (`records-<sha256>.parquet`), so a snapshot never points at a path a later run rewrites and the
+  export tree stays byte-reproducible. Delta runs pick `mode: append` (a delta
   run's records, added as a snapshot) or `mode: overwrite` (a full re-export, replacing the
   contents in one atomic commit) — semantics documented in `docs/iceberg-export.md`. The client
   ships as the `latence-core[iceberg]` extra (pyiceberg, Apache-2.0), never as a core dependency.

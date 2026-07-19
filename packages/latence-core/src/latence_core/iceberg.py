@@ -11,14 +11,23 @@ Why registration and not a second materialisation
 ADR-0017 says the AI-ready deliverable is *files*, never a database. Iceberg is still files plus
 table metadata, so the only new thing is the catalog pointer. Accordingly this module NEVER
 re-serialises the corpus through a different writer: it takes the Parquet the Export produced,
-publishes an **immutable, run-stamped copy** of it next to the deliverable
-(``<out_dir>/iceberg-data/<basename>-<token>.parquet``) and hands that path to Iceberg's
+publishes an **immutable, content-addressed copy** of it next to the deliverable
+(``<out_dir>/iceberg-data/<basename>-<sha256>.parquet``) and hands that path to Iceberg's
 ``add_files``. The copy is a streamed byte copy through the :class:`~latence_core.storage.Storage`
 seam (O(chunk) memory, never O(corpus)), and it exists for one reason: an Iceberg data file must be
 **immutable**, while ``records.parquet`` is deliberately rewritten by every run. Pointing the
 catalog at ``records.parquet`` itself would leave every previous snapshot dangling at a path whose
 bytes have since changed — a silently-corrupt table. So the deliverable keeps its stable name and
 the catalog gets content that can never move under it.
+
+The copy is named after the **sha256 of its own bytes**, not a random per-run token, because this
+path is part of an export deliverable and the framework promises exports are reproducible: a random
+name would put a hidden ``uuid4`` on the export path and make ``latence stack validate``'s
+determinism check (which walks ``export/`` recursively and compares two fresh runs key-for-key)
+report ``export diverged`` on a perfectly deterministic pipeline. Content addressing also *is* the
+immutability guarantee rather than merely approximating it — a path named after its own digest can
+only ever hold one byte sequence — and it stops repeated runs into a stable ``out_dir`` from
+accumulating a full-corpus copy each.
 
 Delta semantics (honest)
 ------------------------
@@ -44,9 +53,8 @@ nothing; configured-but-absent fails loudly at wiring time with the install line
 
 from __future__ import annotations
 
-import shutil
-import uuid
 from dataclasses import dataclass
+from hashlib import sha256
 from os.path import abspath
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +71,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _APPEND = "append"
 _OVERWRITE = "overwrite"
 _MODES = (_APPEND, _OVERWRITE)
+
+# The streaming copy/hash unit for the published data file. Fixed and modest so the optional
+# output inherits the Export's O(batch) memory bound (ADR-0033) regardless of corpus size.
+_COPY_CHUNK_BYTES = 1 << 20
 
 # Table/snapshot property keys. Namespaced so they never collide with the catalog's own or with
 # Iceberg's reserved ``write.*`` / ``schema.*`` keys, and identical on the table and on every
@@ -238,7 +250,19 @@ class IcebergCorpusTable:
 
                     tx.delete(AlwaysTrue(), snapshot_properties=stamps)
                 tx.set_properties(**stamps)
-                tx.add_files([_absolute_uri(data_uri)], snapshot_properties=stamps)
+                # ``check_duplicate_files=False``: the data file is content-addressed, so a run
+                # that re-exports IDENTICAL bytes into the SAME out_dir now maps onto the one
+                # existing path instead of a fresh random copy of the same bytes. Iceberg's
+                # duplicate guard would turn that into a hard failure and silently change the
+                # documented delta semantics — ``append`` says a repeated FULL export duplicates
+                # every row (see the module docstring), and it must keep saying that. Referencing
+                # one immutable file from two snapshots is exactly the old behaviour minus the
+                # redundant second copy on disk.
+                tx.add_files(
+                    [_absolute_uri(data_uri)],
+                    snapshot_properties=stamps,
+                    check_duplicate_files=False,
+                )
         except (ConfigError, ProviderError):
             # Already typed and already specific (the install hint, the unreachable catalog, the
             # namespace/table failures below). Re-wrapping would only bury the precise message.
@@ -400,20 +424,48 @@ class IcebergCorpusTable:
     def _publish_data_file(
         storage: Storage, parquet_uri: str, out_dir: str, basename: str
     ) -> str:
-        """Stream-copy the deliverable to an immutable, run-stamped Iceberg data file.
+        """Stream-copy the deliverable to an immutable, CONTENT-ADDRESSED Iceberg data file.
 
-        Streamed through the Storage seam in fixed-size chunks (``shutil.copyfileobj``), so the
-        Export's O(batch) memory bound (ADR-0033) survives the optional output, and published with
-        the same temp-then-rename discipline as every other artifact (ADR-0010), so a crash mid-copy
-        never leaves a half-written file for the catalog to point at.
+        Streamed through the Storage seam in fixed-size chunks, so the Export's O(batch) memory
+        bound (ADR-0033) survives the optional output, and published with the same
+        temp-then-rename discipline as every other artifact (ADR-0010), so a crash mid-copy never
+        leaves a half-written file for the catalog to point at.
+
+        The published name is ``<basename>-<sha256 of the bytes>.parquet``, and the digest is
+        folded into the streaming copy — one pass, never a whole-corpus buffer. Content addressing
+        (rather than a random per-run token) is what makes this path satisfy BOTH of the
+        constraints it sits between:
+
+        * **Iceberg immutability** — the catalog must never reference a path whose bytes later
+          change. A path named after the sha256 of its own contents can only ever hold one byte
+          sequence, which is strictly stronger than "a fresh random name each run".
+        * **The framework's determinism invariant** — the export tree is a deliverable, and
+          ``stacks.validate`` proves reproducibility by walking ``export/`` RECURSIVELY and
+          comparing two fresh runs key-for-key. A random filename put a hidden ``uuid4`` on the
+          export path and made that check report ``export diverged`` on a perfectly deterministic
+          pipeline. Equal corpus bytes now yield an equal key.
+
+        An identical data file already present is left ALONE rather than rewritten: its bytes are
+        identical by construction, and a file a previous snapshot may already point at must not be
+        replaced underneath the catalog. That also bounds re-runs into a stable ``out_dir``, which
+        previously accumulated one full-corpus copy per run.
         """
         data_dir = f"{out_dir}/iceberg-data"
         storage.makedirs(data_dir)
-        data_uri = f"{data_dir}/{basename}-{uuid.uuid4().hex}.parquet"
-        tmp_uri = storage.temp_uri(data_uri)
+        # Copy into a temp sibling while hashing, THEN name the destination from the digest: the
+        # content is only knowable once it has been read, and reading it twice (hash pass + copy
+        # pass) would double the I/O on a full corpus for nothing.
+        tmp_uri = storage.temp_uri(f"{data_dir}/{basename}.parquet")
+        digest = sha256()
         with storage.open(parquet_uri, "rb") as src, storage.open(tmp_uri, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-        storage.finalize_atomic(tmp_uri, data_uri)
+            while chunk := src.read(_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+                dst.write(chunk)
+        data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
+        if storage.exists(data_uri):
+            storage.remove(tmp_uri)
+        else:
+            storage.finalize_atomic(tmp_uri, data_uri)
         return data_uri
 
 
