@@ -176,8 +176,10 @@ class QdrantSink:
         reconcile: bool — default ``True``. Sweep points not present in this Export (the
             Retraction/Purge path). Set ``False`` when loading an *incremental* Export into a
             collection that also holds records the increment omits.
-        load_id: str | None — the sweep marker stamped on every touched point. Defaults to a fresh
-            random id per load; pass one explicitly to make a run auditable/reproducible.
+        load_id: str | None — an audit **label** for the run. The marker stamped on every touched
+            point is always unique per load (a reused marker would make the sweep a silent no-op);
+            a label is prefixed onto it as ``"<label>:<nonce>"``, so a named run stays greppable in
+            the payload and in the report. Omitted ⇒ the bare nonce.
         id_namespace: str — UUID namespace for point-id derivation (default
             :data:`DEFAULT_ID_NAMESPACE`).
         url / host / port / grpc_port / prefer_grpc / https / api_key / timeout / location —
@@ -275,7 +277,7 @@ class QdrantSink:
         reconciling sweep has **not** run, so nothing was deleted.
         """
         store = storage or Storage.for_uri(export_dir)
-        load_id = self._configured_load_id or uuid.uuid4().hex
+        load_id = _load_marker(self._configured_load_id)
         batches = read_export(
             export_dir, store, basename=self._basename, batch_size=self._batch_size
         )
@@ -524,6 +526,21 @@ class QdrantSink:
             )
             raise ImportError(msg) from exc
         return QdrantClient, models
+
+
+def _load_marker(label: str | None) -> str:
+    """The value this load stamps on every point it touches — unique per load, always.
+
+    ``load_id`` is the run's **label**, not the marker itself. The sweep deletes exactly
+    ``must_not(_latence_load_id == marker)``, so a marker reused across runs matches the *previous*
+    run's points too, i.e. matches nothing: the sweep silently becomes a no-op and the convergence
+    check passes over an empty-by-construction stale set, leaving retracted/purged points serving.
+    So a configured label is *prefixed* onto a fresh nonce — the run stays auditable (filter the
+    collection on the ``"<label>:"`` prefix, and the summary prints the whole marker) while the
+    marker stays per-run unique. Without a label the marker is the bare nonce, exactly as before.
+    """
+    nonce = uuid.uuid4().hex
+    return f"{label}:{nonce}" if label else nonce
 
 
 def _digest(vector: list[float], payload: dict[str, Any]) -> str:

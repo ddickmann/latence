@@ -52,7 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="metric used only when creating the collection (default: cosine)",
     )
     load.add_argument("--vector-name", help="named vector to write (default: the unnamed vector)")
-    load.add_argument("--load-id", help="explicit sweep marker for this load (default: random)")
+    load.add_argument(
+        "--load-id",
+        help="audit label for this load, prefixed onto the per-run sweep marker (default: none)",
+    )
     load.add_argument(
         "--no-reconcile",
         action="store_true",

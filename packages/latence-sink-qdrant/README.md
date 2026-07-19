@@ -118,7 +118,7 @@ reconcile: true
 | `distance` | `cosine` | `cosine` / `dot` / `euclid` / `manhattan`, used only at collection creation |
 | `vector_name` | `null` | named vector to write; `null` ⇒ the collection's single unnamed vector |
 | `reconcile` | `true` | sweep points absent from this Export |
-| `load_id` | random | explicit sweep marker, for an auditable run |
+| `load_id` | none | audit **label** for the run, prefixed onto the per-run sweep marker (`<label>:<nonce>`). It is a label, never the marker itself: the sweep deletes everything *not* stamped with this run's marker, so a marker reused across runs would match nothing and silently keep serving retracted points |
 | `id_namespace` | fixed UUID | point-id derivation namespace |
 | `url` / `host` / `port` / `grpc_port` / `prefer_grpc` / `https` / `api_key` / `timeout` / `location` | — | threaded verbatim to `QdrantClient` |
 

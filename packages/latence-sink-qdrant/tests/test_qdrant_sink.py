@@ -297,6 +297,50 @@ def test_retracted_record_is_verifiably_absent_after_reload(
     assert sink(client).verify_absent(["c1", "c2"]) == ["c1"]
 
 
+def test_a_configured_load_id_still_sweeps_a_retracted_record(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """A stable configured ``load_id`` must not turn the sweep into a vacuous no-op.
+
+    ``load_id`` is the run's *label*; the value the sweep filters on has to differ between runs or
+    ``must_not(_latence_load_id == label)`` matches nothing and the previous run's points survive.
+    With the label reused as the marker, the load reports ``deleted 0`` and its own convergence
+    check passes over an empty-by-construction stale set — a green load still serving purged data.
+    """
+    full = write_export(tmp_path / "v1", {"c1": "alpha", "c2": "beta", "c3": "gamma"})
+    sink(client, load_id="nightly-load").load(full)
+    first_marker = stored_payload(client, "c1")[LOAD_ID_KEY]
+
+    after_retraction = write_export(tmp_path / "v2", {"c1": "alpha", "c3": "gamma"})
+    report = sink(client, load_id="nightly-load").load(after_retraction)
+
+    assert report.deleted == 1
+    assert stored_record_ids(client) == {"c1", "c3"}
+    assert sink(client).verify_absent(["c2"]) == []
+    # the marker is per-run unique even though the label is pinned — including on the *unchanged*
+    # points, which are restamped rather than re-upserted
+    assert stored_payload(client, "c1")[LOAD_ID_KEY] != first_marker
+    # ...and the label is still recoverable for the audit trail
+    assert first_marker.startswith("nightly-load:")
+    assert report.load_id.startswith("nightly-load:")
+    assert "load_id=nightly-load" in report.summary()
+
+
+def test_without_a_configured_load_id_the_marker_is_a_bare_random_hex(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The default path is untouched by the label/marker split: a bare 32-char hex nonce."""
+    export = write_export(tmp_path, {"c1": "alpha"})
+
+    report = sink(client).load(export)
+
+    marker = stored_payload(client, "c1")[LOAD_ID_KEY]
+    assert marker == report.load_id
+    assert len(marker) == 32
+    assert ":" not in marker
+    int(marker, 16)
+
+
 def test_purging_every_document_empties_the_collection(
     tmp_path: Path, client: FakeQdrantClient
 ) -> None:
