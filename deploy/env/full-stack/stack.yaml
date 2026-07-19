@@ -85,12 +85,27 @@ stages:
       device: cuda
       pii_labels: [person, email, phone number, address, credit card number]
 
+  # `pii_labels` is REQUIRED — the Provider hard-raises on a missing/empty list (audit R5). The set
+  # below IS the generator's `latence_core.setup.wizard.FINANCIAL_PII_LABELS` (ADR-0044) floor, kept
+  # in sync by test_env_stack_constructible.py.
   - name: redact_financial
     capability: redaction
     provider: redaction.gliner2
     depends_on: [content_screen]
     config:
       device: cuda
+      pii_labels:
+        [
+          person,
+          email,
+          phone number,
+          address,
+          iban,
+          credit card number,
+          tax id,
+          bank account number,
+          social security number,
+        ]
 
   - name: profiling
     capability: profiling
