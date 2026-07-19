@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from typing import TypeGuard
 
 import pytest
 
@@ -311,7 +312,7 @@ _JIT_NEUTRALIZING_LOADERS = ("load_then_cast", "load_gliner2_optimized")
 _MDEBERTA_MODEL_HINTS = ("gliner", "forconditionalgeneration", "automodel")
 
 
-def _is_mdeberta_model_from_pretrained_ref(node: ast.AST) -> bool:
+def _is_mdeberta_model_from_pretrained_ref(node: ast.AST) -> TypeGuard[ast.Attribute]:
     """Whether ``node`` is a ``<mdeberta model>.from_pretrained`` *reference* (attribute expr)."""
     if not isinstance(node, ast.Attribute) or node.attr != "from_pretrained":
         return False

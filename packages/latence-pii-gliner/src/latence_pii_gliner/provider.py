@@ -45,6 +45,7 @@ from latence_core.providers.perf import (
     apply_gliner_max_len,
     load_then_cast,
     maybe_compile,
+    neutralize_torch_jit,
     place_on_device,
     resolve_max_len,
 )
@@ -231,6 +232,14 @@ class GlinerPIIRedactor:
     def _load_model(self) -> Any:
         if self._model is not None:
             return self._model
+        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner import — that
+        # import transitively pulls in transformers' deberta_v2 modeling module, whose
+        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
+        # (inside load_then_cast) cannot un-script them: the env switch is read by torch only at
+        # ITS import, and jit._state.disable() only affects FUTURE script() calls — so the
+        # scripted helpers would still die in nvrtc (libnvrtc-builtins.so.13.0) on the first
+        # forward on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
+        neutralize_torch_jit(provider_name="redaction.gliner_pii")
         try:
             from gliner import GLiNER
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
