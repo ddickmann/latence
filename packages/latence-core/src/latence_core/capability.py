@@ -94,6 +94,13 @@ class DocumentEnumerator(Protocol):
     :meth:`Source.produce` stamps on ``Provenance.document_id`` — an id that disagreed would
     silently mis-classify documents as new. A Source that cannot do better simply does not
     implement it, and the runner falls back to ``produce`` (correct, just not free).
+
+    The enumeration MAY be **partial**, and a Source that can only name *some* of its documents
+    cheaply MUST leave the rest out rather than fetch them: an omitted id cannot intersect the
+    parent Version, so its document is treated as new and fetched exactly once by ``produce``,
+    whereas fetching it here transfers it unconditionally *in addition to* that — which is how a
+    no-op delta ends up costing twice a full run (audit R3-connectors_ingestion-8). Omitting can
+    only lose a reuse; it can never invent one, and it never changes a document's records.
     """
 
     def document_ids(self, storage: Storage) -> Iterator[str]:

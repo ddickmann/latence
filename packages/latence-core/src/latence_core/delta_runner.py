@@ -196,7 +196,15 @@ class DeltaRunner:
             doclevel_records=new_doclevel,
             induced_schema=new_schema,
             documents_reused=len(reusable_ids),
-            documents_extracted=len(current_doc_ids) - len(reusable_ids),
+            # Derived from the documents this run ACTUALLY produced (the union manifest), not
+            # from the discovery pass: a Source whose cheap enumeration is partial — SharePoint
+            # Online can only content-address the items Graph reports a ``sha256Hash`` for —
+            # under-reports ``current_doc_ids``, and the old
+            # ``len(current_doc_ids) - len(reusable_ids)`` then reported 0 extracted for a run
+            # that re-extracted the whole library (audit R3-connectors_ingestion-8). The manifest
+            # counts every live document, so manifest − reused is exactly the freshly-extracted
+            # set. Identical on a Source that enumerates completely.
+            documents_extracted=len(current_manifest) - len(reusable_ids),
         )
         return self._attach_churn(pipeline, run_id, report, churn)
 
@@ -543,6 +551,12 @@ class DeltaRunner:
         that cannot falls back to ``produce`` — correct, just not free. Either way the durable
         deletions are pushed into the Source's ``exclude_document_ids`` first, so even the
         fallback never re-fetches a document this run is going to drop anyway.
+
+        An enumeration may be **partial** (a Source that can name only some of its documents
+        without fetching them omits the rest — see ``DocumentEnumerator``). The returned set is
+        therefore a lower bound on the live documents: it is used only to pick the *reusable*
+        ones, so a missing id costs a reuse and nothing else. Nothing downstream may treat it as
+        the corpus census — that is the union manifest.
         """
         storage = Storage.for_uri(pipeline.storage_uri)
         excluded_set = set(excluded)

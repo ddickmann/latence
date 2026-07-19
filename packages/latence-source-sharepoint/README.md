@@ -13,7 +13,11 @@ in-core `source.local_folder` implements, so every downstream Stage is untouched
   `latence-core` takes on nothing new (ADR-0016).
 - **Secrets are environment-only, and it is enforced.** A config that inlines a token or a
   client secret raises `ConfigError` before a connection is opened.
-- **Delta-aware.** An incremental run skips unchanged documents **without downloading them**.
+- **Delta-aware.** An incremental run never costs more than a full one, and on a drive whose
+  listing carries a `sha256Hash` (OneDrive Personal) it skips unchanged documents **without
+  downloading them**. SharePoint Online lists a `quickXorHash`, which is not a reproducible
+  SHA-256 content address, so there each document is fetched once per run and re-extracted —
+  see [Delta](#delta-adr-0018).
 
 ## Install
 
@@ -108,8 +112,9 @@ listing for free — the same value hashing the bytes would give. So:
   discovery pass must not fetch content either — or the saving would be zero no matter what the
   run itself skips. The connector therefore implements the optional
   `latence_core.capability.DocumentEnumerator` seam (`document_ids(storage)`), answering it from
-  the **listing alone**. `tests/test_sharepoint_delta_transfer.py` drives the real `DeltaRunner`
-  twice over one shared fake transport and asserts the second run transfers **zero** bytes;
+  the **listing alone** — never by downloading. `tests/test_sharepoint_delta_transfer.py` drives
+  the real `DeltaRunner` over one shared fake transport and asserts the second run transfers
+  **zero** bytes, and — on a `quickXorHash` library — that no run ever fetches a document twice;
 
 - a changed document gets a new id (`ADDED`, retiring the old one as `DELETED`) and is
   re-fetched;
@@ -123,8 +128,19 @@ stable-identity Source would report `UPDATED` instead of `ADDED`+`DELETED`; see
 
 If the listing carries no usable `sha256Hash` — none at all (Graph computes `file.hashes`
 asynchronously after upload, so a fresh item has none) or a `quickXorHash` / `sha1Hash`, which
-are not reproducible SHA-256 content addresses — the connector downloads and hashes the bytes.
-Still correct, just not free. It does **not** mint the id from the facet instead: that would put
+are not reproducible SHA-256 content addresses — the connector downloads and hashes the bytes
+**in the run**, once. Still correct, just not free.
+
+Such an item is deliberately **not enumerated** by `document_ids`: the discovery pass runs before
+any exclusion exists, so hashing it there would transfer it unconditionally *on top of* the run's
+own fetch, and a no-op delta over an unchanged SharePoint Online library would cost twice a full
+run (audit `R3-connectors_ingestion-8`). Left out of the enumeration it is simply classified as
+new, fetched once and re-extracted — the delta reports it `UNCHANGED` (its content address did
+not move) with `documents_extracted` counting it honestly. So on SharePoint Online the guarantee
+is the weaker one: **an incremental run never costs more than a full run**; the zero-transfer
+skip needs a `sha256Hash`.
+
+The connector does **not** mint the id from the facet instead: that would put
 one document in two id namespaces, so the facet merely appearing would change the id of a
 document nobody touched and the DeltaRunner would read it as `DELETED`+`ADDED` — making a no-op
 delta cost *more* than a full run (audit `R2-connectors_ingestion-10`). Restoring the free path
@@ -181,8 +197,16 @@ is also how you supply a corporate proxy / mTLS transport without forking the Pr
 5. Assert the deliverable: every exported row's `provenance.source_system` is `sharepoint` and
    its `source_uri` resolves — paste the `itemId` into
    `GET /drives/{drive_id}/items/{itemId}` and you should get the same document back.
-6. Re-run it unchanged. The second run must report every document `UNCHANGED` and transfer no
-   document bytes (watch the run's duration, or a network counter).
+6. Re-run it unchanged. The second run must report every document `UNCHANGED`. What it transfers
+   depends on the backend (watch a network counter):
+   - **SharePoint Online** (`quickXorHash` in `file.hashes`): **at most one pass** over the
+     library — the same bytes a full run moves, never more. `documents_reused` is `0` and
+     `documents_extracted` is the library size.
+   - **OneDrive Personal** (`sha256Hash`): **no document bytes at all**, with
+     `documents_reused` equal to the library size and `documents_extracted` `0`.
+
+   Check which one you are on: `GET /drives/{drive_id}/root/children?$select=id,name,file`
+   and read the algorithm key under `file.hashes`.
 
 Live numbers are never fabricated into this repo: a tenant is required, so the shipped
 conformance verdict for this Provider is flagged *verified against a stub*.

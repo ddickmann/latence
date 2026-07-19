@@ -34,8 +34,9 @@ value hashing the bytes would give, just free. So:
   from the listing too, via the optional
   :class:`~latence_core.capability.DocumentEnumerator` seam (:meth:`SharePointSource.document_ids`);
   without that, discovery would pull the whole library on every delta and the saving would be
-  zero. Together that is the whole point: an incremental run over a 50k-document library
-  transfers only the documents that actually changed. The offline suite asserts it by counting
+  zero. Together that is the whole point: on a ``sha256Hash`` backend an incremental run over a
+  50k-document library transfers only the documents that actually changed. The offline suite
+  asserts it — and the weaker bound that holds everywhere else — by counting
   the fake transport's download calls through the REAL DeltaRunner
   (``tests/test_sharepoint_delta_transfer.py``), not by reading a flag and not by hand-injecting
   the exclusions.
@@ -46,10 +47,18 @@ value hashing the bytes would give, just free. So:
   relies on. (A stable-identity Source would report UPDATED instead; see
   :mod:`latence_core.state.delta_detector`.)
 
-If the listing carries no usable ``sha256Hash`` — no hash at all (Graph computes the facet
-asynchronously after upload, so a freshly-uploaded item has none), or a ``quickXorHash`` /
-``sha1Hash``, which are not reproducible SHA-256 content addresses — the connector falls back
-to downloading and hashing the bytes. Correct, just not free. What it will **not** do is mint
+**Which backends get the free skip.** Graph reports ``sha256Hash`` on **OneDrive Personal**;
+**SharePoint Online reports ``quickXorHash``**, and a freshly-uploaded item has no facet at all
+(Graph computes it asynchronously). Only a ``sha256Hash`` is a reproducible SHA-256 content
+address, so only there is the zero-transfer skip available. Everywhere else the connector
+downloads and hashes the bytes **in the run** — once. It does **not** hash them in the discovery
+pass as well: an item the listing cannot address is left out of
+:meth:`SharePointSource.document_ids` entirely, so it is classified as new and fetched exactly
+once. Fetching it in discovery too named it correctly but doubled the cost of every run,
+including a no-op delta over an unchanged library (audit R3-connectors_ingestion-8). The bound
+that holds on **every** backend is therefore: an incremental run never costs more than a full
+run; on ``sha256Hash`` backends it costs only the changed documents. What the connector will
+**not** do is mint
 the id from the facet instead: that would put "the same document" in two id namespaces, and the
 facet appearing (or the backend's algorithm differing) would change the id of a document nobody
 touched — the DeltaRunner reads that as DELETED+ADDED and a no-op delta run costs *more* than a
@@ -331,18 +340,27 @@ class SharePointSource:
         stamps on ``Provenance.document_id`` — the same single ``sha256(<bytes>)`` namespace,
         which is what makes the intersection sound.
 
-        An item the listing cannot address that way (no hash yet, or a ``quickXorHash``) still
-        has to be fetched and hashed here — the same unavoidable fallback :meth:`produce` makes,
-        and the same id.
+        **This pass never downloads.** An item the listing cannot content-address (a
+        ``quickXorHash`` — SharePoint Online — a legacy ``sha1Hash``, or no facet yet) is simply
+        not enumerated. Hashing its bytes here would name it correctly but at the one cost this
+        seam exists to avoid: discovery runs BEFORE any exclusion is known, so every byte it
+        moves is moved unconditionally, *on top of* the fetch :meth:`produce` then makes for the
+        same document — a no-op delta over an unchanged SharePoint Online library cost twice a
+        full run (audit R3-connectors_ingestion-8).
+
+        Under-reporting here is safe and is the documented "correct, just not free" fallback: an
+        id the runner does not see cannot intersect the parent Version, so the document is
+        treated as new and :meth:`produce` fetches it exactly ONCE. The connector forfeits the
+        *extraction* reuse for that document, never the correctness of its records — the id
+        :meth:`produce` stamps is the same content address either way, so the manifest diff
+        still classifies it UNCHANGED. It can never invent a reuse, only miss one.
         """
         for item in self._client.list_files(self._root_path):
             extension = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
             if extension not in self._extensions:
                 continue
             listed_id = _listed_document_id(item)
-            if listed_id is None:
-                listed_id = _content_document_id(self._client.download(item))
-            if listed_id not in self._excluded:
+            if listed_id is not None and listed_id not in self._excluded:
                 yield listed_id
 
     def _file_name(self, item: GraphItem) -> str:

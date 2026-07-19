@@ -287,26 +287,31 @@ def test_document_id_is_one_namespace_across_every_hash_facet_state(
     """
     body = b"# unchanged bytes\n"
     produced_ids: dict[str | None, str] = {}
-    enumerated_ids: dict[str | None, str] = {}
+    enumerated_ids: dict[str | None, list[str]] = {}
     for algorithm in (None, "quickXorHash", "sha256Hash"):
         item = FakeFile(path="/a.md", content=body, hash_algorithm=algorithm)
         produced_ids[algorithm] = _produce(
             _source(FakeGraphTransport(_api(item)), monkeypatch=monkeypatch), storage
         )[0].provenance.document_id
-        enumerated_ids[algorithm] = next(
-            iter(
-                _source(
-                    FakeGraphTransport(_api(item)), monkeypatch=monkeypatch
-                ).document_ids(storage)
+        enumerated_ids[algorithm] = list(
+            _source(FakeGraphTransport(_api(item)), monkeypatch=monkeypatch).document_ids(
+                storage
             )
         )
 
     assert len(set(produced_ids.values())) == 1, (
         "the same bytes minted different document_ids per hash facet state: " f"{produced_ids}"
     )
-    # The enumeration seam must agree with produce(), or the intersection the runner does is
-    # against ids nothing ever stamps.
-    assert enumerated_ids == produced_ids
+    # Whatever the enumeration seam DOES report must be exactly what produce() stamps, or the
+    # intersection the runner does is against ids nothing ever stamps. It reports an id only
+    # when the listing can content-address the item — a hash-less or quickXorHash listing is
+    # left out rather than downloaded, because that discovery fetch doubles the cost of every
+    # run (audit R3-connectors_ingestion-8); the document is then simply re-extracted.
+    assert enumerated_ids == {
+        None: [],
+        "quickXorHash": [],
+        "sha256Hash": [produced_ids["sha256Hash"]],
+    }
 
     # ...and it is still a CONTENT address: different bytes, different id.
     changed = _produce(
