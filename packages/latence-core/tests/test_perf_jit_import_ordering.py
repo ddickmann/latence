@@ -112,6 +112,14 @@ class _MdebertaModel:
     def to(self, arg: Any) -> _MdebertaModel:  # noqa: ARG002 - device/dtype both no-op here
         return self
 
+    def batch_extract_entities(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG002
+        """Inert: ``Gliner2PIIRedactor._load_model`` asserts this API exists (#192) at LOAD.
+
+        This suite asserts on the JIT state at the backbone IMPORT, never on inference, so the
+        method only has to be callable for the load path to complete.
+        """
+        return {"entities": {}}
+
     def forward(self, text: str) -> None:
         """The encoder forward — consults the relative-position helper, like mdeberta does."""
         self.relative_position(len(text), 0)
@@ -217,6 +225,23 @@ def _load_fused_extractor(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG
     )._load_model()  # noqa: SLF001
 
 
+def _load_pii_gliner2_redactor(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
+    """R4: the FIFTH mdeberta Provider — and the one #197 made the wizard's blessed default.
+
+    ``redaction.gliner2`` is emitted by the wizard in BOTH profiles
+    (``BLESSED_REDACT_PROVIDER``), yet it was the only mdeberta Provider whose W9-jit ordering had
+    no behavioural proof: its sole guard was the AST check in
+    ``test_perf_fp32_regression_guard.py``, which is purely lexical (min-lineno of any
+    ``neutralize_torch_jit`` call vs min-lineno of any backbone import) and therefore blind to any
+    call that is textually first but does not take effect — e.g. one wrapped in an env-gated
+    ``if``. ``Gliner2PIIRedactor._gliner2_cls`` (entered from ``_load_model``) is the load path
+    that evaluates ``from gliner2 import GLiNER2``.
+    """
+    from latence_pii_gliner2 import Gliner2PIIRedactor
+
+    Gliner2PIIRedactor({"pii_labels": ["person"], "device": "cpu"})._load_model()  # noqa: SLF001
+
+
 def _load_glinker_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     """R2/#190-5: the sixth DeBERTa-backed Provider, previously absent from every #190 suite.
 
@@ -236,6 +261,7 @@ _PROVIDERS = [
     pytest.param(("gliner", "GLiNER"), _load_pii_redactor, id="redaction.gliner_pii"),
     pytest.param(("gliner", "GLiNER"), _load_relation_extractor, id="relation.gliner_relex"),
     pytest.param(("gliner2", "GLiNER2"), _load_fused_extractor, id="fused_entity_relation.gliner2"),
+    pytest.param(("gliner2", "GLiNER2"), _load_pii_gliner2_redactor, id="redaction.gliner2"),
     pytest.param(
         ("glinker", "GLinkerModel", {"ProcessorFactory": _FakeProcessorFactory}),
         _load_glinker_backend,
