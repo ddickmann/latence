@@ -91,7 +91,12 @@ stages:
   - name: redact_financial
     capability: redaction
     provider: redaction.gliner2
-    depends_on: [content_screen]
+    # CHAINED behind redact_pii (audit R5-12), NOT a sibling off content_screen: the corpus Export
+    # hangs off the LAST redaction link, so as siblings `redact_pii` was wired-but-dead — it ran,
+    # reported success and contributed counts while none of its person/email/phone/address/
+    # credit-card masks reached `records.parquet`. Redaction composes (each Redactor detects on the
+    # chunk's clean `content`; `finalize_redacted_chunk` UNIONs the upstream spans in).
+    depends_on: [redact_pii]
     config:
       device: cuda
       pii_labels:

@@ -15,10 +15,17 @@
 # it allocated CUDA memory doing it (the #191 guard). `latence env verify` refuses this environment
 # if any Provider in `learned_providers` is missing from this file.
 #
-# The two redaction Stages are deliberate SIBLINGS over the same screened chunks, not a chain:
-# GLiNER-PII (#191's Provider — the one whose silent CPU fallback started this) and GLiNER2
-# (#192's pinned checkout API, carrying the ADR-0044 financial-PII floor). Both must be proven on
-# the GPU, and a sibling pair keeps each one's output attributable to exactly one detector.
+# The two redaction Stages are CHAINED, not siblings (audit R5-12): GLiNER-PII (#191's Provider —
+# the one whose silent CPU fallback started this) feeds GLiNER2 (#192's pinned checkout API,
+# carrying the ADR-0044 financial-PII floor), and the corpus Export hangs off the LAST link. They
+# were siblings off `content_screen` with `export_corpus` depending only on `redact_financial`,
+# which made `redact_pii` wired-but-dead: it ran on the GPU, passed the #198 placement probe and
+# contributed its Stage counts, while the Runner threaded only the declared parent's output into
+# the Export — so none of its person/email/phone/address/credit-card masks reached
+# `records.parquet`. The financial floor firing via the exported branch is exactly why that read
+# green. Chaining is safe because Redaction composes: each Redactor detects on the chunk's clean
+# `content` (never on a predecessor's `masked_content`), and `finalize_redacted_chunk` UNIONs the
+# upstream spans in, so each mask stays attributable to exactly one detector.
 #
 # NOT here: `parser.endpoint`. It IS installed and IS registered by this environment — it is the
 # ADR-0030 boundary across which the transformers>=5 OCR VLMs are reached (see environment.yaml's
@@ -100,7 +107,8 @@ stages:
   - name: redact_financial
     capability: redaction
     provider: redaction.gliner2
-    depends_on: [content_screen]
+    # CHAINED behind redact_pii (audit R5-12) so both Redactors' masks reach the exported corpus.
+    depends_on: [redact_pii]
     config:
       device: cuda
       pii_labels:

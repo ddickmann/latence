@@ -396,6 +396,37 @@ def _merge_floor(
     return result
 
 
+def _compose_prior_spans(spans: list[PIISpan], prior: list[PIISpan]) -> list[PIISpan]:
+    """Union THIS Stage's spans with those an UPSTREAM Redaction Stage already applied.
+
+    Redaction composes (audit R5-12). Both span sets are chunk-local offsets into the SAME clean
+    ``content`` — every Redactor detects on ``content``, never on a predecessor's
+    ``masked_content`` — so the two sets share one coordinate system and can be unioned directly.
+    Without this, a second Redaction Stage rebuilds ``masked_content`` from the clean text and
+    CLOBBERS every mask its predecessor applied: the upstream Stage still reports success, still
+    contributes its counts, and none of its masks reach the exported corpus.
+
+    Resolution mirrors :func:`_merge_floor` exactly — longer span wins first (max masking
+    coverage), and on an identical span THIS Stage wins the tie (source rank 0 < 1) so the
+    Provider that just ran keeps its own provenance. A prior span therefore survives only where
+    this Stage left a gap, which is the whole guarantee.
+
+    ``prior`` is empty for every single-Redactor Pipeline (nothing upstream populated
+    ``pii_spans``), so this is a no-op there and the output stays byte-identical.
+    """
+    if not prior:
+        return spans
+    tagged: list[tuple[PIISpan, int]] = [*((s, 0) for s in spans), *((s, 1) for s in prior)]
+    tagged.sort(key=lambda item: (item[0].char_start, -item[0].length, item[1], item[0].pii_type))
+    result: list[PIISpan] = []
+    last_end = -1
+    for span, _source in tagged:
+        if span.char_start >= last_end:
+            result.append(span)
+            last_end = span.char_end
+    return result
+
+
 def finalize_redacted_chunk(
     chunk: ChunkRecord,
     plan: ChunkRedactionPlan,
@@ -441,6 +472,10 @@ def finalize_redacted_chunk(
         )
         for start, end, pii_type, value, detector, confidence in accepted
     ]
+    # Compose with an UPSTREAM Redaction Stage's spans (audit R5-12). Unconditional — a chunk this
+    # Stage's policy SKIPS must still keep the masks a predecessor already applied, or a chained
+    # Redactor un-redacts it. Empty (hence byte-identical) for every single-Redactor Pipeline.
+    spans = _compose_prior_spans(spans, list(chunk.pii_spans))
     masked = apply_masking(chunk.content, spans) if spans else chunk.content
     return chunk.model_copy(
         update={
