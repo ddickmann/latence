@@ -397,6 +397,46 @@ def test_verify_absent_on_a_collection_that_does_not_exist(client: FakeQdrantCli
     assert sink(client).verify_absent(["c1"]) == []
 
 
+def test_an_overlapping_load_never_erases_the_points_this_load_declared_current(
+    tmp_path: Path,
+) -> None:
+    """Two overlapping loads must not empty the collection while both report success.
+
+    The sweep deletes by a collection-*global* ``must_not(my marker)`` filter, so its correctness
+    argument ("everything I touched carries my marker") stops holding the instant another load
+    restamps the same points. Unguarded, the losing run deletes every point it had itself just
+    counted as ``unchanged`` — the exact "silently-erased data" the module docstring promises can
+    never happen. It must refuse instead: stale-but-present beats erased (ADR-0034, fail-closed).
+    """
+    export = write_export(tmp_path, {"c1": "alpha", "c2": "beta", "c3": "gamma"})
+
+    class Overlapping(FakeQdrantClient):
+        """Runs a whole competing load the moment this load restamps its unchanged points."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.overlap: str | None = None
+
+        def set_payload(self, *args: Any, **kwargs: Any) -> bool:
+            result = super().set_payload(*args, **kwargs)
+            if self.overlap is not None:
+                competing, self.overlap = self.overlap, None
+                sink(self).load(competing)  # the cron re-load, start to finish, in the gap
+            return result
+
+    client = Overlapping()
+    sink(client).load(export)
+
+    client.overlap = export
+    with pytest.raises(SinkLoadError) as excinfo:
+        sink(client).load(export)
+
+    assert "concurrent" in str(excinfo.value).lower()
+    assert stored_record_ids(client) == {"c1", "c2", "c3"}
+    # The competing load's own sweep is the only delete anyone was entitled to issue.
+    assert client.calls.count("delete") == 0
+
+
 # --- failure containment ---------------------------------------------------------------------------
 
 

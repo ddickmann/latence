@@ -39,6 +39,12 @@ load. Both are one config key, and the docstring of :meth:`load` says which to u
 **Failure containment.** A store fault anywhere in the upsert phase aborts the load *before* the
 sweep. A half-uploaded corpus therefore never deletes the records it did not reach — the worst case
 is a collection with stale-but-present data, never one with silently-erased data.
+
+The sweep is guarded for the same reason. Its filter is collection-*global* (``must_not(marker)``),
+so it is the stale set only while nothing else has stamped the collection. Before deleting anything
+the sink checks that exactly as many points carry its marker as it processed records; a load
+running concurrently restamps those points and trips the check, which fails the *losing* load
+loudly and deletes nothing rather than erasing a live index behind a green report.
 """
 
 from __future__ import annotations
@@ -312,7 +318,7 @@ class QdrantSink:
                 return LoadReport(collection=self._collection, dimension=0, load_id=load_id)
             dimension = 0
 
-        deleted = self._sweep(load_id) if self._reconcile else 0
+        deleted = self._sweep(load_id, upserted + unchanged) if self._reconcile else 0
         return LoadReport(
             collection=self._collection,
             dimension=dimension,
@@ -412,9 +418,34 @@ class QdrantSink:
             ),
         )
 
-    def _sweep(self, load_id: str) -> int:
-        """Delete everything this load did not touch, then prove the stale set is empty."""
+    def _sweep(self, load_id: str, touched: int) -> int:
+        """Delete everything this load did not touch, then prove the stale set is empty.
+
+        ``touched`` is how many records this load processed — every one of them was either upserted
+        with this run's marker or payload-restamped with it, so *exactly* that many points must
+        carry the marker when the sweep begins. That equality is checked **before** anything is
+        deleted, because the sweep's filter is collection-*global*: it deletes by
+        ``must_not(marker)``, which is the stale set only while nothing else has stamped the
+        collection. A load that overlaps this one restamps the very points this one just declared
+        current, and an unguarded sweep would then delete them all — erasing a live index while
+        both runs report success. On a mismatch the load fails loudly and deletes nothing, so the
+        worst case stays the documented one: stale-but-present data, never silently-erased data.
+        """
         models = self._load_models()
+        mine = models.Filter(
+            must=[models.FieldCondition(key=LOAD_ID_KEY, match=models.MatchValue(value=load_id))]
+        )
+        marked = self._count(mine)
+        if marked != touched:
+            msg = (
+                f"refusing to sweep collection {self._collection!r}: this load processed {touched} "
+                f"record(s) but {marked} point(s) carry its marker {load_id!r}. Another load is "
+                "running against this collection concurrently (or the Export repeats a record_id). "
+                "Nothing was deleted — the collection still holds the data this load read. Re-run "
+                "the load once no other load is in flight."
+            )
+            raise SinkLoadError(msg)
+
         stale = models.Filter(
             must_not=[
                 models.FieldCondition(key=LOAD_ID_KEY, match=models.MatchValue(value=load_id))
