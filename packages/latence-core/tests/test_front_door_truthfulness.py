@@ -14,7 +14,10 @@ Four independent falsifiers, each of which failed on the pre-#189 tree:
   real ``packages/latence-runner-*`` distribution, unless the sentence explicitly marks it
   as not-shipped.
 * **The ADR count.** The README quoted "32 architecture decisions" against 52 files on
-  disk. Any count the README states about ``docs/adr/`` must equal the tree.
+  disk. Any count *any* front-door page states about ``docs/adr/`` must equal the tree —
+  the first version of this guard read ``README.md`` alone, which let the docs-site home
+  page and the Concepts index sit at "44 architecture decisions" while the README, the
+  Decision Log and the go-live runbook all said 52.
 * **Dangling cross-references.** ``docs/retrieval-tooling.md`` and ADR-0048 pointed at a
   ``docs/INTEROP.md`` that was never written. No markdown link and no backticked
   ``docs/...md`` reference in the front-door set may point at a missing file.
@@ -125,20 +128,53 @@ def test_readme_claims_no_runner_adapter_that_does_not_exist() -> None:
     )
 
 
-def test_readme_adr_count_matches_the_tree() -> None:
-    """Any "N architecture decisions" the README states must equal the files on disk."""
+# How the published pages actually phrase a size claim about the Decision Log. A count is a
+# count wherever it appears, so these run over every front-door page rather than the README.
+_ADR_COUNT_CLAIM = re.compile(
+    r"(?<![\d.])(\d{1,3})\s+(?:architecture decisions|architecture decision records|ADRs\b)"
+    r"|holds\s+(\d{1,3})\s+records"
+)
+
+
+def _adr_count_claims(text: str) -> list[tuple[int, int]]:
+    """``(lineno, claimed_count)`` for every ADR-count claim in ``text``."""
+    out: list[tuple[int, int]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for match in _ADR_COUNT_CLAIM.finditer(line):
+            out.append((lineno, int(match.group(1) or match.group(2))))
+    return out
+
+
+def test_adr_count_matches_the_tree_on_every_front_door_page() -> None:
+    """Any "N architecture decisions" a *published* page states must equal the files on disk.
+
+    Not just the README: the docs-site ``Home`` page is the first thing an evaluator sees
+    after the go-live runbook's deploy step, and it drifted 8 records behind the log it links
+    to while this test was green.
+    """
     actual = len([p for p in _ADR_DIR.glob("[0-9][0-9][0-9][0-9]-*.md")])
     assert actual > 0, "no ADR files discovered under docs/adr/"
 
-    text = _README.read_text()
-    claims = [int(m) for m in re.findall(r"\((\d+)\s+architecture decisions\)", text)]
-    claims += [int(m) for m in re.findall(r"the\s+(\d+)\s+architecture decisions", text)]
-    assert claims, "README no longer states an ADR count — keep the claim, keep it true"
+    problems: list[str] = []
+    total_claims = 0
+    for page in _front_door_docs():
+        for lineno, claimed in _adr_count_claims(page.read_text()):
+            total_claims += 1
+            if claimed != actual:
+                problems.append(
+                    f"{page.relative_to(_REPO_ROOT)}:{lineno}: claims {claimed}"
+                )
 
-    wrong = [c for c in claims if c != actual]
-    assert not wrong, (
-        f"README claims {wrong} architecture decisions; docs/adr/ holds {actual}. "
-        "Update the README (or the ADRs) so the front door matches the tree."
+    assert not problems, (
+        f"published pages state an ADR count that docs/adr/ contradicts (it holds {actual}):\n"
+        + "\n".join(problems)
+        + "\nUpdate the pages (or the ADRs) so every front door matches the tree."
+    )
+    assert total_claims, "the docs no longer state an ADR count — keep the claim, keep it true"
+
+    # The README specifically must keep stating it: it is the page most readers never leave.
+    assert _adr_count_claims(_README.read_text()), (
+        "README no longer states an ADR count — keep the claim, keep it true"
     )
 
 
