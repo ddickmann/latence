@@ -315,16 +315,22 @@ class GraphClient:
         ``max_retries`` behaviour is identical on both legs, deliberately.
         """
         refreshed = False
+        # Set for exactly ONE iteration by the 401 branch and consumed here. A flag that
+        # stayed set would force a fresh client-credentials exchange on every subsequent
+        # throttled retry, defeating the token cache and hammering the (itself rate-limited)
+        # Entra ID token endpoint while the tenant is already throttling this application.
+        force_refresh = False
         attempt = 0
         while True:
             headers = (
                 {
-                    "Authorization": f"Bearer {self._tokens.token(force_refresh=refreshed)}",
+                    "Authorization": f"Bearer {self._tokens.token(force_refresh=force_refresh)}",
                     "Accept": "application/json",
                 }
                 if credentialed
                 else {}
             )
+            force_refresh = False
             response = self._transport.request(method, url, headers=headers)
             if response.status in _RETRYABLE:
                 if attempt >= self._max_retries:
@@ -344,6 +350,7 @@ class GraphClient:
                 # The token expired mid-run. Force exactly one refresh and retry; a second
                 # 401 is a genuine authorisation failure and falls through below.
                 refreshed = True
+                force_refresh = True
                 continue
             if response.status == 401:
                 msg = (

@@ -41,9 +41,14 @@ class _ScriptedTokenProvider:
         self.refreshes = 0
 
     def token(self, *, force_refresh: bool = False) -> str:
-        if force_refresh and self.index + 1 < len(self._tokens):
-            self.index += 1
+        # ``refreshes`` counts EVERY forced exchange, not only the ones that had a further
+        # token left to hand out. Gating the counter on the script's length would cap it at
+        # ``len(tokens) - 1`` by construction, and an assertion on a counter that cannot
+        # exceed its expected value proves nothing about the client.
+        if force_refresh:
             self.refreshes += 1
+            if self.index + 1 < len(self._tokens):
+                self.index += 1
         return self._tokens[self.index]
 
 
@@ -227,6 +232,30 @@ def test_an_expired_token_triggers_exactly_one_refresh_and_the_run_continues() -
         FakeGraphApi(files=[FakeFile(path="/a.md", content=b"a")]), token_provider=tokens
     )
     assert [item.name for item in client.list_files()] == ["a.md"]
+    assert tokens.refreshes == 1
+
+
+def test_throttling_after_an_expired_token_does_not_re_force_a_refresh_per_retry() -> None:
+    """The 401 forces ONE token exchange; the throttled retries reuse the fresh token.
+
+    Re-forcing on every retry defeats the token cache and hammers the Entra ID token
+    endpoint — which is itself rate-limited — precisely while the tenant is already
+    throttling this application, escalating a transient throttle into a token-endpoint
+    block.
+    """
+    tokens = _ScriptedTokenProvider(["expired-token", "valid-token"])
+    api = FakeGraphApi(
+        files=[FakeFile(path="/a.md", content=b"a")],
+        # The expired-token 401 is answered before the throttle counter is consulted, so
+        # the burst lands on the retries that follow the refresh.
+        throttle_after=0,
+        throttle_burst=3,
+        retry_after_seconds=1,
+    )
+    sleeps: list[float] = []
+    client, _ = _client(api, token_provider=tokens, sleeps=sleeps)
+    assert [item.name for item in client.list_files()] == ["a.md"]
+    assert sleeps == [1.0, 1.0, 1.0]
     assert tokens.refreshes == 1
 
 
