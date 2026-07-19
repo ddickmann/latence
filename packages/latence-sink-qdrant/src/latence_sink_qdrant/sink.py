@@ -48,11 +48,15 @@ key, and the docstring of :meth:`load` says which to use when.
 sweep. A half-uploaded corpus therefore never deletes the records it did not reach — the worst case
 is a collection with stale-but-present data, never one with silently-erased data.
 
-The sweep is guarded for the same reason. ``must_not(marker)`` is the stale set only while nothing
-else has restamped this corpus's points. Before deleting anything the sink checks that exactly as
-many points carry its marker as it processed records; a load running concurrently restamps those
-points and trips the check, which fails the *losing* load loudly and deletes nothing rather than
-erasing a live index behind a green report.
+The sweep is guarded for the same reason, and it is guarded *twice*, because one check is not
+enough. ``must_not(marker)`` picks the sweep's **candidates**, and before enumerating any the sink
+checks that exactly as many points carry its marker as it processed records: a load running
+concurrently restamps those points and trips the check, which fails the *losing* load loudly and
+deletes nothing. But that check is a pre-check over a marker another writer can move, so the delete
+never re-derives the stale set from it. Each candidate is instead checked against the **Export** —
+the source of truth (ADR-0017), and the one condition a concurrent load cannot flip — and deleted by
+explicit id only when its ``record_id`` is genuinely no longer exported. A restamp landing inside
+the window can therefore make the sweep skip a point, never erase one.
 """
 
 from __future__ import annotations
@@ -73,10 +77,15 @@ from latence_sink_qdrant.errors import (
     SinkLoadError,
     SinkVerificationError,
 )
-from latence_sink_qdrant.export_reader import ExportRow, read_export
+from latence_sink_qdrant.export_reader import (
+    RECORD_ID_COLUMN,
+    ExportRow,
+    read_export,
+    read_record_ids,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 #: Payload key holding the content digest of the record as loaded — the change detector.
 DIGEST_KEY = "_latence_digest"
@@ -337,7 +346,9 @@ class QdrantSink:
                 return LoadReport(collection=self._collection, dimension=0, load_id=load_id)
             dimension = 0
 
-        deleted = self._sweep(load_id, upserted + unchanged) if self._reconcile else 0
+        deleted = (
+            self._sweep(load_id, upserted + unchanged, export_dir, store) if self._reconcile else 0
+        )
         return LoadReport(
             collection=self._collection,
             dimension=dimension,
@@ -456,7 +467,11 @@ class QdrantSink:
         )
 
     def _stale_filter(self, load_id: str, models: Any) -> Any:
-        """The points this load owns and did not touch — the stale set, scoped to this corpus.
+        """The points this load owns and did not touch — the sweep's *candidates*, scoped to this
+        corpus.
+
+        Candidates, not the stale set: what is actually deleted is the subset the Export no longer
+        contains (:meth:`_sweep`). This filter only narrows the scan.
 
         Two clauses, and both matter:
 
@@ -482,20 +497,35 @@ class QdrantSink:
             ],
         )
 
-    def _sweep(self, load_id: str, touched: int) -> int:
-        """Delete the stale points of *this corpus*, then prove that set is empty.
+    def _sweep(self, load_id: str, touched: int, export_dir: str, storage: Storage) -> int:
+        """Delete the retracted points of *this corpus*, then prove none is left.
 
-        ``touched`` is how many records this load processed — every one of them was either upserted
-        with this run's marker or payload-restamped with it, so *exactly* that many points must
-        carry the marker when the sweep begins. That equality is checked **before** anything is
-        deleted, because the marker is the only thing separating "current" from "stale": a load that
-        overlaps this one restamps the very points this one just declared current, and an unguarded
-        sweep would then delete them all — erasing a live index while both runs report success. On a
-        mismatch the load fails loudly and deletes nothing, so the worst case stays the documented
-        one: stale-but-present data, never silently-erased data.
+        Two conditions, and only the second one is authoritative.
 
-        The deletion filter itself is scoped to this corpus's ``id_namespace``
-        (:meth:`_stale_filter`), so a co-tenant corpus sharing the collection is never in reach.
+        The marker is the **candidate** filter: ``touched`` is how many records this load processed,
+        every one of them was either upserted with this run's marker or payload-restamped with it,
+        so exactly that many points must carry the marker when the sweep begins. A mismatch means a
+        load is overlapping this one, and the sweep refuses outright — cheap, early, and it catches
+        the common case before a single candidate is enumerated.
+
+        But that check is a *pre*-check, and the marker is a thing another writer can move. If the
+        deletion re-derived "stale" from ``must_not(my marker)`` at delete time, a concurrent
+        ``_restamp`` landing in the window between the guard and the delete would push a point this
+        load had just declared *current* into the delete's reach — the winning load erasing a live
+        record behind a green report, and its own post-sweep count confirming the corrupted state as
+        converged. So the delete never re-derives anything: candidates are enumerated by id and each
+        one is checked against the **Export**, which is the source of truth (ADR-0017) and the one
+        condition no concurrent writer can flip. A point is deleted only when its ``record_id`` is
+        absent from the Export this load just read; a point carrying no ``record_id`` at all
+        (hand-loaded, or written by an older loader) is absent by definition and goes.
+
+        Convergence is then proven in the same terms: a candidate that survived *because it is still
+        in the Export* is live, not unconverged, while a genuinely retracted point that survived the
+        delete is a loud failure. Candidates are paged at ``batch_size``, so the sweep costs
+        O(batch) memory however large the retracted set is (ADR-0033).
+
+        Everything here is scoped to this corpus's ``id_namespace`` (:meth:`_stale_filter`), so a
+        co-tenant corpus sharing the collection is never in reach.
         """
         models = self._load_models()
         mine = models.Filter(
@@ -512,30 +542,84 @@ class QdrantSink:
             )
             raise SinkLoadError(msg)
 
-        stale = self._stale_filter(load_id, models)
-        before = self._count(stale)
-        if before:
-            self._call(
-                "delete",
-                lambda c: c.delete(
-                    collection_name=self._collection,
-                    points_selector=models.FilterSelector(filter=stale),
-                    wait=True,
-                ),
-            )
-        after = self._count(stale)
-        if after:
-            # The verification step, run automatically: a load that leaves stale points behind is
-            # a FAILED load, not a green one with a caveat. Anything else would let a purged
-            # record keep serving.
+        candidates = self._stale_filter(load_id, models)
+        deleted = 0
+        for page in self._candidate_pages(candidates):
+            doomed = self._retracted(page, export_dir, storage)
+            if doomed:
+                self._delete_ids(doomed, models)
+                deleted += len(doomed)
+
+        # The verification step, run automatically: a load that leaves a retracted point behind is
+        # a FAILED load, not a green one with a caveat. Anything else would let a purged record
+        # keep serving.
+        left = sum(
+            len(self._retracted(page, export_dir, storage))
+            for page in self._candidate_pages(candidates)
+        )
+        if left:
             msg = (
-                f"reconcile did not converge on collection {self._collection!r}: {after} point(s) "
-                f"of id_namespace {self._namespace!s} not written by this load are still present "
-                "after the sweep. The collection may "
+                f"reconcile did not converge on collection {self._collection!r}: {left} point(s) "
+                f"of id_namespace {self._namespace!s} that this load's Export no longer contains "
+                "are still present after the sweep. The collection may "
                 "still serve retracted or purged records — do not treat this load as complete."
             )
             raise SinkLoadError(msg)
-        return before
+        return deleted
+
+    def _candidate_pages(self, candidates: Any) -> Iterator[list[tuple[Any, Any]]]:
+        """Page the sweep's candidate set as ``(point id, record_id)``, ``batch_size`` at a time.
+
+        Paged rather than materialised so a purge of a ten-million-record corpus costs the same
+        memory as loading it (ADR-0033). Scroll pages in point-id order, so deleting a page already
+        handed out never disturbs the offset of the pages still to come.
+        """
+        offset: Any = None
+        while True:
+            page, offset = self._call(
+                "scroll",
+                lambda c, o=offset: c.scroll(
+                    collection_name=self._collection,
+                    scroll_filter=candidates,
+                    limit=self._batch_size,
+                    offset=o,
+                    with_payload=[RECORD_ID_COLUMN],
+                    with_vectors=False,
+                ),
+            )
+            if page:
+                yield [(rec.id, (rec.payload or {}).get(RECORD_ID_COLUMN)) for rec in page]
+            if offset is None:
+                return
+
+    def _retracted(
+        self, page: list[tuple[Any, Any]], export_dir: str, storage: Storage
+    ) -> list[Any]:
+        """Of one candidate page, the point ids the Export no longer contains — the real stale set.
+
+        Asked of the Export, not of the store's payload markers: "still in the Export" is a fact a
+        concurrent load cannot change under us, which is what makes the delete safe to issue.
+        """
+        wanted = {rid for _, rid in page if isinstance(rid, str) and rid}
+        exported: set[str] = set()
+        if wanted:
+            for ids in read_record_ids(
+                export_dir, storage, basename=self._basename, batch_size=self._batch_size
+            ):
+                exported |= wanted.intersection(ids)
+                if len(exported) == len(wanted):
+                    break
+        return [pid for pid, rid in page if not (isinstance(rid, str) and rid in exported)]
+
+    def _delete_ids(self, ids: list[Any], models: Any) -> None:
+        self._call(
+            "delete",
+            lambda c: c.delete(
+                collection_name=self._collection,
+                points_selector=models.PointIdsList(points=ids),
+                wait=True,
+            ),
+        )
 
     def _count(self, filt: Any) -> int:
         result = self._call(

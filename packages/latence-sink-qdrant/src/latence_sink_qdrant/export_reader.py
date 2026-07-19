@@ -104,6 +104,46 @@ def read_export(
                 yield rows
 
 
+def read_record_ids(
+    export_dir: str,
+    storage: Storage,
+    *,
+    basename: str = "records",
+    batch_size: int = 1024,
+) -> Iterator[list[str]]:
+    """Stream just the ``record_id`` column of the Export, in batches of at most ``batch_size``.
+
+    The reconciling sweep needs one question answered about a candidate point — *is this
+    ``record_id`` still in the Export?* — and the Export is the only authority on it (ADR-0017). It
+    reads a single column and one row group at a time, so asking costs O(batch) memory (ADR-0033)
+    and never decodes a vector.
+
+    Unlike :func:`read_export` this does **not** require an ``embedding`` column: it answers a
+    membership question, not a load, and the caller has already established that the Export is
+    loadable. A missing file is still a loud
+    :class:`~latence_sink_qdrant.errors.SinkExportError` — an unreadable Export must never be read
+    as "nothing is exported", which would make every stored point look retracted.
+    """
+    uri = f"{export_dir.rstrip('/')}/{basename}.parquet"
+    if not storage.exists(uri):
+        msg = (
+            f"No Export found at {uri!r} while reconciling. The sink will not treat an unreadable "
+            "Export as an empty corpus — that would sweep every point in the collection."
+        )
+        raise SinkExportError(msg)
+    with storage.open(uri, "rb") as fh:
+        parquet = pq.ParquetFile(fh)  # type: ignore[no-untyped-call]
+        if RECORD_ID_COLUMN not in set(parquet.schema_arrow.names):  # pragma: no cover - always set
+            msg = f"The Export at {uri!r} has no {RECORD_ID_COLUMN!r} column; it is not a corpus."
+            raise SinkExportError(msg)
+        for batch in parquet.iter_batches(  # type: ignore[no-untyped-call]
+            batch_size=batch_size, columns=[RECORD_ID_COLUMN]
+        ):
+            ids = [rid for rid in batch.column(0).to_pylist() if isinstance(rid, str) and rid]
+            if ids:
+                yield ids
+
+
 def _to_row(raw: dict[str, Any], width: int | None, uri: str) -> tuple[ExportRow, int]:
     """Project one raw Parquet row into an :class:`ExportRow`, pinning/checking the vector width."""
     record_id = raw.get(RECORD_ID_COLUMN)
@@ -140,4 +180,10 @@ def _to_row(raw: dict[str, Any], width: int | None, uri: str) -> tuple[ExportRow
     return ExportRow(record_id=record_id, vector=values, payload=payload), width
 
 
-__all__ = ["EMBEDDING_COLUMN", "RECORD_ID_COLUMN", "ExportRow", "read_export"]
+__all__ = [
+    "EMBEDDING_COLUMN",
+    "RECORD_ID_COLUMN",
+    "ExportRow",
+    "read_export",
+    "read_record_ids",
+]

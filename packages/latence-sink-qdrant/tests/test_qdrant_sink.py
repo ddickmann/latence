@@ -510,6 +510,56 @@ def test_an_overlapping_load_never_erases_the_points_this_load_declared_current(
     assert client.calls.count("delete") == 0
 
 
+def test_a_restamp_inside_the_guard_delete_window_never_erases_an_exported_record(
+    tmp_path: Path,
+) -> None:
+    """The guard is a *pre*-check; the sweep must not act on a condition re-derived after it.
+
+    The guard counts markers at one instant and the filter-delete re-evaluates ``must_not(my
+    marker)`` at another. A concurrent load restamping a point *in that window* moves it into the
+    delete's reach — so the **winning** load erases a record it had itself just declared current,
+    reports exit 0, and its own post-sweep convergence count (0, by construction) certifies the
+    corrupted collection as converged.
+
+    The only condition a concurrent writer cannot flip is the Export (ADR-0017): ``c0`` is *in* the
+    Export this load read, so nothing this load does may delete it — while the genuinely retracted
+    ``c2`` must still go.
+    """
+    full = write_export(tmp_path / "v1", {"c0": "alpha", "c1": "beta", "c2": "gamma"})
+    after_retraction = write_export(tmp_path / "v2", {"c0": "alpha", "c1": "beta"})
+
+    class RestampInWindow(FakeQdrantClient):
+        """Lands one competing ``set_payload`` the moment the sweep guard has been answered."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.intruder: str | None = None
+
+        def count(
+            self,
+            collection_name: str,
+            count_filter: Any | None = None,
+            exact: bool = True,
+        ) -> Any:
+            result = super().count(collection_name, count_filter=count_filter, exact=exact)
+            # The guard's own count (the only one filtering *for* this load's marker) has just
+            # been answered: the window between the check and the act is now open.
+            if self.intruder is not None and count_filter is not None and count_filter.must:
+                marker, self.intruder = self.intruder, None
+                self.set_payload(collection_name, {LOAD_ID_KEY: marker}, [point_id("c0")])
+            return result
+
+    client = RestampInWindow()
+    sink(client).load(full)
+
+    client.intruder = "a-competing-load"
+    report = sink(client).load(after_retraction)
+
+    assert stored_record_ids(client) == {"c0", "c1"}  # c0 is live and stays live
+    assert report.deleted == 1  # exactly the retracted record, honestly counted
+    assert sink(client).verify_absent(["c0"]) == ["c0"]  # never certified as erased
+
+
 # --- failure containment ---------------------------------------------------------------------------
 
 

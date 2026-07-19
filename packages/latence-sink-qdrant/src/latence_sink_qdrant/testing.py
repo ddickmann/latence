@@ -312,6 +312,47 @@ class FakeQdrantClient:
             found.append(Record(id=pid, payload=shown, vector=vector if with_vectors else None))
         return found
 
+    def scroll(
+        self,
+        collection_name: str,
+        scroll_filter: Filter | None = None,
+        limit: int = 10,
+        offset: Any | None = None,
+        with_payload: bool | list[str] = True,
+        with_vectors: bool = False,
+    ) -> tuple[list[Record], Any | None]:
+        """Page through the collection in point-id order, like the real ``scroll``.
+
+        Returns ``(records, next_page_offset)``; ``next_page_offset`` is the id the *next* call
+        should start from, or ``None`` when the last page has been handed out. Ordering is by point
+        id (Qdrant's own scroll order) so pagination is stable, and a page already handed out can be
+        deleted without disturbing the offset of the pages still to come — which is exactly what the
+        sink's sweep does.
+        """
+        self._enter("scroll")
+        store = self._collection(collection_name)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise FakeUnexpectedResponse(400, "limit must be a positive integer")
+        ordered = sorted(store.items(), key=lambda kv: str(kv[0]))
+        if offset is not None:
+            start = str(_validate_point_id(offset))
+            ordered = [kv for kv in ordered if str(kv[0]) >= start]
+        matched = [
+            kv for kv in ordered if scroll_filter is None or _matches(kv[1][1], scroll_filter)
+        ]
+        page = matched[:limit]
+        next_offset = matched[limit][0] if len(matched) > limit else None
+        records = []
+        for pid, (vector, payload) in page:
+            if with_payload is True:
+                shown: dict[str, Any] | None = dict(payload)
+            elif with_payload is False:
+                shown = None
+            else:
+                shown = {k: payload[k] for k in with_payload if k in payload}
+            records.append(Record(id=pid, payload=shown, vector=vector if with_vectors else None))
+        return records, next_offset
+
     def set_payload(
         self,
         collection_name: str,
