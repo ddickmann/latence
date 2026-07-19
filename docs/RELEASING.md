@@ -104,11 +104,28 @@ bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets 
 (cd release-assets && shasum -a 256 -c SHA256SUMS)
 ```
 
-**Last verified local dry run** (tag `v0.1.0`, all 25 packages): 56 distributions built,
-a 45-component CycloneDX 1.6 SBOM generated from `uv.lock` and stamped as
-`latence-framework 0.1.0`, 58 assets checksummed, and `shasum -a 256 -c SHA256SUMS`
-verified all 58. Running the script twice produced a byte-identical `sbom.cdx.json`
+**Last verified local dry run** (tag `v0.1.0`). Each count below is *derived from the tree*,
+and `test_releasing_dry_run_evidence_matches_the_tree` recomputes all three from `packages/`
+on every test run — so this block cannot silently rot as the workspace grows (it once
+claimed 25 packages / 56 distributions / 58 assets against a tree that had none of those):
+
+| measured | value | derivation |
+| --- | --- | --- |
+| packages built | 32 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
+| distributions | 64 | one sdist + one wheel per package (every package builds with `hatchling`) |
+| assets checksummed | 66 | the 64 distributions + `sbom.cdx.json` + `VERIFY.md` |
+
+`shasum -a 256 -c SHA256SUMS` verified all 66. The CycloneDX 1.6 SBOM was generated from
+`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 66 components — 54 pinned
+third-party requirements plus 12 workspace path entries (see below). Running
+`scripts/generate-sbom.sh` twice produced a byte-identical `sbom.cdx.json`
 (`--output-reproducible`), so the release is reproducible from the same lockfile.
+
+> Those 12 components are emitted as `unknown`: they are the `./packages/...` path
+> requirements that `uv export --no-emit-project` does not strip and that `cyclonedx-py`
+> cannot resolve to a name or version. They are inert for CVE matching — the third-party
+> surface an adopter scans is the 54 pinned components — but they do pad the component
+> count. Recorded in `issues/audit/R2-docs_truth-7.md`.
 
 > The SBOM generator is version-pinned (`cyclonedx-bom>=7,<8`) on purpose. It had silently
 > stopped working: `cyclonedx-py` 7 removed the `--outfile` flag the script passed, so the
@@ -156,8 +173,8 @@ the commit you are about to tag.
 
 > **Single source of truth (open option).** Versions are currently duplicated per package.
 > A future improvement is a shared source (a `_version.py` read via Hatchling `dynamic`,
-> or a release script). It was left out of 0.1.0 to avoid perturbing the 25 already-green
-> build backends; adopt it when the release cadence justifies the machinery.
+> or a release script). It was left out of 0.1.0 to avoid perturbing the already-green
+> per-package build backends; adopt it when the release cadence justifies the machinery.
 
 ## Publishing to PyPI (manual, gated — currently OFF)
 

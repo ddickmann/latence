@@ -17,6 +17,7 @@ Everything here is deterministic, offline, and dependency-free.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -371,7 +372,9 @@ def test_front_page_and_docs_route_a_reporter_to_the_cvd_policy() -> None:
 # network (it fetches cyclonedx-bom) and ~30s, which does not belong in the merge gate. They
 # encode the failure that actually happened — cyclonedx-bom 7 removed `--outfile`, so the
 # unpinned script had silently stopped producing an SBOM at all. The end-to-end proof is the
-# release dry run documented in docs/RELEASING.md.
+# release dry run documented in docs/RELEASING.md — whose counts are no longer unguarded
+# prose: test_releasing_dry_run_evidence_matches_the_tree (below) recomputes them from
+# packages/ and fails when the document and the tree disagree.
 # --------------------------------------------------------------------------------------
 
 _GENERATE_SBOM = _REPO_ROOT / "scripts" / "generate-sbom.sh"
@@ -416,3 +419,98 @@ def test_releasing_doc_documents_the_signing_and_sbom_steps() -> None:
     assert "-c SHA256SUMS" in doc
     assert "sbom.cdx.json" in doc
     assert "dry_run" in doc, "no documented rehearsal procedure"
+
+
+# --------------------------------------------------------------------------------------
+# The "Last verified local dry run" evidence block
+#
+# The block is the only end-to-end evidence that the release + SBOM machinery actually
+# produces a verifiable asset set, so it has to stay reproducible. It did not: it claimed
+# "all 25 packages: 56 distributions built … 58 assets checksummed" against a tree that had
+# 32 packages (64 distributions, 66 assets) — and 25 was already wrong when it was written.
+# Prose evidence that nothing recomputes is not evidence, so recompute it here.
+# --------------------------------------------------------------------------------------
+
+_RELEASING = _REPO_ROOT / "docs" / "RELEASING.md"
+
+
+def _package_dirs() -> list[Path]:
+    """Exactly what the release workflow's ``for pkg in packages/*/`` loop builds."""
+    return sorted(p.parent for p in (_REPO_ROOT / "packages").glob("*/pyproject.toml"))
+
+
+def _documented_dry_run_counts() -> dict[str, int]:
+    """The derivation table in the evidence block, as {label: value}."""
+    rows = re.findall(
+        r"^\|\s*(packages built|distributions|assets checksummed)\s*\|\s*(\d+)\s*\|",
+        _RELEASING.read_text(),
+        re.MULTILINE,
+    )
+    return {label: int(value) for label, value in rows}
+
+
+def test_releasing_dry_run_evidence_matches_the_tree() -> None:
+    """The documented dry-run counts are recomputed from packages/ — drift fails the gate."""
+    counts = _documented_dry_run_counts()
+    assert set(counts) == {"packages built", "distributions", "assets checksummed"}, (
+        "the 'Last verified local dry run' derivation table in docs/RELEASING.md must state "
+        f"all three derived counts; found {sorted(counts)}"
+    )
+
+    packages = _package_dirs()
+    assert counts["packages built"] == len(packages), (
+        f"docs/RELEASING.md claims the dry run built {counts['packages built']} packages, but "
+        f"packages/ holds {len(packages)}. release.yml builds `for pkg in packages/*/`, so "
+        "adding or removing a package changes the release — update the evidence block."
+    )
+
+    # The x2 derivation only holds because every package emits an sdist AND a wheel.
+    not_hatchling = [
+        p.name
+        for p in packages
+        if 'build-backend = "hatchling.build"' not in (p / "pyproject.toml").read_text()
+    ]
+    assert not not_hatchling, (
+        "the documented '2 distributions per package' derivation assumes hatchling (sdist + "
+        f"wheel) for every package; these do not use it: {not_hatchling}"
+    )
+    assert counts["distributions"] == 2 * len(packages), (
+        f"{len(packages)} hatchling packages build {2 * len(packages)} distributions, but "
+        f"docs/RELEASING.md records {counts['distributions']}"
+    )
+
+    # release-integrity.sh stages the distributions flat and adds exactly two more assets
+    # before writing SHA256SUMS, which covers every file except SHA256SUMS* itself.
+    script = _SCRIPT.read_text()
+    assert 'SBOM="$OUT/sbom.cdx.json"' in script and 'cat > "$OUT/VERIFY.md"' in script, (
+        "the '+2 assets' derivation assumes release-integrity.sh stages sbom.cdx.json and "
+        "VERIFY.md alongside the distributions — it no longer does"
+    )
+    assert counts["assets checksummed"] == counts["distributions"] + 2, (
+        f"{counts['distributions']} distributions + sbom.cdx.json + VERIFY.md = "
+        f"{counts['distributions'] + 2} assets, but docs/RELEASING.md records "
+        f"{counts['assets checksummed']}"
+    )
+
+    doc = _RELEASING.read_text()
+    verified = re.search(r"-c SHA256SUMS`? verified all (\d+)", doc)
+    assert verified is not None, "the evidence block no longer records a verified asset count"
+    assert int(verified.group(1)) == counts["assets checksummed"], (
+        "the evidence block verifies a different number of assets than it says it checksummed"
+    )
+
+
+def test_releasing_sbom_component_arithmetic_is_consistent() -> None:
+    """The SBOM sentence's total equals its own breakdown (third-party + workspace paths)."""
+    doc = _RELEASING.read_text()
+    total = re.search(r"carried (\d+) components", doc)
+    third_party = re.search(r"(\d+) pinned\s+third-party requirements", doc)
+    workspace = re.search(r"plus (\d+) workspace path entries", doc)
+    assert total and third_party and workspace, (
+        "the evidence block must break the SBOM component count down into pinned "
+        "third-party requirements + workspace path entries, so a change in either is visible"
+    )
+    assert int(total.group(1)) == int(third_party.group(1)) + int(workspace.group(1)), (
+        f"SBOM component arithmetic does not add up: {total.group(1)} != "
+        f"{third_party.group(1)} + {workspace.group(1)}"
+    )
