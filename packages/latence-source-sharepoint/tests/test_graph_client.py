@@ -6,6 +6,7 @@ logic under test is the logic that ships — not a parallel implementation livin
 
 from __future__ import annotations
 
+import urllib.error
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,7 +19,7 @@ from latence_source_sharepoint.testing import (
     FakeGraphApi,
     FakeGraphTransport,
 )
-from latence_source_sharepoint.transport import UrllibTransport, require_tls
+from latence_source_sharepoint.transport import UrllibTransport, redact_url, require_tls
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -309,3 +310,67 @@ def test_the_production_transport_refuses_a_cleartext_request() -> None:
     headers: Mapping[str, str] = {"Authorization": "Bearer secret"}
     with pytest.raises(ConfigError, match="https"):
         UrllibTransport().request("GET", "http://graph.microsoft.com/v1.0/me", headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# The pre-authenticated download URL is a credential (ADR-0034 / ADR-0044)
+# ---------------------------------------------------------------------------
+
+# Shaped exactly like the URL Graph puts in the 302 'Location' for a content download: the
+# 'tempauth' query parameter is a live access token for the storage host.
+_PREAUTH_TOKEN = "eyJhbGciOiJub25lIn0.LIVE_TEMPAUTH_TOKEN_VALUE.sig"  # noqa: S105 - fake
+_PREAUTH_PATH = "/_layouts/15/download.aspx"
+_PREAUTH_QUERY = f"UniqueId=abc-123&tempauth={_PREAUTH_TOKEN}&ApiVersion=2.0"
+
+
+class _ExplodingOpener:
+    """Stands in for the urllib opener when the storage host is unreachable."""
+
+    def open(self, request: object, timeout: float | None = None) -> object:
+        raise urllib.error.URLError("[Errno 8] nodename nor servname provided")
+
+
+def test_a_transport_failure_never_echoes_the_preauthenticated_download_token() -> None:
+    url = f"https://contoso.sharepoint.com{_PREAUTH_PATH}?{_PREAUTH_QUERY}"
+    transport = UrllibTransport()
+    transport._opener = _ExplodingOpener()  # noqa: SLF001 - the socket is the thing being faked
+
+    with pytest.raises(ProviderError) as raised:
+        transport.request("GET", url, headers={})
+
+    message = str(raised.value)
+    assert _PREAUTH_TOKEN not in message
+    assert "tempauth" not in message
+    assert "UniqueId=abc-123" not in message
+    # Still diagnosable: the operator learns which host and which path failed, and why.
+    assert "contoso.sharepoint.com" in message
+    assert _PREAUTH_PATH in message
+    assert "nodename nor servname" in message
+
+
+def test_a_non_tls_download_redirect_never_echoes_its_token() -> None:
+    url = f"http://contoso.sharepoint.com{_PREAUTH_PATH}?{_PREAUTH_QUERY}"
+
+    with pytest.raises(ConfigError) as raised:
+        require_tls(url)
+
+    message = str(raised.value)
+    assert _PREAUTH_TOKEN not in message
+    assert "tempauth" not in message
+    assert "https" in message
+    assert "contoso.sharepoint.com" in message
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://host/path?a=b", "https://host/path?<redacted>"),
+        ("https://host/path", "https://host/path"),
+        ("https://user:pw@host/path", "https://host/path"),
+        ("https://host:8443/p#frag", "https://host:8443/p#<redacted>"),
+        ("http://[::1]:8080/p?t=1", "http://[::1]:8080/p?<redacted>"),
+        ("graph/v1.0", "graph/v1.0"),
+    ],
+)
+def test_redact_url_keeps_the_diagnosable_parts_and_nothing_else(url: str, expected: str) -> None:
+    assert redact_url(url) == expected

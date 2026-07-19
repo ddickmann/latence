@@ -93,13 +93,36 @@ class HttpTransport(Protocol):
         ...
 
 
+def redact_url(url: str) -> str:
+    """Return a form of ``url`` that is safe to put in an error message and therefore a log.
+
+    Scheme, host, port and path survive — that is the whole diagnostic value of a URL in a
+    failure message. The **query string, the fragment and any userinfo are dropped**, because
+    not every URL this connector touches is a plain Graph API URL: Graph answers a content
+    download with a ``302`` to a *pre-authenticated* storage URL whose query string carries a
+    live access token (``...&tempauth=<JWT>&...``). Echoing that verbatim into a typed error
+    leaks a working credential into the operator's log (ADR-0034/ADR-0044).
+
+    The redaction is unconditional rather than a denylist of known-sensitive parameter names:
+    the query string of a URL the *server* handed us is not ours to classify.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or ""
+    if ":" in host:  # IPv6 literal — urlsplit strips the brackets, urlunsplit needs them back.
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if host and parsed.port is not None else host
+    query = "<redacted>" if parsed.query else ""
+    fragment = "<redacted>" if parsed.fragment else ""
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, query, fragment))
+
+
 def require_tls(url: str) -> None:
     """Refuse any URL that would put a bearer token on the wire in the clear.
 
     Raises :class:`~latence_core.errors.ConfigError` for a non-``https`` URL, except for a
-    loopback host (a local Graph emulator). The URL is echoed in the message; a token never
-    appears in a URL (Graph rejects query-string tokens, and so does the shipped fake), so
-    the message is safe to log.
+    loopback host (a local Graph emulator). The URL is echoed in the message only after
+    :func:`redact_url` — this guard also runs on the server-supplied download redirect, whose
+    query string carries a live pre-authenticated token.
     """
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme == "https":
@@ -108,8 +131,8 @@ def require_tls(url: str) -> None:
         return
     msg = (
         f"Refusing to send a SharePoint request over {parsed.scheme or 'a schemeless URL'!r} "
-        f"({url!r}): credentials may only travel over https (loopback http is allowed for a "
-        "local Graph emulator). Fix 'graph_base_url' / 'login_base_url'."
+        f"({redact_url(url)!r}): credentials may only travel over https (loopback http is "
+        "allowed for a local Graph emulator). Fix 'graph_base_url' / 'login_base_url'."
     )
     raise ConfigError(msg)
 
@@ -178,6 +201,11 @@ class UrllibTransport:
             )
         except urllib.error.URLError as exc:
             # A genuine transport failure. The reason is included; headers (and therefore the
-            # bearer token) never are.
-            msg = f"SharePoint transport failure for {method.upper()} {url!r}: {exc.reason}"
+            # bearer token) never are, and the URL only after redact_url — this is also the
+            # leg that fetches the pre-authenticated download URL, whose query string carries
+            # a live access token.
+            msg = (
+                f"SharePoint transport failure for {method.upper()} "
+                f"{redact_url(url)!r}: {exc.reason}"
+            )
             raise ProviderError(msg) from exc
