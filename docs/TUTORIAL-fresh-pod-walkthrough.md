@@ -82,6 +82,7 @@ pip install --break-system-packages \
   -e packages/latence-parser-lighton-vllm \
   -e packages/latence-schema-inducer \
   -e packages/latence-extract-gliner2 \
+  -e packages/latence-pii-gliner2 \
   -e packages/latence-pii-gliner \
   -e packages/latence-disambig-glinker \
   -e packages/latence-linkpred-ultra \
@@ -101,9 +102,14 @@ pip install --break-system-packages \
 
 - `gliner2 peft accelerate` — the GLiNER2 fused entity+relation extractor (mdeberta-v3 backbone).
 - `gliner` — the learned PII redactor `redaction.gliner_pii`, which §4's hand-written stack wires.
-  (`latence setup --profile enterprise-sota` blesses `redaction.gliner2` instead — #197, ADR-0041
-  §7a — so it needs no package beyond the `gliner2` above. Both are supported; install both to run
-  §4 and §5 from the same environment.)
+  Its entry point ships in the **`packages/latence-pii-gliner`** distribution above.
+- The redactor `latence setup --profile enterprise-sota` blesses is the **other** one,
+  `redaction.gliner2` (#197, ADR-0041 §7a). Do not confuse the two names: the `gliner2` line in the
+  pip block above is the third-party **PyPI wheel** (the library + mdeberta-v3 backbone), while the
+  `redaction.gliner2` **entry point** is registered only by the
+  **`packages/latence-pii-gliner2`** distribution — which is why that package is in the editable
+  list. Both redactors are supported; both are installed above, so §3's wizard fast path and §4's
+  hand-written stack run from the same environment.
 - `glinker flashdeberta` — the neural GLinker entity-linker (`disambiguation.glinker`): the
   `gliner-linker-large` biencoder + `gliner-linker-rerank` reranker + FlashDeBERTa.
 - `sentence-transformers` — the Granite r2 embedder (the GLinker resolver's opt-in STS rung **and**
