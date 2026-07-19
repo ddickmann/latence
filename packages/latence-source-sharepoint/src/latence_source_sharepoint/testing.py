@@ -54,11 +54,17 @@ LOGIN_HOST = "https://login.microsoftonline.com"
 
 @dataclass(frozen=True)
 class FakeFile:
-    """One file in the fake drive. ``hash_algorithm=None`` models a drive that reports no hash."""
+    """One file in the fake drive.
+
+    ``hash_algorithm`` models which ``file.hashes`` facet the backend reports: ``"sha256Hash"``
+    (OneDrive Personal, and the default here because it is the one algorithm the connector can
+    reproduce from the bytes), ``"quickXorHash"`` (SharePoint Online), or ``None`` — a drive
+    state that really occurs, because Graph computes the facet asynchronously after upload.
+    """
 
     path: str
     content: bytes
-    hash_algorithm: str | None = "quickXorHash"
+    hash_algorithm: str | None = "sha256Hash"
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,9 @@ class FakeGraphApi:
     # ``download_throttle_burst`` requests to it answer ``download_throttle_status`` with
     # ``Retry-After: download_retry_after_seconds``; the default of 0 leaves the download host
     # answering exactly as before.
+    # Report a ``sha256Hash`` that does NOT match the bytes for this drive-relative path, to
+    # exercise the connector's post-download verification of a listing-derived identity.
+    corrupt_listing_hash_for: str | None = None
     download_throttle_burst: int = 0
     download_throttle_status: int = 503
     download_retry_after_seconds: int = 1
@@ -144,9 +153,18 @@ class FakeGraphApi:
     def _file_entry(self, entry: FakeFile) -> dict[str, Any]:
         file_facet: dict[str, Any] = {"mimeType": "text/plain"}
         if entry.hash_algorithm is not None:
-            # A deterministic stand-in for the real hash value; the connector only requires
-            # that it changes iff the content changes, which this does.
-            digest = hashlib.sha256(entry.content).hexdigest()[:32].upper()
+            if entry.hash_algorithm == "sha256Hash":
+                # Graph's sha256Hash IS the SHA-256 of the file content, uppercase hex — the
+                # one facet the connector can reproduce from the bytes, so the fake reports it
+                # faithfully rather than as a stand-in.
+                digest = hashlib.sha256(entry.content).hexdigest().upper()
+                if self.corrupt_listing_hash_for == entry.path:
+                    digest = hashlib.sha256(b"not the bytes").hexdigest().upper()
+            else:
+                # A deterministic stand-in for quickXorHash/sha1Hash, whose real values the
+                # connector never reproduces; it only requires that it changes iff the
+                # content changes, which this does.
+                digest = hashlib.sha256(entry.content).hexdigest()[:32].upper()
             file_facet["hashes"] = {entry.hash_algorithm: digest}
         return {
             "id": self.item_id(entry.path),

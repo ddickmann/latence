@@ -93,9 +93,11 @@ came from.
 
 ## Delta (ADR-0018)
 
-Graph reports a content hash for every `driveItem` (`quickXorHash` on SharePoint Online,
-`sha256Hash` on OneDrive Personal) **in the listing, before any download**. The connector mints
-`document_id = sha256(<algorithm>:<hash>|<size>)` from it, so:
+`document_id` is **always** `sha256(<the document's bytes>)` — one id function, one namespace,
+never a function of anything Graph reports *about* the document. Graph carries a content hash for
+a `driveItem` **in the listing, before any download**; when it is a `sha256Hash` (OneDrive
+Personal) that hash **is** the SHA-256 of the content, so the connector reads the id off the
+listing for free — the same value hashing the bytes would give. So:
 
 - an unchanged document keeps the same id across runs; the DeltaRunner marks it `UNCHANGED` and
   injects the id into this Provider's `exclude_document_ids` — and the connector then **skips it
@@ -119,9 +121,19 @@ id" is "byte-identical", which is what the Runner's cross-run record reuse relie
 stable-identity Source would report `UPDATED` instead of `ADDED`+`DELETED`; see
 `latence_core.state.delta_detector`.
 
-If a drive reports no hash for an item, the connector falls back to downloading and hashing the
-bytes — still correct, just not free. It never derives identity from mutable metadata such as
-`eTag`, which would churn the corpus on a metadata-only edit.
+If the listing carries no usable `sha256Hash` — none at all (Graph computes `file.hashes`
+asynchronously after upload, so a fresh item has none) or a `quickXorHash` / `sha1Hash`, which
+are not reproducible SHA-256 content addresses — the connector downloads and hashes the bytes.
+Still correct, just not free. It does **not** mint the id from the facet instead: that would put
+one document in two id namespaces, so the facet merely appearing would change the id of a
+document nobody touched and the DeltaRunner would read it as `DELETED`+`ADDED` — making a no-op
+delta cost *more* than a full run (audit `R2-connectors_ingestion-10`). Restoring the free path
+on SharePoint Online means implementing Microsoft's QuickXorHash locally and verifying it against
+their published test vectors; until that verification exists, correctness wins over the saving.
+The connector likewise never derives identity from mutable metadata such as `eTag`, which would
+churn the corpus on a metadata-only edit. When a listing-derived id *is* used and the bytes
+arrive, they are verified against it — a contradiction is a typed `ProviderError`, never a
+silently wrong `document_id` (ADR-0034).
 
 ## Offline testing and the live smoke path
 

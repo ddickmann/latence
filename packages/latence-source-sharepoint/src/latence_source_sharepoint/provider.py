@@ -16,16 +16,20 @@ implements the same one-method ``produce(storage) -> Iterator[ParserInput]`` the
   inherits it unchanged, so an exported chunk still names the SharePoint item it came from.
 * ``document_id`` — the **content address** (see below).
 
-**Delta** (ADR-0018) — the property that makes an incremental run cheap. Graph reports a
-content hash for each ``driveItem`` (``quickXorHash`` on SharePoint Online, ``sha256Hash`` on
-OneDrive Personal) in the *listing*, before any download. The connector mints
-``document_id = sha256(<algorithm>:<hash>|<size>)`` from that, so:
+**Delta** (ADR-0018) — the property that makes an incremental run cheap. ``document_id`` is
+**always** ``sha256(<the document's bytes>)``, exactly like the reference
+``source.local_folder`` — one id function, one namespace, never a function of anything Graph
+reports *about* the document. Graph carries a content hash for a ``driveItem`` in the
+*listing*, before any download; when that hash is a ``sha256Hash`` (OneDrive Personal) it **is**
+the SHA-256 of the content, so the connector reads the id straight off the listing — the same
+value hashing the bytes would give, just free. So:
 
 * a document whose bytes did not change keeps the same id across runs — the DeltaRunner
   intersects ids with the parent Corpus Version, marks it UNCHANGED, and injects it into this
   Provider's ``exclude_document_ids``;
-* **and this Provider then skips it without downloading it.** The exclusion is checked against
-  the id derived from the *listing*, before the download call is ever made. The runner's
+* **and this Provider then skips it without downloading it**, whenever the listing gave up the
+  id. The exclusion is checked against that listing-derived id before the download call is ever
+  made. The runner's
   *discovery* pass — which enumerates the current ids before any exclusion exists — is answered
   from the listing too, via the optional
   :class:`~latence_core.capability.DocumentEnumerator` seam (:meth:`SharePointSource.document_ids`);
@@ -42,9 +46,18 @@ OneDrive Personal) in the *listing*, before any download. The connector mints
   relies on. (A stable-identity Source would report UPDATED instead; see
   :mod:`latence_core.state.delta_detector`.)
 
-If a drive reports no hash for an item, the connector falls back to downloading and hashing
-the bytes — correct, just not free — rather than inventing an identity from mutable metadata
-like ``eTag``, which would churn the corpus on a metadata-only edit.
+If the listing carries no usable ``sha256Hash`` — no hash at all (Graph computes the facet
+asynchronously after upload, so a freshly-uploaded item has none), or a ``quickXorHash`` /
+``sha1Hash``, which are not reproducible SHA-256 content addresses — the connector falls back
+to downloading and hashing the bytes. Correct, just not free. What it will **not** do is mint
+the id from the facet instead: that would put "the same document" in two id namespaces, and the
+facet appearing (or the backend's algorithm differing) would change the id of a document nobody
+touched — the DeltaRunner reads that as DELETED+ADDED and a no-op delta run costs *more* than a
+full one (audit R2-connectors_ingestion-10). Nor does it derive identity from mutable metadata
+like ``eTag``, which would churn the corpus on a metadata-only edit. Restoring the free path on
+SharePoint Online means implementing Microsoft's QuickXorHash locally and verifying it against
+their published test vectors; until that verification exists, correctness wins over the
+transfer saving.
 
 **Secrets** are environment-only and enforced (:mod:`~latence_source_sharepoint.auth`): a
 config that inlines a token is a :class:`~latence_core.errors.ConfigError`, so no credential
@@ -57,7 +70,7 @@ import hashlib
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Classification, ParserInput, Provenance
-from latence_core.errors import ConfigError
+from latence_core.errors import ConfigError, ProviderError
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
@@ -263,19 +276,26 @@ class SharePointSource:
                 raise ConfigError(msg)
             seen_names[file_name] = item.drive_path
 
-            # The Delta win: the identity comes from the LISTING when Graph reported a hash,
-            # so an excluded (unchanged) document is skipped with zero bytes transferred.
+            # The Delta win: the identity comes from the LISTING when Graph reported a
+            # reproducible sha256Hash, so an excluded (unchanged) document is skipped with zero
+            # bytes transferred. It is the SAME id hashing the bytes would produce — there is
+            # only ever one namespace (audit R2-connectors_ingestion-10).
             listed_id = _listed_document_id(item)
-            if listed_id is not None:
-                if listed_id in self._excluded:
-                    continue
-                data = self._client.download(item)
-                document_id = listed_id
-            else:
-                data = self._client.download(item)
-                document_id = "sha256:" + hashlib.sha256(data).hexdigest()
-                if document_id in self._excluded:
-                    continue
+            if listed_id is not None and listed_id in self._excluded:
+                continue
+            data = self._client.download(item)
+            document_id = _content_document_id(data)
+            if listed_id is not None and listed_id != document_id:
+                msg = (
+                    f"SharePointSource: the content hash Graph reported for {item.drive_path!r} "
+                    f"({item.content_hash}) does not match the bytes it served "
+                    f"({document_id}). The listing identity a Delta run skips on would not be "
+                    "the identity of the document, so the run stops rather than record a "
+                    "wrong document_id."
+                )
+                raise ProviderError(msg)
+            if document_id in self._excluded:
+                continue
 
             language = (
                 detect_language(data.decode("utf-8", errors="replace"))
@@ -306,12 +326,14 @@ class SharePointSource:
         DeltaRunner has to enumerate the library's document ids before it can work out which ones
         are unchanged, and that pass runs before any exclusion is known — so if it went through
         :meth:`produce` it would pull every document's bytes on every delta run and the saving
-        would be zero. Graph reports a content hash per ``driveItem`` in the listing, so the id is
-        computable from metadata alone; the ids are byte-for-byte the ones :meth:`produce` stamps
-        on ``Provenance.document_id``, which is what makes the intersection sound.
+        would be zero. When Graph carries a ``sha256Hash`` for a ``driveItem`` the id is
+        computable from the listing alone; the ids are byte-for-byte the ones :meth:`produce`
+        stamps on ``Provenance.document_id`` — the same single ``sha256(<bytes>)`` namespace,
+        which is what makes the intersection sound.
 
-        Only an item whose drive reports NO hash still has to be fetched (and hashed) here — the
-        same unavoidable fallback :meth:`produce` makes.
+        An item the listing cannot address that way (no hash yet, or a ``quickXorHash``) still
+        has to be fetched and hashed here — the same unavoidable fallback :meth:`produce` makes,
+        and the same id.
         """
         for item in self._client.list_files(self._root_path):
             extension = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
@@ -319,7 +341,7 @@ class SharePointSource:
                 continue
             listed_id = _listed_document_id(item)
             if listed_id is None:
-                listed_id = "sha256:" + hashlib.sha256(self._client.download(item)).hexdigest()
+                listed_id = _content_document_id(self._client.download(item))
             if listed_id not in self._excluded:
                 yield listed_id
 
@@ -332,13 +354,46 @@ class SharePointSource:
         return f"sharepoint://{self._drive_id}{item.drive_path}?itemId={item.item_id}"
 
 
-def _listed_document_id(item: GraphItem) -> str | None:
-    """The content address derivable from the listing alone, or ``None`` if Graph reported none.
+_SHA256_HEX_LENGTH = 64
 
-    ``sha256`` over the algorithm-qualified hash and the size: stable across runs, changes iff
-    the content changes, and — crucially — computable without downloading the document.
+
+def _content_document_id(data: bytes) -> str:
+    """THE id function. One namespace, one input: the document's bytes."""
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _listed_document_id(item: GraphItem) -> str | None:
+    """The same content address, read off the listing — or ``None`` when it cannot be.
+
+    The id is *always* ``sha256(<bytes>)`` (:func:`_content_document_id`). This function is a
+    shortcut to that value, never a second definition of it: Graph's ``sha256Hash`` **is** the
+    SHA-256 of the file content, so when the listing carries a well-formed one the id is known
+    without downloading anything, and it is identical by construction to the id hashing the
+    bytes would produce.
+
+    Any other facet (``quickXorHash`` on SharePoint Online, legacy ``sha1Hash``) is not a
+    reproducible SHA-256 content address, so it yields ``None`` and the caller downloads and
+    hashes. That costs the zero-transfer delta on those backends, and it is the price of the
+    invariant: Graph computes ``file.hashes`` asynchronously and reports different algorithms on
+    different backends, so an id minted from the facet changes for a document nobody touched —
+    the DeltaRunner then reads an untouched document as DELETED+ADDED and a no-op delta costs
+    more than a full run (audit R2-connectors_ingestion-10). Restoring the fast path for
+    ``quickXorHash`` means implementing Microsoft's QuickXorHash locally and verifying it
+    against their published test vectors; until that verification exists it stays out.
     """
+    hex_digest = _listed_sha256_hex(item)
+    return None if hex_digest is None else "sha256:" + hex_digest
+
+
+def _listed_sha256_hex(item: GraphItem) -> str | None:
+    """The listing's ``sha256Hash`` as lowercase hex, or ``None`` if there isn't a usable one."""
     if item.content_hash is None:
         return None
-    digest = hashlib.sha256(f"{item.content_hash}|{item.size}".encode()).hexdigest()
-    return "sha256:" + digest
+    algorithm, _, value = item.content_hash.partition(":")
+    if algorithm != "sha256" or len(value) != _SHA256_HEX_LENGTH:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
+    return value

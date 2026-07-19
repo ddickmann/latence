@@ -273,6 +273,62 @@ def test_a_drive_without_hashes_falls_back_to_hashing_the_downloaded_bytes(
     assert excluded == []
 
 
+def test_document_id_is_one_namespace_across_every_hash_facet_state(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-connectors_ingestion-10: unchanged bytes keep ONE id whatever Graph reports.
+
+    Graph computes ``file.hashes`` asynchronously after upload and the algorithm differs by
+    backend (``quickXorHash`` on SharePoint Online, ``sha256Hash`` on OneDrive Personal), so the
+    SAME untouched item is listed hashless on one run and hashed on the next. If the id is a
+    function of the facet rather than of the bytes, the DeltaRunner sees DELETED+ADDED for a
+    document nobody touched: it is re-downloaded and re-extracted, and a no-op delta costs more
+    than a full run. The id must be a function of the CONTENT alone.
+    """
+    body = b"# unchanged bytes\n"
+    produced_ids: dict[str | None, str] = {}
+    enumerated_ids: dict[str | None, str] = {}
+    for algorithm in (None, "quickXorHash", "sha256Hash"):
+        item = FakeFile(path="/a.md", content=body, hash_algorithm=algorithm)
+        produced_ids[algorithm] = _produce(
+            _source(FakeGraphTransport(_api(item)), monkeypatch=monkeypatch), storage
+        )[0].provenance.document_id
+        enumerated_ids[algorithm] = next(
+            iter(
+                _source(
+                    FakeGraphTransport(_api(item)), monkeypatch=monkeypatch
+                ).document_ids(storage)
+            )
+        )
+
+    assert len(set(produced_ids.values())) == 1, (
+        "the same bytes minted different document_ids per hash facet state: " f"{produced_ids}"
+    )
+    # The enumeration seam must agree with produce(), or the intersection the runner does is
+    # against ids nothing ever stamps.
+    assert enumerated_ids == produced_ids
+
+    # ...and it is still a CONTENT address: different bytes, different id.
+    changed = _produce(
+        _source(
+            FakeGraphTransport(_api(FakeFile(path="/a.md", content=b"# changed bytes\n"))),
+            monkeypatch=monkeypatch,
+        ),
+        storage,
+    )
+    assert changed[0].provenance.document_id not in set(produced_ids.values())
+
+
+def test_a_listing_hash_that_contradicts_the_bytes_is_a_typed_error(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0034: "same id ⇒ byte-identical" is enforced once the bytes are in hand, not assumed."""
+    transport = FakeGraphTransport(_api(FakeFile(path="/a.md", content=b"# real\n")))
+    transport.api.corrupt_listing_hash_for = "/a.md"
+    with pytest.raises(ProviderError, match="content hash"):
+        _produce(_source(transport, monkeypatch=monkeypatch), storage)
+
+
 # ---------------------------------------------------------------------------
 # Secrets: environment-only, enforced and unleaked
 # ---------------------------------------------------------------------------
