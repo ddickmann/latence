@@ -59,6 +59,22 @@ class SinkLoadError(SinkError):
     """
 
 
+class SinkVerificationError(SinkError):
+    """The erasure audit could not be *performed* — so it must not be reported as passed.
+
+    Raised by :meth:`~latence_sink_qdrant.sink.QdrantSink.verify_absent` when the collection it was
+    pointed at does not exist. An empty result from that method is the evidence a Retraction/Purge
+    runbook ends with, and "the records are gone" and "I inspected nothing" are not the same
+    finding: a typo'd collection or a stale URL would otherwise certify records that are still live
+    and searchable in the real collection.
+
+    Deliberately **not** a :class:`SinkLoadError`: the load verb's create-if-absent behaviour on a
+    missing collection is correct (it is projecting the Export), whereas an audit verb may neither
+    create nor assume anything. Like the other store-facing errors it carries no URL, api key or
+    driver text — only the collection name and the remedy.
+    """
+
+
 class SinkAuthError(SinkLoadError):
     """The store rejected the credentials (HTTP 401/403 from Qdrant).
 
@@ -75,4 +91,5 @@ __all__ = [
     "SinkError",
     "SinkExportError",
     "SinkLoadError",
+    "SinkVerificationError",
 ]

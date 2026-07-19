@@ -27,6 +27,7 @@ from latence_sink_qdrant.errors import (
     SinkError,
     SinkExportError,
     SinkLoadError,
+    SinkVerificationError,
 )
 from latence_sink_qdrant.export_reader import ExportRow, read_export
 from latence_sink_qdrant.sink import (
@@ -52,6 +53,7 @@ __all__ = [
     "SinkError",
     "SinkExportError",
     "SinkLoadError",
+    "SinkVerificationError",
     "point_id",
     "read_export",
 ]

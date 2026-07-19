@@ -146,6 +146,21 @@ def test_verify_absent_exits_zero_after_the_record_is_gone(
     assert "verified absent" in capsys.readouterr().out
 
 
+def test_verify_absent_against_a_typoed_collection_exits_two_and_certifies_nothing(
+    tmp_path: Path, store: FakeQdrantClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The README runbook's step 4 must never print a green for a collection it never inspected."""
+    cli.main(["load", _export(tmp_path, ["c1"]), "--collection", "corpus"])
+
+    code = cli.main(["verify-absent", "c1", "--collection", "corpuss"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "verified absent" not in captured.out
+    assert "corpuss" in captured.err
+    assert "c1" in {payload["record_id"] for _, payload in store.points["corpus"].values()}
+
+
 def test_a_sink_error_exits_two_with_the_message(
     tmp_path: Path, store: FakeQdrantClient, capsys: pytest.CaptureFixture[str]
 ) -> None:

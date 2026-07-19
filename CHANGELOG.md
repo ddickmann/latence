@@ -150,7 +150,8 @@ workspace are versioned and released together under one version number.
   - **Retraction/Purge honoured** — records the Export no longer contains are deleted by a
     reconciling sweep, and the load **counts the stale set back to zero before reporting success**;
     `latence-sink-qdrant verify-absent <record_id>…` is the operator-side audit step (exit 1 while
-    any named record is still there). `--no-reconcile` covers the incremental-Export case.
+    any named record is still there; `SinkVerificationError`/exit 2 rather than a false green when
+    the named collection does not exist, so a typo can never pass for erasure evidence). `--no-reconcile` covers the incremental-Export case.
   - A store fault mid-load aborts **before** the sweep, so a half-uploaded corpus can never delete
     the records it did not reach.
   - The Export stays the source of truth ([ADR-0017](docs/adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md));

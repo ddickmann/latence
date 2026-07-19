@@ -37,6 +37,7 @@ from latence_sink_qdrant import (
     SinkConfigError,
     SinkExportError,
     SinkLoadError,
+    SinkVerificationError,
     point_id,
 )
 from latence_sink_qdrant.testing import FakeQdrantClient, FakeUnexpectedResponse
@@ -392,9 +393,34 @@ def test_reconcile_off_keeps_records_absent_from_the_export(
     assert "delete" not in client.calls
 
 
-def test_verify_absent_on_a_collection_that_does_not_exist(client: FakeQdrantClient) -> None:
-    """Nothing loaded yet ⇒ nothing present. It must not raise a 404 at the operator."""
-    assert sink(client).verify_absent(["c1"]) == []
+def test_verify_absent_refuses_to_prove_erasure_against_a_collection_that_does_not_exist(
+    client: FakeQdrantClient,
+) -> None:
+    """A missing collection is "I looked at nothing", never the affirmative "they are absent".
+
+    ``verify_absent`` returning ``[]`` is the erasure evidence the Retraction/Purge runbook ends
+    with, so the one thing it must never do is hand that evidence back for a collection it never
+    inspected — a typo'd ``--collection`` or a stale ``--url`` would otherwise certify records that
+    are still live in the real collection.
+    """
+    with pytest.raises(SinkVerificationError) as raised:
+        sink(client).verify_absent(["c1"])
+
+    message = str(raised.value)
+    assert _COLLECTION in message
+    assert "--collection" in message
+
+
+def test_verify_absent_certifies_nothing_when_the_records_live_in_another_collection(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The operator-typo scenario end to end: `c1` is live in `corpus`, audited in `corpuss`."""
+    sink(client).load(write_export(tmp_path, {"c1": "alpha"}))
+
+    with pytest.raises(SinkVerificationError):
+        sink(client, collection="corpuss").verify_absent(["c1"])
+
+    assert stored_record_ids(client) == {"c1"}  # still live, and the audit said so by refusing
 
 
 def test_an_overlapping_load_never_erases_the_points_this_load_declared_current(

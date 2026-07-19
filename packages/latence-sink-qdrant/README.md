@@ -81,6 +81,12 @@ latence-sink-qdrant verify-absent 'contract-42#chunk-0' 'contract-42#chunk-1' \
 # or exits 1 listing every id still present.
 ```
 
+Exit 0 there is the erasure evidence, so the command will not produce it for a collection it never
+looked at: if `--collection` is mistyped or the connection points at the wrong cluster, the
+collection does not exist and `verify-absent` fails with a typed `SinkVerificationError` (exit 2)
+instead of reporting the records absent. `load` is different on purpose — it creates the collection
+it is projecting the Export into; an audit verb may neither create nor assume.
+
 (Qdrant marks deleted vectors in its HNSW graph and reclaims them on optimisation. The guarantee
 here is the one erasure needs: the point and its payload are no longer retrievable or searchable.)
 
@@ -101,7 +107,8 @@ A store fault anywhere in the upsert phase aborts the load **before** the sweep.
 corpus therefore never deletes the records it did not reach: the worst case is stale-but-present
 data, never silently erased data. Native `qdrant_client` faults are mapped to typed errors
 (`SinkAuthError` for 401/403, `SinkLoadError` otherwise) that carry no URL, api key, payload or
-driver stack.
+driver stack. `verify-absent` adds one more: `SinkVerificationError` when the audit could
+not be *performed* at all (no such collection), kept apart from "the audit ran and passed".
 
 ## Configuration
 

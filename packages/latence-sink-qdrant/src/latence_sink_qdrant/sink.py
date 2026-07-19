@@ -63,6 +63,7 @@ from latence_sink_qdrant.errors import (
     SinkError,
     SinkExportError,
     SinkLoadError,
+    SinkVerificationError,
 )
 from latence_sink_qdrant.export_reader import ExportRow, read_export
 
@@ -339,11 +340,24 @@ class QdrantSink:
         deleted vectors in its HNSW graph and reclaims them on optimisation; the guarantee here is
         the one that matters for erasure: the point and its payload are no longer retrievable or
         searchable.)
+
+        Because that empty list *is* the evidence, this method refuses to produce it for a
+        collection it never inspected: a missing collection raises
+        :class:`~latence_sink_qdrant.errors.SinkVerificationError` rather than answering "absent".
+        Unlike :meth:`load`, which legitimately creates the collection it is projecting the Export
+        into, an audit verb may neither create nor assume — otherwise a typo'd collection or a
+        stale URL would certify records that are still live and searchable in the real one.
         """
         wanted = list(dict.fromkeys(record_ids))
-        if not wanted:
-            return []
         if not self._collection_exists():
+            msg = (
+                f"Cannot verify erasure: collection {self._collection!r} does not exist on this "
+                "store, so nothing was inspected. An empty result from this command is erasure "
+                "evidence and will not be reported for a collection that was never looked at — "
+                "check --collection and the connection (--url/--host) and run it again."
+            )
+            raise SinkVerificationError(msg)
+        if not wanted:
             return []
         by_point = {point_id(rid, self._namespace): rid for rid in wanted}
         found = self._call(

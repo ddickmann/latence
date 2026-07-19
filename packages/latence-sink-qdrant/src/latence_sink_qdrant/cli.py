@@ -8,7 +8,9 @@ and print what the *store* reports.
 
 ``load`` is idempotent: run it again and it upserts only what changed and sweeps what the Export no
 longer contains. ``verify-absent`` is the audit step a Retraction/Purge runbook ends with — it exits
-non-zero, listing the offenders, if any named record is still in the collection.
+non-zero, listing the offenders, if any named record is still in the collection, and exits ``2``
+rather than reporting absence if the collection it was pointed at does not exist (a mistyped
+``--collection`` or the wrong cluster must never pass for erasure evidence).
 
 Config may come from a YAML/JSON file (``--config``) with the flags overriding it, so a cluster's
 connection block lives in one file and the day-to-day command stays short. ``stdlib argparse``, not
@@ -68,7 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = subparsers.add_parser(
         "verify-absent",
-        help="assert that the named record ids are NOT in the collection (exit 1 if any remain)",
+        help=(
+            "assert that the named record ids are NOT in the collection (exit 1 if any remain, "
+            "exit 2 if the collection does not exist — an audit never certifies what it did "
+            "not see)"
+        ),
     )
     verify.add_argument("record_id", nargs="+", help="corpus record id(s) that must be gone")
     _add_common(verify)
