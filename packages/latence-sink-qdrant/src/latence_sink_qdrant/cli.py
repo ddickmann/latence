@@ -64,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "do NOT delete points absent from this Export. Use when loading an INCREMENTAL Export "
             "into a collection that also holds records the increment omits; the default (reconcile "
-            "on) is what makes a Retraction/Purge take effect in the store."
+            "on) is what makes a Retraction/Purge take effect in the store. Reconciling only ever "
+            "sweeps points of this load's id_namespace, so a co-tenant corpus is never touched."
         ),
     )
 

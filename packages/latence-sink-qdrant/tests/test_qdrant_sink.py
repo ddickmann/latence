@@ -377,6 +377,53 @@ def test_an_unstamped_point_from_another_loader_is_swept(
     assert stored_record_ids(client) == {"c1"}
 
 
+_NS_A = "11111111-2222-3333-4444-555555555555"
+_NS_B = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+
+def test_second_corpus_in_a_shared_collection_does_not_sweep_the_first(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The setup ``id_namespace`` exists for: two corpora, one collection, both intact.
+
+    ``id_namespace`` is documented as the way to share one collection between two corpora whose
+    ``record_id`` spaces could collide. A collection-*global* sweep makes that advice destructive:
+    loading corpus B deletes every point of corpus A while both loads exit 0 — and ``verify_absent``
+    then hands back an empty list for A's records, i.e. erasure evidence for a corpus nobody
+    retracted. The sweep must own only the namespace partition it wrote.
+    """
+    corpus_a = write_export(tmp_path / "a", {"A#chunk-0": "alpha", "A#chunk-1": "alef"})
+    corpus_b = write_export(tmp_path / "b", {"B#chunk-0": "beta"})
+
+    report_a = sink(client, id_namespace=_NS_A).load(corpus_a)
+    report_b = sink(client, id_namespace=_NS_B).load(corpus_b)
+
+    assert (report_a.upserted, report_a.deleted) == (2, 0)
+    assert (report_b.upserted, report_b.deleted) == (1, 0)
+    assert stored_record_ids(client) == {"A#chunk-0", "A#chunk-1", "B#chunk-0"}
+    # and the audit verb must not certify A as erased
+    auditor = sink(client, id_namespace=_NS_A)
+    assert auditor.verify_absent(["A#chunk-0", "A#chunk-1"]) == ["A#chunk-0", "A#chunk-1"]
+
+
+def test_retraction_sweeps_only_the_loading_namespace(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """Namespace scoping must not cost convergence: A's own retraction still reaches the store."""
+    corpus_a = write_export(tmp_path / "a", {"A#chunk-0": "alpha", "A#chunk-1": "alef"})
+    corpus_b = write_export(tmp_path / "b", {"B#chunk-0": "beta"})
+    sink(client, id_namespace=_NS_A).load(corpus_a)
+    sink(client, id_namespace=_NS_B).load(corpus_b)
+
+    shrunk_a = write_export(tmp_path / "a2", {"A#chunk-0": "alpha"})
+    report = sink(client, id_namespace=_NS_A).load(shrunk_a)
+
+    assert report.deleted == 1
+    assert stored_record_ids(client) == {"A#chunk-0", "B#chunk-0"}
+    assert sink(client, id_namespace=_NS_A).verify_absent(["A#chunk-1"]) == []
+    assert sink(client, id_namespace=_NS_B).verify_absent(["B#chunk-0"]) == ["B#chunk-0"]
+
+
 def test_reconcile_off_keeps_records_absent_from_the_export(
     tmp_path: Path, client: FakeQdrantClient
 ) -> None:

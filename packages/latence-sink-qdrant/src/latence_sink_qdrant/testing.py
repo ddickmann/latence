@@ -21,11 +21,13 @@ re-implements none of the HNSW/ANN machinery (there is no search here — the si
 ADR-0048). Its method signatures are explicit — no ``**kwargs`` swallow — so a kwarg the real client
 does not take would fail here too.
 
-The filter subset it implements is exactly the one the sink uses: ``must`` / ``must_not`` lists of
-``FieldCondition(key, MatchValue(value))``, ANDed, with real Qdrant's semantics that a point
-*lacking* the key does not match the condition (so it survives a ``must``, and satisfies a
-``must_not``) — which is what makes the reconciling sweep also collect points written by an older
-loader that never stamped the marker at all.
+The filter subset it implements is exactly the one the sink uses: ``must`` / ``must_not`` /
+``should`` lists of ``FieldCondition(key, MatchValue(value))`` and
+``IsEmptyCondition(PayloadField(key))``, with real Qdrant's semantics — the clauses are ANDed, a
+non-empty ``should`` needs one match, a point *lacking* the key does not match a ``FieldCondition``
+(so it survives a ``must`` and satisfies a ``must_not``) but *does* match ``IsEmpty``. That last
+pair is what lets the reconciling sweep collect points no loader ever stamped while leaving points
+another corpus explicitly owns alone.
 
 Adopters can use this class too: it is shipped, not test-local, so a downstream project that wires
 the sink into its own pipeline can test that wiring with no Qdrant running.
@@ -104,11 +106,31 @@ class FieldCondition:
 
 
 @dataclass(frozen=True)
-class Filter:
-    """A conjunction of conditions, and/or a conjunction of negated conditions."""
+class PayloadField:
+    """A payload key, as ``IsEmptyCondition`` addresses it."""
 
-    must: list[FieldCondition] = field(default_factory=list)
-    must_not: list[FieldCondition] = field(default_factory=list)
+    key: str
+
+
+@dataclass(frozen=True)
+class IsEmptyCondition:
+    """``payload[key]`` is missing, null, or an empty list — Qdrant's "is empty"."""
+
+    is_empty: PayloadField
+
+
+@dataclass(frozen=True)
+class Filter:
+    """A conjunction of clauses: every ``must``, no ``must_not``, and — if given — some ``should``.
+
+    Qdrant ANDs the clauses of one filter and requires *at least one* ``should`` condition to match
+    when the list is non-empty (``min_should`` defaults to 1); an empty ``should`` list constrains
+    nothing.
+    """
+
+    must: list[FieldCondition | IsEmptyCondition] = field(default_factory=list)
+    must_not: list[FieldCondition | IsEmptyCondition] = field(default_factory=list)
+    should: list[FieldCondition | IsEmptyCondition] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -151,6 +173,8 @@ class _Models:
     FieldCondition = FieldCondition
     Filter = Filter
     FilterSelector = FilterSelector
+    IsEmptyCondition = IsEmptyCondition
+    PayloadField = PayloadField
     PointIdsList = PointIdsList
     Record = Record
 
@@ -451,19 +475,26 @@ def _validate_payload(raw: Any) -> dict[str, Any]:
     return dict(raw)
 
 
-def _matches(payload: dict[str, Any], filt: Filter) -> bool:
-    """Qdrant's ``must`` / ``must_not`` semantics over exact-value field conditions.
+def _condition_matches(payload: dict[str, Any], cond: FieldCondition | IsEmptyCondition) -> bool:
+    """One condition against one payload, with real Qdrant's missing-key semantics.
 
-    A point that does not *have* the key does not match the condition — so it fails a ``must`` and
-    passes a ``must_not``. That is real Qdrant behaviour, and the sink depends on it.
+    A point that does not *have* the key does not match a :class:`FieldCondition` — so it fails a
+    ``must`` and passes a ``must_not`` — and it *does* match an :class:`IsEmptyCondition`, which is
+    exactly how the sink tells "a point nobody stamped" from "a point another corpus owns".
     """
-    for cond in filt.must:
-        if cond.key not in payload or payload[cond.key] != cond.match.value:
-            return False
-    return all(
-        not (cond.key in payload and payload[cond.key] == cond.match.value)
-        for cond in filt.must_not
-    )
+    if isinstance(cond, IsEmptyCondition):
+        value = payload.get(cond.is_empty.key)
+        return value is None or value == []
+    return cond.key in payload and payload[cond.key] == cond.match.value
+
+
+def _matches(payload: dict[str, Any], filt: Filter) -> bool:
+    """Qdrant's ``must`` / ``must_not`` / ``should`` semantics over one point's payload."""
+    if not all(_condition_matches(payload, cond) for cond in filt.must):
+        return False
+    if any(_condition_matches(payload, cond) for cond in filt.must_not):
+        return False
+    return not filt.should or any(_condition_matches(payload, cond) for cond in filt.should)
 
 
 __all__ = [
@@ -475,7 +506,9 @@ __all__ = [
     "FieldCondition",
     "Filter",
     "FilterSelector",
+    "IsEmptyCondition",
     "MatchValue",
+    "PayloadField",
     "PointIdsList",
     "PointStruct",
     "Record",

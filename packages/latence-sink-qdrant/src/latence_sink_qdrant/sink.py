@@ -26,25 +26,33 @@ the payload, so nothing is lost and a filter can still address it.
   Retraction/Purge case (ADR-0018/0029: after a retract or purge the pipeline re-exports the
   surviving corpus, and the deleted document's derived records are simply not in it). Upserting can
   never express a deletion, so the sink stamps every point it touched in this run with a unique
-  ``_latence_load_id`` and then deletes, by filter, everything in the collection that is *not*
+  ``_latence_load_id`` and then deletes, by filter, everything *this corpus owns* that is not
   stamped with it — and **verifies convergence by counting the stale set back to zero** before
   reporting success. That count is the "documented verification step": the load fails loudly rather
   than reporting a green load over a collection that still serves purged data.
 
-Reconciling assumes the collection is this Export's projection (the natural, and default, setup).
-Loading an *incremental* Export into a collection that also holds records the increment omits would
-sweep them, so that case sets ``reconcile: false`` and the collection converges on the next full
-load. Both are one config key, and the docstring of :meth:`load` says which to use when.
+**What the sweep owns, and what it never touches.** Every point the sink writes also carries the
+``id_namespace`` it was derived under (``_latence_id_namespace``), and the sweep filters on it. So a
+collection shared by two corpora under two namespaces — the setup :data:`DEFAULT_ID_NAMESPACE`
+recommends for colliding ``record_id`` spaces — is safe by construction: each load reconciles its
+own partition and cannot reach its co-tenant's points. Points carrying *no* namespace stamp at all
+(hand-loaded, or written by some other loader) are treated as this corpus's, because the default
+setup is "the collection is this Export's projection" and a purged record must not survive in it.
+
+Reconciling still assumes the *namespace* is this Export's projection. Loading an *incremental*
+Export into a namespace that also holds records the increment omits would sweep them, so that case
+sets ``reconcile: false`` and the collection converges on the next full load. Both are one config
+key, and the docstring of :meth:`load` says which to use when.
 
 **Failure containment.** A store fault anywhere in the upsert phase aborts the load *before* the
 sweep. A half-uploaded corpus therefore never deletes the records it did not reach — the worst case
 is a collection with stale-but-present data, never one with silently-erased data.
 
-The sweep is guarded for the same reason. Its filter is collection-*global* (``must_not(marker)``),
-so it is the stale set only while nothing else has stamped the collection. Before deleting anything
-the sink checks that exactly as many points carry its marker as it processed records; a load
-running concurrently restamps those points and trips the check, which fails the *losing* load
-loudly and deletes nothing rather than erasing a live index behind a green report.
+The sweep is guarded for the same reason. ``must_not(marker)`` is the stale set only while nothing
+else has restamped this corpus's points. Before deleting anything the sink checks that exactly as
+many points carry its marker as it processed records; a load running concurrently restamps those
+points and trips the check, which fails the *losing* load loudly and deletes nothing rather than
+erasing a live index behind a green report.
 """
 
 from __future__ import annotations
@@ -74,13 +82,19 @@ if TYPE_CHECKING:
 DIGEST_KEY = "_latence_digest"
 #: Payload key stamped with the id of the load that last touched the point — the sweep marker.
 LOAD_ID_KEY = "_latence_load_id"
+#: Payload key stamped with the ``id_namespace`` the point's id was derived under — the sweep's
+#: *ownership* mark. The marker says "this load touched it"; this says "this corpus owns it", which
+#: is what keeps a co-tenant corpus in a shared collection out of the sweep's reach.
+NAMESPACE_KEY = "_latence_id_namespace"
 #: Payload keys the sink owns. An Export column of the same name would be silently overwritten (and
 #: would corrupt the reconcile marker), so it is rejected loudly instead.
-RESERVED_PAYLOAD_KEYS = frozenset({DIGEST_KEY, LOAD_ID_KEY})
+RESERVED_PAYLOAD_KEYS = frozenset({DIGEST_KEY, LOAD_ID_KEY, NAMESPACE_KEY})
 
 #: The default UUIDv5 namespace for deriving a point id from a ``record_id``. Fixed forever: a
 #: change here would re-key every collection ever loaded. Override ``id_namespace`` (per corpus) to
-#: share one collection between two corpora whose ``record_id`` spaces could collide.
+#: share one collection between two corpora whose ``record_id`` spaces could collide: the namespace
+#: is stamped on every point (:data:`NAMESPACE_KEY`) and scopes the reconciling sweep, so each
+#: corpus converges its own partition and never deletes its co-tenant's points.
 DEFAULT_ID_NAMESPACE = uuid.UUID("6f6c1a4e-2b3d-5f7a-9c1e-4d2f8a0b6c31")
 
 #: Distance metrics Qdrant's ``VectorParams`` accepts, lowercased. Validated at construction (no
@@ -180,15 +194,17 @@ class QdrantSink:
             unnamed vector). Named *sparse* vectors are deliberately out of scope: the Export's
             ``sparse_indices`` / ``sparse_values`` columns ride through as payload, and sparse
             wiring is the engine's concern (#156).
-        reconcile: bool — default ``True``. Sweep points not present in this Export (the
-            Retraction/Purge path). Set ``False`` when loading an *incremental* Export into a
-            collection that also holds records the increment omits.
+        reconcile: bool — default ``True``. Sweep this corpus's points that are not present in this
+            Export (the Retraction/Purge path). Scoped to ``id_namespace``, so a co-tenant corpus in
+            the same collection is never swept. Set ``False`` when loading an *incremental* Export
+            into a namespace that also holds records the increment omits.
         load_id: str | None — an audit **label** for the run. The marker stamped on every touched
             point is always unique per load (a reused marker would make the sweep a silent no-op);
             a label is prefixed onto it as ``"<label>:<nonce>"``, so a named run stays greppable in
             the payload and in the report. Omitted ⇒ the bare nonce.
         id_namespace: str — UUID namespace for point-id derivation (default
-            :data:`DEFAULT_ID_NAMESPACE`).
+            :data:`DEFAULT_ID_NAMESPACE`). It is also the sweep's ownership scope: two corpora
+            loaded under two namespaces can share one collection without erasing each other.
         url / host / port / grpc_port / prefer_grpc / https / api_key / timeout / location —
             connection kwargs threaded verbatim to ``QdrantClient`` when it is built lazily.
             Ignored when a ``client`` is injected.
@@ -274,8 +290,10 @@ class QdrantSink:
 
         The whole command in one call: create the collection if it is absent (at the Export's own
         vector width), stream the Export in bounded batches, upsert only the records whose content
-        changed, and — unless ``reconcile`` is off — delete every point the Export no longer
-        contains, verifying the stale count back to zero before returning.
+        changed, and — unless ``reconcile`` is off — delete every point of *this corpus's*
+        ``id_namespace`` the Export no longer contains, verifying the stale count back to zero
+        before returning. Points another corpus owns (a different ``id_namespace`` in the same
+        collection) are never in the sweep's reach.
 
         Raises :class:`~latence_sink_qdrant.errors.SinkExportError` if the Export is unusable (the
         source of truth is never repaired here), and
@@ -385,7 +403,12 @@ class QdrantSink:
             )
             raise SinkExportError(msg)
         digest = _digest(row.vector, row.payload)
-        payload = {**row.payload, DIGEST_KEY: digest, LOAD_ID_KEY: load_id}
+        payload = {
+            **row.payload,
+            DIGEST_KEY: digest,
+            LOAD_ID_KEY: load_id,
+            NAMESPACE_KEY: str(self._namespace),
+        }
         return _Point(
             id=point_id(row.record_id, self._namespace),
             record_id=row.record_id,
@@ -426,24 +449,53 @@ class QdrantSink:
             "set_payload",
             lambda c: c.set_payload(
                 collection_name=self._collection,
-                payload={LOAD_ID_KEY: load_id},
+                payload={LOAD_ID_KEY: load_id, NAMESPACE_KEY: str(self._namespace)},
                 points=[p.id for p in points],
                 wait=True,
             ),
         )
 
+    def _stale_filter(self, load_id: str, models: Any) -> Any:
+        """The points this load owns and did not touch — the stale set, scoped to this corpus.
+
+        Two clauses, and both matter:
+
+        * ``must_not(_latence_load_id == this run's marker)`` — everything this load did not touch.
+        * ``should(_latence_id_namespace == mine OR _latence_id_namespace is empty)`` — everything
+          this corpus **owns**: its own points, plus points nobody ever stamped (hand-loaded or
+          written by an older loader, which the collection-as-projection default says are stale).
+
+        Without the second clause the sweep is collection-*global*, which makes the documented
+        ``id_namespace`` setup — one collection shared by two corpora with colliding ``record_id``
+        spaces — silently destructive: loading corpus B would delete every point of corpus A, both
+        loads would exit 0, and :meth:`verify_absent` would then certify A's records as erased.
+        """
+        return models.Filter(
+            must_not=[
+                models.FieldCondition(key=LOAD_ID_KEY, match=models.MatchValue(value=load_id))
+            ],
+            should=[
+                models.FieldCondition(
+                    key=NAMESPACE_KEY, match=models.MatchValue(value=str(self._namespace))
+                ),
+                models.IsEmptyCondition(is_empty=models.PayloadField(key=NAMESPACE_KEY)),
+            ],
+        )
+
     def _sweep(self, load_id: str, touched: int) -> int:
-        """Delete everything this load did not touch, then prove the stale set is empty.
+        """Delete the stale points of *this corpus*, then prove that set is empty.
 
         ``touched`` is how many records this load processed — every one of them was either upserted
         with this run's marker or payload-restamped with it, so *exactly* that many points must
         carry the marker when the sweep begins. That equality is checked **before** anything is
-        deleted, because the sweep's filter is collection-*global*: it deletes by
-        ``must_not(marker)``, which is the stale set only while nothing else has stamped the
-        collection. A load that overlaps this one restamps the very points this one just declared
-        current, and an unguarded sweep would then delete them all — erasing a live index while
-        both runs report success. On a mismatch the load fails loudly and deletes nothing, so the
-        worst case stays the documented one: stale-but-present data, never silently-erased data.
+        deleted, because the marker is the only thing separating "current" from "stale": a load that
+        overlaps this one restamps the very points this one just declared current, and an unguarded
+        sweep would then delete them all — erasing a live index while both runs report success. On a
+        mismatch the load fails loudly and deletes nothing, so the worst case stays the documented
+        one: stale-but-present data, never silently-erased data.
+
+        The deletion filter itself is scoped to this corpus's ``id_namespace``
+        (:meth:`_stale_filter`), so a co-tenant corpus sharing the collection is never in reach.
         """
         models = self._load_models()
         mine = models.Filter(
@@ -460,11 +512,7 @@ class QdrantSink:
             )
             raise SinkLoadError(msg)
 
-        stale = models.Filter(
-            must_not=[
-                models.FieldCondition(key=LOAD_ID_KEY, match=models.MatchValue(value=load_id))
-            ]
-        )
+        stale = self._stale_filter(load_id, models)
         before = self._count(stale)
         if before:
             self._call(
@@ -482,7 +530,8 @@ class QdrantSink:
             # record keep serving.
             msg = (
                 f"reconcile did not converge on collection {self._collection!r}: {after} point(s) "
-                "not written by this load are still present after the sweep. The collection may "
+                f"of id_namespace {self._namespace!s} not written by this load are still present "
+                "after the sweep. The collection may "
                 "still serve retracted or purged records — do not treat this load as complete."
             )
             raise SinkLoadError(msg)

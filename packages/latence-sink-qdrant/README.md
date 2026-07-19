@@ -46,26 +46,34 @@ Run it again — same command, same collection — and three things happen in on
 |---|---|
 | **unchanged** | nothing. Its stored content digest matches, so it is **not** re-upserted — this is what makes an incremental/Delta run ([ADR-0018](../../docs/adr/0018-incremental-corpus-deltas.md)) cheap without the sink having to be told it is one. |
 | **new or changed** | upserted at the same derived point id, so it overwrites rather than duplicates. |
-| **gone from the Export** | deleted. |
+| **gone from the Export** | deleted — but only within this corpus's `id_namespace` (see below). |
 
 Idempotency rests on **derived point ids**: Qdrant point ids must be unsigned integers or UUIDs, and
 a corpus `record_id` is a content-addressed string, so the sink derives a deterministic UUIDv5 from
 it (fixed namespace, overridable per corpus with `id_namespace`). The `record_id` itself rides in
 the payload, so it stays filterable.
 
+`id_namespace` is also the **sweep's ownership scope**: every point carries the namespace it was
+derived under (`_latence_id_namespace`), and reconciling filters on it. Two corpora whose
+`record_id` spaces could collide can therefore share one collection under two namespaces — each
+load converges its own partition and cannot delete its co-tenant's points. (Points carrying no
+namespace stamp at all — hand-loaded, or written by some other loader — count as this corpus's, so
+the default "the collection is this Export's projection" setup still purges what it must.)
+
 ## The GDPR story crosses the boundary with the data
 
 After a `latence retract` or `latence purge`, the pipeline re-exports the *surviving* corpus — the
 deleted document's derived records are simply not in it. Upserting can never express a deletion, so
 the sink stamps every point it touches with a per-run `_latence_load_id` and then deletes, by
-filter, everything in the collection **not** stamped with this run's marker.
+filter, everything it owns (`_latence_id_namespace`) that is **not** stamped with this run's
+marker.
 
 **The verification step is not optional and not manual — it runs inside the load.** After the sweep
 the sink counts the stale set again and *fails the load* if it is not zero:
 
 ```
-error: reconcile did not converge on collection 'corpus': 3 point(s) not written by this load
-are still present after the sweep. The collection may still serve retracted or purged records —
+error: reconcile did not converge on collection 'corpus': 3 point(s) of id_namespace
+6f6c1a4e-2b3d-5f7a-9c1e-4d2f8a0b6c31 not written by this load are still present after the sweep. The collection may still serve retracted or purged records —
 do not treat this load as complete.
 ```
 
@@ -131,9 +139,9 @@ reconcile: true
 | `batch_size` | `256` | records per store round-trip (bounds memory *and* request size) |
 | `distance` | `cosine` | `cosine` / `dot` / `euclid` / `manhattan`, used only at collection creation |
 | `vector_name` | `null` | named vector to write; `null` ⇒ the collection's single unnamed vector |
-| `reconcile` | `true` | sweep points absent from this Export |
+| `reconcile` | `true` | sweep this corpus's points absent from this Export (scoped to `id_namespace`) |
 | `load_id` | none | audit **label** for the run, prefixed onto the per-run sweep marker (`<label>:<nonce>`). It is a label, never the marker itself: the sweep deletes everything *not* stamped with this run's marker, so a marker reused across runs would match nothing and silently keep serving retracted points |
-| `id_namespace` | fixed UUID | point-id derivation namespace |
+| `id_namespace` | fixed UUID | point-id derivation namespace **and** the reconciling sweep's ownership scope — two corpora sharing one collection each get their own |
 | `url` / `host` / `port` / `grpc_port` / `prefer_grpc` / `https` / `api_key` / `timeout` / `location` | — | threaded verbatim to `QdrantClient` |
 
 ## Testing without a Qdrant
