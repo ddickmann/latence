@@ -19,7 +19,7 @@ import ipaddress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, ClassVar
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from latence_console import browse, render
 from latence_console.artifacts import RunArtifacts
@@ -78,7 +78,13 @@ class ConsoleApp:
         """Answer one request. Pure: same files in, same bytes out, nothing written."""
         if method.upper() not in READ_METHODS:
             return Response.html(405, render.render_method_not_allowed())
-        split = urlsplit(target)
+        split = _split_url(target)
+        if split is None:
+            # An unparseable target names no page. It is refused the same way every other
+            # unknown path is — a typed 404 Response, never an exception escaping the app.
+            return Response.html(
+                404, render.render_not_found(f"There is no page at {target!r}.")
+            )
         path = unquote(split.path)
         if path in ("", "/"):
             return Response.html(
@@ -210,6 +216,20 @@ def _require_loopback(host: str) -> str:
     raise NotLoopbackError(msg)
 
 
+def _split_url(value: str) -> SplitResult | None:
+    """Split a URL, or ``None`` when it is not one.
+
+    :func:`urlsplit` *raises* on an unbalanced ``[`` (``Invalid IPv6 URL``). Both callers here
+    parse attacker-controlled text — a request target and an ``Origin`` header — where an
+    escaping exception would leave the client with zero bytes and dump a native traceback to
+    stderr (ADR-0034). Making the parse total turns that into an ordinary refusal.
+    """
+    try:
+        return urlsplit(value)
+    except ValueError:
+        return None
+
+
 def _is_loopback_name(host: str) -> bool:
     """Is ``host`` a name for this machine? (``localhost`` or any loopback IP literal.)"""
     if host.lower() == "localhost":
@@ -267,7 +287,9 @@ def is_local_origin_header(value: str | None, bound_port: int) -> bool:
     """Is this ``Origin`` one the console may answer? Absent is fine; cross-site is not."""
     if not value:
         return True
-    origin = urlsplit(value.strip())
+    origin = _split_url(value.strip())
+    if origin is None:
+        return False
     if origin.scheme not in ("http", "https") or not origin.netloc:
         return False
     host, port = _split_authority(origin.netloc)

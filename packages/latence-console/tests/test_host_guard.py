@@ -167,3 +167,79 @@ def test_is_local_host_header(value: str | None, expected: bool) -> None:
 )
 def test_is_local_origin_header(value: str | None, expected: bool) -> None:
     assert is_local_origin_header(value, 8787) is expected
+
+
+# -- malformed URLs are refused, not crashed on (ADR-0034) ---------------------
+#
+# `urlsplit` RAISES on an unbalanced "[" ("Invalid IPv6 URL"). Both the host guard and the
+# router parse attacker-controlled text, so an escaping ValueError left the client with zero
+# bytes — no status line at all — and dumped a native traceback with absolute filesystem paths
+# to stderr, defeating the deliberate `log_message` silencing. These pin the refusal.
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["http://[::1", "http://[", "https://[::1:8787", "http://user@[::1"],
+)
+def test_a_malformed_origin_is_refused_rather_than_raising(value: str) -> None:
+    assert is_local_origin_header(value, 8787) is False
+
+
+@pytest.mark.parametrize("target", ["//[", "http://[::1", "/run/[::1]", "//[::1"])
+def test_a_malformed_target_answers_a_typed_response(populated: str, target: str) -> None:
+    """`respond` is the documented pure request→response core: it returns, it never raises."""
+    app = ConsoleApp.over_storage(Storage.for_uri(populated), populated)
+    response = app.respond("GET", target)
+    assert response.status in (404, 403, 200)
+    assert isinstance(response.body, bytes)
+    assert b"run-0001" not in response.body
+
+
+def test_a_malformed_origin_over_a_real_socket_gets_a_whole_response(
+    served: int, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The wire-level proof: a complete HTTP refusal, and no traceback on stderr."""
+    lines = [
+        "GET / HTTP/1.1",
+        f"Host: 127.0.0.1:{served}",
+        "Origin: http://[::1",
+        "Connection: close",
+        "",
+        "",
+    ]
+    with socket.create_connection(("127.0.0.1", served), timeout=10) as sock:
+        sock.sendall("\r\n".join(lines).encode("ascii"))
+        raw = b""
+        while True:
+            data = sock.recv(65536)
+            if not data:
+                break
+            raw += data
+
+    assert raw, "the console closed the connection without writing a single byte"
+    assert raw.startswith(b"HTTP/1.0 403") or raw.startswith(b"HTTP/1.1 403")
+    assert b"run-0001" not in raw
+    assert "Traceback (most recent call last)" not in capfd.readouterr().err
+
+
+def test_a_malformed_absolute_form_target_over_a_real_socket_is_answered(served: int) -> None:
+    """http.server passes an absolute-form target through verbatim — the router must survive it."""
+    lines = [
+        "GET http://[::1 HTTP/1.1",
+        f"Host: 127.0.0.1:{served}",
+        "Connection: close",
+        "",
+        "",
+    ]
+    with socket.create_connection(("127.0.0.1", served), timeout=10) as sock:
+        sock.sendall("\r\n".join(lines).encode("ascii"))
+        raw = b""
+        while True:
+            data = sock.recv(65536)
+            if not data:
+                break
+            raw += data
+
+    assert raw, "the console closed the connection without writing a single byte"
+    assert raw.split(b"\r\n", 1)[0].split()[1] == b"404"
+    assert b"run-0001" not in raw
