@@ -234,8 +234,34 @@ def score(test: UnitTest, output: str, *, split: str) -> TestResult:
     )
 
 
+def score_document_failure(test: UnitTest, *, split: str, reason: str) -> TestResult:
+    """Score one unit test of a document that never produced an output at all.
+
+    A document-level failure — a ``PARSE_ERROR``, or a referenced PDF absent from the dataset
+    root — leaves nothing to score, so every test the harness *can* score is FAILED: a parser
+    must never be able to raise its way to a better number.
+
+    A class the harness cannot score stays UNSUPPORTED regardless. It is outside the pass-rate
+    denominator when the document parses, and letting a parse failure move it inside would make
+    the denominator depend on which documents the pinned Provider happened to parse — so two
+    Providers' pass rates would be computed over different sets of tests and could not be
+    compared, which is exactly what re-pinning the Parse suite is for.
+
+    The UNSUPPORTED verdict is produced by :func:`score` itself rather than rebuilt here, so
+    there is exactly one implementation of the supported/unsupported rule and one reason string.
+    The ``output`` argument passed through is irrelevant: :func:`score` returns on the class
+    check before it ever looks at the text.
+    """
+    if test.type not in SUPPORTED_TYPES:
+        return score(test, "", split=split)
+    return TestResult(test.id, split, test.type, Outcome.FAILED, reason)
+
+
 #: The functions whose semantics *are* the unit-test metric. A change to any of them changes
 #: what a published pass rate means, so their bodies feed the scorer fingerprint below.
+#: :func:`score_document_failure` is deliberately absent: it introduces no verdict of its own —
+#: its UNSUPPORTED branch *is* :func:`score`, and its FAILED branch is the long-standing "a
+#: parse failure is a failure" rule, which :attr:`ScorerPin.supported_types` already describes.
 _SCORING_BEHAVIOUR: tuple[Callable[..., Any], ...] = (
     normalise,
     fuzzy_find,

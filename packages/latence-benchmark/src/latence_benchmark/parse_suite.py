@@ -11,8 +11,11 @@ Three properties are deliberate:
   numbers describe the Parse Stage an adopter actually runs. The pin is validated through
   core's own :class:`~latence_core.pipeline.Stage` model, so a typo'd Provider name or a
   capability mismatch fails here rather than producing a mystery zero.
-* **A parse failure is a failure.** A ``PARSE_ERROR`` document's tests are scored as failed,
-  not skipped. Skipping them would let a parser improve its score by crashing.
+* **A parse failure is a failure.** A ``PARSE_ERROR`` document's scoreable tests are scored as
+  failed, not skipped. Skipping them would let a parser improve its score by crashing. Its
+  tests in a class this slice cannot score stay ``UNSUPPORTED``, so a parse failure never moves
+  a test into or out of the pass-rate denominator — the denominator is a property of the pinned
+  dataset alone, which is what makes two Providers' pass rates comparable.
 * **Determinism.** Documents are visited in sorted path order and splits in a fixed order, so
   two runs of the same revision + pin produce byte-identical results.
 """
@@ -34,7 +37,7 @@ from latence_core.pipeline import CapabilityKind
 
 from latence_benchmark.datasets import OLMOCR_BENCH, DatasetSpec
 from latence_benchmark.providers import ProviderUnavailableError, load_provider
-from latence_benchmark.scoring import Outcome, TestResult, score, scorer_pin
+from latence_benchmark.scoring import TestResult, score, score_document_failure, scorer_pin
 from latence_benchmark.suite import SplitScore, StackPin, SuiteResult
 from latence_benchmark.unittests import load_split
 
@@ -167,7 +170,7 @@ class ParseSuite:
                     # is counted as a failure and surfaced — never silently dropped.
                     missing_pdfs += 1
                     results.extend(
-                        TestResult(t.id, split, t.type, Outcome.FAILED, "referenced PDF missing")
+                        score_document_failure(t, split=split, reason="referenced PDF missing")
                         for t in split_tests
                     )
                     continue
@@ -176,8 +179,8 @@ class ParseSuite:
                 if record.disposition is Disposition.PARSE_ERROR:
                     document_failures += 1
                     results.extend(
-                        TestResult(
-                            t.id, split, t.type, Outcome.FAILED, f"parse failed: {record.error}"
+                        score_document_failure(
+                            t, split=split, reason=f"parse failed: {record.error}"
                         )
                         for t in split_tests
                     )

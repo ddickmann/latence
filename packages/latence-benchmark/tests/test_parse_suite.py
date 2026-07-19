@@ -118,6 +118,45 @@ def test_a_document_that_cannot_be_parsed_fails_its_tests(
     assert (split.passed, split.failed) == (0, 2)
 
 
+@pytest.mark.parametrize("materialise_pdf", [False, True], ids=["missing-pdf", "parse-error"])
+def test_a_failed_document_cannot_move_unsupported_tests_into_the_denominator(
+    tmp_path: Path,
+    write_dataset: Callable[[Path, dict[str, list[dict[str, Any]]]], Path],
+    materialise_pdf: bool,
+) -> None:
+    """A document-level failure must not change WHICH tests the pass rate is computed over.
+
+    ``table``/``math`` are unscoreable in this slice, so they are UNSUPPORTED when the PDF
+    parses. If a parse failure turned them into failures, the denominator would depend on which
+    documents the pinned Provider happened to parse and two Providers' pass rates would be
+    computed over different test sets — exactly the cross-Provider comparison the docs
+    recommend.
+    """
+    root = write_dataset(
+        tmp_path,
+        {
+            "old_scans": [
+                _row(id="present"),
+                _row(id="math", type="math", text=None, math="x^2"),
+                _row(id="table", type="table", text=None, cell="7"),
+            ]
+        },
+    )
+    if materialise_pdf:
+        corrupt = root / "bench_data" / "pdfs" / PDF
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b"not a pdf at all")
+
+    result = ParseSuite(splits=("old_scans",)).run(root)
+    (split,) = result.splits
+
+    assert (split.passed, split.failed, split.unsupported) == (0, 1, 2)
+    assert split.scored == 1
+    assert split.pass_rate == 0.0
+    # The anti-gaming property is untouched: the failure is still recorded as a failure.
+    assert result.document_failures == (1 if materialise_pdf else 0)
+
+
 def test_two_runs_of_the_same_pin_are_identical(dataset: Path) -> None:
     first = _suite(dataset).run(dataset)
     second = _suite(dataset).run(dataset)
