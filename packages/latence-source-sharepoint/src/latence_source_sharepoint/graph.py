@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ConfigError, ProviderError
 
-from latence_source_sharepoint.transport import require_tls
+from latence_source_sharepoint.transport import redact_url, require_tls
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -229,7 +229,13 @@ class GraphClient:
         return f"{drive}/root:/{quoted}:/children?$top={self._page_size}"
 
     def _paginate(self, url: str) -> Iterator[dict[str, Any]]:
-        """Follow ``@odata.nextLink`` until exhausted, yielding each page's ``value`` entries."""
+        """Follow ``@odata.nextLink`` until exhausted, yielding each page's ``value`` entries.
+
+        The ``nextLink`` is a **server-supplied** URL, so like the download redirect it only ever
+        reaches an error message through :func:`~latence_source_sharepoint.transport.redact_url`
+        — its query string is not ours to classify, and every message raised from here is copied
+        verbatim into the runner's span (ADR-0034).
+        """
         next_url: str | None = url
         seen: set[str] = set()
         while next_url:
@@ -237,7 +243,7 @@ class GraphClient:
                 # A server that echoed its own page as the nextLink would loop forever.
                 msg = (
                     "SharePointSource: Graph returned a repeating '@odata.nextLink' "
-                    f"({next_url!r}); refusing to paginate in a cycle."
+                    f"({redact_url(next_url)!r}); refusing to paginate in a cycle."
                 )
                 raise ProviderError(msg)
             seen.add(next_url)
@@ -246,7 +252,7 @@ class GraphClient:
             if not isinstance(value, list):
                 msg = (
                     "SharePointSource: Graph returned a children page without a 'value' array "
-                    f"for {next_url!r}."
+                    f"for {redact_url(next_url)!r}."
                 )
                 raise ProviderError(msg)
             for entry in value:
@@ -259,20 +265,25 @@ class GraphClient:
         response = self._send(url, method="GET")
         if response.status == 404:
             msg = (
-                f"SharePointSource: Graph returned 404 for {url!r}. The drive id "
+                f"SharePointSource: Graph returned 404 for {redact_url(url)!r}. The drive id "
                 f"{self._drive_id!r} or the configured 'root_path' does not exist, or the "
                 "application has no permission to read it."
             )
             raise ConfigError(msg)
         if response.status != 200:
-            raise ProviderError(self._failure_message(response, what=f"list {url!r}"))
+            raise ProviderError(
+                self._failure_message(response, what=f"list {redact_url(url)!r}")
+            )
         try:
             payload = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            msg = f"SharePointSource: Graph returned a non-JSON body for {url!r}."
+            msg = f"SharePointSource: Graph returned a non-JSON body for {redact_url(url)!r}."
             raise ProviderError(msg) from exc
         if not isinstance(payload, dict):
-            msg = f"SharePointSource: Graph returned a non-object JSON body for {url!r}."
+            msg = (
+                "SharePointSource: Graph returned a non-object JSON body for "
+                f"{redact_url(url)!r}."
+            )
             raise ProviderError(msg)
         return payload
 
@@ -319,7 +330,8 @@ class GraphClient:
                 continue
             if response.status == 401:
                 msg = (
-                    f"SharePointSource: Graph rejected the credentials for {method} {url!r} "
+                    "SharePointSource: Graph rejected the credentials for "
+                    f"{method} {redact_url(url)!r} "
                     f"(HTTP 401, {_graph_error_code(response.body)!r}) even after refreshing "
                     "the token. Check the app registration's Sites.Read.All / Files.Read.All "
                     "application permission and its admin consent."
@@ -327,8 +339,8 @@ class GraphClient:
                 raise ProviderError(msg)
             if response.status == 403:
                 msg = (
-                    f"SharePointSource: Graph denied access for {method} {url!r} (HTTP 403, "
-                    f"{_graph_error_code(response.body)!r}). The token is valid but the "
+                    f"SharePointSource: Graph denied access for {method} {redact_url(url)!r} "
+                    f"(HTTP 403, {_graph_error_code(response.body)!r}). The token is valid but the "
                     "application is not permitted to read this drive."
                 )
                 raise ProviderError(msg)
@@ -338,7 +350,7 @@ class GraphClient:
         self, response: HttpResponse, *, method: str, url: str, credentialed: bool
     ) -> str:
         if credentialed:
-            who, target = "Graph", f"{method} {url!r}"
+            who, target = "Graph", f"{method} {redact_url(url)!r}"
             advice = (
                 "The tenant is throttling this application; lower 'page_size' or run less often."
             )

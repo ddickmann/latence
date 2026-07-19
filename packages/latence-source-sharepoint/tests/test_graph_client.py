@@ -19,7 +19,12 @@ from latence_source_sharepoint.testing import (
     FakeGraphApi,
     FakeGraphTransport,
 )
-from latence_source_sharepoint.transport import UrllibTransport, redact_url, require_tls
+from latence_source_sharepoint.transport import (
+    HttpResponse,
+    UrllibTransport,
+    redact_url,
+    require_tls,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -359,6 +364,55 @@ def test_a_non_tls_download_redirect_never_echoes_its_token() -> None:
     assert "tempauth" not in message
     assert "https" in message
     assert "contoso.sharepoint.com" in message
+
+
+def test_a_server_supplied_next_link_is_never_echoed_into_an_error() -> None:
+    """The `@odata.nextLink` is server-controlled, so its query string is not ours to classify.
+
+    `redact_url`'s rule is unconditional for exactly this reason (transport.py). `GraphClient`
+    handles the one *other* server-supplied URL in the connector — the pagination link — and must
+    apply the same rule, because a `ProviderError` message is copied verbatim into the runner's
+    `stage_end` span and from there into the `latence.trace` log pipeline (ADR-0034).
+    """
+    secret = "OPAQUE_SERVER_STATE_VALUE"  # pragma: allowlist secret
+    next_link = f"{GRAPH_HOST}/drives/d1/root/children?$skiptoken={secret}"
+
+    class _PaginatingThenFailingTransport:
+        """Page 1 hands back a nextLink; page 2 fails the way a degraded Graph does."""
+
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: Mapping[str, str],
+            body: bytes | None = None,
+        ) -> HttpResponse:
+            if url == next_link:
+                return HttpResponse(status=500, headers={}, body=b'{"error":{"code":"boom"}}')
+            page = f'{{"value": [], "@odata.nextLink": "{next_link}"}}'
+            return HttpResponse(status=200, headers={}, body=page.encode())
+
+    client = GraphClient(
+        transport=_PaginatingThenFailingTransport(),
+        token_provider=_ScriptedTokenProvider(["valid-token"]),
+        drive_id="d1",
+        base_url=GRAPH_HOST,
+        page_size=200,
+        max_retries=0,
+        max_retry_after_seconds=300.0,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        list(client.list_files())
+
+    message = str(raised.value)
+    assert secret not in message
+    assert "$skiptoken" not in message
+    # Still diagnosable: which host and which listing failed survive the redaction.
+    assert "graph.microsoft.com" in message
+    assert "/drives/d1/root/children" in message
 
 
 @pytest.mark.parametrize(
