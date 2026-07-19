@@ -103,13 +103,20 @@ def _is_model_from_pretrained(node: ast.Call) -> bool:
     return any(hint in root for hint in _MODEL_CALLEE_HINTS)
 
 
-def _model_from_pretrained_passed_to_perf_seam(tree: ast.Module) -> set[int]:
-    """The id()s of model ``from_pretrained`` *attribute* exprs handed to the perf seam as its func arg.
+def _model_from_pretrained_passed_to_perf_seam(
+    tree: ast.Module, seam_funcs: tuple[str, ...] = _PERF_SEAM_FUNCS
+) -> set[int]:
+    """The id()s of model ``from_pretrained`` *attribute* exprs handed to ``seam_funcs`` as func arg.
 
     ``load_with_fa2_fallback(Model.from_pretrained, model_id, perf)`` passes the bound
     ``Model.from_pretrained`` (an ``ast.Attribute``, NOT a call) as its first argument — so the model
     load never appears as a bare ``ast.Call`` at all. Collect those attribute nodes so the scan does
     not flag them (they ARE going through the seam).
+
+    ``seam_funcs`` is a parameter, not a constant, because the accept-set differs per guard: the W8
+    fp32 guard accepts ALL of :data:`_PERF_SEAM_FUNCS` (all three spread/cast a dtype), while the
+    #190 JIT guard accepts only :data:`_JIT_NEUTRALIZING_LOADERS` (``load_with_fa2_fallback`` does
+    NOT call ``neutralize_torch_jit``, so routing an mdeberta load through it is an offence).
     """
     ok: set[int] = set()
     for call in ast.walk(tree):
@@ -117,7 +124,7 @@ def _model_from_pretrained_passed_to_perf_seam(tree: ast.Module) -> set[int]:
             continue
         func = call.func
         name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else "")
-        if name not in _PERF_SEAM_FUNCS or not call.args:
+        if name not in seam_funcs or not call.args:
             continue
         first = call.args[0]
         if isinstance(first, ast.Attribute) and first.attr == "from_pretrained":
@@ -293,7 +300,41 @@ _MDEBERTA_PROVIDER_SOURCES = (
 )
 
 # The shared perf-seam loaders that neutralize the TorchScript JIT before calling the native loader.
+# NOT the whole of ``_PERF_SEAM_FUNCS``: ``load_with_fa2_fallback`` spreads the perf kwargs but does
+# NOT call ``neutralize_torch_jit`` — an mdeberta load routed through it stays exposed to the
+# Blackwell/CUDA-13 nvrtc crash. This constant is the accept-set the #190 guard actually asserts on.
 _JIT_NEUTRALIZING_LOADERS = ("load_then_cast", "load_gliner2_optimized")
+
+# Hints matched case-INSENSITIVELY against the attribute chain of a ``*.from_pretrained`` reference
+# in an mdeberta Provider, so an indirected class handle (``gliner2_cls.from_pretrained``,
+# ``self._gliner2_cls().from_pretrained``) is covered too. Tokenizers/processors do not match.
+_MDEBERTA_MODEL_HINTS = ("gliner", "forconditionalgeneration", "automodel")
+
+
+def _is_mdeberta_model_from_pretrained_ref(node: ast.AST) -> bool:
+    """Whether ``node`` is a ``<mdeberta model>.from_pretrained`` *reference* (attribute expr)."""
+    if not isinstance(node, ast.Attribute) or node.attr != "from_pretrained":
+        return False
+    root = ast.unparse(node).lower()
+    return any(hint in root for hint in _MDEBERTA_MODEL_HINTS)
+
+
+def jit_seam_offenders(tree: ast.Module) -> list[str]:
+    """Every mdeberta model ``from_pretrained`` in ``tree`` NOT routed through a JIT-neutralizing loader.
+
+    Scans **attribute references**, not calls, because both offending shapes reduce to one: a direct
+    ``GLiNER2.from_pretrained(model_id)`` call carries the attribute as its ``func``, and a load
+    handed to a non-neutralizing loader (``load_with_fa2_fallback(GLiNER.from_pretrained, ...)``)
+    passes the very same attribute node as an argument. Only the references collected as arguments
+    of :data:`_JIT_NEUTRALIZING_LOADERS` are exempt.
+    """
+    jit_routed = _model_from_pretrained_passed_to_perf_seam(tree, _JIT_NEUTRALIZING_LOADERS)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not _is_mdeberta_model_from_pretrained_ref(node) or id(node) in jit_routed:
+            continue
+        offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
+    return offenders
 
 
 @pytest.mark.parametrize("rel_source", _MDEBERTA_PROVIDER_SOURCES)
@@ -301,22 +342,100 @@ def test_mdeberta_providers_load_through_a_jit_neutralizing_seam(rel_source: str
     """Every mdeberta-backed Provider's model load routes through the shared JIT-neutralizing seam.
 
     The teeth for #190's "shared seam, not a per-Provider copy": a sixth mdeberta Provider that
-    calls ``GLiNER2.from_pretrained`` directly (bypassing ``load_then_cast`` /
-    ``load_gliner2_optimized``) re-opens the Blackwell nvrtc crash, and this scan bites the moment
-    its source lands.
+    calls ``GLiNER2.from_pretrained`` directly — **or** routes it through ``load_with_fa2_fallback``,
+    which spreads the perf kwargs but does NOT neutralize the JIT — re-opens the Blackwell nvrtc
+    crash, and this scan bites the moment its source lands.
     """
     path = _packages_root() / rel_source
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    seam_routed = _model_from_pretrained_passed_to_perf_seam(tree)
-    assert seam_routed, f"{rel_source}: no model load routed through the shared perf seam"
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or id(node.func) in seam_routed:
-            continue
-        assert not _is_model_from_pretrained(node), (
-            f"{rel_source} line {node.lineno}: {_callee_root_name(node)}(...) bypasses the shared "
-            "JIT-neutralizing loaders "
-            f"({', '.join(_JIT_NEUTRALIZING_LOADERS)}) — re-opens the Blackwell/CUDA-13 nvrtc crash"
+    jit_routed = _model_from_pretrained_passed_to_perf_seam(tree, _JIT_NEUTRALIZING_LOADERS)
+    assert jit_routed, (
+        f"{rel_source}: no model load routed through the shared JIT-neutralizing loaders "
+        f"({', '.join(_JIT_NEUTRALIZING_LOADERS)})"
+    )
+
+    offenders = jit_seam_offenders(tree)
+    assert not offenders, (
+        f"{rel_source}: mdeberta model load(s) bypass the shared JIT-neutralizing loaders "
+        f"({', '.join(_JIT_NEUTRALIZING_LOADERS)}) — re-opens the Blackwell/CUDA-13 nvrtc crash:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_jit_guard_flags_a_load_routed_through_the_non_neutralizing_fa2_loader() -> None:
+    """Meta-test: ``load_with_fa2_fallback`` is NOT an acceptable route for an mdeberta model.
+
+    The pre-fix guard reused the W8 accept-set (``_PERF_SEAM_FUNCS``), which includes
+    ``load_with_fa2_fallback`` — so this source produced ZERO offenders and the #190 AC was
+    unenforced. The guard must flag it.
+    """
+    tree = ast.parse("m = load_with_fa2_fallback(GLiNER.from_pretrained, model_id, perf)\n")
+    assert jit_seam_offenders(tree), (
+        "an mdeberta model load handed to load_with_fa2_fallback (which never calls "
+        "neutralize_torch_jit) must be flagged by the #190 guard"
+    )
+
+
+def test_jit_guard_flags_a_bare_and_an_indirected_mdeberta_load() -> None:
+    """Meta-test: a bare load and an indirected class handle are both flagged (no false negative)."""
+    for bad in (
+        "m = GLiNER2.from_pretrained(model_id)\n",
+        "m = gliner2_cls.from_pretrained(model_id, quantize=True)\n",
+        "m = self._gliner2_cls().from_pretrained(model_id)\n",
+    ):
+        assert jit_seam_offenders(ast.parse(bad)), f"must be flagged: {bad!r}"
+
+
+def test_jit_guard_accepts_the_neutralizing_loaders() -> None:
+    """Meta-test: the two real JIT-neutralizing routes are NOT flagged (no false positive)."""
+    for good in (
+        "m = load_then_cast(GLiNER.from_pretrained, model_id, config, device)\n",
+        "m = load_gliner2_optimized(gliner2_cls.from_pretrained, model_id, dev, cfg)\n",
+        "m = load_gliner2_optimized(self._gliner2_cls().from_pretrained, model_id, dev, cfg)\n",
+        # a processor/tokenizer load takes no perf kwargs and is not an mdeberta model
+        "p = AutoProcessor.from_pretrained(model_id)\n",
+    ):
+        assert not jit_seam_offenders(ast.parse(good)), f"must NOT be flagged: {good!r}"
+
+
+def test_jit_neutralizing_loaders_constant_matches_the_real_perf_seam() -> None:
+    """The accept-set is TRUE of ``perf.py``: each named loader calls ``neutralize_torch_jit``…
+
+    …and a perf-seam loader that is NOT in the accept-set does not. This keeps the constant from
+    drifting into a lie (the pre-fix state, where it was named in a message but asserted nowhere).
+    """
+    perf_src = (
+        _packages_root() / "latence-core/src/latence_core/providers/perf.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(perf_src)
+    bodies = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    def _calls_neutralize(fn_name: str) -> bool:
+        fn = bodies.get(fn_name)
+        assert fn is not None, f"perf.py has no function {fn_name!r}"
+        return any(
+            isinstance(c, ast.Call)
+            and (
+                (isinstance(c.func, ast.Name) and c.func.id == "neutralize_torch_jit")
+                or (isinstance(c.func, ast.Attribute) and c.func.attr == "neutralize_torch_jit")
+            )
+            for c in ast.walk(fn)
+        )
+
+    for loader in _JIT_NEUTRALIZING_LOADERS:
+        assert _calls_neutralize(loader), (
+            f"perf.py:{loader} is listed in _JIT_NEUTRALIZING_LOADERS but does not call "
+            "neutralize_torch_jit"
+        )
+    for loader in set(_PERF_SEAM_FUNCS) - set(_JIT_NEUTRALIZING_LOADERS):
+        assert not _calls_neutralize(loader), (
+            f"perf.py:{loader} now neutralizes the JIT — add it to _JIT_NEUTRALIZING_LOADERS so "
+            "the #190 guard accepts it"
         )
 
 
