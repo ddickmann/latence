@@ -95,10 +95,12 @@ def read_export(
             msg = f"The Export at {uri!r} has no {RECORD_ID_COLUMN!r} column; it is not a corpus."
             raise SinkExportError(msg)
 
+        ordinal = 0
         for batch in parquet.iter_batches(batch_size=batch_size):  # type: ignore[no-untyped-call]
             rows: list[ExportRow] = []
             for raw in batch.to_pylist():
-                row, width = _to_row(raw, width, uri)
+                row, width = _to_row(raw, width, uri, ordinal)
+                ordinal += 1
                 rows.append(row)
             if rows:
                 yield rows
@@ -144,11 +146,23 @@ def read_record_ids(
                 yield ids
 
 
-def _to_row(raw: dict[str, Any], width: int | None, uri: str) -> tuple[ExportRow, int]:
-    """Project one raw Parquet row into an :class:`ExportRow`, pinning/checking the vector width."""
+def _to_row(
+    raw: dict[str, Any], width: int | None, uri: str, ordinal: int
+) -> tuple[ExportRow, int]:
+    """Project one raw Parquet row into an :class:`ExportRow`, pinning/checking the vector width.
+
+    A bad row is named by its **position** in the Export and by the *names* of the columns it
+    carries — never by their values. Every error an operator reads is counts-and-schema only
+    (ADR-0034): the ``content`` column is redacted chunk text, and a message that quotes it would
+    walk the corpus straight into a log file and the ticket pasted from it (ADR-0044).
+    """
     record_id = raw.get(RECORD_ID_COLUMN)
     if not isinstance(record_id, str) or not record_id:
-        msg = f"The Export at {uri!r} has a record with an empty {RECORD_ID_COLUMN!r}: {raw!r:.200}"
+        msg = (
+            f"The Export at {uri!r} has a record with an empty {RECORD_ID_COLUMN!r} at row "
+            f"{ordinal} (0-based). Its columns are {sorted(raw)}; the values are not shown because "
+            "an Export carries corpus content. Re-run the Export, or drop the row."
+        )
         raise SinkExportError(msg)
 
     vector = raw.get(EMBEDDING_COLUMN)

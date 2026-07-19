@@ -692,6 +692,42 @@ def test_ragged_vector_widths_are_refused(tmp_path: Path, client: FakeQdrantClie
     assert "3-dimensional" in str(excinfo.value)
 
 
+def test_a_blank_record_id_is_refused_without_quoting_the_corpus(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The error names the bad row by POSITION; it never quotes a column value (R4 regression).
+
+    The Export's ``content`` column is redacted chunk text — exactly what the redaction floor
+    (ADR-0044) exists to keep out of the places humans copy-paste. An error message is one of those
+    places: it reaches stderr, the operator's log, and the ticket pasted from it. So this path is
+    counts-and-schema only (ADR-0034), the same discipline the retrieval backend already holds.
+    Truncating a row repr does not satisfy it: with a blank ``record_id`` the Export's column order
+    puts ``content`` well inside the first 200 characters.
+    """
+    secret = "Patient Jane Doe SSN 123-45-6789 card 4111111111111111"
+    table = pa.table(
+        {
+            "record_id": ["c1", ""],
+            "schema_version": [1, 1],
+            "provenance": ['{"offset": 0}', '{"offset": 1}'],
+            "classification": ['{"level": "internal"}', '{"level": "internal"}'],
+            "content": ["alpha", secret],
+            "embedding": [[0.1, 0.2], [0.3, 0.4]],
+        }
+    )
+    pq.write_table(table, tmp_path / "records.parquet")  # type: ignore[no-untyped-call]
+
+    with pytest.raises(SinkExportError) as excinfo:
+        sink(client).load(str(tmp_path))
+
+    message = str(excinfo.value)
+    assert secret not in message  # the whole point
+    assert "123-45-6789" not in message
+    assert "alpha" not in message  # no row's content, not just the offending one
+    assert "row 1" in message  # ...and it is still actionable: which row
+    assert "record_id" in message  # column NAMES are schema, and stay
+
+
 def test_a_column_colliding_with_the_sink_bookkeeping_is_refused(
     tmp_path: Path, client: FakeQdrantClient
 ) -> None:
