@@ -285,7 +285,7 @@ class RedactionSuite:
             "The gold set deliberately includes person names and postal addresses, which a "
             "rule-based redactor structurally cannot detect. The recall below is therefore NOT "
             "expected to be 1.0, and the per-type table shows exactly where the residual is. "
-            "The learned re-pin for names is `--provider pii.gliner`.",
+            "The learned re-pin for names is `--provider redaction.gliner_pii`.",
             "Per-type slices count a detected span as a false positive for its own type when it "
             "covers no gold value; a value masked under a different label counts as a miss for "
             "its gold type (and appears under the `exact span+type` criterion), because a "

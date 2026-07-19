@@ -117,13 +117,16 @@ surprised by.
   an entity *detection* baseline: it has no notion of RED^FM's label inventory beyond `NUMBER`,
   so `span+type` sits far below `span`, and Arabic and Chinese — which have no case distinction —
   score near zero **by construction**. That is why the suite reports a per-language slice rather
-  than one aggregate. The learned re-pin is `--provider ner.gliner`.
+  than one aggregate. The learned re-pin is `--provider entity.gliner`.
 * **Relation Extraction** pins `relation.pattern` with five type-prior co-occurrence rules whose
   head/tail signatures were derived from RED^FM's **train** split (never the scored `test`
   split). A co-occurrence rule fires on every in-window type pair, so recall is respectable and
   precision is the honest weakness of a rule baseline. It is scored from **gold mentions**, so
   the number measures relation extraction rather than the entity extractor upstream of it. The
-  learned re-pins are `--provider relation.gliner` / `relation.llm`.
+  learned re-pin is `--provider relation.llm` — the only learned Provider that satisfies the
+  standalone `RelationExtractor` seam this Stage resolves. The learned gliner relation
+  extractors are **Fused** Providers (ADR-0036): they belong under a `fused_entity_relation`
+  Stage and cannot be re-pinned into this one.
 * **Disambiguation** pins `disambiguation.cascade`, which resolves entities by *surface* and has
   no Wikidata index. It therefore cannot link two different surfaces of one entity, and it will
   merge two same-surfaced different entities — both of which the pairwise metric charges it for.

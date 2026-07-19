@@ -69,7 +69,7 @@ _NUMBER = r"\d[\d.,]{0,14}"
 #: nothing at all in Arabic or Chinese, which have no case distinction — the per-language slices
 #: show exactly that, which is the point of publishing them. ``NUMBER`` is a genuinely typed
 #: recogniser, so the ``span+type`` criterion is measuring something rather than being zero by
-#: construction. The learned re-pin is ``--provider ner.gliner``.
+#: construction. The learned re-pin is ``--provider entity.gliner``.
 ENTITY_STACK_PIN = StackPin(
     stage="entity_extraction",
     provider="entity.gazetteer",
@@ -89,7 +89,10 @@ ENTITY_STACK_PIN = StackPin(
 #: a rule. The signatures and the window were derived from RED^FM's **train** split (en+de) and
 #: never from the scored ``test`` split — a rule tuned on the test set would publish a number
 #: about itself. ``window_chars=250`` is ≈ the 90th percentile of the train split's head-end →
-#: tail-start gap. The learned re-pins are ``--provider relation.gliner`` / ``relation.llm``.
+#: tail-start gap. The learned re-pin is ``--provider relation.llm`` — the only learned Provider
+#: that satisfies the *standalone* ``RelationExtractor`` seam this Stage resolves. The learned
+#: gliner relation extractors are **Fused** Providers (ADR-0036): they belong under a
+#: ``fused_entity_relation`` Stage and cannot be re-pinned into this one.
 RELATION_STACK_PIN = StackPin(
     stage="relation_extraction",
     provider="relation.pattern",
@@ -268,7 +271,7 @@ class EntitySuite:
             "notion of RED^FM's label inventory beyond NUMBER, so `span+type` is far below "
             "`span`; and Arabic and Chinese have no case distinction, so their per-language "
             "slices are near-zero BY CONSTRUCTION, not by defect. The learned re-pin is "
-            "`--provider ner.gliner` (installs latence-ner-gliner).",
+            "`--provider entity.gliner` (installs latence-ner-gliner).",
             "Per-language slices use the `span` (boundaries-only) criterion; the `match` "
             "dimension micro-averages both criteria over all languages.",
             *_excluded_note(excluded),
@@ -373,7 +376,10 @@ class RelationSuite:
             "BOTH sides — gold triples with other predicates are out of scope, not false "
             "negatives. A co-occurrence rule fires on every in-window head/tail type pair, so "
             "recall is high and precision is the honest weakness of a rule baseline. The "
-            "learned re-pins are `--provider relation.gliner` / `relation.llm`.",
+            "learned re-pin is `--provider relation.llm` (installs latence-relation-llm) — the "
+            "only learned Provider that satisfies the standalone RelationExtractor seam this "
+            "Stage resolves. The learned gliner relation extractors are Fused Providers "
+            "(ADR-0036): they belong under a `fused_entity_relation` Stage, not this one.",
             f"Scored predicates: {', '.join(sorted(scored_labels))}.",
             *_subset_note(limit),
         ]
