@@ -113,9 +113,23 @@ echo "==> Stamping SBOM with release $TAG"
 # stamp the release identity onto it. A structurally wrong or empty SBOM is rejected rather
 # than attached: an SBOM nobody can answer "am I affected by CVE-X?" from is worse than none,
 # because it looks like evidence.
+#
+# The coverage check lives HERE, not only in generate-sbom.sh, and that placement is
+# load-bearing. generate-sbom.sh validates its intermediate requirements export; this script
+# is the choke point every release SBOM passes through on its way to being stamped,
+# checksummed and Sigstore-signed. Two paths reach a signed release without ever touching the
+# generator's guard:
+#   1. --sbom PATH supplies a document directly (a stale cache, a partial regeneration, a
+#      hand-edited file) and skips generate-sbom.sh entirely.
+#   2. Anything that drops components between the requirements export and the emitted
+#      CycloneDX JSON is invisible to a check that reads the requirements file.
+# So the guard is applied to the bytes that actually get signed. A document that does not
+# account for every distribution this release ships is rejected before SHA256SUMS exists.
 SBOM="$SBOM" VERSION="$VERSION" TAG="$TAG" REPO_SLUG="$REPO_SLUG" python3 - <<'PY'
 import json
 import os
+import pathlib
+import re
 import sys
 
 path = os.environ["SBOM"]
@@ -136,6 +150,34 @@ if not isinstance(components, list) or not components:
         "the release as if it were evidence"
     )
 
+# Every workspace package under packages/ is built and published by this same release
+# (release.yml loops `for pkg in packages/*/`). `cyclonedx-py requirements` emits one
+# component per `./packages/<name>` path requirement, carrying the path as an
+# externalReferences URL (the component's own `name` is "unknown" — pip cannot resolve a
+# name from a bare path — so the path reference is what identifies it).
+covered: set[str] = set()
+_PATH = re.compile(r"(?:^|/)packages/([A-Za-z0-9._-]+)/?$")
+for component in components:
+    if not isinstance(component, dict):
+        continue
+    for ref in component.get("externalReferences") or []:
+        if not isinstance(ref, dict):
+            continue
+        match = _PATH.search(str(ref.get("url", "")).rstrip("/"))
+        if match:
+            covered.add(match.group(1))
+
+tree = {p.parent.name for p in pathlib.Path("packages").glob("*/pyproject.toml")}
+uncovered = sorted(tree - covered)
+if uncovered:
+    sys.exit(
+        f"release-integrity: {path} accounts for {len(covered & tree)} of the {len(tree)} "
+        "distributions this release publishes — the SBOM would be stamped, checksummed and "
+        "signed as this release's component inventory while omitting those packages and "
+        "every third-party dependency they pull, so an adopter scanning it for 'am I "
+        f"affected by CVE-X?' gets a silent false negative. Missing: {', '.join(uncovered)}"
+    )
+
 metadata = doc.setdefault("metadata", {})
 metadata["component"] = {
     "type": "application",
@@ -154,7 +196,10 @@ metadata["properties"] = sorted(properties, key=lambda p: p["name"])
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, indent=2, sort_keys=True)
     fh.write("\n")
-print(f"    stamped {len(components)} components as latence-framework {os.environ['VERSION']}")
+print(
+    f"    stamped {len(components)} components as latence-framework {os.environ['VERSION']} "
+    f"({len(tree)}/{len(tree)} published distributions covered)"
+)
 PY
 
 # ---- 2. Verification instructions (shipped WITH the assets, and reused as release notes) --

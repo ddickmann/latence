@@ -43,6 +43,24 @@ reintroduce silently. `uv export --no-emit-project` leaves one `./packages/<name
 requirement per resolved member, so the script compares that set against
 `packages/*/pyproject.toml` and aborts on any shortfall.
 
+The coverage check is enforced **twice, at two different levels**, and that redundancy is
+deliberate:
+
+| where | what it reads | what it catches |
+| --- | --- | --- |
+| `scripts/generate-sbom.sh` | the intermediate requirements export | a wrong resolution scope (a dropped `--all-packages`, a member missing from the workspace globs) |
+| `scripts/release-integrity.sh` | the **final CycloneDX document**, before stamping | everything the first check cannot see |
+
+The second one is the load-bearing guard, because `generate-sbom.sh` is not on every path to
+a signed release. `release-integrity.sh --sbom PATH` accepts a caller-supplied document and
+skips the generator entirely — a stale cache, a partial regeneration or a hand-edited file
+would otherwise be stamped `latence-framework <version>`, digest-recorded in `SHA256SUMS`
+and Sigstore-signed without anything having compared it against the distributions actually
+being published. `release-integrity.sh` is the choke point every release SBOM passes
+through, so the check runs there on the exact bytes that get signed: it reads back the
+`./packages/<name>` path components, compares them against `packages/*/pyproject.toml`, and
+fails closed — naming the missing packages — before `SHA256SUMS` is written.
+
 Both tools run via `uv run --with … --no-project`, so nothing is added to the
 workspace's own dependency set.
 

@@ -31,8 +31,36 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO_ROOT / "scripts" / "release-integrity.sh"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-# A minimal but structurally valid CycloneDX 1.6 document, so the tests never need `uv
-# export` or the network. It mirrors the shape `cyclonedx-py requirements` emits.
+def _workspace_packages() -> list[str]:
+    """Every package under ``packages/`` — the distributions a release builds and publishes."""
+    return sorted(p.parent.name for p in (_REPO_ROOT / "packages").glob("*/pyproject.toml"))
+
+
+def _workspace_components(names: list[str] | None = None) -> list[dict[str, Any]]:
+    """The workspace path components `cyclonedx-py requirements` emits for `./packages/<name>`.
+
+    It cannot resolve a distribution name from a bare path, so each lands as ``name:
+    "unknown"`` and the path survives only as an externalReferences URL. That URL is what
+    identifies the component, which is why the coverage guard reads it rather than ``name``.
+    """
+    return [
+        {
+            "type": "library",
+            "name": "unknown",
+            "bom-ref": f"requirements-L{i}",
+            "externalReferences": [
+                {"type": "other", "comment": "explicit local path", "url": f"./packages/{name}"}
+            ],
+        }
+        for i, name in enumerate(_workspace_packages() if names is None else names)
+    ]
+
+
+# A structurally valid CycloneDX 1.6 document, so the tests never need `uv export` or the
+# network. It mirrors the shape `cyclonedx-py requirements` emits: pinned third-party
+# components plus one path component per workspace package. The workspace half is not
+# decoration — release-integrity.sh fails closed unless the SBOM accounts for every
+# distribution the release publishes, so a fixture without it would not be a releasable SBOM.
 _CYCLONEDX_DOC: dict[str, Any] = {
     "bomFormat": "CycloneDX",
     "specVersion": "1.6",
@@ -40,6 +68,7 @@ _CYCLONEDX_DOC: dict[str, Any] = {
     "components": [
         {"type": "library", "name": "pydantic", "version": "2.9.2"},
         {"type": "library", "name": "fsspec", "version": "2024.9.0"},
+        *_workspace_components(),
     ],
 }
 
@@ -174,7 +203,18 @@ def test_sbom_is_stamped_with_the_release_identity(tmp_path: Path) -> None:
     assert properties["latence:release:tag"] == "v9.9.9"
     assert properties["latence:release:repository"] == "ddickmann/latence-framework"
     # The resolved dependency set survives stamping — that is the whole point of the SBOM.
-    assert {c["name"] for c in doc["components"]} == {"pydantic", "fsspec"}
+    assert {"pydantic", "fsspec"} <= {c["name"] for c in doc["components"]}
+    # ...and so does the coverage of every distribution the release publishes. Stamping a
+    # release identity onto a document rewrites it in place, so the workspace components must
+    # come out the other side: the stamp asserts "this is the inventory for this exact
+    # release", and that claim is only true if the inventory still accounts for the release.
+    stamped_paths = {
+        ref["url"].rsplit("/", 1)[-1]
+        for c in doc["components"]
+        for ref in c.get("externalReferences", [])
+        if "/packages/" in ref.get("url", "")
+    }
+    assert stamped_paths == set(_workspace_packages())
 
 
 def test_verify_instructions_pin_the_tag_and_link_the_cvd_policy(tmp_path: Path) -> None:
@@ -285,6 +325,71 @@ def test_refuses_to_attach_a_useless_sbom(
     assert result.returncode != 0, "a useless SBOM was accepted"
     assert expected in result.stderr, result.stderr
     assert not (out / "SHA256SUMS").exists(), "asset set was assembled around a rejected SBOM"
+
+
+def test_refuses_to_sign_an_sbom_that_omits_published_distributions(tmp_path: Path) -> None:
+    """An SBOM that covers only part of the release is rejected before it is signed.
+
+    This is the shape the CPU-first dev environment produced before ``--all-packages``:
+    ``uv export`` resolved only the root meta-project, so the document described 12 of the 32
+    distributions the same release publishes and named none of their heavy dependencies
+    (torch, transformers, gliner2, peft, presidio-analyzer...). It is still reachable via
+    ``--sbom``, which bypasses generate-sbom.sh and its coverage check entirely.
+
+    Such a document is not merely incomplete — it is stamped ``latence-framework <version>``,
+    digest-recorded in SHA256SUMS and Sigstore-signed, so an adopter scanning it for
+    "am I affected by CVE-X?" gets a CLEAN answer that is cryptographically authenticated.
+    The guard must therefore run on the document that gets signed, and fail closed.
+    """
+    all_packages = _workspace_packages()
+    assert len(all_packages) > 12, "fixture assumes a multi-package workspace"
+
+    # The pre-fix resolution scope: the root project's own dependency closure only.
+    cpu_only = [
+        name
+        for name in all_packages
+        if name
+        in {
+            "latence-benchmark",
+            "latence-console",
+            "latence-core",
+            "latence-demo",
+            "latence-disambig-embedding",
+            "latence-muvera",
+            "latence-parser-document",
+            "latence-parser-pdfplumber",
+            "latence-parser-plaintext",
+            "latence-retrieval",
+            "latence-sink-qdrant",
+            "latence-source-sharepoint",
+        }
+    ]
+    omitted = sorted(set(all_packages) - set(cpu_only))
+    assert omitted, "fixture assumes some packages are outside the CPU-first closure"
+
+    partial = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+        # Non-empty and structurally valid: it passes every pre-existing check.
+        "components": [
+            {"type": "library", "name": "pydantic", "version": "2.9.2"},
+            *_workspace_components(cpu_only),
+        ],
+    }
+
+    result, out = _run(tmp_path, sbom=partial, extra=("--no-sign",))
+
+    assert result.returncode != 0, "an SBOM omitting published distributions was accepted"
+    assert "distributions this release publishes" in result.stderr, result.stderr
+    # The error names what is missing, rather than failing anonymously (ADR-0034).
+    for name in omitted:
+        assert name in result.stderr, f"{name} missing from the failure message: {result.stderr}"
+    assert not (out / "SHA256SUMS").exists(), (
+        "the asset set was assembled — and would have been signed — around an SBOM that "
+        "omits distributions the release publishes"
+    )
+    assert not (out / "SHA256SUMS.sigstore.json").exists()
 
 
 def test_signing_has_no_default(tmp_path: Path) -> None:
