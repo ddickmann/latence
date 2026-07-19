@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from latence_benchmark import cli
 from latence_benchmark.datasets import OMNIDOCBENCH
+from latence_benchmark.metrics import MetricScore
 from latence_benchmark.parse_suite import ParseSuite
 from latence_benchmark.results import VENDOR_CLAIMS, render_markdown
+from latence_benchmark.suite import StackPin, SuiteResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -141,3 +143,56 @@ def test_the_results_page_records_the_verified_licence_and_the_reproduce_command
     assert "| Evaluation-toolkit license | **Apache-2.0** |" in page
     assert "latence-benchmark run --suite parse --provider parser.pdfplumber" in page
     assert "54a96a6fb6a2bd3b297e59869491db4d3625b711" in page
+
+
+def _criteria_result() -> SuiteResult:
+    """A result shaped like the redaction suite's: a language PARTITION plus match CRITERIA.
+
+    Both dimensions cover the same 35 gold items — the language slices by carving them up, the
+    match slices by re-scoring all of them under three different rules.
+    """
+    return SuiteResult(
+        suite="parse",
+        stage="redaction",
+        dataset=OMNIDOCBENCH,
+        stack_pin=StackPin(stage="redaction", provider="redaction.hybrid_rule"),
+        splits=(),
+        documents_scored=20,
+        metrics=(
+            MetricScore("language", "de", true_positives=14, false_positives=0, false_negatives=4),
+            MetricScore("language", "en", true_positives=13, false_positives=0, false_negatives=4),
+            MetricScore("match", "coverage", true_positives=27, false_positives=0, false_negatives=8),
+            MetricScore("match", "exact span", true_positives=25, false_positives=2, false_negatives=10),
+            MetricScore("match", "span+type", true_positives=22, false_positives=5, false_negatives=13),
+        ),
+        headline_dimension="language",
+        measured_on="2026-07-18",
+    )
+
+
+def test_the_page_publishes_no_aggregate_over_a_criteria_dimension() -> None:
+    """A `match` table must carry no bold MICRO row.
+
+    Its slices are alternative scoring criteria over ONE gold set, so summing their confusion
+    counts multiply-counts every gold item: a 35-span corpus rendered with a Gold column of 105,
+    published as the only bold row in the section and therefore read as its authoritative
+    summary. It corresponds to no measurable quantity, so it must not be rendered at all.
+    """
+    page = render_markdown([_criteria_result()], generated_on="2026-07-18")
+    section = page[page.index("#### By match criterion") :]
+    section = section[: section.index("Documents scored:")]
+
+    assert "**MICRO**" not in section
+    assert "| 105 |" not in section  # the multiply-counted gold denominator
+    assert "alternative scoring criteria over the same gold items" in section
+    # The measurements themselves are untouched — only the fabricated aggregate is gone.
+    assert "| `coverage` | 100.0% | 77.1% | 87.1% | 27 | 0 | 8 | 35 |" in section
+
+
+def test_the_page_still_totals_a_partition_dimension() -> None:
+    """Removing the fabricated aggregate must not remove the real ones."""
+    page = render_markdown([_criteria_result()], generated_on="2026-07-18")
+    section = page[page.index("#### By language") : page.index("#### By match criterion")]
+    assert "| **MICRO** |" in section
+    assert "| 27 | 0 | 8 | 35 |" in section  # the language slices DO partition the 35 gold spans
+    assert "**Headline (micro over language):**" in page

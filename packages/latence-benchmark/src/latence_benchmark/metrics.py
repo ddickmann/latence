@@ -120,6 +120,10 @@ def micro(scores: Sequence[MetricScore], *, dimension: str, name: str = "MICRO")
     three gold spans cannot swing the headline number as hard as one with three thousand. A
     macro average over wildly uneven language slices would flatter or damn the system by
     accident.
+
+    This is the raw sum and asks no questions of its inputs: summing is only *meaningful* when
+    the scores partition one gold set, and the caller is what knows that. Callers aggregating a
+    whole dimension must go through :func:`total`, which checks it.
     """
     return MetricScore(
         dimension=dimension,
@@ -128,3 +132,45 @@ def micro(scores: Sequence[MetricScore], *, dimension: str, name: str = "MICRO")
         false_positives=sum(s.false_positives for s in scores),
         false_negatives=sum(s.false_negatives for s in scores),
     )
+
+
+#: Dimensions whose slices are **alternative criteria over one gold set**, not a partition of it.
+#:
+#: A ``language`` or ``pii_type`` slice owns a disjoint share of the gold items, so the slices'
+#: counts add up to the corpus and a micro-average over them is a real measurement. A ``match``
+#: slice does not: it re-scores *the same* gold items under a stricter or looser rule for what
+#: counts as a hit (``coverage`` vs ``exact span`` vs ``exact span+type``). Summing those counts
+#: each gold item once per criterion — 35 gold spans become a denominator of 105 — and blends
+#: three mutually redundant views of one detection set into a number that measures nothing.
+#:
+#: So no aggregate is defined here. That is not a gap to be filled with a different average:
+#: there is no single quantity that "the match dimension overall" names.
+CRITERIA_DIMENSIONS: frozenset[str] = frozenset({"match"})
+
+
+class MetricAggregationError(ValueError):
+    """An aggregate was requested over a dimension whose slices do not partition a gold set."""
+
+
+def is_partition(dimension: str) -> bool:
+    """Do this dimension's slices carve one gold set into disjoint parts (so a total exists)?"""
+    return dimension not in CRITERIA_DIMENSIONS
+
+
+def total(scores: Sequence[MetricScore], *, dimension: str, name: str = "MICRO") -> MetricScore:
+    """The aggregate row for ``dimension`` — refusing the dimensions that have no aggregate.
+
+    :raises MetricAggregationError: if ``dimension`` is a criteria dimension
+        (:data:`CRITERIA_DIMENSIONS`). Loudly, never as a quietly wrong number: a published
+        aggregate that multiply-counts its gold set is exactly the kind of confident fiction
+        this harness exists to keep out of ``docs/BENCHMARKS.md``.
+    """
+    if not is_partition(dimension):
+        msg = (
+            f"Dimension {dimension!r} has no aggregate: its slices are alternative scoring "
+            "criteria over the SAME gold items, not disjoint slices of them, so summing their "
+            "confusion counts would count every gold item once per criterion. Report the "
+            "criteria individually."
+        )
+        raise MetricAggregationError(msg)
+    return micro(scores, dimension=dimension, name=name)

@@ -167,7 +167,8 @@ Attribution: Latence synthetic PII corpus (Apache-2.0) — part of the latence-f
 | `coverage (value fully masked)` | 100.0% | 77.1% | 87.1% | 27 | 0 | 8 | 35 |
 | `exact span` | 92.6% | 71.4% | 80.6% | 25 | 2 | 10 | 35 |
 | `exact span+type` | 81.5% | 62.9% | 71.0% | 22 | 5 | 13 | 35 |
-| **MICRO** | **91.4%** | **70.5%** | **79.6%** | 74 | 7 | 31 | 105 |
+
+These rows are **alternative scoring criteria over the same gold items**, not disjoint slices of the corpus, so there is deliberately no aggregate row: summing them would count every gold item once per criterion and report a denominator several times the size of the gold set. Read each criterion on its own.
 
 Documents scored: 20.
 

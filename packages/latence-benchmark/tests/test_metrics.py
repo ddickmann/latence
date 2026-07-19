@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from latence_benchmark.metrics import MetricScore, confusion, micro
+from latence_benchmark.metrics import (
+    MetricAggregationError,
+    MetricScore,
+    confusion,
+    is_partition,
+    micro,
+    total,
+)
 
 
 def test_an_undefined_ratio_is_none_not_zero() -> None:
@@ -62,3 +69,35 @@ def test_metric_serialisation_carries_the_counts_and_the_ratios() -> None:
     assert payload["true_positives"] == 3
     assert payload["precision"] == pytest.approx(0.75)
     assert payload["f1"] == pytest.approx(0.75)
+
+
+def test_a_criteria_dimension_has_no_aggregate() -> None:
+    """`match` slices re-score ONE gold set under different rules; they do not partition it.
+
+    The redaction corpus has 35 gold PII spans, scored under three overlapping criteria. Summing
+    their confusion counts publishes a Gold denominator of 105 for a 35-span corpus, and a
+    "precision" that is an arithmetic blend of three redundant views of the same detections.
+    That number measures nothing, so `total` refuses to compute it rather than emitting it.
+    """
+    criteria = [
+        MetricScore("match", "coverage", true_positives=27, false_positives=0, false_negatives=8),
+        MetricScore("match", "exact span", true_positives=25, false_positives=2, false_negatives=10),
+        MetricScore("match", "span+type", true_positives=22, false_positives=5, false_negatives=13),
+    ]
+    # What the raw sum would have said — a 35-span corpus reported with 105 gold items.
+    assert micro(criteria, dimension="match").gold == 105
+
+    assert not is_partition("match")
+    with pytest.raises(MetricAggregationError, match="alternative scoring criteria"):
+        total(criteria, dimension="match")
+
+
+def test_a_partition_dimension_still_totals() -> None:
+    """The guard must not swallow the real aggregates: language slices are disjoint."""
+    slices = [
+        MetricScore("language", "de", true_positives=9, false_positives=1, false_negatives=1),
+        MetricScore("language", "en", true_positives=6, false_positives=0, false_negatives=4),
+    ]
+    assert is_partition("language")
+    aggregate = total(slices, dimension="language")
+    assert (aggregate.true_positives, aggregate.gold, aggregate.name) == (15, 20, "MICRO")

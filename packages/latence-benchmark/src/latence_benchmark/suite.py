@@ -39,7 +39,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from latence_benchmark.metrics import MetricScore, micro
+from latence_benchmark.metrics import MetricScore, total
 from latence_benchmark.scoring import Outcome
 
 if TYPE_CHECKING:
@@ -164,11 +164,16 @@ class SuiteResult:
 
     @property
     def headline(self) -> MetricScore | None:
-        """Micro-average over :attr:`headline_dimension`, or ``None`` for a unit-test suite."""
+        """Micro-average over :attr:`headline_dimension`, or ``None`` for a unit-test suite.
+
+        Goes through :func:`~latence_benchmark.metrics.total`, so naming a *criteria* dimension
+        (whose slices re-score one gold set under different rules) as the headline raises rather
+        than leading the page with a number whose denominator is a multiple of the gold set.
+        """
         if self.headline_dimension is None:
             return None
         slices = self.metrics_for(self.headline_dimension)
-        return micro(slices, dimension=self.headline_dimension) if slices else None
+        return total(slices, dimension=self.headline_dimension) if slices else None
 
     @property
     def overall(self) -> SplitScore:

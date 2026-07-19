@@ -27,7 +27,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from latence_benchmark.metrics import MetricScore, micro
+from latence_benchmark.metrics import MetricScore, is_partition, total
 from latence_benchmark.scoring import SUPPORTED_TYPES
 from latence_benchmark.suite import SplitScore, StackPin, SuiteResult, get_suite, suite_names
 
@@ -240,13 +240,25 @@ def _metric_tables(result: SuiteResult) -> list[str]:
                 f"{_pct(score.f1)} | {score.true_positives} | {score.false_positives} | "
                 f"{score.false_negatives} | {score.gold} |"
             )
-        total = micro(slices, dimension=dimension)
-        lines += [
-            f"| **MICRO** | **{_pct(total.precision)}** | **{_pct(total.recall)}** | "
-            f"**{_pct(total.f1)}** | {total.true_positives} | {total.false_positives} | "
-            f"{total.false_negatives} | {total.gold} |",
-            "",
-        ]
+        if is_partition(dimension):
+            aggregate = total(slices, dimension=dimension)
+            lines += [
+                f"| **MICRO** | **{_pct(aggregate.precision)}** | **{_pct(aggregate.recall)}** | "
+                f"**{_pct(aggregate.f1)}** | {aggregate.true_positives} | "
+                f"{aggregate.false_positives} | {aggregate.false_negatives} | "
+                f"{aggregate.gold} |",
+                "",
+            ]
+        else:
+            lines += [
+                "",
+                "These rows are **alternative scoring criteria over the same gold items**, not "
+                "disjoint slices of the corpus, so there is deliberately no aggregate row: "
+                "summing them would count every gold item once per criterion and report a "
+                "denominator several times the size of the gold set. Read each criterion on its "
+                "own.",
+                "",
+            ]
     lines += [
         f"Documents scored: {result.documents_scored}.",
         "",
