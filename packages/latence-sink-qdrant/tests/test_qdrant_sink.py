@@ -52,10 +52,10 @@ _COLLECTION = "corpus"
 # --- fixtures: a REAL Export ---------------------------------------------------------------------
 
 
-def _chunk(record_id: str, text: str) -> ChunkRecord:
+def _chunk(record_id: str, text: str, file_name: str = "a.txt") -> ChunkRecord:
     prov = Provenance(
-        source_uri="file:///c/a.txt",
-        file_name="a.txt",
+        source_uri=f"file:///c/{file_name}",
+        file_name=file_name,
         file_type="txt",
         file_size=100,
         document_id="sha256:d1",
@@ -91,6 +91,25 @@ def write_export(
         [_chunk(rid, text) for rid, text in records.items()],
         Storage(),
         str(out_dir),
+    )
+    return str(out_dir)
+
+
+def write_rows_export(
+    out_dir: Path, rows: list[tuple[str, str, str]], *, dimension: int = _DIMENSION
+) -> str:
+    """Write a real ``records.parquet`` for ``(record_id, text, file_name)`` **rows**.
+
+    The ``dict``-keyed :func:`write_export` cannot express the one thing the pipeline routinely
+    produces and the sink has to survive: two rows carrying the *same* ``record_id``. That is not a
+    corrupt Export — ids are content-addressed (``sha256`` of the document bytes), so two
+    byte-identical documents in a corpus share one, while their Provenance still differs.
+    """
+    export = JsonlParquetExport(
+        {"embedder": {"provider": "embedding.hashing", "config": {"dimension": dimension}}}
+    )
+    export.export(
+        [_chunk(rid, text, file_name=name) for rid, text, name in rows], Storage(), str(out_dir)
     )
     return str(out_dir)
 
@@ -726,3 +745,101 @@ def test_the_report_summarises_what_happened(tmp_path: Path, client: FakeQdrantC
     assert "upserted 1" in summary
     assert "load_id=run-7" in summary
     assert report.records == 1
+
+
+# --- two byte-identical documents: one record_id, one point (R3 regression) ----------------------
+
+#: A corpus holding the same document twice — the duplicate a real document library always has.
+#: Both rows carry the id latence-core derives from the *bytes* (``sha256`` of the content, then
+#: ``#chunk-<i>``), because identical content genuinely is the same record; only Provenance differs.
+_DUPLICATED = "sha256:2e02f2c2#chunk-0"
+_TWO_COPIES = [
+    (_DUPLICATED, "the same words", "a.txt"),
+    (_DUPLICATED, "the same words", "b_copy.txt"),
+]
+
+
+def _file_name_of(client: FakeQdrantClient, record_id: str) -> str:
+    return str(json.loads(stored_payload(client, record_id)["provenance"])["file_name"])
+
+
+def test_a_corpus_with_two_byte_identical_documents_loads_and_converges(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """Duplicated content must load, not deadlock the default reconciling path.
+
+    Before the fix the sweep's guard compared Export **rows** against marked **points**: two rows
+    collapsing onto one deterministic point made ``touched=2`` and ``marked=1``, so every default
+    (``reconcile: true``) load of such a corpus raised ``SinkLoadError`` — permanently, and blaming
+    a concurrent load that does not exist. The only escape was ``reconcile: false``, i.e. turning
+    off the sweep the erasure runbook depends on.
+    """
+    export = write_rows_export(tmp_path, _TWO_COPIES)
+
+    report = sink(client).load(export)
+
+    # One record, one point — and the counts say so in the units they name.
+    assert report.upserted == 1
+    assert report.duplicate_rows == 1
+    assert report.points == 1
+    assert report.records == 2  # rows read from the Export
+    assert report.deleted == 0
+    assert list(client.points[_COLLECTION]) == [point_id(_DUPLICATED)]
+    # Last row wins, exactly as an upsert of a repeated id behaves on a real Qdrant.
+    assert _file_name_of(client, _DUPLICATED) == "b_copy.txt"
+
+    # ...and re-running is idempotent rather than a second failure.
+    again = sink(client).load(export)
+    assert (again.upserted, again.unchanged, again.duplicate_rows, again.deleted) == (0, 1, 1, 0)
+    assert list(client.points[_COLLECTION]) == [point_id(_DUPLICATED)]
+
+
+def test_the_report_counts_points_not_rows_with_reconcile_off(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The non-sweeping path reported "upserted 2" over a collection holding one point."""
+    export = write_rows_export(tmp_path, _TWO_COPIES)
+
+    report = sink(client, reconcile=False).load(export)
+
+    assert report.upserted == len(client.points[_COLLECTION]) == 1
+    assert report.duplicate_rows == 1
+    assert "1 repeated record_id(s) collapsed" in report.summary()
+
+
+def test_duplicate_record_ids_are_counted_once_across_batches(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The repeat is recognised even when the two rows never meet in one batch.
+
+    ``batch_size=1`` puts each copy in its own round-trip, so a within-batch de-duplication alone
+    would still over-count and still trip the sweep's guard. The second row is recognised from the
+    marker this load already stamped on the point — which is also why ``load`` never has to hold a
+    corpus-sized set of ids (ADR-0033).
+    """
+    export = write_rows_export(tmp_path, _TWO_COPIES)
+
+    report = sink(client, batch_size=1).load(export)
+
+    assert (report.upserted, report.duplicate_rows, report.points) == (1, 1, 1)
+    assert _file_name_of(client, _DUPLICATED) == "b_copy.txt"
+
+
+def test_a_duplicated_document_is_still_verifiably_absent_after_retraction(
+    tmp_path: Path, client: FakeQdrantClient
+) -> None:
+    """The erasure runbook has to keep working for the corpus that provoked the bug.
+
+    This is the reason the fix could not be "document ``reconcile: false``": with the sweep off, the
+    purged record stays live and searchable, and ``verify_absent`` says so.
+    """
+    full = write_rows_export(tmp_path / "v1", [*_TWO_COPIES, ("c1", "alpha", "c1.txt")])
+    sink(client).load(full)
+    assert sink(client).verify_absent([_DUPLICATED]) == [_DUPLICATED]
+
+    after_purge = write_rows_export(tmp_path / "v2", [("c1", "alpha", "c1.txt")])
+    report = sink(client).load(after_purge)
+
+    assert report.deleted == 1
+    assert stored_record_ids(client) == {"c1"}
+    assert sink(client).verify_absent([_DUPLICATED]) == []

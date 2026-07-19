@@ -48,9 +48,17 @@ key, and the docstring of :meth:`load` says which to use when.
 sweep. A half-uploaded corpus therefore never deletes the records it did not reach — the worst case
 is a collection with stale-but-present data, never one with silently-erased data.
 
+**Two rows, one record.** The corpus is content-addressed: a document's id is the sha256 of its
+bytes, so two byte-identical documents in one corpus deliberately share one ``record_id`` (and one
+derived point). The Export still holds a row each — their Provenance differs — so *rows read* and
+*points touched* are different numbers, and the sink counts them separately: repeated rows collapse
+onto the point they address (last row wins, exactly as an upsert of a repeated id behaves), and the
+:class:`LoadReport` reports both counts. Nothing downstream may confuse the two — in particular the
+sweep's guard below, which is stated in points.
+
 The sweep is guarded for the same reason, and it is guarded *twice*, because one check is not
 enough. ``must_not(marker)`` picks the sweep's **candidates**, and before enumerating any the sink
-checks that exactly as many points carry its marker as it processed records: a load running
+checks that exactly as many points carry its marker as it *touched*: a load running
 concurrently restamps those points and trips the check, which fails the *losing* load loudly and
 deletes nothing. But that check is a pre-check over a marker another writer can move, so the delete
 never re-derives the stale set from it. Each candidate is instead checked against the **Export** —
@@ -142,9 +150,12 @@ def point_id(record_id: str, namespace: uuid.UUID = DEFAULT_ID_NAMESPACE) -> str
 class LoadReport:
     """What one :meth:`QdrantSink.load` actually did — the numbers the CLI prints.
 
-    Every field is an observed count, not an intention: ``upserted + unchanged`` is the number of
-    Export records processed, and ``deleted`` is the number of stale points the reconciling sweep
-    removed (0 on a first load, and exactly the retracted/purged set on a re-load after a deletion).
+    Every field is an observed count, not an intention, and the units differ — load-bearing, not
+    pedantic. ``upserted`` and ``unchanged`` count **points**; ``duplicate_rows`` counts the Export
+    **rows** that addressed a point another row in the same load had already handled (two
+    byte-identical documents share one content-addressed ``record_id``, so one point is the correct
+    outcome, not an error). ``deleted`` is the number of stale points the reconciling sweep removed
+    (0 on a first load, and exactly the retracted/purged set on a re-load after a deletion).
     """
 
     collection: str
@@ -153,13 +164,19 @@ class LoadReport:
     created_collection: bool = False
     upserted: int = 0
     unchanged: int = 0
+    duplicate_rows: int = 0
     deleted: int = 0
     reconciled: bool = False
 
     @property
-    def records(self) -> int:
-        """Records read from the Export in this load."""
+    def points(self) -> int:
+        """Distinct points this load touched — what the collection holds for this Export."""
         return self.upserted + self.unchanged
+
+    @property
+    def records(self) -> int:
+        """Rows read from the Export in this load (``points`` plus the repeated rows)."""
+        return self.points + self.duplicate_rows
 
     def summary(self) -> str:
         """One human line for the CLI (and for a run log)."""
@@ -169,10 +186,16 @@ class LoadReport:
             else "reconcile disabled (no stale sweep)"
         )
         created = "created" if self.created_collection else "existing"
+        # Named only when there are any, so an ordinary corpus's output is untouched.
+        repeats = (
+            f", {self.duplicate_rows} repeated record_id(s) collapsed"
+            if self.duplicate_rows
+            else ""
+        )
         return (
             f"collection {self.collection!r} ({created}, dim {self.dimension}): "
             f"{self.records} record(s) read — upserted {self.upserted}, "
-            f"unchanged {self.unchanged}, {sweep} [load_id={self.load_id}]"
+            f"unchanged {self.unchanged}{repeats}, {sweep} [load_id={self.load_id}]"
         )
 
 
@@ -320,17 +343,21 @@ class QdrantSink:
         created = False
         upserted = 0
         unchanged = 0
+        duplicate_rows = 0
         for rows in batches:
             points = [self._to_point(row, load_id) for row in rows]
             if dimension is None:
                 dimension = len(points[0].vector)
                 created = self._ensure_collection(dimension)
-            changed, same = self._partition(points)
+            points, repeats = _collapse_repeats(points)
+            duplicate_rows += repeats
+            changed, same, already = self._partition(points, load_id)
+            duplicate_rows += len(already)
             if changed:
                 self._upsert(changed)
-                upserted += len(changed)
+                upserted += sum(1 for p in changed if p.id not in already)
             if same:
-                unchanged += len(same)
+                unchanged += sum(1 for p in same if p.id not in already)
                 if self._reconcile:
                     # Unchanged records are NOT re-upserted (that is the whole point), but they
                     # must still carry this run's sweep marker or the reconcile below would delete
@@ -346,6 +373,8 @@ class QdrantSink:
                 return LoadReport(collection=self._collection, dimension=0, load_id=load_id)
             dimension = 0
 
+        # Stated in POINTS, which is what the sweep counts back. Rows are not points: a corpus with
+        # two byte-identical documents reads more rows than it touches points, by design.
         deleted = (
             self._sweep(load_id, upserted + unchanged, export_dir, store) if self._reconcile else 0
         )
@@ -356,6 +385,7 @@ class QdrantSink:
             created_collection=created,
             upserted=upserted,
             unchanged=unchanged,
+            duplicate_rows=duplicate_rows,
             deleted=deleted,
             reconciled=self._reconcile,
         )
@@ -428,21 +458,39 @@ class QdrantSink:
             digest=digest,
         )
 
-    def _partition(self, points: list[_Point]) -> tuple[list[_Point], list[_Point]]:
-        """Split a batch into (must-upsert, already-current) by comparing stored content digests."""
+    def _partition(
+        self, points: list[_Point], load_id: str
+    ) -> tuple[list[_Point], list[_Point], set[str]]:
+        """Split a batch into (must-upsert, already-current, already-touched-by-this-load).
+
+        The first two are the change detector, by stored content digest, exactly as before. The
+        third answers a different question — "have I already touched this point in an *earlier*
+        batch of this same load?" — and it is asked of the **store**, from the marker this load
+        stamps, rather than of a remembered set of ids. That is what keeps the repeat count exact
+        for a duplicate whose two rows land in different batches while ``load`` stays O(batch)
+        (ADR-0033): a corpus-sized id set would be the obvious implementation and would be a
+        memory regression on a ten-million-record load. It costs no extra round-trip — the same
+        retrieve carries one more payload key.
+
+        A repeated point is still processed normally (its later row may carry different content,
+        and last row wins, matching an upsert of a repeated id on a real Qdrant); it is only
+        excluded from the *point* counts, which the sweep's guard is stated in.
+        """
         stored = self._call(
             "retrieve",
             lambda c: c.retrieve(
                 collection_name=self._collection,
                 ids=[p.id for p in points],
-                with_payload=[DIGEST_KEY],
+                with_payload=[DIGEST_KEY, LOAD_ID_KEY],
                 with_vectors=False,
             ),
         )
-        digests = {str(rec.id): (rec.payload or {}).get(DIGEST_KEY) for rec in stored}
+        payloads = {str(rec.id): (rec.payload or {}) for rec in stored}
+        digests = {pid: payload.get(DIGEST_KEY) for pid, payload in payloads.items()}
+        already = {pid for pid, payload in payloads.items() if payload.get(LOAD_ID_KEY) == load_id}
         changed = [p for p in points if digests.get(p.id) != p.digest]
         same = [p for p in points if digests.get(p.id) == p.digest]
-        return changed, same
+        return changed, same, already
 
     def _upsert(self, points: list[_Point]) -> None:
         models = self._load_models()
@@ -502,7 +550,9 @@ class QdrantSink:
 
         Two conditions, and only the second one is authoritative.
 
-        The marker is the **candidate** filter: ``touched`` is how many records this load processed,
+        The marker is the **candidate** filter: ``touched`` is how many distinct **points** this
+        load addressed — not how many Export rows it read, which is a larger number whenever the
+        corpus holds two byte-identical documents under one content-addressed ``record_id`` — and
         every one of them was either upserted with this run's marker or payload-restamped with it,
         so exactly that many points must carry the marker when the sweep begins. A mismatch means a
         load is overlapping this one, and the sweep refuses outright — cheap, early, and it catches
@@ -534,9 +584,9 @@ class QdrantSink:
         marked = self._count(mine)
         if marked != touched:
             msg = (
-                f"refusing to sweep collection {self._collection!r}: this load processed {touched} "
-                f"record(s) but {marked} point(s) carry its marker {load_id!r}. Another load is "
-                "running against this collection concurrently (or the Export repeats a record_id). "
+                f"refusing to sweep collection {self._collection!r}: this load touched {touched} "
+                f"point(s) but {marked} point(s) carry its marker {load_id!r}. Another load is "
+                "running against this collection concurrently. "
                 "Nothing was deleted — the collection still holds the data this load read. Re-run "
                 "the load once no other load is in flight."
             )
@@ -719,6 +769,21 @@ def _load_marker(label: str | None) -> str:
     """
     nonce = uuid.uuid4().hex
     return f"{label}:{nonce}" if label else nonce
+
+
+def _collapse_repeats(points: list[_Point]) -> tuple[list[_Point], int]:
+    """One batch's points with repeated ids collapsed onto the last row, and how many were dropped.
+
+    Two byte-identical documents share a content-addressed ``record_id``, hence one derived point,
+    so a batch can legitimately carry the same id twice. Keeping the **last** occurrence is not a
+    policy choice: it is what upserting a list with a repeated id already does on a real Qdrant
+    (later writes win), so the stored state is identical to sending the whole list — only the point
+    count, and the wasted round-trip on the shadowed row, change. Order is otherwise preserved.
+    """
+    by_id = {p.id: p for p in points}
+    if len(by_id) == len(points):
+        return points, 0
+    return list(by_id.values()), len(points) - len(by_id)
 
 
 def _digest(vector: list[float], payload: dict[str, Any]) -> str:
