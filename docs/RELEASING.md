@@ -194,7 +194,8 @@ the commit you are about to tag.
 Per the maintainer-manual-publish policy, releasing to PyPI is a deliberate human act and
 is **not** wired to fire on a tag. `release.yml` contains a fully-formed `pypi-publish`
 job that uses **PyPI Trusted Publishing (OIDC)** — no API token is ever stored — but it is
-disabled with `if: false` and gated behind a protected `pypi` GitHub Environment.
+disabled with a leading `false &&` in its `if:` condition and gated behind a protected
+`pypi` GitHub Environment.
 
 To enable it (one-time setup, then per-release approval):
 
@@ -205,7 +206,8 @@ To enable it (one-time setup, then per-release approval):
    maintainer(s) as **Required reviewers**, so every publish pauses for a manual approval.
 3. **Settle the namespace** (see "Open decisions") — the `latence-*` names must be
    available or owned on PyPI, or the upload 403s.
-4. **Turn it on:** delete the `if: false` line on the `pypi-publish` job. From then on, a
+4. **Turn it on:** remove the `false &&` from the `if:` condition on the `pypi-publish` job
+   (keep the `dry_run` clause). From then on, a
    `v*` tag builds + creates the GitHub Release automatically, and the PyPI upload waits in
    the `pypi` environment for a reviewer to approve.
 
@@ -218,6 +220,6 @@ Optional dry run: point the publish step at TestPyPI first by setting
   available (or owned) on PyPI before first publish, or pick/claim a namespace. `latence`
   as a lead name may already be taken — verify. Consider reserving the namespace even
   before enabling auto-publish.
-- **Auto-publish.** Whether to ever remove `if: false` and let approved tags flow to PyPI,
+- **Auto-publish.** Whether to ever remove the `false &&` short-circuit and let approved tags flow to PyPI,
   or keep publishing fully manual (`uv publish` from a maintainer machine). Both are
   supported; the gated workflow is the recommended path.

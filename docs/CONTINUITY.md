@@ -108,7 +108,7 @@ Read this as the *ceiling*, not the aspiration.
 | Security fixes for older releases | **None.** Upgrade to the latest release is the only supported remediation path. |
 | Support commitment | **Best-effort, no SLA.** There is no commercial support offering and no contractual response time. |
 | End-of-life policy | **None published.** No deprecation window is promised for a `0.x` line. |
-| Published packages | The `latence-*` distributions build from this repository; automatic PyPI publishing is **deliberately disabled** (`if: false` on the `pypi-publish` job in `.github/workflows/release.yml`). Verify what you install. |
+| Published packages | The `latence-*` distributions build from this repository; automatic PyPI publishing is **deliberately disabled** (a leading `false &&` short-circuits the `if:` condition on the `pypi-publish` job in `.github/workflows/release.yml`). Verify what you install. |
 
 An integrator who needs a longer or contractual lifetime should plan on either
 vendoring a pinned version or maintaining a fork — both are cheap here (§2), and
@@ -188,7 +188,8 @@ says so.
   `sha256sum -c SHA256SUMS`).
 - **PyPI publication remains gated.** The `pypi-publish` job is written against **PyPI
   Trusted Publishing (OIDC)** — no long-lived API token is ever stored — and is still
-  disabled behind `if: false` plus a protected `pypi` GitHub Environment requiring a human
+  disabled behind a `false &&` short-circuit on its `if:` condition plus a protected `pypi`
+  GitHub Environment requiring a human
   reviewer. Turning it on is a documented checklist in `docs/RELEASING.md`.
 - **Verification by rebuild still works.** The lockfile is committed and the build is
   reproducible from source with `uv build --package <name>`; an adopter with a high
@@ -280,7 +281,7 @@ goes red — so this page cannot quietly become aspirational.
 | CVD channel + response targets | `SECURITY.md` → *Reporting a vulnerability* |
 | Threat model with residual risks | [`docs/THREAT-MODEL.md`](THREAT-MODEL.md) |
 | Release mechanics | `.github/workflows/release.yml`, `docs/RELEASING.md`, `CHANGELOG.md` |
-| PyPI auto-publish disabled | `if: false` on `pypi-publish` in `.github/workflows/release.yml` |
+| PyPI auto-publish disabled | the `false &&` short-circuit in the `if:` condition of `pypi-publish` in `.github/workflows/release.yml` |
 | Signed release chain, keyless Sigstore | `scripts/release-integrity.sh` (signs `SHA256SUMS`, emits the bundle + VERIFY.md); the `release-integrity` job in `.github/workflows/release.yml`, whose publish step refuses a release without the bundle |
 | SBOM on demand, release-time | `scripts/generate-sbom.sh`, [`docs/SBOM.md`](SBOM.md) |
 | Supply-chain controls | `.github/dependabot.yml`, `.github/workflows/codeql.yml`, `.github/workflows/scorecard.yml`, `scripts/secret_scan_gate.py`, `.secrets.baseline` |

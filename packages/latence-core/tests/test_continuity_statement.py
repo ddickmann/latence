@@ -19,8 +19,11 @@ These tests make the statement self-verifying, offline and dependency-free:
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
+
+import yaml
 
 # tests/  ->  latence-core/  ->  packages/  ->  repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -199,13 +202,127 @@ def test_signing_claim_matches_the_release_workflow() -> None:
         )
 
 
+def _pypi_autopublish_gate_defect(workflow_text: str) -> str | None:
+    """Return why `pypi-publish` is not hard-gated off, or None when it is.
+
+    Anchored to the *executable* condition, never to prose: `yaml.safe_load` drops `#`
+    comments, so a workflow whose only `if: false` occurrences are in the ENABLE CHECKLIST
+    cannot satisfy this check. The gate counts as closed only when the job's condition
+    unconditionally short-circuits — a bare `false`, or a `false &&` prefix inside the
+    `${{ … }}` expression. Anything else (including a condition that merely mentions
+    `false` somewhere downstream of an `||`) is reported as a defect.
+    """
+    loaded = yaml.safe_load(workflow_text)
+    jobs = (loaded or {}).get("jobs") or {}
+    if "pypi-publish" not in jobs:
+        return "release.yml has no `pypi-publish` job at all"
+    job = jobs["pypi-publish"] or {}
+    if "if" not in job:
+        return "the `pypi-publish` job carries no `if:` condition — it runs unconditionally"
+
+    condition = str(job["if"]).strip()
+    # Unwrap `${{ … }}` so the check sees the expression itself, not the delimiters.
+    expression = condition
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+
+    if expression.lower() == "false":
+        return None
+    if re.match(r"^false\s*&&", expression, flags=re.IGNORECASE):
+        return None
+    return (
+        f"the `pypi-publish` condition {condition!r} does not unconditionally "
+        "short-circuit to false — a tag push can reach PyPI"
+    )
+
+
 def test_pypi_publish_disabled_claim_matches_the_workflow() -> None:
     """The statement says auto-publish is off; release.yml must actually gate it off."""
     workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
-    assert "if: false" in workflow, (
-        "docs/CONTINUITY.md states PyPI auto-publish is disabled, but release.yml no "
-        "longer carries the `if: false` gate on pypi-publish."
+    defect = _pypi_autopublish_gate_defect(workflow)
+    assert defect is None, (
+        "docs/CONTINUITY.md states PyPI auto-publish is deliberately disabled, but "
+        f"{defect}."
     )
+
+
+def test_pypi_gate_check_rejects_the_documented_enable_mutation() -> None:
+    """The guard must catch the exact edit release.yml's ENABLE CHECKLIST prescribes.
+
+    This is the anti-false-green half. The old guard asserted the literal string
+    `if: false`, which lives only inside `#` comment blocks — so removing the real
+    `false &&` short-circuit (i.e. enabling auto-publish on every `v*` tag) left the
+    comment prose, and the guard, untouched and green while docs/CONTINUITY.md's
+    "deliberately disabled" claim became false.
+    """
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    assert _pypi_autopublish_gate_defect(workflow) is None, "precondition: gate is closed"
+
+    enabled = workflow.replace("${{ false && github.event.inputs.dry_run", "${{ github.event.inputs.dry_run")
+    assert enabled != workflow, (
+        "the enable-mutation no longer applies — release.yml's `pypi-publish` condition "
+        "changed shape, so this guard must be re-anchored to the new one."
+    )
+    # Prose asserting the job is disabled survives the mutation untouched — which is exactly
+    # why a check anchored to comments (rather than to the condition) cannot be trusted.
+    assert "SCAFFOLDED, DISABLED" in enabled, (
+        "expected the disabled-claiming ENABLE CHECKLIST comments to survive the mutation"
+    )
+
+    defect = _pypi_autopublish_gate_defect(enabled)
+    assert defect is not None, (
+        "removing the `false &&` short-circuit enables auto-publish to PyPI on every tag "
+        "push, but the guard still reports the gate as closed — docs/CONTINUITY.md would "
+        "silently become false."
+    )
+
+
+def test_docs_do_not_cite_a_gate_literal_that_release_yml_lacks() -> None:
+    """A buyer greps for the cited gate; it must be findable outside the comments.
+
+    The statement used to name an `if: false` gate that exists nowhere in release.yml
+    except its own ENABLE CHECKLIST prose.
+    """
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    executable = str(yaml.safe_load(workflow)["jobs"]["pypi-publish"]["if"])
+    for relpath in ("docs/CONTINUITY.md", "docs/GO-LIVE-RUNBOOK.md", "docs/RELEASING.md"):
+        text = (_REPO_ROOT / relpath).read_text()
+        for cited in re.findall(r"`(if: [^`\n]+)`", text):
+            assert cited in workflow or cited.rstrip(" …") in executable, (
+                f"{relpath} cites the gate as {cited!r}, which does not appear in the "
+                f"executable condition {executable!r} of the pypi-publish job."
+            )
+
+
+def test_pypi_gate_check_is_not_vacuous_when_the_job_disappears() -> None:
+    """Deleting the job or its condition must fail loudly, not pass by absence."""
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    loaded = yaml.safe_load(workflow)
+
+    without_job = copy.deepcopy(loaded)
+    del without_job["jobs"]["pypi-publish"]
+    assert _pypi_autopublish_gate_defect(yaml.safe_dump(without_job)) is not None
+
+    without_condition = copy.deepcopy(loaded)
+    del without_condition["jobs"]["pypi-publish"]["if"]
+    assert _pypi_autopublish_gate_defect(yaml.safe_dump(without_condition)) is not None
+
+
+def test_pypi_gate_check_rejects_a_condition_that_merely_mentions_false() -> None:
+    """`false` reachable behind an `||` is not a gate; the checker must say so."""
+    template = yaml.safe_load(
+        (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    for condition in (
+        "${{ false || github.event.inputs.dry_run != 'true' }}",
+        "${{ github.event.inputs.dry_run != 'true' && false }}",
+        "${{ github.ref_type == 'tag' }}",
+    ):
+        mutated = copy.deepcopy(template)
+        mutated["jobs"]["pypi-publish"]["if"] = condition
+        assert _pypi_autopublish_gate_defect(yaml.safe_dump(mutated)) is not None, (
+            f"condition {condition!r} lets a tag push reach PyPI but was accepted"
+        )
 
 
 def test_supported_versions_claim_matches_security_md() -> None:

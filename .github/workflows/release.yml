@@ -12,7 +12,7 @@ name: Release
 #
 # What is scaffolded but DELIBERATELY OFF (maintainer-manual-publish policy):
 #   4. pypi-publish    — PyPI Trusted Publishing (OIDC). Present, wired, and gated behind
-#                        `if: false` + a protected `pypi` Environment. It NEVER fires until
+#                        `if: ${{ false && … }}` + a protected `pypi` Environment. It NEVER fires until
 #                        a maintainer flips it on. See the enable checklist on that job.
 #
 # DRY RUN: `workflow_dispatch` with dry_run=true runs build + release-integrity (signing
@@ -213,11 +213,11 @@ jobs:
   # ----------------------------------------------------------------------------------
   # PyPI Trusted Publishing (OIDC) — SCAFFOLDED, DISABLED.
   #
-  # This job is intentionally NOT active: `if: false` short-circuits it on every run so a
-  # tag push can never auto-publish to PyPI. It respects the maintainer-manual-publish
-  # policy: releasing to PyPI stays a deliberate, human-gated act.
+  # This job is intentionally NOT active: the leading `false &&` in its `if:` short-circuits
+  # it on every run so a tag push can never auto-publish to PyPI. It respects the
+  # maintainer-manual-publish policy: releasing to PyPI stays a deliberate, human-gated act.
   #
-  # ENABLE CHECKLIST (do all four, then delete the `if: false` line):
+  # ENABLE CHECKLIST (do all four; step 4 is the only edit that changes behaviour):
   #   1. On PyPI, create each distribution project (latence-core, latence-parser-*, …) and
   #      add a Trusted Publisher: owner=ddickmann, repo=latence-framework,
   #      workflow=release.yml, environment=pypi. (No API token is ever stored — OIDC only.)
@@ -225,7 +225,8 @@ jobs:
   #      maintainers as Required reviewers so each publish waits for a manual approval.
   #   3. Decide the brand/namespace first (see docs/RELEASING.md → "Open decisions"): the
   #      `latence-*` names must be available/owned on PyPI, or the publish 403s.
-  #   4. Remove `if: false` below. The `id-token: write` permission + the pinned
+  #   4. Remove the `false &&` from the `if:` on `pypi-publish` below (keep the `dry_run`
+  #      clause). The `id-token: write` permission + the pinned
   #      pypa/gh-action-pypi-publish action then do a tokenless OIDC upload of dist/*.
   # ----------------------------------------------------------------------------------
   pypi-publish:

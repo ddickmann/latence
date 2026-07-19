@@ -10,7 +10,7 @@ distribution name, and a published announcement are all very hard to take back. 
 [Blockers](#blockers-decide-before-step-1).
 
 !!! warning "Nothing here is automated on purpose"
-    The Release workflow's `pypi-publish` job is scaffolded behind `if: false` and a
+    The Release workflow's `pypi-publish` job is scaffolded behind a `false &&` short-circuit and a
     protected `pypi` Environment; repository visibility is a GitHub setting. Neither
     changes without a human doing it deliberately. See
     [`RELEASING.md`](RELEASING.md) → *Publishing to PyPI*.
