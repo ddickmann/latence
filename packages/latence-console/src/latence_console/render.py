@@ -80,12 +80,23 @@ _FOOTER = (
 
 # Anything that would reach off this machine when the page is opened. Used by the offline
 # audit test: the rendered bytes must contain none of these.
-_EXTERNAL = re.compile(r"(?i)\b(?:https?:)?//(?!127\.0\.0\.1|localhost)[a-z0-9.-]+")
+#
+# An authority-form reference: an OPTIONAL scheme, then ``//``, then the host. The scheme is
+# optional *and reachable* — no leading ``\b``, because a protocol-relative reference is always
+# preceded by a non-word character (``"``, ``(``, whitespace), so a word boundary there can never
+# hold and the scheme-less branch would be dead. Requiring the double slash keeps same-origin
+# paths (``/run/abc``) out, and the leading ``(?<!/)`` keeps an EMPTY authority out too, so a
+# local ``file:///tmp/x`` is not misread as ``//`` + host ``tmp``. Loopback is excluded by host,
+# below, not by a lookahead — a prefix lookahead would whitelist ``localhost.evil.example.com``.
+_EXTERNAL = re.compile(r"(?i)(?<!/)(?:\b[a-z][a-z0-9+.-]*:)?//(?P<host>\[[0-9a-f:]+\]|[a-z0-9.-]+)")
+_LOOPBACK = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 
 
 def external_references(html: str) -> list[str]:
     """Every off-machine URL reference in ``html`` (empty ⇒ the page is fully offline)."""
-    return _EXTERNAL.findall(html)
+    return [
+        m.group(0) for m in _EXTERNAL.finditer(html) if m.group("host").lower() not in _LOOPBACK
+    ]
 
 
 def _when(stamp: datetime | None) -> str:
@@ -105,9 +116,7 @@ def _page(title: str, body: str) -> str:
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     head = "".join(f"<th>{escape(h)}</th>" for h in headers)
-    body = "".join(
-        "<tr>" + "".join(f"<td>{escape(c)}</td>" for c in row) + "</tr>" for row in rows
-    )
+    body = "".join("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in row) + "</tr>" for row in rows)
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
@@ -170,7 +179,7 @@ def render_run(summary: RunSummary, report: QualityReport | None) -> str:
         f'<div class="card verdict {_tone_for(summary.status)}">'
         f'<div class="t">Overall</div>'
         f'<p class="h"><span class="pill {summary.status.value}">'
-        f'{escape(summary.status.label)}</span></p>'
+        f"{escape(summary.status.label)}</span></p>"
         f'<p class="e">{escape(summary.status.blurb)}</p></div>'
     )
     head += render_run_nav(summary.run_id, active="overview")
@@ -284,8 +293,7 @@ def render_quarantine(
         parts.append(
             '<div class="card">'
             + _table(
-                ["File", "Type", "Bytes held back", "Checkpoint", "Detector", "Category",
-                 "Reason"],
+                ["File", "Type", "Bytes held back", "Checkpoint", "Detector", "Category", "Reason"],
                 [
                     [
                         e.file_name,
@@ -379,15 +387,15 @@ def render_chunk(run_id: str, view: B.ChunkInspection) -> str:
         _run_head(
             run_id,
             f"Chunk {view.index} of {view.file_name}",
-            "Resolved back through Provenance to its source document, page and character "
-            "offsets.",
+            "Resolved back through Provenance to its source document, page and character offsets.",
             "chunks",
         )
     ]
 
     doc_state = (
         f"parsed ({view.document_pages} page(s), {view.document_chars:,} characters)"
-        if view.document_parsed and view.document_pages is not None
+        if view.document_parsed
+        and view.document_pages is not None
         and view.document_chars is not None
         else ("parsed" if view.document_parsed else "not in this run's checkpoints")
     )
@@ -409,8 +417,7 @@ def render_chunk(run_id: str, view: B.ChunkInspection) -> str:
                 ["Character offsets — Provenance", view.provenance_span],
                 ["Character offsets — resolved from the offset map", view.resolved_span],
                 ["Chunk id", view.chunk_id],
-                ["Chunk length", f"{view.character_count:,} characters, "
-                                 f"{view.token_count} tokens"],
+                ["Chunk length", f"{view.character_count:,} characters, {view.token_count} tokens"],
             ],
         )
         + "</div>"
@@ -431,8 +438,8 @@ def render_chunk(run_id: str, view: B.ChunkInspection) -> str:
     )
 
     parts.append("<h2>Redaction disposition</h2>")
-    tone = "bad" if view.redaction.control_disabled else (
-        "good" if view.redaction.applied else "warn"
+    tone = (
+        "bad" if view.redaction.control_disabled else ("good" if view.redaction.applied else "warn")
     )
     parts.append(
         f'<div class="card verdict {tone}"><div class="t">Redaction</div>'
@@ -442,8 +449,16 @@ def render_chunk(run_id: str, view: B.ChunkInspection) -> str:
         parts.append(
             '<div class="card">'
             + _table(
-                ["PII type", "Detector", "Action", "Placeholder", "In this chunk",
-                 "In the source document", "Page(s)", "Confidence"],
+                [
+                    "PII type",
+                    "Detector",
+                    "Action",
+                    "Placeholder",
+                    "In this chunk",
+                    "In the source document",
+                    "Page(s)",
+                    "Confidence",
+                ],
                 [
                     [
                         s.pii_type,
@@ -467,10 +482,7 @@ def render_chunk(run_id: str, view: B.ChunkInspection) -> str:
             '<div class="card">'
             + _table(
                 ["Category", "Detector", "Score", "Reason"],
-                [
-                    [m.category, m.detector, f"{m.score:.2f}", m.reason]
-                    for m in view.risk_markers
-                ],
+                [[m.category, m.detector, f"{m.score:.2f}", m.reason] for m in view.risk_markers],
             )
             + "</div>"
         )
