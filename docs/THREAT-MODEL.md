@@ -195,9 +195,11 @@ the repo.
   against an audited `.secrets.baseline`; a genuinely new secret turns the gate red
   (`scripts/secret_scan_gate.py`). `.env*`, `*.pem`, `*.key`, `.pypirc` are
   git-ignored.
-- **Permissive-only default licenses** — every default model Provider has its weights
+- **Permissive-by-default licenses** — every default model Provider has its weights
   **and** code license verified separately (ADR-0012; recorded in `NOTICE` /
-  `THIRD-PARTY-LICENSES.md`).
+  `THIRD-PARTY-LICENSES.md`). The disclosed exceptions are never defaults: restricted-license
+  models (EmbeddingGemma) are opt-in, and the pinned GPU environments under `deploy/env/`
+  pull proprietary NVIDIA CUDA wheels.
 - **Automation added with this workstream** — Dependabot (`pip` + `github-actions`,
   weekly, grouped minor/patch), CodeQL SAST for Python, OpenSSF Scorecard, and a
   documented CycloneDX SBOM script (`scripts/generate-sbom.sh`, see

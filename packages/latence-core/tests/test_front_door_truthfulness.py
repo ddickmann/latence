@@ -6,7 +6,7 @@ machine-checked half of "nothing published may be false on day one": every claim
 tests cover is one an outsider can falsify in under a minute, so it is checked here
 rather than trusted to a reviewer's eye.
 
-Four independent falsifiers, each of which failed on the pre-#189 tree:
+Five independent falsifiers, each of which failed on the tree that introduced it:
 
 * **Shipped Runner adapters.** The README promised "thin adapters run the same Stages on
   Databricks or Airflow" while only ``latence-runner-airflow`` exists. Any *substrate*
@@ -24,6 +24,10 @@ Four independent falsifiers, each of which failed on the pre-#189 tree:
 * **The install story.** The README advertised a meta-package that is not publishable, and
   every ``pip install`` line must name a distribution that actually exists under
   ``packages/``.
+* **The licence summary.** The README's index called ``THIRD-PARTY-LICENSES.md`` "(all
+  permissive)" *after* the release-fleet stream added ~40 proprietary NVIDIA CUDA wheels and
+  the Gemma opt-in to that very file. No published page may summarise the dependency tree as
+  uniformly permissive while the disclosure file says otherwise.
 
 These assert observable repository facts, never a flag that records intent.
 """
@@ -161,9 +165,7 @@ def test_adr_count_matches_the_tree_on_every_front_door_page() -> None:
         for lineno, claimed in _adr_count_claims(page.read_text()):
             total_claims += 1
             if claimed != actual:
-                problems.append(
-                    f"{page.relative_to(_REPO_ROOT)}:{lineno}: claims {claimed}"
-                )
+                problems.append(f"{page.relative_to(_REPO_ROOT)}:{lineno}: claims {claimed}")
 
     assert not problems, (
         f"published pages state an ADR count that docs/adr/ contradicts (it holds {actual}):\n"
@@ -220,9 +222,7 @@ def _readme_shell_blocks() -> str:
 
 def test_readme_install_lines_name_real_distributions() -> None:
     """Every ``pip install latence-*`` command in the README maps to a real package."""
-    distributions = {
-        pkg.name for pkg in _PACKAGES.iterdir() if (pkg / "pyproject.toml").is_file()
-    }
+    distributions = {pkg.name for pkg in _PACKAGES.iterdir() if (pkg / "pyproject.toml").is_file()}
     named = set(re.findall(r"pip install (?:-e )?'?(latence[a-z0-9-]*)", _readme_shell_blocks()))
     assert named, "README no longer documents an install — the front door needs one"
 
@@ -230,6 +230,127 @@ def test_readme_install_lines_name_real_distributions() -> None:
     assert not missing, (
         f"README tells the reader to install {missing}, which does not exist under packages/. "
         "There is no publishable `latence` meta-package; name the real distributions."
+    )
+
+
+# --------------------------------------------------------------------------------------
+# The licence summary (R3-docs_truth-5)
+# --------------------------------------------------------------------------------------
+
+_LICENCES = _REPO_ROOT / "THIRD-PARTY-LICENSES.md"
+
+# How a page phrases a blanket "nothing here is restricted" claim. Kept deliberately narrow:
+# only sweeping statements, never a scoped one ("the default Embedder is permissive").
+_BLANKET_PERMISSIVE = re.compile(
+    r"\ball\b[^.\n]{0,60}\bpermissive\b|\bpermissive\b[^.\n]{0,30}\bonly\b|\bpermissive-only\b",
+    re.IGNORECASE,
+)
+
+# Wording that turns a blanket claim into an honest one by naming the carve-out in the same
+# breath. `docs/CONTINUITY.md` §2 does exactly this and must keep passing.
+_CARVE_OUT = (
+    "proprietary",
+    "eula",
+    "nvidia",
+    "cuda",
+    "exception",
+    "carve-out",
+    "carve out",
+    "opt-in",
+    "restricted",
+    "not open-source",
+    "non-permissive",
+)
+
+# Evidence, inside THIRD-PARTY-LICENSES.md itself, that something in it is NOT permissive.
+_NON_PERMISSIVE_EVIDENCE = re.compile(
+    r"LicenseRef-NVIDIA-Proprietary|proprietary \((?:CUDA|cuDNN|NCCL|NVSHMEM) EULA\)"
+    r"|not\*{0,2} open-source|Not OSI open-source",
+    re.IGNORECASE,
+)
+
+
+def _blocks(text: str) -> list[tuple[int, str]]:
+    """``(start_lineno, block_text)`` for each paragraph / top-level bullet.
+
+    A claim and its qualification live in the same bullet, not necessarily on the same
+    physical line, so the unit of judgement is the block — a top-level ``- `` item together
+    with its indented continuation lines, or a blank-line-delimited paragraph.
+    """
+    out: list[tuple[int, str]] = []
+    start = 1
+    buf: list[str] = []
+
+    def flush() -> None:
+        if any(line.strip() for line in buf):
+            out.append((start, "\n".join(buf)))
+
+    for lineno, line in enumerate(text.splitlines(), 1):
+        starts_block = not line.strip() or bool(re.match(r"^(?:[-*+]\s|#{1,6}\s|\|)", line))
+        if starts_block and buf:
+            flush()
+            buf, start = [], lineno
+        if not buf:
+            start = lineno
+        buf.append(line)
+    flush()
+    return out
+
+
+def test_no_front_door_page_calls_the_dependency_tree_wholly_permissive() -> None:
+    """A page that summarises ``THIRD-PARTY-LICENSES.md`` may not call it uniformly permissive.
+
+    The pre-fix README's front-door index read "runtime dep + model licenses (all permissive)"
+    while the very file it links to opens with "NVIDIA CUDA wheels that are **not**
+    open-source", tabulates ~40 wheels as ``LicenseRef-NVIDIA-Proprietary``, and records
+    EmbeddingGemma as "Not OSI open-source". A procurement reviewer who reads only the README
+    concludes the tree is licence-clean and skips the EULA review the repo's own disclosure
+    file says is required.
+
+    Ground truth is read out of ``THIRD-PARTY-LICENSES.md`` rather than hard-coded, so the day
+    a *new* proprietary wheel lands the guard re-arms itself. A blanket claim is still allowed
+    when the same block names the carve-out — which is how ``docs/CONTINUITY.md`` §2 states it.
+    """
+    assert _LICENCES.is_file(), "THIRD-PARTY-LICENSES.md is missing"
+    licence_text = _LICENCES.read_text()
+
+    # Non-vacuity: the guard only means something while the file really does disclose
+    # non-permissive entries. If that ever stops being true, this assertion fails loudly and a
+    # human decides whether the blanket claim has become honest again.
+    evidence = _NON_PERMISSIVE_EVIDENCE.findall(licence_text)
+    assert evidence, (
+        "THIRD-PARTY-LICENSES.md no longer discloses any non-permissive entry. If the "
+        "proprietary CUDA wheels and the Gemma opt-in are genuinely gone, retire this guard "
+        "deliberately; do not let it pass by finding nothing."
+    )
+
+    problems: list[str] = []
+    citing = 0
+    for page in _front_door_docs():
+        for lineno, block in _blocks(page.read_text()):
+            if "THIRD-PARTY-LICENSES.md" not in block:
+                continue
+            citing += 1
+            low = block.lower()
+            if _BLANKET_PERMISSIVE.search(block) and not any(h in low for h in _CARVE_OUT):
+                problems.append(
+                    f"{page.relative_to(_REPO_ROOT)}:{lineno}: " + " ".join(block.split())[:200]
+                )
+
+    assert citing, "no published page cites THIRD-PARTY-LICENSES.md — keep the pointer"
+    assert not problems, (
+        "published pages summarise THIRD-PARTY-LICENSES.md as uniformly permissive, but that "
+        f"file discloses {len(evidence)} non-permissive entries (NVIDIA CUDA EULAs, Gemma):\n"
+        + "\n".join(problems)
+        + "\nSay 'permissive by default' and name the disclosed exceptions."
+    )
+
+
+def test_readme_still_points_at_the_licence_disclosure() -> None:
+    """Correcting the claim must not delete the pointer to the disclosure file."""
+    assert "THIRD-PARTY-LICENSES.md" in _README.read_text(), (
+        "README no longer links THIRD-PARTY-LICENSES.md — the front door must reach the "
+        "licence disclosure in one hop."
     )
 
 

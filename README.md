@@ -185,7 +185,11 @@ distribution, and each one has its own README.
   (visibility flip, PyPI publish, docs deploy, announcement) and their pre-flight checks.
 - [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) — **continuity & security process**: the honest bus factor, fork posture, support lifetime, CVD / patch / SBOM / signing posture, and CRA readiness. Start here if you are evaluating this for adoption.
 - [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
-- [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).
+- [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses.
+  **Permissive by default, with two disclosed exceptions you must read before you rely on
+  them**: the pinned GPU environments under `deploy/env/` pull NVIDIA CUDA wheels that are
+  *not* open-source (proprietary EULAs, each wheel named), and EmbeddingGemma is opt-in only,
+  under the Gemma license with its flow-down obligations. Nothing else is affected.
 
 ## License
 
