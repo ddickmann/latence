@@ -172,7 +172,7 @@ distribution, and each one has its own README.
 - [`docs/running-a-stack.md`](./docs/running-a-stack.md) — run + validate a full-spine stack (`latence stack validate`).
 - [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) — run a per-Stage provider bake-off (`latence bake-off`).
 - [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) — public benchmark results (our reproducible numbers, kept separate from cited vendor claims), and [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) to reproduce them yourself.
-- [`docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge`](./docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge) — incremental corpus updates (`latence delta` / `retract` / `purge`).
+- [`docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge`](./docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge) — incremental corpus updates (`latence delta` / `retract` / `purge`).
 - [`PERF-RESULTS.md`](./PERF-RESULTS.md) — **measured** per-Stage throughput envelopes (CPU + GPU), each with hardware, stack profile, corpus shape, date and reproduction command, plus an explicit *not yet measured* list. Reproduce with `uv run python scripts/bench_throughput.py`.
 - [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.

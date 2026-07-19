@@ -201,6 +201,159 @@ def test_no_dangling_cross_references_in_the_front_door() -> None:
     assert not problems, "dangling cross-references in published docs:\n" + "\n".join(problems)
 
 
+# --------------------------------------------------------------------------------------
+# Section anchors (R4-docs_truth-5)
+# --------------------------------------------------------------------------------------
+#
+# The guard above resolves `target.split("#", 1)[0]` — it throws the fragment away, so it
+# passes on *any* wrong anchor, and it skips same-page `#...` links entirely. That blind
+# spot let the README's only pointer to incremental corpus updates advertise
+# `...walkthrough.md#7-incremental-updates-...` while the material lives under `## 8.`;
+# `mkdocs build --strict` never sees README.md, so nothing else could catch it either.
+
+# Anchors declared by hand rather than derived from a heading: `attr_list`'s `{#id}` and
+# raw HTML. Both are honoured by GitHub and by the docs site.
+_ATTR_LIST_ID = re.compile(r"\{[^}]*#([A-Za-z0-9_\-:.]+)[^}]*\}")
+_HTML_ID = re.compile(r"<[^>]*\b(?:id|name)\s*=\s*[\"']([^\"']+)[\"']")
+# A mkdocstrings injection point. The anchors under it are generated at build time from
+# Python objects, so no static reader can enumerate them.
+_MKDOCSTRINGS = re.compile(r"^:::\s+\S", re.MULTILINE)
+
+
+def _github_slug(heading: str) -> str:
+    """Slug GitHub gives a heading — the renderer these pages are actually read in.
+
+    ``mkdocs.yml`` pins ``pymdownx.slugs.slugify`` for exactly this reason (a hand-written
+    ``#anchor`` must resolve on github.com *and* on the docs site), so reproducing GitHub's
+    rule here keeps the guard aligned with both. The rule: strip inline markup, lowercase,
+    drop every character that is not a word character, hyphen or space, then turn spaces
+    into hyphens *without collapsing runs* — which is why "GPU requirements + the Blackwell
+    note" becomes ``gpu-requirements--the-blackwell-note`` and "5.4 Release-signing" becomes
+    ``54-release-signing``.
+    """
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading.strip())  # [text](url) -> text
+    text = text.replace("`", "")
+    text = re.sub(r"[*~]", "", text)  # emphasis / strikethrough markers
+    text = re.sub(r"[^\w\- ]", "", text, flags=re.UNICODE)  # `\w` keeps `_`, as GitHub does
+    return text.lower().replace(" ", "-")
+
+
+def _anchors_of(path: Path) -> set[str] | None:
+    """Every anchor ``path`` defines, or ``None`` when they cannot be known statically.
+
+    ``None`` means "generated": a page carrying a mkdocstrings ``:::`` block grows anchors
+    from Python objects at build time (``docs/reference/*.md``), and guessing at them would
+    trade a real check for a flaky one. Those targets are left to ``mkdocs --strict``.
+    """
+    text = path.read_text()
+    if _MKDOCSTRINGS.search(text):
+        return None
+
+    anchors: set[str] = set()
+    seen: dict[str, int] = {}
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        anchors.update(_ATTR_LIST_ID.findall(line))
+        anchors.update(_HTML_ID.findall(line))
+        match = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if not match:
+            continue
+        slug = _github_slug(re.sub(_ATTR_LIST_ID, "", match.group(1)))
+        # GitHub disambiguates repeats with -1, -2, … in document order.
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else f"{slug}-{count}")
+    return anchors
+
+
+def _dangling_anchors(pages: list[Path], root: Path) -> tuple[list[str], int]:
+    """``(problems, links_checked)`` for the fragment half of the cross-reference check."""
+    problems: list[str] = []
+    checked = 0
+    for page in pages:
+        for lineno, line in enumerate(page.read_text().splitlines(), 1):
+            for target in _MD_LINK.findall(line):
+                if target.startswith(("http://", "https://", "mailto:")) or "#" not in target:
+                    continue
+                path_part, fragment = target.split("#", 1)
+                if not fragment:
+                    continue
+                resolved = page if not path_part else (page.parent / path_part).resolve()
+                if not resolved.is_file() or resolved.suffix != ".md":
+                    continue  # missing files are the neighbouring test's finding
+                anchors = _anchors_of(resolved)
+                if anchors is None:
+                    continue  # build-time generated anchors — see _anchors_of
+                checked += 1
+                if fragment.lower() not in anchors:
+                    where = resolved.relative_to(root)
+                    problems.append(
+                        f"{page.relative_to(root)}:{lineno}: #{fragment} "
+                        f"is not a heading in {where}"
+                    )
+    return problems, checked
+
+
+def test_no_dangling_section_anchors_in_the_front_door() -> None:
+    """Every ``#fragment`` a published page links to must exist on the page it points at.
+
+    A wrong anchor is silent in every gate the repository had: it renders fine, it links to
+    a real file, and the reader simply lands at the top of a long document with no idea
+    where the material they were promised is. The falsifier this was written against is
+    ``README.md``'s pointer at the pod tutorial's *incremental updates* section — the only
+    route from the front door to ``latence delta`` / ``retract`` / ``purge``.
+    """
+    problems, checked = _dangling_anchors(_front_door_docs(), _REPO_ROOT)
+
+    # Non-vacuity: if the front door stops linking to sections at all, this guard is
+    # checking nothing and must say so rather than pass.
+    assert checked, (
+        "no front-door page links to a section anchor any more — this guard is inspecting "
+        "nothing. Restore the cross-references or retire the guard deliberately."
+    )
+    assert not problems, (
+        "published pages link to section anchors that do not exist "
+        f"(of {checked} fragment links checked):\n"
+        + "\n".join(problems)
+        + "\nGitHub renders these as a jump to the top of the page."
+    )
+
+
+def test_anchor_resolver_rejects_a_wrong_section_number(tmp_path: Path) -> None:
+    """The resolver itself catches the exact shape of the defect, on a synthetic page.
+
+    Keeps the guard above honest: were the README's link ever deleted rather than fixed,
+    the tree-wide test would have nothing to find, but this one still proves the resolver
+    distinguishes a right anchor from a wrong one.
+    """
+    target = tmp_path / "tutorial.md"
+    target.write_text(
+        "## 7. Discover the final output\n\ntext\n\n"
+        "## 8. Incremental updates: add / update / retract / purge\n\ntext\n"
+        "## GPU requirements + the Blackwell note\n\ntext\n"
+        "## Custom {#pinned-id}\n\ntext\n"
+    )
+    anchors = _anchors_of(target)
+    assert anchors is not None
+    assert "8-incremental-updates-add--update--retract--purge" in anchors
+    assert "7-incremental-updates-add--update--retract--purge" not in anchors
+    assert "gpu-requirements--the-blackwell-note" in anchors  # `+` removed, both spaces kept
+    assert "pinned-id" in anchors
+
+    page = tmp_path / "page.md"
+    page.write_text("[bad](./tutorial.md#7-incremental-updates-add--update--retract--purge)\n")
+    problems, checked = _dangling_anchors([page], tmp_path)
+    assert checked == 1 and len(problems) == 1, (problems, checked)
+
+    page.write_text("[good](./tutorial.md#8-incremental-updates-add--update--retract--purge)\n")
+    assert _dangling_anchors([page], tmp_path) == ([], 1)
+
+
 def _readme_shell_blocks() -> str:
     """The README's fenced ``bash`` blocks — the commands a reader copy-pastes.
 
