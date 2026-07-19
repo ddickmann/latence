@@ -24,7 +24,9 @@ rejects.** Faithfully reproduced refusals, each mirroring documented Graph behav
   ``grant_type``/``scope`` → ``400 invalid_request``
 
 Throttling is scriptable (``throttle_after`` / ``retry_after_seconds``) so the real
-``Retry-After`` path is exercised rather than asserted about, and every request is recorded on
+``Retry-After`` path is exercised rather than asserted about — on the Graph host *and*,
+via ``download_throttle_burst``, on the pre-authenticated download host, so the retry
+behaviour of the leg that actually moves the bytes is proven too. Every request is recorded on
 :attr:`FakeGraphTransport.calls` so a test can assert *behaviour* — e.g. "the excluded document
 was never downloaded" — instead of a flag.
 """
@@ -90,9 +92,18 @@ class FakeGraphApi:
     throttle_after: int | None = None
     throttle_burst: int = 1
     retry_after_seconds: int = 7
+    # The pre-authenticated download host is a *different* service from Graph and throttles
+    # (or blips) independently, so it has its own script. The first
+    # ``download_throttle_burst`` requests to it answer ``download_throttle_status`` with
+    # ``Retry-After: download_retry_after_seconds``; the default of 0 leaves the download host
+    # answering exactly as before.
+    download_throttle_burst: int = 0
+    download_throttle_status: int = 503
+    download_retry_after_seconds: int = 1
 
     _served: int = field(default=0, init=False)
     _throttled: int = field(default=0, init=False)
+    _download_throttled: int = field(default=0, init=False)
 
     # -- item helpers -------------------------------------------------------
 
@@ -202,6 +213,9 @@ class FakeGraphApi:
                     }
                 },
             )
+        throttled = self._maybe_throttle_download()
+        if throttled is not None:
+            return throttled
         item_id = urllib.parse.parse_qs(parsed.query).get("itemId", [""])[0]
         entry = self._file_by_item_id(item_id)
         if entry is None:
@@ -319,6 +333,29 @@ class FakeGraphApi:
             headers={"Retry-After": str(self.retry_after_seconds)},
             body=json.dumps(
                 {"error": {"code": "activityLimitReached", "message": "Too many requests."}}
+            ).encode("utf-8"),
+        )
+
+    def _maybe_throttle_download(self) -> HttpResponse | None:
+        """The download host's own back-off script — the leg that actually moves the bytes.
+
+        Kept separate from :meth:`_maybe_throttle` because the pre-authenticated URL lives on a
+        storage host, not on graph.microsoft.com: it throttles on its own budget and answers
+        ``503 serviceNotAvailable`` as readily as ``429``.
+        """
+        if self._download_throttled >= self.download_throttle_burst:
+            return None
+        self._download_throttled += 1
+        code = (
+            "activityLimitReached"
+            if self.download_throttle_status == 429
+            else "serviceNotAvailable"
+        )
+        return HttpResponse(
+            status=self.download_throttle_status,
+            headers={"Retry-After": str(self.download_retry_after_seconds)},
+            body=json.dumps(
+                {"error": {"code": code, "message": "The service is temporarily unavailable."}}
             ).encode("utf-8"),
         )
 

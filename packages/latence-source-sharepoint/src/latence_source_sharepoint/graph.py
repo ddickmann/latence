@@ -16,11 +16,15 @@ What it handles, and what the shipped faithful fake therefore also enforces:
   and the fake rejects it with the real ``400 invalidRequest``.
 * **Throttling** — ``429`` (and ``503``) carry ``Retry-After`` in seconds. The client waits
   exactly that long and retries, up to ``max_retries``, then raises. It never busy-loops and
-  never ignores ``Retry-After``, which is what gets a tenant blocked.
+  never ignores ``Retry-After``, which is what gets a tenant blocked. This holds on **every**
+  leg, including the redirected download: the storage host throttles on its own budget, and
+  that is the leg that moves the bytes, so leaving it out would let one transient blip abort a
+  multi-hour library ingest.
 * **Download** — ``/content`` answers ``302`` to a pre-authenticated URL on a different host.
   The client re-issues that GET with **no** ``Authorization`` header (see
-  :mod:`~latence_source_sharepoint.transport`), and verifies the byte count against the size
-  Graph reported, so a truncated body is a typed error rather than a silently short document.
+  :mod:`~latence_source_sharepoint.transport`) but with the same retry/back-off plumbing, and
+  verifies the byte count against the size Graph reported, so a truncated body is a typed
+  error rather than a silently short document.
 
 Determinism: children of a folder are sorted by item id before being walked, so two runs over
 an unchanged drive produce identical documents in an identical order.
@@ -179,7 +183,8 @@ class GraphClient:
 
         The redirected request carries **no** credentials (the download host is a different
         origin; replaying the bearer token there would leak it, and the real endpoint rejects
-        it). The returned byte count is checked against the size Graph reported.
+        it), but it goes through the same retry/``Retry-After`` plumbing as every other
+        request. The returned byte count is checked against the size Graph reported.
         """
         url = (
             f"{self._base_url}/drives/{self._drive_id}/items/"
@@ -196,8 +201,11 @@ class GraphClient:
                 raise ProviderError(msg)
             require_tls(location)
             # Deliberately uncredentialed: a pre-authenticated download URL needs no token,
-            # and the storage host rejects an unexpected Authorization header outright.
-            response = self._transport.request("GET", location, headers={})
+            # and the storage host rejects an unexpected Authorization header outright. It is
+            # still sent through _send, because the download host throttles and blips like any
+            # other service — and this is the leg that moves the bytes, so dropping it out of
+            # the retry plumbing turns one transient 503 into a failed library ingest.
+            response = self._send(location, method="GET", credentialed=False)
         if response.status != 200:
             raise ProviderError(
                 self._failure_message(response, what=f"download {item.drive_path!r}")
@@ -268,16 +276,42 @@ class GraphClient:
             raise ProviderError(msg)
         return payload
 
-    def _send(self, url: str, *, method: str) -> HttpResponse:
-        """One Graph request, with throttling backoff and a single 401-driven token refresh."""
+    def _send(self, url: str, *, method: str, credentialed: bool = True) -> HttpResponse:
+        """One request, with throttling backoff and a single 401-driven token refresh.
+
+        ``credentialed=False`` is the pre-authenticated download leg: it sends **no** headers
+        (replaying the bearer token on the storage host would leak it, and that host rejects
+        it outright), and skips the token-refresh and Graph-specific 401/403 handling — there
+        is no token to refresh on a pre-authenticated URL, and its refusals are the storage
+        host's, not Graph's, so the caller reports them. The retry/``Retry-After``/
+        ``max_retries`` behaviour is identical on both legs, deliberately.
+        """
         refreshed = False
         attempt = 0
         while True:
-            headers = {
-                "Authorization": f"Bearer {self._tokens.token(force_refresh=refreshed)}",
-                "Accept": "application/json",
-            }
+            headers = (
+                {
+                    "Authorization": f"Bearer {self._tokens.token(force_refresh=refreshed)}",
+                    "Accept": "application/json",
+                }
+                if credentialed
+                else {}
+            )
             response = self._transport.request(method, url, headers=headers)
+            if response.status in _RETRYABLE:
+                if attempt >= self._max_retries:
+                    raise ProviderError(
+                        self._retry_exhausted_message(
+                            response, method=method, url=url, credentialed=credentialed
+                        )
+                    )
+                self._sleep(self._retry_delay(response, attempt))
+                attempt += 1
+                continue
+            if not credentialed:
+                # The storage host's own refusals (401/403/404) are not Graph's, and the
+                # caller renders them; only the retryable statuses are handled here.
+                return response
             if response.status == 401 and not refreshed:
                 # The token expired mid-run. Force exactly one refresh and retry; a second
                 # 401 is a genuine authorisation failure and falls through below.
@@ -298,19 +332,31 @@ class GraphClient:
                     "application is not permitted to read this drive."
                 )
                 raise ProviderError(msg)
-            if response.status in _RETRYABLE:
-                if attempt >= self._max_retries:
-                    msg = (
-                        f"SharePointSource: Graph kept returning HTTP {response.status} "
-                        f"({_graph_error_code(response.body)!r}) for {method} {url!r} after "
-                        f"{self._max_retries} retries. The tenant is throttling this "
-                        "application; lower 'page_size' or run less often."
-                    )
-                    raise ProviderError(msg)
-                self._sleep(self._retry_delay(response, attempt))
-                attempt += 1
-                continue
             return response
+
+    def _retry_exhausted_message(
+        self, response: HttpResponse, *, method: str, url: str, credentialed: bool
+    ) -> str:
+        if credentialed:
+            who, target = "Graph", f"{method} {url!r}"
+            advice = (
+                "The tenant is throttling this application; lower 'page_size' or run less often."
+            )
+        else:
+            # NEVER interpolate the redirect URL: a pre-authenticated download URL carries its
+            # own access token in the query string, so echoing it into an error message (and
+            # from there into a log) leaks a live credential. ADR-0034: no secrets in surfaced
+            # output. The Graph-side item is already named by the caller's message.
+            who, target = "The pre-authenticated download host", "the redirected content GET"
+            advice = (
+                "The tenant is throttling this application, or the storage host is degraded; "
+                "raise 'max_retries' or run again later."
+            )
+        return (
+            f"SharePointSource: {who} kept returning HTTP {response.status} "
+            f"({_graph_error_code(response.body)!r}) for {target} after "
+            f"{self._max_retries} retries. {advice}"
+        )
 
     def _retry_delay(self, response: HttpResponse, attempt: int) -> float:
         """Honour ``Retry-After`` exactly; fall back to bounded exponential backoff.

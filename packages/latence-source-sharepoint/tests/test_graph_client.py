@@ -12,6 +12,7 @@ import pytest
 from latence_core.errors import ConfigError, ProviderError
 from latence_source_sharepoint.graph import MAX_PAGE_SIZE, GraphClient
 from latence_source_sharepoint.testing import (
+    DOWNLOAD_HOST,
     GRAPH_HOST,
     FakeFile,
     FakeGraphApi,
@@ -240,6 +241,50 @@ def test_a_truncated_download_is_refused_rather_than_ingested() -> None:
     item = next(iter(client.list_files()))
     with pytest.raises(ProviderError, match="truncated download"):
         client.download(item)
+
+
+def test_a_throttled_download_host_is_retried_honouring_retry_after() -> None:
+    """The byte-transferring leg gets the same backoff as every other request.
+
+    The redirect target is a *different* host from Graph, and it throttles on its own budget.
+    A client that re-issues the pre-authenticated GET outside the retry plumbing aborts the
+    whole ingest on one transient 503 — even with ``max_retries=5`` and an explicit
+    ``Retry-After``.
+    """
+    api = FakeGraphApi(
+        files=[FakeFile(path="/a.md", content=b"a")],
+        download_throttle_burst=1,
+        download_throttle_status=503,
+        download_retry_after_seconds=1,
+    )
+    sleeps: list[float] = []
+    client, transport = _client(api, sleeps=sleeps, max_retries=5)
+    item = next(iter(client.list_files()))
+
+    assert client.download(item) == b"a"
+    assert sleeps == [1.0]
+    # Two attempts against the download host, and NEITHER may carry the bearer token.
+    redirected = [call for call in transport.calls if call.url.startswith(DOWNLOAD_HOST)]
+    assert len(redirected) == 2
+    assert not any(call.had_authorization for call in redirected)
+
+
+def test_a_permanently_failing_download_host_still_raises_a_typed_error() -> None:
+    api = FakeGraphApi(
+        files=[FakeFile(path="/a.md", content=b"a")],
+        download_throttle_burst=99,
+        download_throttle_status=429,
+        download_retry_after_seconds=2,
+    )
+    sleeps: list[float] = []
+    client, _ = _client(api, sleeps=sleeps, max_retries=3)
+    item = next(iter(client.list_files()))
+    with pytest.raises(ProviderError, match="429") as raised:
+        client.download(item)
+    assert sleeps == [2.0, 2.0, 2.0]
+    # A pre-authenticated download URL carries its own access token, so it must never be
+    # echoed into an error message and from there into a log (ADR-0034).
+    assert DOWNLOAD_HOST not in str(raised.value)
 
 
 # ---------------------------------------------------------------------------
