@@ -6,8 +6,14 @@ licenses of the third-party **Python runtime dependencies** its packages pull in
 plus the **default reference-model** licenses (the checkpoints the reference
 Providers point at — downloaded only when a Pipeline configures that Provider).
 
-Every runtime dependency is a permissive license (Apache-2.0 / MIT / BSD / ISC /
-PSF / MPL-2.0). None are copyleft in a way that reaches the framework's code.
+Every runtime dependency of `latence-core`, of every Provider package and of every
+optional extra is a permissive license (Apache-2.0 / MIT / BSD / ISC / PSF /
+MPL-2.0). None are copyleft in a way that reaches the framework's code. There is
+exactly ONE carve-out, and it is not a small one: the two **pinned GPU
+environments** under `deploy/env/` (`gpu-learned/` and `served-ocr-server/`) pull
+NVIDIA CUDA wheels that are **not** open-source. Read
+[CUDA runtime wheels — NOT permissive](#cuda-runtime-wheels--not-permissive-issues-198-and-196)
+before installing either one. Nothing outside those two environments is affected.
 
 ## Python runtime dependencies
 
@@ -154,27 +160,113 @@ Weights and code licenses were verified separately on 2026-07-06 (ADR-0012).
 |---|---|---|---|
 | google/embeddinggemma-300m | Embedding | Gemma | **Not a default; no Gemma-backed Provider ships in this repo.** Not OSI open-source; carries Google's Prohibited Use Policy + flow-down (downstream must be bound to the Gemma restrictions, with a Notice). POLICY: the Gemma family is non-default and, were a Gemma Provider offered, it would be an explicitly opt-in Provider carrying the license and its flow-down obligations. Default Embedder is IBM Granite Embedding r2 (Apache-2.0). |
 
-### CUDA runtime wheels — NOT permissive (issue #198)
+### Served-OCR serving dependencies (issue #196)
 
-`deploy/env/gpu-learned/requirements.lock` resolves 15 `nvidia-*` wheels (`nvidia-cuda-runtime`,
-`nvidia-cublas`, `nvidia-cudnn-cu13`, `nvidia-nccl-cu13`, `nvidia-cusparselt-cu13`, …) as
-transitive dependencies of `torch==2.13.0+cu130`. **They are NOT open-source.** They ship NVIDIA's
-proprietary CUDA Toolkit / cuDNN / NCCL end-user licence agreements, not an OSI licence: checked
-against the PyPI JSON API on 2026-07-18, these distributions declare **no** `license`,
-`license_expression` or `License ::` classifier at all — the terms live in the EULA text inside the
-wheel and at <https://docs.nvidia.com/cuda/eula/>.
+`deploy/env/served-ocr-server/requirements.lock` is the pinned vLLM serving environment behind the
+OCR endpoint seam (ADR-0030). It runs **outside** any framework process — the framework's own side
+of the seam is `deploy/env/served-ocr-client/`, whose only model dependency is an
+OpenAI-compatible HTTP client. Its principal distributions, licences read back from the PyPI JSON
+API on 2026-07-19:
+
+| Package | Version | License | Note |
+|---|---|---|---|
+| vllm | 0.24.0 | Apache-2.0 | `license_expression: Apache-2.0`; the serving runtime itself |
+| flashinfer-python | 0.6.12 | Apache-2.0 | `license_expression: Apache-2.0`; attention kernels (FM-BLACKWELL-FLASHINFER) |
+| flashinfer-cubin | 0.6.12 | Apache-2.0 | precompiled cubins for the above |
+| triton | 3.6.0 | MIT | per PyPI classifier (the served env pins 3.6.0; `gpu-learned` pins 3.7.1) |
+| tokenizers | 0.22.2 | Apache-2.0 | per PyPI classifier; also pinned by `cpu-text` / `gpu-learned` |
+| pillow | 12.3.0 | MIT-CMU | `license_expression: MIT-CMU`; page rasterisation in `served-ocr-client` |
+
+The served **model** (`lightonai/LightOnOCR-2-1B`) has its weights and code licences cited
+separately in `deploy/env/compatibility-matrix.yaml`, per ADR-0012.
+
+The CUDA wheels this environment drags in are the subject of the next section.
+
+### CUDA runtime wheels — NOT permissive (issues #198 and #196)
+
+**Two** committed environments pin a CUDA stack, and both are covered here:
+
+| Lock | `nvidia-*` wheels | Pulled in by |
+|---|---|---|
+| `deploy/env/gpu-learned/requirements.lock` | 15 | `torch==2.13.0+cu130` |
+| `deploy/env/served-ocr-server/requirements.lock` | 25 | `torch==2.11.0+cu130`, `vllm==0.24.0`, `flashinfer-python==0.6.12` |
+
+**Most of these are NOT open-source.** They ship NVIDIA's proprietary CUDA Toolkit / cuDNN / NCCL /
+cuSPARSELt / CUTLASS end-user licence agreements, not an OSI licence. Checked against the PyPI JSON
+API on 2026-07-19, the metadata is inconsistent by design: some declare
+`LicenseRef-NVIDIA-Proprietary`, some `License :: Other/Proprietary License`, and many declare
+**nothing at all** — the terms live in the EULA text inside the wheel and at
+<https://docs.nvidia.com/cuda/eula/>. A prefix cannot tell them apart, so every wheel is named
+individually below, including the handful that really are permissive.
+
+`gpu-learned` (15, all also present in the served-OCR lock unless marked):
+
+| Package | Version | Declared license | Verdict |
+|---|---|---|---|
+| nvidia-cublas | 13.1.1.3 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cuda-cupti | 13.0.85 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cuda-nvrtc | 13.0.88 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cuda-runtime | 13.0.96 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cudnn-cu13 | 9.20.0.48 | *(none declared)* | proprietary (cuDNN EULA) |
+| nvidia-cufft | 12.0.0.61 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cufile | 1.15.1.6 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-curand | 10.4.0.35 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cusolver | 12.0.4.66 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cusparse | 12.6.3.3 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cusparselt-cu13 | 0.8.1 | NVIDIA Proprietary Software | proprietary |
+| nvidia-nccl-cu13 | 2.29.7 | *(none declared)* | proprietary (NCCL EULA) |
+| nvidia-nvjitlink | 13.3.33 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-nvshmem-cu13 | 3.4.5 | *(none declared)* | proprietary (NVSHMEM EULA) |
+| nvidia-nvtx | 13.0.85 | Apache 2.0 | **permissive** |
+
+`served-ocr-server` (25 — the CUDA-13 set above at the pinned 2.11.0+cu130 versions, plus the
+compiler/CUTLASS wheels vLLM and FlashInfer need):
+
+| Package | Version | Declared license | Verdict |
+|---|---|---|---|
+| nvidia-cublas | 13.1.0.3 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cuda-cccl | 13.3.3.4.1 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cuda-crt | 13.3.73 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cuda-cupti | 13.0.85 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cuda-nvcc | 13.2.86 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cuda-nvrtc | 13.0.88 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cuda-runtime | 13.0.96 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cuda-tileiras | 13.2.86 | *(none declared)* | proprietary (CUDA EULA) |
+| nvidia-cudnn-cu13 | 9.19.0.56 | *(none declared)* | proprietary (cuDNN EULA) |
+| nvidia-cudnn-frontend | 1.26.0 | MIT | **permissive** |
+| nvidia-cufft | 12.0.0.61 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cufile | 1.15.1.6 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-curand | 10.4.0.35 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cusolver | 12.0.4.66 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cusparse | 12.6.3.3 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-cusparselt-cu13 | 0.8.0 | NVIDIA Proprietary Software | proprietary |
+| nvidia-cutlass-dsl | 4.5.2 | License :: Other/Proprietary License | proprietary |
+| nvidia-cutlass-dsl-libs-base | 4.5.2 | License :: Other/Proprietary License | proprietary |
+| nvidia-cutlass-dsl-libs-cu13 | 4.5.2 | License :: Other/Proprietary License | proprietary |
+| nvidia-ml-py | 13.610.43 | BSD | **permissive** |
+| nvidia-nccl-cu13 | 2.28.9 | *(none declared)* | proprietary (NCCL EULA) |
+| nvidia-nvjitlink | 13.0.88 | LicenseRef-NVIDIA-Proprietary | proprietary |
+| nvidia-nvshmem-cu13 | 3.4.5 | *(none declared)* | proprietary (NVSHMEM EULA) |
+| nvidia-nvtx | 13.0.85 | Apache 2.0 | **permissive** |
+| nvidia-nvvm | 13.2.86 | *(none declared)* | proprietary (CUDA EULA) |
 
 What that means for this project, stated plainly:
 
-* Nothing changes for the framework's own licence, or for the CPU/text environment — the CUDA
-  wheels are pulled in **only** by the optional `gpu-learned` environment, and only because the
-  operator chose to install a GPU stack. `latence-core` and every Provider package remain
-  permissively licensed and CUDA-free (ADR-0016).
-* An operator installing `deploy/env/gpu-learned/` accepts NVIDIA's terms for those runtime
-  libraries, exactly as they would installing CUDA from NVIDIA directly. This is normal for GPU
-  serving and is called out here so it is a decision, not a surprise.
-* `triton==3.7.1` (also transitive via torch, and required by `flashdeberta`) **is** permissive:
-  MIT, per its PyPI classifier, verified the same day.
+* Nothing changes for the framework's own licence, or for the CPU/text environment, or for the
+  OCR **client** environment — the CUDA wheels are pulled in **only** by `gpu-learned/` and
+  `served-ocr-server/`, and only because the operator chose to install a GPU stack.
+  `latence-core` and every Provider package remain permissively licensed and CUDA-free (ADR-0016).
+* An operator installing `deploy/env/gpu-learned/` **or** `deploy/env/served-ocr-server/` accepts
+  NVIDIA's terms for those runtime libraries, exactly as they would installing CUDA from NVIDIA
+  directly. This is normal for GPU serving and is called out here so it is a decision, not a
+  surprise.
+* `triton` (transitive via torch, and required by `flashdeberta`) **is** permissive: MIT per its
+  PyPI classifier — 3.7.1 in `gpu-learned`, 3.6.0 in `served-ocr-server`, both verified.
+* This disclosure is machine-gated, not a promise: `latence env matrix` reports
+  `E-LICENCE-UNDISCLOSED` if a committed lock pins an `nvidia-*` wheel this file does not name, or
+  does not cite that lock's path — see `_check_disclosure` in `latence_core.compat`. That gate
+  exists because #196 and #198 each shipped a pinned GPU environment and only one of them was
+  disclosed here.
 * UNVERIFIED: the precise EULA *version* bound to each pinned wheel was not independently
   confirmed — NVIDIA does not publish it in the package metadata. Treat the linked CUDA EULA as
   the governing terms and re-check if a redistribution question ever arises.

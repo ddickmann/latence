@@ -38,7 +38,12 @@ What :func:`verify_matrix` makes impossible:
   without a resolution that is enforced by a file in the repo
   (``E-MATRIX-FAILURE-MODE-MISSING`` / ``-UNRESOLVED`` / ``E-MATRIX-ENFORCEMENT-MISSING``);
 * a named served model without its **weights** and **code** licences cited separately
-  (``E-MATRIX-LICENCE-UNCITED``, ADR-0012).
+  (``E-MATRIX-LICENCE-UNCITED``, ADR-0012);
+* a committed environment that pins wheels whose licence cannot be assumed permissive (the
+  ``nvidia-*`` CUDA family) without ``THIRD-PARTY-LICENSES.md`` citing that lock **and** naming
+  each such wheel, or a distribution the matrix vouches for that the register never mentions
+  (``E-LICENCE-UNDISCLOSED`` / ``E-LICENCE-REGISTER-MISSING``) — a carve-out written for one GPU
+  environment does not cover the next one somebody adds.
 
 **Two axes per cell, because they fail differently.** ``resolution`` is whether the combination
 can be *installed* — offline, machine-checkable anywhere, and already gated by ``latence env
@@ -55,6 +60,7 @@ committed locks and the filesystem. It never installs, imports a Provider or tou
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -83,6 +89,19 @@ _KIND_EXCLUDED = "excluded_distribution"
 _KIND_LEARNED_PROVIDER = "learned_provider"
 _KIND_SERVED_MODEL = "served_model"
 _KINDS = (_KIND_DISTRIBUTION, _KIND_EXCLUDED, _KIND_LEARNED_PROVIDER, _KIND_SERVED_MODEL)
+
+LICENCE_REGISTER = "THIRD-PARTY-LICENSES.md"
+"""The published third-party licence register — the page a redistributor reads before installing."""
+
+NON_PERMISSIVE_FAMILIES = ("nvidia-",)
+"""Distribution-name prefixes whose licence can never be assumed permissive.
+
+The ``nvidia-*`` CUDA/cuDNN/NCCL wheels publish *no* usable licence metadata (issue #198): most
+declare nothing at all, some declare ``LicenseRef-NVIDIA-Proprietary``, and a few (``nvidia-ml-py``,
+``nvidia-cudnn-frontend``, ``nvidia-nvtx``) really are permissive. A prefix cannot tell them apart,
+which is precisely why every member must be *named* in :data:`LICENCE_REGISTER` with the licence
+somebody actually read back, rather than inferred from the family.
+"""
 
 REQUIRED_FAILURE_MODES: tuple[str, ...] = (
     "FM-FLASHINFER-SM120",
@@ -646,6 +665,96 @@ def _check_versions(
     return findings
 
 
+def _register(repo_root: Path) -> tuple[str, set[str]] | None:
+    """The published licence register's text plus every distribution name it mentions.
+
+    ``None`` means the register itself is missing — reported once, rather than as one finding per
+    undisclosed wheel.
+    """
+    register = repo_root / LICENCE_REGISTER
+    if not register.exists():
+        return None
+    text = register.read_text(encoding="utf-8")
+    return text, {_canonical(token) for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", text)}
+
+
+def _canonical(name: str) -> str:
+    """PEP 503 name normalisation, without importing ``packaging`` for one regex."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _check_disclosure(
+    matrix: CompatibilityMatrix, specs: dict[str, EnvironmentSpec], repo_root: Path
+) -> list[Finding]:
+    """Nothing a committed environment installs may be absent from the licence register.
+
+    Two lanes shipped a pinned GPU environment and only one disclosed its CUDA wheels (issue #196
+    vs #198), which is possible only because no gate related a *lock* to the register. This is that
+    gate: every proprietary-family distribution a committed lock pins, and every distribution the
+    matrix records a cell for, must be named in :data:`LICENCE_REGISTER` — and each lock carrying
+    such wheels must have its own path cited there, so the disclosure is scoped to the environment
+    an operator is about to install rather than to whichever one happened to be audited first
+    (ADR-0012).
+    """
+    loaded = _register(repo_root)
+    if loaded is None:
+        return [
+            Finding(
+                "E-LICENCE-REGISTER-MISSING",
+                f"'{LICENCE_REGISTER}' does not exist. Every environment this repo pins is "
+                "undisclosed without it.",
+            )
+        ]
+    text, names = loaded
+    findings: list[Finding] = []
+    for env in sorted(specs):
+        spec = specs[env]
+        if not spec.lock_path.exists():
+            continue
+        pinned = parse_lock(spec.lock_path.read_text(encoding="utf-8"))
+        restricted = sorted(name for name in pinned if name.startswith(NON_PERMISSIVE_FAMILIES))
+        if not restricted:
+            continue
+        # Cited by the repo-relative path the register must show, derived from the environment
+        # layout rather than from `spec.lock_path` — which may be resolved through a symlink and
+        # is then not relative to `repo_root` at all.
+        lock_ref = f"deploy/env/{env}/{spec.lock_path.name}"
+        if lock_ref not in text:
+            findings.append(
+                Finding(
+                    "E-LICENCE-UNDISCLOSED",
+                    f"environment '{env}' pins {len(restricted)} distribution(s) whose licence "
+                    f"cannot be assumed permissive, but '{LICENCE_REGISTER}' never cites "
+                    f"'{lock_ref}'. A carve-out scoped to one lock does not cover another.",
+                )
+            )
+        undisclosed = [name for name in restricted if name not in names]
+        if undisclosed:
+            findings.append(
+                Finding(
+                    "E-LICENCE-UNDISCLOSED",
+                    f"environment '{env}' pins {', '.join(undisclosed)}, which "
+                    f"'{LICENCE_REGISTER}' does not name. ADR-0012: a licence is verified and "
+                    "recorded before the dependency is named, and an nvidia-* wheel's own "
+                    "metadata cannot be trusted to say which it is.",
+                )
+            )
+    for component in sorted(
+        {_canonical(cell.component) for cell in matrix.cells if cell.kind == _KIND_DISTRIBUTION}
+    ):
+        if component not in names:
+            findings.append(
+                Finding(
+                    "E-LICENCE-UNDISCLOSED",
+                    f"distribution '{component}' has a matrix cell but is absent from "
+                    f"'{LICENCE_REGISTER}'. A component the matrix vouches for is a runtime "
+                    "dependency somebody installs; it carries a licence whether or not the cell "
+                    "has a field for it.",
+                )
+            )
+    return findings
+
+
 def _check_licenses(matrix: CompatibilityMatrix) -> list[Finding]:
     findings: list[Finding] = []
     for cell in matrix.cells:
@@ -809,6 +918,7 @@ def verify_matrix(
     findings.extend(_check_coverage(matrix, specs))
     findings.extend(_check_versions(matrix, specs))
     findings.extend(_check_licenses(matrix))
+    findings.extend(_check_disclosure(matrix, specs, repo_root))
     for cell in matrix.cells:
         subject = f"cell {cell.environment}/{cell.component}"
         findings.extend(_check_axis(subject, cell.resolution, repo_root))
@@ -932,9 +1042,7 @@ def render_matrix(matrix: CompatibilityMatrix) -> str:
     run = matrix.full_stack_run
     lines.append("## Full-stack end-to-end verification")
     lines.append("")
-    lines.append(
-        f"* **Status:** {_cell_status(Axis(name='status', status=run.status))}"
-    )
+    lines.append(f"* **Status:** {_cell_status(Axis(name='status', status=run.status))}")
     lines.append(f"* **Command:** `{_md(run.command)}`")
     lines.append(f"* **Script:** `{_md(run.script)}`")
     if run.stack:

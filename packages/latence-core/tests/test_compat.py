@@ -176,9 +176,7 @@ def test_an_unverified_cell_must_stay_actionable(
     target = _first(matrix, "learned_provider")
     injected = dataclasses.replace(
         target,
-        runtime=Axis(
-            name="runtime", status=UNVERIFIED, reproduce=reproduce, blocked_by=blocked_by
-        ),
+        runtime=Axis(name="runtime", status=UNVERIFIED, reproduce=reproduce, blocked_by=blocked_by),
     )
     assert "E-MATRIX-REPRODUCE-MISSING" in _codes(_replace_cell(matrix, target, injected))
 
@@ -534,3 +532,100 @@ def test_the_full_stack_stack_crosses_the_served_ocr_boundary() -> None:
     assert parse["provider"] == "parser.endpoint"
     source = next(s for s in stack["stages"] if s["capability"] == "source")
     assert "txt" not in source["config"]["extensions"]
+
+
+# --------------------------------------------------------------------------------------------
+# The licence register covers every environment, not just the one that was audited first.
+#
+# Issue #196 and issue #198 each shipped a pinned GPU environment; only #198's was disclosed in
+# THIRD-PARTY-LICENSES.md, and nothing in the tree noticed, because no gate related a committed
+# lock to the register. These tests inject exactly that omission — one wheel name, one lock path,
+# one matrix distribution — into a repo whose register is doctored, and require the report to
+# bite. Audit R2 / cross-lane #15.
+# --------------------------------------------------------------------------------------------
+
+_REGISTER = "THIRD-PARTY-LICENSES.md"
+
+
+def _repo_with_register(tmp_path: Path, text: str | None) -> Path:
+    """A repo root that IS the real one, except for a doctored (or deleted) licence register."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    for entry in _REPO_ROOT.iterdir():
+        if entry.name == _REGISTER:
+            continue
+        (root / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+    if text is not None:
+        (root / _REGISTER).write_text(text, encoding="utf-8")
+    return root
+
+
+def _findings(matrix: CompatibilityMatrix, root: Path) -> list[tuple[str, str]]:
+    return [(f.code, f.message) for f in verify_matrix(matrix, root).findings]
+
+
+def test_the_committed_register_names_every_cuda_wheel_every_lock_pins() -> None:
+    """The disclosure itself, asserted directly: no `nvidia-*` wheel is missing from the page."""
+    from latence_core.envspec import parse_lock
+
+    register = (_REPO_ROOT / _REGISTER).read_text(encoding="utf-8")
+    for lock in sorted(_REPO_ROOT.glob("deploy/env/*/requirements.lock")):
+        wheels = [
+            n for n in parse_lock(lock.read_text(encoding="utf-8")) if n.startswith("nvidia-")
+        ]
+        if not wheels:
+            continue
+        rel = lock.relative_to(_REPO_ROOT).as_posix()
+        assert rel in register, f"{rel} pins {len(wheels)} nvidia-* wheels and is not disclosed"
+        assert not [w for w in wheels if w not in register], f"{rel}: undisclosed wheels"
+
+
+def test_a_cuda_wheel_missing_from_the_register_is_reported(
+    matrix: CompatibilityMatrix, tmp_path: Path
+) -> None:
+    """`nvidia-cuda-tileiras` is pinned only by the served-OCR lock — dropping it must be seen."""
+    doctored = (
+        (_REPO_ROOT / _REGISTER)
+        .read_text(encoding="utf-8")
+        .replace("nvidia-cuda-tileiras", "some-other-wheel")
+    )
+    reported = _findings(matrix, _repo_with_register(tmp_path, doctored))
+    assert [m for code, m in reported if code == "E-LICENCE-UNDISCLOSED" and "tileiras" in m]
+
+
+def test_a_lock_the_register_never_cites_is_reported(
+    matrix: CompatibilityMatrix, tmp_path: Path
+) -> None:
+    """The #196-vs-#198 defect exactly: a carve-out scoped to one lock does not cover another."""
+    doctored = (
+        (_REPO_ROOT / _REGISTER)
+        .read_text(encoding="utf-8")
+        .replace(
+            "deploy/env/served-ocr-server/requirements.lock",
+            "deploy/env/gpu-learned/requirements.lock",
+        )
+    )
+    reported = _findings(matrix, _repo_with_register(tmp_path, doctored))
+    assert [
+        m
+        for code, m in reported
+        if code == "E-LICENCE-UNDISCLOSED" and "served-ocr-server" in m and "never cites" in m
+    ]
+
+
+def test_a_matrix_distribution_absent_from_the_register_is_reported(
+    matrix: CompatibilityMatrix, tmp_path: Path
+) -> None:
+    """A `kind: distribution` cell carries a licence whether or not the cell has a field for it."""
+    import re as _re
+
+    doctored = _re.sub(
+        "vllm", "some-server", (_REPO_ROOT / _REGISTER).read_text(encoding="utf-8"), flags=_re.I
+    )
+    reported = _findings(matrix, _repo_with_register(tmp_path, doctored))
+    assert [m for code, m in reported if code == "E-LICENCE-UNDISCLOSED" and "'vllm'" in m]
+
+
+def test_a_missing_register_is_reported_once(matrix: CompatibilityMatrix, tmp_path: Path) -> None:
+    reported = _findings(matrix, _repo_with_register(tmp_path, None))
+    assert [code for code, _ in reported].count("E-LICENCE-REGISTER-MISSING") == 1

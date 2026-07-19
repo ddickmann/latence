@@ -23,7 +23,11 @@ workspace are versioned and released together under one version number.
   `environment.yaml` files**, so a new enforced boundary or learned Provider is
   `E-MATRIX-CELL-UNCOVERED` until it is mapped; a recorded version that disagrees with that
   environment's committed lock is `E-MATRIX-VERSION-DRIFT`; a named served model without its
-  weights AND code licences cited separately is `E-MATRIX-LICENCE-UNCITED` (ADR-0012). Each cell
+  weights AND code licences cited separately is `E-MATRIX-LICENCE-UNCITED` (ADR-0012); a committed
+  lock that pins `nvidia-*` CUDA wheels `THIRD-PARTY-LICENSES.md` does not name, or whose path that
+  register never cites, is `E-LICENCE-UNDISCLOSED` — the gate that relates an *environment* to the
+  published licence page, so a second pinned GPU environment cannot ship disclosed only by the
+  first one's carve-out. Each cell
   carries two independent axes — **resolution** (does it install: offline, checked on every commit)
   and **runtime** (does it run on `sm_120`: needs the hardware) — because a green resolution is not
   a runtime claim. The five failure modes of the live 519-page run are matrix entries with their

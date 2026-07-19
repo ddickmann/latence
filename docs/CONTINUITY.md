@@ -51,7 +51,11 @@ outside any employer.
   permissive-only the *default* rule: restricted-licence models (EmbeddingGemma)
   are opt-in and never a default. Model **weights** and model **code** licences are
   verified separately. A fork therefore inherits no copyleft or
-  field-of-use surprise.
+  field-of-use surprise. The one disclosed exception is the CUDA wheel set pulled in
+  by the two pinned GPU environments (`deploy/env/gpu-learned/`,
+  `deploy/env/served-ocr-server/`), which carry NVIDIA's proprietary EULAs; each wheel
+  is named in `THIRD-PARTY-LICENSES.md` and the disclosure is machine-gated
+  (`E-LICENCE-UNDISCLOSED`), so a new GPU environment cannot ship undisclosed.
 - **No hosted service, no phone-home, no licence key.** The framework is a library
   plus a CLI that runs on the adopter's own machines; there is no server that can be
   switched off. Endpoint Providers call an endpoint *the operator chooses and
