@@ -16,6 +16,7 @@ test in each package's suite.
 
 from __future__ import annotations
 
+import pytest
 from latence_core.contracts import (
     ChunkRecord,
     Classification,
@@ -60,7 +61,9 @@ def _chunk(text: str, *, sensitivity: str = "public") -> ChunkRecord:
         classification=Classification(language="en", sensitivity=sensitivity),
         content=text,
         token_count=len(text.split()),
-        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)),
+        offset_map=OffsetMap(
+            segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)
+        ),
     )
 
 
@@ -148,6 +151,73 @@ def test_hybrid_rule_full_coverage_is_byte_identical_to_the_floor() -> None:
     assert rec.masked_content is not None
     for value in (_CARD, _IBAN, _SSN):
         assert value not in rec.masked_content
+
+
+# -- the floor survives a MIS-BOUNDARIED Provider span (audit R6-wiring_dead_code-3) -------------
+#
+# `test_hybrid_rule_full_coverage_is_byte_identical_to_the_floor` above only pins the case where the
+# Provider span overlaps the floor EXACTLY. A learned Provider's boundaries are model-derived and
+# routinely disagree with the regex floor by a character or two — the case that actually matters,
+# because a span that merely STARTS EARLIER must never be allowed to suppress the floor span whole.
+# The invariant is enforced in `_merge_floor` by CLIPPING (audit R6-invariants-0); these cases pin it
+# from the floor suite too, so the guarantee is discoverable where the floor is documented.
+# `DE89370400440532013000` is a published synthetic IBAN example, never real account data (ADR-0044).
+
+
+@pytest.mark.parametrize(
+    ("provider_span", "label"),
+    [
+        ((19, 21), "starts ONE char before the IBAN, ends one char inside it"),
+        ((15, 39), "swallows the 'IBAN ' prefix and all but the trailing '000'"),
+        ((20, 30), "shares the floor's start but stops short — the tail must still be covered"),
+    ],
+)
+def test_misboundaried_provider_span_cannot_suppress_the_floor(
+    provider_span: tuple[int, int], label: str
+) -> None:
+    """A Provider span partially overlapping the floor must CLIP it, never drop it (ADR-0044).
+
+    Pre-fix `_merge_floor` resolved Provider-vs-floor overlap with a greedy earliest-start-wins DROP,
+    so the 2-character Provider span at [19,21) sorted first and the floor's IBAN span [20,42) was
+    discarded WHOLE — `masked_content` read
+    ``'Bankverbindung IBAN[BANK ACCOUNT NUMBER]E89370400440532013000 bei der Sparkasse.'``, leaking
+    21 of the 22 IBAN characters past a floor whose entire purpose is to be non-bypassable by
+    model/backend choice. Reached from the plain SINGLE-Redactor path every stack runs.
+    """
+    content = f"Bankverbindung IBAN {_IBAN} bei der Sparkasse."
+    iban_start = content.index(_IBAN)
+    # The floor itself must see the whole IBAN — otherwise this test would pass vacuously.
+    assert (iban_start, iban_start + len(_IBAN)) == (20, 42)
+    assert any(
+        (start, end, pii_type) == (20, 42, "iban")
+        for start, end, pii_type, *_ in floor_candidates(content)
+    )
+
+    start, end = provider_span
+    chunk = _chunk(content)
+    policy = RedactionPolicy(policies=None, default_action=RedactionAction.MASK)
+    rec = finalize_redacted_chunk(
+        chunk,
+        _plan(chunk, policy),  # type: ignore[arg-type]
+        accepted=[(start, end, "bank_account_number", content[start:end], "gliner2", 0.9)],
+        salt="s",
+    )
+
+    assert rec.masked_content is not None
+    # Not one character of the IBAN may survive in the clear — no substring of it, either.
+    for cut in range(len(_IBAN) - 3):
+        assert _IBAN[cut:] not in rec.masked_content, (
+            f"mis-boundaried Provider span ({label}) leaked IBAN tail {_IBAN[cut:]!r}: "
+            f"{rec.masked_content!r}"
+        )
+    # COVERAGE-PRESERVING: every offset the floor claimed is still claimed by some mutating span.
+    covered = {
+        i
+        for span in rec.pii_spans
+        if span.action is not RedactionAction.TAG
+        for i in range(span.char_start, span.char_end)
+    }
+    assert set(range(20, 42)) <= covered, "floor offsets left uncovered after overlap resolution"
 
 
 # -- drift guard: the floor patterns ARE the hybrid_rule built-ins ------------------------------
