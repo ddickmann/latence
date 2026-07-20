@@ -15,6 +15,7 @@ tutorial does not track fails the gate, not just the three drifts found in the a
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +34,13 @@ _TUTORIAL = _REPO_ROOT / "docs" / "TUTORIAL-fresh-pod-walkthrough.md"
 # Keys whose values are operator-specific placeholders in the tutorial ({CORPUS_DIR}, the OCR
 # endpoint, the stack name) rather than wiring. The wizard takes them from the operator's answers,
 # so they are legitimately different and are compared structurally (present/absent), not by value.
-_OPERATOR_SPECIFIC = frozenset(
-    {"uri", "path", "base_url", "model", "storage_uri", "corpus_id", "name"}
-)
+#
+# `model` is deliberately NOT in this set (audit R7-wizard_profile-11): `_wizard_stages()` feeds
+# the tutorial's own `ocr_model`/`llm_model` into the fixture, so `parse.config.model` and
+# `induce.config.model` compare byte-for-byte — while the wizard's HARD-CODED Granite embedder
+# checkpoint (`_sota_embedder_block()`) is not operator-supplied at all. Exempting `model` blinded
+# the gate to exactly the drift class it exists to catch.
+_OPERATOR_SPECIFIC = frozenset({"uri", "path", "base_url", "storage_uri", "corpus_id", "name"})
 
 
 def _tutorial_text() -> str:
@@ -87,14 +92,37 @@ def _wizard_stages() -> dict[str, dict[str, Any]]:
 
 
 def _strip_operator_specific(value: Any) -> Any:
+    """Neutralise operator-supplied placeholder VALUES at the TOP level of a stage's config.
+
+    Deliberately NOT recursive (audit R7-wizard_profile-11): every operator answer the wizard
+    threads into a stack lands as a top-level key of a stage's ``config`` (``path``, ``base_url``,
+    ``corpus_id``, …). Nested mappings are *nested Provider blocks* — the embedder, the
+    ``graph_features`` block, the ``bm25`` block, the universal parser's ``ocr`` sub-block — whose
+    pins the wizard hard-codes. Recursing neutralised those pins too, so §4 could name any
+    embedder checkpoint it liked and the gate stayed green.
+    """
     if isinstance(value, dict):
-        return {
-            k: (None if k in _OPERATOR_SPECIFIC else _strip_operator_specific(v))
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_strip_operator_specific(v) for v in value]
+        return {k: (None if k in _OPERATOR_SPECIFIC else v) for k, v in value.items()}
     return value
+
+
+def _wiring_drift(
+    tutorial: dict[str, dict[str, Any]], wizard: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Every wiring difference between §4's stages and the wizard's, one line each.
+
+    The single comparison implementation, so a regression test can drive it against a mutated
+    tutorial instead of re-implementing (and thereby not testing) the gate.
+    """
+    drift: list[str] = []
+    for name, want in wizard.items():
+        got = tutorial.get(name, {})
+        for key in ("capability", "provider", "depends_on", "config"):
+            want_v = _strip_operator_specific(want.get(key))
+            got_v = _strip_operator_specific(got.get(key))
+            if want_v != got_v:
+                drift.append(f"  {name}.{key}: tutorial={got_v!r} wizard={want_v!r}")
+    return drift
 
 
 def test_tutorial_section4_names_the_blessed_redactor() -> None:
@@ -144,15 +172,57 @@ def test_tutorial_section4_stage_wiring_equals_the_wizard_output() -> None:
         f"{list(tutorial)} != {list(wizard)}"
     )
 
-    drift: list[str] = []
-    for name, want in wizard.items():
-        got = tutorial[name]
-        for key in ("capability", "provider", "depends_on", "config"):
-            want_v = _strip_operator_specific(want.get(key))
-            got_v = _strip_operator_specific(got.get(key))
-            if want_v != got_v:
-                drift.append(f"  {name}.{key}: tutorial={got_v!r} wizard={want_v!r}")
+    drift = _wiring_drift(tutorial, wizard)
     assert not drift, "§4 is NOT the exact enterprise-sota spine:\n" + "\n".join(drift)
+
+
+@pytest.mark.parametrize(
+    ("stage", "path", "replacement"),
+    [
+        # The hard-coded Granite embedder pin, in BOTH stages that carry it (R7-wizard_profile-11).
+        (
+            "disambiguate",
+            ("embedder", "config", "model"),
+            "sentence-transformers/all-MiniLM-L6-v2",
+        ),
+        (
+            "export_corpus",
+            ("embedder", "config", "model"),
+            "sentence-transformers/all-MiniLM-L6-v2",
+        ),
+        # The other nested Provider pins recursion used to be able to hide.
+        ("export_corpus", ("embedder", "provider"), "embedding.not_blessed"),
+        ("graph", ("graph_features", "provider"), "graph_features.not_blessed"),
+        ("export_corpus", ("bm25", "provider"), "tokenizer.not_blessed"),
+    ],
+)
+def test_the_gate_catches_drift_in_a_NESTED_provider_block(
+    stage: str, path: tuple[str, ...], replacement: str
+) -> None:
+    """Meta-test: a §4 that re-pins a nested Provider block MUST show up as drift.
+
+    The R6 gate neutralised `model` recursively, so a tutorial naming a 384-dim English-only
+    MiniLM behind the block's own `dimension: 768` diffed clean — the exact drift class the gate
+    was written to make impossible. This drives the gate's own comparison logic against a mutated
+    tutorial and asserts it reports the change.
+    """
+    wizard = _wizard_stages()
+    tutorial = deepcopy(wizard)  # start from a perfect match, then plant ONE drift
+
+    node = tutorial[stage]["config"]
+    for key in path[:-1]:
+        node = node[key]
+    assert node[path[-1]] != replacement, "fixture drift: the mutation must change something"
+    node[path[-1]] = replacement
+
+    assert not _wiring_drift(deepcopy(wizard), wizard), (
+        "control: an unmutated copy of the wizard output must diff clean"
+    )
+    drift = _wiring_drift(tutorial, wizard)
+    assert drift, (
+        f"the gate did not notice §4 re-pinning {stage}.config.{'.'.join(path)} to "
+        f"{replacement!r} — a nested Provider block is wiring, not an operator answer"
+    )
 
 
 @pytest.mark.parametrize("token", ["graph_features", "bm25"])
