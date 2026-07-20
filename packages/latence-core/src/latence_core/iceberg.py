@@ -11,14 +11,33 @@ Why registration and not a second materialisation
 ADR-0017 says the AI-ready deliverable is *files*, never a database. Iceberg is still files plus
 table metadata, so the only new thing is the catalog pointer. Accordingly this module NEVER
 re-serialises the corpus through a different writer: it takes the Parquet the Export produced,
-publishes an **immutable, content-addressed copy** of it next to the deliverable
-(``<out_dir>/iceberg-data/<basename>-<sha256>.parquet``) and hands that path to Iceberg's
+publishes an **immutable, content-addressed copy** of it into the target table's own location
+(``<table.location()>/data/<basename>-<sha256>.parquet``) and hands that path to Iceberg's
 ``add_files``. The copy is a streamed byte copy through the :class:`~latence_core.storage.Storage`
 seam (O(chunk) memory, never O(corpus)), and it exists for one reason: an Iceberg data file must be
 **immutable**, while ``records.parquet`` is deliberately rewritten by every run. Pointing the
 catalog at ``records.parquet`` itself would leave every previous snapshot dangling at a path whose
 bytes have since changed — a silently-corrupt table. So the deliverable keeps its stable name and
 the catalog gets content that can never move under it.
+
+Why the TABLE's location and not the Export's ``out_dir``
+---------------------------------------------------------
+Immutable bytes are only half of what a catalog reference needs; the other half is a **durable
+path**. The Export's ``out_dir`` is ``<storage_uri>/_latence/runs/<run_id>/export``
+(:meth:`~latence_core.runner.LocalRunner._export_dir`) — the single most ephemeral directory in the
+system. :meth:`~latence_core.delta_runner.DeltaRunner._purge_run_artifacts` ``remove_tree``s every
+entry under ``_latence/runs`` on EVERY purge, of ANY document, because a run tree holds a purged
+document's raw text in re-derivable artifacts. A data file published there was therefore destroyed
+by an erasure that had nothing to do with it, while the committed snapshot went on recording its
+absolute path verbatim in the Avro manifest: ``table.scan()`` raised ``FileNotFoundError`` for
+good, and in ``append`` mode the post-purge re-export landed under a NEW run id, so the dangling
+path stayed referenced forever. Ordinary run-retention cleanup broke it the same way.
+
+The table's own location is the one place with the right lifetime: it belongs to the catalog, whose
+operator already owns retention for it (``expire_snapshots`` / ``remove_orphan_files`` scan exactly
+there), and nothing in this framework ever deletes it. It is also where every other Iceberg writer
+puts its data files. A consequence worth stating plainly: enabling the ``iceberg`` block now leaves
+the Export deliverable byte-for-byte identical — the optional output adds nothing to ``export/``.
 
 The copy is named after the **sha256 of its own bytes**, not a random per-run token, because this
 path is part of an export deliverable and the framework promises exports are reproducible: a random
@@ -216,7 +235,6 @@ class IcebergCorpusTable:
         *,
         storage: Storage,
         parquet_uri: str,
-        out_dir: str,
         basename: str,
         arrow_schema: pa.Schema,
         contract_version: int,
@@ -225,9 +243,10 @@ class IcebergCorpusTable:
         """Publish this run's corpus into the Iceberg table; return the registered data-file URI.
 
         ``parquet_uri`` is the Export's just-finalized ``records.parquet``. It is copied — streamed,
-        never buffered — to an immutable, run-stamped sibling under ``<out_dir>/iceberg-data/``,
-        and THAT path is what the catalog references (see the module docstring on why the
-        deliverable's own, rewritten-every-run path must not be handed to Iceberg).
+        never buffered — to an immutable, content-addressed file under the target table's own
+        location (``<table.location()>/data/``), and THAT path is what the catalog references (see
+        the module docstring on why the deliverable's own, rewritten-every-run path must not be
+        handed to Iceberg, and why the copy must not live in the ephemeral run tree either).
 
         Every failure on this path — catalog construction, namespace/table resolution, the data-file
         copy, the commit — surfaces as a typed :class:`~latence_core.errors.ProviderError` naming
@@ -241,11 +260,13 @@ class IcebergCorpusTable:
         """
         data_uri = "<not yet published>"
         published_here = False
+        data_storage = storage
         try:
             catalog = self._catalog()
             table = self._ensure_table(catalog, arrow_schema)
+            data_storage, data_dir = self._data_location(table)
             data_uri, published_here = self._publish_data_file(
-                storage, parquet_uri, out_dir, basename
+                storage, data_storage, parquet_uri, data_dir, basename
             )
             stamps = self._stamps(parquet_uri, contract_version, record_versions)
             with table.transaction() as tx:
@@ -279,7 +300,9 @@ class IcebergCorpusTable:
             # namespace creation, table load/create, drift refusal), so there is nothing to clean.
             raise
         except Exception as exc:  # noqa: BLE001 - normalise any catalog/commit failure
-            cleanup = self._discard_unreferenced(storage, data_uri, exc) if published_here else ""
+            cleanup = (
+                self._discard_unreferenced(data_storage, data_uri, exc) if published_here else ""
+            )
             msg = (
                 f"Iceberg registration of {data_uri!r} into "
                 f"{'.'.join(self._target.identifier)} via {self._target.uri!r} failed: {exc}"
@@ -293,12 +316,12 @@ class IcebergCorpusTable:
         """Delete the data file THIS run published when its commit did not land; return the note.
 
         The published copy is the whole corpus, ``content`` included. Once the transaction has
-        failed no snapshot references it, ``expire_snapshots`` can never collect it (it only
-        deletes files recorded in an expired snapshot's manifests) and ``remove_orphan_files``
-        cannot see it (it scans the TABLE location in the warehouse, not the Export's ``out_dir``).
-        Left alone it is an unreachable full-corpus copy inside a deliverable directory — so a
-        registration that failed cleans up after itself, and the deliverable is exactly what it
-        would have been had the optional block never been configured.
+        failed no snapshot references it, so ``expire_snapshots`` can never collect it (it only
+        deletes files recorded in an expired snapshot's manifests). It now lands in the table's own
+        location, where the catalog operator's ``remove_orphan_files`` *could* eventually reach it —
+        but "eventually, if they run it" is not a disposal guarantee for a full-corpus copy of
+        possibly sensitive text, so a registration that failed still cleans up after itself and the
+        warehouse is left exactly as the failed run found it.
 
         Two deliberate exceptions to that:
 
@@ -480,9 +503,56 @@ class IcebergCorpusTable:
             PROP_MODE: self._target.mode,
         }
 
+    def _data_location(self, table: Any) -> tuple[Storage, str]:
+        """The directory an immutable data file for ``table`` belongs in, plus its Storage.
+
+        ``<table.location()>/data`` — the table's OWN location in the catalog's warehouse, which is
+        the only path with the lifetime a snapshot reference needs. The previous home,
+        ``<out_dir>/iceberg-data/``, sat inside ``_latence/runs/<run_id>/`` and was destroyed
+        wholesale by :meth:`~latence_core.delta_runner.DeltaRunner._purge_run_artifacts` on any
+        purge (and by ordinary run-retention cleanup), leaving the committed snapshot pointing at a
+        deleted absolute path — an unreadable, unrecoverable table. See the module docstring.
+
+        The warehouse may be a different filesystem than the Export's (a local run writing into an
+        ``s3://`` warehouse is the normal enterprise shape), so the data file gets its OWN
+        :class:`~latence_core.storage.Storage` bound to that location's scheme. A scheme the
+        Storage seam refuses surfaces as its own typed ``ConfigError`` naming the scheme; anything
+        else becomes a typed :class:`~latence_core.errors.ProviderError` naming the table
+        (ADR-0034) — never a raw ``pyiceberg``/fsspec traceback.
+        """
+        from latence_core.storage import Storage as _Storage
+
+        try:
+            location = str(table.location()).rstrip("/")
+        except Exception as exc:  # noqa: BLE001 - normalise any catalog/metadata failure
+            raise self._table_error("located for its data files", exc) from exc
+        if not location:
+            msg = (
+                f"Iceberg table {'.'.join(self._target.identifier)!r} at {self._target.uri!r} "
+                "reports no location, so there is no durable place to publish its data file. "
+                "Configure the catalog with a warehouse location."
+            )
+            raise ProviderError(msg)
+        data_dir = f"{location}/data"
+        try:
+            return _Storage.for_uri(data_dir), data_dir
+        except ConfigError:
+            # Already a precise, typed scheme refusal (SchemeNotAllowedError) — do not bury it.
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalise any filesystem-construction failure
+            msg = (
+                f"Iceberg table {'.'.join(self._target.identifier)!r} has location {location!r}, "
+                f"which this Export cannot write its data file to: {exc}"
+            )
+            raise ProviderError(msg) from exc
+
     @staticmethod
     def _publish_data_file(
-        storage: Storage, parquet_uri: str, out_dir: str, basename: str
+        src_storage: Storage,
+        dst_storage: Storage,
+        parquet_uri: str,
+        data_dir: str,
+        basename: str,
     ) -> tuple[str, bool]:
         """Stream-copy the deliverable to an immutable, CONTENT-ADDRESSED Iceberg data file.
 
@@ -511,25 +581,29 @@ class IcebergCorpusTable:
 
         An identical data file already present is left ALONE rather than rewritten: its bytes are
         identical by construction, and a file a previous snapshot may already point at must not be
-        replaced underneath the catalog. That also bounds re-runs into a stable ``out_dir``, which
+        replaced underneath the catalog. That also bounds repeated runs of identical content, which
         previously accumulated one full-corpus copy per run.
+
+        ``src_storage`` reads the Export's deliverable; ``dst_storage`` writes the table's warehouse
+        location. They are two Storages because the two can be different filesystems (see
+        :meth:`_data_location`); the copy therefore streams through memory rather than asking either
+        store for a server-side copy it may not be able to perform across the boundary.
         """
-        data_dir = f"{out_dir}/iceberg-data"
-        storage.makedirs(data_dir)
+        dst_storage.makedirs(data_dir)
         # Copy into a temp sibling while hashing, THEN name the destination from the digest: the
         # content is only knowable once it has been read, and reading it twice (hash pass + copy
         # pass) would double the I/O on a full corpus for nothing.
-        tmp_uri = storage.temp_uri(f"{data_dir}/{basename}.parquet")
+        tmp_uri = dst_storage.temp_uri(f"{data_dir}/{basename}.parquet")
         digest = sha256()
-        with storage.open(parquet_uri, "rb") as src, storage.open(tmp_uri, "wb") as dst:
+        with src_storage.open(parquet_uri, "rb") as src, dst_storage.open(tmp_uri, "wb") as dst:
             while chunk := src.read(_COPY_CHUNK_BYTES):
                 digest.update(chunk)
                 dst.write(chunk)
         data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
-        if storage.exists(data_uri):
-            storage.remove(tmp_uri)
+        if dst_storage.exists(data_uri):
+            dst_storage.remove(tmp_uri)
             return data_uri, False
-        storage.finalize_atomic(tmp_uri, data_uri)
+        dst_storage.finalize_atomic(tmp_uri, data_uri)
         return data_uri, True
 
 

@@ -22,6 +22,7 @@ Covered:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pyarrow.parquet as pq
@@ -41,7 +42,6 @@ from pyiceberg.catalog.rest import RestCatalog
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 _NAMESPACE = "lake.latence"
 _TABLE = "corpus"
@@ -93,6 +93,25 @@ def _load_table(uri: str) -> Any:
     return RestCatalog("assert", uri=uri).load_table((*_NAMESPACE.split("."), _TABLE))
 
 
+def _table_data_dir(uri: str) -> str:
+    """Where the Export must publish its data file: the target TABLE's own location (R6).
+
+    Requires the catalog to be up, so a test that needs this after the server has stopped captures
+    it inside the ``local_rest_catalog`` block (or uses :func:`_warehouse_data_files`).
+    """
+    return f"{str(_load_table(uri).location()).rstrip('/')}/data"
+
+
+def _warehouse_data_files(catalog_root: Path) -> list[str]:
+    """Every Iceberg data file the Export published anywhere in the catalog's warehouse.
+
+    Searched from the warehouse ROOT rather than one known directory, so a data file published to
+    the wrong place inside the warehouse is still found (and a test asserting "none" cannot pass
+    just because it looked in a directory that does not exist).
+    """
+    return sorted(p.name for p in (catalog_root / "warehouse").rglob("records-*.parquet"))
+
+
 def test_enabled_registers_the_corpus_as_an_iceberg_table(tmp_path: Path) -> None:
     """The headline AC: enable one config block ⇒ the corpus IS a governed table."""
     with local_rest_catalog(tmp_path / "catalog") as uri:
@@ -104,10 +123,15 @@ def test_enabled_registers_the_corpus_as_an_iceberg_table(tmp_path: Path) -> Non
         rows = _scan(uri)
         assert [row["record_id"] for row in rows] == ["c1", "c2"]
         assert [row["content"] for row in rows] == ["alpha text", "beta text"]
-        # The registered data file is reported as an output URI, and it is a real file on disk.
-        data_uris = [u for u in uris if "/iceberg-data/" in u]
-        assert len(data_uris) == 1
-        assert (tmp_path / data_uris[0].removeprefix(str(tmp_path) + "/")).exists()
+        # The registered data file is reported as an output URI, it is a real file on disk, and it
+        # lives in the TABLE's own location — never in the ephemeral run tree (R6).
+        data_dir = _table_data_dir(uri)
+        data_uris = [u for u in uris if u.startswith(f"{data_dir}/")]
+        assert len(data_uris) == 1, uris
+        assert Path(data_uris[0].removeprefix("file://")).exists()
+        assert _warehouse_data_files(tmp_path / "catalog") == [
+            data_uris[0].rsplit("/", 1)[-1]
+        ]
         # ADR-0017: the deliverable is still the file, and it is untouched.
         assert (out / "records.parquet").exists()
         assert (out / "records.jsonl").exists()
@@ -218,26 +242,41 @@ def test_the_export_tree_is_byte_identical_across_two_fresh_runs(tmp_path: Path)
     (``stacks.validate._export_artifacts``, which walks ``export/`` RECURSIVELY and keys by the
     run-relative path) under the REAL check (``_check_determinism`` is a plain ``==``).
 
-    Pre-fix the data file was named ``records-<uuid4>.parquet``, so the two runs produced
-    disjoint keys and the harness reported ``export diverged`` on a perfectly deterministic
-    pipeline. The name is content-addressed now, so identical corpus bytes ⇒ identical key.
+    Pre-fix the data file was named ``records-<uuid4>.parquet`` *inside the export tree*, so the two
+    runs produced disjoint keys and the harness reported ``export diverged`` on a perfectly
+    deterministic pipeline. The name is content-addressed now (identical corpus bytes ⇒ identical
+    name), and since R6 the file lives in the TABLE's location rather than the export tree — so the
+    deliverable is untouched by the optional block, and determinism is asserted where the artifact
+    now actually lands.
     """
     from latence_core.stacks.validate import _export_artifacts
 
     records = [_chunk("alpha text", "c1"), _chunk("beta text", "c2")]
+    published: list[str] = []
     with local_rest_catalog(tmp_path / "catalog") as uri:
         config = _iceberg_config(uri)
+        data_dir = ""
         for run in ("run-1", "run-2"):
-            JsonlParquetExport(config).export(records, Storage(), str(tmp_path / run / "export"))
+            uris = JsonlParquetExport(config).export(
+                records, Storage(), str(tmp_path / run / "export")
+            )
+            data_dir = data_dir or _table_data_dir(uri)
+            published.append(next(u for u in uris if u.startswith(f"{data_dir}/")))
         # ``append`` still accumulated a snapshot per run (the documented delta disposition is
         # untouched by content addressing), and both runs' rows scan back.
         assert len(_load_table(uri).history()) == 2
 
+    # The derived artifact is deterministic: two independent runs over identical records
+    # content-address onto ONE path (non-vacuous — the URIs are real and were really published).
+    assert len(published) == 2
+    assert published[0] == published[1], published
+    assert _warehouse_data_files(tmp_path / "catalog") == [published[0].rsplit("/", 1)[-1]]
+
     primary = _export_artifacts(Storage(), str(tmp_path / "run-1"))
     second = _export_artifacts(Storage(), str(tmp_path / "run-2"))
-    # The Iceberg data file is genuinely part of what is compared — not an empty-vs-empty pass.
-    iceberg_keys = [key for key in primary if key.startswith("iceberg-data/")]
-    assert len(iceberg_keys) == 1, sorted(primary)
+    # The export deliverable is non-empty and carries nothing Iceberg-specific at all: enabling the
+    # block cannot perturb the tree ``stack validate`` compares (R6).
+    assert sorted(primary) == ["records.jsonl", "records.parquet"]
     assert primary == second, (
         f"export diverged — primary_only={sorted(set(primary) - set(second))}, "
         f"second_only={sorted(set(second) - set(primary))}"
@@ -254,7 +293,8 @@ def test_the_data_file_name_is_content_addressed(tmp_path: Path) -> None:
             uris = JsonlParquetExport(_iceberg_config(uri)).export(
                 [_chunk(text, "c1")], Storage(), str(out)
             )
-        return next(u for u in uris if "/iceberg-data/" in u)
+            data_dir = _table_data_dir(uri)
+        return next(u for u in uris if u.startswith(f"{data_dir}/"))
 
     same_a = publish("a", "alpha text")
     same_b = publish("b", "alpha text")
@@ -263,11 +303,48 @@ def test_the_data_file_name_is_content_addressed(tmp_path: Path) -> None:
     assert same_a.rsplit("/", 1)[-1] == same_b.rsplit("/", 1)[-1]
     assert other.rsplit("/", 1)[-1] != same_a.rsplit("/", 1)[-1]
     # And the token really is the digest of the file the catalog points at.
-    published = (
-        tmp_path / "a" / "export" / "iceberg-data" / same_a.rsplit("/", 1)[-1]
-    ).read_bytes()
+    published = Path(same_a.removeprefix("file://")).read_bytes()
     digest = hashlib.sha256(published).hexdigest()
     assert same_a.rsplit("/", 1)[-1] == f"records-{digest}.parquet"
+
+
+def test_a_purge_of_the_run_artifacts_leaves_the_registered_table_readable(
+    tmp_path: Path,
+) -> None:
+    """R6: the catalog's data file must NOT live in the tree the framework's own Purge deletes.
+
+    The Export writes into ``<storage_uri>/_latence/runs/<run_id>/export`` (``Runner._export_dir``)
+    and ``DeltaRunner._purge_run_artifacts`` — the GDPR-erasure step of EVERY purge, for ANY
+    document — ``remove_tree``s every entry under ``_latence/runs``. Publishing the Iceberg data
+    file under the Export's ``out_dir`` therefore put a file the committed snapshot references by
+    absolute path inside the most ephemeral directory in the system: one unrelated purge and
+    ``table.scan()`` raised ``FileNotFoundError`` forever (in ``append`` mode the re-export lands
+    under a NEW run id, so the dangling path stays referenced).
+
+    Driven through the REAL purge method with the REAL run layout — not a hand-rolled rmtree.
+    """
+    from latence_core.delta_runner import DeltaRunner
+    from latence_core.pipeline import CapabilityKind, Pipeline, Stage
+
+    storage_uri = str(tmp_path / "lake")
+    run_dir = f"{storage_uri}/_latence/runs/run-1"
+    pipeline = Pipeline(
+        name="p",
+        storage_uri=storage_uri,
+        stages=[Stage(name="export", capability=CapabilityKind.EXPORT, provider="jsonl_parquet")],
+    )
+
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        JsonlParquetExport(_iceberg_config(uri)).export(
+            [_chunk("alpha text", "c1")], Storage(), f"{run_dir}/export"
+        )
+        assert [row["record_id"] for row in _scan(uri)] == ["c1"]
+
+        DeltaRunner()._purge_run_artifacts(pipeline)  # noqa: SLF001 - the real erasure step
+        assert not Path(run_dir).exists(), "the purge must really have wiped the run tree"
+
+        # The derived table is still readable: its data file never lived in the purged tree.
+        assert [row["record_id"] for row in _scan(uri)] == ["c1"]
 
 
 def test_the_jsonl_deliverable_matches_the_registered_table(tmp_path: Path) -> None:
@@ -398,9 +475,9 @@ def test_a_run_that_adds_a_signal_column_is_refused_with_a_typed_error(tmp_path:
         assert [row["record_id"] for row in _scan(uri)] == ["c1"]
 
 
-def _iceberg_data_files(out_dir: Path) -> list[str]:
-    """Every published Iceberg data file inside one Export deliverable directory."""
-    return sorted(path.name for path in (out_dir / "iceberg-data").glob("*.parquet"))
+def _iceberg_data_files(catalog_root: Path) -> list[str]:
+    """Every published Iceberg data file in the catalog's warehouse (where R6 moved them)."""
+    return _warehouse_data_files(catalog_root)
 
 
 def _commit_fault(status: int) -> Callable[[str, str], int | None]:
@@ -423,10 +500,10 @@ def test_a_failed_commit_leaves_no_orphan_data_file_in_the_deliverable(tmp_path:
     """A commit that definitively did not land must not leave its corpus-sized copy behind.
 
     ``register`` publishes the data file BEFORE opening the transaction, so a commit failure used
-    to leave a full byte-for-byte copy of the corpus (``content`` included) under
-    ``<out_dir>/iceberg-data/`` that no manifest references. Nothing could ever collect it:
-    ``expire_snapshots`` only deletes files recorded in an expired snapshot's manifests, and
-    ``remove_orphan_files`` scans the TABLE location, not the Export's ``out_dir``.
+    to leave a full byte-for-byte copy of the corpus (``content`` included) in the table's location
+    that no manifest references, and that ``expire_snapshots`` can never collect (it only deletes
+    files recorded in an expired snapshot's manifests). The operator's ``remove_orphan_files``
+    could eventually reach it, but "eventually, if they run it" is not a disposal guarantee.
     """
     with local_rest_catalog(tmp_path / "catalog", fault=_commit_fault(503)) as uri:
         out = tmp_path / "run"
@@ -437,7 +514,7 @@ def test_a_failed_commit_leaves_no_orphan_data_file_in_the_deliverable(tmp_path:
 
     # The deliverable is intact (ADR-0017) — only the derived, uncommitted copy is gone.
     assert (out / "records.parquet").exists()
-    assert _iceberg_data_files(out) == []
+    assert _iceberg_data_files(tmp_path / "catalog") == []
     assert "removed" in str(caught.value)
 
 
@@ -455,7 +532,7 @@ def test_an_unknown_commit_outcome_keeps_the_data_file_on_purpose(tmp_path: Path
                 [_chunk("alpha", "c1")], Storage(), str(out)
             )
 
-    assert len(_iceberg_data_files(out)) == 1
+    assert len(_iceberg_data_files(tmp_path / "catalog")) == 1
     assert "UNKNOWN" in str(caught.value)
 
 
@@ -464,7 +541,7 @@ def test_a_failed_commit_never_deletes_a_data_file_an_earlier_run_committed(
 ) -> None:
     """Cleanup is scoped to what THIS run published — never to a file a snapshot already points at.
 
-    Two runs of identical bytes into the same ``out_dir`` content-address onto the SAME path. The
+    Two runs of identical bytes into the same table content-address onto the SAME path. The
     first run commits it; the second run's commit fails. Removing that path would break the first
     run's snapshot, so only a file this run actually created may be discarded.
     """
@@ -480,12 +557,12 @@ def test_a_failed_commit_never_deletes_a_data_file_an_earlier_run_committed(
     with local_rest_catalog(tmp_path / "catalog", fault=fault) as uri:
         export = JsonlParquetExport(_iceberg_config(uri))
         export.export(records, Storage(), str(out))
-        committed = _iceberg_data_files(out)
+        committed = _iceberg_data_files(tmp_path / "catalog")
         assert len(committed) == 1
 
         faulting["on"] = True
         with pytest.raises(ProviderError):
             export.export(records, Storage(), str(out))
 
-        assert _iceberg_data_files(out) == committed
+        assert _iceberg_data_files(tmp_path / "catalog") == committed
         assert [row["record_id"] for row in _scan(uri)] == ["c1"]

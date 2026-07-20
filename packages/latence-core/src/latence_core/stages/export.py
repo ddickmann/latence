@@ -445,9 +445,11 @@ class JsonlParquetExport:
             schema IS the Parquet schema, including whichever optional signal columns this Export
             emits) and is version-stamped with the same contract ``schema_version`` the Parquet
             column carries. The plain Parquet + JSONL deliverable remains the source of truth and is
-            **byte-identical** whether or not this block is present; the only additions are an
-            immutable, content-addressed data file under ``<out_dir>/iceberg-data/`` (in the output
-            URIs) and the catalog registration. Delta semantics are the ``mode`` choice, documented
+            **byte-identical** whether or not this block is present — the export directory itself is
+            untouched; the only additions are an immutable, content-addressed data file inside the
+            TARGET TABLE's own warehouse location (reported in the output URIs, and deliberately not
+            in the ephemeral ``_latence/runs/<run_id>/`` tree that Purge and run-retention delete)
+            and the catalog registration. Delta semantics are the ``mode`` choice, documented
             honestly in :mod:`latence_core.iceberg`: ``append`` adds a snapshot (right for a delta
             run; a repeated FULL export duplicates rows), ``overwrite`` replaces the table contents
             in one atomic commit (right for a full re-export). Absent ⇒ nothing is registered,
@@ -734,7 +736,6 @@ class JsonlParquetExport:
                 self._iceberg.register(
                     storage=storage,
                     parquet_uri=parquet_uri,
-                    out_dir=out_dir,
                     basename=self._basename,
                     arrow_schema=schema,
                     contract_version=SCHEMA_VERSION,

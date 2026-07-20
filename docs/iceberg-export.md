@@ -68,18 +68,27 @@ a single record — so a typo in the catalog URL never surfaces after a long run
   never claims a version its own rows do not have), plus `latence.export.source` and
   `latence.export.mode`.
 * **The data file is an immutable, content-addressed copy, not `records.parquet` itself.** Each
-  run publishes `<out_dir>/iceberg-data/<basename>-<sha256>.parquet` — a streamed byte copy of
+  run publishes `<table location>/data/<basename>-<sha256>.parquet` — a streamed byte copy of
   the deliverable, named after the digest of its own bytes — and registers *that* with Iceberg's
   `add_files`. This is deliberate: `records.parquet` is rewritten by every run, and an Iceberg
   data file must never change under a snapshot that references it. A content-addressed path
   *cannot*, by construction, ever hold different bytes.
 
-  Naming it by content rather than by a random per-run token also keeps the export deliverable
-  **reproducible**: `latence stack validate`'s determinism check walks `export/` recursively and
-  compares two fresh runs key-for-key, so a random filename would report `export diverged` on a
-  perfectly deterministic pipeline. A consequence worth knowing: re-running an identical export
-  into the same `out_dir` reuses the one existing data file instead of accumulating a full-corpus
-  copy per run (the delta semantics below are unchanged — `append` still adds a snapshot).
+  Naming it by content rather than by a random per-run token also makes the artifact
+  **reproducible**: identical corpus bytes yield an identical path, so re-running an identical
+  export reuses the one existing data file instead of accumulating a full-corpus copy per run
+  (the delta semantics below are unchanged — `append` still adds a snapshot).
+* **The copy lands in the table's own location, never in the run tree.** Immutable bytes are only
+  half of what a snapshot reference needs; the other half is a **durable path**. The Export writes
+  into `<storage_uri>/_latence/runs/<run_id>/export`, and that whole tree is deleted wholesale by
+  every Purge (a run tree holds a purged document's raw text in re-derivable artifacts) and by
+  ordinary run-retention cleanup. A data file published there was destroyed by an erasure that had
+  nothing to do with it, leaving the committed snapshot pointing at a path that no longer exists —
+  an unreadable table, and in `append` mode an unrecoverable one, since the re-export lands under a
+  new run id while the dangling path stays referenced. The table's location has the right lifetime:
+  it is yours, your catalog's retention tools (`expire_snapshots`, `remove_orphan_files`) already
+  scan exactly there, and nothing in this framework ever deletes it. A welcome consequence:
+  enabling the `iceberg:` block leaves your export directory **byte-for-byte unchanged**.
 
   The copy is streamed, so the Export's memory stays O(batch) (ADR-0033), and it is published
   temp-then-rename like every other artifact (ADR-0010). Its URI is returned in the Export's
@@ -119,10 +128,10 @@ registers into it.
 reference it, so it is published *before* the commit — and if the commit then fails, the Export
 deletes it again. That matters because a never-committed file is unreachable by every cleanup you
 would reach for: `expire_snapshots` only deletes files recorded in an expired snapshot's manifests,
-and `remove_orphan_files` scans the *table* location in your warehouse, not the Export's `out_dir`.
-Left behind, each failed run against a flaky catalog would drop another full corpus-sized Parquet
-(chunk `content` and all) into `<out_dir>/iceberg-data/`. The error message names the file and says
-whether it was removed.
+`remove_orphan_files` could eventually reach it in the table location, but "eventually, if you run
+it" is not a disposal guarantee for a full corpus-sized Parquet (chunk `content` and all), and each
+failed run against a flaky catalog would drop another one. The error message names the file and
+says whether it was removed.
 
 The one deliberate exception is an **unknown commit outcome** (a 500/502/504 on the commit endpoint,
 which pyiceberg surfaces as `CommitStateUnknownException`): the catalog may have applied the commit
@@ -154,7 +163,7 @@ with `iceberg.uri: http://localhost:8181`. Observed:
 export outputs:
    /private/tmp/iceberg-wh/export/records.jsonl
    /private/tmp/iceberg-wh/export/records.parquet
-   /private/tmp/iceberg-wh/export/iceberg-data/records-<sha256>.parquet
+   file:/tmp/iceberg-wh/lake/corpus/data/records-<sha256>.parquet
 metadata_location: file:/tmp/iceberg-wh/lake/corpus/metadata/00001-....metadata.json
 schema: ['record_id', 'schema_version', 'provenance', 'classification', 'content', 'media_type']
 properties: {'latence.contract.schema_version': '16', 'latence.record.schema_versions': '16',
