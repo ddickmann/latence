@@ -160,6 +160,41 @@ def test_pack_default_redundancy_uses_lexical_overlap() -> None:
     assert _ids(packed) == {"dupA", "diverse"}
 
 
+@pytest.mark.parametrize(
+    ("dup_text", "diverse_text"),
+    [
+        pytest.param(
+            "quarterly revenue rose sharply", "feline biology and habitats", id="latin"
+        ),
+        pytest.param(
+            "Таможенный кодекс Европейского союза регулирует импорт товаров.",
+            "Кошки охотятся ночью и спят днём.",
+            id="cyrillic",
+        ),
+        pytest.param(
+            "欧洲联盟海关法典规定了货物进口。", "猫在夜间狩猎白天睡觉。", id="cjk"
+        ),
+    ],
+)
+def test_pack_default_redundancy_drops_an_exact_duplicate_in_any_script(
+    dup_text: str, diverse_text: str
+) -> None:
+    # The default redundancy path (no similarity_key, no cluster_key) is lexical overlap over the
+    # candidate text. dup1/dup2 are byte-identical, so their overlap is total in EVERY script — an
+    # ASCII-only term unit tokenises non-Latin text to the empty set, scores the exact duplicate
+    # 0.0 redundant, and spends the budget on it. The blessed `enterprise-sota` profile is the
+    # multilingual one, so this must not be a Latin-only guarantee.
+    candidates = [
+        Candidate(id="dup1", score=1.0, text=dup_text, metadata={"tok": 10}),
+        Candidate(id="dup2", score=0.98, text=dup_text, metadata={"tok": 10}),
+        Candidate(id="diverse", score=0.90, text=diverse_text, metadata={"tok": 10}),
+    ]
+    packed = Packer({"budget": 20, "token_key": "tok", "redundancy_weight": 0.5}).process(
+        "q", candidates
+    )
+    assert _ids(packed) == {"dup1", "diverse"}
+
+
 def test_pack_treats_same_cluster_as_redundant() -> None:
     # cluster_key: two items in cluster "c1" are redundant even with disjoint text; the packer keeps
     # one c1 item plus the c2 item rather than both c1 items.

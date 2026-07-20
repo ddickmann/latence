@@ -76,7 +76,13 @@ from latence_retrieval.errors import PackTokenizerError
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+# Unicode alphanumeric runs (underscore excluded, so it stays a boundary) — the same term unit the
+# reference tokenizers emit (`latence_core.bm25`, `latence_core.embedding`, `latence_retrieval.bm25`
+# — R5-wizard_profile-13). An ASCII-only pattern tokenised every non-Latin text to the empty set,
+# which made the default lexical-Jaccard redundancy penalty below a permanent no-op for exactly the
+# multilingual corpora the blessed `enterprise-sota` profile targets (R6-cross_lane_integration-13).
+# ASCII-identical to the previous `[a-z0-9]+` (the text is lowercased first).
+_TOKEN = re.compile(r"[^\W_]+")
 # The heuristic token proxy: word pieces AND standalone punctuation, so a comma/period costs a
 # token as it roughly does under a real BPE tokenizer (a deterministic over-word estimate).
 _HEURISTIC_TOKEN = re.compile(r"\w+|[^\w\s]")

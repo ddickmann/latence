@@ -38,7 +38,11 @@ if TYPE_CHECKING:
     from latence_retrieval.contracts import RetrievalQuery
 
 _VECTOR_MODES = frozenset({Capability.DENSE, Capability.MULTIVECTOR})
-_TOKEN = re.compile(r"[a-z0-9]+")
+# Unicode alphanumeric runs (underscore excluded), matching the reference tokenizers the real
+# backends use. An ASCII-only pattern would score every non-Latin query 0.0 here, letting the fake
+# false-green a defect a real multilingual store would surface (R6-cross_lane_integration-13).
+# ASCII-identical to the previous `[a-z0-9]+` (the text is lowercased first).
+_TOKEN = re.compile(r"[^\W_]+")
 
 
 class FakeBackend:
