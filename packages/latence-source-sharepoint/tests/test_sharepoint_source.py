@@ -395,13 +395,14 @@ def test_every_rejected_secret_key_is_redacted_by_the_core_manifest_scrubber() -
 
     marker = "LEAK-{}"
     config = {key: marker.format(key) for key in sorted(_SECRET_CONFIG_KEYS)}
-    scrubbed = scrub_sensitive({"config": config})["config"]  # type: ignore[index]
+    # ``scrub_sensitive`` returns ``object``; narrow with isinstance rather than laundering the
+    # type through a ``type: ignore``.
+    outer = scrub_sensitive({"config": config})
+    assert isinstance(outer, dict)
+    scrubbed = outer["config"]
+    assert isinstance(scrubbed, dict)
 
-    unredacted = sorted(
-        key
-        for key in _SECRET_CONFIG_KEYS
-        if scrubbed[key] != "***REDACTED***"  # type: ignore[index]
-    )
+    unredacted = sorted(key for key in _SECRET_CONFIG_KEYS if scrubbed[key] != "***REDACTED***")
     assert not unredacted, (
         f"keys refused by reject_inline_secrets but NOT redacted by the core manifest "
         f"scrubber: {unredacted!r} — these would be persisted cleartext to manifest.json "

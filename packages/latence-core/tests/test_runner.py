@@ -287,12 +287,16 @@ def test_scrub_sensitive_redacts_certificate_and_passphrase_keys() -> None:
     dumped = json.dumps(scrubbed)
     for leaked in ("LEAKME", "CERTBLOB", "hunter2", "CERT2", "PEMBLOB", "KSBLOB"):
         assert leaked not in dumped, f"credential {leaked!r} leaked into manifest"
-    config = scrubbed["config"]  # type: ignore[index]
+    # ``scrub_sensitive`` returns ``object`` (it walks an arbitrary JSON-able tree), so narrow
+    # with isinstance rather than laundering the type through a ``type: ignore``.
+    assert isinstance(scrubbed, dict)
+    config = scrubbed["config"]
+    assert isinstance(config, dict)
     for key in ("private_key", "certificate", "passphrase", "client_cert", "tls_pem", "keystore"):
-        assert config[key] == "***REDACTED***", key  # type: ignore[index]
+        assert config[key] == "***REDACTED***", key
     # Over-redaction is a defect too: a substring match on "cert" would eat this one.
-    assert config["certainty_threshold"] == 0.8  # type: ignore[index]
-    assert config["model"] == "gpt-4o"  # type: ignore[index]
+    assert config["certainty_threshold"] == 0.8
+    assert config["model"] == "gpt-4o"
 
 
 def test_manifest_never_persists_an_inlined_private_key(docs_dir: Path, tmp_path: Path) -> None:
