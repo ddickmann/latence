@@ -419,7 +419,13 @@ def render_quarantine(
             "quarantine",
         ),
         _truncation_notice(truncated, unreadable),
-        f"<h2>Quarantined — removed from the pipeline ({len(quarantined)})</h2>",
+        # The held-back list is capped too since audit R7 (the quarantine sidecar grows with the
+        # run), so its tally is hedged on an incomplete read exactly like the flagged one — but
+        # only when there are rows: a cap only ever drops records *after* keeping its full
+        # allowance, so an empty list was never shortened by one, and the empty-state message
+        # below carries the unreadable-file caveat in words instead of muddying the number.
+        "<h2>Quarantined — removed from the pipeline "
+        f"({_count(len(quarantined), incomplete and bool(quarantined))})</h2>",
     ]
     if quarantined:
         parts.append(
@@ -469,10 +475,10 @@ def render_quarantine(
         )
 
     # The flagged list is derived from the chunks, so it rides the CAPPED scan (audit R6): a
-    # marker past the cap is simply absent from ``flagged``. The held-back list above does not —
-    # ``RunArtifacts.quarantined()`` reads the quarantine sidecars whole — so the CAP never
-    # shortens it. An unreadable file does (audit R7), which is why both halves are qualified on
-    # ``unreadable`` while only the flagged half is qualified on ``truncated``.
+    # marker past the cap is simply absent from ``flagged``. The held-back list above rides the
+    # capped sidecar read (audit R7) — both halves can therefore be shortened by the cap, and
+    # both are shortened by an unreadable file. Only the *absence* claims differ: an empty list
+    # can only ever mean "nothing was there" or "I could not look", never "the cap dropped it".
     parts.append(
         "<h2>Flagged — kept, with a risk marker in the corpus "
         f"({_count(len(flagged), incomplete)})</h2>"

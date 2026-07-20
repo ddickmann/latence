@@ -41,7 +41,11 @@ on Storage, all of it JSONL, all of it written by the local Runner under the run
      a truncated map falls through to the streaming lookup. :meth:`mentions_by_id` settles a
      whole page's Evidence citations that way in one pass rather than one pass each;
   3. the *list* views' scan retains at most :data:`MAX_SCAN_RECORDS` records of each kind and
-     reports :meth:`truncated`. To make that truncation redaction-safe, the scan walks the
+     reports :meth:`truncated`. The same cap governs the **sidecars** (audit R7): a run writes
+     one :class:`~latence_core.contracts.ScreeningFinding` per document per screening
+     checkpoint, so ``screening/*.jsonl`` grows with the corpus exactly as a checkpoint does,
+     and :meth:`flag_checkpoints` keeps only the ``FLAG`` subset it actually needs — a ``PASS``
+     finding is never retained. To make that truncation redaction-safe, the scan walks the
      checkpoints in **reverse** dependency order with downstream-wins semantics — so every
      record it keeps is already the most-downstream version, and a truncated scan can never
      surface a pre-Redaction chunk (ADR-0042/0044). With nothing truncated the result is
@@ -201,15 +205,20 @@ class RunArtifacts:
         self._checkpoint_files: list[tuple[str, str]] | None = None
         self._quarantine: list[QuarantineRecord] | None = None
         self._findings: list[ScreeningFinding] | None = None
+        self._flags: dict[tuple[str, str], str] | None = None
+        self._sidecar_truncated = False
         self._unreadable: set[str] = set()
 
     def truncated(self) -> bool:
         """Did a list view hit :data:`MAX_SCAN_RECORDS` and leave records out?
 
         ``False`` until a list view has actually scanned — the single-record views never scan,
-        and never claim anything about the size of the run.
+        and never claim anything about the size of the run. Covers the checkpoint scan *and* the
+        sidecar reads (audit R7): both are capped, so both can leave records out, and a page that
+        hedged only for the first would state a capped sidecar as a complete one.
         """
-        return self._scanned is not None and self._scanned.truncated
+        scanned = self._scanned is not None and self._scanned.truncated
+        return scanned or self._sidecar_truncated
 
     def unreadable(self) -> tuple[str, ...]:
         """Every URI this reader tried and could not read in full, in URI order (audit R7).
@@ -237,23 +246,29 @@ class RunArtifacts:
     # -- the public surface ------------------------------------------------
 
     def quarantined(self) -> list[QuarantineRecord]:
-        """Every record Screening held back, in the order the run recorded them."""
+        """The records Screening held back, in the order the run recorded them.
+
+        Capped at :data:`MAX_SCAN_RECORDS` and reported through :meth:`truncated` (audit R7),
+        like every other list view: the quarantine sidecar grows with the run, so reading it
+        whole put the run's size behind one browse request.
+        """
         if self._quarantine is None:
-            self._quarantine = [
-                record
-                for _stage, payload in self._sidecar_payloads(QUARANTINE_DIR)
-                for record in _validated(QuarantineRecord, payload)
-            ]
+            self._quarantine = list(
+                self._capped(self._sidecar_records(QUARANTINE_DIR, QuarantineRecord))
+            )
         return self._quarantine
 
     def findings(self) -> list[ScreeningFinding]:
-        """Every Screening finding the run recorded (``PASS`` verdicts included)."""
+        """The Screening findings the run recorded (``PASS`` verdicts included).
+
+        Capped at :data:`MAX_SCAN_RECORDS` and reported through :meth:`truncated` (audit R7).
+        A run writes one finding per document per screening checkpoint, so this file is the
+        size of the corpus; :meth:`flag_checkpoints` deliberately does *not* go through here.
+        """
         if self._findings is None:
-            self._findings = [
-                finding
-                for _stage, payload in self._sidecar_payloads(SCREENING_DIR)
-                for finding in _validated(ScreeningFinding, payload)
-            ]
+            self._findings = list(
+                self._capped(self._sidecar_records(SCREENING_DIR, ScreeningFinding))
+            )
         return self._findings
 
     def flag_checkpoints(self) -> dict[tuple[str, str], str]:
@@ -261,12 +276,46 @@ class RunArtifacts:
 
         Lets a risk marker that survived onto a chunk be attributed to the checkpoint that
         raised it, without the chunk having to carry that (it does not).
+
+        **Streamed and FLAG-only** (audit R7). This folded :meth:`findings` — the whole
+        screening sidecar, ``PASS`` verdicts and all — into a dict that keeps none of them. The
+        ``PASS`` findings are the overwhelming majority (one per document per checkpoint), so a
+        200k-document run spent hundreds of megabytes building rows this page never shows. Now
+        each finding is validated, tested, and dropped unless its verdict is ``FLAG``; peak is
+        the FLAG subset, itself capped at :data:`MAX_SCAN_RECORDS`.
         """
-        return {
-            (f.document_id, f.category): f.checkpoint.value
-            for f in self.findings()
-            if f.verdict is ScreeningVerdict.FLAG
-        }
+        if self._flags is None:
+            flags: dict[tuple[str, str], str] = {}
+            for finding in self._sidecar_records(SCREENING_DIR, ScreeningFinding):
+                if finding.verdict is not ScreeningVerdict.FLAG:
+                    continue
+                key = (finding.document_id, finding.category)
+                if key not in flags and len(flags) >= MAX_SCAN_RECORDS:
+                    self._sidecar_truncated = True
+                    continue
+                flags[key] = finding.checkpoint.value
+            self._flags = flags
+        return self._flags
+
+    def _sidecar_records(self, directory: str, model: type[_M]) -> Iterator[_M]:
+        """Every record of one sidecar kind, streamed — nothing accumulated by this pass."""
+        for _stage, payload in self._sidecar_payloads(directory):
+            yield from _validated(model, payload)
+
+    def _capped(self, records: Iterator[_M]) -> Iterator[_M]:
+        """The first :data:`MAX_SCAN_RECORDS` of a stream; the rest set :meth:`truncated`.
+
+        The sidecar counterpart of :class:`_Kept`'s cap. The stream is still drained so an IO
+        failure past the cap is still recorded in :meth:`unreadable` — stopping the read early
+        would turn a partial file into a silently complete-looking one (ADR-0034).
+        """
+        kept = 0
+        for record in records:
+            if kept >= MAX_SCAN_RECORDS:
+                self._sidecar_truncated = True
+                continue
+            kept += 1
+            yield record
 
     def chunks(self) -> list[ChunkRecord]:
         """Every chunk, most-downstream version, ordered by source document then index."""

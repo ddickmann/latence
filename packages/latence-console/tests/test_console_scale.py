@@ -32,6 +32,7 @@ from latence_core.contracts import (
     GraphRecord,
     GraphScope,
     Provenance,
+    QuarantineRecord,
     RiskMarker,
     ScreeningCheckpoint,
     ScreeningFinding,
@@ -803,8 +804,10 @@ def test_quarantine_page_never_claims_no_risk_marker_on_a_capped_read(
     # And the tally is not left standing as a bare count of the whole run.
     assert "Flagged — kept, with a risk marker in the corpus (0)" not in body
     assert "Flagged — kept, with a risk marker in the corpus (0 read so far)" in body
-    # The held-back half is NOT capped (the quarantine sidecars are read whole), so it must keep
-    # speaking plainly — hedging a complete read teaches the reader to ignore the hedge.
+    # This run quarantined nothing, and an empty list was never shortened by the cap (audit R7
+    # caps the sidecar read too, but a cap only drops records after keeping its full allowance).
+    # So the held-back half must keep speaking plainly here — hedging a tally that is complete
+    # teaches the reader to ignore the hedge.
     assert "Quarantined — removed from the pipeline (0)" in body
     assert "Screening held nothing back in this run." in body
 
@@ -903,3 +906,205 @@ def test_records_around_an_overlong_line_still_render(torn_line_app: ConsoleApp)
 
     assert "chunk-3" in body
     assert "x" * (MAX_LINE_BYTES // 1024) not in body
+
+
+# -- The screening sidecar is bounded too (audit R7) -------------------------
+#
+# ``MAX_SCAN_RECORDS`` bounded the *checkpoint* scan; the sidecar path
+# (``quarantine/*.jsonl``, ``screening/*.jsonl``) was left reading whole files into Python
+# lists. A run writes one ScreeningFinding per document per screening checkpoint, so that file
+# is the size of the corpus — and ``flag_checkpoints()`` folded every one of them into a dict
+# that keeps only the FLAG verdicts. The PASS findings, the overwhelming majority, were
+# materialised and thrown away, behind a page that shows none of them.
+
+#: Findings in the sidecar. Large enough that a whole-file reader blows the budget below by an
+#: order of magnitude, small enough to write in about a second.
+SIDECAR_FINDING_COUNT = 40_000
+
+#: Peak the quarantine view is allowed over that sidecar. The page renders one flagged marker
+#: and one held-back record; a reader bounded by MAX_SCAN_RECORDS pays for those, while one
+#: that materialises the file pays ~1.4 KB per finding (≈55 MB).
+SIDECAR_PAGE_PEAK_BYTES = 16 * 1024 * 1024
+
+SIDECAR_RUN_ID = "sidecar"
+SIDECAR_DOC_ID = "sha256:" + "d" * 58
+
+
+def _pass_finding(index: int) -> ScreeningFinding:
+    """One routine PASS finding — what Screening records for a document it waved through."""
+    return ScreeningFinding(
+        checkpoint=ScreeningCheckpoint.CONTENT,
+        verdict=ScreeningVerdict.PASS,
+        document_id="sha256:" + f"{index:058d}",
+        detector="screening.content_keyword",
+        category="content",
+        reason="no marker matched this document",
+    )
+
+
+@pytest.fixture(scope="module")
+def sidecar_storage(tmp_path_factory: pytest.TempPathFactory) -> tuple[Storage, str]:
+    """A run with a corpus-sized screening sidecar and exactly one FLAG hiding in it."""
+    root: Path = tmp_path_factory.mktemp("sidecarcorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/{SIDECAR_RUN_ID}"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "sidecar", "stages": [{"name": "chunk", "depends_on": []}]},
+                "run_id": SIDECAR_RUN_ID,
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    marker = RiskMarker(
+        detector="screening.content_keyword",
+        category="prompt_injection",
+        score=0.91,
+        reason="matched injection pattern",
+    )
+    chunk = ChunkRecord(
+        record_id=f"{SIDECAR_DOC_ID}#chunk-0",
+        provenance=Provenance(
+            source_uri="file:///corpus/flagged.md",
+            file_name="flagged.md",
+            file_type="md",
+            file_size=512,
+            document_id=SIDECAR_DOC_ID,
+            page_start=1,
+            page_end=1,
+            char_start=0,
+            char_end=40,
+        ),
+        classification=_classification(),
+        document_record_id=SIDECAR_DOC_ID,
+        index=0,
+        content="a chunk that carried a marker into the corpus",
+        token_count=9,
+        risk_markers=[marker],
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/chunk.jsonl",
+        (chunk.model_dump_json() + "\n").encode("utf-8"),
+    )
+    # The FLAG the page must still attribute, buried at the END of a corpus-sized run of PASSes.
+    flag = ScreeningFinding(
+        checkpoint=ScreeningCheckpoint.CONTENT,
+        verdict=ScreeningVerdict.FLAG,
+        document_id=SIDECAR_DOC_ID,
+        detector="screening.content_keyword",
+        category="prompt_injection",
+        reason="matched injection pattern",
+        marker=marker,
+    )
+    storage.write_atomic(
+        f"{run_dir}/screening/content_screen.jsonl",
+        (
+            "".join(_pass_finding(i).model_dump_json() + "\n" for i in range(SIDECAR_FINDING_COUNT))
+            + flag.model_dump_json()
+            + "\n"
+        ).encode("utf-8"),
+    )
+    return storage, storage_uri
+
+
+@pytest.fixture(scope="module")
+def sidecar_app(sidecar_storage: tuple[Storage, str]) -> ConsoleApp:
+    storage, storage_uri = sidecar_storage
+    return ConsoleApp.over_storage(storage, storage_uri)
+
+
+def test_quarantine_view_does_not_materialise_the_screening_sidecar(
+    sidecar_app: ConsoleApp,
+) -> None:
+    """One browse page must not cost one Python object per document in the corpus.
+
+    ``flag_checkpoints()`` needs the FLAG verdicts only. Building the whole findings list first
+    puts the run's size behind a single request — the resource exhaustion audit R4 was filed to
+    close, on the page audit R6 hardened (ADR-0033, ADR-0034).
+    """
+    target = f"/run/{SIDECAR_RUN_ID}/quarantine"
+    sidecar_app.respond("GET", target)  # warm caches so the measurement is the read
+
+    response, peak = _peak_bytes(lambda: sidecar_app.respond("GET", target))
+
+    body = response.body  # type: ignore[attr-defined]
+    assert response.status == 200  # type: ignore[attr-defined]
+    assert peak < SIDECAR_PAGE_PEAK_BYTES, (
+        f"rendering the quarantine view over {SIDECAR_FINDING_COUNT:,} screening findings peaked "
+        f"at {peak / 1024 / 1024:.1f} MB — the sidecar was materialised in full "
+        f"(budget {SIDECAR_PAGE_PEAK_BYTES / 1024 / 1024:.0f} MB)"
+    )
+    # …and the page is still correct: the FLAG at the very end of the sidecar is what attributes
+    # the surviving marker to its checkpoint, so a reader that skipped it would render "unknown".
+    assert b"content" in body
+    assert b"prompt_injection" in body
+    assert b"unknown" not in body
+
+
+def test_flag_checkpoints_keeps_only_the_flag_verdicts(
+    sidecar_storage: tuple[Storage, str],
+) -> None:
+    """The PASS findings are retained for nothing — the map must hold the FLAG subset alone."""
+    storage, storage_uri = sidecar_storage
+    artifacts = RunArtifacts(storage, f"{storage_uri}/_latence/runs/{SIDECAR_RUN_ID}")
+
+    flags = artifacts.flag_checkpoints()
+
+    assert flags == {(SIDECAR_DOC_ID, "prompt_injection"): "content"}
+    assert not artifacts.truncated(), "the FLAG subset fits the cap; nothing was dropped"
+
+
+def test_a_sidecar_past_the_cap_is_reported_not_silently_shortened(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A capped quarantine read must say so — a prefix rendered as the whole run is a false page."""
+    root: Path = tmp_path_factory.mktemp("heldcapcorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/heldcap"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "heldcap", "stages": [{"name": "chunk", "depends_on": []}]},
+                "run_id": "heldcap",
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    held = MAX_SCAN_RECORDS + 10
+    storage.write_atomic(
+        f"{run_dir}/quarantine/intake_screen.jsonl",
+        "".join(_quarantine(i).model_dump_json() + "\n" for i in range(held)).encode("utf-8"),
+    )
+    app = ConsoleApp.over_storage(storage, storage_uri)
+
+    body = app.respond("GET", "/run/heldcap/quarantine").body.decode("utf-8")
+
+    assert "Partial view" in body, (
+        f"{held} quarantined records were read under a {MAX_SCAN_RECORDS} cap and the page "
+        "presented the prefix as the whole run"
+    )
+    assert f"Quarantined — removed from the pipeline ({MAX_SCAN_RECORDS} read so far)" in body
+
+
+def _quarantine(index: int) -> QuarantineRecord:
+    return QuarantineRecord(
+        record_id="sha256:" + f"{index:058d}",
+        provenance=Provenance(
+            source_uri=f"file:///corpus/held-{index}.zip",
+            file_name=f"held-{index}.zip",
+            file_type="zip",
+            file_size=2169,
+            document_id="sha256:" + f"{index:058d}",
+        ),
+        classification=Classification(language="und", sensitivity="internal"),
+        checkpoint=ScreeningCheckpoint.INTAKE,
+        detector="screening.archive_bomb",
+        category="archive_bomb",
+        reason="zip compression ratio over the limit",
+        quarantined_bytes=2169,
+    )
