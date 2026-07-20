@@ -268,7 +268,9 @@ class IcebergCorpusTable:
         :meth:`_discard_unreferenced`): the file is published before the transaction opens because
         ``add_files`` can only reference a file that already exists, so a commit that never lands
         would otherwise leave a full corpus-sized Parquet inside the deliverable directory that no
-        manifest references and no catalog-side tool can reach.
+        manifest references and no catalog-side tool can reach. A failure *during* the publication
+        cleans up its own half-written temp copy the same way (:meth:`_publication_failed`), so no
+        failure on this path — before, during or after — leaves corpus bytes in the warehouse.
         """
         data_uri = "<not yet published>"
         published_here = False
@@ -307,9 +309,11 @@ class IcebergCorpusTable:
                 )
         except (ConfigError, ProviderError):
             # Already typed and already specific (the install hint, the unreachable catalog, the
-            # namespace/table failures below). Re-wrapping would only bury the precise message.
-            # Every one of these is raised BEFORE the data file is published (catalog construction,
-            # namespace creation, table load/create, drift refusal), so there is nothing to clean.
+            # namespace/table failures below, and a failed data-file publication). Re-wrapping would
+            # only bury the precise message. Each of these either happens BEFORE anything is written
+            # to the warehouse (catalog construction, namespace creation, table load/create, drift
+            # refusal) or has ALREADY swept what it wrote and said so in its own message
+            # (:meth:`_publication_failed`), so there is nothing left for this handler to clean.
             raise
         except Exception as exc:  # noqa: BLE001 - normalise any catalog/commit failure
             cleanup = (
@@ -672,8 +676,8 @@ class IcebergCorpusTable:
             )
             raise ProviderError(msg) from exc
 
-    @staticmethod
     def _publish_data_file(
+        self,
         src_storage: Storage,
         dst_storage: Storage,
         parquet_uri: str,
@@ -720,17 +724,51 @@ class IcebergCorpusTable:
         # content is only knowable once it has been read, and reading it twice (hash pass + copy
         # pass) would double the I/O on a full corpus for nothing.
         tmp_uri = dst_storage.temp_uri(f"{data_dir}/{basename}.parquet")
-        digest = sha256()
-        with src_storage.open(parquet_uri, "rb") as src, dst_storage.open(tmp_uri, "wb") as dst:
-            while chunk := src.read(_COPY_CHUNK_BYTES):
-                digest.update(chunk)
-                dst.write(chunk)
-        data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
-        if dst_storage.exists(data_uri):
-            dst_storage.remove(tmp_uri)
-            return data_uri, False
-        dst_storage.finalize_atomic(tmp_uri, data_uri)
+        try:
+            digest = sha256()
+            with src_storage.open(parquet_uri, "rb") as src, dst_storage.open(tmp_uri, "wb") as dst:
+                while chunk := src.read(_COPY_CHUNK_BYTES):
+                    digest.update(chunk)
+                    dst.write(chunk)
+            data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
+            if dst_storage.exists(data_uri):
+                dst_storage.remove(tmp_uri)
+                return data_uri, False
+            dst_storage.finalize_atomic(tmp_uri, data_uri)
+        except Exception as exc:  # noqa: BLE001 - normalise, and sweep the half-published copy
+            raise ProviderError(self._publication_failed(dst_storage, tmp_uri, exc)) from exc
         return data_uri, True
+
+    def _publication_failed(self, storage: Storage, tmp_uri: str, exc: BaseException) -> str:
+        """Sweep the temp copy a failed publication left behind; return the typed message.
+
+        The publication's half of :meth:`_discard_unreferenced`, and for the same reason. Between
+        ``temp_uri`` and ``finalize_atomic`` the temp path already holds the ENTIRE corpus, chunk
+        ``content`` included; a transport drop, an ENOSPC or a permission-denied rename in that
+        window used to leave it in the customer's warehouse where no snapshot references it, no
+        ``expire_snapshots`` can collect it, and only a manual ``remove_orphan_files`` would ever
+        reach it. Worse than the committed case: ``Storage.temp_uri`` mints a fresh random token per
+        call, so every retry against a flaky store dropped ANOTHER full-corpus copy — unbounded
+        growth, not one recoverable file.
+
+        There is no ambiguity to respect here (unlike ``CommitStateUnknownException``): the catalog
+        has not been told about this path and no snapshot can possibly reference a temp name, so
+        deleting it can never corrupt a table. Removal is best-effort and never masks the original
+        failure — a failed sweep is appended to the same typed error so the operator learns the
+        exact path still holding the corpus text (ADR-0034).
+        """
+        try:
+            storage.remove(tmp_uri)
+            disposal = f"the partial copy {tmp_uri!r} was removed (no snapshot could reference it)"
+        except Exception as cleanup_exc:  # noqa: BLE001 - never mask the failure being reported
+            disposal = (
+                f"the partial copy {tmp_uri!r} holds this run's corpus and could not be removed "
+                f"({cleanup_exc}); delete it manually"
+            )
+        return (
+            f"Iceberg data file for {'.'.join(self._target.identifier)} could not be published "
+            f"into {self._target.uri!r}: {exc}. Nothing was registered and {disposal}."
+        )
 
 
 def _absolute_uri(uri: str) -> str:

@@ -129,9 +129,7 @@ def test_enabled_registers_the_corpus_as_an_iceberg_table(tmp_path: Path) -> Non
         data_uris = [u for u in uris if u.startswith(f"{data_dir}/")]
         assert len(data_uris) == 1, uris
         assert Path(data_uris[0].removeprefix("file://")).exists()
-        assert _warehouse_data_files(tmp_path / "catalog") == [
-            data_uris[0].rsplit("/", 1)[-1]
-        ]
+        assert _warehouse_data_files(tmp_path / "catalog") == [data_uris[0].rsplit("/", 1)[-1]]
         # ADR-0017: the deliverable is still the file, and it is untouched.
         assert (out / "records.parquet").exists()
         assert (out / "records.jsonl").exists()
@@ -534,6 +532,104 @@ def test_an_unknown_commit_outcome_keeps_the_data_file_on_purpose(tmp_path: Path
 
     assert len(_iceberg_data_files(tmp_path / "catalog")) == 1
     assert "UNKNOWN" in str(caught.value)
+
+
+def _warehouse_leftovers(catalog_root: Path) -> list[str]:
+    """Every file of ANY name the Export left in the warehouse — temp copies included.
+
+    ``_warehouse_data_files`` only sees finalized ``records-<digest>.parquet`` names, so it cannot
+    catch a half-published ``records.parquet.<token>.tmp``. This one globs everything and keeps
+    what carries corpus bytes.
+    """
+    return sorted(
+        str(p.relative_to(catalog_root))
+        for p in (catalog_root / "warehouse").rglob("*")
+        if p.is_file() and "records.parquet" in p.name
+    )
+
+
+def _fail_publishing_the_data_file(
+    monkeypatch: pytest.MonkeyPatch, *, and_sweep_fails: bool = False
+) -> None:
+    """Make the data-file PUBLICATION fail — the step before the catalog is ever contacted.
+
+    A transport drop / ENOSPC / permission-denied rename on the warehouse side, i.e. the failure
+    mode ``_publish_data_file`` sits exposed to: the corpus has already been streamed into
+    ``temp_uri``, and the rename that would give it its content-addressed name is what dies.
+    """
+    real_finalize = Storage.finalize_atomic
+    real_remove = Storage.remove
+
+    def flaky_finalize(self: Storage, tmp_uri: str, uri: str) -> None:
+        if "/data/" in uri and uri.endswith(".parquet"):
+            raise OSError("simulated transport drop")
+        real_finalize(self, tmp_uri, uri)
+
+    def flaky_remove(self: Storage, uri: str) -> None:
+        if uri.endswith(".tmp"):
+            raise PermissionError("warehouse refused the delete")
+        real_remove(self, uri)
+
+    monkeypatch.setattr(Storage, "finalize_atomic", flaky_finalize)
+    if and_sweep_fails:
+        monkeypatch.setattr(Storage, "remove", flaky_remove)
+
+
+def test_a_failed_data_file_publication_leaves_no_orphan_temp_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure DURING the publication must not strand the corpus-sized temp copy either.
+
+    The commit-failure path was covered; the publication itself was not. ``_publish_data_file``
+    streams the whole corpus (chunk ``content`` and all) into ``Storage.temp_uri`` and only then
+    renames it, so a failure in between left a full-corpus ``…records.parquet.<token>.tmp`` in the
+    customer's warehouse that no snapshot references and no ``expire_snapshots`` can collect — and
+    because ``temp_uri`` mints a FRESH random token per call, every retry against a flaky store
+    dropped another distinct copy. The typed error also reported the path as ``<not yet
+    published>``, so the operator was never told what to sweep.
+    """
+    _fail_publishing_the_data_file(monkeypatch)
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        out = tmp_path / "run"
+        export = JsonlParquetExport(_iceberg_config(uri))
+        for _ in range(3):  # retries against a flaky store must not accumulate copies
+            with pytest.raises(ProviderError) as caught:
+                export.export([_chunk("SECRET alpha", "c1")], Storage(), str(out))
+
+    assert _warehouse_leftovers(tmp_path / "catalog") == []
+    assert _iceberg_data_files(tmp_path / "catalog") == []
+    # The deliverable itself is untouched (ADR-0017).
+    assert (out / "records.parquet").exists()
+    # ADR-0034: the typed error names the real path and its disposal, never "<not yet published>".
+    message = str(caught.value)
+    assert "<not yet published>" not in message
+    assert ".tmp" in message
+    assert "removed" in message
+
+
+def test_a_failed_publication_whose_sweep_also_fails_names_the_path_to_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the temp copy cannot be swept, the operator is TOLD which path still holds the corpus.
+
+    Best-effort cleanup that silently gives up would be exactly the silent error ADR-0034 forbids:
+    the file is a full copy of the corpus text, so the failure to remove it rides along on the same
+    typed error rather than disappearing.
+    """
+    _fail_publishing_the_data_file(monkeypatch, and_sweep_fails=True)
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        out = tmp_path / "run"
+        with pytest.raises(ProviderError) as caught:
+            JsonlParquetExport(_iceberg_config(uri)).export(
+                [_chunk("SECRET alpha", "c1")], Storage(), str(out)
+            )
+
+    leftovers = _warehouse_leftovers(tmp_path / "catalog")
+    assert len(leftovers) == 1, leftovers
+    message = str(caught.value)
+    assert Path(leftovers[0]).name in message
+    assert "could not be removed" in message
+    assert "simulated transport drop" in message  # the original failure is never masked
 
 
 def test_a_failed_commit_never_deletes_a_data_file_an_earlier_run_committed(

@@ -170,6 +170,13 @@ it" is not a disposal guarantee for a full corpus-sized Parquet (chunk `content`
 failed run against a flaky catalog would drop another one. The error message names the file and
 says whether it was removed.
 
+That covers a failure *during* the publication too, not only after it. The copy is streamed into a
+temp sibling and renamed into place, so a transport drop or a full/read-only warehouse mid-copy
+would otherwise strand a full-corpus temp file — and because each attempt gets a fresh temp name,
+every retry would strand another. A publication that fails sweeps its own temp copy (no snapshot can
+reference a temp name, so deleting it can never corrupt the table) and the `ProviderError` names
+that path and its disposal.
+
 The one deliberate exception is an **unknown commit outcome** (a 500/502/504 on the commit endpoint,
 which pyiceberg surfaces as `CommitStateUnknownException`): the catalog may have applied the commit
 before the response was lost, and deleting a file a live snapshot references would corrupt the
