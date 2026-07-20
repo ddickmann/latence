@@ -55,6 +55,23 @@ def test_the_budget_is_a_ceiling_not_a_suggestion() -> None:
     assert not fuzzy_contains("brown fox", "xyzzy plugh", 3)
 
 
+def test_a_later_exact_hit_never_hides_the_leftmost_within_budget_hit() -> None:
+    """The exact `str.find` is a BOUND on the Sellers scan, never an answer to it.
+
+    `fuzzy_find` promises "the end index of the leftmost occurrence within `max_diffs` edits".
+    Short-circuiting on `str.find` returned the *exact* occurrence's end even when an
+    approximate one ended earlier, so the answer depended on whether a later exact hit existed
+    at all — which is what let a noisier parse score better on `order` (audit R7).
+    """
+    # "aXc" is one substitution from "abc" and ends at 12; the exact "abc" ends at 24.
+    with_a_later_exact_hit = "zzzz aXc zzzzzzzzzzzzzzz abc"
+    assert with_a_later_exact_hit.find("abc") == 25
+    assert fuzzy_find(with_a_later_exact_hit, "abc", 1) == 8
+
+    # Deleting the later exact occurrence must not change where the leftmost hit is.
+    assert fuzzy_find("zzzz aXc zzzzzzzzzzzzzzz ---", "abc", 1) == 8
+
+
 def test_an_empty_needle_matches_at_the_start() -> None:
     assert fuzzy_find("anything", "", 0) == 0
 
@@ -112,6 +129,24 @@ def test_order_fails_when_the_columns_were_interleaved() -> None:
     result = score(order, "omega ... middle ... alpha", split="s")
     assert result.outcome is Outcome.FAILED
     assert "wrong reading order" in result.reason
+
+
+def test_adding_an_ocr_error_can_never_flip_an_order_verdict() -> None:
+    """A parser must never improve its number by degrading its output (audit R7).
+
+    A running header repeats "Introduction" further down the page, so the parse contains an
+    OCR-damaged first occurrence *and* a clean later one. Scoring the clean one made the
+    `before` passage look like it came after `after`; corrupting it too — strictly more OCR
+    damage — exposed the earlier within-budget occurrence and flipped the same test to PASSED.
+    """
+    order = _test(type="order", text=None, before="Introduction", after="Conclusion", max_diffs=1)
+    damaged = "Intrpduction ... Conclusion ... Introduction ..."
+    more_damaged = "Intrpduction ... Conclusion ... Intreduction ..."
+
+    assert (
+        score(order, damaged, split="s").outcome
+        is score(order, more_damaged, split="s").outcome
+    )
 
 
 def test_order_fails_when_a_passage_is_missing_entirely() -> None:

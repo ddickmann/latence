@@ -7,9 +7,12 @@ soft hyphen is not wrong in any way a reader would care about.
 
 So the primitive here is approximate substring search — "does ``needle`` occur anywhere in
 ``haystack`` within ``max_diffs`` edits, and if so where does the leftmost such occurrence
-end". :func:`fuzzy_find` is Sellers' algorithm (Levenshtein DP with a free start position),
-short-circuited by an exact ``str.find`` first because the overwhelming majority of tests match
-exactly and the DP is O(len(haystack) × len(needle)).
+end". :func:`fuzzy_find` is Sellers' algorithm (Levenshtein DP with a free start position). An
+exact ``str.find`` runs first, but only to **bound** the DP — the overwhelming majority of tests
+match exactly and the DP is O(len(haystack) × len(needle)), so stopping the scan at the exact
+hit's end keeps that case cheap. It cannot *answer* the question: an approximate occurrence
+ending earlier is still the leftmost one, and returning the exact end instead let a parser flip
+an ``order`` test to PASSED by adding an OCR error.
 
 Four of the six test classes are scored here — ``present``, ``absent``, ``order`` and
 ``baseline`` — which is every class that is a pure property of *the text, its reading order, and
@@ -77,26 +80,32 @@ def fuzzy_find(haystack: str, needle: str, max_diffs: int) -> int | None:
     if not needle:
         return 0
     exact = haystack.find(needle)
-    if exact != -1:
-        return exact + len(needle)
     if max_diffs <= 0 or not haystack:
-        return None
+        return exact + len(needle) if exact != -1 else None
 
     m = len(needle)
+    # An exact hit is a cost-0 occurrence ending at `exact + len(needle)`, so it BOUNDS the
+    # search rather than answering it: an approximate occurrence ending earlier is still the
+    # leftmost one, and returning the exact end instead would break the contract above. (It
+    # broke `order` in a way a parser could exploit: `before_end < after_end` could be made
+    # true by ADDING an OCR error, because removing a later exact hit exposed the earlier
+    # within-budget one — a parser improving its number by degrading its output.) Bounding the
+    # DP keeps the common exact case cheap: the loop stops at the exact hit's end, and is
+    # guaranteed to return by then, since that hit itself costs 0.
+    limit = len(haystack) if exact == -1 else exact + m
     # Sellers: column 0 is the "matched i characters, consumed nothing" prefix cost; the free
     # start is expressed by resetting the top row to 0 at every haystack position.
     previous = list(range(m + 1))
-    best_end: int | None = None
-    for j, hay_char in enumerate(haystack, start=1):
+    for j in range(1, limit + 1):
+        hay_char = haystack[j - 1]
         current = [0] * (m + 1)
         for i in range(1, m + 1):
             substitution = previous[i - 1] + (0 if needle[i - 1] == hay_char else 1)
             current[i] = min(substitution, previous[i] + 1, current[i - 1] + 1)
         if current[m] <= max_diffs:
-            best_end = j
-            break
+            return j
         previous = current
-    return best_end
+    return None
 
 
 def fuzzy_contains(haystack: str, needle: str, max_diffs: int) -> bool:

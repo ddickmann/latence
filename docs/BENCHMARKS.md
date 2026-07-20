@@ -66,6 +66,7 @@ which are computed over all five classes.
 **Run notes:**
 
 - Scored with Provider 'parser.pdfplumber' exactly as pinned. A text-layer PDF parser cannot recover text from a scanned page, and much of olmOCR-bench (old_scans, long_tiny_text) is photographed or scanned material with no text layer — those tests fail by construction, not by defect. Comparing an OCR Provider means re-pinning: `--provider parser.lighton` (GPU).
+- Scorer caveat (audit R7): these counts were produced BEFORE the `fuzzy_find` leftmost-occurrence fix. The exact-match short-circuit returned a later end index than the Sellers DP, so an `order` verdict could depend on whether a passage also occurred exactly further down the page. The fix is in; this measurement has NOT been re-run against olmOCR-bench (network), so the `order` share of the number is the pre-fix scorer's and must be re-measured with `latence-benchmark run --suite parse` before it is relied on.
 
 ### Reproduce
 
