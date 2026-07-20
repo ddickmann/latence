@@ -635,6 +635,69 @@ def test_an_empty_probe_set_is_a_finding_not_a_green(tmp_path: Path) -> None:
     assert result.placements == ()
 
 
+def test_a_probe_set_no_stack_component_matches_is_a_finding_not_a_green(tmp_path: Path) -> None:
+    """The OTHER route to the same false green: a probe set nothing in the stack instantiates.
+
+    R6-env_reproducibility-5. The guard used to sit on `if not probe_set` — one CAUSE of measuring
+    nothing rather than the fact of it — which left the measurement loop as an unguarded second
+    route to the identical result. Here the derivation finds `sparse.splade` (the installed package
+    depends on `transformers`), so the probe set is NON-empty and `E-PLACEMENT-NONE` did not fire;
+    but the stack drives only `source.fs`, so every iteration hit `continue`, no finding was
+    appended, and the gate returned `ok=True` with zero placements: green earned by measuring
+    nothing, the exact shape `E-PLACEMENT-NONE` exists to forbid.
+
+    This is `deploy/env/gpu-learned` with its learned Stages removed while its Providers stay
+    installed and declared: gate 3 of `smoke.sh` would exit 0 printing `OK (no findings)` without a
+    single measured forward pass.
+    """
+    repo_root = _write_workspace(tmp_path)  # -> a NON-empty derived probe set: {'sparse.splade'}
+    spec = _write_derived_env(
+        tmp_path,
+        learned=(),
+        stages="  - capability: source\n    provider: source.fs\n",  # nothing learned is driven
+    )
+    from latence_core.envspec import placement_probe_providers
+
+    assert placement_probe_providers(spec, repo_root) == {"sparse.splade"}  # so NOT the empty case
+
+    FakeProvider.driven = []
+    result = _probe_root(spec, repo_root, FakeCuda())
+
+    assert FakeProvider.driven == []  # not one forward pass was driven...
+    assert result.placements == ()
+    assert [f.code for f in result.report.findings] == ["E-PLACEMENT-NONE"]
+    assert "sparse.splade" in result.report.findings[0].message  # ...and the skipped name is said
+    assert not result.ok  # ...so the gate must NOT be green
+
+
+def test_a_measured_failure_is_not_reported_as_having_measured_nothing(tmp_path: Path) -> None:
+    """The `E-PLACEMENT-NONE` guard keys off what was PROBED, not off what was successfully placed.
+
+    A component the probe REJECTED — pinned to `device: cpu`, so `E-PLACEMENT-DEVICE-NOT-CUDA` —
+    yields no `Placement`, so `placements` is empty here exactly as it is when nothing was probed at
+    all. Guarding on empty placements instead of on empty probing would bury that finding under a
+    second, false one claiming the gate measured nothing, when it examined precisely the component
+    it exists to examine.
+    """
+    repo_root = _write_workspace(tmp_path)
+    spec = _write_derived_env(
+        tmp_path,
+        learned=(),
+        stages=(
+            "  - name: sparse\n"
+            "    capability: sparse\n"
+            "    provider: sparse.splade\n"
+            "    config: {device: cpu}\n"
+        ),
+    )
+
+    result = _probe_root(spec, repo_root, FakeCuda())
+
+    assert result.placements == ()  # the same empty placements an unprobed run has...
+    assert [f.code for f in result.report.findings] == ["E-PLACEMENT-DEVICE-NOT-CUDA"]  # ...but
+    assert not result.ok
+
+
 def test_the_shipped_gpu_probe_set_is_unchanged_by_the_derivation() -> None:
     """The committed GPU environment's derived set EQUALS its declared set — today.
 

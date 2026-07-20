@@ -271,8 +271,11 @@ def probe_placement(
 
     * ``E-PLACEMENT-NO-CUDA`` — no CUDA device. The probe FAILS rather than skipping; a GPU smoke
       that reports success on a CPU host is the false green this ticket exists to prevent.
-    * ``E-PLACEMENT-NONE`` — the probe set is empty, so the gate would report green having measured
-      nothing. Also a failure, for the same reason.
+    * ``E-PLACEMENT-NONE`` — **nothing was measured**: either the probe set is empty, or no
+      component of the stack instantiates any member of it. Guarded on what was measured rather
+      than on either cause (R6-env_reproducibility-5), because a guard on one cause left the other
+      as an unguarded route to the same green earned by measuring nothing. Also a failure, for the
+      same reason as the rest of this module.
     * ``E-PLACEMENT-DEVICE-NOT-CUDA`` — a learned component is pinned to ``cpu`` in a GPU
       environment's stack, so the run would prove nothing.
     * ``E-PLACEMENT-UNDRIVABLE`` — no driver for the component's capability. Unexercised is not
@@ -310,33 +313,48 @@ def probe_placement(
 
     root = repo_root if repo_root is not None else repo_root_for(spec.spec_path)
     probe_set = placement_probe_providers(spec, root)
-    if not probe_set:
-        return PlacementReport(
-            EnvironmentReport(
-                spec.name,
-                (
-                    Finding(
-                        "E-PLACEMENT-NONE",
-                        "this environment declares no learned Provider and none of the packages it "
-                        "installs loads a model, so there is nothing for the GPU-placement gate to "
-                        "measure. Reporting success here would be a green earned by measuring "
-                        "nothing — the exact shape of #191 — so it is a failure instead.",
-                    ),
-                ),
-            ),
-            (),
-        )
 
     findings: list[Finding] = []
     placements: list[Placement] = []
+    probed: list[str] = []
     for component in stack_components(spec.stack_path):
         if component.provider not in probe_set:
             continue
+        probed.append(component.provider)
         placement = _probe_one(component, allocator, loader, findings)
         if placement is not None:
             placements.append(placement)
 
+    # THE INVARIANT, guarded once (R6-env_reproducibility-5). This used to be an early return on
+    # `if not probe_set` — a guard on ONE CAUSE of measuring nothing rather than on the fact of it,
+    # which left the loop below as an unguarded second route to the same false green: a non-empty
+    # probe set that no stack component instantiates skips every iteration, appends no finding, and
+    # returned ok=True having driven not one forward pass. Asking what was MEASURED instead of what
+    # was DECLARED cannot have an unguarded twin, because there is only one thing to ask.
+    if not probed:
+        findings.append(_nothing_to_measure(probe_set))
+
     return PlacementReport(EnvironmentReport(spec.name, tuple(findings)), tuple(placements))
+
+
+def _nothing_to_measure(probe_set: frozenset[str]) -> Finding:
+    """``E-PLACEMENT-NONE``, with the cause named: nothing was probed, so nothing was proven."""
+    if not probe_set:
+        detail = (
+            "this environment declares no learned Provider and none of the packages it installs "
+            "loads a model"
+        )
+    else:
+        names = ", ".join(sorted(probe_set))
+        detail = (
+            f"the probe set is [{names}], but no component of this environment's stack "
+            "instantiates any of them, so every one of them was skipped"
+        )
+    return Finding(
+        "E-PLACEMENT-NONE",
+        f"{detail}, so the GPU-placement gate measured nothing. Reporting success here would be a "
+        "green earned by measuring nothing — the exact shape of #191 — so it is a failure instead.",
+    )
 
 
 def _probe_one(

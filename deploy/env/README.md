@@ -221,7 +221,7 @@ And, for a GPU environment, what `latence env placement` catches:
 | a learned Stage pinned to `device: cpu` in a GPU stack | `E-PLACEMENT-DEVICE-NOT-CUDA` |
 | a learned Provider with no driver — unexercised is not passed | `E-PLACEMENT-UNDRIVABLE` |
 | the Provider could not be constructed or raised while driven | `E-PLACEMENT-FAILED` |
-| the probe set is empty — a gate that measured nothing must not report green | `E-PLACEMENT-NONE` |
+| nothing was measured — the probe set is empty, or no stack component instantiates any member of it | `E-PLACEMENT-NONE` |
 
 The probe set is **derived, not declared**: it is the model-loading Providers the environment
 installs (read off the packages' own dependencies, the same derivation the compatibility matrix
