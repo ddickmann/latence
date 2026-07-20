@@ -229,10 +229,19 @@ To enable it (one-time setup, then per-release approval):
    maintainer(s) as **Required reviewers**, so every publish pauses for a manual approval.
 3. **Settle the namespace** (see "Open decisions") — the `latence-*` names must be
    available or owned on PyPI, or the upload 403s.
-4. **Turn it on:** remove the `false &&` from the `if:` condition on the `pypi-publish` job
-   (keep the `dry_run` clause). From then on, a
-   `v*` tag builds + creates the GitHub Release automatically, and the PyPI upload waits in
-   the `pypi` environment for a reviewer to approve.
+4. **Turn it on, then tag — in that order.** Remove the `false &&` from the `if:` condition
+   on the `pypi-publish` job (keep the `dry_run` clause) and merge it to `main` **before**
+   cutting the tag you want published. From then on, a `v*` tag builds + creates the GitHub
+   Release automatically, and the PyPI upload waits in the `pypi` environment for a reviewer
+   to approve.
+
+    A run executes the workflow definition from the **ref it is on**, so a tag cut before the
+    enable landed will never publish — `pypi-publish` short-circuits and is silently skipped,
+    and re-running the workflow for that tag re-reads the same disabled definition.
+    Dispatching from a branch instead is refused by the non-tag signing-identity guard. Every
+    run states its own gate status in the job summary (**PyPI publish gate: DISABLED /
+    ENABLED at this ref**); the recovery options for an already-cut tag are in
+    [`GO-LIVE-RUNBOOK.md`](GO-LIVE-RUNBOOK.md) → Step 4.
 
 Optional dry run: point the publish step at TestPyPI first by setting
 `repository-url: https://test.pypi.org/legacy/` (a commented hint is in the workflow).

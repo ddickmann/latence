@@ -601,6 +601,158 @@ def test_a_real_release_refuses_a_non_tag_signing_identity() -> None:
     )
 
 
+# --------------------------------------------------------------------------------------
+# The PyPI enable is only reachable from the ref that is allowed to publish
+#
+# A run executes the workflow DEFINITION from the ref it is on. The go-live runbook used to
+# say: remove the `false &&`, "Commit that change on `main`", then "Re-run the release
+# workflow for the tag" — which cannot publish anything, ever. The run on refs/tags/v0.1.0
+# re-reads release.yml AS IT EXISTS AT THAT TAG, still short-circuited, so `pypi-publish` is
+# skipped: exit 0, green run, nothing on PyPI, no annotation, no summary line. And the escape
+# hatch is closed too — release-integrity's non-tag guard refuses to publish from `main`, so
+# the only ref permitted to publish is precisely the one that cannot carry the enable.
+#
+# These guard both halves: the instructions must prescribe a reachable ordering, and a run
+# that cannot publish must say so out loud instead of going green in silence.
+# --------------------------------------------------------------------------------------
+
+_GATE_STATUS = _REPO_ROOT / "scripts" / "pypi-gate-status.sh"
+_RUNBOOK = _REPO_ROOT / "docs" / "GO-LIVE-RUNBOOK.md"
+
+
+def _runbook_step_4() -> str:
+    """The PyPI section of the go-live runbook, up to the next top-level step."""
+    text = _RUNBOOK.read_text()
+    start = text.index("## Step 4 — publish to PyPI")
+    return text[start : text.index("\n## ", start + 1)]
+
+
+def test_go_live_runbook_does_not_prescribe_an_unreachable_pypi_enable() -> None:
+    """Step 4 must not tell the maintainer to enable on `main` and re-run an existing tag.
+
+    That sequence is a deadlock, not a slow path: the workflow definition comes from the tag
+    ref, so the enable can never be in force for a tag that predates it.
+    """
+    step4 = _runbook_step_4()
+
+    assert "Commit that change on `main`." not in step4, (
+        "Step 4 still tells the maintainer to commit the PyPI enable on `main` after the tag "
+        "was cut — a run on the tag executes the definition AT THE TAG, which is still "
+        "short-circuited, so `pypi-publish` is skipped and nothing is ever published"
+    )
+    assert not re.search(r"Re-run the release workflow for the tag", step4), (
+        "Step 4 still prescribes re-running the workflow for the existing tag as the way to "
+        "publish; re-running re-reads the same disabled definition from that same tag ref"
+    )
+
+    # The reachable ordering must be stated, not merely implied by the absence of the bad one.
+    assert re.search(r"before\b[^.]*\btag\b", step4, re.IGNORECASE), (
+        "Step 4 must say the enable has to land BEFORE the tag is cut"
+    )
+    # ...and the already-tagged case must be answered honestly, including its real cost.
+    assert "already cut" in step4, (
+        "Step 4 must cover the case where the tag was already cut without the enable — "
+        "otherwise the maintainer who followed the old order has no documented way out"
+    )
+    assert re.search(r"destroys|invalidat", step4, re.IGNORECASE), (
+        "Step 4 must state that re-cutting the tag destroys the already-published signed "
+        "assets; offering that recovery without its cost trades one silent failure for a worse one"
+    )
+
+
+def test_release_runs_state_the_pypi_gate_status_for_their_own_ref() -> None:
+    """A skipped job reports nothing, so an always-running job must report the gate state."""
+    integrity = _workflow()["jobs"]["release-integrity"]
+    run_steps = "\n".join(str(step.get("run", "")) for step in integrity["steps"])
+
+    assert "pypi-gate-status.sh" in run_steps, (
+        "no release job states whether the PyPI gate is open at the ref being executed — a "
+        "run that publishes nothing is then indistinguishable from one that published"
+    )
+    assert "GITHUB_STEP_SUMMARY" in run_steps, (
+        "the gate status must reach the run summary, where a maintainer actually looks"
+    )
+    # It has to run on rehearsals too: the dry run is where you want to catch a dead gate,
+    # and release-integrity is the job that runs in both modes.
+    assert "dry_run" not in str(integrity.get("if", "")), (
+        "release-integrity is gated on dry_run, so the gate status would not be reported "
+        "for rehearsals"
+    )
+
+
+def _gate_status(workflow_text: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    target = tmp_path / "release.yml"
+    target.write_text(workflow_text)
+    return subprocess.run(
+        ["bash", str(_GATE_STATUS), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_pypi_gate_status_reports_the_disabled_gate_of_the_current_workflow(
+    tmp_path: Path,
+) -> None:
+    """Ground truth today: the gate is closed, and the report says so in those words."""
+    result = _gate_status(_WORKFLOW.read_text(), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "DISABLED at this ref" in result.stdout, result.stdout
+    # The report is only useful if it names the remedy, since the failure mode is silence.
+    assert "SKIPPED" in result.stdout and "BEFORE the tag is cut" in result.stdout
+
+
+def test_pypi_gate_status_reports_an_enabled_gate_after_the_documented_edit(
+    tmp_path: Path,
+) -> None:
+    """The exact edit the ENABLE CHECKLIST prescribes must flip the report to ENABLED."""
+    workflow = _WORKFLOW.read_text()
+    enabled = workflow.replace(
+        "    if: ${{ false && github.event.inputs.dry_run",
+        "    if: ${{ github.event.inputs.dry_run",
+    )
+    assert enabled != workflow, (
+        "the documented enable edit no longer applies — re-anchor this guard to the new "
+        "shape of the pypi-publish condition"
+    )
+
+    result = _gate_status(enabled, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "ENABLED at this ref" in result.stdout, result.stdout
+
+
+def test_pypi_gate_status_reads_the_condition_not_the_comments(tmp_path: Path) -> None:
+    """The ENABLE CHECKLIST quotes `if: ${{ false && … }}` verbatim in a comment.
+
+    A reporter that greps for that prose would call an ENABLED workflow disabled — the exact
+    false-green this whole guard exists to prevent.
+    """
+    enabled = _WORKFLOW.read_text().replace(
+        "    if: ${{ false && github.event.inputs.dry_run",
+        "    if: ${{ github.event.inputs.dry_run",
+    )
+    assert "`if: ${{ false && … }}`" in enabled, (
+        "precondition: the disabled-claiming comment survives the enable edit"
+    )
+    assert "ENABLED at this ref" in _gate_status(enabled, tmp_path).stdout
+
+
+def test_pypi_gate_status_fails_loudly_when_the_gate_is_missing(tmp_path: Path) -> None:
+    """No executable `if:` at all is a missing gate, not a closed one — ADR-0034: no silence."""
+    stripped = "\n".join(
+        line
+        for line in _WORKFLOW.read_text().splitlines()
+        if not line.startswith("    if: ${{ false && github.event.inputs.dry_run")
+    )
+    result = _gate_status(stripped, tmp_path)
+    assert result.returncode == 1, (
+        f"a pypi-publish job with no `if:` would publish on every tag push, but the reporter "
+        f"exited {result.returncode}"
+    )
+    assert "::error::" in result.stdout + result.stderr
+    assert "MISSING" in result.stdout + result.stderr
+
+
 def test_front_page_and_docs_route_a_reporter_to_the_cvd_policy() -> None:
     """README links the disclosure policy and the release-verification procedure."""
     readme = (_REPO_ROOT / "README.md").read_text()

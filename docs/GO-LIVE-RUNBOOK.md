@@ -121,6 +121,12 @@ to `main`. It has never deployed while the repo was private.
 
 This is the flow from #178. It is already automated on a tag — you only push the tag.
 
+!!! warning "Decide about PyPI before you push the tag"
+    The tag you push freezes the workflow definition that every run for that tag will use.
+    If v0.1.0 is meant to reach PyPI, do [step 4](#step-4--publish-to-pypi) items 1–4 —
+    including the `pypi-publish` enable — **first**. Enabling afterwards cannot publish this
+    tag, and the only way back is re-cutting it, which invalidates the signed assets below.
+
 ```bash
 # Rehearse first: build + SBOM + Sigstore signing, artifact-only, creates NO release.
 gh workflow run release.yml -f tag=v0.1.0 -f dry_run=true
@@ -142,8 +148,15 @@ trustworthy — delete it and investigate before going further.
 
 ## Step 4 — publish to PyPI
 
-Only after step 3's assets verify. The distributions you publish must be **the ones the
-release signed**, not a fresh local build.
+The distributions you publish must be **the ones the release signed**, not a fresh local
+build.
+
+**This step straddles step 3.** Items 1–3 are PyPI-side setup and can be done at any time.
+Item 4 — the workflow enable — must be merged **before** the tag in step 3 is cut, because a
+run only ever executes the workflow definition present at the ref it runs on. So decide about
+PyPI *first*: if you want v0.1.0 on PyPI, do items 1–4 before pushing the tag, then push it
+once and let the single tag run carry the release all the way through. Item 5 is the recovery
+path if you have already tagged.
 
 1. Create every project on PyPI and add a Trusted Publisher for each:
    owner `ddickmann`, repo `latence-framework`, workflow `release.yml`, environment `pypi`.
@@ -153,9 +166,40 @@ release signed**, not a fresh local build.
 3. *(Recommended)* rehearse against TestPyPI once by setting
    `repository-url: https://test.pypi.org/legacy/` on the publish step, then install from
    TestPyPI in a clean venv exactly as in pre-flight step 4.
-4. In `.github/workflows/release.yml`, remove the `false &&` from the `pypi-publish` job's
-   `if:` condition. Commit that change on `main`.
-5. Re-run the release workflow for the tag and approve the `pypi` environment gate.
+4. **Enable the publish job *before* the tag is cut — this ordering is the whole step.**
+   In `.github/workflows/release.yml`, remove the `false &&` from the `pypi-publish` job's
+   `if:` condition (keep the `dry_run` clause), merge that to `main`, and **only then** cut
+   the tag in step 3.
+
+    !!! danger "Enabling after the tag is cut publishes nothing, silently"
+        A run executes the workflow **definition from the ref it is on**. A run on
+        `refs/tags/v0.1.0` therefore uses `release.yml` *as it exists at that tag* — which
+        still contains `false &&` if you enabled on `main` afterwards. `pypi-publish`
+        evaluates to false and is **skipped**: exit 0, green run, nothing on PyPI, and a
+        skipped job leaves no annotation and no summary line to notice.
+
+        Dispatching from `main` instead does not help: the *Refuse to publish under a
+        non-tag signing identity* step rejects any non-dry run whose signing identity is not
+        `…@refs/tags/<tag>` (step 3). The tag is the only ref allowed to publish, so the tag
+        must be the ref that carries the enable.
+
+    Every release run — dry or real — prints its own gate state to the job summary as
+    **PyPI publish gate: DISABLED / ENABLED at this ref**. Read that line before concluding
+    a publish happened.
+
+5. **If you already cut and signed the tag without the enable**, do not re-run the workflow
+   and expect an upload. Choose one:
+
+    - **Preferred — ship it in the next tag.** Merge the enable to `main` and cut `v0.1.1`.
+      The signed `v0.1.0` release stays valid and untouched, and nothing an adopter may have
+      already downloaded or pinned is invalidated.
+    - **Re-cut `v0.1.0`.** Delete the GitHub Release *and* the tag, re-tag the post-enable
+      commit, and redo step 3 in full. This **destroys the already-published `v0.1.0`
+      assets**: their Sigstore bundle and `SHA256SUMS` certify the old commit, so any copy
+      an adopter already holds stops matching what the name now resolves to. Only do this if
+      you are certain nothing has been downloaded.
+
+6. Push the tag and approve the `pypi` environment gate when the run pauses on it.
 
 **Check:** in a clean environment with **no** `--find-links`, the documented install works
 and the demo runs:
