@@ -491,9 +491,7 @@ class QualityReportBuilder:
                 and prov.char_end >= prov.char_start
             )
             pages_ok = (
-                prov.page_start is None
-                or prov.page_end is None
-                or prov.page_end >= prov.page_start
+                prov.page_start is None or prov.page_end is None or prov.page_end >= prov.page_start
             )
             if span_ok and pages_ok:
                 check.records_with_aligned_offsets += 1
@@ -573,9 +571,7 @@ class QualityReportBuilder:
 
         gold_files = set(gold.by_file_name())
         matched_files = {
-            file_name_of[doc_id]
-            for doc_id in file_name_of
-            if file_name_of[doc_id] in gold_files
+            file_name_of[doc_id] for doc_id in file_name_of if file_name_of[doc_id] in gold_files
         }
         evaluation = GoldSetEvaluation(
             documents_annotated=len(gold.documents),
@@ -583,9 +579,7 @@ class QualityReportBuilder:
             match_min_overlap=gold.match_min_overlap,
         )
         entity_overall, entity_labels = score_entities(typed_mentions, gold, file_name_of)
-        evaluation.stages.append(
-            self._stage_score("entities", entity_overall, entity_labels)
-        )
+        evaluation.stages.append(self._stage_score("entities", entity_overall, entity_labels))
         if gold.total_relations > 0:
             relation_overall, relation_labels = score_relations(
                 typed_relations, typed_mentions, gold, file_name_of
@@ -715,9 +709,7 @@ class QualityReportBuilder:
         return quality
 
     @staticmethod
-    def _entity_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> EntityQuality | None:
+    def _entity_quality(pipeline: Pipeline, records: list[StageOutput]) -> EntityQuality | None:
         """Aggregate Entity-Extraction quality: per-type counts + confidence dist.
 
         Only computed when the Pipeline has an Entity-Extraction Stage. ``records``
@@ -831,6 +823,26 @@ class QualityReportBuilder:
         does (a PIISpan never stores the surface string, so this rollup cannot leak one). The
         deprecated doc-level :class:`~latence_core.contracts.RedactionRecord` path is still tallied
         for backward compatibility.
+
+        ``records`` is the FLAT concatenation of EVERY Redaction Stage's output
+        (``_records_of_kind`` walks ``ordered`` and extends), so a CHAINED topology — exactly what
+        the shipped ``gpu-learned`` / ``full-stack`` stacks declare since audit R5-12
+        (``redact_financial.depends_on: [redact_pii]``) — yields the SAME chunk twice: once as the
+        upstream Stage emitted it, once as the downstream Stage re-emitted it after
+        :func:`~latence_core.redaction_policy._compose_prior_spans` folded the upstream spans into
+        its own. Summing that flat list double-counts every upstream span and can name a
+        ``pii_type`` that exists nowhere in the exported corpus (an upstream span superseded by an
+        identical-extent downstream span of a DIFFERENT type is still tallied under its old label).
+        The report is the operator's redaction audit trail (ADR-0034 counts-only observability), so
+        it must describe the corpus, not the chain length.
+
+        The rollup therefore collapses each record to its LAST version — the downstream-most Stage
+        that emitted that ``record_id``, which is the version that flows on to the Export. Because
+        composition is coverage-preserving and unions the upstream spans in, that last version
+        already carries every mask the chain applied. Insertion order (hence determinism) is
+        preserved: the dict keeps each ``record_id``'s first position and only its value is
+        replaced. A single-Redactor Pipeline has no duplicate ``record_id``s, so its counts are
+        byte-identical to before.
         """
         if not any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages):
             return None
@@ -838,7 +850,11 @@ class QualityReportBuilder:
         redacted_docs: set[str] = set()
         docs_with_pii: set[str] = set()
         disabled_docs: set[str] = set()
+        latest: dict[tuple[str, str], StageOutput] = {}
         for record in records:
+            if isinstance(record, ChunkRecord | RedactionRecord):
+                latest[(type(record).__name__, record.record_id)] = record
+        for record in latest.values():
             if isinstance(record, ChunkRecord):
                 # Chunk-level (W16): masked_content is set on every chunk the Redaction Stage
                 # produced. Roll spans up per type/action; document-level counts dedupe by parent.
@@ -1165,9 +1181,7 @@ class QualityReportBuilder:
         return quality
 
     @staticmethod
-    def _parse_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> ParseQuality | None:
+    def _parse_quality(pipeline: Pipeline, records: list[StageOutput]) -> ParseQuality | None:
         """Aggregate Parse-Stage quality: page-map drift + parse-error counts.
 
         Only computed when the Pipeline actually has a Parse Stage, so a

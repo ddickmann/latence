@@ -285,7 +285,9 @@ def test_partially_overlapping_span_does_not_re_expose_a_masked_card() -> None:
     """
     text = f"Contact Jane Roe Card {_SYNTHETIC_CARD} end."
     upstream = _finalize(
-        _chunk(text), RedactionAction.MASK, [(22, 38, "credit_card", text[22:38], "gliner_pii", 0.9)]
+        _chunk(text),
+        RedactionAction.MASK,
+        [(22, 38, "credit_card", text[22:38], "gliner_pii", 0.9)],
     )
     assert upstream.masked_content == "Contact Jane Roe Card [CREDIT_CARD] end."
 
@@ -457,3 +459,173 @@ def test_every_redaction_stage_reaches_the_corpus_export(stack_path: Path) -> No
             f"{stack_path.parent.name}: redaction Stage(s) {dead} never reach corpus export "
             f"{export_name!r} — their masks are discarded while the Stage reports success."
         )
+
+
+# -- audit R6-cross_lane_integration-14: the Quality Report must describe the CORPUS ---------------
+#
+# Chaining the two Redactors (R5-12) fixed the corpus but broke its audit trail: the Quality Report
+# folds the FLAT list of every Redaction Stage's output, so on the shipped chained topology each
+# chunk is tallied twice — once as `redact_pii` emitted it, once as `redact_financial` re-emitted it
+# with the upstream spans composed in. The R5 tests above never look at RedactionQuality, so the
+# whole suite stayed green over counts that scale with chain length, not with what reached the RAG
+# corpus.
+
+
+def _report_probe_pipeline(store: str, docs_dir: Path) -> Pipeline:
+    """The shipped shape: two chained Redactors with OVERLAPPING detector sets, export off the 2nd.
+
+    ``redact_financial`` re-detects ``email`` (as the shipped stacks' ``pii_labels`` overlap does),
+    so the upstream email span is re-emitted downstream — the double-count. Its ``phone`` detector
+    also claims the card number at the SAME extent as the upstream financial floor's ``credit_card``
+    span, and the provider wins that tie — the phantom type.
+    """
+    return Pipeline.from_yaml_text(
+        f"""
+name: redaction-report-counts
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs_dir}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: redact_pii
+    capability: redaction
+    provider: redaction.hybrid_rule
+    depends_on: [chunk]
+    config:
+      detectors: [email]
+      default_action: mask
+      policies:
+        internal:
+          action: mask
+  - name: redact_financial
+    capability: redaction
+    provider: redaction.hybrid_rule
+    depends_on: [redact_pii]
+    config:
+      detectors: [email, phone]
+      default_action: mask
+      policies:
+        internal:
+          action: mask
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact_financial]
+"""
+    )
+
+
+def test_chained_redactors_do_not_double_count_in_the_quality_report(tmp_path: Path) -> None:
+    """RedactionQuality must equal the spans in the EXPORTED corpus, not the sum over the chain.
+
+    Pre-fix, on this exact shipped shape (one document carrying an email, a phone number and the
+    synthetic card ``4111111111111111``), the report read
+    ``pii_total=5 per_type={'credit_card': 1, 'email': 2, 'phone': 2}`` while the exported record
+    carried **3** spans of types ``['email', 'phone', 'phone']``. Two independent errors:
+
+    * ``email: 2`` — ``redact_pii`` emitted the span and ``redact_financial`` re-emitted the same
+      one via ``_compose_prior_spans``; both Stages' chunks are in the flat rollup list. On the
+      shipped ``gpu-learned`` / ``full-stack`` stacks EVERY person/email/phone/address span the
+      learned ``redaction.gliner_pii`` finds is double-counted this way.
+    * ``credit_card: 1`` — a PHANTOM. The ADR-0044 financial floor's card span from ``redact_pii``
+      was superseded downstream by an identical-extent ``phone`` span (provider wins the tie), so
+      the report certified a ``credit_card`` redaction no exported span records.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "memo.txt").write_text(
+        f"Erika Mustermann, erika@acme.example, phone 555-123-4567, card {_SYNTHETIC_CARD}.\n",
+        encoding="utf-8",
+    )
+    store = f"file://{tmp_path}/store"
+
+    report = LocalRunner().run(_report_probe_pipeline(store, docs), run_id="rq")
+
+    exported = _exported(store, "rq")
+    corpus_types: dict[str, int] = {}
+    corpus_actions: dict[str, int] = {}
+    for rec in exported:
+        for span in rec.pii_spans:
+            corpus_types[span.pii_type] = corpus_types.get(span.pii_type, 0) + 1
+            corpus_actions[span.action.value] = corpus_actions.get(span.action.value, 0) + 1
+    corpus_total = sum(corpus_types.values())
+    # Guard the fixture: the probe is only discriminating while the corpus really carries spans.
+    assert corpus_total == 3, f"fixture drifted, corpus spans: {corpus_types}"
+
+    assert report.redaction is not None
+    rq = report.redaction
+    assert rq.pii_total == corpus_total, (
+        f"report tallies {rq.pii_total} PII spans but the exported corpus carries {corpus_total} "
+        f"— counts scale with chain length, not with the corpus"
+    )
+    assert rq.per_type == dict(sorted(corpus_types.items())), (
+        f"report per_type {rq.per_type} != exported corpus {corpus_types}"
+    )
+    assert rq.per_action == dict(sorted(corpus_actions.items()))
+    # The phantom, stated directly: no type may be certified that the corpus never carries.
+    assert "credit_card" not in rq.per_type, (
+        "report names a credit_card redaction that no exported span records"
+    )
+    assert rq.documents_redacted == 1
+    assert rq.documents_with_pii == 1
+
+
+def test_single_redactor_quality_counts_are_unchanged(tmp_path: Path) -> None:
+    """OFF-BY-DEFAULT: one Redaction Stage has no duplicate record_ids, so the rollup is identical."""
+    docs = _docs(tmp_path)
+    store = f"file://{tmp_path}/store"
+    pipeline = Pipeline.from_yaml_text(
+        f"""
+name: redaction-single-counts
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule
+    depends_on: [chunk]
+    config:
+      detectors: [email, iban]
+      default_action: mask
+      policies:
+        internal:
+          action: mask
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+"""
+    )
+    report = LocalRunner().run(pipeline, run_id="single-counts")
+    assert report.redaction is not None
+    assert report.redaction.pii_total == 2
+    assert report.redaction.per_type == {"email": 1, "iban": 1}
+    assert report.redaction.per_action == {"mask": 2}
+    assert report.redaction.documents_redacted == 1
+    assert report.redaction.documents_with_pii == 1
