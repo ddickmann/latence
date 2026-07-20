@@ -639,6 +639,104 @@ def test_a_same_origin_next_link_spelled_differently_still_paginates() -> None:
 
 
 @pytest.mark.parametrize(
+    "extra_facets",
+    [
+        pytest.param("", id="folder-facet-only"),
+        # `_is_folder` is tested before `_is_file`, so an entry carrying BOTH facets is walked
+        # as a folder and reaches the identical loop.
+        pytest.param(
+            ', "file": {"mimeType": "text/plain"}, "size": 1', id="both-file-and-folder-facet"
+        ),
+    ],
+)
+def test_a_folder_listing_that_names_itself_is_refused_rather_than_walked_forever(
+    extra_facets: str,
+) -> None:
+    """A children collection is a SERVER-SUPPLIED body, so it can name an already-walked folder.
+
+    `_paginate` already refuses a repeating `@odata.nextLink` ("A server that echoed its own page
+    as the nextLink would loop forever"); the folder recursion is the same threat one level up. A
+    hostile, compromised or misdirected Graph-compatible endpoint (or a `graph_base_url` pointed
+    at a non-Graph proxy) that answers a folder's children with that same folder makes `list_files`
+    push the identical children URL back onto `pending` on every iteration: the client requests
+    forever and `pending` grows without bound, so the run both hangs and leaks memory.
+
+    The assertion is on the RECORDED WIRE TRAFFIC as well as the error: what matters is that the
+    walk stopped on its own, not that some outer limit eventually stopped it. The transport's cap
+    is the *failure detector* here — on the pre-fix client it is what trips.
+    """
+    cap = 40
+
+    class _SelfReferencingFolderTransport:
+        """Every children page hands back the very folder that was asked for."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: Mapping[str, str],
+            body: bytes | None = None,
+        ) -> HttpResponse:
+            self.calls.append(url)
+            if len(self.calls) > cap:
+                msg = (
+                    f"list_files did not terminate: {len(self.calls)} requests issued against a "
+                    "drive containing exactly one folder. The folder recursion has no cycle guard."
+                )
+                raise AssertionError(msg)
+            page = (
+                '{"value": [{"id": "FOLDER-1", "name": "loop", '
+                '"folder": {"childCount": 1}' + extra_facets + "}]}"
+            )
+            return HttpResponse(status=200, headers={}, body=page.encode())
+
+    transport = _SelfReferencingFolderTransport()
+    client = GraphClient(
+        transport=transport,
+        token_provider=_ScriptedTokenProvider(["valid-token"]),
+        drive_id="d1",
+        base_url=GRAPH_HOST,
+        page_size=200,
+        max_retries=0,
+        max_retry_after_seconds=300.0,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        list(client.list_files())
+
+    message = str(raised.value)
+    assert "FOLDER-1" in message
+    assert "cycle" in message
+    # Non-vacuity: the root listing AND the folder's own listing were really fetched, so the
+    # client reached the recursion decision rather than failing before it...
+    assert len(transport.calls) >= 2
+    # ...and then stopped there, far below the transport's cap.
+    assert len(transport.calls) <= 3, transport.calls
+
+
+def test_a_nested_drive_still_lists_every_file_with_the_cycle_guard_in_place() -> None:
+    """The guard is inert on legitimate input — distinct folder ids walk exactly as before."""
+    files = [
+        FakeFile(path="/Contracts/nda.md", content=b"nda"),
+        FakeFile(path="/Contracts/Archive/old.md", content=b"old"),
+        FakeFile(path="/Reports/q1.md", content=b"q1"),
+        FakeFile(path="/root.md", content=b"root"),
+    ]
+    client, _ = _client(FakeGraphApi(files=files))
+    assert [item.drive_path for item in client.list_files()] == [
+        "/root.md",
+        "/Contracts/nda.md",
+        "/Contracts/Archive/old.md",
+        "/Reports/q1.md",
+    ]
+
+
+@pytest.mark.parametrize(
     ("url", "expected"),
     [
         ("https://host/path?a=b", "https://host/path?<redacted>"),

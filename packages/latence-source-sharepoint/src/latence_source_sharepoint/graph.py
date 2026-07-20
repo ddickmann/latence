@@ -164,9 +164,18 @@ class GraphClient:
         The per-folder sort buffers one folder's *metadata* (never a document's bytes, which are
         fetched later, one at a time), so memory stays bounded by the widest folder rather than
         by the drive — the same bound the folder recursion stack already carries (ADR-0033).
+
+        The recursion carries the same cycle guard :meth:`_paginate` carries for ``nextLink``,
+        and for the same reason: the children collection is a **server-supplied body**, so a
+        hostile, compromised or simply misdirected Graph-compatible endpoint can name a folder
+        that has already been walked and keep the traversal — and ``pending`` — growing forever.
+        A real drive cannot do this: a Graph item id is opaque, unique, and has one parent.
         """
         normalized = "/" + root_path.strip("/") if root_path.strip("/") else ""
         pending: list[tuple[str, str]] = [(self._children_url(normalized), normalized)]
+        # Bounded by the number of folders in the drive, one short opaque id each — not by the
+        # documents, whose bytes never enter this method (ADR-0033).
+        scheduled_folder_ids: set[str] = set()
         while pending:
             url, folder_path = pending.pop()
             folders: list[tuple[str, str]] = []
@@ -177,6 +186,14 @@ class GraphClient:
                     child_id = str(entry.get("id", ""))
                     child_name = str(entry.get("name", ""))
                     if child_id and child_name:
+                        if child_id in scheduled_folder_ids:
+                            msg = (
+                                "SharePointSource: Graph listed a folder that has already been "
+                                f"walked (item id {child_id!r}, named {child_name!r} under "
+                                f"{item_path or '/'}); refusing to recurse in a cycle."
+                            )
+                            raise ProviderError(msg)
+                        scheduled_folder_ids.add(child_id)
                         folders.append(
                             (
                                 f"{self._base_url}/drives/{self._drive_id}/items/"
