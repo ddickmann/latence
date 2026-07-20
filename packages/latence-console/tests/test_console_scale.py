@@ -20,7 +20,7 @@ import tracemalloc
 from typing import TYPE_CHECKING
 
 import pytest
-from latence_console.artifacts import MAX_SCAN_RECORDS, RunArtifacts
+from latence_console.artifacts import MAX_LINE_BYTES, MAX_SCAN_RECORDS, RunArtifacts
 from latence_console.server import ConsoleApp
 from latence_core.contracts import (
     ChunkRecord,
@@ -839,3 +839,67 @@ def test_quarantine_page_speaks_plainly_when_the_read_was_complete(
     assert "Flagged — kept, with a risk marker in the corpus (0)" in body
     assert "No record in this run&#x27;s corpus carries a risk marker." in body
     assert "read so far" not in body
+
+
+# -- An over-long line is bounded WHILE it is read (audit R6) -----------------
+#
+# ``MAX_LINE_BYTES`` documents a promise: the reader will not accumulate a line bigger than the
+# cap. Iterating the file object (``for raw in handle``) broke that promise in the only way that
+# matters — the line was materialised in full and only *then* measured. A real
+# ``checkpoints/source.jsonl`` line carries one whole ingested document inline, so a run over a
+# large PDF puts a single hundred-megabyte line in front of every browse request.
+
+#: An over-long line an order of magnitude past MAX_LINE_BYTES, so a reader that allocates it
+#: before rejecting it is unmistakable against the budget below.
+OVERLONG_LINE_BYTES = 64 * 1024 * 1024
+
+#: Peak the targeted lookup is allowed while walking past that line. The enforced bound is
+#: MAX_LINE_BYTES + one read block (~17 MB); a reader that materialises the line pays 64 MB+.
+OVERLONG_READ_PEAK_BYTES = 24 * 1024 * 1024
+
+
+@pytest.fixture(scope="module")
+def torn_line_app(tmp_path_factory: pytest.TempPathFactory) -> ConsoleApp:
+    """A run whose ``chunk.jsonl`` opens with one 64 MB line, then a real record."""
+    root: Path = tmp_path_factory.mktemp("torncorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/torn"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "torn", "stages": [{"name": "chunk", "depends_on": []}]},
+                "run_id": "torn",
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    overlong = b'{"content":"' + b"x" * OVERLONG_LINE_BYTES + b'"}\n'
+    good = (_chunk(3, redacted=False).model_dump_json() + "\n").encode("utf-8")
+    storage.write_atomic(f"{run_dir}/checkpoints/chunk.jsonl", overlong + good + overlong)
+    return ConsoleApp.over_storage(storage, storage_uri)
+
+
+def test_overlong_line_is_never_accumulated(torn_line_app: ConsoleApp) -> None:
+    """The cap must bound the read, not merely describe it after the fact."""
+    target = f"/run/torn/chunk?id={DOC_ID}%23chunk-3"
+    torn_line_app.respond("GET", target)  # warm caches so the measurement is the read
+
+    response, peak = _peak_bytes(lambda: torn_line_app.respond("GET", target))
+
+    assert response.status == 200  # type: ignore[attr-defined]
+    assert b"chunk 3" in response.body  # type: ignore[attr-defined]
+    assert peak < OVERLONG_READ_PEAK_BYTES, (
+        f"reading past a {OVERLONG_LINE_BYTES / 1024 / 1024:.0f} MB line peaked at "
+        f"{peak / 1024 / 1024:.1f} MB — the line was materialised before MAX_LINE_BYTES "
+        f"rejected it (budget {OVERLONG_READ_PEAK_BYTES / 1024 / 1024:.0f} MB)"
+    )
+
+
+def test_records_around_an_overlong_line_still_render(torn_line_app: ConsoleApp) -> None:
+    """Abandoning a line must skip exactly that line — the records on either side survive."""
+    body = torn_line_app.respond("GET", "/run/torn/chunks").body.decode("utf-8")
+
+    assert "chunk-3" in body
+    assert "x" * (MAX_LINE_BYTES // 1024) not in body

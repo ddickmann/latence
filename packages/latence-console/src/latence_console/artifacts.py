@@ -69,6 +69,7 @@ from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
+    from typing import IO
 
     from latence_core.storage import Storage
 
@@ -86,6 +87,11 @@ MAX_SCAN_RECORDS = 2000
 #: foreign file, and reading it into memory is the very failure this module bounds.
 MAX_LINE_BYTES = 16 * 1024 * 1024
 
+#: How much of the raw stream the reader pulls at a time while assembling lines. The cap above can
+#: only be *enforced* if the reader never asks the stream for "one line" — see
+#: :func:`_bounded_lines`.
+READ_BLOCK_BYTES = 1024 * 1024
+
 #: One of the four record carriers a Stage checkpoint line can hold.
 Carrier = GraphRecord | EntityMention | ChunkRecord | DocumentRecord
 
@@ -96,6 +102,54 @@ _R = TypeVar("_R")
 _R_co = TypeVar("_R_co", covariant=True)
 #: The carrier subtype :meth:`RunArtifacts._lookup` is asked for.
 _C = TypeVar("_C", bound=Carrier)
+
+
+def _bounded_lines(handle: IO[bytes], cap: int = MAX_LINE_BYTES) -> Iterator[bytes]:
+    """Every line of a binary stream that is at most ``cap`` bytes long; longer ones are abandoned.
+
+    Iterating a file object directly (``for raw in handle``) reads a whole line into one ``bytes``
+    object *before* any length test can run, so a ``len(raw) > cap`` check downstream rejects a
+    line the process has already paid for in full (audit R6). A ``checkpoints/source.jsonl`` line
+    carries one whole ingested document inline, so a run over a 100 MB input produces a single line
+    of that size and every browse request allocated it.
+
+    This reads the stream in :data:`READ_BLOCK_BYTES` blocks and assembles lines itself, dropping a
+    line's accumulated bytes the moment they would exceed ``cap`` and then skipping the rest of
+    that line without buffering it. Peak is ``cap + READ_BLOCK_BYTES``, whatever is on disk — the
+    bound the module documents, now actually enforced.
+
+    Lines are yielded with their trailing newline (as file iteration does); a final line without
+    one is yielded too.
+    """
+    buffer = bytearray()
+    abandoned = False  # mid-line, past the cap: discard bytes until this line's newline
+    while True:
+        block = handle.read(READ_BLOCK_BYTES)
+        if not block:
+            break
+        start = 0
+        while (newline := block.find(b"\n", start)) >= 0:
+            segment = block[start : newline + 1]
+            start = newline + 1
+            if abandoned:
+                abandoned = False
+                continue
+            if len(buffer) + len(segment) > cap:
+                buffer.clear()
+                continue
+            buffer += segment
+            yield bytes(buffer)
+            buffer.clear()
+        if abandoned:
+            continue
+        rest = block[start:]
+        if len(buffer) + len(rest) > cap:
+            buffer.clear()
+            abandoned = True
+        else:
+            buffer += rest
+    if buffer and not abandoned:
+        yield bytes(buffer)
 
 
 class _KeptView(Protocol[_R_co]):
@@ -289,10 +343,14 @@ class RunArtifacts:
     def _read_jsonl(self, uri: str, *, contains: str | None = None) -> Iterator[dict[str, Any]]:
         """Every well-formed JSON object in a JSONL file (blank/torn lines skipped).
 
-        **Streamed** (audit R4): the file is read line by line through ``Storage.open`` and each
-        line is decoded on its own, so peak memory is one record — not the file. A checkpoint is
+        **Streamed** (audit R4): the file is read in blocks through ``Storage.open`` and each line
+        is decoded on its own, so peak memory is one record — not the file. A checkpoint is
         routinely hundreds of megabytes, and ``read_text`` would have materialised all of it (plus
         a second full copy from ``splitlines``) before the first record was parsed.
+
+        **Bounded** (audit R6): line assembly is :func:`_bounded_lines`, not file iteration, so an
+        over-long line is abandoned *while* it is read rather than after it has been allocated in
+        full — the guarantee :data:`MAX_LINE_BYTES` documents.
 
         ``contains`` is a cheap pre-filter for targeted lookups: a line whose raw bytes do not
         contain that substring cannot encode a record carrying it, so it is skipped without being
@@ -307,9 +365,7 @@ class RunArtifacts:
             return
         try:
             with handle:
-                for raw in handle:
-                    if len(raw) > MAX_LINE_BYTES:
-                        continue
+                for raw in _bounded_lines(handle):
                     if needle is not None and needle not in raw:
                         continue
                     stripped = raw.strip()
