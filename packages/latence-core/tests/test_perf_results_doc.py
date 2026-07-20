@@ -76,8 +76,68 @@ def test_every_envelope_states_hardware_profile_corpus_date_and_repro(envelope: 
     for required in ("**Hardware:**", "**Stack profile:**", "**Corpus shape:**", "**Date measured"):
         assert required in section, f"{envelope} is missing {required}"
     assert "**Reproduce:**" in section, f"{envelope} has no reproduction steps"
-    # A date the reader can check, not "recently".
-    assert re.search(r"\d{4}-\d{2}-\d{2}|ADR-\d{4}", section), f"{envelope} has no concrete date"
+    # A date the reader can check, not "recently" — and not an ADR cross-reference either
+    # (an ADR id is not a date, and the ADR it points at may carry no date at all).
+    assert re.search(r"\d{4}-\d{2}-\d{2}", section), f"{envelope} has no concrete date"
+
+
+def test_every_date_measured_line_carries_an_iso_date_not_a_crossreference() -> None:
+    """`**Date measured:**` must resolve on its own line, with no indirection.
+
+    Regression guard: the GPU envelope once read "**Date measured:** the W8 acceleration run
+    recorded in ADR-0036" — a cross-reference to an ADR section that itself carried no date, so
+    the published GPU sizing numbers had no measurement date anywhere in the tree. An operator
+    sizing a cluster cannot tell whether a driver/torch combination is still the one shipped by
+    ``deploy/env/`` if the run has no date. A pointer is not a date: this asserts the ISO date is
+    on the line itself, and that no ADR/issue/PR token can stand in for it.
+    """
+    iso = re.compile(r"\d{4}-\d{2}-\d{2}")
+    lines = [line for line in _perf_text().splitlines() if "**Date measured" in line]
+    assert lines, "PERF-RESULTS.md states no measurement date at all"
+    undated = [line for line in lines if not iso.search(line)]
+    assert not undated, f"'Date measured' lines without an ISO date on the line: {undated}"
+    # And the substitute that used to satisfy the guard must not be the only date-shaped token.
+    for line in lines:
+        stripped = iso.sub("", line)
+        assert not re.search(r"\b(ADR|#)-?\d+\b", stripped) or iso.search(line), line
+
+
+@pytest.mark.parametrize("envelope", ["CPU envelope", "GPU envelope"])
+def test_envelope_date_survives_removal_of_adr_crossreferences(envelope: str) -> None:
+    """The date check must not be satisfiable by an ``ADR-\\d{4}`` token.
+
+    Deleting every ADR reference from the section must leave the measurement date standing.
+    """
+    section = re.sub(r"ADR-\d{4}", "", _section(envelope))
+    assert re.search(r"\d{4}-\d{2}-\d{2}", section), (
+        f"{envelope}'s only date-shaped token is an ADR cross-reference, not a measurement date"
+    )
+
+
+def test_gpu_envelope_crossreferences_resolve_to_a_dated_adr_section() -> None:
+    """If the GPU envelope points at an ADR for its provenance, that ADR must be dated too.
+
+    The GPU envelope cites ADR-0036's W8 acceleration status note. A reader who follows that
+    pointer must land on a section that states when the run happened — otherwise the citation
+    launders an undated number through a second document.
+    """
+    section = _section("GPU envelope")
+    adrs = set(re.findall(r"ADR-(\d{4})", section))
+    assert adrs, "the GPU envelope no longer cites its ADR — update this guard deliberately"
+    for number in sorted(adrs):
+        matches = sorted((_REPO_ROOT / "docs" / "adr").glob(f"{number}-*.md"))
+        assert matches, f"the GPU envelope cites ADR-{number}, which does not exist"
+        body = matches[0].read_text(encoding="utf-8")
+        note = [
+            block
+            for block in re.split(r"^## ", body, flags=re.MULTILINE)
+            if "W8-perf-accel" in block.splitlines()[0]
+        ]
+        assert note, f"ADR-{number} has no W8-perf-accel status note to cite"
+        assert re.search(r"\d{4}-\d{2}-\d{2}", note[0]), (
+            f"ADR-{number}'s W8-perf-accel note states no measurement date, so the GPU "
+            "envelope's cross-reference resolves to nothing checkable"
+        )
 
 
 def test_large_scale_numbers_stay_parked_and_referenced() -> None:

@@ -96,8 +96,12 @@ is exactly what `scripts/bench_throughput.py --stack <your stack>` is for.
 **Stack profile:** generative OCR Parse via `parser.lighton` (LightOnOCR-2), content-safe
 `max_new_tokens=4096`.
 **Corpus shape:** 6 real LBBW German banking PDF pages — dense, multi-column scans.
-**Date measured:** the W8 acceleration run recorded in ADR-0036 (§ *No roster change; CI green;
+**Date measured:** 2026-07-10 — the W8 acceleration pod run, recorded in ADR-0036 (§ *Status note
+— the full-transformers acceleration seam (W8-perf-accel)*, *No roster change; CI green;
 pod-measured*).
+**Software at measurement time:** driver CUDA 12.4, `transformers` full-stack path (not served
+vLLM — that host's driver is too old for a cu126+ torch; see the PENDING section below). If your
+deployment's driver/torch differ from these, re-measure: the ladder is a property of that stack.
 **Reproduce:** `scripts/validate-lighton-on-gpu.md` (the pod runbook) on a CUDA host.
 
 The rows below are the **same measured seconds-per-page as the ladder in the next section**,
@@ -123,6 +127,8 @@ number by anything without measuring it.
 - **Model:** LightOnOCR-2 (`parser.lighton`).
 - **GPU:** NVIDIA RTX 2000 Ada.
 - **Driver:** CUDA 12.4.
+- **Date measured:** 2026-07-10 (the W8 acceleration pod run — the same run the GPU envelope above
+  converts to pages/hour).
 - **Corpus:** 6 real LBBW German banking PDF pages (dense, multi-column).
 - **Content-safe path:** `max_new_tokens=4096` — the natural-EOS budget where every page's OCR
   output is stable/complete. Across every rung below the output is **byte-identical**
@@ -184,7 +190,8 @@ path.
 
 No fabricated encoder numbers beyond the measured **gliner 1.36×** (identical output).
 
-**As a throughput envelope** (same RTX 2000 Ada, same date, unit conversion only): the measured
+**As a throughput envelope** (same RTX 2000 Ada, same date measured 2026-07-10, unit conversion
+only): the measured
 gliner call latency is **19.1 ms/call fp32 → 14.0 ms/call bf16**, i.e. **≈188,000 → ≈257,000
 extraction calls/hour on one GPU**. A *call* is one Entity/Relation/Redaction inference, **not** a
 document — documents/hour for the learned Providers is deliberately **not** derived here, because
