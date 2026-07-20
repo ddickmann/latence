@@ -660,6 +660,92 @@ def test_go_live_runbook_does_not_prescribe_an_unreachable_pypi_enable() -> None
     )
 
 
+# --------------------------------------------------------------------------------------
+# The go-live rehearsal has to be a command that can actually run
+#
+# Step 3 used to dispatch `release.yml -f tag=v0.1.0 -f dry_run=true` BEFORE creating the
+# tag. Every workflow_dispatch supplies `tag` (it is required), and both jobs check out
+# `${{ github.event.inputs.tag || github.ref }}` — so that run dies at the first step of the
+# first job with `couldn't find remote ref v0.1.0`. And `gh workflow run` without `--ref`
+# dispatches on the default branch, so Sigstore certifies `…/release.yml@refs/heads/main`,
+# not the `…@refs/tags/v0.1.0` identity a published VERIFY.md pins.
+# --------------------------------------------------------------------------------------
+
+
+def _runbook_step_3() -> str:
+    """The release section of the go-live runbook, up to the next top-level step."""
+    text = _RUNBOOK.read_text()
+    start = text.index("## Step 3 — cut the first release")
+    return text[start : text.index("\n## ", start + 1)]
+
+
+def _shell_blocks(section: str) -> list[str]:
+    return re.findall(r"```(?:bash|sh|console)\n(.*?)```", section, re.DOTALL)
+
+
+def test_go_live_rehearsal_never_dispatches_a_tag_that_does_not_exist_yet() -> None:
+    """A dispatch checks out the `tag` input, so the tag must already be on origin."""
+    for block in _shell_blocks(_runbook_step_3()):
+        pushed_at: dict[str, int] = {}
+        for lineno, line in enumerate(block.splitlines()):
+            pushed = re.search(r"git push \S+ (v[0-9][^\s]*)", line)
+            if pushed:
+                pushed_at.setdefault(pushed.group(1), lineno)
+            dispatched = re.search(r"gh workflow run \S*release\.yml.*?-f tag=(v[^\s]+)", line)
+            if dispatched:
+                tag = dispatched.group(1)
+                assert tag in pushed_at and pushed_at[tag] < lineno, (
+                    f"the runbook dispatches release.yml with tag={tag} before `git push` "
+                    f"puts {tag} on origin. Both jobs check out `github.event.inputs.tag`, so "
+                    f"this run fails at the very first step with `couldn't find remote ref "
+                    f"{tag}` — the maintainer's first contact with the release flow is a hard "
+                    "failure:\n"
+                    f"{block}"
+                )
+
+
+def test_documented_workflow_dispatches_pin_the_tag_as_the_run_ref() -> None:
+    """`gh workflow run` without `--ref` signs under the default branch, not the tag."""
+    docs = sorted((_REPO_ROOT / "docs").rglob("*.md"))
+    invocations = [
+        (path, line)
+        for path in docs
+        for line in path.read_text().splitlines()
+        if re.search(r"gh workflow run \S*release\.yml", line)
+    ]
+    assert invocations, "no documented `gh workflow run release.yml` command to check"
+
+    for path, line in invocations:
+        ref = re.search(r"--ref[= ](\S+)", line)
+        assert ref is not None, (
+            f"{path.name} dispatches release.yml without `--ref`, which runs it on the default "
+            "branch. Sigstore certifies the ref the RUN is on, so that rehearsal signs under "
+            "`…/release.yml@refs/heads/main` — never the identity a published release pins "
+            f"(docs/RELEASING.md, 'Select the tag as the ref'):\n{line.strip()}"
+        )
+        assert ref.group(1).startswith("v"), (
+            f"{path.name} dispatches release.yml with --ref {ref.group(1)}; the rehearsal must "
+            f"run on the release TAG to sign under the identity VERIFY.md pins:\n{line.strip()}"
+        )
+
+
+def test_go_live_still_offers_a_pre_tag_rehearsal_and_says_why_it_is_unsigned() -> None:
+    """Removing the impossible dispatch must not remove the pre-flight it stood for."""
+    step3 = _runbook_step_3()
+
+    assert "--no-sign" in step3, (
+        "Step 3 no longer offers any rehearsal before the tag is cut. The local unsigned run "
+        "of release-integrity.sh is the only pre-flight that is possible pre-tag — dropping it "
+        "leaves the first exposure of the release machinery to be the real release"
+    )
+    assert re.search(r"sign", step3, re.IGNORECASE) and re.search(
+        r"OIDC|identity|tag (must )?exist", step3, re.IGNORECASE
+    ), (
+        "Step 3 must state WHY the local rehearsal is unsigned — a Sigstore signature needs "
+        "the workflow's OIDC identity, which needs the tag to already be on origin"
+    )
+
+
 def test_release_runs_state_the_pypi_gate_status_for_their_own_ref() -> None:
     """A skipped job reports nothing, so an always-running job must report the gate state."""
     integrity = _workflow()["jobs"]["release-integrity"]

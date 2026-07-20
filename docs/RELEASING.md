@@ -96,8 +96,13 @@ for the bundle before publishing.
 
 ### Rehearsing a release (dry run)
 
-Before tagging, rehearse the whole flow — including a **real** signature — without creating
-a release:
+A rehearsal with a **real** signature needs an **existing** tag: the run is dispatched with
+that tag as its input and every job checks it out, and the signature itself is minted from
+the run's OIDC identity. So this rehearses a tag that is already on origin (a previous
+release, or the one you just pushed) without creating or touching a release. *Before* a tag
+exists, rehearse [locally](#rehearsing-locally) instead (the go-live runbook's
+[Step 3](GO-LIVE-RUNBOOK.md#step-3--cut-the-first-release-signed--sbom) does exactly that) —
+it covers everything except the signature.
 
 ```
 Actions → Release → Run workflow
@@ -123,7 +128,10 @@ To publish for real, push the tag (or re-dispatch with the tag selected as the r
 `dry_run: false`). A non-dry run on a non-tag ref is **refused** by the `release-integrity`
 job: it would create a Release whose own signed instructions could not verify its signature.
 
-Locally, everything except the signature can be rehearsed offline:
+### Rehearsing locally
+
+This is the rehearsal available *before* the tag exists — everything except the signature,
+offline:
 
 ```bash
 for pkg in packages/*/; do uv build --package "$(basename "$pkg")" --out-dir dist; done

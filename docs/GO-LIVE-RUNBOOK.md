@@ -128,13 +128,25 @@ This is the flow from #178. It is already automated on a tag — you only push t
     tag, and the only way back is re-cutting it, which invalidates the signed assets below.
 
 ```bash
-# Rehearse first: build + SBOM + Sigstore signing, artifact-only, creates NO release.
-gh workflow run release.yml -f tag=v0.1.0 -f dry_run=true
-gh run watch          # download the `release-assets` artifact and read VERIFY.md
+# 1. Rehearse LOCALLY — build + SBOM + SHA256SUMS + VERIFY.md, everything except the
+#    signature. This is the only pre-flight that exists before the tag does: a Sigstore
+#    signature is minted from the workflow run's OIDC identity, a workflow_dispatch checks
+#    out its `tag` input, and that tag must exist on origin — so nothing can sign v0.1.0
+#    until v0.1.0 is pushed, and pushing it is the real release (step 2).
+for pkg in packages/*/; do uv build --package "$(basename "$pkg")" --out-dir dist; done
+bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets --no-sign
+(cd release-assets && shasum -a 256 -c SHA256SUMS)   # then read release-assets/VERIFY.md
 
-# Then, for real:
+# 2. Then, for real. The tag push runs on refs/tags/v0.1.0, which is the identity the
+#    published VERIFY.md pins.
 git tag -a v0.1.0 -m "latence-framework 0.1.0"
 git push origin v0.1.0
+
+# 3. Optional, AFTER the tag exists: re-run the signed flow artifact-only. `--ref` is what
+#    Sigstore certifies — omit it and the run dispatches on the default branch and signs
+#    under `…/release.yml@refs/heads/main`, an identity no release ever pins.
+gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0 -f dry_run=true
+gh run watch          # download the `release-assets` artifact and read VERIFY.md
 ```
 
 The tag push runs `build` → `release-integrity` (CycloneDX SBOM + `SHA256SUMS` + a keyless
