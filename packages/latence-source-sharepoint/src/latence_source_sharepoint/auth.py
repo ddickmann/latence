@@ -17,8 +17,19 @@ duration of the run, and persists nothing. Two real mechanisms are supported, wh
 **The env-only posture is enforced, not merely documented.** :func:`reject_inline_secrets`
 scans the Provider config (recursively) for a key that looks like it holds a credential and
 raises :class:`~latence_core.errors.ConfigError`. A stack YAML therefore *cannot* carry a
-token, which is what keeps it out of ``manifest.json``, out of git, and out of a bug report.
-Config names env VARS (``token_env: SHAREPOINT_TOKEN``); it never names values.
+token: a run that inlines one fails, so the credential never reaches git as a working config
+and never reaches the Graph endpoint. Config names env VARS (``token_env: SHAREPOINT_TOKEN``);
+it never names values.
+
+**This guard is not what keeps a credential out of ``manifest.json``** (audit-R7). It runs in
+``SharePointSource.__init__``, i.e. when the Runner CONSTRUCTS the Provider — strictly *after*
+``LocalRunner._run`` has already written the manifest. The thing that keeps the value off disk
+is ``latence_core.runner.scrub_sensitive``, which redacts the value of any secret-looking config
+key *before* the manifest bytes are serialised. Every key in :data:`_SECRET_CONFIG_KEYS` is
+therefore required to be covered by that scrubber, and
+``tests/test_auth.py::test_every_rejected_secret_key_is_redacted_by_the_core_manifest_scrubber``
+holds the two lists together — the guard fails the run, the scrubber protects the artefact, and
+neither alone is the guarantee.
 
 Nothing in this module puts a secret into an exception message, a repr, or a log line — the
 offline suite asserts that with the real secret value, not a flag.

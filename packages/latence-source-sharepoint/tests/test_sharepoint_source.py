@@ -377,6 +377,38 @@ def test_inlined_credentials_are_refused_by_config(config: dict[str, Any]) -> No
         SharePointSource(config)
 
 
+def test_every_rejected_secret_key_is_redacted_by_the_core_manifest_scrubber() -> None:
+    """The guard fails the run; the core scrubber protects the artefact. Both, or neither works.
+
+    audit-R7: ``reject_inline_secrets`` runs in ``SharePointSource.__init__``, which the Runner
+    reaches only AFTER it has written ``manifest.json`` — so this guard cannot be what keeps a
+    credential off disk. That is ``scrub_sensitive``'s job, and its substring list originally
+    missed ``certificate`` and ``private_key``: exactly the two key names this module enumerates
+    for Entra ID certificate auth. An operator hitting the guard therefore got a ConfigError
+    *and* a cleartext private key persisted in the run tree.
+
+    This test pins the two lists together, so adding a key here without teaching the core
+    scrubber about it fails loudly instead of silently reopening the leak.
+    """
+    from latence_core.runner import scrub_sensitive
+    from latence_source_sharepoint.auth import _SECRET_CONFIG_KEYS
+
+    marker = "LEAK-{}"
+    config = {key: marker.format(key) for key in sorted(_SECRET_CONFIG_KEYS)}
+    scrubbed = scrub_sensitive({"config": config})["config"]  # type: ignore[index]
+
+    unredacted = sorted(
+        key
+        for key in _SECRET_CONFIG_KEYS
+        if scrubbed[key] != "***REDACTED***"  # type: ignore[index]
+    )
+    assert not unredacted, (
+        f"keys refused by reject_inline_secrets but NOT redacted by the core manifest "
+        f"scrubber: {unredacted!r} — these would be persisted cleartext to manifest.json "
+        f"before this Provider is ever constructed"
+    )
+
+
 def test_a_missing_token_env_var_is_a_config_error(
     storage: Storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:

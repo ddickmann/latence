@@ -17,6 +17,7 @@ spine (Source→Parse→Export) the order is linear, but the DAG machinery is re
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -162,13 +163,46 @@ _ACCUMULATOR_KINDS = (
 # key whose (lowercased) name contains one of these tokens is redacted before the
 # manifest is written. Matching is substring-based so ``api_key``, ``openai_api_key``,
 # ``auth_token``, ``client_secret``, ``db_password`` are all caught.
-_SENSITIVE_KEY_TOKENS = ("api_key", "apikey", "token", "secret", "password", "passwd", "credential")
+_SENSITIVE_KEY_TOKENS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    # audit-R7: certificate-based auth was the blind spot. Entra ID app-only access to Graph
+    # is *recommended* by Microsoft with a certificate, so ``private_key:``/``certificate:``
+    # inlined into a Stage config is the realistic misconfiguration — and none of the tokens
+    # above appears as a substring of either name, nor of ``passphrase``. Every key that
+    # ``latence_source_sharepoint.auth._SECRET_CONFIG_KEYS`` refuses must be covered here:
+    # that Provider guard runs when the Provider is CONSTRUCTED, which is strictly after the
+    # manifest is written, so the scrubber — not the guard's ordering — is what actually keeps
+    # a credential out of ``manifest.json``.
+    "private_key",
+    "privatekey",
+    "certificate",
+    "passphrase",
+    "keystore",
+    "keyfile",
+)
+
+# Matched against a *whole* underscore/dash/dot-delimited part of the key rather than as a
+# substring, because these are short enough that substring matching would redact innocent
+# config (``cert`` is inside ``certainty_threshold``). ``client_cert`` / ``tls.pem`` are caught
+# here; ``certainty_threshold`` is not.
+_SENSITIVE_KEY_PARTS = frozenset({"cert", "certs", "pem", "pfx", "p12"})
+
+_KEY_PART_SPLIT = re.compile(r"[^a-z0-9]+")
+
 _REDACTED = "***REDACTED***"
 
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
-    return any(token in lowered for token in _SENSITIVE_KEY_TOKENS)
+    if any(token in lowered for token in _SENSITIVE_KEY_TOKENS):
+        return True
+    return any(part in _SENSITIVE_KEY_PARTS for part in _KEY_PART_SPLIT.split(lowered))
 
 
 def scrub_sensitive(value: object) -> object:

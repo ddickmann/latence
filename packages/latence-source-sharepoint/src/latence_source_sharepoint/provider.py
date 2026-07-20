@@ -222,8 +222,11 @@ class SharePointSource:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = dict(config or {})
-        # Enforced BEFORE anything else: a config that inlines a credential never gets as far
-        # as opening a connection, so it can never be written to the run manifest either.
+        # Enforced BEFORE anything else in this constructor: a config that inlines a credential
+        # never gets as far as opening a connection. It does NOT protect the run manifest —
+        # the Runner writes manifest.json before it constructs any Provider (audit-R7); that
+        # artefact is protected by latence_core.runner.scrub_sensitive, which covers every key
+        # named in _SECRET_CONFIG_KEYS (held together by a test in this package).
         reject_inline_secrets(config)
 
         self._root_path = str(config.get("root_path", ""))

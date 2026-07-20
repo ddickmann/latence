@@ -148,10 +148,15 @@ written into the run manifest or logs.
   the KG** at all.
 - **Manifest secret scrubbing** — `scrub_sensitive` /` _SENSITIVE_KEY_TOKENS` in
   `packages/latence-core/src/latence_core/runner.py`: any config key whose name looks
-  like a secret (`api_key`, `token`, `secret`, `password`, `credential`, …) has its
-  **value** replaced with `***REDACTED***` before `manifest.json` is written —
-  inlined values and env-var references alike. No secret is written to the manifest or
-  logs.
+  like a secret (`api_key`, `token`, `secret`, `password`, `credential`, and — since
+  audit-R7 — the certificate-auth family `private_key`, `certificate`, `passphrase`,
+  `client_cert`, …) has its **value** replaced with `***REDACTED***` before
+  `manifest.json` is written — inlined values and env-var references alike. No secret
+  is written to the manifest or logs. This scrubber, **not** a Provider-side guard, is
+  what keeps a credential off disk: the Runner writes the manifest before it constructs
+  any Provider, so `SharePointSource`'s `reject_inline_secrets` fails the run but cannot
+  un-write the manifest. Every key that guard refuses is required by test to be covered
+  here.
 - **Quality Report fingerprinting** — co-occurring entity pairs in the shareable
   Quality Report are **salted-sha256 fingerprinted**, not emitted verbatim
   (`_co_occurrence_fingerprint` in
