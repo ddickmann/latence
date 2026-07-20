@@ -106,7 +106,8 @@ option, determinism, and the dry-validation contract all carry over unchanged:
   profile adds (it replaces lite's parser-recommendation prompt).
 * **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
   `[person, organization]`, `compile` left to the provider default `False`); **redact →
-  `redaction.gliner_pii`** (the same W16 chunk-level `redact → enrich → export_corpus` dataflow).
+  `redaction.gliner2`** (§7a — the same Provider `lite` emits, and the same W16 chunk-level
+  `redact → enrich → export_corpus` dataflow).
 * **disambiguate → `disambiguation.glinker`** — the neural GLinker linker + audited resolver
   (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the IBM Granite r2
   embedder (ADR-0045). `use_embedding_merge` / `min_similarity` are **not emitted** — the provider
@@ -115,6 +116,61 @@ option, determinism, and the dry-validation contract all carry over unchanged:
 * **complete → `graph_completion.ultra`** (`skip_if_unavailable: true` — a missing, un-vendored
   checkpoint skips-with-flag, never fails the run), feeding `export.knowledge_graph`; the corpus
   Export keeps the Granite r2 vectors.
+
+### 7a. The blessed redact Provider — one decision, both profiles (amendment, #197)
+
+**Blessed redact Provider (both profiles): `redaction.gliner2`.** (Pinned in code as
+`latence_core.setup.wizard.BLESSED_REDACT_PROVIDER`, and asserted against this line by
+`packages/latence-core/tests/test_setup_wizard_redactor.py` — the decision is a contract between
+this ADR and the generator, not a comment either side can quietly outgrow.)
+
+The generator had drifted from its own design: §2 above, the `wizard.py` module docstring, and the
+`FINANCIAL_PII_LABELS` constant all named `redaction.gliner2`, while `_build_sota_stages` emitted
+`redaction.gliner_pii` — a different package, a different model library, a different checkpoint for
+the same Stage. Under §1's "the wizard's ONE opinionated config must BE the documented design" that
+is a defect, not a preference. The decision, and why:
+
+* **One engine, not two (ADR-0036 W9).** Both profiles already run `fused_entity_relation.gliner2`
+  for `extract`. Blessing the GLiNER2 redactor means the stack resolves **one** library, **one**
+  mdeberta-v3 encoder family, and **one** version pin for extraction and redaction, instead of
+  additionally pulling the separate `gliner` library solely for `redact`. W9 named gliner2 the
+  unified extraction+PII engine; this makes the guided setup actually reflect that.
+* **The choice is only now a real one (#192).** `redaction.gliner2` previously failed at model load
+  against gliner2 ≥ 1.3 with a native `AttributeError`, so "gliner_pii in the SOTA profile" was a
+  forced pick, not a decision. #192 restored it and moved the pin into the Provider package
+  (`gliner2[local]>=1.3,<2` + a typed `ProviderError` for a hand-installed environment the resolver
+  never saw, ADR-0016/0034), so drift now fails at dependency resolution.
+* **The rejected candidate is not deprecated.** `redaction.gliner_pii` remains a fully supported
+  Provider behind the same `PIIDetector` seam, and #191 fixed its device placement (it honours the
+  resolved `cuda` device at load instead of silently running on CPU). Hand-written stacks that wire
+  it — `stacks/gpu-sota.yaml`, `stacks/gpu-sota-pod.yaml`, `stacks/gpu-sota-glinker.yaml`,
+  `stacks/schema-induction.yaml` — are unchanged and still valid. This is a decision about what the
+  **guided setup blesses**, so the enterprise-sota profile now differs from `gpu-sota-glinker.yaml`
+  on exactly this one Stage (a deliberate, recorded delta, noted in `_build_sota_stages`).
+* **The perf knobs must match the blessed extractor (audit R4).** Blessing the gliner2 engine for
+  `redact` also inherits its perf seam, and that seam's generic `compile` default is `auto` → **True
+  on cuda** — so the emitted `device: cuda` redact stage (which carries no `compile` key, by design:
+  the Provider owns the default) silently enabled `torch.compile`. gliner2 compiles with
+  `dynamic=True` and recompile-thrashes on varied-length production chunks (pod-measured: worker at
+  ~290% CPU, GPU 0%, no progress), which is exactly why `fused_entity_relation.gliner2` forces
+  `compile=False` at construction. The redactor streams the same chunk distribution through
+  `batch_extract_entities`, so it now injects the same off-by-default (`quantize` untouched — the
+  fp16 win stays). The inference-time `_reload_uncompiled` latch does **not** cover this: the thrash
+  is silent slowness, not a `BackendCompilerFailed`. The knob stays opt-in, not removed.
+* **Licensing verified separately (ADR-0012).** `gliner2` framework **code** is Apache-2.0
+  (github.com/fastino-ai/GLiNER2 LICENSE + the PyPI OSI classifier); the default checkpoint
+  `fastino/GLiNER2-Guardrails-PII-Multi` **weights** are Apache-2.0 and ungated (HF model card).
+  Both verified in ADR-0036 W3 and recorded in `THIRD-PARTY-LICENSES.md` — no new license surface,
+  since the profile already ships this framework for `extract`.
+* **The ADR-0044 financial-PII floor is untouched by the choice.** The floor lives at the single
+  shared `finalize_redacted_chunk` seam every Redaction Provider funnels through, so it is
+  non-bypassable by backend — a blessed model that misses an IBAN/card/SSN still emits it masked.
+  The regression suite proves that through *this* Provider with the config the wizard *actually
+  emits* (a nothing-detecting fake model, an IBAN still masked as `floor:iban`), rather than
+  inheriting the guarantee by assumption.
+
+The emitted file header now names the redactor it wires, so the generated config is self-consistent
+for the operator reading it too.
 
 Every learned Stage runs on **CUDA** (the profile pins `device: cuda` — it is a GPU-pod stack); on a
 CPU-only host those Stages are skip-with-flag at `latence stack validate` (device honesty, P3-F1),

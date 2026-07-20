@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from latence_core.pipeline import Pipeline
@@ -250,4 +251,89 @@ stages:
     s = Storage.for_uri(store)
     manifest = s.read_text(f"{store}/_latence/runs/r1/manifest.json")
     assert secret not in manifest, "inlined secret leaked into manifest.json"
+    assert "***REDACTED***" in manifest
+
+
+# -- audit-R7: certificate-based credentials were the scrubber's blind spot --
+
+
+def test_scrub_sensitive_redacts_certificate_and_passphrase_keys() -> None:
+    """Certificate auth key names carry NONE of the api_key/token/secret/password substrings.
+
+    Entra ID app-only Graph access is recommended by Microsoft with a *certificate*, so
+    ``private_key``/``certificate``/``passphrase`` are the realistic inlined credentials — and
+    every one of them slipped through the substring list unredacted before audit-R7. The short
+    forms (``client_cert``, ``tls_pem``) match on a whole key part, so an innocent key that
+    merely *contains* those letters (``certainty_threshold``) is left alone.
+    """
+    from latence_core.runner import scrub_sensitive
+
+    payload = {
+        "config": {
+            # A literal PEM header would trip the repo's detect-secrets gate, so the value is
+            # unmistakably fake. What is under test is the KEY NAME, not the value's shape.
+            "private_key": "PEM-BODY-LEAKME-not-a-real-key",
+            "certificate": "CERTBLOB",
+            "passphrase": "hunter2",
+            "client_cert": "CERT2",
+            "tls_pem": "PEMBLOB",
+            "keystore": "KSBLOB",
+            # Not a secret: must survive, or the manifest stops documenting the run.
+            "certainty_threshold": 0.8,
+            "model": "gpt-4o",
+        }
+    }
+    scrubbed = scrub_sensitive(payload)
+    dumped = json.dumps(scrubbed)
+    for leaked in ("LEAKME", "CERTBLOB", "hunter2", "CERT2", "PEMBLOB", "KSBLOB"):
+        assert leaked not in dumped, f"credential {leaked!r} leaked into manifest"
+    # ``scrub_sensitive`` returns ``object`` (it walks an arbitrary JSON-able tree), so narrow
+    # with isinstance rather than laundering the type through a ``type: ignore``.
+    assert isinstance(scrubbed, dict)
+    config = scrubbed["config"]
+    assert isinstance(config, dict)
+    for key in ("private_key", "certificate", "passphrase", "client_cert", "tls_pem", "keystore"):
+        assert config[key] == "***REDACTED***", key
+    # Over-redaction is a defect too: a substring match on "cert" would eat this one.
+    assert config["certainty_threshold"] == 0.8
+    assert config["model"] == "gpt-4o"
+
+
+def test_manifest_never_persists_an_inlined_private_key(docs_dir: Path, tmp_path: Path) -> None:
+    """End-to-end (audit-R7): a PEM private key + passphrase inlined into a Stage config.
+
+    Before the fix this run wrote the key VERBATIM to ``manifest.json`` — and for a SharePoint
+    stage it did so *before* ``reject_inline_secrets`` could abort the run, so the operator got
+    a ConfigError **and** a cleartext key persisted in the run tree.
+    """
+    store = f"file://{tmp_path}/store"
+    # Unmistakably fake stand-in for a PEM body: a literal PEM header in a committed test file
+    # trips the repo's detect-secrets gate, and the key NAME is what is under test here.
+    pem = "PEM-BODY-LEAKME-not-a-real-key"
+    passphrase = "hunter2-DO-NOT-LEAK"
+    p = Pipeline.from_yaml_text(
+        f"""
+name: t
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config: {{path: 'file://{docs_dir}', private_key: '{pem}', passphrase: '{passphrase}',
+              certificate: 'CERTBLOB'}}
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [parse]
+"""
+    )
+    LocalRunner().run(p, run_id="r1")
+    s = Storage.for_uri(store)
+    manifest = s.read_text(f"{store}/_latence/runs/r1/manifest.json")
+    for leaked in (pem, "LEAKME", passphrase, "CERTBLOB"):
+        assert leaked not in manifest, f"{leaked!r} leaked into manifest.json"
     assert "***REDACTED***" in manifest

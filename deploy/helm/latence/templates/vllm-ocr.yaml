@@ -62,6 +62,10 @@ spec:
                   key: HF_TOKEN
                   optional: true
             {{- end }}
+            {{- range .Values.vllmOcr.extraEnv }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.vllmOcr.port }}

@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-sink-qdrant"
+version = "0.1.0"
+description = "One-shot Qdrant sink loader for the Latence framework: load an Export (records.parquet) into a Qdrant collection with idempotent, digest-skipping upserts and a reconciling sweep that makes a Retraction/Purge verifiably absent. Holds no index and runs no search (ADR-0017/0048)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "rag", "qdrant", "vector-database", "sink", "loader", "gdpr", "model-agnostic"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# Thin by construction (ADR-0016): the sink depends only on `latence-core` — it reads the
+# Export the pipeline already wrote (`records.parquet`, through the core Storage seam + the
+# pyarrow spine core already ships) and maps rows onto points. The Qdrant CLIENT is an
+# OPTIONAL extra imported lazily on first store call, exactly like
+# `latence-retrieval[backend-qdrant]`: the whole mapping/batching/idempotency/reconcile core
+# is pure-Python, so this package installs into the CPU-first, offline dev env and its tests
+# run against the shipped faithful `FakeQdrantClient` with no heavy dep. latence-core takes
+# NO new dependency from this package (the arrow only points one way).
+dependencies = [
+    "latence-core",
+]
+
+[project.optional-dependencies]
+# The real client, for an actual load against a running Qdrant. `qdrant-client` is
+# Apache-2.0 (code: https://github.com/qdrant/qdrant-client/blob/master/LICENSE; PyPI
+# metadata `License: Apache-2.0`) and the Qdrant engine it talks to is Apache-2.0
+# (https://github.com/qdrant/qdrant/blob/master/LICENSE). A vector store ships NO model
+# weights, so there is nothing to attest beyond the permissive CODE license (ADR-0012,
+# verified 2026-07-16 for `latence-retrieval[backend-qdrant]`, same dependency). Pinned
+# `>=1.10` for `collection_exists` + the modern `upsert`/`set_payload`/`delete` signatures.
+client = [
+    "qdrant-client>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+# The ONE command between "pipeline finished" and "my retrieval engine serves the corpus".
+# A sink is not a pipeline Stage (it consumes the finished Export, it does not produce a
+# Record), so it deliberately registers NO `latence.providers` entry point — it ships its own
+# console script instead and the pipeline seam stays exactly as wide as it was (ADR-0017).
+[project.scripts]
+latence-sink-qdrant = "latence_sink_qdrant.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_sink_qdrant"]

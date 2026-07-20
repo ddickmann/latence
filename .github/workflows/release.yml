@@ -3,13 +3,26 @@ name: Release
 # Cut a release by pushing a version tag:  git tag v0.1.0 && git push origin v0.1.0
 #
 # What fires automatically on a v* tag:
-#   1. build          — build wheels + sdists for every package into dist/
-#   2. github-release  — create the GitHub Release with generated notes + attach dist/*
+#   1. build           — build wheels + sdists for every package into dist/
+#   2. release-integrity — per-release CycloneDX SBOM + SHA256SUMS + a keyless Sigstore
+#                        signature over SHA256SUMS (scripts/release-integrity.sh)
+#   3. github-release  — create the GitHub Release with generated notes + the verification
+#                        instructions + the CVD-policy link, and attach the whole signed
+#                        asset set (dists, sbom.cdx.json, SHA256SUMS, the Sigstore bundle)
 #
 # What is scaffolded but DELIBERATELY OFF (maintainer-manual-publish policy):
-#   3. pypi-publish    — PyPI Trusted Publishing (OIDC). Present, wired, and gated behind
-#                        `if: false` + a protected `pypi` Environment. It NEVER fires until
+#   4. pypi-publish    — PyPI Trusted Publishing (OIDC). Present, wired, and gated behind
+#                        `if: ${{ false && … }}` + a protected `pypi` Environment. It NEVER fires until
 #                        a maintainer flips it on. See the enable checklist on that job.
+#
+# DRY RUN: `workflow_dispatch` with dry_run=true runs build + release-integrity (signing
+# included, because the OIDC identity is real) and uploads the asset set as a workflow
+# artifact WITHOUT creating or touching a GitHub Release. See docs/RELEASING.md.
+#
+# Select the TAG under "Use workflow from": Sigstore certifies the ref the run is on, so only
+# a run on the tag rehearses the identity a published release actually pins. A rehearsal from a
+# branch is still signed and still valid — VERIFY.md then quotes that branch identity and marks
+# the set as a rehearsal — but a non-dry run on a non-tag ref is refused outright.
 on:
   push:
     tags:
@@ -19,6 +32,10 @@ on:
       tag:
         description: "Existing tag to (re)build a release for, e.g. v0.1.0"
         required: true
+      dry_run:
+        description: "Rehearse only: build + sign + SBOM, upload as an artifact, create NO release"
+        type: boolean
+        default: true
 
 # Least privilege by default; each job elevates only what it needs.
 permissions:
@@ -69,35 +86,146 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  github-release:
-    name: GitHub Release (notes + artifacts)
+  # ----------------------------------------------------------------------------------
+  # Release integrity — the CRA-facing evidence every release carries.
+  #
+  # scripts/release-integrity.sh assembles the asset set (dists + per-release CycloneDX
+  # SBOM + SHA256SUMS + VERIFY.md) and signs SHA256SUMS with KEYLESS Sigstore. Keyless
+  # means the signing identity is THIS workflow, certified by Fulcio from the job's OIDC
+  # token and logged in Rekor — no long-lived private key exists to store, rotate or leak.
+  # That is why `id-token: write` is the only elevated permission here, and why the
+  # verification identity an adopter pins is the workflow path + the tag ref.
+  # ----------------------------------------------------------------------------------
+  release-integrity:
+    name: SBOM + sign (Sigstore keyless)
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      contents: write # create the Release and upload assets
+      contents: read
+      id-token: write # Fulcio needs the job's OIDC token; no PyPI/GitHub secret involved
     steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # A run executes the workflow DEFINITION from the ref it is on, and this job checked out
+      # that ref above — so the file on disk IS the definition in force. `pypi-publish` cannot
+      # report its own gate (a skipped job emits nothing at all: exit 0, no annotation, no
+      # summary line), which is how "green release run, nothing on PyPI" becomes
+      # indistinguishable from a successful publish. Report it here, where the job always runs.
+      - name: State the PyPI gate status for this ref
+        run: bash scripts/pypi-gate-status.sh .github/workflows/release.yml | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Keyless Sigstore certifies the job_workflow_ref of THIS RUN, not the `tag` input. A
+      # run dispatched from a branch therefore signs under `release.yml@refs/heads/<branch>`,
+      # which is NOT the identity a published release's VERIFY.md pins — so a release cut that
+      # way would ship instructions that cannot verify its own signature, indistinguishable to
+      # an adopter from tampering. Fail closed: a real release must run on the tag ref (push the
+      # tag, or select the tag under "Use workflow from"). Dry runs may rehearse from anywhere;
+      # release-integrity.sh then states the branch identity truthfully and marks the set as a
+      # rehearsal.
+      - name: Refuse to publish under a non-tag signing identity
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          case "$WORKFLOW_REF" in
+            *"@refs/tags/${TAG}") echo "signing identity: ${WORKFLOW_REF}" ;;
+            *)
+              echo "::error::this run signs under '${WORKFLOW_REF}', but a published ${TAG} release must be signed under '...@refs/tags/${TAG}'. Push the tag, or re-dispatch with ${TAG} selected as the ref."
+              exit 1
+              ;;
+          esac
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
       - name: Download built distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist
 
+      # --sign is explicit: the script has no default and never silently skips signing, so a
+      # missing `id-token: write` fails the job instead of quietly shipping unsigned assets.
+      - name: Generate SBOM, checksum, and sign
+        run: |
+          bash scripts/release-integrity.sh \
+            --tag "${{ github.event.inputs.tag || github.ref_name }}" \
+            --dist dist \
+            --out release-assets \
+            --repo "${{ github.repository }}" \
+            --workflow-ref "${{ github.workflow_ref }}" \
+            --sign
+
+      - name: Summarise
+        run: |
+          {
+            echo "## Release integrity"
+            echo '```'
+            cat release-assets/SHA256SUMS
+            echo '```'
+            cat release-assets/VERIFY.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload signed release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub Release (notes + signed artifacts)
+    runs-on: ubuntu-latest
+    needs: release-integrity
+    # A dry run rehearses build + SBOM + signing and stops here: no Release is created,
+    # nothing is published. The signed asset set is still downloadable from the run.
+    if: ${{ github.event.inputs.dry_run != 'true' }}
+    permissions:
+      contents: write # create the Release and upload assets
+    steps:
+      # The signed asset set already CONTAINS the distributions, staged flat next to the
+      # SBOM, SHA256SUMS and its Sigstore bundle — so the Release carries exactly the set
+      # SHA256SUMS covers. Attaching dist/ separately would ship files the checksums do
+      # not account for.
+      - name: Download signed release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Fail if the release is not signed
+        run: |
+          test -s release-assets/SHA256SUMS.sigstore.json \
+            || { echo "::error::no Sigstore bundle — refusing to publish an unsigned release"; exit 1; }
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true # auto changelog from merged PRs since the last tag
+          # VERIFY.md is generated by release-integrity.sh from the same tag/repo that were
+          # signed, so the notes' verify command and CVD link can never drift from the assets.
+          body_path: release-assets/VERIFY.md
+          append_body: true
           fail_on_unmatched_files: true
-          files: dist/*
+          files: release-assets/*
 
   # ----------------------------------------------------------------------------------
   # PyPI Trusted Publishing (OIDC) — SCAFFOLDED, DISABLED.
   #
-  # This job is intentionally NOT active: `if: false` short-circuits it on every run so a
-  # tag push can never auto-publish to PyPI. It respects the maintainer-manual-publish
-  # policy: releasing to PyPI stays a deliberate, human-gated act.
+  # This job is intentionally NOT active: the leading `false &&` in its `if:` short-circuits
+  # it on every run so a tag push can never auto-publish to PyPI. It respects the
+  # maintainer-manual-publish policy: releasing to PyPI stays a deliberate, human-gated act.
   #
-  # ENABLE CHECKLIST (do all four, then delete the `if: false` line):
+  # ENABLE CHECKLIST (do all four; step 4 is the only edit that changes behaviour):
   #   1. On PyPI, create each distribution project (latence-core, latence-parser-*, …) and
   #      add a Trusted Publisher: owner=ddickmann, repo=latence-framework,
   #      workflow=release.yml, environment=pypi. (No API token is ever stored — OIDC only.)
@@ -105,14 +233,29 @@ jobs:
   #      maintainers as Required reviewers so each publish waits for a manual approval.
   #   3. Decide the brand/namespace first (see docs/RELEASING.md → "Open decisions"): the
   #      `latence-*` names must be available/owned on PyPI, or the publish 403s.
-  #   4. Remove `if: false` below. The `id-token: write` permission + the pinned
-  #      pypa/gh-action-pypi-publish action then do a tokenless OIDC upload of dist/*.
+  #   4. Remove the `false &&` from the `if:` on `pypi-publish` below (keep the `dry_run`
+  #      clause), and MERGE THAT TO `main` BEFORE THE TAG IS CUT. The `id-token: write`
+  #      permission + the pinned pypa/gh-action-pypi-publish action then do a tokenless OIDC
+  #      upload of dist/*.
+  #
+  #      ORDERING IS LOAD-BEARING, NOT STYLE. A run executes the workflow definition from the
+  #      REF IT IS ON, so a run on refs/tags/v0.1.0 uses release.yml AS IT EXISTS AT THAT TAG.
+  #      Enabling on `main` after v0.1.0 was tagged does nothing for v0.1.0: pypi-publish still
+  #      short-circuits and is silently skipped. Nor can you dispatch from `main` instead — the
+  #      "Refuse to publish under a non-tag signing identity" step above rejects any non-dry run
+  #      whose signing identity is not `…@refs/tags/<tag>`. The tag is the only ref allowed to
+  #      publish, so the tag must be the ref that carries the enable.
+  #      Already tagged? See docs/GO-LIVE-RUNBOOK.md → Step 4 for the two recovery options.
   # ----------------------------------------------------------------------------------
   pypi-publish:
     name: Publish to PyPI (Trusted Publishing — DISABLED)
-    if: false # <<< remove to enable; see the ENABLE CHECKLIST above
+    # <<< remove the `false &&` to enable; see the ENABLE CHECKLIST above. The dry_run clause
+    # stays either way, so a rehearsal can never reach PyPI.
+    if: ${{ false && github.event.inputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
-    needs: build
+    # Gated on release-integrity, not build: nothing leaves this workflow before the SBOM is
+    # produced and the checksum file is signed.
+    needs: release-integrity
     environment:
       name: pypi
       url: https://pypi.org/project/latence-core/
@@ -131,5 +274,9 @@ jobs:
           packages-dir: dist
           # print-hash surfaces the uploaded file digests in the log for auditability.
           print-hash: true
+          # PEP 740 digital attestations, generated from the same OIDC identity as the
+          # Trusted Publishing upload, so an installer can verify provenance from PyPI too.
+          # This is the PyPI-side counterpart of the Sigstore signature on the GitHub Release.
+          attestations: true
           # To rehearse against TestPyPI first, set:
           # repository-url: https://test.pypi.org/legacy/

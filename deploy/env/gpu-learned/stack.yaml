@@ -1,0 +1,180 @@
+# deploy/env/gpu-learned/stack.yaml — the slice smoke.sh drives on the GPU (issue #198).
+#
+# The SMALLEST stack that instantiates every learned Provider this environment promises, so both
+# GPU gates have something to speak for:
+#
+#   parse -> chunk -> GLiNER2 fused entity+relation -> BOTH learned redactors (GLiNER-PII and the
+#   ADR-0044 financial-floor GLiNER2 one) -> GLinker disambiguation -> graph -> KG export + RAG
+#   corpus export with the Granite r2 GPU-tier dense leg.
+#
+# Every learned Stage pins `device: cuda` — NOT `auto`. `auto` would resolve to cuda on a GPU pod
+# and to cpu on a CPU host, which is exactly how a GPU smoke test quietly turns into a CPU smoke
+# test. Pinning cuda means a host without a GPU FAILS the gate instead of silently narrowing it.
+#
+# `latence env placement` drives each learned component here through one real inference and asserts
+# it allocated CUDA memory doing it (the #191 guard). `latence env verify` refuses this environment
+# if any Provider in `learned_providers` is missing from this file.
+#
+# The two redaction Stages are CHAINED, not siblings (audit R5-12): GLiNER-PII (#191's Provider —
+# the one whose silent CPU fallback started this) feeds GLiNER2 (#192's pinned checkout API,
+# carrying the ADR-0044 financial-PII floor), and the corpus Export hangs off the LAST link. They
+# were siblings off `content_screen` with `export_corpus` depending only on `redact_financial`,
+# which made `redact_pii` wired-but-dead: it ran on the GPU, passed the #198 placement probe and
+# contributed its Stage counts, while the Runner threaded only the declared parent's output into
+# the Export — so none of its person/email/phone/address/credit-card masks reached
+# `records.parquet`. The financial floor firing via the exported branch is exactly why that read
+# green. Chaining is safe because Redaction composes: each Redactor detects on the chunk's clean
+# `content` (never on a predecessor's `masked_content`), and `finalize_redacted_chunk` UNIONs the
+# upstream spans in, so each mask stays attributable to exactly one detector.
+#
+# NOT here: `parser.endpoint`. It IS installed and IS registered by this environment — it is the
+# ADR-0030 boundary across which the transformers>=5 OCR VLMs are reached (see environment.yaml's
+# `excluded_packages`) — and gate 2 asserts it imports. Driving it would need a live served-OCR
+# endpoint, which is #196's environment, not this one's.
+#
+# `{STORAGE_URI}` / `{CORPUS_DIR}` are filled by the harness (`latence stack validate`).
+name: latence-gpu-learned-env-smoke
+storage_uri: "{STORAGE_URI}"
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: "{CORPUS_DIR}"
+      sensitivity: internal
+      extensions: [txt, md, markdown, pdf, zip]
+
+  - name: intake_screen
+    capability: intake_screening
+    provider: screening.intake_signature
+    depends_on: [source]
+    config:
+      max_bytes: 2097152
+      max_zip_ratio: 50.0
+
+  - name: parse
+    capability: parse
+    provider: parser.pdfplumber
+    depends_on: [intake_screen]
+
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    # 640 chunker-tokens is the calibrated safe near-max for the gliner family's 768-token
+    # mdeberta-v3 window (the pod measurement, see stacks/gpu-sota-pod.yaml).
+    config: {max_tokens: 640, overlap_tokens: 80, min_tokens: 8}
+
+  - name: content_screen
+    capability: content_screening
+    provider: screening.content_keyword
+    depends_on: [chunk]
+
+  # GLiNER2 fused extraction. Carries the #190 JIT fix: the Provider calls the shared
+  # neutralize_torch_jit() (PYTORCH_JIT=0) BEFORE it evaluates "from gliner2 import GLiNER2" —
+  # the ordering is the fix, because that import is what scripts the mdeberta-v3 encoder's
+  # relative-position helpers, which then die in nvrtc on CUDA 13 ("failed to open
+  # libnvrtc-builtins.so.13.0") on the first forward. Nothing to configure here — the fix lives in
+  # the Provider's load path, not in this file; see ADR-0036 (W9-jit).
+  - name: extract
+    capability: fused_entity_relation
+    provider: fused_entity_relation.gliner2
+    depends_on: [content_screen]
+    config:
+      device: cuda
+      labels: [organization, person]
+      relation_labels: [works for, partner of]
+      threshold: 0.3
+
+  # #191's Provider, on the device it was configured for. gliner 0.2.x never auto-places, so this
+  # Stage is the one the placement probe exists for.
+  - name: redact_pii
+    capability: redaction
+    provider: redaction.gliner_pii
+    depends_on: [content_screen]
+    config:
+      device: cuda
+      pii_labels: [person, email, phone number, address, credit card number]
+
+  # #192's Provider on its pinned gliner2 checkpoint API, carrying the ADR-0044 financial-PII floor.
+  # `pii_labels` is REQUIRED: the Provider hard-raises on a missing/empty list (the entity type set
+  # is supplied per Pipeline; ADR-0038 unions the induced `pii_types` on top of it at run). Without
+  # it this Stage cannot be constructed at all — gates 3 and 4 of smoke.sh fail on a real pod while
+  # every offline gate stays green (audit R5: `env verify` checks names, and `stack validate` on a
+  # CPU host skips this `device: cuda` Stage before the Provider is built). The set below IS the
+  # generator's `latence_core.setup.wizard.FINANCIAL_PII_LABELS` floor, kept in sync by
+  # test_env_stack_constructible.py.
+  - name: redact_financial
+    capability: redaction
+    provider: redaction.gliner2
+    # CHAINED behind redact_pii (audit R5-12) so both Redactors' masks reach the exported corpus.
+    depends_on: [redact_pii]
+    config:
+      device: cuda
+      pii_labels:
+        [
+          person,
+          email,
+          phone number,
+          address,
+          iban,
+          credit card number,
+          tax id,
+          bank account number,
+          social security number,
+        ]
+
+  - name: profiling
+    capability: profiling
+    provider: profiling.statistical
+    depends_on: [parse, extract]
+
+  # ADR-0046 GLinker — compute="gpu", so the CPU/text environment (#195) can only assert that it
+  # IMPORTS. This is where it finally runs. Its documented graceful degradation (a backend load
+  # failure falls back to the string cascade and still emits correct records) is precisely the
+  # #191 shape, which is why the placement probe measures CUDA bytes rather than trusting output.
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.glinker
+    depends_on: [extract]
+    config:
+      device: cuda
+      context_window: 200
+      threshold: 0.3
+      use_reranker: true
+      use_flash_deberta: true
+      # OFF per the ER audit (FIX-1): the Granite retrieval embedder collapses distinct short
+      # entity names. Recall is carried by the neural linker + string cascade + the fuzzy rung.
+      use_embedding_merge: false
+      use_fuzzy_merge: true
+      min_similarity: 0.90
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config: {corpus_id: latence-gpu-learned-env-smoke}
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+    config: {basename: graph}
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact_financial]
+    config:
+      basename: corpus
+      # The GPU tier of the blessed Granite r2 default (ADR-0045): the 311m multilingual
+      # checkpoint at 768 dims, bf16 + FA2 when flash_attn is importable (the perf seam falls back
+      # to sdpa on its own if not). Licensing per ADR-0012, verified separately 2026-07-18:
+      #   WEIGHTS ibm-granite/granite-embedding-311m-multilingual-r2 — Apache-2.0 (IBM model card)
+      #   CODE    sentence-transformers / transformers loader path   — Apache-2.0
+      embedder:
+        provider: embedding.sentence_transformers
+        config:
+          model: ibm-granite/granite-embedding-311m-multilingual-r2
+          dimension: 768
+          device: cuda

@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from latence_core.capability import DeltaProcessor, ProviderRegistry
+from latence_core.capability import DeltaProcessor, DocumentEnumerator, ProviderRegistry
 from latence_core.contracts import (
     ChunkRecord,
     DeletionMode,
@@ -70,6 +70,8 @@ from latence_core.state.incremental import compute_drift
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from latence_core.contracts import Record
     from latence_core.quality import QualityReport
 
@@ -194,7 +196,15 @@ class DeltaRunner:
             doclevel_records=new_doclevel,
             induced_schema=new_schema,
             documents_reused=len(reusable_ids),
-            documents_extracted=len(current_doc_ids) - len(reusable_ids),
+            # Derived from the documents this run ACTUALLY produced (the union manifest), not
+            # from the discovery pass: a Source whose cheap enumeration is partial — SharePoint
+            # Online can only content-address the items Graph reports a ``sha256Hash`` for —
+            # under-reports ``current_doc_ids``, and the old
+            # ``len(current_doc_ids) - len(reusable_ids)`` then reported 0 extracted for a run
+            # that re-extracted the whole library (audit R3-connectors_ingestion-8). The manifest
+            # counts every live document, so manifest − reused is exactly the freshly-extracted
+            # set. Identical on a Source that enumerates completely.
+            documents_extracted=len(current_manifest) - len(reusable_ids),
         )
         return self._attach_churn(pipeline, run_id, report, churn)
 
@@ -262,6 +272,10 @@ class DeltaRunner:
         # this run) and delete them, then exclude them at Source too as a belt-and-braces guard.
         if deletion_mode is DeletionMode.PURGE:
             self._purge_source_files(pipeline, set(deleted))
+            # ...and the same erasure has to reach the DERIVED tables the Export publishes outside
+            # this storage tree, or the purged text stays readable there (audit R7-invariants-1).
+            # Also before the re-run, so the re-run's own registration republishes the survivors.
+            self._purge_derived_tables(pipeline)
         all_deleted = sorted(set(deleted) | self._prior_deletions(store, parent_version))
         excluded_pipeline = self._with_source_exclusions(pipeline, all_deleted)
         report = self._runner.run(excluded_pipeline, run_id=run_id)
@@ -330,6 +344,42 @@ class DeltaRunner:
                 doc_id = "sha256:" + hashlib.sha256(data).hexdigest()
                 if doc_id in purged_ids:
                     storage.remove(uri)
+
+    @staticmethod
+    def _purge_derived_tables(pipeline: Pipeline) -> None:
+        """Erase every DERIVED catalog table this Pipeline's Exports publish into (#184).
+
+        A Purge that stops at this storage tree is not an erasure. The optional ``iceberg`` block
+        (:mod:`latence_core.iceberg`) copies the whole corpus — ``content`` included — into the
+        catalog's own warehouse, which is *outside* ``storage_uri`` and therefore untouched by
+        :meth:`_purge_source_files`, :meth:`~...CorpusStore.expunge_records` and
+        :meth:`_purge_run_artifacts` alike. In the DEFAULT ``mode: append`` the post-purge re-export
+        merely appends a second data file, leaving the purged rows in the table's CURRENT snapshot:
+        an ordinary ``table.scan()`` returned erased text while the tutorial promised removal
+        "everywhere" (audit R7-invariants-1).
+
+        Called BEFORE the survivor re-run, exactly like :meth:`_purge_source_files`: the re-run's
+        own registration then republishes the surviving corpus onto an emptied table, so ``append``
+        converges on the survivors without the operator having to reconfigure the mode.
+
+        Off-by-default is preserved end-to-end: an Export with no ``iceberg`` block builds no target
+        (``build_iceberg_output`` returns ``None``), so a purge on the default stack does exactly
+        what it did before and never imports ``pyiceberg`` (ADR-0016). When the block IS present,
+        every failure — an unreachable catalog, a missing optional dependency, a refused commit — is
+        a typed error that FAILS THE PURGE (ADR-0034), because a right-to-be-forgotten command must
+        never exit 0 over a warehouse it could not reach.
+        """
+        from latence_core.iceberg import build_iceberg_output
+
+        for stage in pipeline.stages:
+            if stage.capability is not CapabilityKind.EXPORT:
+                continue
+            config = stage.config or {}
+            target = build_iceberg_output(
+                config.get("iceberg"), default_table=str(config.get("basename", "records"))
+            )
+            if target is not None:
+                target.erase()
 
     def _purge_run_artifacts(self, pipeline: Pipeline) -> None:
         """Wipe every run's artifact tree under ``_latence/runs`` (the Purge erasure step).
@@ -525,26 +575,46 @@ class DeltaRunner:
     def _current_document_ids(self, pipeline: Pipeline, excluded: list[str]) -> set[str]:
         """The content-addressed ids of the current live source documents (minus ``excluded``).
 
-        Enumerates each Source Stage (reading + hashing the source bytes, the cheap content-address
-        pass — NOT the expensive per-document extraction the reuse skips) and collects every
-        ``provenance.document_id`` the Source would emit, dropping the durably-deleted ids in
-        ``excluded``. Content-addressing makes an id match a byte-identical match, so intersecting
-        these with a prior Version's committed doc ids yields exactly the UNCHANGED (reusable)
-        documents; the rest are new/changed and get re-extracted.
+        Enumerates each Source Stage and collects every ``provenance.document_id`` the Source
+        would emit, dropping the durably-deleted ids in ``excluded``. Content-addressing makes an
+        id match a byte-identical match, so intersecting these with a prior Version's committed
+        doc ids yields exactly the UNCHANGED (reusable) documents; the rest are new/changed and
+        get re-extracted.
+
+        **This pass must not fetch content.** It runs BEFORE the reuse exclusions are known, so
+        anything it transfers is transferred unconditionally — a discovery pass that downloaded
+        every document would make a delta run over an unchanged remote library cost a full run
+        (in fact more: the changed documents would then be fetched a second time by the run
+        itself), erasing the whole saving ADR-0018 promises. A Source that can name its documents
+        without fetching them therefore implements
+        :class:`~latence_core.capability.DocumentEnumerator` and that is used here; only a Source
+        that cannot falls back to ``produce`` — correct, just not free. Either way the durable
+        deletions are pushed into the Source's ``exclude_document_ids`` first, so even the
+        fallback never re-fetches a document this run is going to drop anyway.
+
+        An enumeration may be **partial** (a Source that can name only some of its documents
+        without fetching them omits the rest — see ``DocumentEnumerator``). The returned set is
+        therefore a lower bound on the live documents: it is used only to pick the *reusable*
+        ones, so a missing id costs a reuse and nothing else. Nothing downstream may treat it as
+        the corpus census — that is the union manifest.
         """
         storage = Storage.for_uri(pipeline.storage_uri)
         excluded_set = set(excluded)
+        enumeration_pipeline = self._with_source_exclusions(pipeline, sorted(excluded_set))
         ids: set[str] = set()
-        for stage in pipeline.stages:
+        for stage in enumeration_pipeline.stages:
             if stage.capability is not CapabilityKind.SOURCE:
                 continue
             provider_cls = self._registry.load(stage.provider)
             provider = provider_cls(stage.config or {})
-            produce = getattr(provider, "produce", None)
-            if produce is None:  # pragma: no cover - a Source always produces
-                continue
-            for parser_input in produce(storage):
-                doc_id = parser_input.provenance.document_id
+            if isinstance(provider, DocumentEnumerator):
+                candidates: Iterator[str] = provider.document_ids(storage)
+            else:
+                produce = getattr(provider, "produce", None)
+                if produce is None:  # pragma: no cover - a Source always produces
+                    continue
+                candidates = (i.provenance.document_id for i in produce(storage))
+            for doc_id in candidates:
                 if doc_id not in excluded_set:
                     ids.add(doc_id)
         return ids

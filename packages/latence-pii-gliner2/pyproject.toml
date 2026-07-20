@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Learned PII Redaction Provider over the fastino GLiNER2 framework (mdeberta-v3, CPU/GPU) for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "pii", "redaction", "gliner", "gliner2"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -34,6 +34,20 @@ classifiers = [
 # H-G1 dep cap: 'gliner2' is a released 1.x library (latest 1.3.2, verified 2026-07-09), so it
 # carries a major-boundary upper cap ('<2') so a downstream install can't silently pull an
 # API-breaking 2.x release.
+# #192 LOWER bound (>=1.3, was >=1.0): the old floor admitted releases whose API this Provider
+# CANNOT drive, which is exactly how a fresh install died at model load with a native
+# AttributeError. Verified by inspecting the released gliner2 distributions (pypi.org/project/
+# gliner2, 2026-07-18):
+#   1.0.x        GLiNER2 has NO 'batch_extract_entities' at all      -> AttributeError at load
+#   1.1.x        no 'include_spans' / 'max_len' kwargs               -> TypeError (and no offsets)
+#   1.2.0-1.2.5  no 'max_len' kwarg                                  -> TypeError
+#   1.2.6+       full surface (max_len + include_spans; from_pretrained takes quantize/compile)
+#   1.3.x        the pod-validated line (1.3.2) — same surface as 1.2.6
+# The floor is 1.3 (not 1.2.6) because 1.3.x is the line actually validated on the pod. This pin
+# is the PRIMARY gate (ADR-0016: the per-Provider package owns its pin) — drift now fails at
+# dependency RESOLUTION; latence_pii_gliner2._compat is the second gate for a hand-installed env
+# the resolver never saw, turning a mismatch into a typed ProviderError (ADR-0034), never a raw
+# native AttributeError. Keep the specifier below in sync with _compat.SUPPORTED_SPEC.
 # NOTE (verified 2026-07-09 against pypi.org/pypi/gliner2/json): the BASE 'gliner2' dist does
 # NOT ship torch/transformers — those live only in the 'gliner2[local]' extra ("full local
 # inference"). This Provider does LOCAL inference (GLiNER2.from_pretrained(...).extract_entities),
@@ -44,7 +58,7 @@ classifiers = [
 # without it. peft is Apache-2.0 (github.com/huggingface/peft, verified 2026-07-10).
 dependencies = [
     "latence-core",
-    "gliner2[local]>=1.0,<2",
+    "gliner2[local]>=1.3,<2",
     "peft>=0.10",
 ]
 

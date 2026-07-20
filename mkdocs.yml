@@ -95,6 +95,12 @@ markdown_extensions:
   - toc:
       permalink: true
       toc_depth: 3
+      # GitHub-compatible heading slugs. The same markdown is read on github.com and on
+      # the docs site, so a hand-written `#anchor` must resolve on BOTH. Python-Markdown's
+      # default slugifier collapses runs of separators ("GPU requirements + the Blackwell
+      # note" -> `gpu-requirements-the-blackwell-note`) while GitHub keeps them
+      # (`gpu-requirements--the-blackwell-note`); pymdownx's slugify matches GitHub.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
   - pymdownx.betterem
   - pymdownx.caret
   - pymdownx.details
@@ -133,6 +139,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - getting-started/index.md
+      - Read the results — the run console: getting-started/run-console.md
       - Fresh-pod walkthrough: TUTORIAL-fresh-pod-walkthrough.md
       - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
       - GPU testing guide: GPU-TESTING-GUIDE.md
@@ -154,9 +161,18 @@ nav:
       - Run & validate a stack: running-a-stack.md
       - Run a bake-off: running-a-bakeoff.md
       - Tune a stack per device: tuning.md
+      - Throughput envelopes (measured): perf-results.md
       - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
+      - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
       - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+      - Iceberg-table Export (optional): iceberg-export.md
       - Retrieval-quality tooling (design): retrieval-tooling.md
+      - Run the public benchmarks: running-the-benchmarks.md
+      - Deploy (Compose · Helm · air-gapped): deployment.md
+      - Observability (metrics · tracing · export): observability.md
+      - Secrets handling: secrets.md
+  - Benchmarks:
+      - Public benchmark results: BENCHMARKS.md
   - Decision Log (ADRs):
       - adr/index.md
       - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
@@ -190,6 +206,7 @@ nav:
       - 0029 — Delta Runner affected-set: adr/0029-delta-runner-affected-set-via-blocking-keys-and-source-exclusion-deletion.md
       - 0030 — Performance path + second Runner adapter: adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md
       - 0031 — Entity Extraction true original offsets: adr/0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md
+      - 0032 — Strict mypy on tests + conftest collision: adr/0032-strict-mypy-on-tests-and-the-conftest-module-collision.md
       - 0033 — Streaming, memory-bounded Runner: adr/0033-streaming-memory-bounded-runner.md
       - 0034 — Observability, typed errors, tracing seam: adr/0034-observability-typed-errors-and-thin-tracing-seam.md
       - 0035 — Second CPU reference Providers: adr/0035-second-cpu-reference-providers-for-single-provider-capabilities.md
@@ -203,11 +220,14 @@ nav:
       - 0044 — Universal redaction floor: adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md
       - 0045 — Granite r2 default Embedder: adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md
       - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
+      - 0047 — Metrics export seam (Prometheus / OTel): adr/0047-observability-export-seam-prometheus-otel-optional.md
       - 0048 — Retrieval tooling is strictly stateless: adr/0048-retrieval-tooling-is-strictly-stateless.md
       - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
       - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md
       - 0051 — DuckDB zero-ops multi-hop graph retrieval: adr/0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md
-      - 0052 — Retrieval MCP: ported hardening + config-driven copy: adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
+      # NOTE: the title contains a colon, so it MUST stay quoted — an unquoted
+      # "0052 — Retrieval MCP: ported …" makes mkdocs.yml unparseable YAML.
+      - "0052 — Retrieval MCP: ported hardening + config-driven copy": adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
       - 0053 — SPLADE structured composition: adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md
   - API Reference:
       - reference/index.md
@@ -220,6 +240,11 @@ nav:
       - Errors & tracing: reference/errors.md
       - Example provider (pdfplumber): reference/example-provider.md
   - Project Internals:
+      - Continuity & security process: CONTINUITY.md
+      - Threat model: THREAT-MODEL.md
+      - SBOM & supply chain: SBOM.md
+      - Releasing: RELEASING.md
+      - Go-live runbook (flip public): GO-LIVE-RUNBOOK.md
       - Architecture audit (S1): audits/S1-architecture-audit.md
       - Algorithmic asset inventory: ASSET-INVENTORY.md
       - Dependency audit: DEPENDENCY-AUDIT.md

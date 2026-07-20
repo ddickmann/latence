@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-benchmark"
+version = "0.1.0"
+description = "The reproducible PUBLIC benchmark harness for the Latence framework: pinned public datasets, pinned stack configs, per-Stage benchmark suites and a published results page. Not a pipeline Provider — it registers nothing under latence.providers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["benchmark", "ocr", "document-parsing", "reproducible", "ai-ready-data"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# The harness RUNS the pipeline's Parse Stage through the real Provider registry, so it depends on
+# latence-core (and on whichever Provider package the pinned stack config names — installed by the
+# adopter, exactly as for a normal run). It pulls NO heavy dep of its own: ADR-0016's thin-core
+# discipline applies here too, so dataset acquisition rides an extra (below), never the base
+# install, and every offline test runs against a local dataset root with no network at all.
+dependencies = [
+    "latence-core",
+]
+
+[project.optional-dependencies]
+# Remote dataset acquisition. `huggingface_hub` (Apache-2.0, code:
+# https://github.com/huggingface/huggingface_hub/blob/main/LICENSE) is a pure client library and
+# ships NO model weights; the DATASET it downloads carries its own, separately verified license
+# (ADR-0012) recorded on every DatasetSpec and enforced by the license gate before a byte is
+# fetched. Offline runs use `LocalDatasetSource` and never need this extra.
+hub = [
+    "huggingface-hub>=0.23",
+]
+
+[project.scripts]
+# The ONE command an outsider runs (AC-1). See README.md.
+latence-benchmark = "latence_benchmark.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_benchmark"]

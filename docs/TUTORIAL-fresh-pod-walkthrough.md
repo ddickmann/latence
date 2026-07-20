@@ -82,6 +82,7 @@ pip install --break-system-packages \
   -e packages/latence-parser-lighton-vllm \
   -e packages/latence-schema-inducer \
   -e packages/latence-extract-gliner2 \
+  -e packages/latence-pii-gliner2 \
   -e packages/latence-pii-gliner \
   -e packages/latence-disambig-glinker \
   -e packages/latence-linkpred-ultra \
@@ -100,7 +101,16 @@ pip install --break-system-packages \
 ```
 
 - `gliner2 peft accelerate` — the GLiNER2 fused entity+relation extractor (mdeberta-v3 backbone).
-- `gliner` — the learned PII redactor (`redaction.gliner_pii`).
+- The redactor both §3's wizard and §4's hand-written stack wire is `redaction.gliner2` (#197,
+  ADR-0041 §7a) — the SAME GLiNER2 engine `extract` runs, so redaction adds no second model library.
+  Do not confuse the two names: the `gliner2` line in the pip block above is the third-party **PyPI
+  wheel** (the library + mdeberta-v3 backbone), while the `redaction.gliner2` **entry point** is
+  registered only by the **`packages/latence-pii-gliner2`** distribution — which is why that package
+  is in the editable list.
+- `gliner` + **`packages/latence-pii-gliner`** — the *alternative* learned redactor
+  `redaction.gliner_pii`. Still fully supported (it drops into §4's `redact` stage unchanged), just
+  not what the guided setup blesses. Installed here only so you can swap it in; drop both lines if
+  you do not want the second model library.
 - `glinker flashdeberta` — the neural GLinker entity-linker (`disambiguation.glinker`): the
   `gliner-linker-large` biencoder + `gliner-linker-rerank` reranker + FlashDeBERTa.
 - `sentence-transformers` — the Granite r2 embedder (the GLinker resolver's opt-in STS rung **and**
@@ -167,7 +177,8 @@ from latence_core.capability import ProviderRegistry
 names = set(ProviderRegistry().names())
 for n in ("source.local_folder","screening.intake_signature","parser.lighton_vllm",
           "chunk.markdown","screening.content_keyword","label_inducer.llm",
-          "fused_entity_relation.gliner2","redaction.gliner_pii","profiling.statistical",
+          "fused_entity_relation.gliner2","redaction.gliner_pii","redaction.gliner2",
+          "profiling.statistical",
           "disambiguation.glinker","graph.canonical","graph_completion.ultra",
           "context.kg_header","export.knowledge_graph","export.jsonl_parquet"):
     print(("ok " if n in names else "MISSING "), n)
@@ -208,10 +219,13 @@ the `model` — are exactly what the parser (and the `latence setup` wizard, §3
 is any placeholder (`EMPTY`); a local vLLM does not check it.
 
 > **Blackwell / FlashInfer caveat (KNOWN).** On bleeding-edge **Blackwell (SM 12.x)** GPUs, vLLM
-> 0.24's bundled FlashInfer cannot JIT the cudagraphs and fails with `FlashInfer requires sm75+`.
-> Either add `--enforce-eager` (you lose the cudagraph speedup; correctness is unaffected) **or**
-> upgrade `flashinfer` to an SM 12.x build and keep cudagraphs on. On mainstream GPUs (Hopper / Ada
-> / Ampere, CUDA ≥ 12.6) do **not** add `--enforce-eager` — it only floors your throughput.
+> 0.24's bundled FlashInfer refuses a capable `sm_120` device at startup with
+> `FlashInfer requires sm75+` (it misparses compute capability 12.0 as `12`). Export
+> **`VLLM_USE_FLASHINFER_SAMPLER=0`** before the serve — that disables only the *sampler*, so
+> cudagraphs stay ON. `--enforce-eager` also clears the abort but kills cudagraphs and floors your
+> throughput; the compatibility matrix records it as deliberately **not** the fix
+> (`FM-FLASHINFER-SM120`). The other exit is upgrading `flashinfer` to an SM 12.x build. Mainstream
+> GPUs (Hopper / Ada / Ampere, CUDA ≥ 12.6) need none of this.
 
 Sanity-check the server is up before running the pipeline:
 
@@ -261,9 +275,9 @@ capability wiring — the SAME machinery `latence stack validate` builds on, no 
 
 ```text
 source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
-  → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner_pii, financial-PII]
-  → profiling → disambiguate[glinker] → graph → complete[ultra, skip_if_unavailable]
-  → enrich(context) → export_kg + export_corpus[Granite r2, context_columns]
+  → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
+  → profiling → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
+  → enrich(context) → export_kg + export_corpus[Granite r2, context_columns, bm25]
 ```
 
 **Deterministic + scriptable (CI/repro).** `--non-interactive` takes every answer from flags, and
@@ -286,16 +300,26 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 > - **induce → `label_inducer.llm`** at **corpus** granularity (`max_labels 40`, `temperature 0`) —
 >   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
->   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner_pii`**
->   (chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus` dataflow).
+>   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner2`**
+>   (#197, ADR-0041 §7a — the SAME GLiNER2 engine `extract` runs, so redaction adds no second
+>   model library; chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus`
+>   dataflow).
 > - **disambiguate → `disambiguation.glinker`** — the neural GLinker entity-linker + audited resolver
 >   (`context_window 200`, `threshold 0.3`, reranker + FlashDeBERTa on) with the **IBM Granite r2**
 >   embedder. The precision-by-default knobs (embedding-merge OFF, fuzzy edit-distance rung +
 >   distinguishing-token guard ON) ride the provider defaults — the config stays minimal and the ER
 >   is precise out of the box.
-> - **graph → `graph.canonical` → complete → `graph_completion.ultra`** (`skip_if_unavailable: true`
->   — no vendored checkpoint means a graceful skip, never a failed run) → **`export.knowledge_graph`**
->   + **`export.jsonl_parquet`** with the Granite r2 corpus vectors.
+> - **graph → `graph.canonical`** with the ADR-0051 **`graph_features: graph_features.pagerank`**
+>   block — PageRank `centrality` + label-propagation `community` stamped on every node, promoted to
+>   `graph-nodes.parquet` columns and projected onto each chunk. These are what the retrieval
+>   Expander's graph bonuses and the Knapsack packer's centrality/cluster inputs read; without the
+>   block they are absent/`0.0`.
+> - **→ complete → `graph_completion.ultra`** (`skip_if_unavailable: true` — no vendored checkpoint
+>   means a graceful skip, never a failed run) → **`export.knowledge_graph`**
+>   + **`export.jsonl_parquet`** with the Granite r2 corpus vectors **and the ADR-0049
+>   `bm25: tokenizer.regex` block** — the index-time term statistics (`bm25-stats.json` +
+>   `bm25-postings.parquet`) the query-side sparse rescorer runs on. Without it the stack ships
+>   dense-only and the hybrid fuser has no sparse leg.
 
 > **PII note (W16, ADR-0042).** With **PII ON**, `redact` is a **chunk-level transform**: it consumes
 > the induced **chunk** stream and sets each chunk's `masked_content` (each chunk ≤ the model window,
@@ -337,9 +361,9 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 ```yaml
 # stacks/my-corpus.yaml — the enterprise-SOTA stack:
 #   source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
-#     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner_pii, financial-PII]
-#     → profiling → disambiguate[glinker] → graph → complete[ultra] → enrich(context)
-#     → export_kg + export_corpus[Granite r2]
+#     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
+#     → profiling → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
+#     → enrich(context) → export_kg + export_corpus[Granite r2 + bm25]
 #
 # {CORPUS_DIR} / {STORAGE_URI} are placeholders — fill them in §4.1 before `latence run`.
 name: my-corpus-stack
@@ -415,14 +439,17 @@ stages:
       relation_labels: [works for, partner of]  # relation floor; induced relation_types union on
       threshold: 0.3
 
-  # 8) Learned PII redaction (GLiNER-PII) with FINANCIAL PII, not just person/email/phone.
+  # 8) Learned PII redaction with FINANCIAL PII, not just person/email/phone. The provider is
+  #    `redaction.gliner2` — the SAME unified GLiNER2 engine `extract` above already runs (#197,
+  #    ADR-0041 §7a), so redaction loads no second model library. (Its twin `redaction.gliner_pii`
+  #    remains supported and drops in here unchanged, but it is not what the guided setup blesses.)
   #    W16 (ADR-0042): redact is a CHUNK→CHUNK transform — it consumes the induced CHUNK stream and
   #    sets each chunk's masked_content (each chunk ≤ the model window, so no PII is truncated). It
   #    depends_on induce so the induced pii_types UNION onto this floor; enrich then reads THIS
   #    redacted chunk stream, so export_corpus is masked AND enriched.
   - name: redact
     capability: redaction
-    provider: redaction.gliner_pii
+    provider: redaction.gliner2
     depends_on: [induce]
     config:
       device: cuda
@@ -457,12 +484,24 @@ stages:
         provider: embedding.sentence_transformers
         config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
 
-  # 11) Assemble the canonical, evidence-linked knowledge graph.
+  # 11) Assemble the canonical, evidence-linked knowledge graph — WITH the ADR-0051 graph-feature
+  #     enrichment. `graph_features` resolves the PageRank computer and stamps a `centrality` score
+  #     + a label-propagation `community` id onto every node; export_kg promotes them to
+  #     graph-nodes.parquet columns and `enrich` projects them onto each chunk
+  #     (kg_node_centrality / kg_node_community). Those are the signals the retrieval Expander's
+  #     graph bonuses and the Knapsack packer's centrality/cluster inputs read — WITHOUT this block
+  #     they are all absent/0.0 and the graph half of the stack is wired but dead.
+  #     Pure Python, CPU-only, deterministic, zero extra deps, and additive: omit the block and the
+  #     emitted graph is byte-identical to before.
   - name: graph
     capability: graph_assembly
     provider: graph.canonical
     depends_on: [disambiguate]
-    config: {corpus_id: my-corpus-stack}
+    config:
+      corpus_id: my-corpus-stack
+      graph_features:
+        provider: graph_features.pagerank
+        config: {}
 
   # 12) ULTRA graph completion (zero-shot inductive link prediction). skip_if_unavailable: true —
   #     the checkpoint is not vendored, so on a host without it the Stage skips-with-flag (no
@@ -503,6 +542,13 @@ stages:
   # 14b) RAG-corpus export from the REDACTED+ENRICHED chunk stream: masked_content (materialized as
   #      the corpus text, W16) + provenance + classification + induced_labels + context_header + a
   #      dense Granite r2 embedding. context_columns: true → the two W13 Parquet columns.
+  #      `bm25` (ADR-0049) adds the INDEX-TIME sparse signal: it materializes bm25-stats.json +
+  #      bm25-postings.parquet next to the corpus — the corpus statistics the query-side BM25
+  #      rescorer runs on. WITHOUT this block no such files are written at all and the hybrid
+  #      fuser's sparse leg is dead (dense-only retrieval). `tokenizer.regex` is the reference
+  #      tokenizer (lowercase Unicode alphanumeric runs) the query side applies, so accented and
+  #      non-Latin terms match; it is not a word segmenter — an unspaced script (zh/ja/th) should
+  #      plug its own segmenter in behind the Tokenizer seam. Deterministic, CPU-only, additive.
   - name: export_corpus
     capability: export
     provider: export.jsonl_parquet
@@ -513,6 +559,9 @@ stages:
       embedder:
         provider: embedding.sentence_transformers
         config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
+      bm25:
+        provider: tokenizer.regex
+        config: {}
 ```
 
 > **Masked and enriched in one file (W16, ADR-0042).** `redact` is a **chunk→chunk transform**: it
@@ -844,6 +893,7 @@ Everything lands under `export/`:
 ```bash
 ls -la /workspace/out/_latence/runs/run-0001/export/
 #   records.jsonl        records.parquet          ← RAG corpus
+#   bm25-stats.json      bm25-postings.parquet    ← sparse (BM25) index-time signal
 #   graph-nodes.parquet  graph-edges.parquet
 #   graph.ttl            graph.graphml            ← knowledge graph
 EX=/workspace/out/_latence/runs/run-0001/export
@@ -902,6 +952,7 @@ PY
 
 ```bash
 # nodes: node_id, type (entity type), canonical_name, confidence, source_document_ids
+# + centrality (PageRank) and community (label-propagation) when `graph_features` is wired (§4 §11)
 python -c "import pyarrow.parquet as pq; t=pq.read_table('$EX/graph-nodes.parquet'); print(t.column_names); print(t.to_pylist()[:5])"
 # edges: edge_id, source_node_id, target_node_id, label, confidence (+ evidence)
 python -c "import pyarrow.parquet as pq; t=pq.read_table('$EX/graph-edges.parquet'); print(t.column_names); print(t.to_pylist()[:5])"
@@ -1036,7 +1087,7 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `parse` produces 0 docs / `openai`-client connection errors | the vLLM OCR endpoint isn't up, or `base_url`/`model` don't match the server | stand up the server (§2); `curl http://localhost:8000/v1/models` and match `parse.config.base_url` + `model` to it; `api_key: EMPTY` is fine. |
-| `FlashInfer requires sm75+` when starting vLLM on Blackwell | vLLM 0.24's bundled FlashInfer can't JIT cudagraphs on SM 12.x | add `--enforce-eager` (loses the cudagraph speedup, correctness unaffected) **or** upgrade `flashinfer` to an SM 12.x build (§2). |
+| `FlashInfer requires sm75+` when starting vLLM on Blackwell | FlashInfer's capability check misparses `sm_120` as `12` and rejects a capable device | `export VLLM_USE_FLASHINFER_SAMPLER=0` before the serve — disables only the *sampler*, cudagraphs stay ON (§2). **Not** `--enforce-eager`: it clears the abort by killing cudagraphs and flooring throughput. |
 | Model downloads hang / error on `hf_xet` (Blackwell pod) | the Hugging Face XET transfer backend is flaky on some SM 12.x pods | `export HF_HUB_DISABLE_XET=1` before downloading (§1.3). |
 | `nvrtc: failed to open libnvrtc-builtins.so.13.0` (GLiNER2/DeBERTa crash) | torch JIT on SM 12.x / cu13x | `export PYTORCH_JIT=0` before running (§1.3). |
 | Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompile-thrashes on varied-length chunks | leave `compile` at its **default OFF**; enable only for a homogeneous / uniform-length workload (§1.3). |

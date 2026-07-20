@@ -17,6 +17,7 @@ spine (Source→Parse→Export) the order is linear, but the DAG machinery is re
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -55,6 +56,12 @@ from latence_core.contracts import (
     ScreeningFinding,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
+from latence_core.observability import (
+    LineageDataset,
+    OpenLineageEmitter,
+    RunLineage,
+    dataset_for_uri,
+)
 from latence_core.pipeline import CapabilityKind, ExtractOn, Pipeline, Stage
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.profile import ProviderProfile, profile_of
@@ -85,7 +92,7 @@ from latence_core.storage import Storage
 from latence_core.tracing import RunTracer, SpanSink
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 # A Stage's output is one of the inter-Stage carriers the DAG threads between
 # Stages: Source→ParserInput; Parse→DocumentRecord; Chunk/Content-Screening→
@@ -156,13 +163,46 @@ _ACCUMULATOR_KINDS = (
 # key whose (lowercased) name contains one of these tokens is redacted before the
 # manifest is written. Matching is substring-based so ``api_key``, ``openai_api_key``,
 # ``auth_token``, ``client_secret``, ``db_password`` are all caught.
-_SENSITIVE_KEY_TOKENS = ("api_key", "apikey", "token", "secret", "password", "passwd", "credential")
+_SENSITIVE_KEY_TOKENS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    # audit-R7: certificate-based auth was the blind spot. Entra ID app-only access to Graph
+    # is *recommended* by Microsoft with a certificate, so ``private_key:``/``certificate:``
+    # inlined into a Stage config is the realistic misconfiguration — and none of the tokens
+    # above appears as a substring of either name, nor of ``passphrase``. Every key that
+    # ``latence_source_sharepoint.auth._SECRET_CONFIG_KEYS`` refuses must be covered here:
+    # that Provider guard runs when the Provider is CONSTRUCTED, which is strictly after the
+    # manifest is written, so the scrubber — not the guard's ordering — is what actually keeps
+    # a credential out of ``manifest.json``.
+    "private_key",
+    "privatekey",
+    "certificate",
+    "passphrase",
+    "keystore",
+    "keyfile",
+)
+
+# Matched against a *whole* underscore/dash/dot-delimited part of the key rather than as a
+# substring, because these are short enough that substring matching would redact innocent
+# config (``cert`` is inside ``certainty_threshold``). ``client_cert`` / ``tls.pem`` are caught
+# here; ``certainty_threshold`` is not.
+_SENSITIVE_KEY_PARTS = frozenset({"cert", "certs", "pem", "pfx", "p12"})
+
+_KEY_PART_SPLIT = re.compile(r"[^a-z0-9]+")
+
 _REDACTED = "***REDACTED***"
 
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
-    return any(token in lowered for token in _SENSITIVE_KEY_TOKENS)
+    if any(token in lowered for token in _SENSITIVE_KEY_TOKENS):
+        return True
+    return any(part in _SENSITIVE_KEY_PARTS for part in _KEY_PART_SPLIT.split(lowered))
 
 
 def scrub_sensitive(value: object) -> object:
@@ -217,9 +257,25 @@ class LocalRunner:
     """Executes a Pipeline on the local node with resumable file-based state."""
 
     def __init__(
-        self, registry: ProviderRegistry | None = None, *, span_sink: SpanSink | None = None
+        self,
+        registry: ProviderRegistry | None = None,
+        *,
+        span_sink: SpanSink | None = None,
+        lineage: OpenLineageEmitter | None = None,
     ) -> None:
         self._registry = registry or ProviderRegistry()
+        # #185: the optional OpenLineage seam. ``None`` (the default) means OFF — no event is
+        # built and no socket is opened, so a default run is byte- and behaviour-identical to a
+        # pre-#185 run. An operator who points it at a lineage endpoint
+        # (``build_lineage_emitter(url)``) gets per-Stage START/COMPLETE/FAIL RunEvents with the
+        # Stage's input/output datasets + schema facets, in the standard vocabulary every catalog
+        # (Marquez/Atlan/Collibra/Dataplex) already consumes. Counts only, never content; an
+        # emission failure is logged and swallowed — lineage never fails a run.
+        self._lineage = lineage
+        # The run-scoped lineage handle, set for the duration of ``run()`` (mirrors the
+        # ``_reuse_overlay_by_type`` pattern) so ``_run`` can emit per-Stage events without
+        # threading a parameter through the whole executor. ``None`` ⇒ lineage off.
+        self._lineage_run: RunLineage | None = None
         # #73: the optional tracing sink. ``None`` ⇒ each run's RunTracer defaults to the
         # silent-by-default LoggingSpanSink, so a normal run's output is unchanged; an operator
         # (or a downstream tracer, or a test) passes a CollectingSpanSink / their own SpanSink to
@@ -533,6 +589,87 @@ class LocalRunner:
             return cls._export_carrier(stage, pipeline)
         return DocumentRecord
 
+    def _lineage_io(
+        self,
+        pipeline: Pipeline,
+        run_id: str,
+        stage: Stage,
+        by_name: Mapping[str, Stage],
+    ) -> tuple[list[LineageDataset], list[LineageDataset]]:
+        """The datasets a Stage reads and writes, in OpenLineage terms (#185).
+
+        A Stage's **output** dataset is its checkpoint on Storage — the durable artifact the run
+        actually produces — carrying a ``schema`` facet derived from the Stage's carrier contract
+        (field names + coarse types, never a value). Its **inputs** are its parents' checkpoints,
+        so the per-Stage events chain into exactly the pipeline DAG in the catalog's graph. A
+        Stage with no parents (a Source) is the graph's entry point: its input is the location it
+        reads from (``path``/``uri`` in its config, else the Pipeline's Storage root) with no
+        schema — the raw corpus has no carrier contract yet.
+        """
+        outputs = [
+            dataset_for_uri(
+                self._checkpoint_uri(pipeline, run_id, stage.name),
+                self._output_type(stage, pipeline),
+            )
+        ]
+        parents = [by_name[p] for p in stage.depends_on if p in by_name]
+        if parents:
+            inputs = [
+                dataset_for_uri(
+                    self._checkpoint_uri(pipeline, run_id, parent.name),
+                    self._output_type(parent, pipeline),
+                )
+                for parent in parents
+            ]
+        else:
+            source = stage.config.get("path") or stage.config.get("uri")
+            location = source if isinstance(source, str) and source else pipeline.storage_uri
+            inputs = [dataset_for_uri(location)]
+        return inputs, outputs
+
+    @staticmethod
+    def _emit_stage_lineage(
+        lineage: RunLineage,
+        stage: Stage,
+        *,
+        records_in: int,
+        records_out: int,
+        duration_ms: float,
+        inputs: Sequence[LineageDataset],
+        outputs: Sequence[LineageDataset],
+        from_checkpoint: bool = False,
+        skipped: bool = False,
+        emit_start: bool = True,
+    ) -> None:
+        """Emit a Stage's START (optional) + COMPLETE pair — one place, so every exit agrees.
+
+        ``emit_start=False`` is the *executed* path, where the START was already emitted before
+        the Provider ran; the resumed and device-skipped paths emit both here because they never
+        reach that point. A consumer therefore always sees a well-formed START/COMPLETE pair per
+        Stage regardless of which path the run took.
+        """
+        if emit_start:
+            lineage.stage_start(
+                stage.name,
+                capability=stage.capability.value,
+                provider=stage.provider,
+                records_in=records_in,
+                inputs=inputs,
+                outputs=outputs,
+            )
+        lineage.stage_end(
+            stage.name,
+            capability=stage.capability.value,
+            provider=stage.provider,
+            records_in=records_in,
+            records_out=records_out,
+            duration_ms=duration_ms,
+            inputs=inputs,
+            outputs=outputs,
+            from_checkpoint=from_checkpoint,
+            skipped=skipped,
+        )
+
     @classmethod
     def _export_carrier(cls, stage: Stage, pipeline: Pipeline) -> type[StageOutput] | type[Record]:
         """Resolve an Export's pass-through carrier from its nearest producing ancestor.
@@ -754,10 +891,29 @@ class LocalRunner:
         self._reuse_overlay_by_type = {}
         for record in reuse or []:
             self._reuse_overlay_by_type.setdefault(type(record), []).append(record)
+        # #185: the run-level OpenLineage bracket. Off unless an emitter was wired, in which case
+        # the pipeline itself is one parent job whose START/COMPLETE/FAIL nests every Stage's job
+        # underneath it in the catalog. The FAIL carries the stable typed error *category* only —
+        # never the exception message, which could quote a document (ADR-0034).
+        lineage = (
+            self._lineage.for_run(pipeline.name, run_id) if self._lineage is not None else None
+        )
+        self._lineage_run = lineage
+        if lineage is not None:
+            lineage.run_start()
         try:
-            return self._run(pipeline, run_id, runner_name=runner_name)
+            report = self._run(pipeline, run_id, runner_name=runner_name)
+        except BaseException as exc:
+            if lineage is not None:
+                lineage.run_end(error_category=error_category(exc))
+            raise
+        else:
+            if lineage is not None:
+                lineage.run_end(documents=report.document_count)
+            return report
         finally:
             self._reuse_overlay_by_type = {}
+            self._lineage_run = None
 
     def _run(
         self, pipeline: Pipeline, run_id: str = "run-0001", *, runner_name: str = "local"
@@ -865,6 +1021,16 @@ class LocalRunner:
                 )
                 records_in = len(incoming)
 
+            # #185: this Stage's lineage datasets (its parents' checkpoints in, its own out),
+            # resolved once and reused by every exit below (resumed / skipped / ran / failed) so
+            # the emitted graph has the same shape whichever path the Stage takes. Built only when
+            # lineage is wired — when it is off this is two empty lists and no work at all.
+            lineage = self._lineage_run
+            lineage_in: list[LineageDataset] = []
+            lineage_out: list[LineageDataset] = []
+            if lineage is not None:
+                lineage_in, lineage_out = self._lineage_io(pipeline, run_id, stage, by_name)
+
             # P3-F1 (ADR-0036 §2) + P3-F2 (§2, the malformed-profile fix): the requested device
             # + the Provider's declared profile are re-derived on BOTH the resume and the fresh
             # path so the profile/device columns (incl. a skip flag) are STICKY across resume —
@@ -944,6 +1110,20 @@ class LocalRunner:
                         **profile_fields,  # type: ignore[arg-type]
                     )
                 )
+                # #185: a resumed Stage still belongs in the lineage graph — its dataset edges are
+                # real (the checkpoint exists and downstream reads it). Flagged ``from_checkpoint``
+                # so a catalog can tell a re-executed Stage from a replayed one.
+                if lineage is not None:
+                    self._emit_stage_lineage(
+                        lineage,
+                        stage,
+                        records_in=records_in,
+                        records_out=len(own_output),
+                        duration_ms=0.0,
+                        inputs=lineage_in,
+                        outputs=lineage_out,
+                        from_checkpoint=True,
+                    )
                 _release_dead_parents(stage)
                 continue
 
@@ -984,6 +1164,20 @@ class LocalRunner:
                         **profile_fields,  # type: ignore[arg-type]
                     )
                 )
+                # #185: a device-skipped Stage produced an (empty) dataset — recorded honestly as
+                # a COMPLETE with ``skipped=True`` and zero records out, never omitted (which would
+                # leave a hole in the catalog's graph) and never faked as a real execution.
+                if lineage is not None:
+                    self._emit_stage_lineage(
+                        lineage,
+                        stage,
+                        records_in=records_in,
+                        records_out=0,
+                        duration_ms=0.0,
+                        inputs=lineage_in,
+                        outputs=lineage_out,
+                        skipped=True,
+                    )
                 _release_dead_parents(stage)
                 continue
 
@@ -994,6 +1188,15 @@ class LocalRunner:
                 provider=stage.provider,
                 records_in=records_in,
             )
+            if lineage is not None:
+                lineage.stage_start(
+                    stage.name,
+                    capability=stage.capability.value,
+                    provider=stage.provider,
+                    records_in=records_in,
+                    inputs=lineage_in,
+                    outputs=lineage_out,
+                )
             started = time.perf_counter()
             try:
                 # P3-F2 §2: a malformed ProviderProfile declaration is fatal — raise the captured
@@ -1024,6 +1227,21 @@ class LocalRunner:
                     error_category=category,
                     error_message=str(exc),
                 )
+                # #185: the FAIL RunEvent. It carries the stable typed *category* and nothing else
+                # about the error — the standard ``errorMessage`` facet is deliberately never
+                # emitted, because ``str(exc)`` can quote a record (ADR-0034 counts-only).
+                if lineage is not None:
+                    lineage.stage_end(
+                        stage.name,
+                        capability=stage.capability.value,
+                        provider=stage.provider,
+                        records_in=records_in,
+                        records_out=0,
+                        duration_ms=round(duration * 1000.0, 3),
+                        inputs=lineage_in,
+                        outputs=lineage_out,
+                        error_category=category,
+                    )
                 # #73: the taxonomy is surfaced in the report *and* the logs — so record the failed
                 # Stage's typed-error metric (error_count=1 + the stable category tag, counts only,
                 # never the exception message) and persist a FAIL Quality Report before re-raising.
@@ -1093,6 +1311,17 @@ class LocalRunner:
                 records_out=len(own_output),
                 duration_ms=round(duration * 1000.0, 3),
             )
+            if lineage is not None:
+                self._emit_stage_lineage(
+                    lineage,
+                    stage,
+                    records_in=records_in,
+                    records_out=len(own_output),
+                    duration_ms=round(duration * 1000.0, 3),
+                    inputs=lineage_in,
+                    outputs=lineage_out,
+                    emit_start=False,
+                )
 
             (
                 induction_fallbacks,

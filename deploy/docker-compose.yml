@@ -18,6 +18,19 @@
 services:
   vllm-ocr:
     # Pin the vLLM image (never `latest`) for a reproducible serving stack. Bump deliberately.
+    #
+    # CUDA-13 / BLACKWELL (sm_120) HOSTS: use the PINNED serving environment instead of this
+    # upstream image — deploy/env/served-ocr-server/ (#196). It carries the solved lock
+    # (vllm==0.24.0 / torch==2.11.0+cu130 / transformers==5.14.1), the exclusions that make the
+    # ABI-broken flash-attn + torchcodec wheels impossible to install, and the settings the live
+    # 519-page run actually needed (VLLM_USE_FLASHINFER_SAMPLER=0, gpu-memory-utilization 0.72,
+    # max-num-seqs 16 — NOT the 0.90/32 below, which OOM'd the multimodal path there):
+    #
+    #   docker build -f ../deploy/env/served-ocr-server/Dockerfile -t latence/ocr-server:0.24.0 \
+    #                ../deploy/env/served-ocr-server
+    #   image: latence/ocr-server:0.24.0     # and drop the command: overrides below
+    #
+    # The values below remain the mainstream Hopper/Ada/Ampere defaults.
     image: vllm/vllm-openai:v0.11.0
     command:
       - "--model=lightonai/LightOnOCR-2-1B"      # Apache-2.0 weights AND code (ADR-0012)
@@ -28,10 +41,15 @@ services:
       - "--mm-processor-cache-gb=0"
       - "--no-enable-prefix-caching"
       - "--max-num-seqs=32"
-      # Blackwell (SM 12.x) note: if vLLM's bundled FlashInfer cannot JIT cudagraphs
-      # ("FlashInfer requires sm75+"), add "--enforce-eager" here (a ~perf floor). Hopper/Ada/
-      # Ampere run cudagraphs fine. See docs/deployment.md.
+      # Blackwell (SM 12.x): the "FlashInfer requires sm75+" abort is fixed by the environment
+      # variable below, NOT by "--enforce-eager" here — that flag clears the abort by turning
+      # cudagraphs off, flooring the throughput this served path exists for (FM-FLASHINFER-SM120).
+      # Hopper/Ada/Ampere run cudagraphs fine. See docs/deployment.md.
     environment:
+      # Blackwell (sm_120) ONLY — uncomment to apply FM-FLASHINFER-SM120's recorded fix. FlashInfer's
+      # capability check misparses 12.0 as 12 and rejects the device; this disables only its SAMPLER,
+      # so cudagraphs stay ON. Leave commented on Hopper/Ada/Ampere.
+      # VLLM_USE_FLASHINFER_SAMPLER: "0"
       # Only used to DOWNLOAD weights on first run; unset in air-gapped mode (pre-cache the model
       # into ./hf-cache and set HF_HUB_OFFLINE=1). See docs/deployment.md.
       HF_TOKEN: "${HF_TOKEN:-}"

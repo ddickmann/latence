@@ -1,0 +1,31 @@
+# GENERATED FILE — do not edit by hand.
+# Source of truth: deploy/env/served-ocr-server/environment.yaml + the workspace packages' pyproject.toml.
+# Regenerate:      latence env render deploy/env/served-ocr-server/environment.yaml
+# Verify:          latence env verify deploy/env/served-ocr-server/environment.yaml
+
+#
+# ENFORCED conflict boundaries for the 'served-ocr-server' environment.
+# Passed to the installer as `-c constraints.txt`, so they bind the resolution — they
+# are not documentation. Every one is also asserted against requirements.lock by
+# `latence env verify`, so a boundary that stops holding fails the build.
+
+# THE boundary that names the split. LightOn-OCR-2 support in vLLM 0.24.0 rides the transformers 5.x line (this environment solves to 5.14.1). The TEXT stack is capped `transformers<5` by glinker/flashdeberta, which are written against the 4.x API. Both pins are correct and they are irreconcilable in one interpreter — which is exactly why OCR is served behind the ADR-0030 endpoint seam instead of imported. Asserting the floor HERE is what keeps the two environments from quietly converging into one broken one.
+transformers>=5,<6
+
+# The CUDA-13 torch line vLLM 0.24.0 is built against (solves to 2.11.0+cu130 from the cu130 index). The live Blackwell run moved across 2.8+cu128 -> 2.11+cu130, and that move is what ABI-broke every prebuilt flash-attn / torchcodec wheel on the box. Pinning the line means a vLLM bump that crosses it fails the merge gate here, on a laptop, instead of on the pod.
+torch>=2.11,<3
+
+# vLLM's attention/sampling JIT component. On Blackwell its sampler REJECTED a perfectly good sm_120 device with "requires sm75 or higher" — its version regex misparses compute capability 12.0 as 12, which compares below 75. serve.sh therefore exports VLLM_USE_FLASHINFER_SAMPLER=0. That workaround is version-shaped, so the version is pinned: a silent flashinfer major bump would change whether the workaround is needed or sufficient.
+flashinfer-python>=0.6,<0.7
+
+# --- EXCLUDED distributions -----------------------------------------------------
+# Each is pinned to a specifier NO release can satisfy, so the resolver REFUSES the
+# install ("no solution found") the moment anything asks for it, directly or
+# transitively. This is the enforcement: never a post-install uninstall step, which
+# only runs if somebody remembers to run it.
+
+# ABI-broken by the serving layer's torch churn on the live run (2.8+cu128 -> 2.11+cu130): the prebuilt wheel is compiled against a specific torch C++ ABI and segfaults / fails to import against another. It is also simply UNNEEDED here — vLLM vendors its own attention backends (FlashAttention/FlashInfer/Triton) and never imports the standalone `flash_attn` package. An unpinned environment picks it up as an optional accelerator of some transitive dependency and breaks the server at import time, hours into a pod session.
+flash-attn<0
+
+# Same ABI story: its prebuilt wheels bind a specific torch/FFmpeg build and were broken by the same torch move. vLLM 0.24.0 does not need it (audio/video decoding is not on the OCR path). This exclusion is also the tripwire on the NEXT version bump — vllm 0.25.1 declares `torchcodec>=0.14`, so upgrading to it fails the resolve LOUDLY ("Because vllm==0.25.1 depends on torchcodec>=0.14 and torchcodec<0, we can conclude that vllm==0.25.1 cannot be used") instead of silently landing an ABI-mismatched wheel. Bumping vLLM past 0.24 is therefore a deliberate decision that must revisit this exclusion, which is the point.
+torchcodec<0

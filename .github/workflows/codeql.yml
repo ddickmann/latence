@@ -30,10 +30,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@b7351df727350dca84cb9d725d57dcf5bc82ba26 # v3.37.1
         with:
           languages: python
           # Use the security-extended suite for a broader query set than the default.
@@ -42,9 +42,9 @@ jobs:
       # Python needs no compilation; the default autobuild is a no-op but keeps the
       # standard three-step CodeQL shape and is safe for a pure-Python tree.
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@b7351df727350dca84cb9d725d57dcf5bc82ba26 # v3.37.1
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@b7351df727350dca84cb9d725d57dcf5bc82ba26 # v3.37.1
         with:
           category: "/language:python"

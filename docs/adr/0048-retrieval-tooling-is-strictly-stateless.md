@@ -12,7 +12,9 @@ meaning of the product promise: *"we provide the machinery for retrieval, not th
 
 Enterprises already run a retrieval engine — Databricks Mosaic AI Vector Search, Qdrant, Weaviate,
 Azure AI Search, Elastic, or a proprietary stack. We do not know which, and we do not want to decide
-(see `docs/INTEROP.md`). The pipeline already stops at *files* (ADR-0017: "the AI-ready deliverable is
+(the per-stack loading story lives in `docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`; this ADR originally
+cited a planned interop document that was never written — reference corrected, decision unchanged).
+The pipeline already stops at *files* (ADR-0017: "the AI-ready deliverable is
 a RAG corpus **and** a knowledge graph, both as files" — never a live database). The retrieval tooling
 is the first in-repo code to cross to the **consumer** side of that boundary, so it must not quietly
 reintroduce the database ADR-0017 refused.

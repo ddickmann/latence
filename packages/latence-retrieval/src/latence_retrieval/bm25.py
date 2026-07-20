@@ -59,7 +59,13 @@ from latence_retrieval.contracts import Candidate
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+# Unicode alphanumeric runs (underscore excluded). This MUST stay the same term unit the index-side
+# tokenizer emits (`latence_core.bm25.RegexWordTokenizer`, the one the `enterprise-sota` setup
+# profile blesses): a query term the index never emits scores nothing, so an ASCII-only pattern made
+# the whole sparse leg a permanent no-op for non-Latin corpora (R5-wizard_profile-13). This package
+# is deliberately independent of `latence-core`, so the agreement is held by a test, not an import.
+# ASCII-identical to the previous `[a-z0-9]+` (the text is lowercased first).
+_TOKEN = re.compile(r"[^\W_]+")
 _DEFAULT_K1 = 1.5
 _DEFAULT_B = 0.75
 

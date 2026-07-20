@@ -4,3 +4,6 @@ out/
 hf-cache/
 .env
 .env.*
+
+# The per-environment venvs created by deploy/env/*/install.sh — never committed.
+env/*/.venv/

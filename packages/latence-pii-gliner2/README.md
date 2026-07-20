@@ -56,9 +56,21 @@ Both the framework code and the default weights are permissive (verified
 pip install latence-core 'latence-pii-gliner2'
 ```
 
-This pulls `gliner2[local]` (and, via that extra, its `torch`/`transformers` stack —
-the base `gliner2` dist ships neither). The model weights are downloaded lazily on
-first run and cached by `transformers`.
+This pulls `gliner2[local]>=1.3,<2` (and, via that extra, its `torch`/`transformers`
+stack — the base `gliner2` dist ships neither). The model weights are downloaded lazily
+on first run and cached by `transformers`.
+
+### Supported `gliner2` versions (#192)
+
+This Provider drives `GLiNER2.from_pretrained(model_id, quantize=…, compile=…)` and
+`model.batch_extract_entities(…, include_spans=True, include_confidence=True, max_len=…)`.
+That surface does not exist across the whole 1.x line — verified against the released
+distributions (2026-07-18): 1.0.x has **no** `batch_extract_entities` at all, 1.1.x has no
+`include_spans`/`max_len`, and 1.2.0–1.2.5 have no `max_len`. The package therefore pins
+`gliner2[local]>=1.3,<2` (the pod-validated line), so drift fails at dependency
+**resolution**. An environment the resolver never saw (a hand-`pip install`ed pod) is
+caught at model load by a typed `ProviderError` naming the supported range and the install
+command — never a raw native `AttributeError`.
 
 ## Use in a Pipeline
 

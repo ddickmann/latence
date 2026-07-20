@@ -58,9 +58,12 @@ from typing import TYPE_CHECKING, Any
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.providers.adapter import AdapterBase
+from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
+    ensure_gliner2_on_cuda,
     is_compile_backend_failure,
     load_gliner2_optimized,
+    neutralize_torch_jit,
     resolve_gliner2_knob,
     resolve_max_len,
 )
@@ -71,6 +74,11 @@ from latence_core.redaction_policy import (
     finalize_redacted_chunk,
     parse_action,
     plan_chunk_redaction,
+)
+
+from latence_pii_gliner2._compat import (
+    require_batched_entity_api,
+    require_supported_gliner2,
 )
 
 _log = logging.getLogger("latence.provider.gliner2_pii")
@@ -102,6 +110,11 @@ class _PendingChunk:
 # Apache-2.0 weights (verified 2026-07-09, HF model card, not gated). Multilingual PII NER over
 # an mdeberta-v3 encoder via the fastino GLiNER2 framework.
 _DEFAULT_MODEL = "fastino/GLiNER2-Guardrails-PII-Multi"
+
+# W9-scaling: torch.compile is OPT-IN for the gliner2 engine (see __init__) — gliner2's
+# ``dynamic=True`` compile recompile-thrashes on varied-length production chunks. Same default, same
+# reason, as the twin ``fused_entity_relation.gliner2`` extractor.
+_COMPILE_DEFAULT = False
 
 
 class Gliner2PIIRedactor(AdapterBase):
@@ -140,7 +153,11 @@ class Gliner2PIIRedactor(AdapterBase):
             default ``auto`` → True on cuda / False on cpu). Pod-measured 2.83× at byte-identical
             PII. Guarded: a quantize fault degrades to a plain load, never a crash.
         compile: bool | 'auto'  — ``torch.compile`` + fused GPU kernels via the gliner2 native
-            ``compile`` kwarg (W9, default ``auto`` → True on cuda / False on cpu). Guarded like
+            ``compile`` kwarg (W9). **OPT-IN: defaulted OFF even on cuda** (W9-scaling), because
+            gliner2 compiles with ``dynamic=True`` and recompile-thrashes on varied-length
+            production chunks (pod-measured: worker at ~290% CPU, GPU 0%, no progress) — the same
+            default the twin ``fused_entity_relation.gliner2`` extractor forces. Set it explicitly
+            to enable it (worth it only for a homogeneous / uniform-length workload). Guarded like
             ``quantize``: a compile/warmup fault degrades to a plain load.
         device: str  — ``auto`` (default) / ``cpu`` / ``cuda``; routed by the device seam.
 
@@ -205,9 +222,11 @@ class Gliner2PIIRedactor(AdapterBase):
             batch=True,
             cost_per_1k=None,
             perf_note=(
-                "gliner2 native quantize (fp16) + compile (torch.compile + fused GPU kernels) on "
-                "cuda, off on cpu (W9; pod-measured 2.83× PII at byte-identical output; guarded → "
-                "plain load on any fault)"
+                "gliner2 native quantize (fp16) on cuda, off on cpu (W9; pod-measured 2.83× PII at "
+                "byte-identical output; guarded → plain load on any fault). compile "
+                "(torch.compile + fused GPU kernels) is OPT-IN, defaulted OFF even on cuda "
+                "(W9-scaling: gliner2's dynamic=True compile recompile-thrashes on varied-length "
+                "production chunks)"
             ),
         )
 
@@ -222,6 +241,19 @@ class Gliner2PIIRedactor(AdapterBase):
             raise ValueError(msg)
         # AdapterBase resolves the device seam (compute="either") against the declared profile.
         super().__init__(config)
+        # W9-scaling (audit R4): default torch.compile OFF for this Provider (opt-in only), exactly
+        # as the twin ``fused_entity_relation.gliner2`` extractor does. gliner2 compiles with
+        # ``dynamic=True``, which recompile-thrashes on the varied-length production chunks this
+        # redactor streams through ``batch_extract_entities`` — pod-measured to pin the worker at
+        # ~290% CPU with the GPU at 0% and no progress. Without this the generic
+        # ``resolve_gliner2_knob`` default (``auto`` → True on cuda) silently turned compile ON for
+        # every GPU stack the wizard emits (it emits ``device: cuda`` and no ``compile`` key), and
+        # the ``_reload_uncompiled`` latch cannot catch it: the thrash is silent slowness, not a
+        # ``BackendCompilerFailed``. ``quantize`` is untouched (the fp16 win stays on for cuda). An
+        # operator who sets ``compile`` explicitly still gets it. Injected into ``self._config`` —
+        # the single source of truth read by BOTH the eager validation below and the lazy load.
+        if "compile" not in self._config:
+            self._config["compile"] = _COMPILE_DEFAULT
         self._labels = [str(label) for label in pii_labels]
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
@@ -270,7 +302,25 @@ class Gliner2PIIRedactor(AdapterBase):
     # -- lazy model load ----------------------------------------------------
 
     def _gliner2_cls(self) -> Any:
+        """The ``gliner2.GLiNER2`` class, after the installed version is checked (#192).
+
+        The version gate runs HERE — before ``from_pretrained``, i.e. before any weight download —
+        so an unsupported ``gliner2`` is a typed, actionable
+        :class:`~latence_core.errors.ProviderError` naming the supported range, never the native
+        ``AttributeError``/``TypeError`` the mismatched API would raise later (ADR-0034).
+
+        W9-jit (#190, audit R1): the TorchScript JIT is neutralized FIRST, before the ``gliner2``
+        import — that import transitively pulls in transformers' deberta_v2 modeling module, whose
+        relative-position helpers are compiled by ``@torch.jit.script`` **AT IMPORT**. Neutralizing
+        later (inside ``load_gliner2_optimized``, entered only once this class is resolved) cannot
+        un-script them: the env switch is read by torch only at ITS import, and
+        ``jit._state.disable()`` affects only FUTURE ``script()`` calls — so the scripted helpers
+        would still die in nvrtc (``libnvrtc-builtins.so.13.0``) on the first forward on a
+        Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
+        """
+        neutralize_torch_jit(provider_name=self.provider_name)
         try:
+            import gliner2
             from gliner2 import GLiNER2
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
             msg = (
@@ -278,6 +328,7 @@ class Gliner2PIIRedactor(AdapterBase):
                 "Install it with: pip install latence-pii-gliner2"
             )
             raise ImportError(msg) from exc
+        require_supported_gliner2(gliner2, provider_name=self.provider_name)
         return GLiNER2
 
     def _load_model(self) -> Any:
@@ -304,6 +355,21 @@ class Gliner2PIIRedactor(AdapterBase):
                 self._config,
                 provider_name=self.provider_name,
             )
+        # W9-scaling: ``load_gliner2_optimized`` uses ``device`` ONLY to resolve the quantize/
+        # compile knobs — it performs NO placement. So when a GPU is present, ensure the fp16 model
+        # actually on cuda and LOG its device: the defence against the #191 fp16-eager GPU-idle hang
+        # (a fp16-converted model that silently stayed on CPU → a CPU-bound spin at 0% GPU, correct
+        # output, no warning). Best-effort + guarded (never crashes); a model already placed
+        # correctly makes the move a harmless no-op. Mirrors the twin fused_entity_relation.gliner2.
+        ensure_gliner2_on_cuda(
+            self._model,
+            cuda=cuda_available(),
+            provider_name=self.provider_name,
+        )
+        # #192: the loaded object must expose the batched-entity API this Provider drives. Checked
+        # at LOAD (not at the first flush) so an API mismatch is a typed, actionable ProviderError
+        # up front — the field failure was this surface raising a raw native AttributeError.
+        require_batched_entity_api(self._model, provider_name=self.provider_name)
         return self._model
 
     def _reload_uncompiled(self) -> Any:
@@ -332,6 +398,13 @@ class Gliner2PIIRedactor(AdapterBase):
                 cfg,
                 provider_name=self.provider_name,
             )
+        # Keep the uncompiled reload on cuda too (W9-scaling) — this model serves the REST of the
+        # run, so skipping placement here would leave it fp16-on-CPU. Placement is idempotent.
+        ensure_gliner2_on_cuda(
+            self._model,
+            cuda=cuda_available(),
+            provider_name=self.provider_name,
+        )
         return self._model
 
     def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
@@ -442,18 +515,11 @@ class Gliner2PIIRedactor(AdapterBase):
         raw_by_chunk: dict[int, Any] = {}
         detect = [p for p in buffer if p.plan.needs_detection]
         if detect:
-            # The batched entry point is offline-unverifiable (the fake mirrors it); guard against
-            # a renamed/missing method with a clear, actionable error rather than a bare
-            # AttributeError (the guard would otherwise surface only the op label). The pod script's
-            # Gate 0 asserts this method EXISTS on the real checkpoint before any throughput number.
-            if not hasattr(self._load_model(), "batch_extract_entities"):
-                msg = (
-                    "redaction.gliner2 batches via model.batch_extract_entities(texts, "
-                    "entity_types, threshold=…), but the loaded GLiNER2 checkpoint exposes no "
-                    "'batch_extract_entities' method. Re-introspect the checkpoint and fix the "
-                    "batched call. See scripts/validate-encoder-batching-on-gpu.md Gate 0."
-                )
-                raise AttributeError(msg)
+            # The batched entry point is version-gated + capability-checked at LOAD (#192,
+            # :mod:`latence_pii_gliner2._compat`): an unsupported gliner2 or a checkpoint object
+            # without 'batch_extract_entities' has already failed as a typed ProviderError there,
+            # so by here the method is guaranteed callable. The pod script's Gate 0 asserts the
+            # same on the real checkpoint before any throughput number.
             # Group by effective label set (one label set per batched call). Order-stable: a dict
             # preserves first-seen group order, and emission below re-walks the buffer in input
             # order.

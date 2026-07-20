@@ -27,7 +27,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PACKAGES = _REPO_ROOT / "packages"
 
 # Every workspace package is publishable to PyPI and must carry release metadata.
-_APACHE_CLASSIFIER = "License :: OSI Approved :: Apache Software License"
+# PEP 639: the license is a bare SPDX *expression* plus a license-files glob. The legacy
+# ``License :: OSI Approved ::`` classifier is deprecated and, combined with an SPDX
+# expression, trips strict twine/PyPI validators — so its absence is asserted, not its
+# presence (issue #72, item 2).
+_DEPRECATED_LICENSE_CLASSIFIER_PREFIX = "License ::"
 _PY_VERSION_CLASSIFIERS = {
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -102,20 +106,42 @@ def test_gitignore_denies_secret_patterns() -> None:
 
 
 def test_every_package_has_pypi_release_metadata() -> None:
-    """Each publishable package advertises Apache-2.0 + classifiers + keywords + urls."""
+    """Each publishable package advertises SPDX Apache-2.0 + classifiers + keywords + urls.
+
+    The license assertion is the PEP 639 form the flip-public rehearsal validated: a bare
+    SPDX expression (``license = "Apache-2.0"``, which hatchling emits as
+    ``License-Expression``), a ``license-files`` glob that resolves to a real file inside
+    the distribution root, and NO deprecated ``License ::`` classifier alongside it.
+    """
     problems: list[str] = []
     for pp in _package_pyprojects():
         proj = tomllib.loads(pp.read_text())["project"]
         name = pp.parent.name
 
         lic = proj.get("license")
-        lic_text = lic.get("text") if isinstance(lic, dict) else lic
-        if lic_text != "Apache-2.0":
-            problems.append(f"{name}: license != Apache-2.0 ({lic_text!r})")
+        if lic != "Apache-2.0":
+            problems.append(
+                f"{name}: license must be the bare SPDX expression 'Apache-2.0' "
+                f"(PEP 639), got {lic!r}"
+            )
+
+        license_files = proj.get("license-files")
+        if not license_files:
+            problems.append(f"{name}: no license-files glob — the wheel would ship no LICENSE")
+        else:
+            for glob in license_files:
+                if not list(pp.parent.glob(glob)):
+                    problems.append(f"{name}: license-files glob {glob!r} matches nothing")
 
         classifiers = set(proj.get("classifiers", []))
-        if _APACHE_CLASSIFIER not in classifiers:
-            problems.append(f"{name}: missing Apache OSI classifier")
+        deprecated = sorted(
+            c for c in classifiers if c.startswith(_DEPRECATED_LICENSE_CLASSIFIER_PREFIX)
+        )
+        if deprecated:
+            problems.append(
+                f"{name}: deprecated license classifier(s) {deprecated} alongside an SPDX "
+                "License-Expression — strict validators reject the combination"
+            )
         if not classifiers >= _PY_VERSION_CLASSIFIERS:
             problems.append(f"{name}: missing Python-version classifiers")
 

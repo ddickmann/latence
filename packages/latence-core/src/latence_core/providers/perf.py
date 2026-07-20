@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from latence_core.errors import ProviderError
 from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
@@ -195,6 +196,51 @@ def load_with_fa2_fallback(
         return loader(model_id, **kwargs)
 
 
+def place_on_device(
+    model: Any, device: str | None, *, provider_name: str = "provider"
+) -> str | None:
+    """Move a plain-``gliner`` model onto the **resolved** device at load, and PROVE it landed.
+
+    The plain ``gliner`` library does NOT auto-place: ``GLiNER.from_pretrained`` loads onto CPU
+    (``map_location`` defaults there), so a Provider that never calls ``.to(device)`` runs on CPU no
+    matter what the device seam resolved — the exact silent performance cliff #191 measured on the
+    pod (``device: cuda`` configured, ~11.5 s/chunk, the GPU idle, and **no warning**). ADR-0036's
+    contract is honour-the-resolved-device-or-fail-loudly, so this is deliberately NOT best-effort:
+
+    * ``device is None`` (the seam skipped, or a Provider that resolves no device) → no-op; the
+      resident device is read back and returned for logging only.
+    * otherwise ``model.to(device)`` — a placement fault propagates as a
+      :class:`~latence_core.errors.ProviderError` naming the provider + device (never swallowed).
+    * the resident device is then read back from the model's parameters and **verified**: a model
+      that reports a different device than the one requested is a
+      :class:`~latence_core.errors.ProviderError`, not a logged shrug. Silence is the bug (#191).
+      A model whose device cannot be read at all (a test double, an exotic wrapper) is accepted —
+      there is nothing to contradict — but the placement call still had to succeed.
+
+    Returns the resident device string (or ``None`` when unreadable). Torch is never imported here:
+    the move and the read-back go through the model object itself (ADR-0016).
+    """
+    if device is not None:
+        try:
+            model.to(device)
+        except Exception as exc:
+            msg = f"{provider_name}: could not place the model on device {device!r}: {exc}"
+            raise ProviderError(msg) from exc
+    resident = _detect_model_device(model)
+    if device is None or resident is None:
+        return resident
+    # ``cuda`` matches ``cuda:0`` (torch names the ordinal); compare on the device TYPE.
+    if resident.split(":", 1)[0] != device.split(":", 1)[0]:
+        msg = (
+            f"{provider_name}: model was placed on {device!r} but reports device {resident!r} — "
+            "refusing to run on the wrong device (a silent CPU fallback is a ~10x throughput "
+            "cliff, ADR-0036)"
+        )
+        raise ProviderError(msg)
+    _log.info("%s: model resident on %s (resolved device %s)", provider_name, resident, device)
+    return resident
+
+
 def load_then_cast(
     loader: Any,
     model_id: str,
@@ -216,7 +262,15 @@ def load_then_cast(
     importable (the offline env) the resolved dtype is a name string, not a ``torch.dtype``, so the
     cast is skipped (there is nothing to cast to) and the bare model is returned — the seam stays
     torch-free-to-import. ``maybe_compile`` still applies afterwards (guarded), independently.
+
+    W9-jit: the TorchScript JIT is neutralized (:func:`neutralize_torch_jit`) before the load —
+    **defence-in-depth only**. By the time a gliner Provider reaches this loader it has already
+    evaluated ``from gliner import GLiNER``, which scripts transformers' deberta_v2
+    relative-position helpers at module-import time, and nothing here can un-script them. The
+    Provider's own call *ahead of that import* is the fix (ADR-0036 W9-jit); this one covers a
+    caller that arrives with the backbone not yet imported. Throughput-only, byte-identical output.
     """
+    neutralize_torch_jit()
     model = loader(model_id)
     dtype_name = resolve_dtype_name(device, config)
     if dtype_name == DTYPE_FP32 or not _effective_is_cuda(device):
@@ -329,6 +383,87 @@ def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str =
         return model
 
 
+# ---------------------------------------------------------------------------
+# Torch **JIT** neutralization (W9-jit) — the second half of the compile guard.
+# ---------------------------------------------------------------------------
+
+#: The environment switch torch reads to decide whether its **TorchScript JIT** is enabled at all.
+#: ``PYTORCH_JIT=0`` makes ``torch.jit.script`` / ``torch.jit.trace`` a **pass-through** (the
+#: decorated function is returned unchanged, run as ordinary eager Python) instead of building a
+#: ScriptFunction whose fused kernels are compiled at runtime by nvrtc.
+TORCH_JIT_ENV = "PYTORCH_JIT"
+
+
+def neutralize_torch_jit(*, provider_name: str = "provider") -> bool:
+    """Turn the TorchScript JIT OFF for this process — guarded, never crashes (W9-jit).
+
+    The **gap** the W9 compile guard did not cover. :func:`maybe_compile` /
+    :func:`load_gliner2_optimized` neutralize ``torch.compile`` (dynamo/inductor); they do NOT touch
+    the *other* runtime compiler in torch — the **TorchScript JIT**. The mdeberta-v3 encoder every
+    GLiNER-family Provider is built on scripts its relative-position helper with
+    ``@torch.jit.script`` (``build_relative_position`` in transformers' DeBERTa-v2 modeling module),
+    and on a **Blackwell / CUDA-13** box executing that ScriptFunction dies in native code:
+
+        RuntimeError: ... failed to open libnvrtc-builtins.so.13.0
+
+    — the JIT fuser asking nvrtc to compile kernels against a builtins library that is not there for
+    that CUDA/torch pairing. Exactly the W9 lesson repeated: the fault surfaces on the **first
+    forward**, not at load, so no load-time try/except can see it. The proven field workaround is
+    the env switch ``PYTORCH_JIT=0``; this function is that workaround **encoded in the seam**, so
+    it is not operator folklore.
+
+    Two levers, because either one alone has a hole:
+
+    * ``os.environ["PYTORCH_JIT"] = "0"`` — read by torch **at import**, so a torch not yet
+      imported (the normal case: the Provider's model load is what pulls torch in) comes up with
+      the JIT already off, and every later ``@torch.jit.script`` at module-import time is a no-op.
+    * ``torch.jit._state.disable()`` — the same switch at **runtime**, for a torch that is ALREADY
+      imported (another library got there first), so scripting is neutralized from here on. Applied
+      before the model load, i.e. before transformers lazily imports its DeBERTa modeling module and
+      evaluates the ``@torch.jit.script`` decorator.
+
+    **Throughput-only degradation, byte-identical output** (the ADR-0036 compile-guard discipline):
+    an un-scripted function is the *same* Python function the JIT would have compiled — same math,
+    same values, only without the fused-kernel speedup. Nothing about the emitted entities /
+    relations / offsets changes.
+
+    Torch-free-safe and never raises: on a host without torch (the offline test env) the env switch
+    is still set — so a torch imported later is still JIT-free — and the runtime lever is a logged
+    no-op. Returns whether the **in-process** JIT state is now known-off (``False`` when torch is
+    absent or exposes no JIT state to read back; the env switch is set either way).
+    """
+    import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    os.environ[TORCH_JIT_ENV] = "0"
+    try:
+        import torch  # noqa: PLC0415 - optional heavy dep; the model load imports it moments later
+
+        state = torch.jit._state  # noqa: SLF001 - the only switch torch exposes for this
+        disable = getattr(state, "disable", None)
+        if callable(disable):
+            disable()
+        enabled_proxy = getattr(state, "_enabled", None)
+        if enabled_proxy is not None and getattr(enabled_proxy, "enabled", False):
+            # A torch whose ``disable()`` is missing/renamed: set the flag the proxy reads directly.
+            enabled_proxy.enabled = False
+        off = enabled_proxy is not None and not getattr(enabled_proxy, "enabled", False)
+    except Exception:  # noqa: BLE001 - deliberate: neutralizing the JIT must never crash a load
+        _log.info(
+            "%s: could not disable the torch JIT in-process (PYTORCH_JIT=0 set for any later "
+            "torch import)",
+            provider_name,
+            exc_info=True,
+        )
+        return False
+    _log.info(
+        "%s: torch JIT neutralized (PYTORCH_JIT=0%s) — nvrtc-free mdeberta forward, throughput "
+        "only",
+        provider_name,
+        ", runtime state disabled" if off else "",
+    )
+    return off
+
+
 # The valid explicit gliner2 quantize/compile config values (an operator may pin one). ``auto``
 # (the default) resolves by device: True on cuda, False on cpu.
 _VALID_GLINER2_KNOB = frozenset({"auto", "true", "false", "1", "0", "yes", "no"})
@@ -385,9 +520,21 @@ def load_gliner2_optimized(
     cpu default) the loader is called plain directly (no kwargs to pass, no fallback needed). The
     ``quantize``/``compile`` config values are resolved *before* the load so an invalid value is a
     ConfigError the adapter surfaces, not a silent fallback.
+
+    **W9-jit — the other compiler.** ``compile``/``quantize`` only govern ``torch.compile``; the
+    ``gliner2`` backbone is mdeberta-v3, which scripts its relative-position helper with
+    ``@torch.jit.script`` and, on a Blackwell/CUDA-13 box, dies in nvrtc on the FIRST forward
+    (``libnvrtc-builtins.so.13.0``) — a crash no load-time guard can catch. The TorchScript JIT is
+    neutralized (:func:`neutralize_torch_jit`) here before the load, unconditionally, for EVERY
+    gliner2 load path (optimized or plain) — but that is **defence-in-depth, not the fix**: the
+    helpers are scripted when ``from gliner2 import GLiNER2`` is evaluated, one statement before
+    this loader is entered, and no lever can un-script them afterwards. The Provider's own call
+    *ahead of its backbone import* is what actually closes #190 (ADR-0036 W9-jit).
+    Throughput-only, byte-identical output.
     """
     quantize = resolve_gliner2_knob("quantize", device, config)
     compile_ = resolve_gliner2_knob("compile", device, config)
+    neutralize_torch_jit(provider_name=provider_name)
     if not quantize and not compile_:
         return loader(model_id)
     try:
@@ -500,7 +647,7 @@ def cap_intra_op_threads(n: int | None, *, provider_name: str = "provider") -> i
 
 
 def _detect_model_device(model: Any) -> str | None:
-    """Best-effort **read** of a gliner2 model's resident torch device as a string — never raises.
+    """Best-effort **read** of a model's resident torch device as a string — never raises.
 
     Tries the common wrapper shapes (``model.device``, ``model.model.device``, the first parameter's
     device) and returns a lowercase device string (``"cuda"``/``"cuda:0"``/``"cpu"``) or ``None`` if

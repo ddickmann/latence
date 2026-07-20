@@ -14,7 +14,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from importlib import metadata
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Protocol,
+    TypeGuard,
+    TypeVar,
+    runtime_checkable,
+)
 
 from latence_core.providers.profile import ProviderProfile, profile_of
 
@@ -74,6 +82,37 @@ class Source(Protocol):
         undecoded source ``content`` (bytes) — decoding and the turn into
         markdown belong to the Parser (ADR-0019), not the Source.
         """
+        ...
+
+
+@runtime_checkable
+class DocumentEnumerator(Protocol):
+    """OPTIONAL Source refinement: enumerate document ids WITHOUT fetching content.
+
+    A delta run has to know which documents the source currently holds *before* it can decide
+    which of them are unchanged and can therefore be skipped (ADR-0018/0043). Deriving that set
+    from :meth:`Source.produce` is correct but pays the full fetch cost for every document — for
+    a remote Source (a SharePoint library, an object store) that means the whole corpus crosses
+    the network on every delta, which is precisely the cost the delta exists to avoid, and it
+    happens *before* the exclusions are known, so no ``exclude_document_ids`` can prevent it.
+
+    A Source that can name its documents more cheaply than it can fetch them implements this:
+    SharePoint reads the content hash Graph reports in the *listing*, so a delta run over an
+    unchanged library transfers zero bytes. The ids MUST be the same content-addressed ids
+    :meth:`Source.produce` stamps on ``Provenance.document_id`` — an id that disagreed would
+    silently mis-classify documents as new. A Source that cannot do better simply does not
+    implement it, and the runner falls back to ``produce`` (correct, just not free).
+
+    The enumeration MAY be **partial**, and a Source that can only name *some* of its documents
+    cheaply MUST leave the rest out rather than fetch them: an omitted id cannot intersect the
+    parent Version, so its document is treated as new and fetched exactly once by ``produce``,
+    whereas fetching it here transfers it unconditionally *in addition to* that — which is how a
+    no-op delta ends up costing twice a full run (audit R3-connectors_ingestion-8). Omitting can
+    only lose a reuse; it can never invent one, and it never changes a document's records.
+    """
+
+    def document_ids(self, storage: Storage) -> Iterator[str]:
+        """Yield the ``Provenance.document_id`` of every document currently in the source."""
         ...
 
 
@@ -920,8 +959,11 @@ class Tokenizer(Protocol):
 
     Two in-core reference adapters ship behind it (:mod:`latence_core.bm25`), and they are
     genuinely different tokenisations (not a clone + a rename — the anti-false-green bar for a real
-    seam): ``tokenizer.regex`` folds to lowercase alphanumeric runs (punctuation is a boundary and
-    is dropped, matching the dense/sparse hashing references), while ``tokenizer.whitespace`` splits
+    seam): ``tokenizer.regex`` folds to lowercase *Unicode* alphanumeric runs (punctuation and the
+    underscore are boundaries and are dropped, matching the dense/sparse hashing references — so
+    ``Müller`` and ``Таможенный`` are whole terms, though an unspaced script like Chinese yields one
+    term per whitespace run: the reference is Unicode-aware, not a word segmenter, and a corpus that
+    needs segmentation plugs it in HERE), while ``tokenizer.whitespace`` splits
     only on whitespace and keeps punctuation attached to the token (so ``"foo,"`` and ``"foo"`` are
     distinct terms). A corpus that wants a store's exact analyzer plugs its own Tokenizer in behind
     this same seam. Both references are deterministic, so the emitted BM25 artifact is
@@ -956,6 +998,52 @@ class Export(Protocol):
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         """Write records to ``out_dir`` on ``storage``; return the output URIs."""
         ...
+
+
+_CapabilityT = TypeVar("_CapabilityT")
+
+
+def protocol_members(protocol: type) -> frozenset[str]:
+    """The member names a ``runtime_checkable`` Protocol requires, without touching an instance.
+
+    ``__protocol_attrs__`` is the authoritative set on 3.12+; on 3.11 (this project's floor) typing
+    does not expose it publicly, so we fall back to the Protocol's own public ``dir()`` — which for
+    every Capability here yields exactly its declared members.
+    """
+    members = getattr(protocol, "__protocol_attrs__", None)
+    if members is None:
+        members = {name for name in dir(protocol) if not name.startswith("_")}
+    return frozenset(members)
+
+
+def satisfies_capability(
+    obj: object, protocol: type[_CapabilityT] | Any
+) -> TypeGuard[_CapabilityT]:
+    """``isinstance(obj, protocol)`` for a Capability Protocol — WITHOUT invoking any member.
+
+    Why this exists rather than plain ``isinstance``: CPython implements a ``runtime_checkable``
+    Protocol check with ``hasattr(instance, name)`` over the Protocol's members, and several
+    Capabilities declare a **property** (:attr:`Embedder.dimension`, :attr:`SparseEmbedder.
+    vocab_size`, :attr:`MultiVectorEmbedder.dimension`). ``hasattr`` therefore *calls* that property
+    — so an ``isinstance`` check performed at **wiring time** executes Provider work that ADR-0016
+    says is deferred to first use. Concretely (audit R6): resolving ``sparse.splade`` behind an
+    Export's ``sparse_embedder`` spec made ``isinstance`` read ``vocab_size``, which loaded a
+    Hugging Face checkpoint from the network during config validation, and made the R5
+    "every committed environment-stack component constructs" guard silently skip the whole Export.
+
+    The check here is structurally identical (every Protocol member must be present) but resolves
+    each member against the provider's **class** first: a property, a method and a class attribute
+    are all present on the class as objects, and looking them up there never runs the descriptor's
+    getter. Only a member absent from the class falls back to the instance — that is a plain
+    ``__init__``-assigned attribute, whose lookup is a dict hit, not Provider work.
+
+    A Provider is still rejected exactly as before when it does not carry a member, so the loud
+    ``ContractError`` at wiring time (ADR-0034) is unchanged.
+    """
+    cls = type(obj)
+    return all(
+        hasattr(cls, name) or hasattr(obj, name) for name in protocol_members(protocol)
+    )
 
 
 class ProviderRegistry:

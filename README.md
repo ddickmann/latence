@@ -10,7 +10,7 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 > security review, reliability/chaos (crash-resume, Delta idempotency), a
 > performance baseline, and determinism ([`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md)).
 > The grilled architecture lives in [`CONTEXT.md`](./CONTEXT.md) (the glossary)
-> and [`docs/adr/`](./docs/adr/) (32 architecture decisions), with
+> and [`docs/adr/`](./docs/adr/) (52 architecture decisions), with
 > [`docs/PORTING-MAP.md`](./docs/PORTING-MAP.md) recording what was mined from four
 > private production repos. **Not yet 1.0:** performance-at-scale and deeper
 > structural file validation are flagged as Phase-2 hardening; see the honest
@@ -21,7 +21,7 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 - **Stages** are units of work with typed input/output contracts (Source → Screen → Parse → Chunk → Screen → Entity Extraction → Relation Extraction → Redaction → Profiling → Disambiguation → Graph Assembly → Export).
 - **Capabilities** are the narrow interfaces a Stage depends on (Parser, EntityExtractor, Embedder, …). The framework never names a model.
 - **Providers** fulfil Capabilities — an in-process model, a remote endpoint, or a cloud AI service. Swapping a model is a one-line config change.
-- **Runners** execute a Pipeline. A built-in local Runner runs the whole thing on a laptop (CPU-only) with checkpoint/resume; thin adapters run the same Stages on Databricks or Airflow.
+- **Runners** execute a Pipeline. A built-in local Runner runs the whole thing on a laptop (CPU-only) with checkpoint/resume; a second, shipped adapter (`latence-runner-airflow`) runs the identical Stages as an Airflow DAG. The Runner seam is the contract, so further adapters (Databricks Workflows, plain containers) are seam-compatible follow-ons — they are **not** shipped today (ADR-0003/0030).
 - **Storage** is one fsspec seam: `file://`, `s3://`, `gs://`, `abfs://` — no code change.
 - Every record carries **Provenance** (source lineage) and **Classification** (language, category, sensitivity), enforced at every Stage boundary.
 - Every run emits a **Quality Report** so "AI-ready" is measured, not asserted.
@@ -44,13 +44,14 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 latence-framework/
 ├── CONTEXT.md                 # glossary — the canonical language
 ├── docs/
-│   ├── adr/                   # architecture decisions (0001–0033)
+│   ├── adr/                   # architecture decisions (0001–0053, 0040 unissued)
 │   └── PORTING-MAP.md         # what was mined from the private repos
 ├── packages/
 │   ├── latence-core/          # contracts, Capabilities, Runner, Storage (pure-Python)
 │   ├── latence-parser-*/      # Parser Providers
 │   ├── latence-ner-*/         # EntityExtractor Providers
 │   ├── ...                    # one package per Provider family
+│   ├── latence-sink-qdrant/   # one-shot loader: Export → a Qdrant collection (idempotent)
 │   └── latence-demo/          # the CPU demo set: bundled corpus + viewer + `latence-demo`
 └── demo/                      # docker compose: messy corpus → KG + Quality Report
 ```
@@ -94,6 +95,20 @@ no extra packages.
 `diff examples/demo-pipeline.yaml examples/demo-pipeline.swap.yaml` shows the single-Provider
 change. See [`packages/latence-demo/README.md`](./packages/latence-demo/README.md) for details.
 
+### Read the results (one command)
+
+```bash
+uv pip install -e packages/latence-console
+uv run latence-console /tmp/latence-demo     # then open http://127.0.0.1:8787/
+```
+
+The **run console** is a read-only, offline, localhost view over the files a run already left on
+Storage: the run list (status + timestamps) and each run's Quality Report rendered as **headline
+quality verdicts a non-engineer can read** — traceability, unsafe input, personal data, the
+knowledge graph, and what changed on an incremental run — with the per-Stage drill-down beneath.
+It writes nothing, holds no state, and makes no network requests. See
+[`docs/getting-started/run-console.md`](./docs/getting-started/run-console.md).
+
 ## Install
 
 The framework is a thin core plus one installable package per Provider family
@@ -103,12 +118,17 @@ promise holds (no torch/cloud client unless you ask for it).
 ```bash
 pip install latence-core            # contracts, Capabilities, local Runner, Storage
 pip install latence-demo            # + the CPU demo set (real-PDF parser), one-command onboarding
+pip install latence-console         # + the read-only run console (`latence-console ./corpus`)
 pip install latence-ner-gliner      # opt-in: a learned NER Provider (pulls torch/transformers)
 pip install latence-relation-llm    # opt-in: LLM relation extraction over any OpenAI-compatible endpoint
 ```
 
-The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
-`latence-demo`); the heavy/endpoint Providers stay isolated. Python ≥ 3.11.
+There is **no** `pip install latence` meta-package — installing is always one or more of the
+distributions above. `latence-demo` is the closest thing to a batteries-included entry point: it
+depends on `latence-core` + `latence-parser-document`, so `pip install latence-demo` gives you the
+one-command demo set and nothing heavy. Every other Provider (torch, endpoint clients, cloud SDKs)
+stays isolated in its own package (ADR-0016), so nothing pulls a GPU stack in behind your back.
+Python ≥ 3.11.
 
 ## Package map
 
@@ -127,20 +147,49 @@ The meta-package pins the CPU demo set (`latence-core` + `latence-parser-*` +
 | `latence-embedder-endpoint` | Embedder performance path (endpoint-backed). |
 | `latence-runner-airflow` | Airflow Runner adapter (`airflow` extra). |
 | `latence-demo` | One-command offline demo + self-contained KG/Report viewer. |
+| `latence-benchmark` | The reproducible **public** benchmark harness (pinned datasets, pinned stack configs, published results page). Not a pipeline Provider. |
+| `latence-console` | Read-only, offline, localhost run console: the run list + the Quality Report as headline verdicts (zero new deps). |
+
+The table is a tour of the families, not the full index — `packages/` holds every published
+distribution, and each one has its own README.
+
+## Security & release integrity
+
+- **Found a vulnerability?** Report it **privately** — see the coordinated-vulnerability-
+  disclosure policy in [`SECURITY.md`](./SECURITY.md) (GitHub Security Advisories, or email
+  the maintainer). Acknowledgement within 3 business days; coordinated disclosure with a
+  90-day target embargo. Please do not open a public issue for a suspected vulnerability.
+- **Every release is verifiable.** Releases are signed with [keyless
+  Sigstore](https://www.sigstore.dev/) and ship a per-release **CycloneDX SBOM**. Two
+  commands verify a download — see [`docs/RELEASING.md`](./docs/RELEASING.md) →
+  *Release integrity*, and [`docs/SBOM.md`](./docs/SBOM.md).
 
 ## Documentation & governance
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary; the canonical language of the project.
-- [`docs/adr/`](./docs/adr/) — the 32 architecture decisions.
+- [`docs/adr/`](./docs/adr/) — the 52 architecture decisions.
 - [`docs/TUTORIAL-fresh-pod-walkthrough.md`](./docs/TUTORIAL-fresh-pod-walkthrough.md) — guided setup (`latence setup` → `latence process`) and the full stage-by-stage walkthrough.
 - [`docs/running-a-stack.md`](./docs/running-a-stack.md) — run + validate a full-spine stack (`latence stack validate`).
 - [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) — run a per-Stage provider bake-off (`latence bake-off`).
-- [`docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge`](./docs/TUTORIAL-fresh-pod-walkthrough.md#7-incremental-updates-add--update--retract--purge) — incremental corpus updates (`latence delta` / `retract` / `purge`).
+- [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) — public benchmark results (our reproducible numbers, kept separate from cited vendor claims), and [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) to reproduce them yourself.
+- [`docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge`](./docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge) — incremental corpus updates (`latence delta` / `retract` / `purge`).
+- [`PERF-RESULTS.md`](./PERF-RESULTS.md) — **measured** per-Stage throughput envelopes (CPU + GPU), each with hardware, stack profile, corpus shape, date and reproduction command, plus an explicit *not yet measured* list. Reproduce with `uv run python scripts/bench_throughput.py`.
 - [`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md) — the signed profound-testing gate.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup (uv workspace), the quality gates, the DoD tiers.
-- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, responsible disclosure.
+- [`SECURITY.md`](./SECURITY.md) — trust model, built-in controls, and the **coordinated
+  vulnerability disclosure policy** — how to report a security issue privately, and what
+  response you can expect.
+- [`docs/RELEASING.md`](./docs/RELEASING.md) — how a release is cut, and **how to verify
+  one**: every release is signed with keyless Sigstore and ships a CycloneDX SBOM.
+- [`docs/GO-LIVE-RUNBOOK.md`](./docs/GO-LIVE-RUNBOOK.md) — the maintainer-manual launch steps
+  (visibility flip, PyPI publish, docs deploy, announcement) and their pre-flight checks.
+- [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) — **continuity & security process**: the honest bus factor, fork posture, support lifetime, CVD / patch / SBOM / signing posture, and CRA readiness. Start here if you are evaluating this for adoption.
 - [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Contributor Covenant.
-- [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses (all permissive).
+- [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md) — runtime dep + model licenses.
+  **Permissive by default, with two disclosed exceptions you must read before you rely on
+  them**: the pinned GPU environments under `deploy/env/` pull NVIDIA CUDA wheels that are
+  *not* open-source (proprietary EULAs, each wheel named), and EmbeddingGemma is opt-in only,
+  under the Gemma license with its flow-down obligations. Nothing else is affected.
 
 ## License
 

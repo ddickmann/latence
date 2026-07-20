@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from latence_core.capability import FusedExtraction
@@ -35,7 +36,11 @@ from latence_core.contracts import (
     Provenance,
     RelationMention,
 )
+from latence_core.errors import ConfigError, ProviderError
 from latence_relation_gliner import GlinerRelexExtractor
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _chunk(
@@ -70,6 +75,20 @@ def _chunk(
     )
 
 
+# The dtype names ``load_then_cast`` may hand ``.to()`` on a torch-free host (it passes the NAME
+# string when torch is absent) — distinguished from a device string so the fake routes like torch.
+_TORCH_DTYPE_NAMES = frozenset({"bfloat16", "float16", "float32", "float64"})
+# The device types torch accepts at the start of a device string; anything else is a RuntimeError.
+_TORCH_DEVICE_TYPES = frozenset({"cpu", "cuda", "mps", "xpu", "meta"})
+
+
+@dataclass(frozen=True)
+class _FakeParam:
+    """A stand-in for a ``torch.nn.Parameter``: the only thing under test is its ``device``."""
+
+    device: str
+
+
 class _FakeGLiNER:
     """Stands in for gliner.GLiNER with the REAL ``predict_relations`` TUPLE API.
 
@@ -97,6 +116,14 @@ class _FakeGLiNER:
         #: FAITHFUL to the real GLiNER model: a ``config`` with a ``max_len`` the library truncates
         #: to. The provider's W12 model-boundary guard sets this so a test can assert the bound.
         self.config = types.SimpleNamespace(max_len=384)
+        #: FAITHFUL to ``GLiNER.from_pretrained`` (a ``torch.nn.Module`` + PyTorchModelHubMixin):
+        #: the weights land on **CPU** — the library does NOT auto-place on cuda (#191). Only an
+        #: explicit ``.to(device)`` moves them, exactly like the real ``nn.Module``.
+        self._param = _FakeParam("cpu")
+
+    def parameters(self) -> Iterator[_FakeParam]:
+        """The real model's parameter iterator — the ground truth for "where does it run"."""
+        yield self._param
 
     @classmethod
     def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER:
@@ -109,8 +136,28 @@ class _FakeGLiNER:
         inst.model_id = model_id
         return inst
 
-    def to(self, dtype: Any) -> _FakeGLiNER:
-        self.cast_dtype = dtype  # W8: the plain-gliner dtype path is .to(bf16) on cuda
+    def to(self, arg: Any) -> _FakeGLiNER:
+        """``nn.Module.to`` — one call takes EITHER a device or a dtype (both are real usages).
+
+        FAITHFUL to torch: a device string MOVES the parameters (so ``parameters()[0].device``
+        changes); a dtype casts them (W8: the plain-gliner dtype path is ``.to(bf16)`` on cuda);
+        an unknown device string is a ``RuntimeError`` exactly as ``torch.device("gpu")`` is, so a
+        typo can never be mistaken for a successful placement. Returns self, like a real module.
+        """
+        if isinstance(arg, str) and arg in _TORCH_DTYPE_NAMES:
+            self.cast_dtype = arg
+            return self
+        if isinstance(arg, str):
+            base = arg.split(":", 1)[0]
+            if base not in _TORCH_DEVICE_TYPES:
+                msg = (
+                    f"Expected one of {sorted(_TORCH_DEVICE_TYPES)} device type at start of "
+                    f"device string: {arg}"
+                )
+                raise RuntimeError(msg)
+            self._param = _FakeParam(arg)
+            return self
+        self.cast_dtype = arg
         return self
 
     def _ents_for(self, text: str, labels: list[str], threshold: float) -> list[dict[str, Any]]:
@@ -653,3 +700,118 @@ def test_missing_inference_api_raises_clear_error_naming_the_fallback(
     monkeypatch.setitem(sys.modules, "gliner", module)
     with pytest.raises(AttributeError, match="predict_relations"):
         GlinerRelexExtractor(_config()).extract_fused([_chunk("Alice works for Acme Corp.")])
+
+
+# --- #191 device placement (ADR-0036 §2) -----------------------------------------------------
+#
+# #191 established that the plain ``gliner`` library NEVER auto-places its model
+# (``from_pretrained`` map-locations to CPU) and encoded the fix in ``place_on_device`` — but only
+# ``redaction.gliner_pii`` was wired to it. ``relation.gliner_relex`` passed ``device=None`` into
+# ``load_then_cast``, so it cast to bf16 off a bare CUDA-availability probe while the weights stayed
+# resident on CPU, and its ``device`` config was read by nobody. These tests bite that gap.
+
+
+def _model_param_device(provider: GlinerRelexExtractor) -> str:
+    """Where the LOADED model's parameters actually live — the only honest "what device ran this"."""
+    param: _FakeParam = next(iter(provider._model.parameters()))
+    return param.device
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_relex_model_parameters_reside_on_the_resolved_device(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    """#191 regression: the model is PLACED on the resolved device at load, not left on CPU.
+
+    Device-parameterized so CPU-only CI still runs both lanes meaningfully: ``LATENCE_CUDA=1`` is
+    the framework's deterministic CUDA probe override, so the ``cuda`` lane exercises the real
+    resolution + placement path on a GPU-less box. Pre-fix the provider never called ``.to(device)``
+    at all, so the cuda lane found the parameters on ``cpu`` — the silent ~10x throughput cliff.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1" if device == "cuda" else "0")
+    extractor = GlinerRelexExtractor({**_config(), "device": device})
+    extractor.extract_fused([_chunk("Alice works for Acme Corp.")])
+    assert _model_param_device(extractor) == device
+
+
+def test_relex_bf16_cast_never_lands_on_a_cpu_resident_model(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bf16 cast and the resident device agree — never bf16 weights running eager on CPU.
+
+    This is the precise pre-fix corruption: on a CUDA host the seam resolved bf16 from a bare
+    availability probe while the model stayed on CPU (``load_then_cast``'s own docstring says the
+    cast applies "only when ... the model is on cuda").
+    """
+    fake_torch = types.ModuleType("torch")
+    bf16 = object()
+    fake_torch.bfloat16 = bf16  # type: ignore[attr-defined]
+    fake_torch.float32 = object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+
+    extractor = GlinerRelexExtractor({**_config(), "device": "cuda"})
+    extractor.extract_fused([_chunk("Alice works for Acme Corp.")])
+    assert extractor._model.cast_dtype is bf16
+    assert _model_param_device(extractor) == "cuda"
+
+
+def test_relex_output_is_identical_across_devices(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The output contract does not move with the device — only throughput does (#191 AC 3)."""
+    fake_gliner.entities = [
+        {"start": 0, "end": 5, "label": "person", "score": 0.95},
+        {"start": 16, "end": 25, "label": "organization", "score": 0.9},
+    ]
+    fake_gliner.relations = [
+        {
+            "head": {"start": 0, "end": 5},
+            "tail": {"start": 16, "end": 25},
+            "relation": "works_for",
+            "score": 0.88,
+        }
+    ]
+
+    def _run(device: str) -> tuple[list[Any], list[Any]]:
+        monkeypatch.setenv("LATENCE_CUDA", "1" if device == "cuda" else "0")
+        extractor = GlinerRelexExtractor({**_config(), "device": device})
+        res = extractor.extract_fused([_chunk("Alice works for Acme Corp.")])
+        return (
+            [(m.text, m.label, m.provenance.char_start, m.provenance.char_end) for m in res.mentions],
+            [(r.label, r.confidence, r.provenance.char_start, r.provenance.char_end) for r in res.relations],
+        )
+
+    assert _run("cuda") == _run("cpu")
+    assert _run("cpu") != ([], [])  # a non-empty comparison, not two empty results
+
+
+def test_relex_cuda_requested_without_a_gpu_fails_loudly(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``device: cuda`` on a CPU-only host is an error, NEVER a silent CPU run (#191: silence IS
+    the bug). Pre-fix the config key was ignored entirely and the run went to CPU without a word."""
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    extractor = GlinerRelexExtractor({**_config(), "device": "cuda"})
+    with pytest.raises(ConfigError, match="no CUDA device is available"):
+        extractor.extract_fused([_chunk("Alice works for Acme Corp.")])
+
+
+def test_relex_placement_mismatch_is_refused(
+    fake_gliner: type[_FakeGLiNER], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that reports the WRONG device after placement is refused, not logged and run.
+
+    Simulates the field failure directly: ``.to(device)`` succeeds but the weights stay on CPU.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    monkeypatch.setattr(_FakeGLiNER, "to", lambda self, arg: self)  # noqa: ARG005
+    extractor = GlinerRelexExtractor({**_config(), "device": "cuda"})
+    with pytest.raises(ProviderError, match="reports device 'cpu'"):
+        extractor.extract_fused([_chunk("Alice works for Acme Corp.")])
+
+
+def test_relex_invalid_device_string_is_a_config_error() -> None:
+    """An unknown device is a ConfigError at CONSTRUCTION — before any weights are downloaded."""
+    with pytest.raises(ConfigError, match="invalid device config"):
+        GlinerRelexExtractor({**_config(), "device": "gpu"})

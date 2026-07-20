@@ -24,7 +24,7 @@ flowchart TB
         P3[redaction.presidio]
     end
 
-    Runner[["Runner — schedules the Stages<br/>(local · Databricks · Airflow)"]]
+    Runner[["Runner — schedules the Stages<br/>(local · Airflow)"]]
     Storage[("Storage — fsspec seam<br/>local · S3 · GCS · Azure")]
 
     Pipeline -->|runs on| Runner
@@ -42,7 +42,9 @@ flowchart TB
 A **[Stage](../pipeline/index.md)** declares a typed input and output contract and nothing
 about how it is scheduled. A **Runner** owns scheduling, retries, and checkpointing but
 never defines pipeline semantics. So the *identical* Stages run under the built-in local
-Runner, an Airflow DAG, or a Databricks job — you swap only the Runner
+Runner or as an Airflow DAG (`latence-runner-airflow`) — you swap only the Runner. Those two
+are what ships; the seam is what makes a third (Databricks Workflows, plain containers)
+writable without touching a Stage
 ([ADR-0003](../adr/0003-stage-library-with-pluggable-runners.md),
 [ADR-0030](../adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md)).
 

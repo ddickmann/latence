@@ -52,7 +52,17 @@ if TYPE_CHECKING:
 BM25_ARTIFACT = "latence.bm25.termstats"
 BM25_ARTIFACT_VERSION = 1
 
-_WORD = re.compile(r"[A-Za-z0-9]+")
+# The reference term unit: maximal runs of Unicode letters/digits (and combining marks), with the
+# underscore excluded so it stays a boundary. `[^\W_]` is `\w` minus `_`, so over pure-ASCII text it
+# matches `[A-Za-z0-9]` character-for-character — every pre-existing corpus, artifact and golden
+# fixture is byte-identical — while `Müller`, `für`, `Größe` and `Таможенный` stay WHOLE terms
+# instead of shattering into single-letter junk (R5-wizard_profile-13).
+#
+# The same pattern is spelled in `latence_core.embedding` (the dense/sparse hashing references) and
+# in `latence_retrieval.bm25` (the query-side rescorer). `latence-retrieval` is a deliberately
+# independent downstream library with no `latence-core` dependency, so there is no constant to
+# share: `test_export_and_query_tokenisation_agree_on_non_ascii` holds the two spellings together.
+_WORD = re.compile(r"[^\W_]+")
 
 
 def _reference_profile() -> ProviderProfile:
@@ -81,11 +91,21 @@ def _reference_profile() -> ProviderProfile:
 class RegexWordTokenizer:
     """Lowercase alphanumeric-run :class:`~latence_core.capability.Tokenizer` (the reference).
 
-    Each text is lowercased and split into maximal ``[A-Za-z0-9]+`` runs, so punctuation and
-    whitespace are boundaries and are dropped — the *reference tokenization* the BM25 tests assert
-    against, and the exact tokenisation the in-core dense (``embedding.hashing``) and sparse
-    (``sparse.hashing``) references use, so the lexical statistics line up with those signals.
-    Deterministic; empty / term-free text yields ``[]``.
+    Each text is lowercased and split into maximal ``[^\\W_]+`` runs — Unicode letters, digits and
+    combining marks — so punctuation, whitespace and the underscore are boundaries and are dropped.
+    This is the *reference tokenization* the BM25 tests assert against, and the exact tokenisation
+    the in-core dense (``embedding.hashing``) and sparse (``sparse.hashing``) references use, so the
+    lexical statistics line up with those signals. Deterministic; empty / term-free text yields
+    ``[]``.
+
+    **It is Unicode-aware, not a word segmenter.** Accented and non-Latin words survive whole
+    (``müller``, ``für``, ``größe``, ``таможенный``), but scripts written *without* word spacing —
+    Chinese, Japanese, Thai — are split only where the text itself has whitespace, so an unspaced
+    run becomes ONE term. That is the honest limit of a zero-dependency reference: real segmentation
+    needs a language model or a dictionary, which core does not carry (ADR-0016). A corpus in those
+    scripts (or one that must match a store's exact analyzer) plugs its own segmenter in behind the
+    :class:`~latence_core.capability.Tokenizer` seam — which is precisely why the tokenisation is a
+    seam and not hard-coded.
     """
 
     @classmethod

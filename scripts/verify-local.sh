@@ -68,6 +68,30 @@ uv run latence stack validate stacks/schema-induction.yaml  # induce+extract ski
 uv run latence stack validate stacks/context-enrichment.yaml  # the KG→chunk enrich Stage RUNS on CPU (W13)
 ok "stack validate"
 
+step "reproducible-environment specs (#195 — pins, enforced conflict boundaries, providers)"
+# The OFFLINE gate of every deploy/env/<name>/ environment: `smoke.sh --spec-only`. It needs no
+# heavy install and no network, and it is what turns dependency drift in a Provider package RED
+# on every commit. It also enforces the #198 transformers-split resolution BEFORE any install:
+# a package whose declared window is disjoint from an enforced boundary, or an excluded
+# in-process OCR package entering the set, fails right here. The remaining gates — standing the
+# environment up, PROVING real GPU placement, and the tiny end-to-end slice — need the installed
+# venv (and a GPU); see deploy/env/README.md.
+for env in deploy/env/*/smoke.sh; do
+  [ -f "$env" ] && bash "$env" --spec-only
+done
+ok "environment specs"
+
+step "Blackwell/CUDA-13 compatibility matrix (#199 — every cell measured or explicitly UNVERIFIED)"
+# Offline and import-free, like the env specs. It fails when a cell claims 'verified' without a
+# date/hardware/command/observed measurement, when an UNVERIFIED cell has no runnable reproduce
+# command, when a learned Provider or serving dependency of a committed environment has no cell at
+# all, when a recorded version drifts from that environment's lock, when one of the live run's
+# failure modes leaves the matrix, or when the published docs/compatibility-matrix.md is not the
+# render of the YAML. The `--require-verified` variant (which also fails while anything is still
+# UNVERIFIED) is deliberately NOT run here — it is the maintainer's switch ON the Blackwell host.
+uv run latence env matrix deploy/env/compatibility-matrix.yaml
+ok "compatibility matrix"
+
 step "bake-off matrices (Goal B — the shipped CPU matrices)"
 for m in parse chunk embed redaction disambiguation graph_completion schema_induction; do
   [ -f "matrix/$m.yaml" ] && uv run latence bake-off "matrix/$m.yaml" --out-dir "$(mktemp -d)" >/dev/null
@@ -77,4 +101,5 @@ ok "bake-off"
 printf '\n\033[1;32m========================================\n'
 printf 'LOCAL VERIFY GREEN — all mirrored CI gates pass.\n'
 printf '========================================\033[0m\n'
-printf 'Not run here (separate/infra): MinIO s3 e2e, Airflow DAG lane, GPU real runs (pod).\n'
+printf 'Not run here (separate/infra): MinIO s3 e2e, Airflow DAG lane, GPU real runs (pod),\n'
+printf '  deploy/env/* gates 2+ (need the installed heavy venv, and a CUDA-13 GPU for the\n  gpu-learned placement gate: bash deploy/env/<name>/smoke.sh).\n'

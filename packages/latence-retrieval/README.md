@@ -158,7 +158,7 @@ backend = QdrantBackend({
     "capabilities": ["dense", "filter"],   # this reference adapter serves {dense, sparse, filter}
     "dimension": 768,                       # the dense index width (required for a dense mode)
     "vector_name": "content",              # the named dense vector to search (None ⇒ unnamed default)
-    "text_key": "text",                    # payload field → Candidate.text
+    "text_key": "content",                 # payload field → Candidate.text (default: "content")
     "url": "http://localhost:6333",        # (+ api_key/prefer_grpc/… — built lazily on first search)
 })
 
@@ -167,6 +167,13 @@ hits = backend.search(
     RetrievalQuery(mode=Capability.DENSE, vector=my_query_vector, filter={"tenant": "acme"}, top_k=10)
 )
 ```
+
+**Where the text comes from.** `text_key` defaults to `"content"` — the framework's own Export
+column name, which the `latence-sink-qdrant` loader writes verbatim into every point's payload. So a
+collection *this framework loaded* is queryable with no override: `Candidate.text` is the chunk text
+the pipeline exported. Point the adapter at a collection somebody else built and set `text_key` to
+whatever key they used; a key the payload does not carry raises `BackendSearchError` naming the keys
+that *are* there — never a page of Candidates with silently empty `text` (ADR-0034).
 
 **The pattern to copy** (`src/latence_retrieval/qdrant.py`): declare `capabilities` honestly (never
 advertise a mode you cannot serve); enforce the seam invariants yourself **before the wire** — reject

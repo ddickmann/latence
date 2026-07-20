@@ -8,7 +8,7 @@ framework — every Stage, Provider, and ADR — reads cleanly.
 | **Capability** | A narrow, model-agnostic interface a Stage depends on (`Parser`, `EntityExtractor`, `PIIDetector`), typed against the framework's data contracts. | [ADR-0004](../adr/0004-capability-protocols-with-provider-plugins.md) · [reference](../reference/capability.md) |
 | **Provider** | A concrete implementation of a Capability — an in-process model, a remote endpoint, or a cloud service — registered as a plugin. The framework never names a model. | [ADR-0004](../adr/0004-capability-protocols-with-provider-plugins.md) · [catalog](../providers/catalog.md) |
 | **Stage** | A unit of pipeline work with a typed input and output contract. Stages declare what they consume and produce; they do not know how they are scheduled or which model fulfils them. | [ADR-0003](../adr/0003-stage-library-with-pluggable-runners.md) · [stages](../pipeline/index.md) |
-| **Runner** | An execution adapter that schedules Stages on a substrate (local, Databricks, Airflow). Runners own scheduling, retries, checkpointing; they never define pipeline semantics. | [ADR-0003](../adr/0003-stage-library-with-pluggable-runners.md) · [reference](../reference/runner.md) |
+| **Runner** | An execution adapter that schedules Stages on a substrate. Two ship: the built-in local Runner and Airflow (`latence-runner-airflow`); other substrates are seam-compatible follow-ons. Runners own scheduling, retries, checkpointing; they never define pipeline semantics. | [ADR-0003](../adr/0003-stage-library-with-pluggable-runners.md) · [reference](../reference/runner.md) |
 | **Storage** | The `fsspec`-backed seam that makes IO cloud-agnostic — the same Pipeline reads and writes local disk, S3, GCS, or Azure without code changes. Local Runner state is files-on-Storage, no database. | [ADR-0009](../adr/0009-fsspec-storage-seam.md) · [ADR-0010](../adr/0010-local-runner-state-is-files-on-storage.md) |
 
 ## Read next
@@ -24,7 +24,7 @@ framework — every Stage, Provider, and ADR — reads cleanly.
   and the words to avoid.
 
 - :material-scale-balance: **[Decision Log (ADRs)](../adr/index.md)**
-  All 44 architecture decisions, in order — the reasoning behind every seam above.
+  All 52 architecture decisions, in order — the reasoning behind every seam above.
 
 </div>
 

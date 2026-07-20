@@ -148,10 +148,15 @@ written into the run manifest or logs.
   the KG** at all.
 - **Manifest secret scrubbing** — `scrub_sensitive` /` _SENSITIVE_KEY_TOKENS` in
   `packages/latence-core/src/latence_core/runner.py`: any config key whose name looks
-  like a secret (`api_key`, `token`, `secret`, `password`, `credential`, …) has its
-  **value** replaced with `***REDACTED***` before `manifest.json` is written —
-  inlined values and env-var references alike. No secret is written to the manifest or
-  logs.
+  like a secret (`api_key`, `token`, `secret`, `password`, `credential`, and — since
+  audit-R7 — the certificate-auth family `private_key`, `certificate`, `passphrase`,
+  `client_cert`, …) has its **value** replaced with `***REDACTED***` before
+  `manifest.json` is written — inlined values and env-var references alike. No secret
+  is written to the manifest or logs. This scrubber, **not** a Provider-side guard, is
+  what keeps a credential off disk: the Runner writes the manifest before it constructs
+  any Provider, so `SharePointSource`'s `reject_inline_secrets` fails the run but cannot
+  un-write the manifest. Every key that guard refuses is required by test to be covered
+  here.
 - **Quality Report fingerprinting** — co-occurring entity pairs in the shareable
   Quality Report are **salted-sha256 fingerprinted**, not emitted verbatim
   (`_co_occurrence_fingerprint` in
@@ -195,9 +200,11 @@ the repo.
   against an audited `.secrets.baseline`; a genuinely new secret turns the gate red
   (`scripts/secret_scan_gate.py`). `.env*`, `*.pem`, `*.key`, `.pypirc` are
   git-ignored.
-- **Permissive-only default licenses** — every default model Provider has its weights
+- **Permissive-by-default licenses** — every default model Provider has its weights
   **and** code license verified separately (ADR-0012; recorded in `NOTICE` /
-  `THIRD-PARTY-LICENSES.md`).
+  `THIRD-PARTY-LICENSES.md`). The disclosed exceptions are never defaults: restricted-license
+  models (EmbeddingGemma) are opt-in, and the pinned GPU environments under `deploy/env/`
+  pull proprietary NVIDIA CUDA wheels.
 - **Automation added with this workstream** — Dependabot (`pip` + `github-actions`,
   weekly, grouped minor/patch), CodeQL SAST for Python, OpenSSF Scorecard, and a
   documented CycloneDX SBOM script (`scripts/generate-sbom.sh`, see

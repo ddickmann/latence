@@ -465,6 +465,92 @@ def _source_case() -> ConformanceCase:
     )
 
 
+def _sharepoint_source_case() -> ConformanceCase:
+    """Source (``source.sharepoint``, #182): list + fetch a fake SharePoint drive over Graph.
+
+    A source *system* connector cannot read a temp folder, so the base Source case does not apply.
+    It runs instead against the faithful offline Microsoft Graph fake the connector package ships
+    (``latence_source_sharepoint.testing``) — the same fake that rejects a missing/expired token,
+    a query-string token, ``$skip`` paging, an unknown drive, and a credentialed request to the
+    pre-authenticated download host. ``stub_scoped=True``, so the harness flags this Provider
+    "verified against a stub; live numbers need a tenant" and nobody mistakes it for a live run.
+
+    The adversarial input is an empty drive: the Source produces no records (the Capability's
+    defined "none"), never a crash.
+    """
+    import os
+
+    token_env = "LATENCE_CONFORMANCE_SHAREPOINT_TOKEN"
+
+    @contextlib.contextmanager
+    def _token_in_env() -> Iterator[None]:
+        """Secrets are environment-only, so the case supplies the fake's token that way too."""
+        previous = os.environ.get(token_env)
+        os.environ[token_env] = "valid-token"
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop(token_env, None)
+            else:
+                os.environ[token_env] = previous
+
+    def _fake_drive(*, empty: bool) -> dict[str, Any]:
+        from latence_source_sharepoint.testing import (
+            GRAPH_HOST,
+            FakeFile,
+            FakeGraphApi,
+            FakeGraphTransport,
+        )
+
+        files = (
+            []
+            if empty
+            else [FakeFile(path="/canonical.txt", content=fixtures.CANONICAL_TEXT.encode("utf-8"))]
+        )
+        api = FakeGraphApi(files=files)
+        return {
+            "drive_id": api.drive_id,
+            "graph_base_url": GRAPH_HOST,
+            "transport": FakeGraphTransport(api),
+            "auth": {"mode": "env_token", "token_env": token_env},
+        }
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        # The Provider under test was constructed from ``config`` (a populated fake drive).
+        with _token_in_env():
+            return list(provider.produce(Storage.for_uri("file:///tmp")))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        if not _records_contract_valid(records, empty_ok=False):
+            return False
+        # A source-system connector must stamp the source system + a resolvable identity.
+        return all(
+            r.provenance.source_system == "sharepoint"
+            and r.provenance.source_uri.startswith("sharepoint://")
+            for r in _as_records(records)
+        )
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        empty_provider = type(provider)(_fake_drive(empty=True))
+        with _token_in_env():
+            return _capture_raise(
+                lambda: list(empty_provider.produce(Storage.for_uri("file:///tmp")))
+            )
+
+    # Constructed once so C4's two runs share the same fake drive (a deterministic Source over
+    # an unchanged drive must produce byte-identical output).
+    config = _fake_drive(empty=False)
+    return ConformanceCase(
+        capability=Capability.SOURCE,
+        config=config,
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        stub_scoped=True,
+    )
+
+
 def _parse_case(*, stub_scoped: bool) -> ConformanceCase:
     """Parse: decode a ParserInput; an undecodable input yields a PARSE_ERROR (graceful)."""
 
@@ -1717,6 +1803,16 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
 }
 
 
+# Per-Provider overrides whose case can only be BUILT when the Provider's own package is
+# installed (it supplies the faithful offline fake the case drives). Built on first use and
+# cached, so importing this module never requires an optional Provider package to be present.
+_LAZY_PROVIDER_CASES: dict[str, Callable[[], ConformanceCase]] = {
+    # source.sharepoint (#182): the case needs latence_source_sharepoint.testing's Graph fake.
+    "source.sharepoint": _sharepoint_source_case,
+}
+_LAZY_CASE_CACHE: dict[str, ConformanceCase] = {}
+
+
 def case_for_provider(provider_name: str) -> ConformanceCase:
     """The ConformanceCase a Provider is checked against (per-Provider override else Capability).
 
@@ -1725,6 +1821,12 @@ def case_for_provider(provider_name: str) -> ConformanceCase:
     whose Capability has **no** case raises ``KeyError`` — a loud failure that forces the case to
     be written, never a silent coverage gap (the issue's explicit anti-silent-skip requirement).
     """
+    if provider_name in _LAZY_PROVIDER_CASES:
+        cached = _LAZY_CASE_CACHE.get(provider_name)
+        if cached is None:
+            cached = _LAZY_PROVIDER_CASES[provider_name]()
+            _LAZY_CASE_CACHE[provider_name] = cached
+        return cached
     if provider_name in _PROVIDER_CASE_OVERRIDES:
         return _PROVIDER_CASE_OVERRIDES[provider_name]
     capability = capability_of(provider_name)

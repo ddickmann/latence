@@ -26,7 +26,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from latence_core.capability import GraphFeatureComputer, ProviderRegistry
+from latence_core.capability import (
+    GraphFeatureComputer,
+    ProviderRegistry,
+    satisfies_capability,
+)
 from latence_core.contracts import (
     DisambiguationRecord,
     DisambiguationScope,
@@ -81,7 +85,9 @@ def _resolve_feature_computer(
         raise ConfigError(msg)
     provider_cls = registry.load(provider_name)
     provider = provider_cls(provider_config)
-    if not isinstance(provider, GraphFeatureComputer):
+    # satisfies_capability, not isinstance: a runtime_checkable isinstance INVOKES a Protocol
+    # property via hasattr, which would run Provider work at wiring time (audit R6).
+    if not satisfies_capability(provider, GraphFeatureComputer):
         msg = (
             f"Provider {provider_name!r} named in Graph Assembly config 'graph_features' does not "
             "satisfy the GraphFeatureComputer capability."

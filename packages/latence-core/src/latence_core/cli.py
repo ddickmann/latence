@@ -37,6 +37,11 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from latence_core.errors import LatenceError, error_category
+from latence_core.observability import (
+    DEFAULT_LINEAGE_NAMESPACE,
+    OpenLineageEmitter,
+    build_lineage_emitter,
+)
 from latence_core.pipeline import Pipeline
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
@@ -50,6 +55,13 @@ app = typer.Typer(add_completion=False, help="Latence — AI-ready data pipeline
 # stack tooling namespaced without cluttering the top-level command list.
 stack_app = typer.Typer(add_completion=False, help="Full-stack Pipeline configs + validation.")
 app.add_typer(stack_app, name="stack")
+
+# The ``env`` sub-command group (``latence env verify|render ...``, issue #195). The reproducible
+# environments under ``deploy/env/<name>/`` are specifications the build checks, not wiki pages.
+env_app = typer.Typer(
+    add_completion=False, help="Reproducible environment specs (deploy/env/<name>/)."
+)
+app.add_typer(env_app, name="env")
 
 logger = logging.getLogger("latence")
 
@@ -203,9 +215,7 @@ def run(
     _execute_pipeline_file(pipeline_path, run_id=run_id, tuned=tuned)
 
 
-def _execute_pipeline_file(
-    pipeline_path: Path, *, run_id: str, tuned: Path | None = None
-) -> None:
+def _execute_pipeline_file(pipeline_path: Path, *, run_id: str, tuned: Path | None = None) -> None:
     """Load a stack/pipeline YAML from disk and run it on the local Runner (shared by run+process).
 
     The single execution path both ``latence run`` and ``latence process`` delegate to: load the
@@ -229,7 +239,7 @@ def _execute_pipeline_file(
         typer.echo(overlay.reason, err=True)
         pipeline = overlay.pipeline
 
-    report = LocalRunner().run(pipeline, run_id=run_id)
+    report = LocalRunner(lineage=_lineage_emitter_from_env()).run(pipeline, run_id=run_id)
 
     logger.info(
         "run complete: %d documents, contracts_complete=%s",
@@ -248,6 +258,34 @@ def _execute_pipeline_file(
     typer.echo(report.to_json())
     if not storage.exists(report_uri):  # pragma: no cover - defensive
         typer.echo("warning: quality report was not persisted", err=True)
+
+
+def _lineage_emitter_from_env() -> OpenLineageEmitter | None:
+    """Build the OpenLineage emitter IFF ``LATENCE_OPENLINEAGE_URL`` opts in (#185).
+
+    Off by default: with the variable unset this returns ``None`` and the Runner emits nothing,
+    opens no socket, and behaves exactly as before. Set it to an OpenLineage endpoint
+    (``http://localhost:5000`` for a local Marquez) to have each Stage show up in the catalog;
+    ``LATENCE_OPENLINEAGE_NAMESPACE`` names the catalog namespace and
+    ``LATENCE_OPENLINEAGE_API_KEY`` supplies a bearer token for a hosted collector — that token
+    may only travel over ``https`` (or to loopback), and is never replayed to a redirect target. A
+    misconfigured
+    endpoint never breaks a run: the ConfigError is logged and lineage stays off.
+    """
+    url = os.environ.get("LATENCE_OPENLINEAGE_URL", "")
+    if not url:
+        return None
+    try:
+        return build_lineage_emitter(
+            url,
+            namespace=os.environ.get("LATENCE_OPENLINEAGE_NAMESPACE", DEFAULT_LINEAGE_NAMESPACE),
+            api_key=os.environ.get("LATENCE_OPENLINEAGE_API_KEY") or None,
+        )
+    except Exception:  # pragma: no cover - observability must never break a run
+        logger.warning(
+            "OpenLineage endpoint %r is not usable; lineage disabled", url, exc_info=True
+        )
+        return None
 
 
 def _maybe_export_metrics(report: QualityReport) -> None:
@@ -388,9 +426,7 @@ def bake_off(
     from latence_core.bakeoff.harness import run_bakeoff
 
     if storage_root is not None:
-        result = run_bakeoff(
-            matrix_path, base_stack_path=resolved_base, storage_root=storage_root
-        )
+        result = run_bakeoff(matrix_path, base_stack_path=resolved_base, storage_root=storage_root)
     else:
         with tempfile.TemporaryDirectory(prefix="latence-bakeoff-") as tmp:
             result = run_bakeoff(
@@ -495,7 +531,9 @@ def setup(
     ] = None,
     storage: Annotated[
         str | None,
-        typer.Option("--storage", help="Output/state Storage URI. Default: file://<cwd>/latence-out."),
+        typer.Option(
+            "--storage", help="Output/state Storage URI. Default: file://<cwd>/latence-out."
+        ),
     ] = None,
     profile: Annotated[
         str | None,
@@ -624,9 +662,7 @@ def setup(
     )
     src_path = Path(src.removeprefix("file://"))
     if not src_path.exists() or not src_path.is_dir():
-        typer.echo(
-            f"Source folder does not exist (or is not a directory): {src}", err=True
-        )
+        typer.echo(f"Source folder does not exist (or is not a directory): {src}", err=True)
         raise typer.Exit(code=2)
     # ONE walk answers both questions: which parser the corpus needs, and how big its documents
     # actually are (which sizes the intake oversize cap, so a real corpus is not quarantined).
@@ -732,8 +768,7 @@ def setup(
         pii_on = pii
     elif interactive:
         typer.echo(
-            "  (adds content-screening + learned financial-PII detection/redaction; "
-            "default ON)",
+            "  (adds content-screening + learned financial-PII detection/redaction; default ON)",
             err=True,
         )
         pii_on = typer.confirm("Enable PII redaction + guardrail screening?", default=True)
@@ -773,10 +808,14 @@ def setup(
         raise typer.Exit(code=2)
 
     # g. Optional domain hint.
-    domain_hint = domain if domain is not None else (
-        str(typer.prompt("Domain / description hint (optional)", default=""))
-        if interactive
-        else ""
+    domain_hint = (
+        domain
+        if domain is not None
+        else (
+            str(typer.prompt("Domain / description hint (optional)", default=""))
+            if interactive
+            else ""
+        )
     )
 
     answers = SetupAnswers(
@@ -868,8 +907,9 @@ def process(
         Path,
         typer.Option("--config", "-c", help="The saved stack config to run."),
     ] = Path("latence.stack.yaml"),
-    run_id: Annotated[str, typer.Option("--run-id", help="Run id (state/checkpoint namespace).")]
-    = "run-0001",
+    run_id: Annotated[
+        str, typer.Option("--run-id", help="Run id (state/checkpoint namespace).")
+    ] = "run-0001",
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
 ) -> None:
     """Run a stack config saved by ``latence setup`` — one line to kick off the pipeline (W15).
@@ -1019,6 +1059,187 @@ def purge(
         typer.echo(f"purge failed [{error_category(exc)}]: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     _emit_delta_report(pipeline, rid, report)
+
+
+def _repo_root_for(spec_path: Path) -> Path:
+    """The repo root a ``deploy/env/<name>/environment.yaml`` belongs to (three parents up)."""
+    from latence_core.envspec import repo_root_for  # noqa: PLC0415 - keeps the CLI import lazy
+
+    return repo_root_for(spec_path)
+
+
+@env_app.command("verify")
+def env_verify(
+    spec_path: Annotated[
+        Path, typer.Argument(help="Path to a deploy/env/<name>/environment.yaml.")
+    ],
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: three parents up from spec)."),
+    ] = None,
+    probe: Annotated[
+        bool,
+        typer.Option(
+            "--probe",
+            help="Additionally LOAD every declared Provider from the registry (imports the heavy "
+            "stack). Only meaningful inside an installed environment.",
+        ),
+    ] = False,
+) -> None:
+    """Check a reproducible environment against the workspace it claims to stand up.
+
+    Offline and import-free: compares the generated ``requirements.in``/``constraints.txt``, the
+    solved lock, the Provider packages' declared dependencies and entry-points, and the smoke
+    stack. Exits non-zero on any finding, so dependency drift fails the build instead of the pod.
+    """
+    from latence_core.envspec import load_environment, probe_providers, verify_environment
+
+    try:
+        spec = load_environment(spec_path)
+        findings = verify_environment(spec, repo_root or _repo_root_for(spec_path)).findings
+        if probe:
+            findings += probe_providers(spec).findings
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"env verify failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    from latence_core.envspec import EnvironmentReport
+
+    report = EnvironmentReport(spec.name, findings)
+    typer.echo(report.describe())
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@env_app.command("placement")
+def env_placement(
+    spec_path: Annotated[
+        Path, typer.Argument(help="Path to a deploy/env/<name>/environment.yaml.")
+    ],
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: three parents up from spec)."),
+    ] = None,
+) -> None:
+    """PROVE every model-loading Provider of a GPU environment really runs on the GPU (issue #198).
+
+    Drives one real inference through each such Provider the environment's stack instantiates and
+    reads torch's CUDA allocator around the call. A model that silently stayed on the CPU allocates
+    zero CUDA bytes no matter how correct its output is — which is exactly the #191 failure this
+    gate makes impossible to reintroduce. Meaningful only inside an installed GPU environment; a
+    missing CUDA device is a FAILURE, never a skip.
+
+    The probe set is derived from the workspace packages the environment installs (which is why
+    ``--repo-root`` matters), unioned with its declared ``learned_providers``.
+    """
+    from latence_core.envspec import load_environment
+    from latence_core.placement import probe_placement
+
+    try:
+        spec = load_environment(spec_path)
+        result = probe_placement(spec, repo_root=repo_root or _repo_root_for(spec_path))
+    except (LatenceError, OSError, ImportError) as exc:
+        typer.echo(f"env placement failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(result.describe())
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
+@env_app.command("render")
+def env_render(
+    spec_path: Annotated[
+        Path, typer.Argument(help="Path to a deploy/env/<name>/environment.yaml.")
+    ],
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: three parents up from spec)."),
+    ] = None,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Do not write; exit non-zero if a generated file is stale."),
+    ] = False,
+) -> None:
+    """Regenerate ``requirements.in`` + ``constraints.txt`` from the spec + the real pyprojects."""
+    from latence_core.envspec import load_environment, render_constraints, render_requirements
+
+    try:
+        spec = load_environment(spec_path)
+        root = repo_root or _repo_root_for(spec_path)
+        rendered = {
+            spec.requirements_path: render_requirements(spec, root),
+            spec.constraints_path: render_constraints(spec, root),
+        }
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"env render failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    stale = [
+        path
+        for path, text in rendered.items()
+        if not path.is_file() or path.read_text(encoding="utf-8") != text
+    ]
+    if check:
+        for path in stale:
+            typer.echo(f"stale: {path}", err=True)
+        typer.echo(f"{len(stale)} stale generated file(s) for environment '{spec.name}'")
+        if stale:
+            raise typer.Exit(code=1)
+        return
+    for path, text in rendered.items():
+        path.write_text(text, encoding="utf-8")
+    typer.echo(f"rendered {len(rendered)} file(s) for environment '{spec.name}'")
+
+
+@env_app.command("matrix")
+def env_matrix(
+    matrix_path: Annotated[
+        Path,
+        typer.Argument(help="Path to deploy/env/compatibility-matrix.yaml."),
+    ] = Path("deploy/env/compatibility-matrix.yaml"),
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Workspace root (default: two parents up from the file)."),
+    ] = None,
+    render: Annotated[
+        bool,
+        typer.Option("--render", help="Write the generated Markdown document instead of checking."),
+    ] = False,
+    require_verified: Annotated[
+        bool,
+        typer.Option(
+            "--require-verified",
+            help="Also fail while ANY cell or the full-stack run is still UNVERIFIED. The switch "
+            "a maintainer flips ON the Blackwell host to prove the map is fully measured.",
+        ),
+    ] = False,
+) -> None:
+    """Check the Blackwell/CUDA-13 compatibility matrix (issue #199).
+
+    Offline and import-free. Every cell must be a measurement — date, hardware, command, observed
+    output — or explicitly ``UNVERIFIED`` with the exact command that turns it into one. Coverage
+    is derived from the committed ``deploy/env/*/environment.yaml`` specs, so a new enforced
+    boundary or learned Provider fails this check until it is mapped.
+    """
+    from latence_core.compat import load_matrix, render_matrix, verify_matrix
+
+    try:
+        matrix = load_matrix(matrix_path)
+        root = repo_root or matrix_path.resolve().parents[2]
+        if render:
+            doc = root / matrix.doc_path
+            doc.parent.mkdir(parents=True, exist_ok=True)
+            doc.write_text(render_matrix(matrix), encoding="utf-8")
+            typer.echo(f"rendered {matrix.doc_path} from {matrix_path}")
+            return
+        report = verify_matrix(matrix, root, require_verified=require_verified)
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"env matrix failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(report.describe())
+    if not report.ok:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:  # pragma: no cover - console entry shim

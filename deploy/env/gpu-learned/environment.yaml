@@ -1,0 +1,172 @@
+# deploy/env/gpu-learned/environment.yaml — the GPU learned-Provider environment (issue #198).
+#
+# THE SINGLE SOURCE OF TRUTH for this environment. `requirements.in` and `constraints.txt` are
+# GENERATED from this file plus the workspace packages' real pyproject metadata
+# (`latence env render`), and `requirements.lock` is the solved resolution. `latence env verify`
+# asserts all four agree, and `latence env placement` proves the models really run on the GPU.
+#
+# Governing: ADR-0016 (per-Provider extras are the composition mechanism — the CUDA payload lives
+# in the Provider packages, never in latence-core), ADR-0007 (GPU serving is the upgrade path),
+# ADR-0030 (endpoint Providers are the performance path — and, here, the boundary that resolves
+# the transformers split), ADR-0036 (device profiles: honour the resolved device or fail loudly),
+# ADR-0045 (Granite r2 default Embedder), ADR-0046 (GLinker entity linking).
+name: gpu-learned
+summary: >-
+  The GPU flavour of the learned-Provider set on CUDA 13 / Blackwell (sm_120): GLiNER2 fused
+  entity+relation extraction, GLiNER2 financial-PII redaction, learned GLiNER PII redaction,
+  GLinker disambiguation and IBM Granite r2 dense embeddings — every one of them pinned, and every
+  one of them PROVEN to allocate CUDA memory before this environment is called green.
+
+# The interpreter range: the intersection of the packages' requires-python and the cp312 wheel
+# coverage of the solved CUDA-13 set.
+python: ">=3.11,<3.13"
+
+# Blackwell is Linux/x86-64 only in practice, and `flashdeberta` (a hard dependency of
+# latence-disambig-glinker) needs `triton`, which publishes Linux wheels only. macOS/arm64 is NOT
+# a supported target for this environment.
+platform: linux-x86_64
+
+# The CUDA 13 wheel index. `+cu130` torch wheels are the ones built with `sm_120` (Blackwell)
+# kernels — the default PyPI torch is a cu12 build, which is exactly the "stale architecture check"
+# the field report hit ("no kernel image is available for execution on the device"). Without this
+# index there is no CUDA-13 torch to resolve at all.
+extra_index_urls:
+  - https://download.pytorch.org/whl/cu130
+index_strategy: unsafe-best-match
+
+# The workspace packages this environment stands up, in install order (latence-core first).
+# Installed from source with --no-deps: their third-party surface is pinned by the lock, which is
+# exactly why `latence env verify` asserts the lock satisfies every dependency they declare.
+#
+# `latence-parser-endpoint` is here deliberately and is the crux of this environment — see the
+# transformers-split note under `excluded_packages` below.
+workspace_packages:
+  - packages/latence-core
+  - packages/latence-parser-plaintext
+  - packages/latence-parser-pdfplumber
+  - packages/latence-parser-endpoint
+  - packages/latence-disambig-embedding
+  - packages/latence-extract-gliner2
+  - packages/latence-pii-gliner
+  - packages/latence-pii-gliner2
+  - packages/latence-disambig-glinker
+  - packages/latence-embedder-st
+
+# Every distribution here is reachable from a package's declared dependencies; the transitive
+# closure is the lock's job.
+extra_requirements: []
+
+# --- ENFORCED conflict boundaries -----------------------------------------------------------
+# Each one is (a) emitted into constraints.txt and passed to the installer as `-c`, and
+# (b) asserted against requirements.lock by `latence env verify`.
+constraints:
+  - requirement: "transformers>=4.51.3,<5"
+    reason: >-
+      THE transformers split, resolved. Floor: gliner 0.2.27 (the learned PII Provider's engine)
+      declares transformers>=4.51.3. Cap: latence-disambig-glinker declares transformers<5 because
+      glinker 0.1.1 and flashdeberta 0.0.7 are written against the transformers 4.x API. Every
+      model in THIS environment is mdeberta/BERT-family and lives inside that window. The models
+      that need transformers>=5 (the OCR VLMs) are NOT in this environment at all — they are
+      reached over HTTP across the ADR-0030 endpoint boundary. See `excluded_packages`.
+  - requirement: "huggingface-hub>=0.34,<1"
+    reason: >-
+      transformers 4.x declares huggingface-hub>=0.34.0,<1.0 while the latest hub release is a 1.x.
+      Unconstrained, the resolver is free to take a 1.x that transformers 4.x cannot use. Also
+      satisfies latence-disambig-glinker's own >=0.23,<1 cap.
+  - requirement: "tokenizers>=0.22,<=0.23.0"
+    reason: >-
+      transformers 4.x declares tokenizers>=0.22.0,<=0.23.0 and the latest tokenizers release is one
+      patch outside that window. The classic silent-drift failure: nothing in the framework mentions
+      tokenizers, yet an unpinned resolve breaks the whole stack.
+  - requirement: "torch>=2.9,<3"
+    reason: >-
+      The CUDA-13 floor. torch publishes `+cu130` wheels — the ones carrying Blackwell (sm_120)
+      kernels — only from 2.9.0 onward; a torch below that resolves to a cu12 build whose kernels
+      the GPU cannot execute. The <3 cap is what latence-disambig-glinker declares: a torch major
+      break would ABI-break the prebuilt flashdeberta/triton wheels this stack depends on.
+
+# --- Packages this environment REFUSES -------------------------------------------------------
+# The other half of the transformers-split resolution, and the reason it fails at DEPENDENCY
+# RESOLUTION rather than at model load. `latence env verify` (gate 1 of smoke.sh, which runs
+# before install.sh) refuses the environment if any of these appears in workspace_packages or is
+# reachable through another installed package's workspace dependencies.
+#
+# Why a refusal list and not a version range: latence-parser-lighton's own metadata declares an
+# UNCAPPED `transformers>=4.45`, so nothing stops a resolver installing it next to transformers
+# 4.57 — the incompatibility lives in the model code, not the package metadata, and would surface
+# only on the first `from_pretrained`. Naming it here is what turns that runtime surprise into a
+# resolution-time refusal.
+#
+# THE ONE SUPPORTED RESOLUTION (there is deliberately no menu):
+#   in-process, transformers 4.x  →  the GLiNER/mdeberta family, in THIS environment
+#   served, transformers 5.x      →  the OCR VLMs, in their OWN environment (#196), reached from
+#                                    here through `parser.endpoint` over HTTP
+# A two-phase install into one interpreter was rejected: it leaves a single site-packages holding
+# one transformers, so whichever phase ran second wins and the other half breaks at load — the
+# failure is merely deferred, not resolved. The ADR-0030 endpoint boundary is a real process
+# boundary, so both majors coexist honestly.
+excluded_packages:
+  - package: packages/latence-parser-lighton
+    reason: >-
+      In-process OCR VLM (lightonai/LightOnOCR-1B-1025, model_type mistral3, architecture
+      LightOnOCRForConditionalGeneration). Its transformers requirement is on the >=5 side of the
+      split reported by issue #198, which is disjoint from this environment's enforced
+      transformers<5 boundary. Reach it over HTTP via `parser.endpoint` against the served-OCR
+      environment (#196) instead. NOTE: the exact >=5 floor comes from the issue's pod field
+      evidence, NOT from independently verified package metadata — the package declares an
+      uncapped transformers>=4.45, which is precisely why this refusal has to be explicit.
+  - package: packages/latence-parser-lighton-vllm
+    reason: >-
+      The served wrapper DEPENDS on latence-parser-lighton, so installing it drags the in-process
+      transformers>=5 VLM into this transformers<5 environment. The served path belongs on the far
+      side of the endpoint boundary (#196), where it is a server, not a library.
+  - package: packages/latence-parser-glm
+    reason: >-
+      A second in-process VLM Parser (torch + transformers, GPU-class). It declares an uncapped
+      transformers>=4.45 and is a recent-transformers model path; it is out of scope for the
+      learned-Provider set and would widen the resolution surface with no Provider this
+      environment's stack drives. Serve it, or use the CPU/text or served-OCR environment.
+
+# --- The Provider set this environment must expose -------------------------------------------
+# smoke.sh asserts every one of these RESOLVES from the registry (which imports the Provider
+# module, and therefore the heavy stack) — that import is where a transformers/torch drift
+# actually explodes.
+providers:
+  - source.local_folder
+  - screening.intake_signature
+  - parser.pdfplumber
+  - chunk.markdown
+  - screening.content_keyword
+  - fused_entity_relation.gliner2
+  - redaction.gliner_pii
+  - redaction.gliner2
+  - profiling.statistical
+  - disambiguation.glinker
+  - disambiguation.embedding
+  - graph.canonical
+  - export.knowledge_graph
+  - export.jsonl_parquet
+  - embedding.sentence_transformers
+  - parser.endpoint
+
+# Nothing is gpu-ONLY-and-unexercised here: this IS the GPU environment, so `disambiguation.glinker`
+# (compute="gpu", skipped-with-flag by the CPU environment) finally gets its runtime slice below.
+gpu_only_providers: []
+
+# --- The learned Providers that must PROVE GPU placement -------------------------------------
+# Part of the probe set of `latence env placement`. Each is driven through one real inference and
+# must allocate CUDA memory doing it; zero bytes is the #191 signature (correct output, configured
+# cuda, the entire forward pass on the CPU) and fails the gate. `latence env verify` additionally
+# refuses this spec if any name here is missing from `providers` or never appears in stack.yaml —
+# a learned Provider the stack never instantiates is one the gate can never speak for.
+#
+# This list can only ADD to the probe set, never shrink it: the probe also DERIVES the model-loading
+# Providers from the workspace packages' own dependencies and takes the union
+# (R5-env_reproducibility-3), so a CUDA Provider added to stack.yaml without a line here is still
+# measured. Today the two sets are identical, and a test asserts that.
+learned_providers:
+  - fused_entity_relation.gliner2
+  - redaction.gliner_pii
+  - redaction.gliner2
+  - disambiguation.glinker
+  - embedding.sentence_transformers

@@ -56,6 +56,10 @@ recompile-thrashes on varied-length production chunks; torch intra-op threads ar
 (default 8) to stop a many-core host oversubscribing to a CPU spin with the GPU idle; the fp16 model
 is explicitly moved to cuda and its device logged (the fp16-on-CPU defence); and extraction streams
 in bounded batches with per-batch progress logging so a large corpus never *appears* hung.
+W9-jit hardening (#190): the shared load seam also neutralizes the **TorchScript JIT** (the guard
+covered ``torch.compile`` and NOT ``torch.jit.script``) — the mdeberta encoder scripts its
+relative-position helper, which dies in nvrtc (``libnvrtc-builtins.so.13.0``) on a Blackwell /
+CUDA-13 box on the FIRST forward. Throughput-only; the emitted records are byte-identical.
 """
 
 from __future__ import annotations
@@ -76,6 +80,7 @@ from latence_core.providers.perf import (
     ensure_gliner2_on_cuda,
     is_compile_backend_failure,
     load_gliner2_optimized,
+    neutralize_torch_jit,
     resolve_gliner2_knob,
     resolve_intra_op_threads,
     resolve_max_len,
@@ -219,7 +224,10 @@ class Gliner2FusedExtractor:
                 "device logged post-load). compile defaults OFF (W9-scaling: dynamic=True "
                 "recompile-thrashes on varied-length corpora; opt-in for uniform workloads). "
                 "Intra-op threads capped (default 8) against many-core oversubscription; "
-                "extraction streams in bounded batches with per-batch progress logging"
+                "extraction streams in bounded batches with per-batch progress logging. "
+                "TorchScript JIT neutralized at the shared load seam (#190: mdeberta's scripted "
+                "relative-position helper dies in nvrtc on Blackwell/CUDA-13) — throughput only, "
+                "byte-identical output"
             ),
         )
 
@@ -288,6 +296,15 @@ class Gliner2FusedExtractor:
     # -- lazy model load ----------------------------------------------------
 
     def _gliner2_cls(self) -> Any:
+        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner2 import — that
+        # import transitively pulls in transformers' deberta_v2 modeling module, whose
+        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
+        # (inside load_gliner2_optimized, which is entered only AFTER this class is resolved) cannot
+        # un-script them: the env switch is read by torch only at ITS import, and
+        # jit._state.disable() only affects FUTURE script() calls — so the scripted helpers would
+        # still die in nvrtc (libnvrtc-builtins.so.13.0) on the first forward on a Blackwell/CUDA-13
+        # box. Throughput-only, byte-identical output.
+        neutralize_torch_jit(provider_name="fused_entity_relation.gliner2")
         try:
             from gliner2 import GLiNER2
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
@@ -301,6 +318,12 @@ class Gliner2FusedExtractor:
     def _load_model(self) -> Any:
         if self._model is not None:
             return self._model
+        # W9-jit (#190, audit R1): FIRST, before anything imports torch — ``cap_intra_op_threads``
+        # below does — so the JIT env switch is already off in the environment torch reads at
+        # ITS import, not only after. Idempotent with the call in ``_gliner2_cls`` (which
+        # guarantees the ordering
+        # against the gliner2/deberta_v2 import for both load sites).
+        neutralize_torch_jit(provider_name="fused_entity_relation.gliner2")
         # W9-scaling: cap torch intra-op threads BEFORE the load/first forward so gliner2's
         # internal batching cannot oversubscribe a many-core host (the ~cpu_count-thread CPU spin
         # with the GPU idle). Guarded → a torch-free/failed cap is a logged no-op.

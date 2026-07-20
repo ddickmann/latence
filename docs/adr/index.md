@@ -6,8 +6,8 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 [Architecture](../concepts/architecture.md) pages are navigational summaries over them.
 
 !!! note
-    ADRs are numbered by decision order. Numbers 0032 and 0040 were not issued (no gap in
-    reasoning — the sequence simply skipped them).
+    ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
+    the sequence simply skipped it), so the log holds 52 records numbered 0001–0053.
 
 ## Foundations & scope
 
@@ -31,6 +31,8 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0017](0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md) | The AI-ready deliverable is a RAG corpus **and** a knowledge graph, both as files |
 | [0033](0033-streaming-memory-bounded-runner.md) | Streaming, memory-bounded local Runner |
 | [0034](0034-observability-typed-errors-and-thin-tracing-seam.md) | Observability: typed error taxonomy and a thin, OTel-free tracing seam |
+| [0047](0047-observability-export-seam-prometheus-otel-optional.md) | A metrics EXPORT seam (Prometheus / OpenTelemetry) layered on ADR-0034, behind an optional extra |
+| [0032](0032-strict-mypy-on-tests-and-the-conftest-module-collision.md) | Strict mypy is enforced on tests too, and the whole-tree conftest module collision is resolved |
 
 ## Providers, licensing & the ecosystem
 

@@ -13,6 +13,8 @@ Contents:
 - [Option B — Kubernetes / Helm (on-prem, VPC)](#option-b--kubernetes--helm-on-prem-vpc)
 - [Air-gapped deployment](#air-gapped-deployment)
 - [Observability + secrets](#observability--secrets)
+- [Reproducible in-process environments](#reproducible-in-process-environments)
+- [Blackwell / CUDA-13: the compatibility matrix](#blackwell--cuda-13-the-compatibility-matrix)
 
 ## What the pipeline depends on
 
@@ -56,11 +58,26 @@ vllm serve lightonai/LightOnOCR-2-1B --dtype bfloat16 --gpu-memory-utilization 0
   --no-enable-prefix-caching --max-num-seqs 32
 ```
 
-**Blackwell (SM 12.x) caveat.** On bleeding-edge Blackwell, vLLM 0.24's bundled FlashInfer cannot
-JIT the cudagraphs (`FlashInfer requires sm75+`). Add `--enforce-eager` there (a ~perf floor) **or**
-upgrade flashinfer. Mainstream GPUs (Hopper / Ada / Ampere) run cudagraphs fine without it. In the
-compose file and the Helm chart this is one added arg — see the `vllmOcr.extraArgs` value and the
-comment in `deploy/docker-compose.yml`.
+**Blackwell (SM 12.x) caveat.** On bleeding-edge Blackwell, vLLM 0.24's bundled FlashInfer refuses a
+perfectly capable `sm_120` device at startup (`FlashInfer requires sm75+`) — its capability check
+misparses compute capability 12.0 as the integer `12`. The recorded fix is **one environment
+variable**:
+
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
+```
+
+That disables only the FlashInfer *sampler*, so **cudagraphs stay ON**. Do **not** reach for
+`--enforce-eager`: it also clears the abort, but it turns cudagraphs off and floors the throughput
+this served path exists for — the compatibility matrix records it as deliberately *not* the fix
+(`FM-FLASHINFER-SM120` in [the compatibility matrix](compatibility-matrix.md)).
+Upgrading `flashinfer` past the fixed check is the other exit, and it is a deliberate version bump.
+Mainstream GPUs (Hopper / Ada / Ampere) need none of this.
+
+In the compose file this is one uncommented `environment:` line; in the Helm chart it is one
+`vllmOcr.extraEnv` entry (below). On a CUDA-13 / Blackwell host prefer the pinned serving
+environment `deploy/env/served-ocr-server/` outright — its `serve.sh` exports the variable for you,
+alongside the `--gpu-memory-utilization 0.72` / `--max-num-seqs 16` the live 519-page run needed.
 
 An **optional LLM server** (if you enable it) has its own GPU need sized to the model you pick
 (default `Qwen/Qwen2.5-7B-Instruct` → one ~24 GB GPU at bf16).
@@ -117,7 +134,8 @@ Key values (full list in `deploy/helm/latence/values.yaml`):
 | `vllmOcr.enabled` | `true` | The served OCR Deployment+Service. Disable to use an external endpoint. |
 | `vllmOcr.gpu.nodeSelector` / `.tolerations` | `nvidia.com/gpu.present` / `nvidia.com/gpu` | Schedule the OCR pod onto GPU nodes only. Adjust to your cluster's labels/taints. |
 | `vllmOcr.resources.limits."nvidia.com/gpu"` | `1` | GPU request for the OCR pod. |
-| `vllmOcr.extraArgs` | LightOn recipe | Add `--enforce-eager` on Blackwell. |
+| `vllmOcr.extraArgs` | LightOn recipe | The serve flags. On Blackwell lower these to the live-run values (`--gpu-memory-utilization=0.72`, `--max-num-seqs=16`) — **not** `--enforce-eager`, which floors throughput. |
+| `vllmOcr.extraEnv` | `[]` | Extra `{name, value}` env for the OCR container. The Blackwell fix goes here: `VLLM_USE_FLASHINFER_SAMPLER=0` (keeps cudagraphs ON). |
 | `vllmLlm.enabled` | `false` | The optional served LLM Deployment. |
 | `persistence.data` | 20Gi RWO | Corpus in (`/data/corpus`) + artifacts out (`/data/out`). Use `existingClaim` for an RWX/NFS claim your corpus is staged into. |
 | `persistence.hfCache` | 100Gi RWO | The HF model cache the vLLM servers share; **pre-cache here for air-gapped** (below). |
@@ -176,3 +194,83 @@ local. Nothing leaves the VPC.
 * **Secrets:** endpoint keys and `HF_TOKEN` are env-only and **referenced**, never embedded — wire a
   Secret via `secrets.existingSecret` and your secret manager (Vault / External Secrets / cloud CSI).
   Full guide: `docs/secrets.md`.
+
+## Reproducible in-process environments
+
+Everything above is the **served** path: the heavy models live behind an HTTP endpoint and the
+pipeline image carries no `torch`. When you instead need the learned Providers **in process**
+(GLiNER2 extraction, learned PII redaction, GLinker disambiguation, Granite r2 embeddings, SPLADE
+sparse), the environment itself becomes the hard part — `torch` churn ABI-breaks prebuilt wheels,
+the GLiNER family and the OCR model disagree on the `transformers` major, and PEP 668 blocks naive
+installs.
+
+Those environments are pinned, one-command-installable, and **checked by the build**:
+
+```bash
+bash deploy/env/cpu-text/install.sh              # the ONE documented install path (PEP-668 safe)
+bash deploy/env/cpu-text/smoke.sh                # the ONE command that proves it stands up
+bash deploy/env/cpu-text/smoke.sh --spec-only    # the offline gate — no install, no network
+
+bash deploy/env/gpu-learned/install.sh           # the GPU learned-Provider set on CUDA 13 / Blackwell
+bash deploy/env/gpu-learned/smoke.sh             # 4 gates, including REAL GPU-placement proof
+```
+
+The GPU environment resolves the `transformers` split the only supported way — the ADR-0030
+endpoint boundary: the GLiNER/mdeberta family in-process on `transformers` 4.x, the OCR VLMs
+served on 5.x and reached over HTTP through `parser.endpoint`. Naming an in-process OCR package in
+that environment fails **gate 1**, i.e. at dependency resolution, before anything installs.
+
+Its extra gate is `latence env placement`: every model-loading Provider the stack instantiates —
+derived from the packages the environment installs, then unioned with the declared
+`learned_providers`, so omitting that optional field cannot silence the gate — is driven through a
+real inference and must allocate CUDA memory **above its resident footprint** doing it (a warm-up
+drive
+and a baseline subtraction keep weights parked on the GPU from being counted as work — real
+`reset_peak_memory_stats()` resets the peak to the current allocation, not to zero). A forward pass
+that silently ran on the CPU allocates zero such bytes however correct its output is — the #191
+failure (`device: cuda` configured, ~11.5
+s/chunk, the GPU idle, no warning) can no longer pass a green build.
+
+The pins are **enforced constraints**, not documentation: `latence env verify` cross-checks the
+generated `requirements.in` / `constraints.txt`, the solved `requirements.lock`, the Provider
+packages' real dependency declarations and the smoke stack, and `scripts/verify-local.sh` runs it
+for every environment on every commit. See **[`deploy/env/README.md`](https://github.com/ddickmann/latence-framework/blob/main/deploy/env/README.md)**
+for the full shape and for how to add one.
+
+## Blackwell / CUDA-13: the compatibility matrix
+
+Which learned Provider and which serving dependency is known-good on which CUDA / torch /
+`transformers` combination — and which combination **nobody has measured** — is a checked artifact,
+not tribal knowledge: **[the compatibility matrix](compatibility-matrix.md)**.
+
+Read it before standing up on Blackwell (`sm_120`). It carries its reference hardware and
+verification date, and it records the failure modes the live 519-page CUDA-13 run actually produced
+— the FlashInfer `sm75` check that misparses `sm_120`, the `nvrtc`/TorchScript crash inside the
+mdeberta encoder, the ABI-broken `flash-attn`/`torchcodec` wheels, the multimodal OOM at the
+generic serve settings, and the `transformers` 4.x/5.x split — each with the resolution and the
+file in the repo that *enforces* it.
+
+Every cell is a measurement or explicitly `UNVERIFIED`, and that is machine-enforced:
+
+```bash
+latence env matrix deploy/env/compatibility-matrix.yaml        # the merge gate runs this
+latence env matrix deploy/env/compatibility-matrix.yaml --render   # regenerate the published page
+latence env matrix deploy/env/compatibility-matrix.yaml --require-verified  # nothing may be UNVERIFIED
+```
+
+A `verified` cell without date/hardware/command/observed output is rejected, an `UNVERIFIED` cell
+without a runnable reproduce command is rejected, and coverage is *derived* from the committed
+`deploy/env/*/environment.yaml` — so a new enforced boundary or learned Provider fails the gate
+until somebody maps it.
+
+The one full-stack end-to-end verification (served OCR **plus** the GPU learned Providers **plus**
+the text stack, small corpus in, Quality Report + Exports out) is one command:
+
+```bash
+export LATENCE_OCR_BASE_URL=http://<host>:8000        # the RUNNING served-OCR environment
+bash deploy/env/full-stack/verify-full-stack.sh --corpus <dir of scanned pages> --record
+```
+
+Its artifact gate fails on a skipped Stage, a Stage that silently resolved to `cpu`, an empty
+export or `document_count: 0`, so the run cannot pass by narrowing its own scope; `--record` prints
+the evidence block to paste back into the matrix.

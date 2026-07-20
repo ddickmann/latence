@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Latence framework core: data contracts, Capability protocols, Pipeline, local Runner, Storage seam."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "contracts", "pipeline", "runner", "storage"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -40,10 +40,27 @@ dependencies = [
 # degrades to a no-op (NoOpMetricSink), exactly the provider-optional pattern the heavy Provider
 # packages use. Same discipline as the tracing seam: this is opt-in, edge-side, never a core dep.
 [project.optional-dependencies]
+# The reproducible-environment verifier (``latence env verify|render``, issue #195). NOT a runtime
+# dependency: the core stays near-zero-dep (ADR-0016) and ``latence_core.envspec`` imports
+# ``packaging`` LAZILY, raising a typed, actionable ConfigError when the extra is absent rather
+# than silently degrading. Same discipline as the observability extra below: opt-in, edge-side,
+# never a core dep. ``packaging`` is pure-Python, dependency-free and PSF-2.0/Apache-2.0
+# dual-licensed (verified 2026-07-18).
+envspec = [
+    "packaging>=23.0",
+]
 observability = [
     "prometheus-client>=0.19",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
+]
+# OPTIONAL Iceberg-table Export output (#184, ADR-0017). NOT a runtime dependency: the Export is
+# Parquet-first and the Iceberg block is OFF by default, so ``pyiceberg`` is never imported unless
+# an operator configures a REST catalog. Install with ``pip install 'latence-core[iceberg]'``.
+# pyiceberg is Apache-2.0 (Apache Software Foundation; code and distribution alike — it ships no
+# model weights, so ADR-0012's weights-vs-code split is trivially the same license).
+iceberg = [
+    "pyiceberg>=0.9",
 ]
 
 [project.urls]

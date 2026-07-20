@@ -8,7 +8,9 @@
 
 latence provides the **machinery and intelligence for SOTA retrieval quality — not the retrieval engine
 itself.** Enterprises keep their engine (Databricks Vector Search, Qdrant, Weaviate, Azure AI Search,
-Elastic, or a proprietary stack); we do not decide or replace it (`docs/INTEROP.md`). The tooling is
+Elastic, or a proprietary stack); we do not decide or replace it — how the pipeline's output loads
+into each of those stacks is spelled out in
+[`docs/RETRIEVAL-ENGINE-INPUT-SPEC.md`](RETRIEVAL-ENGINE-INPUT-SPEC.md). The tooling is
 **strictly stateless** (ADR-0048): it *generates signals* and *transforms candidate lists*, and holds no
 index, no stored vectors, and no standing graph service.
 

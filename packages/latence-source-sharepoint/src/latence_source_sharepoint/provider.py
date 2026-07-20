@@ -1,0 +1,445 @@
+"""``SharePointSource`` — the SharePoint/OneDrive Provider of the Source Capability (#182).
+
+Behind the existing Source seam (ADR-0014) with **no change to any Stage contract**: it
+implements the same one-method ``produce(storage) -> Iterator[ParserInput]`` the reference
+``source.local_folder`` implements, hands the *raw* bytes downstream for the Parser to decode
+(ADR-0019), and stamps the same :class:`~latence_core.contracts.Provenance` /
+:class:`~latence_core.contracts.Classification` every other Source stamps. Point a stack's
+``source`` Stage at ``source.sharepoint`` and the rest of the pipeline is unchanged.
+
+**Provenance** (the AC "source system and document identity, preserved to Export"):
+
+* ``source_system`` — ``"sharepoint"``.
+* ``source_uri`` — ``sharepoint://{drive_id}/{folder}/{name}?itemId={graph item id}``: the
+  human location inside the drive *and* the stable Graph identity that resolves back to the
+  document, in the one URI field the frozen contract provides. Every downstream record
+  inherits it unchanged, so an exported chunk still names the SharePoint item it came from.
+* ``document_id`` — the **content address** (see below).
+
+**Delta** (ADR-0018) — the property that makes an incremental run cheap. ``document_id`` is
+**always** ``sha256(<the document's bytes>)``, exactly like the reference
+``source.local_folder`` — one id function, one namespace, never a function of anything Graph
+reports *about* the document. Graph carries a content hash for a ``driveItem`` in the
+*listing*, before any download; when that hash is a ``sha256Hash`` (OneDrive Personal) it **is**
+the SHA-256 of the content, so the connector reads the id straight off the listing — the same
+value hashing the bytes would give, just free. So:
+
+* a document whose bytes did not change keeps the same id across runs — the DeltaRunner
+  intersects ids with the parent Corpus Version, marks it UNCHANGED, and injects it into this
+  Provider's ``exclude_document_ids``;
+* **and this Provider then skips it without downloading it**, whenever the listing gave up the
+  id. The exclusion is checked against that listing-derived id before the download call is ever
+  made. The runner's
+  *discovery* pass — which enumerates the current ids before any exclusion exists — is answered
+  from the listing too, via the optional
+  :class:`~latence_core.capability.DocumentEnumerator` seam (:meth:`SharePointSource.document_ids`);
+  without that, discovery would pull the whole library on every delta and the saving would be
+  zero. Together that is the whole point: on a ``sha256Hash`` backend an incremental run over a
+  50k-document library transfers only the documents that actually changed. The offline suite
+  asserts it — and the weaker bound that holds everywhere else — by counting
+  the fake transport's download calls through the REAL DeltaRunner
+  (``tests/test_sharepoint_delta_transfer.py``), not by reading a flag and not by hand-injecting
+  the exclusions.
+* a document that changed gets a new id (ADDED) and retires the old one (DELETED); a document
+  removed from the library simply stops appearing in the listing, so the manifest diff surfaces
+  it as DELETED. This is exactly the reference ``source.local_folder`` semantics — content
+  addressing means "same id" is "byte-identical", which is what the Runner's cross-run reuse
+  relies on. (A stable-identity Source would report UPDATED instead; see
+  :mod:`latence_core.state.delta_detector`.)
+
+**Which backends get the free skip.** Graph reports ``sha256Hash`` on **OneDrive Personal**;
+**SharePoint Online reports ``quickXorHash``**, and a freshly-uploaded item has no facet at all
+(Graph computes it asynchronously). Only a ``sha256Hash`` is a reproducible SHA-256 content
+address, so only there is the zero-transfer skip available. Everywhere else the connector
+downloads and hashes the bytes **in the run** — once. It does **not** hash them in the discovery
+pass as well: an item the listing cannot address is left out of
+:meth:`SharePointSource.document_ids` entirely, so it is classified as new and fetched exactly
+once. Fetching it in discovery too named it correctly but doubled the cost of every run,
+including a no-op delta over an unchanged library (audit R3-connectors_ingestion-8). The bound
+that holds on **every** backend is therefore: an incremental run never costs more than a full
+run; on ``sha256Hash`` backends it costs only the changed documents. What the connector will
+**not** do is mint
+the id from the facet instead: that would put "the same document" in two id namespaces, and the
+facet appearing (or the backend's algorithm differing) would change the id of a document nobody
+touched — the DeltaRunner reads that as DELETED+ADDED and a no-op delta run costs *more* than a
+full one (audit R2-connectors_ingestion-10). Nor does it derive identity from mutable metadata
+like ``eTag``, which would churn the corpus on a metadata-only edit. Restoring the free path on
+SharePoint Online means implementing Microsoft's QuickXorHash locally and verifying it against
+their published test vectors; until that verification exists, correctness wins over the
+transfer saving.
+
+**Secrets** are environment-only and enforced (:mod:`~latence_source_sharepoint.auth`): a
+config that inlines a token is a :class:`~latence_core.errors.ConfigError`, so no credential
+can reach the run manifest, the stack file, or git.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import urllib.parse
+from typing import TYPE_CHECKING, Any
+
+from latence_core.contracts import Classification, ParserInput, Provenance
+from latence_core.errors import ConfigError, ProviderError
+from latence_core.language import UNKNOWN_LANGUAGE, detect_language
+from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+
+from latence_source_sharepoint.auth import build_token_provider, reject_inline_secrets
+from latence_source_sharepoint.graph import DEFAULT_GRAPH_BASE_URL, GraphClient
+from latence_source_sharepoint.transport import HttpTransport, UrllibTransport
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from latence_core.storage import Storage
+
+    from latence_source_sharepoint.graph import GraphItem
+
+SOURCE_SYSTEM = "sharepoint"
+
+# Mirrors the reference Source: only a text type can be language-sniffed from raw bytes;
+# anything else is handed on with language ``und`` and classified authoritatively at Parse.
+_TEXT_EXTENSIONS = frozenset({"txt", "md", "markdown", "text"})
+
+# The default accepted extension set, matching ``source.local_folder`` so a stack can swap
+# Sources without also having to widen the filter.
+_DEFAULT_EXTENSIONS = frozenset({"txt", "md", "markdown"})
+
+_NAME_STRATEGIES = frozenset({"item", "path"})
+
+
+def _resolve_transport(spec: Any) -> HttpTransport:
+    """Resolve ``config['transport']``: a live object, a ``"module:factory"`` string, or None.
+
+    The string form is what a YAML stack can express, so an adopter behind a corporate proxy
+    or mTLS supplies their own HTTP transport without forking the Provider — and it is how the
+    offline dry-run path (``latence_source_sharepoint.testing:demo_transport``) is selected.
+    """
+    if spec is None:
+        return UrllibTransport()
+    if isinstance(spec, HttpTransport):
+        return spec
+    if not isinstance(spec, str):
+        msg = (
+            "SharePointSource 'transport' must be an HttpTransport, or a 'module:factory' "
+            f"string naming a zero-argument factory that returns one; got {type(spec).__name__}."
+        )
+        raise ConfigError(msg)
+    module_name, _, attribute = spec.partition(":")
+    if not module_name or not attribute:
+        msg = (
+            f"SharePointSource 'transport' string {spec!r} is not a 'module:factory' "
+            "reference (e.g. 'latence_source_sharepoint.testing:demo_transport')."
+        )
+        raise ConfigError(msg)
+    from importlib import import_module
+
+    try:
+        factory = getattr(import_module(module_name), attribute)
+    except (ImportError, AttributeError) as exc:
+        msg = f"SharePointSource could not import the transport factory {spec!r}: {exc}"
+        raise ConfigError(msg) from exc
+    transport = factory()
+    if not isinstance(transport, HttpTransport):
+        msg = (
+            f"SharePointSource transport factory {spec!r} returned "
+            f"{type(transport).__name__}, which does not implement HttpTransport.request."
+        )
+        raise ConfigError(msg)
+    return transport
+
+
+def _string_list(config: dict[str, Any], key: str) -> list[str] | None:
+    raw = config.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(isinstance(entry, str) for entry in raw):
+        msg = f"SharePointSource {key!r} must be a list of strings."
+        raise ConfigError(msg)
+    return [str(entry) for entry in raw]
+
+
+class SharePointSource:
+    """Source Provider that lists and fetches documents from a SharePoint document library.
+
+    Config:
+        drive_id: str — the Graph drive (document library) id. Required.
+            ``GET /sites/{site-id}/drives`` lists them; ``GET /sites/{hostname}:/sites/{path}``
+            resolves a site URL to a site id.
+        root_path: str — drive-relative folder to read, ``""`` (the default) for the whole
+            drive, ``"/Contracts"`` for one folder.
+        extensions: list[str] | None — extensions to read (no dot). Defaults to text/markdown,
+            like ``source.local_folder``; widen it to feed a PDF/office-capable Parser.
+        name_strategy: ``"item"`` (default) | ``"path"`` — how ``Provenance.file_name`` is
+            derived. Downstream keys (the gold-set harness) assume a unique file name per
+            corpus, and a real document library routinely holds the same file name in two
+            folders. ``"item"`` uses the bare name and raises on a collision (the reference
+            Source's behaviour); ``"path"`` uses the drive-relative path with ``/`` replaced
+            by ``_``, which is unique by construction.
+        sensitivity / category — stamped onto every record's Classification.
+        exclude_document_ids: list[str] — content-addressed ids to skip. The DeltaRunner
+            injects the UNCHANGED ids here; this Provider skips them **without downloading**.
+        auth: dict — ``{"mode": "env_token", "token_env": ...}`` (default) or
+            ``{"mode": "client_credentials", "tenant_id": ..., "client_id_env": ...,
+            "client_secret_env": ...}``. Names environment variables, never values.
+        graph_base_url / page_size / max_retries / max_retry_after_seconds — Graph plumbing.
+        transport — an ``HttpTransport``, or a ``"module:factory"`` string. Defaults to the
+            standard-library HTTPS transport.
+    """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2).
+
+        Pure-code and dependency-free: this Provider ships **no model weights**
+        (``model_id=None``) and pulls no third-party library — it speaks Graph's REST/JSON API
+        over the Python standard library, so its code license is this repo's Apache-2.0
+        (verified per ADR-0012; weights-and-code trivially the same for a pure-code Provider)
+        and ``latence-core`` takes no new dependency (ADR-0016).
+
+        ``compute="cpu"`` (no accelerator), ``batch=False`` (Graph is fetched per item), and
+        ``deterministic=True``: Graph guarantees no ordering for a children collection, so
+        :meth:`~latence_source_sharepoint.graph.GraphClient.list_files` imposes one itself
+        (files sorted by item id, subfolders recursed in drive-path order) and every document id
+        is content-addressed — for a fixed drive state two runs produce identical output. It is
+        network-bound rather than compute-bound, hence a small declared footprint and no
+        ``cost_per_1k`` (Graph is billed by tenant licensing, not per call).
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=32,
+            model_id=None,
+            license="Apache-2.0",
+            license_verified=True,
+            license_code="Apache-2.0",
+            license_weights=None,
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-07-18",
+            deterministic=True,
+            batch=False,
+            cost_per_1k=None,
+        )
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = dict(config or {})
+        # Enforced BEFORE anything else in this constructor: a config that inlines a credential
+        # never gets as far as opening a connection. It does NOT protect the run manifest —
+        # the Runner writes manifest.json before it constructs any Provider (audit-R7); that
+        # artefact is protected by latence_core.runner.scrub_sensitive, which covers every key
+        # named in _SECRET_CONFIG_KEYS (held together by a test in this package).
+        reject_inline_secrets(config)
+
+        self._root_path = str(config.get("root_path", ""))
+        self._sensitivity = str(config.get("sensitivity", "unknown"))
+        category = config.get("category")
+        self._category = None if category is None else str(category)
+
+        raw_extensions = _string_list(config, "extensions")
+        self._extensions = (
+            _DEFAULT_EXTENSIONS
+            if raw_extensions is None
+            else frozenset(entry.lstrip(".").lower() for entry in raw_extensions)
+        )
+        self._excluded = frozenset(_string_list(config, "exclude_document_ids") or ())
+
+        self._name_strategy = str(config.get("name_strategy", "item")).lower()
+        if self._name_strategy not in _NAME_STRATEGIES:
+            msg = (
+                f"SharePointSource 'name_strategy' must be one of {sorted(_NAME_STRATEGIES)!r}; "
+                f"got {self._name_strategy!r}."
+            )
+            raise ConfigError(msg)
+
+        auth_config = config.get("auth") or {}
+        if not isinstance(auth_config, dict):
+            msg = "SharePointSource 'auth' must be a mapping."
+            raise ConfigError(msg)
+
+        transport = _resolve_transport(config.get("transport"))
+        self._drive_id = str(config.get("drive_id", ""))
+        self._client = GraphClient(
+            transport=transport,
+            token_provider=build_token_provider(auth_config, transport=transport),
+            drive_id=self._drive_id,
+            base_url=str(config.get("graph_base_url", DEFAULT_GRAPH_BASE_URL)),
+            page_size=int(config.get("page_size", 200)),
+            max_retries=int(config.get("max_retries", 5)),
+            max_retry_after_seconds=float(config.get("max_retry_after_seconds", 300.0)),
+        )
+
+    def produce(self, storage: Storage) -> Iterator[ParserInput]:
+        """Yield one :class:`ParserInput` per SharePoint document, raw bytes and all.
+
+        ``storage`` is unused: SharePoint is a source *system*, not an fsspec filesystem, so
+        the connector reaches it over Graph. The parameter stays because it is the Source
+        Capability's signature and the Runner passes it — the seam is unchanged (ADR-0014).
+        """
+        seen_names: dict[str, str] = {}
+        for item in self._client.list_files(self._root_path):
+            extension = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
+            if extension not in self._extensions:
+                continue
+            file_name = self._file_name(item)
+            previous = seen_names.get(file_name)
+            if previous is not None:
+                msg = (
+                    f"SharePointSource: duplicate document name {file_name!r} at "
+                    f"{item.drive_path!r} and {previous!r}. Downstream keys (the gold-set "
+                    "harness, Provenance) must not merge distinct documents. Set "
+                    "'name_strategy: path' to disambiguate by folder, or narrow 'root_path'."
+                )
+                raise ConfigError(msg)
+            seen_names[file_name] = item.drive_path
+
+            # The Delta win: the identity comes from the LISTING when Graph reported a
+            # reproducible sha256Hash, so an excluded (unchanged) document is skipped with zero
+            # bytes transferred. It is the SAME id hashing the bytes would produce — there is
+            # only ever one namespace (audit R2-connectors_ingestion-10).
+            listed_id = _listed_document_id(item)
+            if listed_id is not None and listed_id in self._excluded:
+                continue
+            data = self._client.download(item)
+            document_id = _content_document_id(data)
+            if listed_id is not None and listed_id != document_id:
+                msg = (
+                    f"SharePointSource: the content hash Graph reported for {item.drive_path!r} "
+                    f"({item.content_hash}) does not match the bytes it served "
+                    f"({document_id}). The listing identity a Delta run skips on would not be "
+                    "the identity of the document, so the run stops rather than record a "
+                    "wrong document_id."
+                )
+                raise ProviderError(msg)
+            if document_id in self._excluded:
+                continue
+
+            language = (
+                detect_language(data.decode("utf-8", errors="replace"))
+                if extension in _TEXT_EXTENSIONS
+                else UNKNOWN_LANGUAGE
+            )
+            yield ParserInput(
+                provenance=Provenance(
+                    source_uri=self._source_uri(item),
+                    file_name=file_name,
+                    file_type=extension,
+                    file_size=len(data),
+                    document_id=document_id,
+                    source_system=SOURCE_SYSTEM,
+                ),
+                classification=Classification(
+                    language=language,
+                    category=self._category,
+                    sensitivity=self._sensitivity,
+                ),
+                content=data,
+            )
+
+    def document_ids(self, storage: Storage) -> Iterator[str]:
+        """Yield each current document's content address **from the listing** — no download.
+
+        The :class:`~latence_core.capability.DocumentEnumerator` half of the Delta win. The
+        DeltaRunner has to enumerate the library's document ids before it can work out which ones
+        are unchanged, and that pass runs before any exclusion is known — so if it went through
+        :meth:`produce` it would pull every document's bytes on every delta run and the saving
+        would be zero. When Graph carries a ``sha256Hash`` for a ``driveItem`` the id is
+        computable from the listing alone; the ids are byte-for-byte the ones :meth:`produce`
+        stamps on ``Provenance.document_id`` — the same single ``sha256(<bytes>)`` namespace,
+        which is what makes the intersection sound.
+
+        **This pass never downloads.** An item the listing cannot content-address (a
+        ``quickXorHash`` — SharePoint Online — a legacy ``sha1Hash``, or no facet yet) is simply
+        not enumerated. Hashing its bytes here would name it correctly but at the one cost this
+        seam exists to avoid: discovery runs BEFORE any exclusion is known, so every byte it
+        moves is moved unconditionally, *on top of* the fetch :meth:`produce` then makes for the
+        same document — a no-op delta over an unchanged SharePoint Online library cost twice a
+        full run (audit R3-connectors_ingestion-8).
+
+        Under-reporting here is safe and is the documented "correct, just not free" fallback: an
+        id the runner does not see cannot intersect the parent Version, so the document is
+        treated as new and :meth:`produce` fetches it exactly ONCE. The connector forfeits the
+        *extraction* reuse for that document, never the correctness of its records — the id
+        :meth:`produce` stamps is the same content address either way, so the manifest diff
+        still classifies it UNCHANGED. It can never invent a reuse, only miss one.
+        """
+        for item in self._client.list_files(self._root_path):
+            extension = item.name.rsplit(".", 1)[-1].lower() if "." in item.name else ""
+            if extension not in self._extensions:
+                continue
+            listed_id = _listed_document_id(item)
+            if listed_id is not None and listed_id not in self._excluded:
+                yield listed_id
+
+    def _file_name(self, item: GraphItem) -> str:
+        if self._name_strategy == "path":
+            return item.drive_path.lstrip("/").replace("/", "_")
+        return item.name
+
+    def _source_uri(self, item: GraphItem) -> str:
+        """The Provenance URI — percent-encoded, so it is a URI and not just a string.
+
+        SharePoint Online has allowed ``#``, ``%`` and ``&`` in names since 2017, and spaces
+        always. Interpolating those raw makes the value *look* right and parse wrong: a single
+        ``#`` opens a fragment, so ``?itemId=`` lands inside it and ``parse_qs`` recovers no
+        item id at all — the Graph identity this field exists to carry is gone, silently, on
+        every downstream record. A literal ``%`` is worse than lost: ``Report%20final.md``
+        unquotes to ``Report final.md`` and names a different document.
+
+        So every interpolated component is escaped exactly once, the standard way, and
+        ``urlsplit`` + ``parse_qs`` recovers the item id while ``unquote`` recovers the drive
+        path — both byte-for-byte. ``safe="/"`` on the path keeps the folder separators
+        readable; the drive id is one opaque component and keeps nothing. The item id goes
+        through :func:`urllib.parse.urlencode`, the encoder that pairs with ``parse_qs``, so a
+        ``+`` in the id survives too (``quote`` leaves ``+`` alone and ``parse_qs`` would then
+        read it as a space). A name made only of unreserved characters encodes to itself, so
+        URIs already stamped on existing corpora are unchanged
+        (audit R6-connectors_ingestion-10).
+        """
+        drive = urllib.parse.quote(self._drive_id, safe="")
+        path = urllib.parse.quote(item.drive_path, safe="/")
+        query = urllib.parse.urlencode({"itemId": item.item_id})
+        return f"sharepoint://{drive}{path}?{query}"
+
+
+_SHA256_HEX_LENGTH = 64
+
+
+def _content_document_id(data: bytes) -> str:
+    """THE id function. One namespace, one input: the document's bytes."""
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _listed_document_id(item: GraphItem) -> str | None:
+    """The same content address, read off the listing — or ``None`` when it cannot be.
+
+    The id is *always* ``sha256(<bytes>)`` (:func:`_content_document_id`). This function is a
+    shortcut to that value, never a second definition of it: Graph's ``sha256Hash`` **is** the
+    SHA-256 of the file content, so when the listing carries a well-formed one the id is known
+    without downloading anything, and it is identical by construction to the id hashing the
+    bytes would produce.
+
+    Any other facet (``quickXorHash`` on SharePoint Online, legacy ``sha1Hash``) is not a
+    reproducible SHA-256 content address, so it yields ``None`` and the caller downloads and
+    hashes. That costs the zero-transfer delta on those backends, and it is the price of the
+    invariant: Graph computes ``file.hashes`` asynchronously and reports different algorithms on
+    different backends, so an id minted from the facet changes for a document nobody touched —
+    the DeltaRunner then reads an untouched document as DELETED+ADDED and a no-op delta costs
+    more than a full run (audit R2-connectors_ingestion-10). Restoring the fast path for
+    ``quickXorHash`` means implementing Microsoft's QuickXorHash locally and verifying it
+    against their published test vectors; until that verification exists it stays out.
+    """
+    hex_digest = _listed_sha256_hex(item)
+    return None if hex_digest is None else "sha256:" + hex_digest
+
+
+def _listed_sha256_hex(item: GraphItem) -> str | None:
+    """The listing's ``sha256Hash`` as lowercase hex, or ``None`` if there isn't a usable one."""
+    if item.content_hash is None:
+        return None
+    algorithm, _, value = item.content_hash.partition(":")
+    if algorithm != "sha256" or len(value) != _SHA256_HEX_LENGTH:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
+    return value

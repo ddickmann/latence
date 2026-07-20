@@ -1,4 +1,4 @@
-"""Optional metrics + OpenTelemetry seam (ADR-0047), layered on the Quality Report + tracing.
+"""Optional metrics, OpenTelemetry + OpenLineage seams, layered on the Quality Report + tracing.
 
 ADR-0034 already gave ``latence-core`` two dependency-free observability primitives: a typed
 error taxonomy (:mod:`latence_core.errors`) and a thin per-Stage tracing seam
@@ -26,18 +26,33 @@ breaking the CPU-first, offline, thin-core promise (ADR-0016):
   ``LocalRunner(span_sink=MetricsSpanSink(sink))`` — no Runner change, no metric logic
   duplicated (it forwards to the same :class:`MetricSink`).
 
+The module's second half (#185) is the **lineage** export: the Runner emits standard OpenLineage
+``RunEvent``\ s — START/COMPLETE/FAIL per Stage, with the datasets each Stage reads and writes and
+a ``schema`` facet from its carrier contract — so any OpenLineage consumer (Marquez, Atlan,
+Collibra, Dataplex) sees a latence run in the catalog the platform team already governs with. Same
+posture: off by default, stdlib-only on the wire (no ``openlineage-python`` dependency), and an
+emission failure is logged, never fatal.
+
 Counts only, never content — the same no-PII discipline the tracing seam and the Quality Report
-keep. Every value emitted is a duration, a record count, or an error/merge tally; every label is
-a Stage/capability/provider/category/pipeline *name*. A document body, a PII surface, or a secret
-never enters a metric or a label (asserted adversarially in the seam's regression test).
+keep. Every value emitted is a duration, a record count, an error/merge tally, a
+Stage/capability/provider/category/pipeline *name*, a dataset URI, or a schema *field name*. A
+document body, a PII surface, a secret, or an exception message never enters a metric, a label, or
+a lineage facet (asserted adversarially in both seams' regression tests).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol, get_args, get_origin
 
 from latence_core.errors import ConfigError
 
@@ -430,3 +445,580 @@ def build_metric_sink(kind: str, *, strict: bool = False) -> MetricSink:
         )
         return NoOpMetricSink()
     return ctor()
+
+
+# =========================================================================================
+# OpenLineage run events (#185) — the standard-vocabulary lineage seam
+# =========================================================================================
+#
+# One emitter buys every OpenLineage consumer at once (Marquez, Atlan, Collibra, Dataplex):
+# the Runner emits a START / COMPLETE / FAIL ``RunEvent`` per Stage — plus a parent event for
+# the run as a whole — with the Stage's input/output **datasets** (the Storage URIs it actually
+# reads and writes) carrying a ``schema`` facet derived from the Stage's carrier contract.
+#
+# Three rules this section is built around, each pinned by a regression test:
+#
+# * **Counts only, never content** (ADR-0034). A facet carries record counts, a duration, a
+#   Stage/capability/provider *name*, a dataset URI, and a *field name + type* schema — never a
+#   record's text, a PII surface, a secret, or an exception message. In particular the standard
+#   ``errorMessage`` run facet is **deliberately not emitted**: an exception message can quote a
+#   document. A failed run carries the stable typed error *category* instead.
+# * **Off by default, zero-cost when off.** ``LocalRunner`` takes ``lineage=None`` by default and
+#   every emission site is guarded, so a default run builds no event and opens no socket.
+# * **Emission never fails a run.** Every transport call (and the event-building around it) is
+#   wrapped: a dead endpoint, a 500, a serialisation bug — all are logged and swallowed. Lineage
+#   is observability, not a correctness gate.
+#
+# ``latence-core`` stays near-zero-dependency (ADR-0016): the wire format is built with ``json``
+# and shipped with ``urllib`` — the ``openlineage-python`` client is NOT a dependency.
+
+OPENLINEAGE_SPEC_VERSION = "2-0-2"
+_OL_SPEC_BASE = f"https://openlineage.io/spec/{OPENLINEAGE_SPEC_VERSION}/OpenLineage.json"
+
+#: ``schemaURL`` every emitted RunEvent declares (the OpenLineage spec version it conforms to).
+RUN_EVENT_SCHEMA_URL = f"{_OL_SPEC_BASE}#/$defs/RunEvent"
+_SCHEMA_FACET_URL = f"{_OL_SPEC_BASE}#/$defs/SchemaDatasetFacet"
+_PARENT_FACET_URL = f"{_OL_SPEC_BASE}#/$defs/ParentRunFacet"
+_NOMINAL_TIME_FACET_URL = f"{_OL_SPEC_BASE}#/$defs/NominalTimeRunFacet"
+_JOB_TYPE_FACET_URL = (
+    "https://openlineage.io/spec/facets/2-0-3/JobTypeJobFacet.json#/$defs/JobTypeJobFacet"
+)
+
+#: ``producer`` stamped on every event + facet — who generated this lineage.
+LINEAGE_PRODUCER = "https://github.com/ddickmann/latence-framework"
+_LATENCE_FACET_URL = f"{LINEAGE_PRODUCER}#/facets/LatenceRunFacet"
+
+#: The default OpenLineage *namespace* a run's jobs live in when the operator names none.
+DEFAULT_LINEAGE_NAMESPACE = "latence"
+
+#: The ``eventType`` values this emitter produces (a subset of the spec's enum).
+_EVENT_TYPES = frozenset({"START", "RUNNING", "COMPLETE", "ABORT", "FAIL", "OTHER"})
+
+_LINEAGE_UUID_NAMESPACE = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")  # uuid.NAMESPACE_URL
+
+
+def lineage_run_uuid(namespace: str, pipeline: str, run_id: str, stage: str | None = None) -> str:
+    """The UUID a run (or one Stage of it) is known by in the lineage graph.
+
+    OpenLineage requires ``run.runId`` to be a **UUID** — latence run ids are operator-chosen
+    strings like ``"run-0001"``, so they are hashed into a v5 UUID. Deterministic by
+    construction: the same ``(namespace, pipeline, run_id, stage)`` always yields the same UUID,
+    so a *resumed* run continues the same lineage run rather than forking a new one in the
+    catalog, and a test can assert the id without freezing a clock or a random seed.
+    """
+    key = f"{namespace}/{pipeline}/{run_id}" + (f"/{stage}" if stage is not None else "")
+    return str(uuid.uuid5(_LINEAGE_UUID_NAMESPACE, key))
+
+
+# The carrier-field type mapping: a Python annotation -> the coarse type name that goes in the
+# OpenLineage schema facet. Names + coarse types only — a schema facet describes *shape*, so no
+# value ever passes through here.
+_SCALAR_TYPE_NAMES: dict[object, str] = {
+    str: "string",
+    bytes: "binary",
+    bool: "boolean",
+    int: "integer",
+    float: "double",
+}
+
+
+def _field_type_name(annotation: object) -> str:
+    """Coarse OpenLineage type name for a pydantic field annotation (shape, never a value)."""
+    origin = get_origin(annotation)
+    if origin is None:
+        scalar = _SCALAR_TYPE_NAMES.get(annotation)
+        if scalar is not None:
+            return scalar
+        if isinstance(annotation, type):
+            return "struct" if hasattr(annotation, "model_fields") else "string"
+        return "string"
+    args = [a for a in get_args(annotation) if a is not type(None)]
+    if origin in (list, tuple, set, frozenset, Sequence):
+        return "array"
+    if origin in (dict, Mapping):
+        return "map"
+    if len(args) == 1:  # Optional[X] / Annotated[X, ...] collapse to X
+        return _field_type_name(args[0])
+    return "string"
+
+
+def schema_fields_of(carrier: type[Any] | None) -> tuple[tuple[str, str], ...]:
+    """The ``(field name, type)`` pairs of a Stage's carrier — the schema facet's payload.
+
+    Reads the carrier contract's declared fields (a pydantic model's ``model_fields``), so the
+    schema a consumer sees is the *contract*, not a sample of the data: no record is inspected,
+    no value is read. A carrier without declared fields yields an empty tuple (the facet is then
+    omitted rather than emitted empty).
+    """
+    fields = getattr(carrier, "model_fields", None)
+    if not isinstance(fields, dict):
+        return ()
+    return tuple(
+        (name, _field_type_name(getattr(info, "annotation", None)))
+        for name, info in sorted(fields.items())
+    )
+
+
+@dataclass(frozen=True)
+class LineageDataset:
+    """One dataset in the lineage graph: where it lives + the shape of what is in it.
+
+    ``namespace`` / ``name`` follow the OpenLineage dataset naming convention (a local path is
+    ``file`` + the absolute path; an object store is ``<scheme>://<bucket>`` + the key). ``fields``
+    is the carrier's ``(name, type)`` schema — never a value.
+    """
+
+    namespace: str
+    name: str
+    fields: tuple[tuple[str, str], ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"namespace": self.namespace, "name": self.name}
+        if self.fields:
+            out["facets"] = {
+                "schema": {
+                    "_producer": LINEAGE_PRODUCER,
+                    "_schemaURL": _SCHEMA_FACET_URL,
+                    "fields": [{"name": n, "type": t} for n, t in self.fields],
+                }
+            }
+        return out
+
+
+def dataset_for_uri(uri: str, carrier: type[Any] | None = None) -> LineageDataset:
+    """Map a latence Storage URI onto the OpenLineage dataset naming convention.
+
+    ``file:///data/x.jsonl`` (or a bare path) -> namespace ``file``, name ``/data/x.jsonl``;
+    ``s3://bucket/key`` -> namespace ``s3://bucket``, name ``key``. The optional ``carrier`` adds
+    the schema facet. A URI is a *location*, not content — this is exactly the identity a catalog
+    needs to stitch latence's outputs into its graph.
+    """
+    parsed = urllib.parse.urlsplit(uri)
+    if parsed.scheme in ("", "file"):
+        namespace = "file"
+        name = parsed.path or uri
+    else:
+        namespace = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else parsed.scheme
+        name = parsed.path.lstrip("/")
+    return LineageDataset(namespace=namespace, name=name or "/", fields=schema_fields_of(carrier))
+
+
+def validate_run_event(event: Mapping[str, Any]) -> None:
+    """Reject an event the OpenLineage spec rejects — raise :class:`ConfigError`.
+
+    These are the **required/typed constraints of the OpenLineage 2-0-2 JSON Schema** itself
+    (``RunEvent``/``BaseEvent``/``Run``/``Job``/``Dataset``/``BaseFacet``), checked locally so an
+    offline test is never a *weaker* consumer than a real one — a fake that accepts what a catalog
+    rejects manufactures false green. Note the direction: this is strictly no laxer than a real
+    backend, and in places stricter — Marquez 0.51.1's ``POST /api/v1/lineage`` was measured to
+    accept a non-UUID ``runId`` and a naive ``eventTime`` that the spec forbids and that a
+    schema-validating consumer (the OpenLineage client's own models, a hosted catalog) rejects.
+    Being stricter can only produce a false *red*, which the live-Marquez check
+    (``scripts/verify-openlineage-marquez.py``) disproves.
+
+    * ``eventType`` is one of the spec's enum values;
+    * ``eventTime`` is ISO-8601 **with a timezone offset** (a naive timestamp is rejected);
+    * ``run.runId`` is a real UUID (this is the constraint latence run ids must be hashed for);
+    * ``job.namespace`` / ``job.name`` are non-empty;
+    * ``producer`` and ``schemaURL`` are present;
+    * every input/output dataset has a non-empty namespace + name;
+    * every facet object carries its required ``_producer`` and ``_schemaURL`` keys.
+    """
+    event_type = event.get("eventType")
+    if event_type not in _EVENT_TYPES:
+        raise ConfigError(f"invalid OpenLineage eventType {event_type!r}")
+    event_time = event.get("eventTime")
+    if not isinstance(event_time, str):
+        raise ConfigError("OpenLineage eventTime is required")
+    try:
+        parsed_time = datetime.fromisoformat(event_time)
+    except ValueError as exc:
+        raise ConfigError(f"OpenLineage eventTime is not ISO-8601: {event_time!r}") from exc
+    if parsed_time.tzinfo is None:
+        raise ConfigError(f"OpenLineage eventTime needs a timezone offset: {event_time!r}")
+    for key in ("producer", "schemaURL"):
+        if not event.get(key):
+            raise ConfigError(f"OpenLineage event is missing {key!r}")
+    run = event.get("run")
+    if not isinstance(run, Mapping):
+        raise ConfigError("OpenLineage event is missing 'run'")
+    try:
+        uuid.UUID(str(run.get("runId")))
+    except ValueError as exc:
+        raise ConfigError(
+            f"OpenLineage run.runId must be a UUID, got {run.get('runId')!r}"
+        ) from exc
+    job = event.get("job")
+    if not isinstance(job, Mapping) or not job.get("namespace") or not job.get("name"):
+        raise ConfigError("OpenLineage job needs a non-empty namespace + name")
+    for side in ("inputs", "outputs"):
+        for dataset in event.get(side) or ():
+            if not isinstance(dataset, Mapping):
+                raise ConfigError(f"OpenLineage {side} entry must be an object")
+            if not dataset.get("namespace") or not dataset.get("name"):
+                raise ConfigError(f"OpenLineage {side} dataset needs a namespace + name")
+            _validate_facets(dataset.get("facets"), where=f"{side} dataset")
+    _validate_facets(run.get("facets"), where="run")
+    _validate_facets(job.get("facets"), where="job")
+
+
+def _validate_facets(facets: Any, *, where: str) -> None:
+    if facets is None:
+        return
+    if not isinstance(facets, Mapping):
+        raise ConfigError(f"OpenLineage {where} facets must be an object")
+    for name, facet in facets.items():
+        if not isinstance(facet, Mapping):
+            raise ConfigError(f"OpenLineage {where} facet {name!r} must be an object")
+        for required in ("_producer", "_schemaURL"):
+            if not facet.get(required):
+                raise ConfigError(f"OpenLineage {where} facet {name!r} is missing {required!r}")
+
+
+class LineageTransport(Protocol):
+    """Where a built OpenLineage event goes — the one seam the emitter writes through."""
+
+    def send(self, event: Mapping[str, Any]) -> None: ...
+
+
+class CollectingLineageTransport:
+    """An in-memory transport that keeps every event — the test + local-inspection transport.
+
+    It is deliberately **no laxer than a real backend**: each event is run through
+    :func:`validate_run_event` (the OpenLineage JSON-Schema constraints) before it is recorded, so
+    a spec-invalid event raises here instead of being silently collected — the fake never accepts
+    more than the real thing does.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def send(self, event: Mapping[str, Any]) -> None:
+        validate_run_event(event)
+        self.events.append(dict(event))
+
+
+_LINEAGE_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+class _NoRedirectLineageHandler(urllib.request.HTTPRedirectHandler):
+    """Turn every redirect into an ``HTTPError`` instead of a followed request.
+
+    Returning ``None`` from ``redirect_request`` makes ``urllib`` raise for the ``3xx`` rather
+    than re-issuing the request against the ``Location`` host. That matters because urllib's
+    *default* opener replays the original headers — including ``Authorization: Bearer <api key>``
+    — to whatever host the redirect names, so a compromised, misconfigured or MITM'd collector
+    could harvest the hosted-catalog credential. Same defence, same reason as the SharePoint
+    connector's ``_NoRedirectHandler``.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        return None
+
+
+class HttpLineageTransport:
+    """POSTs events to an OpenLineage HTTP endpoint (Marquez, Atlan, Collibra, Dataplex, …).
+
+    Stdlib ``urllib`` only — the ``openlineage-python`` client is not a ``latence-core``
+    dependency (ADR-0016). ``url`` is the collector root (``http://localhost:5000``); the standard
+    ``/api/v1/lineage`` path is appended unless the URL already names a path. An optional
+    ``api_key`` rides as a ``Bearer`` header. A non-2xx response or a transport error raises — the
+    *emitter* is what swallows it, so this class stays honest about failure and remains reusable.
+
+    **The API key never leaves the configured collector.** Redirects are refused rather than
+    followed (urllib's default opener would replay the ``Authorization`` header to the redirect
+    target, including a different host), and a key may only travel over ``https`` — plain ``http``
+    stays available for a keyless local Marquez and for a loopback emulator. Because the emitter
+    swallows every transport exception, a leak here would be silent, so it is prevented rather
+    than reported.
+    """
+
+    def __init__(self, url: str, *, api_key: str | None = None, timeout: float = 5.0) -> None:
+        if not url:
+            raise ConfigError("OpenLineage endpoint URL must not be empty")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ConfigError(f"OpenLineage endpoint must be http(s), got {url!r}")
+        if (
+            api_key
+            and parsed.scheme == "http"
+            and (parsed.hostname or "") not in _LINEAGE_LOOPBACK_HOSTS
+        ):
+            raise ConfigError(
+                "Refusing to send the OpenLineage API key over plaintext http to "
+                f"{parsed.hostname!r}: a bearer token may only travel over https (loopback http "
+                "is allowed for a local collector). Use an https LATENCE_OPENLINEAGE_URL."
+            )
+        path = parsed.path.rstrip("/")
+        self.url = url.rstrip("/") + ("" if path else "/api/v1/lineage")
+        self._api_key = api_key
+        self._timeout = timeout
+        self._opener = urllib.request.build_opener(_NoRedirectLineageHandler)
+
+    def send(self, event: Mapping[str, Any]) -> None:
+        body = json.dumps(event, sort_keys=True).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        request = urllib.request.Request(  # noqa: S310 - scheme is validated to http(s) above
+            self.url, data=body, headers=headers, method="POST"
+        )
+        try:
+            with self._opener.open(request, timeout=self._timeout) as response:
+                status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as exc:
+            # Includes the 3xx the no-redirect handler surfaces: a status the collector really
+            # returned, reported as a typed error rather than a raw urllib traceback (ADR-0034).
+            raise ProviderLineageError(f"lineage endpoint returned HTTP {exc.code}") from None
+        if status >= 300:
+            raise ProviderLineageError(f"lineage endpoint returned HTTP {status}")
+
+
+class ProviderLineageError(RuntimeError):
+    """A lineage endpoint rejected an event — always caught by the emitter, never fatal."""
+
+
+@dataclass
+class OpenLineageEmitter:
+    """The configured lineage seam: a transport + the namespace this deployment's jobs live in.
+
+    Long-lived and run-agnostic (the ``LocalRunner`` holds one). :meth:`for_run` mints the
+    run-scoped :class:`RunLineage` the Runner actually calls — the same shape as
+    :class:`~latence_core.tracing.RunTracer`.
+    """
+
+    transport: LineageTransport
+    namespace: str = DEFAULT_LINEAGE_NAMESPACE
+
+    def for_run(self, pipeline: str, run_id: str) -> RunLineage:
+        return RunLineage(emitter=self, pipeline=pipeline, run_id=run_id)
+
+
+@dataclass
+class RunLineage:
+    """The run-scoped emitter the Runner drives: one parent job + one job per Stage.
+
+    Five calls — :meth:`run_start`, :meth:`stage_start`, :meth:`stage_end`, :meth:`run_end` — build
+    OpenLineage ``RunEvent``\\ s and hand them to the transport. **Nothing here can fail a run**:
+    every method is wrapped end-to-end (building *and* sending), so a malformed field, a dead
+    endpoint, or a 500 is logged at WARNING and the pipeline continues.
+
+    Each Stage is its own OpenLineage *job* (``<pipeline>.<stage>``) carrying a ``parent`` run
+    facet pointing at the pipeline's run, which is how a catalog nests the Stages under one run and
+    stitches the per-Stage datasets into a single graph.
+    """
+
+    emitter: OpenLineageEmitter
+    pipeline: str
+    run_id: str
+
+    @property
+    def namespace(self) -> str:
+        return self.emitter.namespace
+
+    @property
+    def run_uuid(self) -> str:
+        """The parent (pipeline-level) run UUID — deterministic, stable across a resume."""
+        return lineage_run_uuid(self.namespace, self.pipeline, self.run_id)
+
+    def stage_run_uuid(self, stage: str) -> str:
+        return lineage_run_uuid(self.namespace, self.pipeline, self.run_id, stage)
+
+    # --- the four calls the Runner makes -------------------------------------------------
+    def run_start(self) -> None:
+        self._emit(
+            "START",
+            job=self.pipeline,
+            run_uuid=self.run_uuid,
+            job_type="PIPELINE",
+            facet={"latence_run_id": self.run_id, "pipeline": self.pipeline},
+        )
+
+    def run_end(self, *, documents: int | None = None, error_category: str | None = None) -> None:
+        facet: dict[str, Any] = {"latence_run_id": self.run_id, "pipeline": self.pipeline}
+        if documents is not None:
+            facet["documents"] = documents
+        if error_category is not None:
+            facet["error_category"] = error_category
+        self._emit(
+            "FAIL" if error_category is not None else "COMPLETE",
+            job=self.pipeline,
+            run_uuid=self.run_uuid,
+            job_type="PIPELINE",
+            facet=facet,
+        )
+
+    def stage_start(
+        self,
+        stage: str,
+        *,
+        capability: str,
+        provider: str,
+        records_in: int,
+        inputs: Sequence[LineageDataset] = (),
+        outputs: Sequence[LineageDataset] = (),
+    ) -> None:
+        self._emit(
+            "START",
+            job=f"{self.pipeline}.{stage}",
+            run_uuid=self.stage_run_uuid(stage),
+            job_type="STAGE",
+            parent=True,
+            inputs=inputs,
+            outputs=outputs,
+            facet={
+                "stage": stage,
+                "capability": capability,
+                "provider": provider,
+                "records_in": records_in,
+            },
+        )
+
+    def stage_end(
+        self,
+        stage: str,
+        *,
+        capability: str,
+        provider: str,
+        records_in: int,
+        records_out: int,
+        duration_ms: float,
+        inputs: Sequence[LineageDataset] = (),
+        outputs: Sequence[LineageDataset] = (),
+        error_category: str | None = None,
+        from_checkpoint: bool = False,
+        skipped: bool = False,
+    ) -> None:
+        facet: dict[str, Any] = {
+            "stage": stage,
+            "capability": capability,
+            "provider": provider,
+            "records_in": records_in,
+            "records_out": records_out,
+            "duration_ms": duration_ms,
+            "from_checkpoint": from_checkpoint,
+            "skipped": skipped,
+        }
+        if error_category is not None:
+            # The stable typed *category* only (ADR-0034). The standard ``errorMessage`` facet is
+            # deliberately never emitted: an exception message can quote a document.
+            facet["error_category"] = error_category
+        self._emit(
+            "FAIL" if error_category is not None else "COMPLETE",
+            job=f"{self.pipeline}.{stage}",
+            run_uuid=self.stage_run_uuid(stage),
+            job_type="STAGE",
+            parent=True,
+            inputs=inputs,
+            outputs=outputs,
+            facet=facet,
+        )
+
+    # --- event construction ---------------------------------------------------------------
+    def _emit(
+        self,
+        event_type: str,
+        *,
+        job: str,
+        run_uuid: str,
+        job_type: str,
+        facet: Mapping[str, Any],
+        parent: bool = False,
+        inputs: Sequence[LineageDataset] = (),
+        outputs: Sequence[LineageDataset] = (),
+    ) -> None:
+        try:
+            event = self._build(
+                event_type,
+                job=job,
+                run_uuid=run_uuid,
+                job_type=job_type,
+                facet=facet,
+                parent=parent,
+                inputs=inputs,
+                outputs=outputs,
+            )
+            self.emitter.transport.send(event)
+        except Exception:  # noqa: BLE001 - lineage is observability; it never fails a run
+            logger.warning(
+                "OpenLineage emission failed (%s %s); continuing", event_type, job, exc_info=True
+            )
+
+    def _build(
+        self,
+        event_type: str,
+        *,
+        job: str,
+        run_uuid: str,
+        job_type: str,
+        facet: Mapping[str, Any],
+        parent: bool,
+        inputs: Sequence[LineageDataset],
+        outputs: Sequence[LineageDataset],
+    ) -> dict[str, Any]:
+        run_facets: dict[str, Any] = {
+            "latence_run": {
+                "_producer": LINEAGE_PRODUCER,
+                "_schemaURL": _LATENCE_FACET_URL,
+                **dict(facet),
+            }
+        }
+        if parent:
+            run_facets["parent"] = {
+                "_producer": LINEAGE_PRODUCER,
+                "_schemaURL": _PARENT_FACET_URL,
+                "run": {"runId": self.run_uuid},
+                "job": {"namespace": self.namespace, "name": self.pipeline},
+            }
+        return {
+            "eventType": event_type,
+            "eventTime": datetime.now(UTC).isoformat(),
+            "producer": LINEAGE_PRODUCER,
+            "schemaURL": RUN_EVENT_SCHEMA_URL,
+            "run": {"runId": run_uuid, "facets": run_facets},
+            "job": {
+                "namespace": self.namespace,
+                "name": job,
+                "facets": {
+                    "jobType": {
+                        "_producer": LINEAGE_PRODUCER,
+                        "_schemaURL": _JOB_TYPE_FACET_URL,
+                        "processingType": "BATCH",
+                        "integration": "LATENCE",
+                        "jobType": job_type,
+                    }
+                },
+            },
+            "inputs": [d.to_json() for d in inputs],
+            "outputs": [d.to_json() for d in outputs],
+        }
+
+
+def build_lineage_emitter(
+    url: str | None,
+    *,
+    namespace: str = DEFAULT_LINEAGE_NAMESPACE,
+    api_key: str | None = None,
+    timeout: float = 5.0,
+) -> OpenLineageEmitter | None:
+    """Build the emitter for an endpoint — or ``None`` when no endpoint is configured.
+
+    ``None``/empty ``url`` returns ``None``, which is what "off by default" means concretely: the
+    Runner holds no emitter, builds no event, and opens no socket. A malformed URL is a
+    :class:`~latence_core.errors.ConfigError` (an operator who *asked* for lineage and mistyped the
+    endpoint should hear about it at wiring time, not silently get no lineage).
+    """
+    if not url:
+        return None
+    return OpenLineageEmitter(
+        transport=HttpLineageTransport(url, api_key=api_key, timeout=timeout),
+        namespace=namespace or DEFAULT_LINEAGE_NAMESPACE,
+    )

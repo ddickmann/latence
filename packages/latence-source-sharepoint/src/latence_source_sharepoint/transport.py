@@ -1,0 +1,265 @@
+"""The HTTP transport seam the SharePoint connector talks to Microsoft Graph through.
+
+Two things live here and nothing else: the tiny request/response shape the Graph client
+needs (:class:`HttpResponse`, :class:`HttpTransport`) and the real, dependency-free
+implementation over the Python standard library (:class:`UrllibTransport`).
+
+The seam exists because the behaviour genuinely varies (the codebase-design bar: a seam only
+where two REAL implementations exist, never speculatively):
+
+* :class:`UrllibTransport` — production. Talks to ``https://graph.microsoft.com``.
+* :class:`~latence_source_sharepoint.testing.FakeGraphTransport` — the shipped faithful
+  offline fake of the Graph API, used by every offline test, by the conformance suite, and
+  by an adopter who wants a dry run with no tenant.
+
+An adopter with a corporate proxy / mTLS / a different HTTP client supplies a third one by
+naming a factory in config (``transport: "my_pkg.module:build_transport"``) — no fork.
+
+**Three security properties are enforced here, at the only place every byte passes through.**
+
+1. **TLS only.** A request to a non-``https`` URL is refused before a single header is
+   written, so a bearer token can never leave the process in the clear. (``http://`` is
+   allowed only for a loopback host, so an adopter can point the connector at a local Graph
+   emulator without disabling the guard globally.)
+2. **Redirects are never followed automatically.** Graph answers
+   ``GET /drives/{id}/items/{id}/content`` with a ``302`` to a short-lived pre-authenticated
+   download URL on a *different host* (an Azure blob endpoint). ``urllib``'s default opener
+   would follow it and re-send the ``Authorization`` header to that host — a token leak. The
+   opener installed here returns the ``3xx`` to the caller instead, and
+   :class:`~latence_source_sharepoint.graph.GraphClient` re-issues the download with **no**
+   credentials, exactly as the real API expects. The faithful fake rejects a credentialed
+   request to the download host with the same ``403`` the real blob endpoint returns, so a
+   regression that re-introduces the leak fails the offline suite.
+3. **A server-supplied URL that the client follows *credentialed* is pinned to the configured
+   Graph origin** (:func:`require_same_origin`). The redirect guard above only covers the ``3xx``
+   leg; the other server-supplied URL in the connector is the ``@odata.nextLink`` of a listing
+   page, which :class:`~latence_source_sharepoint.graph.GraphClient` follows *with* the
+   ``Authorization`` header. Unpinned, a response body naming a foreign host would replay the
+   tenant's token there — the same leak by a different door, and one ``require_tls`` cannot see,
+   because a hostile URL is perfectly able to be ``https``.
+"""
+
+from __future__ import annotations
+
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from latence_core.errors import ConfigError, ProviderError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from http.client import HTTPMessage
+    from typing import IO
+
+# Graph's own timeouts are generous; a stuck socket must not hang a pipeline forever.
+DEFAULT_TIMEOUT_SECONDS = 60.0
+
+# Hosts for which plain ``http://`` is tolerated (a local Graph emulator / test double).
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    """One HTTP response: status, headers, body. Deliberately smaller than any HTTP client's."""
+
+    status: int
+    headers: Mapping[str, str]
+    body: bytes
+
+    def header(self, name: str) -> str | None:
+        """Case-insensitive header lookup (HTTP header names are case-insensitive)."""
+        lowered = name.lower()
+        for key, value in self.headers.items():
+            if key.lower() == lowered:
+                return value
+        return None
+
+
+@runtime_checkable
+class HttpTransport(Protocol):
+    """Send one HTTP request, return the response. No retries, no auth, no JSON — those are
+    :class:`~latence_source_sharepoint.graph.GraphClient`'s job."""
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+    ) -> HttpResponse:
+        """Perform the request and return the response, including for ``4xx``/``5xx``/``3xx``.
+
+        Only a *transport* failure (DNS, connection refused, timeout, a refused non-TLS URL)
+        raises; every status the server actually returned comes back as an
+        :class:`HttpResponse` so the client can apply the Graph retry/refresh policy.
+        """
+        ...
+
+
+def redact_url(url: str) -> str:
+    """Return a form of ``url`` that is safe to put in an error message and therefore a log.
+
+    Scheme, host, port and path survive — that is the whole diagnostic value of a URL in a
+    failure message. The **query string, the fragment and any userinfo are dropped**, because
+    not every URL this connector touches is a plain Graph API URL: Graph answers a content
+    download with a ``302`` to a *pre-authenticated* storage URL whose query string carries a
+    live access token (``...&tempauth=<JWT>&...``). Echoing that verbatim into a typed error
+    leaks a working credential into the operator's log (ADR-0034/ADR-0044).
+
+    The redaction is unconditional rather than a denylist of known-sensitive parameter names:
+    the query string of a URL the *server* handed us is not ours to classify.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or ""
+    if ":" in host:  # IPv6 literal — urlsplit strips the brackets, urlunsplit needs them back.
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if host and parsed.port is not None else host
+    query = "<redacted>" if parsed.query else ""
+    fragment = "<redacted>" if parsed.fragment else ""
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, query, fragment))
+
+
+def require_tls(url: str) -> None:
+    """Refuse any URL that would put a bearer token on the wire in the clear.
+
+    Raises :class:`~latence_core.errors.ConfigError` for a non-``https`` URL, except for a
+    loopback host (a local Graph emulator). The URL is echoed in the message only after
+    :func:`redact_url` — this guard also runs on the server-supplied download redirect, whose
+    query string carries a live pre-authenticated token.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and (parsed.hostname or "") in _LOOPBACK_HOSTS:
+        return
+    msg = (
+        f"Refusing to send a SharePoint request over {parsed.scheme or 'a schemeless URL'!r} "
+        f"({redact_url(url)!r}): credentials may only travel over https (loopback http is "
+        "allowed for a local Graph emulator). Fix 'graph_base_url' / 'login_base_url'."
+    )
+    raise ConfigError(msg)
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def origin_of(url: str) -> tuple[str, str, int | None]:
+    """The ``(scheme, host, port)`` triple two URLs must share to be the same origin.
+
+    The port is normalised: an explicit ``:443`` on an ``https`` URL is the same origin as no
+    port at all, and the host is lower-cased (DNS names are case-insensitive), so a cosmetic
+    difference in how the server spelled its own URL is not mistaken for a foreign host.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+        port = None
+    return (scheme, host, port)
+
+
+def require_same_origin(url: str, *, expected: str, what: str) -> None:
+    """Refuse a **server-supplied** URL that points anywhere but ``expected``'s origin.
+
+    This is the pagination-leg twin of the ``_NoRedirectHandler`` guard above, and it exists for
+    the identical reason. A Graph listing response carries an ``@odata.nextLink`` that the client
+    follows *with the ``Authorization`` header attached* — so a response body containing
+    ``{"@odata.nextLink": "https://attacker.example.invalid/harvest"}`` would replay the tenant's
+    bearer token to that host, the exact cross-host token leak the download leg goes out of its
+    way to prevent by re-issuing the ``302`` uncredentialed. :func:`require_tls` does not catch
+    it: an attacker's URL is perfectly happy to be ``https``.
+
+    The link is therefore pinned to the origin of the configured ``graph_base_url``. A mismatch is
+    a :class:`~latence_core.errors.ProviderError` — it is the *server's* response that is wrong,
+    not the operator's configuration — and the offending URL reaches the message only through
+    :func:`redact_url` (ADR-0034: typed, content-free failures).
+    """
+    if origin_of(url) == origin_of(expected):
+        return
+    msg = (
+        f"SharePointSource: refusing to follow a server-supplied {what} to "
+        f"{redact_url(url)!r} — it points outside the configured Graph endpoint "
+        f"({redact_url(expected)!r}), and following it would replay the tenant's access token "
+        "to a foreign host. Either the endpoint returned a hostile/misdirected link, or "
+        "'graph_base_url' does not match the service actually being called."
+    )
+    raise ProviderError(msg)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Turn every redirect into a returned response instead of a followed request.
+
+    Returning ``None`` from ``redirect_request`` makes ``urllib`` raise ``HTTPError`` for the
+    ``3xx``, which :class:`UrllibTransport` converts back into an :class:`HttpResponse`. The
+    point is that the ``Authorization`` header is never replayed to the redirect target.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        return None
+
+
+class UrllibTransport:
+    """The production transport: Python's standard library, zero third-party dependencies.
+
+    Zero-dep is a deliberate choice, not an omission (ADR-0016 keeps heavy deps out of core;
+    this connector keeps them out of itself too). Graph is a plain REST/JSON API — an HTTP
+    client library would buy nothing a Source connector needs and would add a supply-chain
+    surface to a package whose entire job is to hold credentials.
+    """
+
+    def __init__(self, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+        self._timeout = timeout_seconds
+        self._opener = urllib.request.build_opener(_NoRedirectHandler)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+    ) -> HttpResponse:
+        require_tls(url)
+        request = urllib.request.Request(  # noqa: S310 - scheme is enforced by require_tls
+            url, data=body, method=method.upper()
+        )
+        for key, value in headers.items():
+            request.add_header(key, value)
+        try:
+            with self._opener.open(request, timeout=self._timeout) as response:
+                return HttpResponse(
+                    status=int(response.status),
+                    headers=dict(response.headers.items()),
+                    body=bytes(response.read()),
+                )
+        except urllib.error.HTTPError as exc:
+            # A status the server really returned (including the 302 the no-redirect handler
+            # surfaces): the client decides what it means, not the transport.
+            return HttpResponse(
+                status=int(exc.code),
+                headers=dict(exc.headers.items()),
+                body=bytes(exc.read()),
+            )
+        except urllib.error.URLError as exc:
+            # A genuine transport failure. The reason is included; headers (and therefore the
+            # bearer token) never are, and the URL only after redact_url — this is also the
+            # leg that fetches the pre-authenticated download URL, whose query string carries
+            # a live access token.
+            msg = (
+                f"SharePoint transport failure for {method.upper()} "
+                f"{redact_url(url)!r}: {exc.reason}"
+            )
+            raise ProviderError(msg) from exc

@@ -833,7 +833,10 @@ dropped → that would return unfiltered hits).
 > (`pip install 'latence-retrieval[backend-qdrant]'`) is the real seam adapter over a running Qdrant
 > ≥1.10. It imports without the client (lazy) and satisfies the identical `RetrievalBackend` Protocol,
 > so the orchestrator/MCP code above is *unchanged* against it — only the fetch reaches a live store.
-> Validate it out of band against a real Qdrant.
+> Validate it out of band against a real Qdrant. Against a collection loaded by `latence-sink-qdrant`
+> no payload mapping is needed: `text_key` defaults to `"content"`, the Export column name the sink
+> writes, so `Candidate.text` is the chunk text. For a collection somebody else built, set `text_key`
+> to their key — a key the payload lacks is a loud `BackendSearchError`, not an empty `text`.
 
 ---
 

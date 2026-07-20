@@ -38,8 +38,11 @@ from latence_core.capability import (
     SparseEmbedder,
     SparseSignals,
     Tokenizer,
+    satisfies_capability,
 )
+from latence_core.contracts import SCHEMA_VERSION
 from latence_core.errors import ConfigError, ContractError
+from latence_core.iceberg import build_iceberg_output
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
@@ -433,6 +436,25 @@ class JsonlParquetExport:
             store indexes, and never re-leak PII, ADR-0044/0053). Absent ⇒ neither file is written
             and the corpus is byte-identical.
 
+        iceberg: dict | None  — OPTIONAL opt-in Iceberg-table output (#184, ADR-0017), OFF by
+            default. A ``{"uri": "<Iceberg REST catalog>", "namespace": "latence", "table":
+            "records", "mode": "append" | "overwrite", ...}`` block. When present, the Export
+            *additionally* registers this run's corpus as an Apache Iceberg table in that REST
+            catalog, so the same data is directly governable in Unity/Polaris/Glue/Lakekeeper with
+            no glue code. The registered table mirrors the Parquet consumer contract exactly (its
+            schema IS the Parquet schema, including whichever optional signal columns this Export
+            emits) and is version-stamped with the same contract ``schema_version`` the Parquet
+            column carries. The plain Parquet + JSONL deliverable remains the source of truth and is
+            **byte-identical** whether or not this block is present — the export directory itself is
+            untouched; the only additions are an immutable, content-addressed data file inside the
+            TARGET TABLE's own warehouse location (reported in the output URIs, and deliberately not
+            in the ephemeral ``_latence/runs/<run_id>/`` tree that Purge and run-retention delete)
+            and the catalog registration. Delta semantics are the ``mode`` choice, documented
+            honestly in :mod:`latence_core.iceberg`: ``append`` adds a snapshot (right for a delta
+            run; a repeated FULL export duplicates rows), ``overwrite`` replaces the table contents
+            in one atomic commit (right for a full re-export). Absent ⇒ nothing is registered,
+            ``pyiceberg`` is never imported, and no extra file is written.
+
     Every new signal column/sidecar is **additive**: with none of ``sparse_embedder`` /
     ``multivector_embedder`` / ``fde_converter`` / ``keep_multivectors`` / ``bm25`` wired,
     ``records.jsonl`` + ``records.parquet`` are byte-identical to today and no sidecar is written
@@ -503,6 +525,11 @@ class JsonlParquetExport:
         self._bm25_tokenizer_name = (
             str(bm25_spec["provider"]) if isinstance(bm25_spec, dict) else ""
         )
+        # #184 (ADR-0017): the OPTIONAL Iceberg-table output. ``None`` unless an ``iceberg``
+        # block is configured — off by default, so the default Export never touches pyiceberg
+        # and its files stay byte-identical. Parsed HERE (at wiring time) so a malformed catalog
+        # config fails before the pipeline runs, not after it produced its deliverable.
+        self._iceberg = build_iceberg_output(config.get("iceberg"), default_table=self._basename)
         # Wiring invariants: the multi-vector generator is the sole source of both the FDE column
         # and the sidecar, so either sink without it is a config error caught loudly at wiring time
         # (never a silently-empty column/sidecar).
@@ -537,6 +564,13 @@ class JsonlParquetExport:
         at wiring time** — a :class:`~latence_core.errors.ContractError` (a ``TypeError``) — rather
         than silently emitting no signal. A malformed ``spec`` shape is a
         :class:`~latence_core.errors.ConfigError`.
+
+        The capability check is :func:`~latence_core.capability.satisfies_capability`, NOT plain
+        ``isinstance`` (audit R6): several of these Protocols declare a property, and a
+        ``runtime_checkable`` ``isinstance`` calls ``hasattr`` — which would *invoke* it and pull a
+        Provider's heavy backend (``sparse.splade`` loads a Hugging Face checkpoint from
+        ``vocab_size``) at **wiring** time, breaking ADR-0016's defer-to-first-use contract and
+        making config validation reach the network.
         """
         if spec is None:
             return None
@@ -557,7 +591,7 @@ class JsonlParquetExport:
             raise ConfigError(msg)
         provider_cls = registry.load(provider_name)
         provider = provider_cls(provider_config)
-        if not isinstance(provider, protocol):
+        if not satisfies_capability(provider, protocol):
             msg = (
                 f"Provider {provider_name!r} named in Export config {key!r} does not satisfy the "
                 f"{protocol.__name__} capability."
@@ -612,6 +646,10 @@ class JsonlParquetExport:
         postings_tmp = storage.temp_uri(postings_uri) if bm25 else None
 
         wrote_any = False
+        # #184: the record schema_versions this run actually carried — stamped onto the optional
+        # Iceberg table so it never claims a contract version its own rows do not have. Folded from
+        # the rows already in hand (O(distinct versions), normally one), never a second pass.
+        record_versions: set[int] = set()
         # Streamed writers, all to temp paths, atomically published on success. The JSONL is
         # byte-stable: one sorted-key object per line, and the trailing newline is written per line
         # (an N-line file ends in exactly one "\n"; an empty file is empty). The Parquet + sidecar
@@ -637,6 +675,7 @@ class JsonlParquetExport:
                 stack.callback(postings_writer.close)
 
             for batch_rows in self._batched(records, _EXPORT_BATCH_ROWS):
+                record_versions.update(int(row["schema_version"]) for row in batch_rows)
                 multivectors = self._attach_signals(batch_rows)
                 # ADR-0053: the dense-vector + SPLADE signals have now consumed the RAW header (the
                 # vector is allowed it — non-inspectable). Before the header reaches the INSPECTABLE
@@ -689,6 +728,20 @@ class JsonlParquetExport:
             storage.write_text(stats_tmp, stats_json)
             storage.finalize_atomic(stats_tmp, stats_uri)
             out_uris.extend([postings_uri, stats_uri])
+        if self._iceberg is not None:
+            # #184: LAST, and only after the Parquet deliverable is atomically published — the
+            # catalog is registered against a file that is already complete and immutable, so a
+            # crash before this point leaves the normal deliverable untouched and simply no table.
+            out_uris.append(
+                self._iceberg.register(
+                    storage=storage,
+                    parquet_uri=parquet_uri,
+                    basename=self._basename,
+                    arrow_schema=schema,
+                    contract_version=SCHEMA_VERSION,
+                    record_versions=record_versions,
+                )
+            )
         return out_uris
 
     def _attach_signals(self, rows: list[dict[str, Any]]) -> list[list[list[float]]] | None:

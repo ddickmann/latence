@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-source-sharepoint"
+version = "0.1.0"
+description = "SharePoint / OneDrive Source Provider (Microsoft Graph, zero third-party dependencies) for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "data-pipeline", "sharepoint", "onedrive", "microsoft-graph", "connector"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+# LICENSE DILIGENCE (ADR-0012, verified 2026-07-18).
+#   * This package's own CODE: Apache-2.0 (the repo LICENSE). It ships NO model weights, so
+#     there is no separate weights license to verify — the weights/code split is trivially
+#     satisfied for a pure-code connector.
+#   * Third-party runtime dependencies: NONE. The connector speaks Microsoft Graph's REST/JSON
+#     API over the Python standard library (`urllib.request`, `json`, `hashlib`), whose license
+#     is the PSF License Agreement (permissive). No Microsoft SDK, no HTTP client library, no
+#     vendored code — nothing to audit, nothing to keep in step with a CVE feed.
+#   * Microsoft Graph itself is a SERVICE, not distributed code: calling it carries no software
+#     license obligation. The adopter's own tenant terms govern their use of it; the framework
+#     makes no claim about them.
+# Core takes no new dependency (ADR-0016): everything above ships in THIS package.
+dependencies = [
+    "latence-core",
+]
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+# Registers this Provider under the framework's discovery group. Installing this package makes
+# 'source.sharepoint' available to any Pipeline with no core change (ADR-0004), alongside the
+# in-core 'source.local_folder' reference — swappable by one config line.
+[project.entry-points."latence.providers"]
+"source.sharepoint" = "latence_source_sharepoint.provider:SharePointSource"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_source_sharepoint"]

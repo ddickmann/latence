@@ -35,7 +35,32 @@ import yaml
 # The stack name the generated config carries (stable → byte-identical across runs).
 STACK_NAME = "latence-setup-stack"
 
-# The financial-PII label FLOOR the learned redactor (`redaction.gliner2`) runs when PII is ON.
+# The ONE blessed PII redactor the wizard emits — in EVERY profile (#197, ADR-0041/0036/0044).
+#
+# The wizard's one opinionated config must BE the profile's documented design, and it had drifted:
+# `lite` (and this module's own documented spine) named `redaction.gliner2` while `enterprise-sota`
+# emitted `redaction.gliner_pii` — a different package, library, and checkpoint for the same Stage.
+# #197 decides ONE, and the decision is `redaction.gliner2` (reasoning recorded in ADR-0041 §7a):
+#
+#   * ADR-0036 W9 makes gliner2 the UNIFIED extraction+PII engine, and both profiles already run
+#     `fused_entity_relation.gliner2` for `extract`. Blessing the gliner2 redactor means the stack
+#     resolves ONE library, ONE mdeberta-v3 encoder family, and ONE version pin for both Stages
+#     rather than additionally pulling the separate `gliner` library only for `redact`.
+#   * The choice is only now a real one: #192 restored `redaction.gliner2` loadability and pinned it
+#     (`gliner2[local]>=1.3,<2` + a typed ProviderError for a hand-installed env), so drift fails at
+#     dependency resolution. Its twin `redaction.gliner_pii` remains fully supported (#191 placed it
+#     on the resolved device) — it is simply not what the guided setup blesses.
+#   * Weights AND code are permissive and verified separately (ADR-0012): the `gliner2` framework is
+#     Apache-2.0 (code) and the default `fastino/GLiNER2-Guardrails-PII-Multi` checkpoint is
+#     Apache-2.0 and ungated (weights) — see packages/latence-pii-gliner2 and ADR-0036 W3.
+#   * The ADR-0044 financial-PII floor is unaffected by the choice: it lives at the single shared
+#     `finalize_redacted_chunk` seam every Redaction Provider funnels through, so it is
+#     non-bypassable by backend. `test_setup_wizard_redactor.py` proves it through THIS Provider
+#     with THIS emitted config rather than assuming it.
+BLESSED_REDACT_PROVIDER = "redaction.gliner2"
+
+# The financial-PII label FLOOR the blessed redactor (`BLESSED_REDACT_PROVIDER`) runs when PII
+# is ON.
 # Wider than the generic person/email/phone default: the enterprise corpora this stack targets carry
 # account/tax/card identifiers. The induced pii_types UNION on top of this floor at run (ADR-0038),
 # so the effective set is always ⊇ this list. Kept as one constant so the generator and the tests
@@ -79,6 +104,29 @@ SOTA_OCR_MAX_CONCURRENCY = 8
 # biencoders/rerankers/OCR need a GPU). On a CPU-only host these Stages are skip-with-flag at
 # `latence stack validate` (device honesty, P3-F1) — the generated config still validates.
 SOTA_DEVICE = "cuda"
+
+# The index-time SIGNALS the blessed enterprise-SOTA stack bakes in (ADR-0041: the wizard emits ONE
+# opinionated, quality-baked config). Both are pure-Python, CPU-only, deterministic, zero extra deps
+# — they add no GPU cost and no new dependency to the pod stack, and both are strictly ADDITIVE:
+# omitting the block leaves the export byte-identical (the ADR-0049/0051 guarantee).
+#
+#   * graph features (ADR-0051, #161) — PageRank centrality + label-propagation community stamped
+#     onto every KG node, promoted by export_kg to first-class graph-nodes.parquet columns and
+#     projected by `enrich` onto each chunk's context_header. Feeds multi-hop expansion and the
+#     Knapsack packer's optional signals. `pagerank` (not `degree`): global influence over the
+#     whole citation-like graph an enterprise corpus builds, not just local degree.
+#   * BM25 (ADR-0049, #164) — the term-statistics artifact (`bm25-stats.json` +
+#     `bm25-postings.parquet`) the query-side sparse rescorer runs on. `tokenizer.regex` is the
+#     documented reference tokenizer (lowercase UNICODE alphanumeric runs), matching the retrieval
+#     tooling's query-side term unit exactly — the agreement the sparse leg depends on.
+#     Scope, stated honestly because this profile is the MULTILINGUAL stack (it emits a
+#     multilingual embedder and a multilingual PII model): the reference tokenizer keeps accented
+#     and non-Latin words WHOLE, but it is not a word SEGMENTER — a script written without word
+#     spacing (Chinese/Japanese/Thai) yields one term per whitespace-delimited run. A corpus in
+#     those scripts should plug its own segmenter in behind the `Tokenizer` seam; the dense leg
+#     (Granite r2, multilingual) is unaffected either way.
+SOTA_GRAPH_FEATURES_PROVIDER = "graph_features.pagerank"
+SOTA_BM25_TOKENIZER = "tokenizer.regex"
 
 # Extensions that read as scanned/image inputs (OCR territory) vs born-digital PDF.
 _IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"})
@@ -406,6 +454,33 @@ def _sota_embedder_block() -> dict[str, object]:
     }
 
 
+def _sota_graph_features_block() -> dict[str, object]:
+    """The enterprise-SOTA graph-feature block (ADR-0051, #161) for the ``graph`` Stage.
+
+    PageRank centrality + label-propagation community, stamped onto every KG node and promoted by
+    ``export_kg`` to graph-nodes.parquet columns (and projected by ``enrich`` onto each chunk's
+    context_header). Pure Python, CPU-only, deterministic, zero extra deps — and additive: with the
+    block absent the emitted graph is byte-identical, so the enrichment costs the stack nothing it
+    did not already own.
+    """
+    return {"provider": SOTA_GRAPH_FEATURES_PROVIDER, "config": {}}
+
+
+def _sota_bm25_block() -> dict[str, object]:
+    """The enterprise-SOTA BM25 signal block (ADR-0049, #164) for the corpus Export.
+
+    Materializes the term-statistics artifact (``bm25-stats.json`` + ``bm25-postings.parquet``)
+    alongside the corpus Export — the index-time sparse signal the query-side BM25 rescorer runs on.
+    ``tokenizer.regex`` is the reference tokenizer (lowercase *Unicode* alphanumeric runs) the
+    retrieval tooling documents, and it is the same term unit the query-side rescorer applies — so
+    accented and non-Latin terms are indexed and matched, not dropped. It is not a word segmenter:
+    an unspaced script (Chinese/Japanese/Thai) yields one term per whitespace-delimited run, and
+    such a corpus should plug its own segmenter in behind the Tokenizer seam.
+    Deterministic, CPU-only, and additive (absent ⇒ no files, byte-identical).
+    """
+    return {"provider": SOTA_BM25_TOKENIZER, "config": {}}
+
+
 def build_pipeline_dict(answers: SetupAnswers) -> dict[str, object]:
     """Build the Pipeline mapping (the quality-baked GOOD stack) as an ordered dict.
 
@@ -540,7 +615,7 @@ def _build_lite_stages(
             {
                 "name": "redact",
                 "capability": "redaction",
-                "provider": "redaction.gliner2",
+                "provider": BLESSED_REDACT_PROVIDER,
                 "depends_on": ["induce"],
                 "config": {
                     "device": answers.device,
@@ -644,10 +719,15 @@ def _build_sota_stages(
 
     Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: served
     vLLM OCR (``parser.lighton_vllm``) → chunk[640] → LLM schema induction[corpus] → fused GLiNER2
-    entity+relation → learned PII redaction (``redaction.gliner_pii``) → profiling → the neural
+    entity+relation → learned PII redaction (``redaction.gliner2``, #197) → profiling → the neural
     **GLinker** disambiguator (``disambiguation.glinker`` + Granite r2 STS embedder) → canonical KG
     → **ULTRA** graph completion (skip-with-flag when absent) → KG + context-enriched RAG-corpus
     export (Granite r2 vectors). Every learned Stage runs on CUDA (``SOTA_DEVICE``).
+
+    Deliberate delta from ``stacks/gpu-sota-glinker.yaml`` (#197): that hand-written stack predates
+    the decision and still wires ``redaction.gliner_pii``; the wizard emits the ONE blessed
+    :data:`BLESSED_REDACT_PROVIDER` in every profile. Both Providers remain supported behind the
+    same ``PIIDetector`` seam — the profile just no longer picks a different one per tier.
 
     The ONE PII toggle and the W18 mask-before-extract option ride exactly as in ``lite``: PII adds
     ``content_screen`` + ``redact`` and wires ``redact → enrich → export_corpus`` (W16 chunk-level
@@ -748,7 +828,9 @@ def _build_sota_stages(
         }
     )
 
-    # 8) learned PII redaction (GLiNER-PII) — the PII half of the ONE toggle. W16 (ADR-0042): a
+    # 8) learned PII redaction — the PII half of the ONE toggle, on the SAME blessed Provider `lite`
+    # emits (#197: `BLESSED_REDACT_PROVIDER`, the ADR-0036 W9 unified gliner2 engine this profile
+    # already runs for `extract`, so `redact` adds no second model library). W16 (ADR-0042): a
     # chunk→chunk transform over the induced chunk stream that sets each chunk's masked_content, so
     # `enrich` reads a masked stream and export_corpus is masked AND enriched.
     if answers.pii:
@@ -756,7 +838,7 @@ def _build_sota_stages(
             {
                 "name": "redact",
                 "capability": "redaction",
-                "provider": "redaction.gliner_pii",
+                "provider": BLESSED_REDACT_PROVIDER,
                 "depends_on": ["induce"],
                 "config": {
                     "device": SOTA_DEVICE,
@@ -798,14 +880,20 @@ def _build_sota_stages(
         }
     )
 
-    # 11) canonical, evidence-linked KG.
+    # 11) canonical, evidence-linked KG — WITH the ADR-0051 graph-feature enrichment (#193): the
+    # assembler resolves the PageRank computer and stamps centrality + community onto every node,
+    # which export_kg promotes to graph-nodes.parquet columns and `enrich` projects onto each
+    # chunk's context_header. Those signals feed multi-hop expansion + the Knapsack packer.
     stages.append(
         {
             "name": "graph",
             "capability": "graph_assembly",
             "provider": "graph.canonical",
             "depends_on": ["disambiguate"],
-            "config": {"corpus_id": STACK_NAME},
+            "config": {
+                "corpus_id": STACK_NAME,
+                "graph_features": _sota_graph_features_block(),
+            },
         }
     )
 
@@ -858,7 +946,10 @@ def _build_sota_stages(
         }
     )
 
-    # 14b) RAG-corpus export from the ENRICHED chunk stream (context_columns + Granite r2 vectors).
+    # 14b) RAG-corpus export from the ENRICHED chunk stream (context_columns + Granite r2 vectors)
+    # PLUS the ADR-0049 BM25 index-time signal (#194): the term-statistics artifact
+    # (bm25-stats.json + bm25-postings.parquet) the query-side sparse rescorer runs on. Without it
+    # the blessed stack ships dense-only and the hybrid fuser has no sparse leg.
     stages.append(
         {
             "name": "export_corpus",
@@ -869,6 +960,7 @@ def _build_sota_stages(
                 "basename": "records",
                 "context_columns": True,
                 "embedder": _sota_embedder_block(),
+                "bm25": _sota_bm25_block(),
             },
         }
     )
@@ -899,6 +991,11 @@ def _render_header(answers: SetupAnswers) -> str:
             "#   disambiguator + IBM Granite r2 embeddings + ULTRA graph completion. Every learned",
             "#   Stage runs on CUDA; on a CPU-only host they skip-with-flag at `latence stack",
             "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR box.",
+            "#   Index-time signals (CPU, deterministic, zero extra deps): graph features on",
+            "#   `graph` (ADR-0051 — PageRank centrality + community, exported as graph-nodes",
+            "#   columns and projected onto each chunk's context_header) and BM25 on",
+            "#   `export_corpus` (ADR-0049 — bm25-stats.json + bm25-postings.parquet for the",
+            "#   query-side sparse rescorer). Drop either block to get the plain export back.",
         ]
     lines += [
         "#",
@@ -906,6 +1003,13 @@ def _render_header(answers: SetupAnswers) -> str:
     ]
     if answers.pii:
         lines += [
+            f"#   Redactor: `{BLESSED_REDACT_PROVIDER}` (#197, ADR-0036 W9) — the SAME GLiNER2",
+            "#   engine `extract` runs, so PII detection adds no second model library. Its",
+            "#   `pii_labels` are the ADR-0044 financial floor; the induced pii_types UNION on top",
+            "#   at run (ADR-0038), and the universal financial floor masks card/iban/ssn even",
+            "#   when",
+            "#   the model misses them. Any other Redaction Provider drops in behind the same",
+            "#   Capability seam — swap `redact.provider` and nothing else moves.",
             "#   W16 (ADR-0042): `redact` is a CHUNK-LEVEL transform — it consumes the induced",
             "#   chunk stream and sets each chunk's `masked_content` (each chunk fits the model",
             "#   window, so no PII is truncated). `enrich` reads THAT redacted chunk stream, and",

@@ -24,8 +24,14 @@ latence-disambig-embedding = { workspace = true }
 latence-disambig-glinker = { workspace = true }
 latence-runner-airflow = { workspace = true }
 latence-retrieval = { workspace = true }
+latence-source-sharepoint = { workspace = true }
+
+latence-benchmark = { workspace = true }
 latence-splade = { workspace = true }
 latence-muvera = { workspace = true }
+latence-sink-qdrant = { workspace = true }
+
+latence-console = { workspace = true }
 latence-demo = { workspace = true }
 
 # Dev-only aggregate environment for the whole workspace.
@@ -82,6 +88,46 @@ dependencies = [
     # latence-demo — its offline/deterministic MaxSim-approximation tests run, and the conformance
     # suite (C1–C6) exercises the REAL 'fde.muvera' converter, alongside the in-core 'fde.reference'.
     "latence-muvera",
+    # The OPTIONAL Iceberg-table Export output's client (#184, ADR-0017). It is an EXTRA on the
+    # published latence-core (`latence-core[iceberg]`), never a runtime dependency — but it IS
+    # pinned into the dev env, deliberately: the #184 acceptance criterion is an end-to-end
+    # verification against a REAL local Iceberg REST catalog, and the offline test
+    # (packages/latence-core/tests/_iceberg_rest.py) drives the real RestCatalog client over real
+    # HTTP against a real SqlCatalog. Faking pyiceberg would accept commits a real catalog rejects
+    # and manufacture false green. It is safe for the CPU-first offline env: pure-Python, no torch,
+    # no network at import, no model weights (Apache-2.0, ASF). `sql-sqlite` adds SQLAlchemy, the
+    # metastore behind the local REST fixture.
+    "pyiceberg[sql-sqlite]>=0.9",
+
+    # The SharePoint/OneDrive Source connector (#182, ADR-0014/0018). Pure-Python and
+    # DEPENDENCY-FREE (it speaks Microsoft Graph's REST/JSON API over the standard library), so
+    # unlike the torch/openai Provider packages it installs into the default dev env like
+    # latence-demo: its offline tests run against the faithful Graph fake it ships, and the
+    # conformance suite (C1-C6) exercises the REAL connector against that fake.
+    "latence-source-sharepoint",
+
+    # The first first-party SINK: the one-shot Qdrant loader (#183, first slice of #156). Its whole
+    # mapping/idempotency/reconcile core is pure-Python over latence-core (already pinned) — the
+    # `qdrant-client` rides the OPTIONAL `[client]` extra and is imported lazily — so, like
+    # latence-demo and latence-retrieval, it installs into the default dev env and its
+    # offline/deterministic tests run against the shipped faithful `FakeQdrantClient`. It registers
+    # NO `latence.providers` entry point (a sink consumes the finished Export, it is not a Stage), so
+    # the conformance suite never sees it.
+    "latence-sink-qdrant",
+
+    # The reproducible PUBLIC benchmark harness (#181). It is NOT a pipeline Provider — it
+    # registers nothing under `latence.providers` — but it RUNS the real Stages through the real
+    # registry, so it installs into the default dev env (like latence-demo) and its offline tests
+    # score the real `parser.pdfplumber` Parse Stage over a faithful local dataset root. Its only
+    # dependency is latence-core; remote dataset acquisition rides its `[hub]` extra (ADR-0016), so
+    # plain `uv sync` stays CPU-first, offline and deterministic.
+    "latence-benchmark",
+
+    # The read-only run console (#186, ADR-0010/0017). ZERO new deps — `http.server` from the
+    # standard library plus hand-rendered HTML — so, like latence-demo, it installs into the
+    # default CPU-first dev env and its offline/deterministic tests run. It registers NO
+    # Provider entry point: it reads the files a run left behind, it never joins a Pipeline.
+    "latence-console",
 ]
 
 # Documentation toolchain (mkdocs-material site + mkdocstrings autodoc + mermaid). An
@@ -106,6 +152,11 @@ docs = [
 observability = [
     "latence-core[observability]",
 ]
+# Optional Iceberg-table Export output (#184, ADR-0017), mirrored at the workspace root for the
+# same one-shot-resolve convenience: `uv sync --extra iceberg`. The real extra is on latence-core.
+iceberg = [
+    "latence-core[iceberg]",
+]
 
 [dependency-groups]
 dev = [
@@ -116,6 +167,11 @@ dev = [
     # never a runtime dependency of any package, so thin-core (ADR-0016) is unaffected —
     # hypothesis appears only in this dev group, not in latence-core's dependencies.
     "hypothesis>=6.100",
+    # PEP 440/508 parsing for the reproducible-environment verifier (issue #195). The real home is
+    # the OPTIONAL ``latence-core[envspec]`` extra (thin core, ADR-0016); it is pinned in the DEV
+    # group as well so ``latence env verify`` + its regression tests run in the plain workspace
+    # env and in scripts/verify-local.sh without an extra install step.
+    "packaging>=23.0",
 ]
 
 [tool.ruff]

@@ -98,8 +98,10 @@ vllmOcr:
     pullPolicy: IfNotPresent
   model: lightonai/LightOnOCR-2-1B          # Apache-2.0 weights AND code (ADR-0012)
   port: 8000
-  # The vLLM serve args (LightOn's official recipe). Add "--enforce-eager" on Blackwell (SM 12.x)
-  # where FlashInfer cannot JIT cudagraphs — see docs/deployment.md.
+  # The vLLM serve args (LightOn's official recipe). On Blackwell (SM 12.x) do NOT add
+  # "--enforce-eager" here: it clears the FlashInfer abort only by turning cudagraphs off, flooring
+  # the throughput the served path exists for. The recorded fix is the extraEnv entry below
+  # (FM-FLASHINFER-SM120). See docs/deployment.md.
   extraArgs:
     - "--dtype=bfloat16"
     - "--gpu-memory-utilization=0.90"
@@ -108,6 +110,20 @@ vllmOcr:
     - "--mm-processor-cache-gb=0"
     - "--no-enable-prefix-caching"
     - "--max-num-seqs=32"
+  # Extra environment for the OCR container, appended verbatim after the chart's own env. Empty by
+  # default — an empty list renders nothing, so the manifest is byte-identical when unused.
+  #
+  # BLACKWELL (SM 12.x): this is where FM-FLASHINFER-SM120's fix goes. vLLM aborts with
+  # "FlashInfer requires sm75+" because FlashInfer's check misparses compute capability 12.0 as 12.
+  # Disabling only its SAMPLER (VLLM_USE_FLASHINFER_SAMPLER=0) clears the abort, cudagraphs stay ON:
+  #
+  #   extraEnv:
+  #     - name: VLLM_USE_FLASHINFER_SAMPLER
+  #       value: "0"
+  #
+  # Pair it with the live-run memory settings on that hardware (extraArgs:
+  # --gpu-memory-utilization=0.72, --max-num-seqs=16). Never use "--enforce-eager" instead.
+  extraEnv: []
   # GPU scheduling: a nodeSelector + tolerations so the OCR pod lands on a GPU node only.
   gpu:
     count: 1
