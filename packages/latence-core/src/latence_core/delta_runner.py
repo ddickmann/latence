@@ -272,6 +272,10 @@ class DeltaRunner:
         # this run) and delete them, then exclude them at Source too as a belt-and-braces guard.
         if deletion_mode is DeletionMode.PURGE:
             self._purge_source_files(pipeline, set(deleted))
+            # ...and the same erasure has to reach the DERIVED tables the Export publishes outside
+            # this storage tree, or the purged text stays readable there (audit R7-invariants-1).
+            # Also before the re-run, so the re-run's own registration republishes the survivors.
+            self._purge_derived_tables(pipeline)
         all_deleted = sorted(set(deleted) | self._prior_deletions(store, parent_version))
         excluded_pipeline = self._with_source_exclusions(pipeline, all_deleted)
         report = self._runner.run(excluded_pipeline, run_id=run_id)
@@ -340,6 +344,42 @@ class DeltaRunner:
                 doc_id = "sha256:" + hashlib.sha256(data).hexdigest()
                 if doc_id in purged_ids:
                     storage.remove(uri)
+
+    @staticmethod
+    def _purge_derived_tables(pipeline: Pipeline) -> None:
+        """Erase every DERIVED catalog table this Pipeline's Exports publish into (#184).
+
+        A Purge that stops at this storage tree is not an erasure. The optional ``iceberg`` block
+        (:mod:`latence_core.iceberg`) copies the whole corpus — ``content`` included — into the
+        catalog's own warehouse, which is *outside* ``storage_uri`` and therefore untouched by
+        :meth:`_purge_source_files`, :meth:`~...CorpusStore.expunge_records` and
+        :meth:`_purge_run_artifacts` alike. In the DEFAULT ``mode: append`` the post-purge re-export
+        merely appends a second data file, leaving the purged rows in the table's CURRENT snapshot:
+        an ordinary ``table.scan()`` returned erased text while the tutorial promised removal
+        "everywhere" (audit R7-invariants-1).
+
+        Called BEFORE the survivor re-run, exactly like :meth:`_purge_source_files`: the re-run's
+        own registration then republishes the surviving corpus onto an emptied table, so ``append``
+        converges on the survivors without the operator having to reconfigure the mode.
+
+        Off-by-default is preserved end-to-end: an Export with no ``iceberg`` block builds no target
+        (``build_iceberg_output`` returns ``None``), so a purge on the default stack does exactly
+        what it did before and never imports ``pyiceberg`` (ADR-0016). When the block IS present,
+        every failure — an unreachable catalog, a missing optional dependency, a refused commit — is
+        a typed error that FAILS THE PURGE (ADR-0034), because a right-to-be-forgotten command must
+        never exit 0 over a warehouse it could not reach.
+        """
+        from latence_core.iceberg import build_iceberg_output
+
+        for stage in pipeline.stages:
+            if stage.capability is not CapabilityKind.EXPORT:
+                continue
+            config = stage.config or {}
+            target = build_iceberg_output(
+                config.get("iceberg"), default_table=str(config.get("basename", "records"))
+            )
+            if target is not None:
+                target.erase()
 
     def _purge_run_artifacts(self, pipeline: Pipeline) -> None:
         """Wipe every run's artifact tree under ``_latence/runs`` (the Purge erasure step).

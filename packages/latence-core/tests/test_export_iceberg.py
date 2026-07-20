@@ -566,3 +566,140 @@ def test_a_failed_commit_never_deletes_a_data_file_an_earlier_run_committed(
 
         assert _iceberg_data_files(tmp_path / "catalog") == committed
         assert [row["record_id"] for row in _scan(uri)] == ["c1"]
+
+
+# -- Purge reaches the derived table (audit R7-invariants-1) ---------------------------------
+
+
+def _delta_pipeline(store: str, docs_dir: Path, catalog_uri: str) -> Any:
+    """A real Source->Parse->Chunk->Export pipeline whose Export publishes an Iceberg table."""
+    from latence_core.pipeline import Pipeline
+
+    iceberg = json.dumps(
+        {"uri": catalog_uri, "namespace": _NAMESPACE, "table": _TABLE, "mode": "append"}
+    )
+    return Pipeline.from_yaml_text(
+        f"""
+name: iceberg-purge-slice
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config: {{path: 'file://{docs_dir}', sensitivity: internal, extensions: [txt]}}
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [chunk]
+    config: {{iceberg: {iceberg}}}
+"""
+    )
+
+
+def test_purge_erases_the_purged_document_from_the_derived_iceberg_table(tmp_path: Path) -> None:
+    """A Purge must reach the catalog warehouse — in the DEFAULT ``append`` mode (R7).
+
+    Before the fix the purge run merely APPENDED the survivors as a second data file: the first
+    data file (the whole pre-purge corpus) stayed referenced by the table's CURRENT snapshot, so an
+    ordinary ``table.scan()`` — not time travel — still returned the erased document's text, and its
+    bytes stayed in the warehouse forever, while the tutorial promised removal "everywhere".
+    """
+    import hashlib
+
+    from latence_core.delta_runner import DeltaRunner
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "purged.txt").write_text("Alice Marchetti works at Acme.\n", encoding="utf-8")
+    (docs / "keep.txt").write_text("Bob Ndiaye is here.\n", encoding="utf-8")
+    store = f"file://{tmp_path}/store"
+
+    with local_rest_catalog(tmp_path / "catalog") as uri:
+        pipeline = _delta_pipeline(store, docs, uri)
+        DeltaRunner().apply_delta(pipeline, run_id="v0")
+
+        # The pre-purge table really does carry the document that is about to be erased.
+        before = " ".join(str(row["content"]) for row in _scan(uri))
+        assert "Alice Marchetti" in before
+        assert "Bob Ndiaye" in before
+
+        purged_id = "sha256:" + hashlib.sha256((docs / "purged.txt").read_bytes()).hexdigest()
+        DeltaRunner().purge(pipeline, run_id="pur", document_ids=[purged_id])
+
+        after = " ".join(str(row["content"]) for row in _scan(uri))
+        # 1. The erased document is gone from the table's CURRENT snapshot...
+        assert "Alice Marchetti" not in after
+        # 2. ...and the survivor is still there: the erasure is total but the purge's own re-run
+        #    republishes the surviving corpus, so `append` converges without a mode change.
+        assert "Bob Ndiaye" in after
+
+    # 3. The bytes are physically gone from the catalog warehouse too — a delete-all snapshot that
+    #    left the corpus copy on disk would not be a GDPR erasure.
+    leaked = [
+        path
+        for path in (tmp_path / "catalog").rglob("*.parquet")
+        if b"Alice Marchetti" in path.read_bytes()
+    ]
+    assert leaked == [], f"purged text survived in the warehouse: {[str(p) for p in leaked]}"
+
+
+def test_purge_without_an_iceberg_block_never_touches_pyiceberg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OFF BY DEFAULT survives the new purge hook: no block ⇒ no import, no behaviour change."""
+    import builtins
+    import hashlib
+
+    from latence_core.delta_runner import DeltaRunner
+    from latence_core.pipeline import Pipeline
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.txt").write_text("Alice works at Acme.\n", encoding="utf-8")
+    store = f"file://{tmp_path}/store"
+    pipeline = Pipeline.from_yaml_text(
+        f"""
+name: plain-slice
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config: {{path: 'file://{docs}', sensitivity: internal, extensions: [txt]}}
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [chunk]
+"""
+    )
+    DeltaRunner().apply_delta(pipeline, run_id="v0")
+
+    real_import = builtins.__import__
+
+    def guard(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.split(".")[0] == "pyiceberg":
+            msg = "pyiceberg must not be imported by a purge on a stack with no iceberg block"
+            raise AssertionError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guard)
+    doc_id = "sha256:" + hashlib.sha256((docs / "a.txt").read_bytes()).hexdigest()
+    report = DeltaRunner().purge(pipeline, run_id="pur", document_ids=[doc_id])
+    assert report.delta is not None
+    assert report.delta.documents_deleted == 1

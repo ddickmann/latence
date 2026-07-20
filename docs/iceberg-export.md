@@ -113,6 +113,43 @@ Two consequences worth stating plainly:
   cleaning orphan files is your catalog's retention policy (`expire_snapshots`), not something
   the Export does behind your back.
 
+## Erasure — what `latence purge` does to this table
+
+`latence purge` is the hard, GDPR right-to-be-forgotten deletion, and it **does** reach this table.
+It has to: the data file published here is a full copy of the corpus, chunk `content` and all, and
+it lives in your catalog's warehouse — outside the pipeline's `storage_uri`, so none of the purge's
+other erasure steps (the source file, the derived records in every committed Corpus Version, the
+whole `_latence/runs` tree) touch it.
+
+What a purge does, before it re-runs the pipeline over the survivors:
+
+1. **Commits a delete-all** on the table, so its current snapshot references none of the pre-purge
+   data files, and
+2. **physically removes** every corpus copy this framework published into the table's `data/`
+   directory (the content-addressed `<basename>-<sha256>.parquet` files — nothing else in that
+   directory is touched, so a table you share with another engine keeps that engine's files).
+
+The erasure is **total, not row-scoped**. The exported schema is the flat consumer contract, whose
+document id lives *inside* the `provenance` JSON string, so there is no column an Iceberg predicate
+could filter one document out by. That is safe here only because this table is strictly *derived*
+(ADR-0017): the purge's own survivor re-run republishes the surviving corpus onto the emptied table
+in the same command — in `append` mode as much as in `overwrite` — so the table converges on the
+survivors without you changing `mode`.
+
+Two things to know:
+
+* **Pre-purge snapshots become unreadable.** Their manifests still name data files that no longer
+  exist, so time travel to a snapshot older than the purge fails. That is what erasure *is*; a purge
+  that left the old snapshots readable would not be one. Run `expire_snapshots` whenever you like to
+  drop the stale metadata.
+* **A purge fails if it cannot reach the catalog.** If the endpoint is down, or `pyiceberg` is not
+  installed while an `iceberg:` block is configured, the purge raises a typed error instead of
+  exiting 0 over a warehouse it never reached. A table that was never created is a no-op, not an
+  error.
+
+Retraction (the soft, default deletion) does **not** do any of this: it is an audit-preserving
+tombstone, and the table converges on the next run under your configured `mode`.
+
 ## Failure behaviour
 
 The registration runs **last**, only after the Parquet deliverable has been atomically

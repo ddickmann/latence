@@ -72,6 +72,7 @@ nothing; configured-but-absent fails loudly at wiring time with the install line
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from os.path import abspath
@@ -102,6 +103,17 @@ PROP_CONTRACT_VERSION = "latence.contract.schema_version"
 PROP_RECORD_VERSIONS = "latence.record.schema_versions"
 PROP_SOURCE = "latence.export.source"
 PROP_MODE = "latence.export.mode"
+#: Stamped on the snapshot a Purge-driven erasure commits, so the reason the table went empty is
+#: legible from the table's own history rather than only from an operator's memory.
+PROP_ERASURE = "latence.export.erasure"
+
+#: The exact shape :meth:`IcebergCorpusTable._publish_data_file` gives every file it publishes:
+#: ``<basename>-<sha256 of the bytes>.parquet``. It is the OWNERSHIP SCOPE of the erasure sweep —
+#: the analogue of the Qdrant sink's ``_latence_id_namespace`` marker. A file in the table's data
+#: directory that does not match was written by some other engine, and the sweep never touches it
+#: (Iceberg's own writers name files ``<partition>-<task>-<uuid4>.parquet``, whose trailing segment
+#: is a 36-char dashed UUID, never a bare 64-hex digest — so the two spaces cannot collide).
+_PUBLISHED_DATA_FILE = re.compile(r"-[0-9a-f]{64}\.parquet$")
 
 _INSTALL_HINT = (
     "The Iceberg Export output needs the optional 'pyiceberg' dependency: "
@@ -310,6 +322,120 @@ class IcebergCorpusTable:
             )
             raise ProviderError(msg) from exc
         return data_uri
+
+    def erase(self) -> str:
+        """Erase this derived table's contents for a Purge; return a counts-only operator note.
+
+        The GDPR half of the optional output (audit R7-invariants-1). A Purge is a *physical*
+        erasure — ``DeltaRunner._delete`` deletes the source file, expunges the derived records from
+        every committed Corpus Version and ``remove_tree``s the whole ``_latence/runs`` tree — but
+        the data file this module publishes lives in the CATALOG's warehouse, which nothing in the
+        purge path reaches. It is a full copy of the corpus, ``content`` included, so a purge that
+        skipped it left the erased text readable through an ordinary ``table.scan()`` while the
+        tutorial and the threat model both promised removal "everywhere".
+
+        Erasing is *total*, not row-scoped, and that is a deliberate consequence of the deliverable
+        contract rather than a shortcut: the exported schema is the flat consumer contract
+        (``record_id`` / ``provenance`` / ``content`` / …) with the document id living INSIDE the
+        ``provenance`` JSON string, so there is no column an Iceberg predicate could filter a
+        purged document out by. Totality is also safe here in a way it would never be for the corpus
+        itself, because ADR-0017 makes this table strictly DERIVED: the caller runs this BEFORE the
+        purge's survivor re-run, whose own :meth:`register` republishes exactly the surviving corpus
+        — in ``append`` mode as much as in ``overwrite``, since it is appending onto an emptied
+        table. The table therefore converges on the survivors within the same purge command.
+
+        Two steps, in this order:
+
+        1. **The snapshot.** A delete-all commit, so the table's CURRENT snapshot references none of
+           the pre-purge data files. Skipped when the table has no snapshot yet (nothing to delete).
+        2. **The bytes.** Every data file THIS framework published into the table's ``data/``
+           directory (:data:`_PUBLISHED_DATA_FILE` — content-addressed, therefore unambiguously
+           ours) is physically removed. Step 1 alone would leave the erased text sitting in the
+           warehouse, reachable by time travel and by anyone with filesystem access, which is not an
+           erasure at all.
+
+        The price, stated plainly because erasure always has one: **pre-purge snapshots become
+        unreadable.** Their manifests still name files that no longer exist, so time-travelling to a
+        snapshot older than the purge fails. That is what "physically removed everywhere and cannot
+        be recovered" means; a right-to-be-forgotten erasure that left the old snapshots readable
+        would not be one. The catalog operator can drop the stale metadata with ``expire_snapshots``
+        whenever they like.
+
+        Fail-closed and typed (ADR-0034): if the catalog is unreachable, or ``pyiceberg`` is not
+        installed while an ``iceberg`` block IS configured, this raises rather than letting the
+        purge report a success it did not achieve. A table that was never created is a no-op.
+        """
+        catalog = self._catalog()
+        table = self._load_for_erasure(catalog)
+        if table is None:
+            return ""
+        data_storage, data_dir = self._data_location(table)
+        try:
+            if table.current_snapshot() is not None:
+                from pyiceberg.expressions import AlwaysTrue
+
+                with table.transaction() as tx:
+                    tx.delete(
+                        AlwaysTrue(),
+                        snapshot_properties={PROP_ERASURE: "purge", PROP_MODE: self._target.mode},
+                    )
+        except Exception as exc:  # noqa: BLE001 - normalise any commit failure (ADR-0034)
+            msg = (
+                f"Iceberg table {'.'.join(self._target.identifier)!r} at {self._target.uri!r} "
+                f"could not be erased for a Purge: {exc}. The purged document's derived rows may "
+                "still be readable from this table; erase or drop it before treating the erasure "
+                "as complete."
+            )
+            raise ProviderError(msg) from exc
+        removed = self._sweep_published_data_files(data_storage, data_dir)
+        return f"erased {'.'.join(self._target.identifier)} (data files removed: {removed})"
+
+    def _load_for_erasure(self, catalog: Any) -> Any | None:
+        """The target table, or ``None`` when it was never created (nothing was ever published)."""
+        from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
+
+        try:
+            return catalog.load_table(self._target.identifier)
+        except (NoSuchTableError, NoSuchNamespaceError):
+            # Nothing was ever registered here, so there is nothing to erase. Deliberately NOT an
+            # error: a purge on a stack whose Iceberg output has not run yet must still succeed.
+            return None
+        except Exception as exc:  # noqa: BLE001 - normalise catalog failures
+            raise self._table_error("loaded for a Purge erasure", exc) from exc
+
+    def _sweep_published_data_files(self, storage: Storage, data_dir: str) -> int:
+        """Physically remove the corpus copies THIS framework published; return how many.
+
+        Scoped by :data:`_PUBLISHED_DATA_FILE`, so a table this Export shares with another engine
+        keeps that engine's files. Counts only (ADR-0034): no path, no content, ever surfaces in the
+        note this returns.
+        """
+        try:
+            entries = storage.ls(data_dir)
+        except FileNotFoundError:
+            return 0
+        except Exception as exc:  # noqa: BLE001 - normalise any filesystem failure
+            msg = (
+                f"Iceberg table {'.'.join(self._target.identifier)!r} had its rows deleted for a "
+                f"Purge, but its data directory could not be listed to remove the published corpus "
+                f"copies: {exc}. Those files still hold the purged text; remove them manually."
+            )
+            raise ProviderError(msg) from exc
+        removed = 0
+        for entry in entries:
+            if not _PUBLISHED_DATA_FILE.search(entry):
+                continue
+            try:
+                storage.remove(entry)
+            except Exception as exc:  # noqa: BLE001 - a partial erasure must never look complete
+                msg = (
+                    f"Iceberg table {'.'.join(self._target.identifier)!r} had its rows deleted for "
+                    f"a Purge, but a published corpus copy in its data directory could not be "
+                    f"removed: {exc}. That file still holds the purged text; remove it manually."
+                )
+                raise ProviderError(msg) from exc
+            removed += 1
+        return removed
 
     @staticmethod
     def _discard_unreferenced(storage: Storage, data_uri: str, exc: BaseException) -> str:
@@ -633,6 +759,7 @@ def build_iceberg_output(spec: Any, *, default_table: str) -> IcebergCorpusTable
 
 __all__ = [
     "PROP_CONTRACT_VERSION",
+    "PROP_ERASURE",
     "PROP_MODE",
     "PROP_RECORD_VERSIONS",
     "PROP_SOURCE",
