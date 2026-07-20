@@ -509,6 +509,135 @@ def test_a_server_supplied_next_link_is_never_echoed_into_an_error() -> None:
     assert "/drives/d1/root/children" in message
 
 
+class _RecordingTransport:
+    """Records every (url, Authorization) pair, and serves a scripted body per URL prefix."""
+
+    def __init__(self, first_page_body: bytes) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._first_page_body = first_page_body
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+    ) -> HttpResponse:
+        self.calls.append((url, headers.get("Authorization")))
+        if not url.startswith(GRAPH_HOST):
+            # The foreign host happily answers — a real harvesting endpoint would, and would
+            # keep the token. If the client ever reaches here, the token has already left.
+            return HttpResponse(status=200, headers={}, body=b'{"value": []}')
+        return HttpResponse(status=200, headers={}, body=self._first_page_body)
+
+
+@pytest.mark.parametrize(
+    "foreign_next_link",
+    [
+        "https://attacker.example.com/harvest?p=1",
+        # Same path, different host: the resemblance to a Graph URL buys it nothing.
+        "https://graph.microsoft.com.attacker.example.com/v1.0/drives/d1/root/children",
+        # A different *scheme* on the right host is still a different origin (and would also
+        # be caught by require_tls — belt and braces, in either order).
+        "http://graph.microsoft.com/v1.0/drives/d1/root/children",
+    ],
+)
+def test_a_foreign_next_link_never_receives_the_bearer_token(foreign_next_link: str) -> None:
+    """A server-supplied `@odata.nextLink` off the configured origin is refused, uncalled.
+
+    This is the pagination twin of the download leg's cross-host protection. `_paginate` follows
+    the nextLink *credentialed*, so an unpinned link turns any hostile / compromised / misdirected
+    Graph-compatible endpoint into a token exfiltration primitive: one listing body containing
+    `{"@odata.nextLink": "https://attacker..."}` and the tenant's access token is `GET`-ed to the
+    attacker with a full `Authorization: Bearer` header. `require_tls` does not catch it (an
+    attacker's URL is happily https), and the shipped fake never emits a foreign-host nextLink.
+
+    The assertion is on the RECORDED WIRE TRAFFIC, not on the raised error: what matters is that
+    the request was never made, not that a message was produced afterwards.
+    """
+    token = "SUPER-SECRET-BEARER"  # pragma: allowlist secret
+    page = f'{{"value": [], "@odata.nextLink": "{foreign_next_link}"}}'.encode()
+    transport = _RecordingTransport(page)
+
+    client = GraphClient(
+        transport=transport,
+        token_provider=_ScriptedTokenProvider([token]),
+        drive_id="d1",
+        base_url=GRAPH_HOST,
+        page_size=200,
+        max_retries=0,
+        max_retry_after_seconds=300.0,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises((ProviderError, ConfigError)) as raised:
+        list(client.list_files())
+
+    # Non-vacuity: the first, legitimate page WAS fetched credentialed, so the client really did
+    # reach the pagination decision rather than failing before it.
+    assert len(transport.calls) >= 1
+    assert transport.calls[0][0].startswith(GRAPH_HOST)
+    assert transport.calls[0][1] == f"Bearer {token}"
+    # The defect: any call to a host other than the configured Graph origin.
+    off_origin = [url for url, _auth in transport.calls if not url.startswith(GRAPH_HOST)]
+    assert off_origin == [], (
+        f"the bearer token was replayed off-origin to {off_origin!r} "
+        f"(headers: {[auth for url, auth in transport.calls if url in off_origin]!r})"
+    )
+    # And the token never appears on any recorded request bar the legitimate Graph one.
+    for url, auth in transport.calls[1:]:
+        assert auth is None or url.startswith(GRAPH_HOST)
+
+    message = str(raised.value)
+    assert token not in message
+    assert "p=1" not in message  # the link's query string is redacted like every other
+
+
+def test_a_same_origin_next_link_spelled_differently_still_paginates() -> None:
+    """The pin is an ORIGIN comparison, not a string prefix — it must not break real paging.
+
+    Graph is free to spell its own nextLink with an explicit default port or a differently-cased
+    host. Rejecting those would turn a security guard into an outage, so this pins the normalising
+    behaviour that keeps a legitimate multi-page listing working.
+    """
+    next_link = "https://GRAPH.microsoft.com:443/v1.0/drives/d1/root/children?__page=1"
+    second_page = (
+        '{"value": [{"id": "i2", "name": "b.md", "size": 1, "file": {"mimeType": "text/plain"}, '
+        '"webUrl": "https://w/2", "lastModifiedDateTime": "2024-01-01T00:00:00Z"}]}'
+    )
+    first_page = (
+        '{"value": [{"id": "i1", "name": "a.md", "size": 1, "file": {"mimeType": "text/plain"}, '
+        '"webUrl": "https://w/1", "lastModifiedDateTime": "2024-01-01T00:00:00Z"}], '
+        f'"@odata.nextLink": "{next_link}"}}'
+    )
+
+    class _TwoPageTransport:
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: Mapping[str, str],
+            body: bytes | None = None,
+        ) -> HttpResponse:
+            payload = second_page if url == next_link else first_page
+            return HttpResponse(status=200, headers={}, body=payload.encode())
+
+    client = GraphClient(
+        transport=_TwoPageTransport(),
+        token_provider=_ScriptedTokenProvider(["valid-token"]),
+        drive_id="d1",
+        base_url=GRAPH_HOST,
+        page_size=200,
+        max_retries=0,
+        max_retry_after_seconds=300.0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert [item.item_id for item in client.list_files()] == ["i1", "i2"]
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [

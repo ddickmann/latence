@@ -15,7 +15,7 @@ where two REAL implementations exist, never speculatively):
 An adopter with a corporate proxy / mTLS / a different HTTP client supplies a third one by
 naming a factory in config (``transport: "my_pkg.module:build_transport"``) — no fork.
 
-**Two security properties are enforced here, at the only place every byte passes through.**
+**Three security properties are enforced here, at the only place every byte passes through.**
 
 1. **TLS only.** A request to a non-``https`` URL is refused before a single header is
    written, so a bearer token can never leave the process in the clear. (``http://`` is
@@ -30,6 +30,13 @@ naming a factory in config (``transport: "my_pkg.module:build_transport"``) — 
    credentials, exactly as the real API expects. The faithful fake rejects a credentialed
    request to the download host with the same ``403`` the real blob endpoint returns, so a
    regression that re-introduces the leak fails the offline suite.
+3. **A server-supplied URL that the client follows *credentialed* is pinned to the configured
+   Graph origin** (:func:`require_same_origin`). The redirect guard above only covers the ``3xx``
+   leg; the other server-supplied URL in the connector is the ``@odata.nextLink`` of a listing
+   page, which :class:`~latence_source_sharepoint.graph.GraphClient` follows *with* the
+   ``Authorization`` header. Unpinned, a response body naming a foreign host would replay the
+   tenant's token there — the same leak by a different door, and one ``require_tls`` cannot see,
+   because a hostile URL is perfectly able to be ``https``.
 """
 
 from __future__ import annotations
@@ -135,6 +142,53 @@ def require_tls(url: str) -> None:
         "allowed for a local Graph emulator). Fix 'graph_base_url' / 'login_base_url'."
     )
     raise ConfigError(msg)
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def origin_of(url: str) -> tuple[str, str, int | None]:
+    """The ``(scheme, host, port)`` triple two URLs must share to be the same origin.
+
+    The port is normalised: an explicit ``:443`` on an ``https`` URL is the same origin as no
+    port at all, and the host is lower-cased (DNS names are case-insensitive), so a cosmetic
+    difference in how the server spelled its own URL is not mistaken for a foreign host.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+        port = None
+    return (scheme, host, port)
+
+
+def require_same_origin(url: str, *, expected: str, what: str) -> None:
+    """Refuse a **server-supplied** URL that points anywhere but ``expected``'s origin.
+
+    This is the pagination-leg twin of the ``_NoRedirectHandler`` guard above, and it exists for
+    the identical reason. A Graph listing response carries an ``@odata.nextLink`` that the client
+    follows *with the ``Authorization`` header attached* — so a response body containing
+    ``{"@odata.nextLink": "https://attacker.example.invalid/harvest"}`` would replay the tenant's
+    bearer token to that host, the exact cross-host token leak the download leg goes out of its
+    way to prevent by re-issuing the ``302`` uncredentialed. :func:`require_tls` does not catch
+    it: an attacker's URL is perfectly happy to be ``https``.
+
+    The link is therefore pinned to the origin of the configured ``graph_base_url``. A mismatch is
+    a :class:`~latence_core.errors.ProviderError` — it is the *server's* response that is wrong,
+    not the operator's configuration — and the offending URL reaches the message only through
+    :func:`redact_url` (ADR-0034: typed, content-free failures).
+    """
+    if origin_of(url) == origin_of(expected):
+        return
+    msg = (
+        f"SharePointSource: refusing to follow a server-supplied {what} to "
+        f"{redact_url(url)!r} — it points outside the configured Graph endpoint "
+        f"({redact_url(expected)!r}), and following it would replay the tenant's access token "
+        "to a foreign host. Either the endpoint returned a hostile/misdirected link, or "
+        "'graph_base_url' does not match the service actually being called."
+    )
+    raise ProviderError(msg)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):

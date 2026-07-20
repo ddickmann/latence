@@ -13,7 +13,9 @@ What it handles, and what the shipped faithful fake therefore also enforces:
   refresh and one retry. A second ``401`` is a real authorisation failure and is raised.
 * **Pagination** — a drive listing is followed via ``@odata.nextLink`` until it is absent.
   Graph does **not** support ``$skip`` on ``driveItem`` children; the client never sends it
-  and the fake rejects it with the real ``400 invalidRequest``.
+  and the fake rejects it with the real ``400 invalidRequest``. The ``nextLink`` is
+  server-supplied and is followed *credentialed*, so it is pinned to the configured Graph
+  origin first — otherwise a hostile listing body could replay the tenant's token to any host.
 * **Throttling** — ``429`` (and ``503``) carry ``Retry-After`` in seconds. The client waits
   exactly that long and retries, up to ``max_retries``, then raises. It never busy-loops and
   never ignores ``Retry-After``, which is what gets a tenant blocked. This holds on **every**
@@ -44,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ConfigError, ProviderError
 
-from latence_source_sharepoint.transport import redact_url, require_tls
+from latence_source_sharepoint.transport import redact_url, require_same_origin, require_tls
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -252,6 +254,13 @@ class GraphClient:
         reaches an error message through :func:`~latence_source_sharepoint.transport.redact_url`
         — its query string is not ours to classify, and every message raised from here is copied
         verbatim into the runner's span (ADR-0034).
+
+        And, for the same reason, it is **pinned to the configured Graph origin** before it is
+        requested. This leg carries the ``Authorization`` header, so an unpinned link would let a
+        hostile or misdirected response body (``{"@odata.nextLink": "https://elsewhere/..."}``)
+        replay the tenant's access token to a foreign host — precisely the cross-host leak the
+        download leg prevents by re-issuing the ``302`` uncredentialed. ``require_tls`` does not
+        cover it: an attacker's URL is quite happy to be ``https``.
         """
         next_url: str | None = url
         seen: set[str] = set()
@@ -264,6 +273,7 @@ class GraphClient:
                 )
                 raise ProviderError(msg)
             seen.add(next_url)
+            require_same_origin(next_url, expected=self._base_url, what="'@odata.nextLink'")
             payload = self._get_json(next_url)
             value = payload.get("value")
             if not isinstance(value, list):
