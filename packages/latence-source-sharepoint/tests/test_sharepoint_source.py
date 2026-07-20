@@ -6,6 +6,7 @@ it stamps, the requests it makes, the errors it raises — never about a flag th
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -93,6 +94,30 @@ def test_lists_and_fetches_documents_with_sharepoint_provenance(
     assert handbook.provenance.source_uri == (
         "sharepoint://drive-1/Handbook/onboarding.md?itemId=item-Handbook-onboarding.md"
     )
+
+
+def test_source_uri_survives_uri_syntax_in_a_legal_sharepoint_name(
+    storage: Storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``#``/space/``%`` are legal in SharePoint names and must not destroy the identity.
+
+    Parsed, not substring-matched: an unescaped ``#`` pushes ``?itemId=`` into the URI
+    *fragment*, so a real parser recovers no item id at all — and a literal ``%`` decodes to a
+    different name. The URI is the only field carrying the Graph identity downstream, so it has
+    to round-trip through the standard parser (audit R6-connectors_ingestion-10).
+    """
+    drive_path = "/Q1 #final/Report%20final & C++ draft.md"
+    transport = FakeGraphTransport(_api(FakeFile(path=drive_path, content=b"# Q1\n")))
+    (parser_input,) = _produce(_source(transport, monkeypatch=monkeypatch), storage)
+
+    parts = urllib.parse.urlsplit(parser_input.provenance.source_uri)
+    # The `#` must not have opened a fragment...
+    assert parts.fragment == ""
+    # ...so the Graph identity is recoverable by a parser, exactly as Graph reports it.
+    assert urllib.parse.parse_qs(parts.query)["itemId"] == [transport.api.item_id(drive_path)]
+    # ...and the human location decodes back to the drive path, `%` included and NOT decoded
+    # into a space (that would name a different document).
+    assert urllib.parse.unquote(parts.path) == drive_path
 
 
 def test_only_configured_extensions_are_read(

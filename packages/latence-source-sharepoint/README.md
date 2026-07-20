@@ -95,6 +95,12 @@ the exact `driveItem`, in the one URI field the frozen Provenance contract provi
 downstream record inherits it unchanged, so an exported chunk still names the SharePoint item it
 came from.
 
+Every component is **percent-encoded** — SharePoint Online allows `#`, `%`, `&` and spaces in
+names, and a raw `#` would otherwise open a URI fragment and swallow the `itemId`. Read it with
+a URI parser: `unquote(urlsplit(uri).path)` gives the drive path and
+`parse_qs(urlsplit(uri).query)["itemId"][0]` gives the Graph item id. Names made only of
+unreserved characters encode to themselves, so the URI stays human-readable in the common case.
+
 ## Delta (ADR-0018)
 
 `document_id` is **always** `sha256(<the document's bytes>)` — one id function, one namespace,
@@ -195,8 +201,10 @@ is also how you supply a corporate proxy / mTLS transport without forking the Pr
    latence process --stack stacks/sharepoint-smoke.yaml
    ```
 5. Assert the deliverable: every exported row's `provenance.source_system` is `sharepoint` and
-   its `source_uri` resolves — paste the `itemId` into
-   `GET /drives/{drive_id}/items/{itemId}` and you should get the same document back.
+   its `source_uri` resolves — recover the `itemId` with
+   `parse_qs(urlsplit(source_uri).query)["itemId"][0]` (the components are percent-encoded, so
+   read them with a URI parser, not by splitting on `?`), paste it into
+   `GET /drives/{drive_id}/items/{itemId}`, and you should get the same document back.
 6. Re-run it unchanged. The second run must report every document `UNCHANGED`. What it transfers
    depends on the backend (watch a network counter):
    - **SharePoint Online** (`quickXorHash` in `file.hashes`): **at most one pass** over the

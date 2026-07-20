@@ -76,6 +76,7 @@ can reach the run manifest, the stack file, or git.
 from __future__ import annotations
 
 import hashlib
+import urllib.parse
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Classification, ParserInput, Provenance
@@ -371,7 +372,29 @@ class SharePointSource:
         return item.name
 
     def _source_uri(self, item: GraphItem) -> str:
-        return f"sharepoint://{self._drive_id}{item.drive_path}?itemId={item.item_id}"
+        """The Provenance URI — percent-encoded, so it is a URI and not just a string.
+
+        SharePoint Online has allowed ``#``, ``%`` and ``&`` in names since 2017, and spaces
+        always. Interpolating those raw makes the value *look* right and parse wrong: a single
+        ``#`` opens a fragment, so ``?itemId=`` lands inside it and ``parse_qs`` recovers no
+        item id at all — the Graph identity this field exists to carry is gone, silently, on
+        every downstream record. A literal ``%`` is worse than lost: ``Report%20final.md``
+        unquotes to ``Report final.md`` and names a different document.
+
+        So every interpolated component is escaped exactly once, the standard way, and
+        ``urlsplit`` + ``parse_qs`` recovers the item id while ``unquote`` recovers the drive
+        path — both byte-for-byte. ``safe="/"`` on the path keeps the folder separators
+        readable; the drive id is one opaque component and keeps nothing. The item id goes
+        through :func:`urllib.parse.urlencode`, the encoder that pairs with ``parse_qs``, so a
+        ``+`` in the id survives too (``quote`` leaves ``+`` alone and ``parse_qs`` would then
+        read it as a space). A name made only of unreserved characters encodes to itself, so
+        URIs already stamped on existing corpora are unchanged
+        (audit R6-connectors_ingestion-10).
+        """
+        drive = urllib.parse.quote(self._drive_id, safe="")
+        path = urllib.parse.quote(item.drive_path, safe="/")
+        query = urllib.parse.urlencode({"itemId": item.item_id})
+        return f"sharepoint://{drive}{path}?{query}"
 
 
 _SHA256_HEX_LENGTH = 64
