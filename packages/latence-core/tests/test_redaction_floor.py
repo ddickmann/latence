@@ -220,6 +220,52 @@ def test_misboundaried_provider_span_cannot_suppress_the_floor(
     assert set(range(20, 42)) <= covered, "floor offsets left uncovered after overlap resolution"
 
 
+def test_label_prefixed_provider_span_cannot_leak_a_card_tail() -> None:
+    """The credit_card twin of the case above — the reported R6-security_secrets-7 scenario.
+
+    `test_misboundaried_provider_span_cannot_suppress_the_floor` exercises the CLIP invariant on the
+    `iban` detector only. This pins it on `credit_card`, in the single most ordinary NER boundary
+    disagreement there is: the model swallows the leading label token (`Karte `) and stops one digit
+    group short, so its span STARTS BEFORE the floor match and ENDS INSIDE it. Under the pre-fix
+    earliest-start-wins DROP the Provider span [0,20) sorted first and the floor's credit_card span
+    [6,25) was discarded whole, leaving `'[CREDIT_CARD] 4444 wurde belastet.'` — the card's last four
+    digits exported in the clear past a floor that claims to be non-bypassable by model choice
+    (ADR-0044). The card below is a synthetic Mastercard test number, never real PAN data.
+    """
+    card = "5555 5555 5555 4444"
+    content = f"Karte {card} wurde belastet."
+    # Guard against a vacuous pass: the floor must see the WHOLE card at [6,25).
+    assert any(
+        (start, end, pii_type) == (6, 25, "credit_card")
+        for start, end, pii_type, *_ in floor_candidates(content)
+    )
+
+    chunk = _chunk(content)
+    policy = RedactionPolicy(policies=None, default_action=RedactionAction.MASK)
+    rec = finalize_redacted_chunk(
+        chunk,
+        _plan(chunk, policy),  # type: ignore[arg-type]
+        # Starts at the label token, stops one group short — an entirely ordinary NER boundary.
+        accepted=[(0, 20, "person", content[0:20], "gliner", 0.9)],
+        salt="s",
+    )
+
+    assert rec.masked_content is not None
+    # No tail of the card may survive in the clear — the last four digits least of all.
+    for cut in range(0, len(card), 5):
+        assert card[cut:] not in rec.masked_content, (
+            f"label-prefixed Provider span leaked card tail {card[cut:]!r}: {rec.masked_content!r}"
+        )
+    # COVERAGE-PRESERVING: every offset the floor claimed is still claimed by a mutating span.
+    covered = {
+        i
+        for span in rec.pii_spans
+        if span.action is not RedactionAction.TAG
+        for i in range(span.char_start, span.char_end)
+    }
+    assert set(range(6, 25)) <= covered, "floor offsets left uncovered after overlap resolution"
+
+
 # -- drift guard: the floor patterns ARE the hybrid_rule built-ins ------------------------------
 
 
