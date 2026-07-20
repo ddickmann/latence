@@ -28,8 +28,18 @@ from typing import Any
 
 import pytest
 import yaml
-from latence_core.contracts import ChunkRecord
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    Provenance,
+    RedactionAction,
+)
 from latence_core.pipeline import Pipeline
+from latence_core.redaction_policy import (
+    RedactionPolicy,
+    finalize_redacted_chunk,
+    plan_chunk_redaction,
+)
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
@@ -181,6 +191,185 @@ stages:
     assert "[EMAIL]" in memo.content
     assert "[IBAN]" in memo.content
     assert {sp.pii_type for sp in memo.pii_spans} == {"email", "iban"}
+
+
+# -- audit R6-invariants-0: composition must never REMOVE a mask ---------------------------------
+#
+# The R5-12 union above resolved overlaps greedily — sort by (start, -length, source) and DROP any
+# span that overlaps an accepted one. That silently UN-REDACTED text in three ways, none of which
+# the three tests above can see (they use DISJOINT spans). All fixtures are synthetic: 4111…1111 is
+# the published Visa test number, never real PAN data (ADR-0044).
+
+_SYNTHETIC_CARD = "4111111111111111"
+
+
+def _finalize(
+    chunk: ChunkRecord,
+    action: RedactionAction,
+    accepted: list[tuple[int, int, str, str, str, float]],
+) -> ChunkRecord:
+    """Drive the ONE seam every Redactor funnels through, at the chunk level."""
+    policy = RedactionPolicy(policies=None, default_action=action)
+    plan = plan_chunk_redaction(
+        chunk,
+        policy,
+        detector_types={"person", "credit_card"},
+        sensitive_set=set(),
+        min_chars=1,
+    )
+    return finalize_redacted_chunk(chunk, plan, accepted=accepted, salt="s")
+
+
+def _chunk(text: str) -> ChunkRecord:
+    return ChunkRecord(
+        record_id="d1#chunk:0",
+        document_record_id="d1",
+        index=0,
+        provenance=Provenance(
+            source_uri="file:///c/a.txt",
+            file_name="a.txt",
+            file_type="txt",
+            file_size=len(text),
+            document_id="sha256:d1",
+            char_start=0,
+            char_end=len(text),
+            page_start=1,
+            page_end=1,
+        ),
+        classification=Classification(language="en", sensitivity="internal"),
+        content=text,
+        token_count=len(text.split()),
+    )
+
+
+def test_upstream_tag_span_cannot_swallow_the_financial_floor() -> None:
+    """An upstream TAG Stage must not un-mask the ADR-0044 floor's card span.
+
+    Pre-fix the union sorted purely by offset, so the prior TAG person span at 6 outranked the
+    floor's MASK ``credit_card`` span at 20 and DROPPED it; ``apply_masking`` then skips the TAG
+    span (TAG leaves text readable by design) and NOTHING masked the region — the exported
+    ``masked_content`` carried the full 16-digit card verbatim.
+    """
+    text = f"Note: Jane Roe Card {_SYNTHETIC_CARD} filed."
+    # Upstream Stage: audit-only TAG over 'Jane Roe Card 4111111111111111'.
+    upstream = _finalize(
+        _chunk(text), RedactionAction.TAG, [(6, 36, "person", text[6:36], "gliner:person", 0.9)]
+    )
+    assert upstream.masked_content == text  # TAG leaves the text readable — as documented.
+
+    # Downstream `redact_financial`: detects nothing itself; the universal floor finds the card.
+    final = _finalize(upstream, RedactionAction.MASK, [])
+
+    assert final.masked_content is not None
+    assert _SYNTHETIC_CARD not in final.masked_content, (
+        f"upstream TAG span swallowed the financial floor: {final.masked_content!r}"
+    )
+    assert final.masked_content == "Note: Jane Roe Card [CREDIT_CARD] filed."
+
+
+def test_partially_overlapping_span_does_not_re_expose_a_masked_card() -> None:
+    """Chained learned Redactors: a partial overlap must CLIP, not drop the prior mask.
+
+    Reachable with the shipped ``gpu-learned`` stack — two masking Stages whose learned span
+    boundaries need not coincide. Pre-fix the downstream person span [8,26) caused the prior,
+    already-applied ``credit_card`` mask [22,38) to be discarded WHOLE, yielding
+    ``'Contact [PERSON]111111111111 end.'`` — 12 digits of a fully-masked card re-exposed.
+    """
+    text = f"Contact Jane Roe Card {_SYNTHETIC_CARD} end."
+    upstream = _finalize(
+        _chunk(text), RedactionAction.MASK, [(22, 38, "credit_card", text[22:38], "gliner_pii", 0.9)]
+    )
+    assert upstream.masked_content == "Contact Jane Roe Card [CREDIT_CARD] end."
+
+    final = _finalize(
+        upstream, RedactionAction.MASK, [(8, 26, "person", text[8:26], "gliner2", 0.9)]
+    )
+
+    assert final.masked_content is not None
+    assert "111111111111" not in final.masked_content, (
+        f"prior card mask was truncated, re-exposing digits: {final.masked_content!r}"
+    )
+    assert final.masked_content == "Contact [PERSON][CREDIT_CARD] end."
+
+
+def test_provider_span_overlapping_the_floor_does_not_truncate_it() -> None:
+    """The SAME hole in ``_merge_floor`` — no chaining needed, one Redactor is enough (ADR-0044).
+
+    A single Provider person span [8,26) partially overlapping the floor's ``credit_card`` [22,38)
+    dropped the floor span outright pre-fix, leaking the card's tail on the plain single-Redactor
+    path that every stack runs.
+    """
+    text = f"Contact Jane Roe Card {_SYNTHETIC_CARD} end."
+
+    final = _finalize(
+        _chunk(text), RedactionAction.MASK, [(8, 26, "person", text[8:26], "gliner2", 0.9)]
+    )
+
+    assert final.masked_content is not None
+    assert "111111111111" not in final.masked_content, (
+        f"floor span truncated by an overlapping Provider span: {final.masked_content!r}"
+    )
+    assert final.masked_content == "Contact [PERSON][CREDIT_CARD] end."
+
+
+def _masked_offsets(chunk: ChunkRecord) -> set[int]:
+    """Every ``content`` offset a mutating (non-TAG) span covers on this chunk."""
+    return {
+        i
+        for span in chunk.pii_spans
+        if span.action is not RedactionAction.TAG
+        for i in range(span.char_start, span.char_end)
+    }
+
+
+@pytest.mark.parametrize(
+    ("prior_span", "this_span"),
+    [
+        ((5, 15), (10, 20)),  # this Stage overlaps the prior span's tail
+        ((10, 20), (5, 15)),  # this Stage overlaps the prior span's head
+        ((5, 25), (10, 15)),  # this Stage strictly inside the prior span
+        ((10, 15), (5, 25)),  # prior span strictly inside this Stage's
+        ((5, 15), (15, 25)),  # exactly abutting — no overlap
+        ((5, 15), (5, 15)),  # identical spans
+        ((5, 10), (20, 25)),  # fully disjoint
+    ],
+)
+def test_composition_never_removes_a_masked_character(
+    prior_span: tuple[int, int], this_span: tuple[int, int]
+) -> None:
+    """COVERAGE MONOTONICITY: composing may only ADD masked characters, never remove one.
+
+    The invariant the greedy union broke, stated directly and checked over every overlap topology:
+    a character masked by the upstream Stage stays masked after the downstream Stage composes.
+    """
+    text = "A" * 40
+    p_start, p_end = prior_span
+    t_start, t_end = this_span
+
+    upstream = _finalize(
+        _chunk(text),
+        RedactionAction.MASK,
+        [(p_start, p_end, "person", text[p_start:p_end], "up", 0.9)],
+    )
+    before = _masked_offsets(upstream)
+    assert before == set(range(p_start, p_end))
+
+    final = _finalize(
+        upstream,
+        RedactionAction.MASK,
+        [(t_start, t_end, "credit_card", text[t_start:t_end], "down", 0.9)],
+    )
+
+    after = _masked_offsets(final)
+    assert before <= after, (
+        f"composition UNMASKED offsets {sorted(before - after)} "
+        f"(prior={prior_span}, this={this_span})"
+    )
+    assert set(range(t_start, t_end)) <= after, "this Stage's own mask was lost"
+    # apply_masking's precondition: ordered and non-overlapping.
+    starts_ends = [(s.char_start, s.char_end) for s in final.pii_spans]
+    assert starts_ends == sorted(starts_ends)
+    assert all(a[1] <= b[0] for a, b in zip(starts_ends, starts_ends[1:], strict=False))
 
 
 def _stage_map(stack_path: Path) -> dict[str, dict[str, Any]]:

@@ -33,7 +33,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from latence_core.contracts import PIISpan, RedactionAction
 
@@ -369,6 +369,60 @@ def floor_candidates(text: str) -> list[tuple[int, int, str, str, str, float]]:
     return out
 
 
+_T = TypeVar("_T")
+
+
+def _resolve_clipping(intervals: list[tuple[int, int, _T]]) -> list[tuple[int, int, _T]]:
+    """Greedy non-overlapping resolution that CLIPS an overlapping span to its uncovered tail.
+
+    ``intervals`` MUST already be sorted by ``start`` ascending (callers append their tie-breakers
+    after it). The classic greedy rule — accept iff ``start >= last_end``, otherwise DROP — silently
+    UN-MASKS text: a span overlapping an accepted one by a single character is discarded wholesale,
+    so the part of it nothing else covers is emitted verbatim (audit R6-invariants-0: 12 digits of
+    an already-masked card re-exposed). Clipping instead of dropping makes the resolution
+    COVERAGE-PRESERVING — every character covered by ANY input interval stays covered.
+
+    Clipping to ``last_end`` (the max end so far) is sound precisely because the input is
+    start-sorted: for any point ``p`` in ``[start, last_end)`` the accepted span that set
+    ``last_end`` began at or before ``start``, hence already covers ``p``. Truncated-to-empty spans
+    (fully covered, e.g. the floor duplicate of a coincident Provider span) drop out, so a
+    disjoint or coincident input is byte-identical to the pre-fix greedy output.
+    """
+    result: list[tuple[int, int, _T]] = []
+    last_end = -1
+    for start, end, payload in intervals:
+        clipped = max(start, last_end)
+        if clipped < end:
+            result.append((clipped, end, payload))
+            last_end = end
+    return result
+
+
+def _subtract_covered(
+    start: int, end: int, covered: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """``[start, end)`` minus an ordered, non-overlapping ``covered`` set → surviving fragments.
+
+    Used to keep a non-mutating TAG span's audit record wherever a masking span did not already
+    claim the region, without ever letting the TAG span overlap (and so shadow) a mask.
+    """
+    fragments: list[tuple[int, int]] = []
+    cursor = start
+    for c_start, c_end in covered:
+        if c_end <= cursor:
+            continue
+        if c_start >= end:
+            break
+        if c_start > cursor:
+            fragments.append((cursor, c_start))
+        cursor = max(cursor, c_end)
+        if cursor >= end:
+            return fragments
+    if cursor < end:
+        fragments.append((cursor, end))
+    return fragments
+
+
 def _merge_floor(
     accepted: list[tuple[int, int, str, str, str, float]],
     floor: list[tuple[int, int, str, str, str, float]],
@@ -381,19 +435,20 @@ def _merge_floor(
     left a gap, which is exactly the guarantee. When the two sets fully coincide (e.g. the in-core
     ``redaction.hybrid_rule``, whose built-ins ARE these patterns) the Provider wins every span and
     the output is byte-identical.
+
+    "Where the Provider left a gap" is enforced by CLIPPING, not by dropping (audit
+    R6-invariants-0): a Provider span that overlaps a floor span by one character used to discard
+    the floor span whole, re-exposing the rest of a card/IBAN/SSN the ADR-0044 floor had matched —
+    on the plain SINGLE-Redactor path, no chaining required. The clipped remainder keeps the floor's
+    ``value`` so its placeholder stays the deterministic one derived from the full match.
     """
     tagged: list[tuple[tuple[int, int, str, str, str, float], int]] = [
         *((span, 0) for span in accepted),
         *((span, 1) for span in floor),
     ]
     tagged.sort(key=lambda item: (item[0][0], -(item[0][1] - item[0][0]), item[1], item[0][2]))
-    result: list[tuple[int, int, str, str, str, float]] = []
-    last_end = -1
-    for span, _source in tagged:
-        if span[0] >= last_end:
-            result.append(span)
-            last_end = span[1]
-    return result
+    resolved = _resolve_clipping([(span[0], span[1], span) for span, _source in tagged])
+    return [(start, end, span[2], span[3], span[4], span[5]) for start, end, span in resolved]
 
 
 def _compose_prior_spans(spans: list[PIISpan], prior: list[PIISpan]) -> list[PIISpan]:
@@ -406,10 +461,23 @@ def _compose_prior_spans(spans: list[PIISpan], prior: list[PIISpan]) -> list[PII
     CLOBBERS every mask its predecessor applied: the upstream Stage still reports success, still
     contributes its counts, and none of its masks reach the exported corpus.
 
-    Resolution mirrors :func:`_merge_floor` exactly — longer span wins first (max masking
-    coverage), and on an identical span THIS Stage wins the tie (source rank 0 < 1) so the
-    Provider that just ran keeps its own provenance. A prior span therefore survives only where
-    this Stage left a gap, which is the whole guarantee.
+    Resolution mirrors :func:`_merge_floor` — longer span wins first (max masking coverage), and on
+    an identical span THIS Stage wins the tie (source rank 0 < 1) so the Provider that just ran
+    keeps its own provenance. A prior span survives wherever this Stage left a gap, which is the
+    whole guarantee, and the resolution is COVERAGE-PRESERVING in both directions: composing can
+    only ever ADD masked characters, never remove one (audit R6-invariants-0). Two rules make that
+    true, and the pre-fix greedy union broke both:
+
+    * **Masking spans outrank TAG.** ``TAG`` is the one action :func:`apply_masking` skips (the
+      surface text stays readable), so a TAG span that merely STARTS EARLIER must never displace a
+      ``MASK``/``REPLACE``/``HASH`` span — least of all the ADR-0044 financial floor's. Pre-fix an
+      upstream TAG person span swallowed the downstream floor's ``credit_card`` span outright and
+      the full card number was exported verbatim. TAG spans are therefore resolved SECOND and
+      subtracted against the accepted masking coverage, keeping their audit record only where no
+      mask claimed the region.
+    * **Overlaps CLIP, never drop.** A learned Redactor's boundaries need not coincide with its
+      predecessor's; discarding a partly-overlapping prior span whole re-exposed the uncovered tail
+      of text the pipeline had already masked.
 
     ``prior`` is empty for every single-Redactor Pipeline (nothing upstream populated
     ``pii_spans``), so this is a no-op there and the output stays byte-identical.
@@ -418,13 +486,26 @@ def _compose_prior_spans(spans: list[PIISpan], prior: list[PIISpan]) -> list[PII
         return spans
     tagged: list[tuple[PIISpan, int]] = [*((s, 0) for s in spans), *((s, 1) for s in prior)]
     tagged.sort(key=lambda item: (item[0].char_start, -item[0].length, item[1], item[0].pii_type))
-    result: list[PIISpan] = []
-    last_end = -1
-    for span, _source in tagged:
-        if span.char_start >= last_end:
-            result.append(span)
-            last_end = span.char_end
-    return result
+    masking = [
+        (s.char_start, s.char_end, s) for s, _r in tagged if s.action is not RedactionAction.TAG
+    ]
+    resolved = _resolve_clipping(masking)
+    covered = [(start, end) for start, end, _s in resolved]
+    out: list[tuple[int, int, PIISpan]] = list(resolved)
+    for span, _rank in tagged:
+        if span.action is not RedactionAction.TAG:
+            continue
+        out.extend(
+            (start, end, span)
+            for start, end in _subtract_covered(span.char_start, span.char_end, covered)
+        )
+    out.sort(key=lambda item: (item[0], item[1], item[2].pii_type))
+    return [
+        span
+        if (start, end) == (span.char_start, span.char_end)
+        else span.model_copy(update={"char_start": start, "char_end": end})
+        for start, end, span in out
+    ]
 
 
 def finalize_redacted_chunk(
