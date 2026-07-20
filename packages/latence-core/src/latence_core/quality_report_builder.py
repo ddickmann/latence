@@ -299,8 +299,20 @@ class QualityReportBuilder:
             storage=storage,
             run_id=run_id,
         )
+        # A Redaction Stage that another Redaction Stage depends on (transitively) is SUPERSEDED:
+        # its chunks are re-emitted downstream with its spans composed in, and only that
+        # downstream version reaches the Export. Gathering the superseded Stage's output too
+        # would tally every upstream span twice. Dropping it at the STAGE level (rather than
+        # de-duplicating records by ``record_id``) is what keeps the rollup honest for a corpus
+        # containing byte-identical documents, whose content-addressed ``record_id``s legitimately
+        # repeat — see :meth:`_redaction_quality`.
         redactions = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.REDACTION, storage=storage, run_id=run_id
+            pipeline,
+            [s for s in ordered if s.name in self._terminal_redaction_stages(pipeline)],
+            outputs,
+            CapabilityKind.REDACTION,
+            storage=storage,
+            run_id=run_id,
         )
         features = self._records_of_kind(
             pipeline, ordered, outputs, CapabilityKind.PROFILING, storage=storage, run_id=run_id
@@ -806,6 +818,35 @@ class QualityReportBuilder:
         return quality
 
     @staticmethod
+    def _terminal_redaction_stages(pipeline: Pipeline) -> set[str]:
+        """Names of the Redaction Stages whose output actually reaches the rest of the Pipeline.
+
+        A Redaction Stage is SUPERSEDED when some other Redaction Stage depends on it, directly or
+        transitively: since W16 Redaction is a chunk→chunk transform and
+        :func:`~latence_core.redaction_policy._compose_prior_spans` folds the upstream spans into
+        the downstream Stage's own, the downstream Stage re-emits the same chunks carrying every
+        mask the chain applied. Only that downstream version flows on to the Export, so only it may
+        be tallied. Parallel Redaction branches supersede nothing and are all terminal.
+        """
+        by_name = {s.name: s for s in pipeline.stages}
+        redaction_stages = {
+            s.name for s in pipeline.stages if s.capability is CapabilityKind.REDACTION
+        }
+        superseded: set[str] = set()
+        for name in redaction_stages:
+            seen: set[str] = set()
+            frontier = list(by_name[name].depends_on)
+            while frontier:
+                dep = frontier.pop()
+                if dep in seen or dep not in by_name:
+                    continue
+                seen.add(dep)
+                if dep in redaction_stages:
+                    superseded.add(dep)
+                frontier.extend(by_name[dep].depends_on)
+        return redaction_stages - superseded
+
+    @staticmethod
     def _redaction_quality(
         pipeline: Pipeline, records: list[StageOutput]
     ) -> RedactionQuality | None:
@@ -824,25 +865,31 @@ class QualityReportBuilder:
         deprecated doc-level :class:`~latence_core.contracts.RedactionRecord` path is still tallied
         for backward compatibility.
 
-        ``records`` is the FLAT concatenation of EVERY Redaction Stage's output
-        (``_records_of_kind`` walks ``ordered`` and extends), so a CHAINED topology — exactly what
-        the shipped ``gpu-learned`` / ``full-stack`` stacks declare since audit R5-12
-        (``redact_financial.depends_on: [redact_pii]``) — yields the SAME chunk twice: once as the
-        upstream Stage emitted it, once as the downstream Stage re-emitted it after
-        :func:`~latence_core.redaction_policy._compose_prior_spans` folded the upstream spans into
-        its own. Summing that flat list double-counts every upstream span and can name a
-        ``pii_type`` that exists nowhere in the exported corpus (an upstream span superseded by an
-        identical-extent downstream span of a DIFFERENT type is still tallied under its old label).
-        The report is the operator's redaction audit trail (ADR-0034 counts-only observability), so
-        it must describe the corpus, not the chain length.
+        ``records`` carries the output of the TERMINAL Redaction Stages only
+        (:meth:`_terminal_redaction_stages`), and every one of those records is summed with FULL
+        MULTIPLICITY. Both halves matter, and they used to be got wrong in opposite directions:
 
-        The rollup therefore collapses each record to its LAST version — the downstream-most Stage
-        that emitted that ``record_id``, which is the version that flows on to the Export. Because
-        composition is coverage-preserving and unions the upstream spans in, that last version
-        already carries every mask the chain applied. Insertion order (hence determinism) is
-        preserved: the dict keeps each ``record_id``'s first position and only its value is
-        replaced. A single-Redactor Pipeline has no duplicate ``record_id``s, so its counts are
-        byte-identical to before.
+        * Folding EVERY Redaction Stage's output (the flat concatenation ``_records_of_kind``
+          builds) double-counts a CHAINED topology — exactly what the shipped ``gpu-learned`` /
+          ``full-stack`` stacks declare since audit R5-12
+          (``redact_financial.depends_on: [redact_pii]``). The same chunk appears twice: once as
+          the upstream Stage emitted it, once as the downstream Stage re-emitted it after
+          :func:`~latence_core.redaction_policy._compose_prior_spans` folded the upstream spans in.
+          That inflates every upstream span and can name a ``pii_type`` that exists nowhere in the
+          exported corpus (an upstream span replaced by an identical-extent downstream span of a
+          DIFFERENT type would still be tallied under its old label). Dropping the superseded
+          Stages at the source fixes this: the terminal Stage's chunks already carry every mask the
+          chain applied, because composition is coverage-preserving.
+        * De-duplicating the flat list by ``record_id`` instead (audit R6) fixes the chain but
+          UNDER-counts the plain single-Redactor path, because ``record_id``s are
+          content-addressed: two byte-identical documents share one ``document_id`` and hence one
+          chunk ``record_id``, yet both are separately exported and both carry real PII. Halving
+          that corpus's tally is a silent regression (audit R7), so no de-duplication by
+          ``record_id`` happens here.
+
+        The report is the operator's redaction audit trail (ADR-0034 counts-only observability), so
+        it must describe the EXPORTED CORPUS — not the chain length, and not the number of
+        distinct content hashes in it.
         """
         if not any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages):
             return None
@@ -850,11 +897,7 @@ class QualityReportBuilder:
         redacted_docs: set[str] = set()
         docs_with_pii: set[str] = set()
         disabled_docs: set[str] = set()
-        latest: dict[tuple[str, str], StageOutput] = {}
         for record in records:
-            if isinstance(record, ChunkRecord | RedactionRecord):
-                latest[(type(record).__name__, record.record_id)] = record
-        for record in latest.values():
             if isinstance(record, ChunkRecord):
                 # Chunk-level (W16): masked_content is set on every chunk the Redaction Stage
                 # produced. Roll spans up per type/action; document-level counts dedupe by parent.

@@ -629,3 +629,81 @@ stages:
     assert report.redaction.per_action == {"mask": 2}
     assert report.redaction.documents_redacted == 1
     assert report.redaction.documents_with_pii == 1
+
+
+def test_duplicate_documents_keep_their_full_pii_tally(tmp_path: Path) -> None:
+    """A corpus with two BYTE-IDENTICAL documents must not have its PII tally halved (audit R7).
+
+    ``record_id``s are content-addressed (``sha256:<digest>`` at Source, ``…#chunk-<i>`` at Chunk),
+    so two byte-identical documents legitimately produce two exported records that share one
+    ``record_id``. De-duplicating the redaction rollup by ``record_id`` therefore silently drops
+    real, separately-exported PII from the operator's audit trail (ADR-0034 counts-only
+    observability) on the plain, single-Redactor default path. The report must describe the
+    EXPORTED corpus, so it is asserted against the exported records rather than a literal.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # Byte-identical on purpose: same content hash => same document_id => same chunk record_id.
+    (docs / "memo_a.txt").write_text(_PII_LINE, encoding="utf-8")
+    (docs / "memo_b.txt").write_text(_PII_LINE, encoding="utf-8")
+    store = f"file://{tmp_path}/store"
+    pipeline = Pipeline.from_yaml_text(
+        f"""
+name: redaction-duplicate-docs
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule
+    depends_on: [chunk]
+    config:
+      detectors: [email, iban]
+      default_action: mask
+      policies:
+        internal:
+          action: mask
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+"""
+    )
+    report = LocalRunner().run(pipeline, run_id="duplicate-docs")
+
+    exported = _exported(store, "duplicate-docs")
+    # Guard the fixture: the probe only discriminates while the duplicate really is a duplicate.
+    assert len(exported) == 2, f"fixture drifted, exported {len(exported)} records"
+    assert len({r.record_id for r in exported}) == 1, (
+        "fixture drifted: the two documents no longer share a content-addressed record_id"
+    )
+    corpus_types: dict[str, int] = {}
+    for rec in exported:
+        for span in rec.pii_spans:
+            corpus_types[span.pii_type] = corpus_types.get(span.pii_type, 0) + 1
+    assert corpus_types == {"email": 2, "iban": 2}, f"fixture drifted, corpus spans: {corpus_types}"
+
+    assert report.redaction is not None
+    rq = report.redaction
+    assert rq.pii_total == sum(corpus_types.values()), (
+        f"report tallies {rq.pii_total} PII spans but the exported corpus carries "
+        f"{sum(corpus_types.values())} — duplicate documents were deduped out of the audit trail"
+    )
+    assert rq.per_type == dict(sorted(corpus_types.items())), (
+        f"report per_type {rq.per_type} != exported corpus {corpus_types}"
+    )
+    assert rq.per_action == {"mask": 4}
