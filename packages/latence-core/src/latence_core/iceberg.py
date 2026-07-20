@@ -73,6 +73,7 @@ nothing; configured-but-absent fails loudly at wiring time with the install line
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from os.path import abspath
@@ -275,6 +276,7 @@ class IcebergCorpusTable:
         data_uri = "<not yet published>"
         published_here = False
         data_storage = storage
+        table = None
         try:
             catalog = self._catalog()
             table = self._ensure_table(catalog, arrow_schema)
@@ -317,7 +319,9 @@ class IcebergCorpusTable:
             raise
         except Exception as exc:  # noqa: BLE001 - normalise any catalog/commit failure
             cleanup = (
-                self._discard_unreferenced(data_storage, data_uri, exc) if published_here else ""
+                self._discard_unreferenced(data_storage, data_uri, exc, table)
+                if published_here
+                else ""
             )
             msg = (
                 f"Iceberg registration of {data_uri!r} into "
@@ -441,8 +445,9 @@ class IcebergCorpusTable:
             removed += 1
         return removed
 
-    @staticmethod
-    def _discard_unreferenced(storage: Storage, data_uri: str, exc: BaseException) -> str:
+    def _discard_unreferenced(
+        self, storage: Storage, data_uri: str, exc: BaseException, table: Any
+    ) -> str:
         """Delete the data file THIS run published when its commit did not land; return the note.
 
         The published copy is the whole corpus, ``content`` included. Once the transaction has
@@ -461,10 +466,30 @@ class IcebergCorpusTable:
           the file is kept and the typed error says so — the same discipline every other Iceberg
           engine follows for this case. This one path can still leave a file behind; that is the
           safe side of a genuinely ambiguous outcome, not an oversight.
-        * **A file this run did not create.** Only a copy :meth:`_publish_data_file` actually
+        * **A file some snapshot references.** Only a copy :meth:`_publish_data_file` actually
           finalized is eligible; when content addressing mapped this run onto a file an EARLIER run
           already committed, that file belongs to that run's snapshot and is never touched (the
-          caller gates on ``published_here``).
+          caller gates on ``published_here``). ``published_here`` is a NECESSARY but not a
+          SUFFICIENT condition, which is why the catalog is asked as well (audit
+          R7-data_contracts_sinks-4): it is decided by ``exists(data_uri)`` followed by
+          ``finalize_atomic(...)``, a check-then-act pair. Two concurrent Exports of IDENTICAL
+          corpus content content-address onto the SAME path; if both evaluate ``exists()`` before
+          either rename lands, both observe ``False``, both finalize that path and BOTH claim
+          authorship. A failed commit then deleted a file the other run had already committed a
+          snapshot for, and because the manifest records the absolute path forever the governed
+          table was permanently unreadable — the R6 dangling-data-file mode re-entered by a
+          different door. So the destructive step now answers to the CATALOG, which is the
+          serialization point for what is referenced: :meth:`_snapshot_references` asks the table's
+          fresh metadata whether ANY snapshot (not just the current one — ``overwrite`` leaves
+          earlier snapshots reachable through time travel) points at this path, and a file that is
+          referenced, or whose status cannot be established at all, is KEPT and reported.
+
+        A residual window is accepted deliberately: if the concurrent run has published but not yet
+        committed when the check runs, its file can still be swept. That case fails LOUDLY on the
+        other side — ``add_files`` reads each Parquet footer, so a missing file surfaces there as a
+        typed :class:`~latence_core.errors.ProviderError` — rather than silently corrupting a
+        committed table, and closing it entirely would need a cross-writer lock the Storage seam
+        does not offer.
 
         The removal is best-effort and never masks the original failure: a failure to delete is
         appended to the same typed error, so the operator learns the path to sweep (ADR-0034 — no
@@ -479,6 +504,22 @@ class IcebergCorpusTable:
                 "references would corrupt the table. Verify the table's latest snapshot, then let "
                 "the catalog's own orphan-file policy remove it if the commit did not land."
             )
+        referenced = self._snapshot_references(table, data_uri)
+        if referenced is True:
+            return (
+                f" The data file {data_uri!r} was KEPT on purpose: a committed snapshot of "
+                f"{'.'.join(self._target.identifier)} already references it (a concurrent Export "
+                "of identical content published the same content-addressed path), and deleting it "
+                "would break that table."
+            )
+        if referenced is None:
+            return (
+                f" The data file {data_uri!r} was KEPT on purpose: this run could not establish "
+                f"from {self._target.uri!r} whether a snapshot of "
+                f"{'.'.join(self._target.identifier)} references it, and an unprovable deletion of "
+                "a full-corpus file is not a cleanup. Check the table's snapshots, then let the "
+                "catalog's own orphan-file policy remove it if nothing points at it."
+            )
         try:
             storage.remove(data_uri)
         except Exception as cleanup_exc:  # noqa: BLE001 - never mask the failure being reported
@@ -487,6 +528,47 @@ class IcebergCorpusTable:
                 f"could not be removed ({cleanup_exc}); delete it manually."
             )
         return f" The data file {data_uri!r} this run published was removed (no snapshot uses it)."
+
+    @staticmethod
+    def _snapshot_references(table: Any, data_uri: str) -> bool | None:
+        """Does ANY snapshot of ``table`` reference ``data_uri``? ``None`` when unknowable.
+
+        The proof :meth:`_discard_unreferenced` needs before it deletes a full-corpus file that a
+        concurrent writer may also have published (audit R7-data_contracts_sinks-4). ``exists()``
+        cannot answer this — it says the file is there, never who is entitled to it — so the
+        question is put to the catalog, which is the only serialization point for what is
+        referenced.
+
+        Deliberately over-broad in two directions, because a false "unreferenced" corrupts a table
+        while a false "referenced" only leaves a file for the operator's orphan-file policy:
+
+        * EVERY snapshot is walked, not just the current one. ``overwrite`` supersedes data files
+          without unlinking them, and Iceberg time travel keeps those older snapshots readable, so
+          "the current snapshot does not use it" is not the same as "nothing uses it".
+        * Metadata is refreshed first, so a snapshot the concurrent run committed AFTER this run
+          loaded the table is seen. A refresh that fails falls back to the metadata already in hand
+          rather than giving up — stale evidence of a reference is still evidence.
+
+        Any failure to answer returns ``None`` (keep the file and say so), never an exception:
+        this runs on a path that is already reporting a failure, and a second one must not bury it.
+        """
+        if table is None:
+            return None
+        candidates = {data_uri, _absolute_uri(data_uri)}
+        candidates |= {uri.split("://", 1)[-1] for uri in tuple(candidates)}
+        with suppress(Exception):  # stale metadata still answers; never mask the failure
+            table = table.refresh()
+        try:
+            io = table.io
+            for snapshot in table.metadata.snapshots:
+                for manifest in snapshot.manifests(io):
+                    for entry in manifest.fetch_manifest_entry(io, discard_deleted=False):
+                        path = str(entry.data_file.file_path)
+                        if path in candidates or path.split("://", 1)[-1] in candidates:
+                            return True
+        except Exception:  # noqa: BLE001 - unknowable is its own answer (the file is then KEPT)
+            return None
+        return False
 
     def _catalog(self) -> Any:
         """The real ``pyiceberg`` REST catalog client for the configured endpoint."""

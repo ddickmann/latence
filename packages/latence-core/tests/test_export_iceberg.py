@@ -31,10 +31,12 @@ from _iceberg_rest import local_rest_catalog
 from latence_core.contracts import SCHEMA_VERSION, ChunkRecord, Classification, Provenance
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.iceberg import (
+    _PUBLISHED_DATA_FILE,
     PROP_CONTRACT_VERSION,
     PROP_MODE,
     PROP_RECORD_VERSIONS,
     PROP_SOURCE,
+    IcebergCorpusTable,
 )
 from latence_core.stages.export import JsonlParquetExport
 from latence_core.storage import Storage
@@ -662,6 +664,101 @@ def test_a_failed_commit_never_deletes_a_data_file_an_earlier_run_committed(
 
         assert _iceberg_data_files(tmp_path / "catalog") == committed
         assert [row["record_id"] for row in _scan(uri)] == ["c1"]
+
+
+def _stale_existence_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the published data file's ``exists()`` probe answer with a STALE ``False``.
+
+    That is precisely what a concurrent publisher observes: two Exports of identical corpus content
+    content-address onto the SAME path, and the one whose ``exists()`` runs before the other's
+    ``finalize_atomic`` lands is told the file is absent. It then re-finalizes the same path and
+    believes it created it. Nothing about the code under test is stubbed here — only the
+    interleaving is pinned, so the race is reproducible instead of a 1-in-N flake.
+    """
+    real_exists = Storage.exists
+
+    def racing_exists(self: Storage, uri: str) -> bool:
+        if "/data/" in uri and _PUBLISHED_DATA_FILE.search(uri):
+            return False
+        return bool(real_exists(self, uri))
+
+    monkeypatch.setattr(Storage, "exists", racing_exists)
+
+
+def test_a_concurrent_publisher_never_deletes_a_committed_runs_data_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost publish race must not let a failed commit destroy a COMMITTED table (R7-…-4).
+
+    ``published_here`` was decided by a check-then-act pair — ``exists(data_uri)`` then
+    ``finalize_atomic(tmp_uri, data_uri)``. Two concurrent Exports of identical content both see
+    ``exists() == False``, both rename onto the same content-addressed path, and both claim
+    authorship. When the second one's commit then failed, ``_discard_unreferenced`` deleted the
+    shared file even though the FIRST run had already committed a snapshot referencing it: the
+    manifest records that absolute path forever, so the governed table became permanently
+    unreadable while the run that broke it reported success.
+    """
+    faulting = {"on": False}
+
+    def fault(method: str, path: str) -> int | None:
+        return _commit_fault(503)(method, path) if faulting["on"] else None
+
+    records = [_chunk("alpha", "c1")]
+    out = tmp_path / "run"
+    with local_rest_catalog(tmp_path / "catalog", fault=fault) as uri:
+        export = JsonlParquetExport(_iceberg_config(uri))
+        export.export(records, Storage(), str(out))  # run A: publishes AND commits
+        committed = _iceberg_data_files(tmp_path / "catalog")
+        assert len(committed) == 1
+
+        # Run B: identical corpus, its existence probe answers with the pre-rename world, and its
+        # commit fails. It must NOT sweep the file A's snapshot points at.
+        _stale_existence_check(monkeypatch)
+        faulting["on"] = True
+        with pytest.raises(ProviderError) as caught:
+            export.export(records, Storage(), str(out))
+
+        assert _iceberg_data_files(tmp_path / "catalog") == committed
+        assert [row["record_id"] for row in _scan(uri)] == ["c1"]  # A's table still reads
+
+    # ADR-0034: the operator is told the file was kept, and why.
+    assert "KEPT" in str(caught.value)
+
+
+def test_an_unestablishable_reference_keeps_the_data_file_and_names_it(tmp_path: Path) -> None:
+    """When the catalog cannot say whether a snapshot uses the file, the file SURVIVES.
+
+    The other half of R7-data_contracts_sinks-4: a deletion that cannot be justified is not a
+    cleanup. If the metadata refresh AND the manifest walk both fail there is no evidence the file
+    is unreferenced, so the safe answer is the same one ``CommitStateUnknownException`` gets — keep
+    it, and tell the operator the exact path and why (ADR-0034).
+    """
+
+    class _UnreadableTable:
+        """A table whose metadata cannot be reached (catalog down mid-failure-handling)."""
+
+        def refresh(self) -> Any:
+            raise OSError("catalog unreachable")
+
+        @property
+        def metadata(self) -> Any:
+            raise OSError("catalog unreachable")
+
+    target = tmp_path / "data" / f"records-{'a' * 64}.parquet"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"corpus bytes")
+    table_obj = IcebergCorpusTable(
+        _iceberg_config("http://localhost:1")["iceberg"], default_table=_TABLE
+    )
+
+    assert table_obj._snapshot_references(_UnreadableTable(), str(target)) is None
+    note = table_obj._discard_unreferenced(
+        Storage(), str(target), RuntimeError("commit rejected"), _UnreadableTable()
+    )
+
+    assert target.exists()  # the whole point: unprovable ⇒ untouched
+    assert "KEPT" in note
+    assert str(target) in note
 
 
 # -- Purge reaches the derived table (audit R7-invariants-1) ---------------------------------
