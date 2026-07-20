@@ -14,7 +14,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from importlib import metadata
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Protocol,
+    TypeGuard,
+    TypeVar,
+    runtime_checkable,
+)
 
 from latence_core.providers.profile import ProviderProfile, profile_of
 
@@ -990,6 +998,52 @@ class Export(Protocol):
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         """Write records to ``out_dir`` on ``storage``; return the output URIs."""
         ...
+
+
+_CapabilityT = TypeVar("_CapabilityT")
+
+
+def protocol_members(protocol: type) -> frozenset[str]:
+    """The member names a ``runtime_checkable`` Protocol requires, without touching an instance.
+
+    ``__protocol_attrs__`` is the authoritative set on 3.12+; on 3.11 (this project's floor) typing
+    does not expose it publicly, so we fall back to the Protocol's own public ``dir()`` — which for
+    every Capability here yields exactly its declared members.
+    """
+    members = getattr(protocol, "__protocol_attrs__", None)
+    if members is None:
+        members = {name for name in dir(protocol) if not name.startswith("_")}
+    return frozenset(members)
+
+
+def satisfies_capability(
+    obj: object, protocol: type[_CapabilityT] | Any
+) -> TypeGuard[_CapabilityT]:
+    """``isinstance(obj, protocol)`` for a Capability Protocol — WITHOUT invoking any member.
+
+    Why this exists rather than plain ``isinstance``: CPython implements a ``runtime_checkable``
+    Protocol check with ``hasattr(instance, name)`` over the Protocol's members, and several
+    Capabilities declare a **property** (:attr:`Embedder.dimension`, :attr:`SparseEmbedder.
+    vocab_size`, :attr:`MultiVectorEmbedder.dimension`). ``hasattr`` therefore *calls* that property
+    — so an ``isinstance`` check performed at **wiring time** executes Provider work that ADR-0016
+    says is deferred to first use. Concretely (audit R6): resolving ``sparse.splade`` behind an
+    Export's ``sparse_embedder`` spec made ``isinstance`` read ``vocab_size``, which loaded a
+    Hugging Face checkpoint from the network during config validation, and made the R5
+    "every committed environment-stack component constructs" guard silently skip the whole Export.
+
+    The check here is structurally identical (every Protocol member must be present) but resolves
+    each member against the provider's **class** first: a property, a method and a class attribute
+    are all present on the class as objects, and looking them up there never runs the descriptor's
+    getter. Only a member absent from the class falls back to the instance — that is a plain
+    ``__init__``-assigned attribute, whose lookup is a dict hit, not Provider work.
+
+    A Provider is still rejected exactly as before when it does not carry a member, so the loud
+    ``ContractError`` at wiring time (ADR-0034) is unchanged.
+    """
+    cls = type(obj)
+    return all(
+        hasattr(cls, name) or hasattr(obj, name) for name in protocol_members(protocol)
+    )
 
 
 class ProviderRegistry:

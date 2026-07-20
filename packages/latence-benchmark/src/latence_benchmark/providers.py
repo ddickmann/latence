@@ -14,9 +14,9 @@ generalises so the four #187 suites cannot quietly break them:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from latence_core.capability import ProviderRegistry
+from latence_core.capability import ProviderRegistry, satisfies_capability
 from latence_core.pipeline import Stage
 
 if TYPE_CHECKING:
@@ -68,11 +68,15 @@ def load_provider(
         )
         raise ProviderUnavailableError(msg) from exc
     provider = provider_cls(dict(stage.config))
-    if not isinstance(provider, protocol):
+    # satisfies_capability, not isinstance: a runtime_checkable isinstance INVOKES a Protocol
+    # property via hasattr, which would run Provider work at wiring time (audit R6).
+    if not satisfies_capability(provider, protocol):
         msg = (
             f"Provider {stage.provider!r} does not satisfy the "
             f"{getattr(protocol, '__name__', protocol)} Capability, "
             f"so it cannot be benchmarked as a {pin.stage} Stage."
         )
         raise TypeError(msg)
-    return provider
+    # The structural check above has just established this; ``protocol`` is a runtime value, so the
+    # narrowing cannot be expressed statically (it could not be with ``isinstance`` either).
+    return cast("P", provider)

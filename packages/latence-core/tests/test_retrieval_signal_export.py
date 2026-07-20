@@ -368,6 +368,76 @@ def test_misnamed_sparse_provider_fails_loudly() -> None:
         )
 
 
+class _LazyBackendSparseEmbedder:
+    """A SparseEmbedder shaped exactly like ``sparse.splade``: ``vocab_size`` loads the backend.
+
+    ``vocab_size`` is the ONLY member whose real implementation touches the heavy backend, and it
+    is a **property** — so any ``hasattr``-based capability check invokes it. This stands in for
+    ``latence_splade.SpladeSparseEmbedder``, whose ``vocab_size`` calls
+    ``AutoModelForMaskedLM.from_pretrained(...)``.
+    """
+
+    reads = 0
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self._config = dict(config or {})
+
+    @property
+    def vocab_size(self) -> int:
+        type(self).reads += 1
+        msg = "the heavy backend is required to run this provider"
+        raise ImportError(msg)
+
+    def encode_sparse(self, texts: Any) -> Any:
+        for _ in texts:
+            yield SparseVector(indices=[1], values=[1.0])
+
+
+class _NoVocabSizeSparseEmbedder:
+    """Carries ``encode_sparse`` but NOT ``vocab_size`` — must still be rejected."""
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        self._config = dict(config or {})
+
+    def encode_sparse(self, texts: Any) -> Any:
+        for _ in texts:
+            yield SparseVector(indices=[1], values=[1.0])
+
+
+def test_wiring_a_signal_provider_never_invokes_its_capability_property() -> None:
+    """Audit R6: constructing an Export must not READ a resolved Provider's Protocol property.
+
+    ``Export._resolve_signal`` used plain ``isinstance(provider, SparseEmbedder)``. CPython
+    implements a ``runtime_checkable`` Protocol check with ``hasattr`` over the Protocol's members,
+    and ``SparseEmbedder`` declares ``vocab_size`` as a **property** — so the capability check
+    *called* it. For the committed ``deploy/env/cpu-text`` stack that meant
+    ``JsonlParquetExport.__init__`` pulled a Hugging Face checkpoint (network!) during what
+    ADR-0016 promises is a cheap, offline, config-only construction, and made the R5
+    environment-stack guard silently skip the whole Export behind its ``ImportError`` carve-out.
+
+    On the old code this FAILS with that exact ImportError escaping ``__init__``.
+    """
+    _LazyBackendSparseEmbedder.reads = 0
+    export = JsonlParquetExport(
+        {"basename": "corpus", "sparse_embedder": {"provider": "sparse.lazy", "config": {}}},
+        registry=_registry_with("sparse.lazy", _LazyBackendSparseEmbedder),
+    )
+    assert export is not None
+    assert _LazyBackendSparseEmbedder.reads == 0, (
+        "wiring read the Provider's 'vocab_size' property — the capability check is invoking "
+        "members instead of merely resolving them"
+    )
+
+
+def test_a_provider_missing_the_capability_property_is_still_rejected() -> None:
+    """The non-invoking check is not a weaker check: an absent property still fails loudly."""
+    with pytest.raises(TypeError, match="SparseEmbedder"):
+        JsonlParquetExport(
+            {"sparse_embedder": {"provider": "sparse.novocab", "config": {}}},
+            registry=_registry_with("sparse.novocab", _NoVocabSizeSparseEmbedder),
+        )
+
+
 def test_sparse_vector_enforces_canonical_invariants() -> None:
     """The SparseVector contract rejects malformed vectors (length/order) at construction."""
     with pytest.raises(ValueError, match="length mismatch"):

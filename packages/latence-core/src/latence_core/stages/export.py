@@ -38,6 +38,7 @@ from latence_core.capability import (
     SparseEmbedder,
     SparseSignals,
     Tokenizer,
+    satisfies_capability,
 )
 from latence_core.contracts import SCHEMA_VERSION
 from latence_core.errors import ConfigError, ContractError
@@ -561,6 +562,13 @@ class JsonlParquetExport:
         at wiring time** — a :class:`~latence_core.errors.ContractError` (a ``TypeError``) — rather
         than silently emitting no signal. A malformed ``spec`` shape is a
         :class:`~latence_core.errors.ConfigError`.
+
+        The capability check is :func:`~latence_core.capability.satisfies_capability`, NOT plain
+        ``isinstance`` (audit R6): several of these Protocols declare a property, and a
+        ``runtime_checkable`` ``isinstance`` calls ``hasattr`` — which would *invoke* it and pull a
+        Provider's heavy backend (``sparse.splade`` loads a Hugging Face checkpoint from
+        ``vocab_size``) at **wiring** time, breaking ADR-0016's defer-to-first-use contract and
+        making config validation reach the network.
         """
         if spec is None:
             return None
@@ -581,7 +589,7 @@ class JsonlParquetExport:
             raise ConfigError(msg)
         provider_cls = registry.load(provider_name)
         provider = provider_cls(provider_config)
-        if not isinstance(provider, protocol):
+        if not satisfies_capability(provider, protocol):
             msg = (
                 f"Provider {provider_name!r} named in Export config {key!r} does not satisfy the "
                 f"{protocol.__name__} capability."

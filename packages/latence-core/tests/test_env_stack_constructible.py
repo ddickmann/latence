@@ -16,9 +16,21 @@ on, making #198's GPU-placement proof unreachable for one of the five declared
 ``learned_providers``.
 
 Construction is cheap and offline: every in-tree Provider defers its heavy backend import to first
-use (ADR-0016), so ``__init__`` only validates config. A Provider whose optional backend is genuinely
-absent from *this* environment raises ``ImportError`` at construction and is SKIPPED — a missing
-extra is an environment fact, not a stack defect. Any other error is a real config defect.
+use (ADR-0016), so ``__init__`` only validates config — and this module HOLDS that premise rather
+than assuming it. It used to carry a blanket ``except ImportError: continue`` carve-out ("a missing
+extra is an environment fact, not a stack defect"), which turned the premise into an unfalsifiable
+claim: audit R6 found that carve-out silently swallowing ``export.jsonl_parquet`` for
+``deploy/env/cpu-text`` — the most elaborate committed config in the tree — so the one stack with
+nested ``embedder`` + ``sparse_embedder`` specs got ZERO construct-validation while the guard
+reported green. (Root cause: ``Export.__init__`` capability-checked its resolved Provider with
+``isinstance`` against a ``runtime_checkable`` Protocol, which ``hasattr``-invokes
+``SparseEmbedder.vocab_size`` and thereby loaded a Hugging Face model at wiring time. Fixed by
+:func:`~latence_core.capability.satisfies_capability`.)
+
+So: an ``ImportError`` raised while CONSTRUCTING a Provider is now REPORTED as a defect like any
+other. Construction touching a heavy backend at all is precisely the ADR-0016 violation this guard
+should surface — the registry ``load`` step above already reports a Provider package that is not
+installed at all.
 """
 
 from __future__ import annotations
@@ -57,9 +69,6 @@ def _unconstructible(stack_path: Path) -> tuple[list[str], int]:
             continue
         try:
             provider_cls(dict(component.config))
-        except ImportError:
-            # Optional heavy backend absent from THIS environment (ADR-0016). Not a stack defect.
-            continue
         except Exception as exc:  # noqa: BLE001 - the defect class this guard exists for
             defects.append(f"{component.provider}: {type(exc).__name__}: {exc}")
             continue
