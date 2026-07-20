@@ -358,10 +358,33 @@ def _pager(
     return f'<p class="sub">{escape(shown)}</p><p class="nav">{"".join(links)}</p>'
 
 
-def _truncation_notice(truncated: bool) -> str:
-    """Say it when the reader stopped short — a partial list is never shown as a whole one."""
-    if not truncated:
+def _truncation_notice(truncated: bool, unreadable: tuple[str, ...] = ()) -> str:
+    """Say it when the reader stopped short — a partial list is never shown as a whole one.
+
+    Two different things stop it short, and the notice must name the right one (audit R7). The
+    cap (``truncated``) means the run is larger than one view; ``unreadable`` means the reader
+    could not read a file *at all*, or lost the stream part-way through and kept only a prefix.
+    The second was previously invisible: an unreadable checkpoint produced an empty list with no
+    notice, which the page then stated as fact (ADR-0034, ADR-0017/0021).
+    """
+    if not truncated and not unreadable:
         return ""
+    if unreadable:
+        listed = ", ".join(escape(uri.rsplit("/", 1)[-1]) for uri in unreadable)
+        head = (
+            '<div class="card verdict warn"><div class="t">Partial view</div>'
+            '<p class="h">The console could not read part of this run.</p>'
+            f'<p class="e">These files on Storage would not read: {listed}. '
+            "What is listed below is therefore only what could be read — an empty list or a "
+            "count here is NOT a statement that the run holds nothing. The files on Storage "
+            "remain the source of truth; check their permissions and query them directly."
+        )
+        if truncated:
+            head += (
+                " The reader also hit its per-view record limit, so even the readable files are "
+                "shown only in part."
+            )
+        return head + "</p></div>"
     return (
         '<div class="card verdict warn"><div class="t">Partial view</div>'
         '<p class="h">This run holds more records than the console reads into one view.</p>'
@@ -379,8 +402,10 @@ def render_quarantine(
     page: int = 1,
     held_page: int = 1,
     truncated: bool = False,
+    unreadable: tuple[str, ...] = (),
 ) -> str:
     """What Screening held back, and what it let through carrying a risk marker."""
+    incomplete = truncated or bool(unreadable)
     shown_held, held_page, held_pages = _paginate(quarantined, held_page)
     shown_flagged, page, flag_pages = _paginate(flagged, page)
     parts = [
@@ -393,7 +418,7 @@ def render_quarantine(
             "reason the run recorded.",
             "quarantine",
         ),
-        _truncation_notice(truncated),
+        _truncation_notice(truncated, unreadable),
         f"<h2>Quarantined — removed from the pipeline ({len(quarantined)})</h2>",
     ]
     if quarantined:
@@ -429,15 +454,28 @@ def render_quarantine(
             + "</div>"
         )
     else:
-        parts.append(_empty("Screening held nothing back in this run."))
+        parts.append(
+            _empty(
+                "Screening held nothing back in this run.",
+                # The cap cannot shorten this list, but an unreadable quarantine sidecar can
+                # empty it outright (audit R7) — and then "held nothing back" is a false
+                # statement about a file the console never managed to read.
+                partial=(
+                    "Nothing held back appears here, but the console could not read part of this "
+                    "run — this is not a statement that Screening held nothing back."
+                ),
+                truncated=bool(unreadable),
+            )
+        )
 
     # The flagged list is derived from the chunks, so it rides the CAPPED scan (audit R6): a
     # marker past the cap is simply absent from ``flagged``. The held-back list above does not —
-    # ``RunArtifacts.quarantined()`` reads the quarantine sidecars whole — so its tally and its
-    # empty card stay plain even here. Only the half that can be short of the truth is qualified.
+    # ``RunArtifacts.quarantined()`` reads the quarantine sidecars whole — so the CAP never
+    # shortens it. An unreadable file does (audit R7), which is why both halves are qualified on
+    # ``unreadable`` while only the flagged half is qualified on ``truncated``.
     parts.append(
         "<h2>Flagged — kept, with a risk marker in the corpus "
-        f"({_count(len(flagged), truncated)})</h2>"
+        f"({_count(len(flagged), incomplete)})</h2>"
     )
     if flagged:
         parts.append(
@@ -478,21 +516,27 @@ def render_quarantine(
             _empty(
                 "No record in this run's corpus carries a risk marker.",
                 partial=(
-                    "No risk marker was among the records this view read — the run holds more "
-                    "than the console reads into one view, so this is not a statement that the "
-                    "run's corpus carries none. A RAG consumer must filter on the corpus files, "
-                    "not on this page."
+                    "No risk marker was among the records this view read, and this view did not "
+                    "read the whole run — so this is not a statement that the run's corpus "
+                    "carries none. A RAG consumer must filter on the corpus files, not on this "
+                    "page."
                 ),
-                truncated=truncated,
+                truncated=incomplete,
             )
         )
     return _page(f"Held back & flagged — {run_id}", "".join(parts))
 
 
 def render_chunks(
-    run_id: str, rows: list[B.ChunkRow], *, page: int = 1, truncated: bool = False
+    run_id: str,
+    rows: list[B.ChunkRow],
+    *,
+    page: int = 1,
+    truncated: bool = False,
+    unreadable: tuple[str, ...] = (),
 ) -> str:
     """The chunk list: find the chunk you want to interrogate. Paginated (audit R4)."""
+    incomplete = truncated or bool(unreadable)
     parts = [
         _run_head(
             run_id,
@@ -502,18 +546,17 @@ def render_chunks(
             "resolves back through Provenance.",
             "chunks",
         ),
-        _truncation_notice(truncated),
+        _truncation_notice(truncated, unreadable),
     ]
     if not rows:
         parts.append(
             _empty(
                 "This run checkpointed no chunks.",
                 partial=(
-                    "No chunk was among the records this view read — the run holds more than "
-                    "the console reads into one view, so this is not a statement that the run "
-                    "checkpointed none."
+                    "No chunk was among the records this view read, and this view did not read "
+                    "the whole run — so this is not a statement that the run checkpointed none."
                 ),
-                truncated=truncated,
+                truncated=incomplete,
             )
         )
         return _page(f"Chunks — {run_id}", "".join(parts))
@@ -715,6 +758,7 @@ def render_graph(
     page: int = 1,
     entity_page: int = 1,
     truncated: bool = False,
+    unreadable: tuple[str, ...] = (),
 ) -> str:
     """The KG browser: entities to navigate, and every edge with its Evidence.
 
@@ -722,6 +766,7 @@ def render_graph(
     an order of magnitude larger than an entity row — one shared pager would make the page size
     depend on which of the two happened to be long.
     """
+    incomplete = truncated or bool(unreadable)
     shown_entities, entity_page, entity_pages = _paginate(entities, entity_page)
     shown_edges, page, edge_pages = _paginate(edges, page)
     parts = [
@@ -733,8 +778,8 @@ def render_graph(
             "where they sit in their documents, and how strongly.",
             "graph",
         ),
-        _truncation_notice(truncated),
-        f"<h2>Entities ({_count(len(entities), truncated)})</h2>",
+        _truncation_notice(truncated, unreadable),
+        f"<h2>Entities ({_count(len(entities), incomplete)})</h2>",
         _pager(
             run_id,
             "/graph",
@@ -772,15 +817,15 @@ def render_graph(
             _empty(
                 "This run assembled no graph nodes.",
                 partial=(
-                    "No graph node was among the records this view read — the run holds more "
-                    "than the console reads into one view, so this is not a statement that the "
-                    "run assembled none."
+                    "No graph node was among the records this view read, and this view did not "
+                    "read the whole run — so this is not a statement that the run assembled "
+                    "none."
                 ),
-                truncated=truncated,
+                truncated=incomplete,
             )
         )
 
-    parts.append(f"<h2>Relations ({_count(len(edges), truncated)})</h2>")
+    parts.append(f"<h2>Relations ({_count(len(edges), incomplete)})</h2>")
     if edges:
         edge_pager = _pager(
             run_id,
@@ -800,11 +845,11 @@ def render_graph(
             _empty(
                 "This run assembled no graph edges.",
                 partial=(
-                    "No graph edge was among the records this view read — the run holds more "
-                    "than the console reads into one view, so this is not a statement that the "
-                    "run assembled none."
+                    "No graph edge was among the records this view read, and this view did not "
+                    "read the whole run — so this is not a statement that the run assembled "
+                    "none."
                 ),
-                truncated=truncated,
+                truncated=incomplete,
             )
         )
     return _page(f"Knowledge graph — {run_id}", "".join(parts))
@@ -817,6 +862,7 @@ def render_entity(
     *,
     page: int = 1,
     truncated: bool = False,
+    unreadable: tuple[str, ...] = (),
 ) -> str:
     """One entity, and every edge touching it — each with its Evidence.
 
@@ -828,6 +874,7 @@ def render_entity(
     touches this entity" — an affirmative claim of isolation that the graph checkpoints
     contradict. Both the tally and the empty state are now qualified when ``truncated``.
     """
+    incomplete = truncated or bool(unreadable)
     shown_edges, page, edge_pages = _paginate(edges, page)
     parts = [
         _run_head(
@@ -836,7 +883,7 @@ def render_entity(
             "One canonical entity and every relation that touches it.",
             "graph",
         ),
-        _truncation_notice(truncated),
+        _truncation_notice(truncated, unreadable),
         '<div class="card">'
         + _table(
             ["Measure", "Value"],
@@ -850,7 +897,7 @@ def render_entity(
             ],
         )
         + "</div>",
-        f"<h2>Relations ({_count(len(edges), truncated)})</h2>",
+        f"<h2>Relations ({_count(len(edges), incomplete)})</h2>",
     ]
     if edges:
         pager = _pager(
@@ -871,13 +918,12 @@ def render_entity(
             _empty(
                 "No relation in this graph touches this entity.",
                 partial=(
-                    "No relation touching this entity was among the relations this view read. "
-                    "The run holds more graph records than the console reads into one view, so "
-                    "this is NOT a statement that the entity is isolated — relations beyond the "
-                    "reader's limit are not listed. Query the graph checkpoints directly to "
-                    "settle it."
+                    "No relation touching this entity was among the relations this view read, "
+                    "and this view did not read the whole run, so this is NOT a statement that "
+                    "the entity is isolated — relations the reader never reached are not "
+                    "listed. Query the graph checkpoints directly to settle it."
                 ),
-                truncated=truncated,
+                truncated=incomplete,
             )
         )
     return _page(f"{entity.canonical_name} — {run_id}", "".join(parts))

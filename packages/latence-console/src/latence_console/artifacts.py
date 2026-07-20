@@ -201,6 +201,7 @@ class RunArtifacts:
         self._checkpoint_files: list[tuple[str, str]] | None = None
         self._quarantine: list[QuarantineRecord] | None = None
         self._findings: list[ScreeningFinding] | None = None
+        self._unreadable: set[str] = set()
 
     def truncated(self) -> bool:
         """Did a list view hit :data:`MAX_SCAN_RECORDS` and leave records out?
@@ -209,6 +210,29 @@ class RunArtifacts:
         and never claim anything about the size of the run.
         """
         return self._scanned is not None and self._scanned.truncated
+
+    def unreadable(self) -> tuple[str, ...]:
+        """Every URI this reader tried and could not read in full, in URI order (audit R7).
+
+        Populated by :meth:`_read_jsonl` when ``Storage.open`` refuses, and when the stream fails
+        *part-way* — in which case the caller was handed a silent PREFIX of the file, which is a
+        partial read just as surely as a refused one. Empty until something has actually been
+        read, exactly like :meth:`truncated`.
+        """
+        return tuple(sorted(self._unreadable))
+
+    def partial(self) -> bool:
+        """Was this run read INCOMPLETELY, for any reason? (The gate on every absence claim.)
+
+        A list view may state "this run checkpointed no chunks" only when the reader actually read
+        the whole run. Two things stop it doing so: the :data:`MAX_SCAN_RECORDS` cap
+        (:meth:`truncated`) and a file it could not read (:meth:`unreadable`). Before audit R7
+        only the first was asked, so an unreadable checkpoint — differential ACLs on the tree that
+        holds unredacted ``content``, an S3 403, a file a concurrent Purge removed between the
+        ``ls`` and the ``open`` — was rendered as an affirmative "the run contains nothing", the
+        opposite of what the files say (ADR-0017/0021, ADR-0034).
+        """
+        return self.truncated() or bool(self._unreadable)
 
     # -- the public surface ------------------------------------------------
 
@@ -357,11 +381,20 @@ class RunArtifacts:
         decoded or validated. It is a superset filter over the same lines — never a different
         answer, only a faster one — and callers only pass a value that survives JSON escaping
         unchanged (:func:`_literal_in_json`).
+
+        **An IO failure is recorded, never swallowed** (audit R7). A file the store refuses to
+        open, and a stream that fails part-way through (leaving the caller a silent *prefix*),
+        both add ``uri`` to :meth:`unreadable` before the iterator ends. The read still degrades
+        to "no more records" rather than raising — the console stays legible over whatever is on
+        disk — but the caller can now tell "there is nothing here" from "I could not look", which
+        is the whole difference between an honest browse page and a false one (ADR-0034,
+        ADR-0017/0021).
         """
         needle = contains.encode("utf-8") if contains is not None else None
         try:
             handle = self._storage.open(uri, "rb")
         except (OSError, ValueError):
+            self._unreadable.add(uri)
             return
         try:
             with handle:
@@ -378,6 +411,7 @@ class RunArtifacts:
                     if isinstance(payload, dict):
                         yield payload
         except (OSError, ValueError):
+            self._unreadable.add(uri)
             return
 
     def _jsonl_files(self, directory: str) -> list[tuple[str, str]]:

@@ -121,8 +121,11 @@ class ConsoleApp:
     # -- the #188 views ----------------------------------------------------
 
     def _quarantine_view(self, run_id: str, artifacts: RunArtifacts, query: str) -> Response:
-        # Both lists are derived before rendering, so ``truncated()`` is asked AFTER the scan
-        # that would set it — the page never claims completeness the reader did not deliver.
+        # Both lists are derived before rendering, so ``truncated()`` / ``unreadable()`` are
+        # asked AFTER the reads that would set them — the page never claims completeness the
+        # reader did not deliver. ``unreadable()`` carries the audit-R7 half of that: a
+        # checkpoint or sidecar the store would not hand over is a partial read too, and an
+        # empty list from one must never be rendered as "the run holds none".
         held = browse.quarantine_entries(artifacts)
         flagged = browse.flag_entries(artifacts)
         return Response.html(
@@ -134,6 +137,7 @@ class ConsoleApp:
                 page=render.parse_page(_param(query, "page")),
                 held_page=render.parse_page(_param(query, "held")),
                 truncated=artifacts.truncated(),
+                unreadable=artifacts.unreadable(),
             ),
         )
 
@@ -146,6 +150,7 @@ class ConsoleApp:
                 rows,
                 page=render.parse_page(_param(query, "page")),
                 truncated=artifacts.truncated(),
+                unreadable=artifacts.unreadable(),
             ),
         )
 
@@ -178,6 +183,7 @@ class ConsoleApp:
                 page=render.parse_page(_param(query, "page")),
                 entity_page=render.parse_page(_param(query, "entities")),
                 truncated=artifacts.truncated(),
+                unreadable=artifacts.unreadable(),
             ),
         )
 
@@ -201,6 +207,7 @@ class ConsoleApp:
                 browse.edge_views(artifacts, node.node_id),
                 page=render.parse_page(_param(query, "page")),
                 truncated=artifacts.truncated(),
+                unreadable=artifacts.unreadable(),
             ),
         )
 
