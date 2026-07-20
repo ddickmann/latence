@@ -36,7 +36,7 @@
         "unsupported": 4405
       },
       "scorer_pin": {
-        "algorithm_digest": "b2221b17e5b69df4",
+        "algorithm_digest": "ac7b1361a4c999a7",
         "baseline_min_chars": 1,
         "supported_types": [
           "absent",

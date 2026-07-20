@@ -257,17 +257,24 @@ def score_document_failure(test: UnitTest, *, split: str, reason: str) -> TestRe
     return TestResult(test.id, split, test.type, Outcome.FAILED, reason)
 
 
-#: The functions whose semantics *are* the unit-test metric. A change to any of them changes
-#: what a published pass rate means, so their bodies feed the scorer fingerprint below.
-#: :func:`score_document_failure` is deliberately absent: it introduces no verdict of its own —
-#: its UNSUPPORTED branch *is* :func:`score`, and its FAILED branch is the long-standing "a
-#: parse failure is a failure" rule, which :attr:`ScorerPin.supported_types` already describes.
+#: The **entry points** of the unit-test metric: every way a verdict is produced. A change to
+#: anything they reach changes what a published pass rate means, so the fingerprint below is taken
+#: over their transitive closure — every module-level function they call and every module-level
+#: constant they read — never over this tuple alone.
+#:
+#: That distinction is the whole point. This list used to be the fingerprinted set itself, curated
+#: by hand, which opted every helper and constant *out* by default: ``_window`` (the
+#: ``first_n``/``last_n`` rule), ``_WHITESPACE`` (what :func:`normalise` collapses),
+#: ``_REPLACEMENT_CHAR`` (what a ``baseline`` row rejects) and :func:`score_document_failure` (what
+#: a parse failure does to an unscoreable test) all changed the metric without moving the digest —
+#: the last of them demonstrably so, when audit R5 moved that rule into this module and changed it.
 _SCORING_BEHAVIOUR: tuple[Callable[..., Any], ...] = (
     normalise,
     fuzzy_find,
     fuzzy_contains,
     _score_baseline,
     score,
+    score_document_failure,
 )
 
 
@@ -275,6 +282,7 @@ class ScorerSourceUnavailableError(RuntimeError):
     """The scorer's own source cannot be read, so its fingerprint cannot be computed."""
 
 
+@functools.cache
 def _semantic_source(function: Callable[..., Any]) -> str:
     """Return ``function``'s source with docstrings, comments and formatting normalised away.
 
@@ -356,11 +364,83 @@ class ScorerPin:
 
 
 @functools.cache
+def _referenced_module_names(function: Callable[..., Any]) -> frozenset[str]:
+    """Module-level names ``function``'s body reads.
+
+    Anything else — locals, nested functions, builtins, names that only exist under
+    ``TYPE_CHECKING`` — is not in this module's globals and is therefore not a rule of ours.
+    """
+    source = textwrap.dedent(inspect.getsource(function))
+    names = {
+        node.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    return frozenset(name for name in names if name in globals())
+
+
+def _canonical_constant(value: Any) -> str:
+    """A deterministic, value-revealing rendering of a scoring constant.
+
+    ``repr`` alone is not enough: a compiled pattern's ``repr`` is fine but its flags are not
+    always shown, and a ``set``/``frozenset`` reprs in iteration order, which would make the
+    digest — and therefore every published fingerprint — depend on insertion order.
+    """
+    if isinstance(value, re.Pattern):
+        return f"re.compile({value.pattern!r}, flags={int(value.flags)})"
+    if isinstance(value, frozenset | set):
+        return "{" + ", ".join(sorted(_canonical_constant(item) for item in value)) + "}"
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_canonical_constant(item) for item in value) + "]"
+    return repr(value)
+
+
+def _behaviour_closure() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The canonicalised sources, and the ``name = value`` renderings of the constants, that the
+    unit-test metric consists of.
+
+    Reachability, not a curated list: starting from :data:`_SCORING_BEHAVIOUR`, every module-level
+    function a scoring function calls is itself scoring behaviour (``score`` delegates the
+    ``first_n``/``last_n`` window to ``_window``), and every module-level constant one reads is a
+    scoring rule stated outside a function body (``normalise`` *is* ``_WHITESPACE``). A helper or
+    a constant added later is covered the moment it is used, which is the property a
+    hand-maintained tuple could not have.
+
+    Every name is resolved through the module namespace rather than through the objects captured
+    in :data:`_SCORING_BEHAVIOUR`, so a slice of the scorer that is swapped out — a test, or a
+    future build flag — is described by what it actually is, exactly as :func:`scorer_pin`
+    promises for the two explicit pin fields. Only the per-function source parsing is memoised
+    (:func:`_semantic_source`, :func:`_referenced_module_names`); a given function object's source
+    genuinely cannot change in-process, but which object a name refers to can.
+    """
+    sources: dict[str, str] = {}
+    constants: dict[str, str] = {}
+    pending = [function.__name__ for function in _SCORING_BEHAVIOUR]
+    while pending:
+        name = pending.pop()
+        if name in sources or name in constants:
+            continue
+        value = globals()[name]
+        if not inspect.isfunction(value):
+            constants[name] = _canonical_constant(value)
+            continue
+        sources[name] = _semantic_source(value)
+        pending.extend(
+            referenced
+            for referenced in _referenced_module_names(value)
+            if not inspect.ismodule(globals()[referenced])
+            and not inspect.isclass(globals()[referenced])
+        )
+    return (
+        tuple(sources[name] for name in sorted(sources)),
+        tuple(f"{name} = {constants[name]}" for name in sorted(constants)),
+    )
+
+
 def _algorithm_digest() -> str:
-    """Digest over the scoring functions' semantics. Cached — source cannot change in-process."""
-    return hashlib.sha256(
-        "\n".join(_semantic_source(function) for function in _SCORING_BEHAVIOUR).encode("utf-8")
-    ).hexdigest()[:16]
+    """Digest over the scoring behaviour's semantics: its sources *and* its constants."""
+    sources, constants = _behaviour_closure()
+    return hashlib.sha256("\n".join((*sources, *constants)).encode("utf-8")).hexdigest()[:16]
 
 
 def scorer_pin() -> ScorerPin:

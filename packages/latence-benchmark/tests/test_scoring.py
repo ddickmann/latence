@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -207,6 +208,51 @@ def test_changing_what_the_scorer_does_moves_its_fingerprint(
     monkeypatch: pytest.MonkeyPatch, attribute: str, value: Any
 ) -> None:
     """Otherwise a published pass rate could be re-described by rules that never produced it."""
+    before = scorer_pin().fingerprint
+    monkeypatch.setattr(scoring, attribute, value)
+    assert scorer_pin().fingerprint != before
+
+
+def _pre_r5_score_document_failure(test: UnitTest, *, split: str, reason: str) -> Any:
+    """The document-failure rule as it stood before ``fa35f06``: every test FAILED.
+
+    Under this rule a `table`/`math` test of a `PARSE_ERROR` or missing-PDF document lands inside
+    the pass-rate denominator; under today's rule it stays UNSUPPORTED, outside it. A synthetic
+    split with one `present`, one `table` and one `math` test scores 0/1/2 (scored 1) today and
+    0/3/0 (scored 3) under this one — a different published number.
+    """
+    return scoring.TestResult(test.id, split, test.type, Outcome.FAILED, reason)
+
+
+def _no_window(text: str, test: UnitTest) -> str:
+    """``_window`` with the ``first_n``/``last_n`` rule removed — a real change to the metric."""
+    return text
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        # The rule audit R5 changed. It decides whether an unscoreable test of a failed document
+        # is FAILED (in the denominator) or UNSUPPORTED (out of it) — a verdict of its own.
+        ("score_document_failure", _pre_r5_score_document_failure),
+        # A helper `score` delegates a scoring rule to.
+        ("_window", _no_window),
+        # Constants read inside fingerprinted functions but written outside them: what `normalise`
+        # collapses, and what a `baseline` row rejects as mis-decoded text.
+        ("_WHITESPACE", re.compile(r"[ ]+")),
+        ("_REPLACEMENT_CHAR", "?"),
+    ],
+)
+def test_every_rule_the_metric_reaches_moves_the_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, attribute: str, value: Any
+) -> None:
+    """The pin is only a guard if it covers *every* rule, not the five functions someone listed.
+
+    `_SCORING_BEHAVIOUR` used to be the fingerprinted set itself, so helpers and module constants
+    were opted out by default: swapping any of these left the digest — and therefore the
+    fingerprint stamped on every published measurement — bit-for-bit identical, and
+    `carry_forward` republished a pass rate the changed rules would not have produced.
+    """
     before = scorer_pin().fingerprint
     monkeypatch.setattr(scoring, attribute, value)
     assert scorer_pin().fingerprint != before
