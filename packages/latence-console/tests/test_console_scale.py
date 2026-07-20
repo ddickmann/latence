@@ -32,6 +32,10 @@ from latence_core.contracts import (
     GraphRecord,
     GraphScope,
     Provenance,
+    RiskMarker,
+    ScreeningCheckpoint,
+    ScreeningFinding,
+    ScreeningVerdict,
 )
 from latence_core.storage import Storage
 
@@ -658,3 +662,180 @@ def test_complete_graph_with_no_edges_still_states_it_plainly(
     assert "This run assembled no graph nodes." in body
     assert "This run assembled no graph edges." in body
     assert "Partial view" not in body
+
+
+# -- the flagged-risk-marker list on a capped read (audit R6) -----------------
+
+FLAG_RUN_ID = "flagcap"
+#: Past MAX_SCAN_RECORDS, so the scan stops before the flagged chunk at the tail.
+FLAG_CHUNK_COUNT = MAX_SCAN_RECORDS + 500
+FLAG_DOC_ID = "sha256:" + "c" * 58
+FLAG_CATEGORY = "prompt_injection"
+
+
+def _flag_marker() -> RiskMarker:
+    return RiskMarker(
+        category=FLAG_CATEGORY,
+        detector="screening.content_keyword",
+        score=0.93,
+        reason="matched injection pattern 'ignore previous instructions'",
+    )
+
+
+def _flag_provenance(index: int) -> Provenance:
+    return Provenance(
+        source_uri="file:///corpus/flagged.md",
+        file_name="flagged.md",
+        file_type="md",
+        file_size=FLAG_CHUNK_COUNT * 64,
+        document_id=FLAG_DOC_ID,
+        page_start=1,
+        page_end=1,
+        char_start=index * 64,
+        char_end=(index + 1) * 64,
+    )
+
+
+def _flag_chunk(index: int, *, marked: bool) -> ChunkRecord:
+    return ChunkRecord(
+        record_id=f"{FLAG_DOC_ID}#chunk-{index}",
+        provenance=_flag_provenance(index),
+        classification=_classification(),
+        document_record_id=FLAG_DOC_ID,
+        index=index,
+        content=f"chunk {index} " + "y" * 40,
+        token_count=12,
+        risk_markers=[_flag_marker()] if marked else [],
+    )
+
+
+@pytest.fixture(scope="module")
+def flag_storage(tmp_path_factory: pytest.TempPathFactory) -> tuple[Storage, str]:
+    """A run bigger than the cap whose LAST chunk carries a risk marker into the corpus."""
+    root: Path = tmp_path_factory.mktemp("flagcapcorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/{FLAG_RUN_ID}"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "flagcap", "stages": [{"name": "chunk", "depends_on": []}]},
+                "run_id": FLAG_RUN_ID,
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    last = FLAG_CHUNK_COUNT - 1
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/chunk.jsonl",
+        "".join(
+            _flag_chunk(i, marked=(i == last)).model_dump_json() + "\n"
+            for i in range(FLAG_CHUNK_COUNT)
+        ).encode("utf-8"),
+    )
+    # The sidecar the Screener wrote when it raised the marker: the same run, saying so twice.
+    storage.write_atomic(
+        f"{run_dir}/screening/content_screen.jsonl",
+        (
+            ScreeningFinding(
+                checkpoint=ScreeningCheckpoint.CONTENT,
+                verdict=ScreeningVerdict.FLAG,
+                document_id=FLAG_DOC_ID,
+                detector="screening.content_keyword",
+                category=FLAG_CATEGORY,
+                reason=_flag_marker().reason,
+                marker=_flag_marker(),
+            ).model_dump_json()
+            + "\n"
+        ).encode("utf-8"),
+    )
+    return storage, storage_uri
+
+
+def _markers_on_disk(storage: Storage, run_dir: str) -> list[str]:
+    """Every chunk id in the run's chunk checkpoint that carries a risk marker.
+
+    Read straight off Storage, bypassing the console: ADR-0017 makes the files the source of
+    truth, so the ground the page is judged against must come from the files, never from the
+    reader under test.
+    """
+    found = []
+    with storage.open(f"{run_dir}/checkpoints/chunk.jsonl") as handle:
+        for line in handle:
+            record = json.loads(line)
+            if record.get("risk_markers"):
+                found.append(record["record_id"])
+    return found
+
+
+def test_quarantine_page_never_claims_no_risk_marker_on_a_capped_read(
+    flag_storage: tuple[Storage, str],
+) -> None:
+    """A marker the cap dropped must not be rendered as "the corpus carries none".
+
+    The flagged list is derived from ``RunArtifacts.chunks()``, which is the capped scan, so a
+    marker past MAX_SCAN_RECORDS is simply absent from the list the page renders. Saying
+    "No record in this run's corpus carries a risk marker." there states as fact the opposite of
+    what the run's own chunk checkpoint says — and this is the RAG-safety surface, the page a
+    consumer reads to decide what to exclude (ADR-0017; ADR-0021/0031).
+    """
+    storage, storage_uri = flag_storage
+    run_dir = f"{storage_uri}/_latence/runs/{FLAG_RUN_ID}"
+    on_disk = _markers_on_disk(storage, run_dir)
+    assert on_disk, "fixture is wrong: no chunk on Storage carries a marker to be lied about"
+
+    app = ConsoleApp.over_storage(storage, storage_uri)
+    body = app.respond("GET", f"/run/{FLAG_RUN_ID}/quarantine").body.decode("utf-8")
+
+    assert "Flagged — kept, with a risk marker in the corpus (0" in body, (
+        f"the cap no longer drops the flagged chunk ({on_disk}) — the fixture must outgrow "
+        "MAX_SCAN_RECORDS for this regression to mean anything"
+    )
+    assert "Partial view" in body, "the run lost records to the cap without saying so"
+    # The page HTML-escapes its text, so the claim is matched in the form it actually renders.
+    assert "No record in this run&#x27;s corpus carries a risk marker." not in body, (
+        "the quarantine page told the reader the corpus carries no risk marker, but the run's "
+        f"chunk checkpoint holds {on_disk}"
+    )
+    # The weaker, true statement is made in its place — the page still says it found nothing.
+    assert "No risk marker was among the records this view read" in body
+    # And the tally is not left standing as a bare count of the whole run.
+    assert "Flagged — kept, with a risk marker in the corpus (0)" not in body
+    assert "Flagged — kept, with a risk marker in the corpus (0 read so far)" in body
+    # The held-back half is NOT capped (the quarantine sidecars are read whole), so it must keep
+    # speaking plainly — hedging a complete read teaches the reader to ignore the hedge.
+    assert "Quarantined — removed from the pipeline (0)" in body
+    assert "Screening held nothing back in this run." in body
+
+
+def test_quarantine_page_speaks_plainly_when_the_read_was_complete(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A run that really carries no marker must keep saying so — the true claim survives."""
+    root: Path = tmp_path_factory.mktemp("flagsmallcorpus")
+    storage_uri = f"file://{root}/corpus"
+    storage = Storage.for_uri(storage_uri)
+    run_dir = f"{storage_uri}/_latence/runs/flagsmall"
+    storage.write_atomic(
+        f"{run_dir}/manifest.json",
+        json.dumps(
+            {
+                "pipeline": {"name": "flagsmall", "stages": [{"name": "chunk", "depends_on": []}]},
+                "run_id": "flagsmall",
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
+    storage.write_atomic(
+        f"{run_dir}/checkpoints/chunk.jsonl",
+        (_flag_chunk(0, marked=False).model_dump_json() + "\n").encode("utf-8"),
+    )
+    app = ConsoleApp.over_storage(storage, storage_uri)
+
+    body = app.respond("GET", "/run/flagsmall/quarantine").body.decode("utf-8")
+
+    assert "Partial view" not in body
+    assert "Flagged — kept, with a risk marker in the corpus (0)" in body
+    assert "No record in this run&#x27;s corpus carries a risk marker." in body
+    assert "read so far" not in body

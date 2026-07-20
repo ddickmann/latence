@@ -431,7 +431,14 @@ def render_quarantine(
     else:
         parts.append(_empty("Screening held nothing back in this run."))
 
-    parts.append(f"<h2>Flagged — kept, with a risk marker in the corpus ({len(flagged)})</h2>")
+    # The flagged list is derived from the chunks, so it rides the CAPPED scan (audit R6): a
+    # marker past the cap is simply absent from ``flagged``. The held-back list above does not —
+    # ``RunArtifacts.quarantined()`` reads the quarantine sidecars whole — so its tally and its
+    # empty card stay plain even here. Only the half that can be short of the truth is qualified.
+    parts.append(
+        "<h2>Flagged — kept, with a risk marker in the corpus "
+        f"({_count(len(flagged), truncated)})</h2>"
+    )
     if flagged:
         parts.append(
             _pager(
@@ -467,7 +474,18 @@ def render_quarantine(
             f"<tbody>{''.join(rows)}</tbody></table></div>"
         )
     else:
-        parts.append(_empty("No record in this run's corpus carries a risk marker."))
+        parts.append(
+            _empty(
+                "No record in this run's corpus carries a risk marker.",
+                partial=(
+                    "No risk marker was among the records this view read — the run holds more "
+                    "than the console reads into one view, so this is not a statement that the "
+                    "run's corpus carries none. A RAG consumer must filter on the corpus files, "
+                    "not on this page."
+                ),
+                truncated=truncated,
+            )
+        )
     return _page(f"Held back & flagged — {run_id}", "".join(parts))
 
 
