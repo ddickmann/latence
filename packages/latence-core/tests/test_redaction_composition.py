@@ -16,8 +16,16 @@ The defect this closes had two halves, and only both together make a second reda
 The fix composes upstream spans in the one shared seam every Provider funnels through (the same
 place the ADR-0044 universal financial floor lives), so masks accumulate across a redaction chain.
 
-The tests below are the discriminating probe: two ``redaction.hybrid_rule`` Stages with DISJOINT
-detector sets, so each mask is attributable to exactly one Stage and a lost mask is unambiguous.
+The end-to-end tests below are the discriminating probe for that pair: two ``redaction.hybrid_rule``
+Stages with DISJOINT detector sets, so each mask is attributable to exactly one Stage and a lost
+mask is unambiguous.
+
+Disjoint detectors are NOT sufficient on their own, though — they are exactly the configuration in
+which a greedy first-wins union never bites (audit R6-invariants-0, R6-wiring-2). The shipped
+``full-stack`` / ``gpu-learned`` stacks chain two LEARNED Redactors whose ``pii_labels`` overlap
+heavily, so two models scoring the same entity with different boundaries is the expected case. The
+span-level tests therefore drive the shared seam directly across every overlap topology, and assert
+COVERAGE MONOTONICITY: composing may only ever ADD masked characters, never remove one.
 """
 
 from __future__ import annotations
@@ -290,6 +298,40 @@ def test_partially_overlapping_span_does_not_re_expose_a_masked_card() -> None:
         f"prior card mask was truncated, re-exposing digits: {final.masked_content!r}"
     )
     assert final.masked_content == "Contact [PERSON][CREDIT_CARD] end."
+
+
+def test_overlapping_same_type_spans_from_chained_learned_redactors_compose() -> None:
+    """Two learned Redactors scoring the SAME entity with DIFFERENT boundaries (audit R6-wiring-2).
+
+    The shipped ``full-stack`` / ``gpu-learned`` stacks chain ``redact_pii`` -> ``redact_financial``
+    with heavily overlapping ``pii_labels`` (``person``, ``email``, ``phone number``, ``address``,
+    ``credit card number`` are in BOTH), so both Stages emitting a ``person`` span over the same name
+    with different boundaries is the EXPECTED case, not an edge case. ``pii_type`` is a tie-breaker
+    in the composition sort, so pin the same-type shape explicitly — the other partial-overlap tests
+    all use two different types.
+
+    Pre-fix the downstream span [9,17) sorted first and the prior, already-applied [14,28) mask was
+    dropped WHOLE, yielding ``'Kontakt: [PERSON] Mustermann arbeitet hier.'`` — a surname that was
+    masked before the second Stage existed, exported in the clear.
+    """
+    text = "Kontakt: Herr Max Mustermann arbeitet hier."
+
+    # Stage 1 (`redact_pii`): "Max Mustermann".
+    upstream = _finalize(
+        _chunk(text), RedactionAction.MASK, [(14, 28, "person", text[14:28], "gliner_pii", 0.9)]
+    )
+    assert upstream.masked_content == "Kontakt: Herr [PERSON] arbeitet hier."
+
+    # Stage 2 (`redact_financial`): re-detects on the clean content, boundaries "Herr Max".
+    final = _finalize(
+        upstream, RedactionAction.MASK, [(9, 17, "person", text[9:17], "gliner2", 0.9)]
+    )
+
+    assert final.masked_content is not None
+    assert "Mustermann" not in final.masked_content, (
+        f"adding a redaction Stage un-masked an already-masked name: {final.masked_content!r}"
+    )
+    assert final.masked_content == "Kontakt: [PERSON][PERSON] arbeitet hier."
 
 
 def test_provider_span_overlapping_the_floor_does_not_truncate_it() -> None:
