@@ -144,13 +144,31 @@ the `✓ look for` specifics:
   divergence is worth a finding (the extractor is missing the corpus's most explicit relations).
 
 ### 3.2 The visual console
+The console ships as its own package and is invoked by its console-script entrypoint
+`latence-console` (there is **no** `python -m latence_console.cli` module runner and **no** `--run`
+flag). Install it if it isn't already, then point it at the **Storage location** the run wrote under
+— the folder that holds `_latence/runs/`, i.e. the same directory `latence process` ran in — **not** a
+single run dir:
 ```bash
-python -m latence_console.cli --run _latence/runs/<run_id>    # read-only, localhost, offline
+uv pip install -e packages/latence-console    # if `which latence-console` is empty
+latence-console .    # read-only, localhost, offline; positional location, holds _latence/runs/
 ```
-✓ **look for** — in a browser: the run's **Quality Report** (verdict headlines, not raw JSON), the
-**chunk inspector** (each chunk resolves to a source RFC + page/offset), and the **KG browser** where
-**every edge shows its Evidence** (the sentence it was extracted from). Confirm on a known edge, e.g.
-`RFC 9110 —obsoletes→ RFC 7230`: the Evidence must be the real "Obsoletes" line.
+It prints a `http://127.0.0.1:8787/` URL (Ctrl-C to stop). Open it in a browser.
+
+✓ **look for** — the console renders as **self-contained HTML** (inlined CSS, no CDN/font/script/
+external asset; it works with the network pulled) and binds loopback only:
+- The **run list** shows `<run_id>` with its pipeline name, document count, timings, and a headline
+  **status** (`Passed` / `Needs attention` / `Failed` / `Unfinished`).
+- Selecting the run renders its **Quality Report** as headline verdicts first — plain sentences with
+  the numbers in them (traceability %, KG node/edge counts + evidence %, redaction held-back count),
+  not raw JSON — then the per-Stage drill-down table.
+
+Per-chunk source-mapping and the per-edge **Evidence** sentence (e.g. `RFC 9110 —obsoletes→ RFC 7230`
+must quote the real "Obsoletes" line) are verified from the **files** in §3.1 (`chunk.jsonl` /
+`extract.jsonl` / `graph-edges.parquet`) and the §3.3 charts — the files are the source of truth
+(ADR-0017). The console's dedicated **chunk inspector** and **KG browser** are a documented follow-up
+slice (`docs/getting-started/run-console.md` §Scope) and are **not** in this build; do not treat their
+absence from the console UI as a finding, but a missing edge-Evidence field in `extract.jsonl` **is**.
 
 ### 3.3 Correctness charts
 ```bash
