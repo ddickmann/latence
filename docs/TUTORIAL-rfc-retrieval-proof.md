@@ -200,7 +200,7 @@ cd /workspace/qdrant-bin && nohup ./qdrant > /workspace/qdrant.log 2>&1 &   # li
 sleep 6 && curl -sf localhost:6333/healthz && echo " <- real qdrant up"
 export LATENCE_QDRANT_URL=http://localhost:6333
 cd /workspace/latence-framework
-latence-sink-qdrant load --export _latence/runs/<run_id>/export --collection rfc --vector dense
+latence-sink-qdrant load _latence/runs/<run_id>/export --collection rfc --url "$LATENCE_QDRANT_URL"
 ```
 ✓ **look for** — `healthz` returns OK **from the real server**; the loader reports N points upserted =
 N corpus chunks; a re-run upserts the same ids idempotently (no duplication); `curl
