@@ -162,6 +162,19 @@ def point_id(record_id: str, namespace: uuid.UUID = DEFAULT_ID_NAMESPACE) -> str
     return str(uuid.uuid5(namespace, record_id))
 
 
+def _is_response_handling_fault(exc: BaseException | None) -> bool:
+    """True when ``exc`` is qdrant-client's ``ResponseHandlingException``.
+
+    That exception marks a **client-side** failure to handle an otherwise-valid response — the
+    hallmark of a client-newer-than-server version skew — as opposed to a server *rejection*,
+    which arrives as an ``UnexpectedResponse`` carrying an HTTP ``status_code``. Matched by class
+    name so nothing from the optional, lazily-imported ``qdrant_client`` package is pulled in here
+    (ADR-0016); the faithful offline fake raises a same-named class so the fallback is exercised
+    without a live server.
+    """
+    return exc is not None and type(exc).__name__ == "ResponseHandlingException"
+
+
 @dataclass(frozen=True, slots=True)
 class LoadReport:
     """What one :meth:`QdrantSink.load` actually did — the numbers the CLI prints.
@@ -695,11 +708,56 @@ class QdrantSink:
         )
 
     def _count(self, filt: Any) -> int:
-        result = self._call(
-            "count",
-            lambda c: c.count(collection_name=self._collection, count_filter=filt, exact=True),
-        )
+        """The exact number of points matching ``filt`` — the sweep's concurrency guard.
+
+        Qdrant's ``count`` is the fast, one-round-trip path. But a qdrant-client that is *newer
+        than the server* can be unable to parse an otherwise-successful count response — a
+        ``ResponseHandlingException``, which is a **client-side** handling fault, not a server
+        rejection: the identical count over the raw HTTP API, and every other call this load makes
+        (upsert, retrieve, scroll, delete), succeeds. Failing an otherwise-correct load on that
+        alone would be a false red, so a handling fault falls back to counting through
+        :meth:`_scroll_count` — the same version-robust ``scroll`` path the sweep already pages
+        candidates with, which returns the identical exact count. A genuine fault (auth, a missing
+        collection, a real server error, or a transport failure that also downs the scroll) still
+        raises through :meth:`_call`'s mapping and is never swallowed (ADR-0034).
+        """
+        try:
+            result = self._call(
+                "count",
+                lambda c: c.count(collection_name=self._collection, count_filter=filt, exact=True),
+            )
+        except SinkLoadError as exc:
+            if _is_response_handling_fault(exc.__cause__):
+                return self._scroll_count(filt)
+            raise
         return int(result.count)
+
+    def _scroll_count(self, filt: Any) -> int:
+        """Count points matching ``filt`` by paging ``scroll`` — the count fallback for a client
+        that cannot parse the native ``count`` response (a client-newer-than-server version skew).
+
+        O(matched) round trips at ``batch_size``, payload- and vector-free, so only point ids
+        cross the wire however large the matched set is (ADR-0033). Scroll pages in point-id order,
+        so a concurrent delete of a page already handed out never disturbs the offset of the pages
+        still to come and the total stays exact.
+        """
+        total = 0
+        offset: Any = None
+        while True:
+            page, offset = self._call(
+                "scroll",
+                lambda c, o=offset: c.scroll(
+                    collection_name=self._collection,
+                    scroll_filter=filt,
+                    limit=self._batch_size,
+                    offset=o,
+                    with_payload=False,
+                    with_vectors=False,
+                ),
+            )
+            total += len(page)
+            if offset is None:
+                return total
 
     def _collection_exists(self) -> bool:
         return bool(
@@ -751,7 +809,14 @@ class QdrantSink:
 
     def _resolve_client(self) -> Any:
         if self._client is None:
-            self._client = self._import_qdrant()[0](**self._client_kwargs)
+            kwargs = dict(self._client_kwargs)
+            # A qdrant-client newer than the target server prints an incompatibility UserWarning on
+            # construction. The gap it warns about is exactly the count-response parsing skew that
+            # :meth:`_count` already tolerates by falling back to ``scroll``, so on an otherwise
+            # healthy load the warning is pure alarm — suppressed here rather than left to spook an
+            # operator following the tutorial. Only defaulted, so an explicit config value wins.
+            kwargs.setdefault("check_compatibility", False)
+            self._client = self._import_qdrant()[0](**kwargs)
         return self._client
 
     def _load_models(self) -> Any:
