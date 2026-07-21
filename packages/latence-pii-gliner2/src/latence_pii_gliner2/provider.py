@@ -80,6 +80,7 @@ from latence_pii_gliner2._compat import (
     require_batched_entity_api,
     require_supported_gliner2,
 )
+from latence_pii_gliner2._tokenizer_compat import coerce_list_extra_special_tokens
 
 _log = logging.getLogger("latence.provider.gliner2_pii")
 
@@ -347,6 +348,14 @@ class Gliner2PIIRedactor(AdapterBase):
         # The import is resolved OUTSIDE the guard so a missing-dep ImportError surfaces as the
         # clear "pip install latence-pii-gliner2" error, not a wrapped ProviderError.
         gliner2_cls = self._gliner2_cls()
+        # dogfood-2b-process: the default PII checkpoint's tokenizer_config.json stores
+        # ``extra_special_tokens`` as a LIST, which transformers >= 4.57 (pulled transitively via
+        # gliner2[local], within this Provider's allowed range) rejects at load with a native
+        # ``AttributeError: 'list' object has no attribute 'keys'`` — killing the whole pipeline
+        # before any run dir is written. Coerce it to the dict shape 4.57 requires BEFORE the load
+        # (guarded, best-effort, byte-identical tokenization). Mirrors the glinker backend's
+        # _patch_tokenizer_config precedent; a dict-shaped checkpoint is an idempotent no-op.
+        coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
         with self.guard("load_model"):
             self._model = load_gliner2_optimized(
                 gliner2_cls.from_pretrained,
@@ -390,6 +399,9 @@ class Gliner2PIIRedactor(AdapterBase):
             "model (quantize kept) — throughput only, never a crash"
         )
         gliner2_cls = self._gliner2_cls()
+        # Idempotent no-op after _load_model already patched the cached config (dogfood-2b); kept
+        # for symmetry so this reload path is never coupled to a prior patch having run.
+        coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
         with self.guard("load_model"):
             self._model = load_gliner2_optimized(
                 gliner2_cls.from_pretrained,

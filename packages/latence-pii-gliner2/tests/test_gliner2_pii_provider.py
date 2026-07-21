@@ -16,6 +16,7 @@ and a dedicated anchor test proves a provider that mis-parses that shape as a fl
 
 from __future__ import annotations
 
+import json
 import sys
 import tomllib
 import types
@@ -1035,3 +1036,159 @@ def test_uncompiled_reload_also_placed_on_cuda(
     assert placing_gliner2.to_calls == ["cuda", "cuda"]  # initial load + uncompiled reload
     assert rec.masked_content is not None
     assert "Alice" not in rec.masked_content
+
+
+# ---------------------------------------------------------------------------
+# dogfood-2b-process: the default PII checkpoint's tokenizer_config.json stores
+# ``extra_special_tokens`` as a LIST, which transformers >= 4.57 (pulled transitively via
+# gliner2[local]) rejects at tokenizer build with
+# ``AttributeError: 'list' object has no attribute 'keys'`` — killing ``latence process`` at the
+# mandatory redact stage before any run dir / export is written. The provider now coerces that field
+# to the dict shape 4.57 requires BEFORE the load (byte-identical tokenization). These tests inject a
+# faithful ``huggingface_hub`` + a ``from_pretrained`` that reproduces the REAL transformers loader,
+# so the field crash — and its fix — are exercised deterministically and offline (no torch download).
+# ---------------------------------------------------------------------------
+
+#: The 10 GLiNER2 structural special tokens the real ``fastino/GLiNER2-Guardrails-PII-Multi``
+#: ``tokenizer_config.json`` stores as a LIST (verified against the live HF file, 2026-07-21). Every
+#: one is ALSO a ``special`` added token in that checkpoint's ``tokenizer.json``, so coercing the
+#: list to a ``{token: token}`` dict is byte-identical in tokenization — only the config *shape* changes.
+_STRUCT_TOKENS = [
+    "[SEP_STRUCT]", "[SEP_TEXT]", "[P]", "[C]", "[E]", "[R]", "[L]",
+    "[EXAMPLE]", "[OUTPUT]", "[DESCRIPTION]",
+]
+
+
+def _transformers_set_model_specific_special_tokens(extra: Any) -> list[str]:
+    """FAITHFUL stand-in for transformers >= 4.57 ``_set_model_specific_special_tokens``.
+
+    The 4.57 loader treats ``extra_special_tokens`` as a **dict** ``{name: token}`` — it calls
+    ``special_tokens.keys()`` then ``.items()`` on it. So a **list** raises exactly
+    ``AttributeError: 'list' object has no attribute 'keys'`` (the field crash), and a **dict** whose
+    values are strings is accepted — the precise accept/reject boundary the real dep enforces, so this
+    fake is not a false-green (a list is rejected here iff transformers 4.57 rejects it).
+    """
+    added = list(extra.keys())  # dies on a list with 'list' object has no attribute 'keys'
+    for key, value in extra.items():
+        if not isinstance(value, str):
+            msg = f"Special token {key} has to be either str or AddedToken but got: {type(value)}"
+            raise TypeError(msg)
+    return added
+
+
+class _TokenizerLoadingGLiNER2(_FakeGLiNER2):
+    """A ``_FakeGLiNER2`` whose ``from_pretrained`` ALSO builds the tokenizer the way transformers
+    >= 4.57 does — it resolves the checkpoint's cached ``tokenizer_config.json`` (via the injected
+    ``huggingface_hub.hf_hub_download``) and runs the faithful ``_set_model_specific_special_tokens``.
+
+    This is what reproduces the dogfood field crash offline: a list-valued config raises
+    ``AttributeError`` at load; a dict-valued one loads cleanly.
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER2:
+        from huggingface_hub import hf_hub_download
+
+        config_path = hf_hub_download(model_id, "tokenizer_config.json")
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        # The exact transformers 4.57 tokenizer-build step that crashed on the pod.
+        _transformers_set_model_specific_special_tokens(config.get("extra_special_tokens", {}))
+        return super().from_pretrained(model_id, **kwargs)
+
+
+def _fake_huggingface_hub_module(config_path: Path) -> types.ModuleType:
+    """A ``huggingface_hub`` whose ``hf_hub_download`` returns our fake-cache tokenizer_config path.
+
+    The SAME path the shim patches and the fake ``from_pretrained`` reads back — so a patch by the
+    shim is observed by the subsequent load, exactly as it is on a real shared HF cache.
+    """
+    module = types.ModuleType("huggingface_hub")
+
+    def hf_hub_download(repo_id: str, filename: str, **_kwargs: Any) -> str:
+        if filename != "tokenizer_config.json":
+            msg = f"unexpected file requested from the fake hub: {filename!r}"
+            raise FileNotFoundError(msg)
+        return str(config_path)
+
+    module.hf_hub_download = hf_hub_download  # type: ignore[attr-defined]
+    return module
+
+
+@pytest.fixture()
+def list_valued_pii_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    """A fake HF cache whose default-PII-checkpoint ``tokenizer_config.json`` is the CRASHING shape.
+
+    ``extra_special_tokens`` is a *list* (the real, field-failing shape), and both the shim and the
+    faithful ``from_pretrained`` resolve it through the injected ``huggingface_hub``. Returns the
+    config path so a test can assert it was coerced list -> dict.
+    """
+    config_path = tmp_path / "tokenizer_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "DebertaV2Tokenizer",
+                "extra_special_tokens": list(_STRUCT_TOKENS),  # the shape transformers 4.57 rejects
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", _fake_huggingface_hub_module(config_path))
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_TokenizerLoadingGLiNER2, _PINNED_GLINER2)
+    )
+    _FakeGLiNER2.entities = []
+    _FakeGLiNER2.per_text = None
+    _FakeGLiNER2.raise_on_extract = False
+    _FakeGLiNER2.last_kwargs = {}
+    _FakeGLiNER2.last_max_len = None
+    _FakeGLiNER2.raise_on_optimized_load = False
+    _FakeGLiNER2.compiled_forward_raises = False
+    return config_path
+
+
+def test_list_extra_special_tokens_crashes_transformers_faithful_load(
+    list_valued_pii_checkpoint: Path,  # noqa: ARG001 - fixture installs the crashing checkpoint
+) -> None:
+    """ANCHOR (anti-false-green): the offline fake must reproduce the REAL transformers >= 4.57 crash.
+
+    A LIST-valued ``extra_special_tokens`` must raise ``AttributeError: 'list' object has no attribute
+    'keys'`` at ``from_pretrained`` — the exact pod failure. If this fake ever silently tolerated a
+    list, the regression below would pass for the wrong reason (a load that never crashed), so this
+    anchor pins the fake to the real accept/reject boundary.
+    """
+    import gliner2
+
+    with pytest.raises(AttributeError, match="'list' object has no attribute 'keys'"):
+        gliner2.GLiNER2.from_pretrained("fastino/GLiNER2-Guardrails-PII-Multi")
+
+
+def test_process_survives_list_valued_extra_special_tokens(
+    list_valued_pii_checkpoint: Path,
+) -> None:
+    """REGRESSION (dogfood-2b-process): redact must NOT crash on the default PII checkpoint.
+
+    With the checkpoint's ``extra_special_tokens`` stored as a list, the pre-fix load died with a
+    ``ProviderError`` (native ``AttributeError``) at the mandatory redact stage, so ``latence process``
+    exited non-zero and wrote no run dir. The shim coerces the cached config to the dict shape
+    transformers >= 4.57 requires before the load, so redact loads the model, completes, and yields a
+    record — and the cached config is now dict-shaped.
+    """
+    a_start = _TEXT.index("Alice")
+    _TokenizerLoadingGLiNER2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95},
+    ]
+
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)])))
+
+    # The load no longer crashes: redact runs end-to-end and the PII is masked.
+    assert isinstance(rec, ChunkRecord)
+    assert rec.masked_content is not None
+    assert "Alice" not in rec.masked_content
+
+    # The cached tokenizer_config was coerced list -> dict — the exact shape transformers 4.57
+    # iterates, keyed token->token (every struct token preserved as a model-specific special token).
+    patched = json.loads(list_valued_pii_checkpoint.read_text(encoding="utf-8"))
+    assert patched["extra_special_tokens"] == {token: token for token in _STRUCT_TOKENS}
