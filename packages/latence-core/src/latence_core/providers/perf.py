@@ -721,7 +721,7 @@ def resolve_intra_op_threads(
     import os  # noqa: PLC0415 - stdlib, only to read the core count when a cap is requested
 
     cores = os.cpu_count() or raw
-    return min(raw, cores)
+    return min(int(raw), int(cores))
 
 
 def cap_intra_op_threads(n: int | None, *, provider_name: str = "provider") -> int | None:
@@ -973,4 +973,4 @@ def _positive_int_knob(config: Mapping[str, Any], key: str, default: int) -> int
     if raw < 1:
         msg = f"invalid {key} {raw}: must be >= 1"
         raise ValueError(msg)
-    return raw
+    return int(raw)
