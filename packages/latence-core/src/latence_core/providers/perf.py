@@ -32,7 +32,7 @@ from latence_core.errors import ProviderError
 from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
 _log = logging.getLogger("latence.perf")
 
@@ -856,3 +856,121 @@ def apply_gliner_max_len(model: Any, max_len: int) -> None:
             "could not set model.config.max_len=%d (window bound skipped); model default applies",
             max_len,
         )
+
+
+# ---------------------------------------------------------------------------
+# Token-budget micro-batching (dogfood-2b-process) — decouple the model-FORWARD
+# tensor batch from the progress-cadence ``batch_size`` so a learned encoder's
+# single ``batch_extract_entities`` call can never demand an OOM-sized activation.
+# ---------------------------------------------------------------------------
+#
+# The gliner2 (mdeberta-v3) span-scorer pads a group of N texts into ONE tensor and scores every
+# span position, so its peak activation scales with (N × seq_len) — NOT with N alone. A whole
+# progress-``batch_size`` group (default 32) of long chunks therefore demands a single multi-GiB
+# allocation. Measured on a 32 GB Blackwell pod (dogfood-2b-process): batch_size=32 of ~768-token
+# chunks spiked ~+17 GiB and OOM'd at redact, while batch_size=4 peaked at 21.6 GiB and passed
+# cleanly. The cure is to split each forward's texts into MICRO-BATCHES bounded by a conservative
+# token budget (and a hard text-count cap), issue one native call per micro-batch, and concatenate
+# the per-text results IN ORDER — the output is batch-invariant, so this is byte-identical while the
+# peak allocation stays bounded for ANY configured ``batch_size``/``max_len``/label count.
+
+#: The hard cap on texts packed into ONE model forward. This is the PRIMARY safety bound: gliner2
+#: pads every text in a micro-batch up to the batch's longest sequence, so the padded worst case is
+#: ``max_texts × max_len`` regardless of how short the other texts are — a token budget summed over
+#: *actual* lengths cannot see that padding. Pinned to **4** because a batch of 4 × 768-token chunks
+#: peaked at 21.6 GiB and passed on the 32 GB pod (batch_size=32 OOM'd). With the default 768 window
+#: this bounds the padded forward to 4 × 768 = 3072 token-positions — the empirically-safe point.
+DEFAULT_MICROBATCH_MAX_TEXTS = 4
+
+#: The token budget for ONE model forward: the sum of the micro-batch's per-text token lengths
+#: (each capped at ``max_len``) may not exceed this. = 4 × :data:`DEFAULT_GLINER_MAX_LEN` (3072),
+#: the pod-safe "4 texts of 768 tokens" point. This SECONDARY bound bites when texts are long but
+#: ``max_len`` is raised above the default (where ``max_texts`` alone would allow a larger padded
+#: tensor); with the default window ``max_texts`` is the tighter of the two. Both default SAFE on a
+#: modest GPU; both are overridable per-provider (:func:`resolve_microbatch_bounds`) for a box with
+#: more or less VRAM, but the defaults never assume the 32 GB card.
+DEFAULT_MICROBATCH_TOKEN_BUDGET = 4 * DEFAULT_GLINER_MAX_LEN
+
+
+def estimate_token_length(text: str, max_len: int) -> int:
+    """A conservative, torch-free estimate of a text's model-token length, capped at ``max_len``.
+
+    The real mdeberta-v3 token count needs the tokenizer (torch/transformers), which
+    ``latence-core`` must not import (ADR-0016). This proxy assumes ~4 characters per token (the
+    usual English average) and rounds UP, then caps at ``max_len`` because the provider threads
+    ``max_len`` into the native call and the model truncates past it — so a text can contribute at
+    most ``max_len`` positions to the padded batch. Over-estimating only splits micro-batches
+    *smaller* (safer); the ``max_texts`` cap is the hard guarantee regardless of this estimate.
+    """
+    if not text:
+        return 0
+    return min(-(-len(text) // 4), max_len)
+
+
+def iter_token_budget_microbatches(
+    texts: Sequence[str],
+    *,
+    max_len: int,
+    max_texts: int = DEFAULT_MICROBATCH_MAX_TEXTS,
+    token_budget: int = DEFAULT_MICROBATCH_TOKEN_BUDGET,
+    token_len: Callable[[str, int], int] = estimate_token_length,
+) -> Iterator[tuple[int, int]]:
+    """Yield ``(start, end)`` half-open index ranges partitioning ``texts`` into safe micro-batches.
+
+    Greedy and order-preserving: it walks ``texts`` once and starts a new micro-batch when adding
+    the next text WOULD exceed either the ``max_texts`` count cap or the ``token_budget`` (summed
+    per-text ``token_len``, each capped at ``max_len``). Every micro-batch holds **at least one**
+    text, so a lone text whose own length exceeds the budget still goes through in a batch of one
+    (the reactive OOM backoff is the last-resort net for that pathological case). The ranges tile
+    ``texts`` exactly and in order, so the caller can slice ``texts[start:end]`` per micro-batch and
+    concatenate the per-text results back in input order — the output is batch-invariant.
+
+    Pure index arithmetic over string lengths — no torch, no model — so ``latence-core`` stays
+    torch-free at import (ADR-0016). ``max_texts``/``token_budget`` are clamped ``>= 1`` so a
+    degenerate bound degrades to a batch of one rather than looping forever.
+    """
+    max_texts = max(1, max_texts)
+    token_budget = max(1, token_budget)
+    n = len(texts)
+    start = 0
+    while start < n:
+        end = start
+        tokens = 0
+        while end < n:
+            length = token_len(texts[end], max_len)
+            # Always admit the first text of a micro-batch (even if it alone exceeds the budget);
+            # otherwise break before a text that would overflow the count OR the token budget.
+            if end > start and (end - start >= max_texts or tokens + length > token_budget):
+                break
+            tokens += length
+            end += 1
+        yield (start, end)
+        start = end
+
+
+def resolve_microbatch_bounds(config: Mapping[str, Any]) -> tuple[int, int]:
+    """Resolve the ``(max_texts, token_budget)`` micro-batch bounds from a Provider ``config``.
+
+    Reads the optional ``microbatch_max_texts`` / ``microbatch_token_budget`` knobs, defaulting to
+    the pod-safe module constants (:data:`DEFAULT_MICROBATCH_MAX_TEXTS` /
+    :data:`DEFAULT_MICROBATCH_TOKEN_BUDGET`). A non-int or ``< 1`` value is a ValueError the caller
+    surfaces as a ConfigError (the same fail-fast discipline as ``batch_size``/``max_len``). Pure
+    config read — no torch — so the default is safe on a modest GPU and an operator with more VRAM
+    can widen it explicitly, but nothing ever silently assumes the 32 GB card.
+    """
+    max_texts = _positive_int_knob(config, "microbatch_max_texts", DEFAULT_MICROBATCH_MAX_TEXTS)
+    token_budget = _positive_int_knob(
+        config, "microbatch_token_budget", DEFAULT_MICROBATCH_TOKEN_BUDGET
+    )
+    return max_texts, token_budget
+
+
+def _positive_int_knob(config: Mapping[str, Any], key: str, default: int) -> int:
+    raw = config.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        msg = f"invalid {key} {raw!r}: must be an int >= 1"
+        raise ValueError(msg)
+    if raw < 1:
+        msg = f"invalid {key} {raw}: must be >= 1"
+        raise ValueError(msg)
+    return raw

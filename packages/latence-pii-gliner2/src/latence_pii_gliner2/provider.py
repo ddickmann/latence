@@ -65,10 +65,12 @@ from latence_core.providers.perf import (
     inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
+    iter_token_budget_microbatches,
     load_gliner2_optimized,
     neutralize_torch_jit,
     resolve_gliner2_knob,
     resolve_max_len,
+    resolve_microbatch_bounds,
 )
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
@@ -149,10 +151,21 @@ class Gliner2PIIRedactor(AdapterBase):
             unreliable); this bounds the window explicitly. CAVEAT: the chunker counts in a
             DIFFERENT tokenizer, ~1.2× fewer tokens than mdeberta — keep the chunk cap ≤ ~640 for
             this 768 window; this guard is the hard backstop.
-        batch_size: int  — how many documents share ONE ``batch_extract_entities`` forward pass
-            (default from AdapterBase; the P8 autotuner overrides per-device). Purely
-            memory-shaping: the emitted RedactionRecords (PIISpans/masking/order) are
-            record-for-record identical for any positive batch size (W7). Must be ``>= 1``.
+        batch_size: int  — the flush cadence: how many documents are BUFFERED per flush (default
+            from AdapterBase; the P8 autotuner overrides per-device). It is NOT the model-forward
+            tensor size — a flush's texts are split into token-budget micro-batches
+            (``microbatch_max_texts`` / ``microbatch_token_budget``, below) before the native call,
+            so a large ``batch_size`` shapes the flush/GC granularity, never a single padded
+            activation (dogfood-2b-process). The emitted RedactionRecords (PIISpans/masking/order)
+            are record-for-record identical for any positive batch size (W7). Must be ``>= 1``.
+        microbatch_max_texts: int  — the hard cap on texts packed into ONE
+            ``batch_extract_entities`` forward (default 4, the pod-safe count). gliner2 pads a
+            micro-batch to its longest sequence, so this bounds the padded forward to
+            ``max_texts × max_len`` positions regardless of ``batch_size`` — the PRIMARY OOM guard.
+        microbatch_token_budget: int  — the token budget (summed per-text token lengths, each
+            capped at ``max_len``) for ONE forward (default 3072 = 4 × 768). The SECONDARY bound,
+            tighter than ``max_texts`` when ``max_len`` is raised. Both default safe on a modest
+            GPU; raise them only on a card with more VRAM.
         quantize: bool | 'auto'  — load fp16 via the gliner2 native ``quantize`` kwarg (W9,
             default ``auto`` → True on cuda / False on cpu). Pod-measured 2.83× at byte-identical
             PII. Guarded: a quantize fault degrades to a plain load, never a crash.
@@ -178,15 +191,27 @@ class Gliner2PIIRedactor(AdapterBase):
     Batching (W7, ADR-0036 §1 / ADR-0033): GLiNER2 (mdeberta-v3) is an ENCODER, so a per-document
     ``extract_entities`` loop under-feeds the GPU. This Provider buffers up to ``batch_size``
     documents and, on flush, GROUPS the detect-needing docs by their effective label set (one label
-    set per ``batch_extract_entities`` call) and runs ONE ``model.batch_extract_entities(texts,
-    labels, threshold=…, include_spans=True, include_confidence=True)`` forward pass per group (the
-    batched entry point — ``hasattr``-guarded here and pod-Gate-0 asserted; offline-unverifiable so
-    not yet pod-confirmed) — ``ceil(N/batch_size)`` calls when all docs share a label set, not N —
-    mapping each per-text result back to its document **by identity**. Documents that a policy SKIPS
-    or that are near-empty need no model call and are emitted clean, in input order. The
-    per-document policy resolution, span building, masking, and Provenance carry are UNCHANGED; the
-    in-flight
-    buffer is bounded to ``batch_size`` (never the whole corpus, ADR-0033).
+    set per ``batch_extract_entities`` call), then splits each group's texts into **token-budget
+    micro-batches** and runs ONE ``model.batch_extract_entities(texts, labels, threshold=…,
+    include_spans=True, include_confidence=True, max_len=…)`` forward pass PER MICRO-BATCH (the
+    batched entry point — ``hasattr``-guarded here and pod-Gate-0 asserted), concatenating each
+    micro-batch's per-text results IN ORDER and mapping each back to its document **by identity**.
+
+    dogfood-2b-process: the micro-batch step is the OOM cure. gliner2 pads a group of N texts into
+    ONE tensor and scores every span position, so the peak activation scales with (N × seq_len) —
+    a whole ``batch_size`` group of long chunks demands a single multi-GiB allocation (measured: 32
+    chunks × ~768 tokens → ~+17 GiB spike → OOM on a 32 GB Blackwell; 4 chunks peaked at 21.6 GiB
+    and passed). Splitting each forward by a conservative token budget + text-count cap
+    (:func:`~latence_core.providers.perf.iter_token_budget_microbatches`) bounds the padded
+    activation for ANY ``batch_size``/``max_len``, PROACTIVELY — the reactive
+    :meth:`_batch_extract` OOM split-on-fault stays as a last-resort net that now rarely fires.
+    Because the output is batch-size-INVARIANT (W7 — same spans/masking/order for any positive
+    batch), micro-batching is byte-identical.
+
+    Documents that a policy SKIPS or that are near-empty need no model call and are emitted clean,
+    in input order. The per-document policy resolution, span building, masking, and Provenance carry
+    are UNCHANGED; the in-flight buffer is bounded to ``batch_size`` (never the whole corpus,
+    ADR-0033).
     """
 
     @classmethod
@@ -269,6 +294,19 @@ class Gliner2PIIRedactor(AdapterBase):
         # Validate the batch_size knob eagerly (fail-fast at construction like the twin providers)
         # even though the batched call reads it lazily via AdapterBase.batch_size() (W7).
         self.batch_size()
+        # dogfood-2b-process: resolve the token-budget micro-batch bounds that DECOUPLE the model
+        # forward tensor from the progress-cadence ``batch_size``. ``batch_size`` buffers docs for
+        # the flush; each flush then splits its texts into micro-batches bounded by BOTH a text
+        # count and a token budget (perf-seam constants, pod-safe defaults) so a single
+        # ``batch_extract_entities`` call can never demand an OOM-sized padded activation, for ANY
+        # configured ``batch_size``/``max_len``. Validated eagerly (fail-fast) like the other knobs.
+        try:
+            self._microbatch_max_texts, self._microbatch_token_budget = resolve_microbatch_bounds(
+                self._config
+            )
+        except ValueError as exc:
+            msg = f"{self.provider_name}: {exc}"
+            raise ConfigError(msg) from exc
         # Validate the W9 quantize/compile knobs eagerly too (fail-fast): an invalid value is an
         # operator ConfigError at construction, not a native fault buried in the lazy load.
         self._validate_perf_knobs()
@@ -569,20 +607,30 @@ class Gliner2PIIRedactor(AdapterBase):
             for pending in detect:
                 groups.setdefault(pending.labels, []).append(pending)
             for labels, pendings in groups.items():
-                # Re-fetch per group so a prior group's W9 uncompiled reload (which updates
-                # self._model) is picked up here, not the stale compiled handle.
-                model = self._load_model()
                 texts = [p.text for p in pendings]
-                # ONE forward pass over the group (results[i] is the per-label dict for texts[i]),
-                # with the W9 inference-time compile guard: a lazy torch.compile fault degrades to
-                # the uncompiled model and retries, never a crash.
-                results_list = self._batch_extract(model, texts, list(labels))
-                if len(results_list) != len(pendings):
-                    msg = (
-                        "redaction.gliner2: batch_extract_entities returned "
-                        f"{len(results_list)} results for a batch of {len(pendings)} texts."
-                    )
-                    raise ValueError(msg)
+                # dogfood-2b-process: split the group's texts into token-budget MICRO-BATCHES and
+                # issue one ``batch_extract_entities`` call per micro-batch, concatenating results
+                # in order. This decouples the model-forward tensor from the progress-cadence
+                # ``batch_size`` — a whole group of long chunks no longer pads into ONE multi-GiB
+                # activation (the measured OOM), for ANY configured ``batch_size``/``max_len``. The
+                # output is batch-invariant (same spans/order), so this is byte-identical.
+                results_list: list[Any] = []
+                for start, end in iter_token_budget_microbatches(
+                    texts,
+                    max_len=self._max_len,
+                    max_texts=self._microbatch_max_texts,
+                    token_budget=self._microbatch_token_budget,
+                ):
+                    # Re-fetch the model per micro-batch so a prior micro-batch's W9 uncompiled
+                    # reload (which updates self._model) is picked up here, not the stale handle.
+                    micro = self._batch_extract(self._load_model(), texts[start:end], list(labels))
+                    if len(micro) != end - start:
+                        msg = (
+                            "redaction.gliner2: batch_extract_entities returned "
+                            f"{len(micro)} results for a micro-batch of {end - start} texts."
+                        )
+                        raise ValueError(msg)
+                    results_list.extend(micro)
                 for pending, raw in zip(pendings, results_list, strict=True):
                     raw_by_chunk[id(pending)] = raw
         for pending in buffer:

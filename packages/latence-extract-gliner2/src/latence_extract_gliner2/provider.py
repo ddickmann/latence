@@ -154,6 +154,13 @@ class Gliner2FusedExtractor:
             batch tensor; the emitted mentions AND relations (offsets/labels/endpoints/order) are
             record-for-record identical for any positive batch size. Must be ``>= 1``. The clamp
             guarantees a large corpus always logs progress often enough to never *appear* hung.
+            (dogfood-2b-process: because the forward is single-chunk BY CONSTRUCTION, this extractor
+            has no padded multi-text activation to bound — so it needs no micro-batching. Its twin
+            ``redaction.gliner2`` DOES pack multiple docs into one ``batch_extract_entities`` call,
+            so it reaches the SAME bounded-forward guarantee the other way: by splitting each
+            forward into token-budget micro-batches via
+            :func:`~latence_core.providers.perf.iter_token_budget_microbatches`. Both keep
+            ``batch_size`` a genuine progress/flush knob, decoupled from the forward.)
         intra_op_threads: int  — cap on torch **intra-op** threads applied at load (W9-scaling,
             default 8; ``<= 0`` disables the cap). On a many-core host gliner2's internal batching
             oversubscribes torch's default ``os.cpu_count()`` intra-op pool to ~cpu_count threads —

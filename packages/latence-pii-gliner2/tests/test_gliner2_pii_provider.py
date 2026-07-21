@@ -35,6 +35,11 @@ from latence_core.contracts import (
     RedactionAction,
 )
 from latence_core.errors import ProviderError
+from latence_core.providers.perf import (
+    DEFAULT_MICROBATCH_MAX_TEXTS,
+    DEFAULT_MICROBATCH_TOKEN_BUDGET,
+    estimate_token_length,
+)
 from latence_pii_gliner2 import Gliner2PIIRedactor
 from latence_pii_gliner2._compat import SUPPORTED_SPEC
 
@@ -729,6 +734,180 @@ def test_batch_size_must_be_positive_int() -> None:
 
     with pytest.raises(ConfigError, match="batch_size must be >= 1"):
         Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 0})
+
+
+# --- dogfood-2b-process: token-budget micro-batching decouples the forward from batch_size -----
+
+
+class _RecordingGLiNER2(_FakeGLiNER2):
+    """A faithful :class:`_FakeGLiNER2` that ALSO records the texts of every batched forward.
+
+    Instance-level ``calls`` (one entry per ``batch_extract_entities`` call = the exact list of
+    texts fed to it) lets the regression test read back BOTH the num_texts and the summed token
+    length of every native forward, and prove the provider splits a large ``batch_size`` group into
+    token-budget MICRO-BATCHES instead of one giant padded tensor (the measured 32 GB OOM). It
+    delegates to the real fake for behaviour (per-label dict shape, threshold/label filtering, the
+    OOM/compile hooks), so it rejects exactly what the real gliner2 API rejects.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: one entry per batched forward: the texts handed to it, in call order.
+        self.calls: list[list[str]] = []
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        self.calls.append(list(texts))
+        return super().batch_extract_entities(
+            texts,
+            entity_types,
+            batch_size,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )
+
+
+def _long_distinct_chunks(n: int, body_chars: int) -> list[ChunkRecord]:
+    """N distinct chunks, each padded to ``body_chars`` so its estimated token length is large.
+
+    Like :func:`_distinct_chunks` (a distinct ``PersonNNN`` at chunk-offset ``i`` → distinct spans,
+    so a mis-ordered micro-batch map is caught), but each chunk carries a long body — enough that a
+    whole ``batch_size`` group would pad into an OOM-sized activation without micro-batching.
+    """
+    filler = " lorem ipsum dolor sit amet consectetur"
+    chunks: list[ChunkRecord] = []
+    for i in range(n):
+        head = ("." * i) + f"Person{i:03d} was here."
+        pad = (filler * (body_chars // len(filler) + 1))[:body_chars]
+        chunks.append(
+            _chunk(
+                head + pad,
+                record_id=f"doc{i}#chunk:0",
+                document_record_id=f"doc{i}",
+                index=0,
+            )
+        )
+    return chunks
+
+
+@pytest.fixture()
+def recording_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_RecordingGLiNER2]:
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_RecordingGLiNER2, _PINNED_GLINER2)
+    )
+    # Reset the inherited class-level knobs (a prior test may have set them on the base class).
+    _RecordingGLiNER2.entities = []
+    _RecordingGLiNER2.per_text = None
+    _RecordingGLiNER2.raise_on_extract = False
+    _RecordingGLiNER2.last_kwargs = {}
+    _RecordingGLiNER2.last_max_len = None
+    _RecordingGLiNER2.raise_on_optimized_load = False
+    _RecordingGLiNER2.compiled_forward_raises = False
+    _RecordingGLiNER2.oom_above_batch = None
+    _RecordingGLiNER2.oom_always = False
+    return _RecordingGLiNER2
+
+
+def test_large_batch_size_split_into_token_budget_microbatches(
+    recording_gliner2: type[_RecordingGLiNER2],
+) -> None:
+    """dogfood-2b-process: a large ``batch_size`` group is split into token-budget micro-batches.
+
+    The confirmed OOM: the provider fed a whole ``batch_size`` group (default 32) of long chunks
+    into ONE ``batch_extract_entities`` call; gliner2 padded them into a single tensor whose
+    span-scoring activation (~num_texts × seq_len) demanded ~17 GiB and OOM'd on a 32 GB card. The
+    cure decouples the forward from the progress ``batch_size``: each forward carries a MICRO-BATCH
+    bounded by BOTH a text-count cap and a token budget. This test feeds a large ``batch_size`` (32)
+    of long chunks and asserts (a) MULTIPLE forwards happened, (b) NO forward exceeded either bound,
+    and (c) the output is record-for-record identical to the one-chunk-per-call reference.
+
+    It FAILS on the pre-fix code (one giant call of all 10 texts — 10 > max_texts and
+    10 × 768 tokens ≫ the budget), which is what makes it an anti-false-green regression.
+    """
+    chunks = _long_distinct_chunks(10, body_chars=4000)
+    recording_gliner2.per_text = _per_text_person_map(chunks)
+    cfg = {"pii_labels": ["person"], "batch_size": 32}
+
+    provider = Gliner2PIIRedactor(cfg)
+    batched = list(provider.redact(chunks))
+    calls = provider._model.calls
+
+    # (a) The whole group did NOT go through one giant forward — it was micro-batched.
+    assert len(calls) >= 2, f"expected multiple micro-batch forwards, got {len(calls)}"
+    max_len = 768  # the default gliner window the provider threads into the call
+    for texts in calls:
+        # (b1) the text-count cap — the PRIMARY bound on the padded worst case (max_texts × max_len)
+        assert len(texts) <= DEFAULT_MICROBATCH_MAX_TEXTS
+        # (b2) the token budget — summed per-text token length (each capped at max_len)
+        total = sum(estimate_token_length(t, max_len) for t in texts)
+        assert total <= DEFAULT_MICROBATCH_TOKEN_BUDGET
+    # every chunk was still scanned exactly once (the micro-batches tile the group in order)
+    assert sum(len(texts) for texts in calls) == len(chunks)
+
+    # (c) batch-invariance: identical to the one-chunk-per-forward path, record for record.
+    unbatched = [
+        r
+        for c in chunks
+        for r in Gliner2PIIRedactor({**cfg, "batch_size": 1}).redact([c])
+    ]
+    assert len(batched) == len(unbatched) == 10
+    for b, u in zip(batched, unbatched, strict=True):
+        assert b.record_id == u.record_id
+        assert b.masked_content == u.masked_content
+        assert [(s.char_start, s.char_end, s.pii_type) for s in b.pii_spans] == [
+            (s.char_start, s.char_end, s.pii_type) for s in u.pii_spans
+        ]
+    for i, rec in enumerate(batched):
+        assert rec.masked_content is not None
+        assert f"Person{i:03d}" not in rec.masked_content
+        assert "[PERSON]" in rec.masked_content
+
+
+def test_token_budget_bites_before_count_when_max_len_raised(
+    recording_gliner2: type[_RecordingGLiNER2],
+) -> None:
+    """The token budget (not only the count cap) bounds the forward when ``max_len`` is raised.
+
+    With a larger window each long chunk contributes more tokens, so the token budget forces
+    micro-batches SMALLER than ``max_texts`` — proving the budget is a real, independent bound (the
+    ``max_texts`` cap alone would let a bigger padded tensor through at a raised window).
+    """
+    chunks = _long_distinct_chunks(4, body_chars=12000)
+    recording_gliner2.per_text = _per_text_person_map(chunks)
+    # max_len 2048 → each chunk estimates at ~2048 tokens, so 2 per forward already exceed the 3072
+    # budget → micro-batches of ONE, well below the max_texts=4 count cap.
+    provider = Gliner2PIIRedactor(
+        {"pii_labels": ["person"], "batch_size": 32, "max_len": 2048}
+    )
+    list(provider.redact(chunks))
+    calls = provider._model.calls
+
+    assert len(calls) >= 2
+    assert max(len(texts) for texts in calls) < DEFAULT_MICROBATCH_MAX_TEXTS
+    for texts in calls:
+        total = sum(estimate_token_length(t, 2048) for t in texts)
+        assert total <= DEFAULT_MICROBATCH_TOKEN_BUDGET
+
+
+def test_microbatch_bound_config_must_be_positive_int() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="microbatch_max_texts"):
+        Gliner2PIIRedactor({"pii_labels": ["person"], "microbatch_max_texts": 0})
+    with pytest.raises(ConfigError, match="microbatch_token_budget"):
+        Gliner2PIIRedactor({"pii_labels": ["person"], "microbatch_token_budget": -1})
 
 
 class _NoBatchGLiNER2:
