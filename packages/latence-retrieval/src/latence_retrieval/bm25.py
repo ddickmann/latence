@@ -50,14 +50,24 @@ state across calls, so identical inputs always yield an identical rescored order
 
 from __future__ import annotations
 
+import json
 import math
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from latence_retrieval.contracts import Candidate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from os import PathLike
+
+# The filename the Export stage writes the corpus-level BM25 term statistics to
+# (``latence_core.bm25.Bm25Stats.to_artifact``). This package is deliberately independent of
+# `latence-core` (it holds no index and runs no pipeline, ADR-0048), so the agreement on this
+# artifact's name + shape is held here by :meth:`Bm25Rescorer.from_export` and its test, not an
+# import — exactly as the tokenizer agreement on `_TOKEN` below is.
+_BM25_STATS_FILENAME = "bm25-stats.json"
 
 # Unicode alphanumeric runs (underscore excluded). This MUST stay the same term unit the index-side
 # tokenizer emits (`latence_core.bm25.RegexWordTokenizer`, the one the `enterprise-sota` setup
@@ -146,6 +156,86 @@ class Bm25Rescorer:
         self._top_k: int | None = top_k
 
         self._supplied_stats = self._parse_stats(cfg.get("stats"))
+
+    @classmethod
+    def from_export(
+        cls,
+        export_dir: str | PathLike[str],
+        config: dict[str, Any] | None = None,
+    ) -> Bm25Rescorer:
+        """Build a rescorer from a pipeline export's ``bm25-stats.json`` — **no re-tokenisation**.
+
+        The Export stage writes the corpus-level BM25 term statistics to
+        ``<export_dir>/bm25-stats.json`` (:meth:`latence_core.bm25.Bm25Stats.to_artifact`): the
+        corpus scalars ``doc_count`` (N) and ``avgdl`` plus one ``{term, df, idf}`` entry per
+        vocabulary term. This reads **only that compact stats file** and constructs a rescorer whose
+        supplied ``stats`` reproduce the corpus's *global* BM25 exactly — the same numbers the index
+        computed — without re-reading or re-tokenising the corpus (the postings parquet is never
+        touched: global IDF needs only ``doc_count`` + per-term ``df``). The artifact's ``avgdl``
+        maps to the rescorer's ``avg_doc_len`` and its ``terms[].df`` fold into ``doc_freq``; the
+        stored per-term ``idf`` is *derived*, so it is not carried across — the rescorer recomputes
+        the identical Lucene/Robertson IDF from ``doc_count`` + ``df``.
+
+        ``export_dir`` may be the export directory (the file ``bm25-stats.json`` is joined onto it)
+        or the stats file itself. ``config`` may carry the usual ``k1`` / ``b`` / ``top_k`` knobs;
+        passing a ``stats`` key in it is rejected (the statistics come from the export, never two
+        sources at once). Reading is stateless: the returned rescorer holds only the parsed
+        statistics (ADR-0048), never the file handle or the corpus. A missing, unreadable, or
+        malformed artifact raises :class:`ValueError` at construction — never a silent,
+        quietly-wrong rescore at query time (ADR-0034).
+        """
+        base = Path(export_dir)
+        stats_path = base if base.is_file() else base / _BM25_STATS_FILENAME
+        try:
+            raw_text = stats_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            msg = f"bm25 from_export: could not read the stats artifact at '{stats_path}': {exc}."
+            raise ValueError(msg) from exc
+        try:
+            artifact = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            msg = f"bm25 from_export: '{stats_path}' is not valid JSON: {exc}."
+            raise ValueError(msg) from exc
+        if not isinstance(artifact, dict):
+            got = type(artifact).__name__
+            msg = f"bm25 from_export: '{stats_path}' must hold a JSON object, got {got}."
+            raise ValueError(msg)
+
+        terms = artifact.get("terms")
+        if not isinstance(terms, list):
+            msg = f"bm25 from_export: '{stats_path}' 'terms' must be a list, got {terms!r}."
+            raise ValueError(msg)
+        doc_freq: dict[str, int] = {}
+        for entry in terms:
+            if not isinstance(entry, dict):
+                msg = f"bm25 from_export: each 'terms' entry must be an object, got {entry!r}."
+                raise ValueError(msg)
+            term = entry.get("term")
+            df = entry.get("df")
+            if not isinstance(term, str) or not term:
+                msg = f"bm25 from_export: a 'terms' entry has a non-string/empty 'term': {entry!r}."
+                raise ValueError(msg)
+            if isinstance(df, bool) or not isinstance(df, int):
+                msg = f"bm25 from_export: 'terms' entry {term!r} has a non-integer 'df': {df!r}."
+                raise ValueError(msg)
+            doc_freq[term] = df
+
+        merged = dict(config or {})
+        if "stats" in merged:
+            msg = (
+                "bm25 from_export: the corpus statistics come from the export; do not also pass a "
+                "'stats' block in config."
+            )
+            raise ValueError(msg)
+        # Hand the raw scalars straight to _parse_stats so the export path shares the ONE validation
+        # gate (doc_count int >= 1, avg_doc_len > 0, every df in [0, doc_count]) — a malformed or
+        # empty-corpus artifact fails loudly here, never silently at query time.
+        merged["stats"] = {
+            "doc_count": artifact.get("doc_count"),
+            "avg_doc_len": artifact.get("avgdl"),
+            "doc_freq": doc_freq,
+        }
+        return cls(merged)
 
     @staticmethod
     def _parse_stats(raw: object) -> _CorpusStats | None:

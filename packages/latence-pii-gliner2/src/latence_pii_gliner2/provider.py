@@ -60,12 +60,17 @@ from latence_core.induced import LabelSlot, effective_labels
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
+    empty_cuda_cache,
     ensure_gliner2_on_cuda,
+    inference_context,
     is_compile_backend_failure,
+    is_cuda_oom,
+    iter_token_budget_microbatches,
     load_gliner2_optimized,
     neutralize_torch_jit,
     resolve_gliner2_knob,
     resolve_max_len,
+    resolve_microbatch_bounds,
 )
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
@@ -80,6 +85,7 @@ from latence_pii_gliner2._compat import (
     require_batched_entity_api,
     require_supported_gliner2,
 )
+from latence_pii_gliner2._tokenizer_compat import coerce_list_extra_special_tokens
 
 _log = logging.getLogger("latence.provider.gliner2_pii")
 
@@ -145,10 +151,21 @@ class Gliner2PIIRedactor(AdapterBase):
             unreliable); this bounds the window explicitly. CAVEAT: the chunker counts in a
             DIFFERENT tokenizer, ~1.2× fewer tokens than mdeberta — keep the chunk cap ≤ ~640 for
             this 768 window; this guard is the hard backstop.
-        batch_size: int  — how many documents share ONE ``batch_extract_entities`` forward pass
-            (default from AdapterBase; the P8 autotuner overrides per-device). Purely
-            memory-shaping: the emitted RedactionRecords (PIISpans/masking/order) are
-            record-for-record identical for any positive batch size (W7). Must be ``>= 1``.
+        batch_size: int  — the flush cadence: how many documents are BUFFERED per flush (default
+            from AdapterBase; the P8 autotuner overrides per-device). It is NOT the model-forward
+            tensor size — a flush's texts are split into token-budget micro-batches
+            (``microbatch_max_texts`` / ``microbatch_token_budget``, below) before the native call,
+            so a large ``batch_size`` shapes the flush/GC granularity, never a single padded
+            activation (dogfood-2b-process). The emitted RedactionRecords (PIISpans/masking/order)
+            are record-for-record identical for any positive batch size (W7). Must be ``>= 1``.
+        microbatch_max_texts: int  — the hard cap on texts packed into ONE
+            ``batch_extract_entities`` forward (default 4, the pod-safe count). gliner2 pads a
+            micro-batch to its longest sequence, so this bounds the padded forward to
+            ``max_texts × max_len`` positions regardless of ``batch_size`` — the PRIMARY OOM guard.
+        microbatch_token_budget: int  — the token budget (summed per-text token lengths, each
+            capped at ``max_len``) for ONE forward (default 3072 = 4 × 768). The SECONDARY bound,
+            tighter than ``max_texts`` when ``max_len`` is raised. Both default safe on a modest
+            GPU; raise them only on a card with more VRAM.
         quantize: bool | 'auto'  — load fp16 via the gliner2 native ``quantize`` kwarg (W9,
             default ``auto`` → True on cuda / False on cpu). Pod-measured 2.83× at byte-identical
             PII. Guarded: a quantize fault degrades to a plain load, never a crash.
@@ -174,15 +191,27 @@ class Gliner2PIIRedactor(AdapterBase):
     Batching (W7, ADR-0036 §1 / ADR-0033): GLiNER2 (mdeberta-v3) is an ENCODER, so a per-document
     ``extract_entities`` loop under-feeds the GPU. This Provider buffers up to ``batch_size``
     documents and, on flush, GROUPS the detect-needing docs by their effective label set (one label
-    set per ``batch_extract_entities`` call) and runs ONE ``model.batch_extract_entities(texts,
-    labels, threshold=…, include_spans=True, include_confidence=True)`` forward pass per group (the
-    batched entry point — ``hasattr``-guarded here and pod-Gate-0 asserted; offline-unverifiable so
-    not yet pod-confirmed) — ``ceil(N/batch_size)`` calls when all docs share a label set, not N —
-    mapping each per-text result back to its document **by identity**. Documents that a policy SKIPS
-    or that are near-empty need no model call and are emitted clean, in input order. The
-    per-document policy resolution, span building, masking, and Provenance carry are UNCHANGED; the
-    in-flight
-    buffer is bounded to ``batch_size`` (never the whole corpus, ADR-0033).
+    set per ``batch_extract_entities`` call), then splits each group's texts into **token-budget
+    micro-batches** and runs ONE ``model.batch_extract_entities(texts, labels, threshold=…,
+    include_spans=True, include_confidence=True, max_len=…)`` forward pass PER MICRO-BATCH (the
+    batched entry point — ``hasattr``-guarded here and pod-Gate-0 asserted), concatenating each
+    micro-batch's per-text results IN ORDER and mapping each back to its document **by identity**.
+
+    dogfood-2b-process: the micro-batch step is the OOM cure. gliner2 pads a group of N texts into
+    ONE tensor and scores every span position, so the peak activation scales with (N × seq_len) —
+    a whole ``batch_size`` group of long chunks demands a single multi-GiB allocation (measured: 32
+    chunks × ~768 tokens → ~+17 GiB spike → OOM on a 32 GB Blackwell; 4 chunks peaked at 21.6 GiB
+    and passed). Splitting each forward by a conservative token budget + text-count cap
+    (:func:`~latence_core.providers.perf.iter_token_budget_microbatches`) bounds the padded
+    activation for ANY ``batch_size``/``max_len``, PROACTIVELY — the reactive
+    :meth:`_batch_extract` OOM split-on-fault stays as a last-resort net that now rarely fires.
+    Because the output is batch-size-INVARIANT (W7 — same spans/masking/order for any positive
+    batch), micro-batching is byte-identical.
+
+    Documents that a policy SKIPS or that are near-empty need no model call and are emitted clean,
+    in input order. The per-document policy resolution, span building, masking, and Provenance carry
+    are UNCHANGED; the in-flight buffer is bounded to ``batch_size`` (never the whole corpus,
+    ADR-0033).
     """
 
     @classmethod
@@ -265,6 +294,19 @@ class Gliner2PIIRedactor(AdapterBase):
         # Validate the batch_size knob eagerly (fail-fast at construction like the twin providers)
         # even though the batched call reads it lazily via AdapterBase.batch_size() (W7).
         self.batch_size()
+        # dogfood-2b-process: resolve the token-budget micro-batch bounds that DECOUPLE the model
+        # forward tensor from the progress-cadence ``batch_size``. ``batch_size`` buffers docs for
+        # the flush; each flush then splits its texts into micro-batches bounded by BOTH a text
+        # count and a token budget (perf-seam constants, pod-safe defaults) so a single
+        # ``batch_extract_entities`` call can never demand an OOM-sized padded activation, for ANY
+        # configured ``batch_size``/``max_len``. Validated eagerly (fail-fast) like the other knobs.
+        try:
+            self._microbatch_max_texts, self._microbatch_token_budget = resolve_microbatch_bounds(
+                self._config
+            )
+        except ValueError as exc:
+            msg = f"{self.provider_name}: {exc}"
+            raise ConfigError(msg) from exc
         # Validate the W9 quantize/compile knobs eagerly too (fail-fast): an invalid value is an
         # operator ConfigError at construction, not a native fault buried in the lazy load.
         self._validate_perf_knobs()
@@ -347,6 +389,14 @@ class Gliner2PIIRedactor(AdapterBase):
         # The import is resolved OUTSIDE the guard so a missing-dep ImportError surfaces as the
         # clear "pip install latence-pii-gliner2" error, not a wrapped ProviderError.
         gliner2_cls = self._gliner2_cls()
+        # dogfood-2b-process: the default PII checkpoint's tokenizer_config.json stores
+        # ``extra_special_tokens`` as a LIST, which transformers >= 4.57 (pulled transitively via
+        # gliner2[local], within this Provider's allowed range) rejects at load with a native
+        # ``AttributeError: 'list' object has no attribute 'keys'`` — killing the whole pipeline
+        # before any run dir is written. Coerce it to the dict shape 4.57 requires BEFORE the load
+        # (guarded, best-effort, byte-identical tokenization). Mirrors the glinker backend's
+        # _patch_tokenizer_config precedent; a dict-shaped checkpoint is an idempotent no-op.
+        coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
         with self.guard("load_model"):
             self._model = load_gliner2_optimized(
                 gliner2_cls.from_pretrained,
@@ -390,6 +440,9 @@ class Gliner2PIIRedactor(AdapterBase):
             "model (quantize kept) — throughput only, never a crash"
         )
         gliner2_cls = self._gliner2_cls()
+        # Idempotent no-op after _load_model already patched the cached config (dogfood-2b); kept
+        # for symmetry so this reload path is never coupled to a prior patch having run.
+        coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
         with self.guard("load_model"):
             self._model = load_gliner2_optimized(
                 gliner2_cls.from_pretrained,
@@ -407,48 +460,75 @@ class Gliner2PIIRedactor(AdapterBase):
         )
         return self._model
 
-    def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
-        """One batched forward (``batch_extract_entities``) with the W9 inference compile guard.
+    def _extract_once(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
+        """A single ``batch_extract_entities`` forward under :meth:`AdapterBase.guard` (typed).
 
-        ``labels`` is this group's effective label set (``config ∪ induced``, W12). The forward runs
-        under :meth:`AdapterBase.guard` (native fault → typed
-        :class:`~latence_core.errors.ProviderError`, no PII leak). BUT ``torch.compile`` compiles
-        lazily on the first forward, so a backend that cannot compile the model raises a
-        ``BackendCompilerFailed`` (dynamo/inductor) HERE, not at load. This wrapper catches exactly
-        that class of fault (:func:`~latence_core.providers.perf.is_compile_backend_failure`) BEFORE
-        the guard maps it, re-loads the uncompiled model ONCE (:meth:`_reload_uncompiled`; quantize
-        kept), and retries the batch — so a bad compile costs only throughput, never a crash. Any
-        OTHER native fault is surfaced through the guard as before (typed, no PII).
+        ``results[i]`` is the per-label dict for ``texts[i]``. The guard maps any native fault to a
+        typed :class:`~latence_core.errors.ProviderError` carrying no record content / PII.
+
+        The forward runs INSIDE :func:`~latence_core.providers.perf.inference_context`
+        (``torch.inference_mode()``): a redaction-only encoder never backpropagates, so building an
+        autograd graph and pinning its activations alive would only ACCUMULATE VRAM run-over-run to
+        a CUDA OOM (dogfood-2b-process). Under inference mode no graph is built and each forward's
+        activations free immediately — same spans, bounded memory (torch-free-safe offline).
+        """
+        with self.guard("batch_extract_entities"), inference_context():
+            return list(
+                model.batch_extract_entities(
+                    texts,
+                    labels,
+                    threshold=self._threshold,
+                    include_spans=True,
+                    include_confidence=True,
+                    max_len=self._max_len,
+                )
+            )
+
+    def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
+        """One batched forward with the W9 compile guard AND a CUDA-OOM micro-batch backoff.
+
+        ``labels`` is this group's effective label set (``config ∪ induced``, W12).
+
+        Two inference-time faults are recovered here so ``latence process`` does not die mid-run and
+        forfeit the whole run dir (the redaction floor, ADR-0044, must hold — no chunk is ever
+        dropped or emitted un-scanned):
+
+        * **compile fault** — ``torch.compile`` compiles lazily on the first forward, so a backend
+          that cannot compile raises a ``BackendCompilerFailed`` (dynamo/inductor) HERE, not at load
+          (:func:`~latence_core.providers.perf.is_compile_backend_failure`). The provider re-loads
+          the uncompiled model ONCE (:meth:`_reload_uncompiled`; quantize kept) and retries.
+
+        * **CUDA OOM** (dogfood-2b-process) — GLiNER2's span-scoring activation for a whole group of
+          long chunks can demand a single multi-GiB allocation the GPU cannot satisfy (pod: 6.28 GiB
+          on a 32 GB Blackwell already 27 GB resident), surfacing a native ``OutOfMemoryError``
+          (:func:`~latence_core.providers.perf.is_cuda_oom`). Because the emitted RedactionRecords
+          are **batch-size-invariant** (W7 — same spans/masking/order for any positive batch size),
+          the group is split in half and each half retried recursively after a best-effort cache
+          release; the activation scales with the batch dimension, so halving shrinks the peak
+          allocation until it fits. A batch of ONE that still OOMs is genuinely unrecoverable on
+          this hardware — it surfaces as a typed ``ProviderError`` (no fake green, no dropped
+          chunk).
+
+        Any OTHER native fault is surfaced through the guard as before (typed, no PII).
         """
         try:
-            with self.guard("batch_extract_entities"):
-                # ONE forward pass over the group; results[i] is the per-label dict for texts[i].
-                return list(
-                    model.batch_extract_entities(
-                        texts,
-                        labels,
-                        threshold=self._threshold,
-                        include_spans=True,
-                        include_confidence=True,
-                        max_len=self._max_len,
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001 - intercept a compile fault before surfacing
-            # ``guard`` wraps a compile fault as ProviderError; the predicate walks the cause chain
-            # to find the original BackendCompilerFailed underneath.
+            return self._extract_once(model, texts, labels)
+        except Exception as exc:  # noqa: BLE001 - intercept recoverable faults before surfacing
+            # ``guard`` wraps the native fault as ProviderError; both predicates walk the cause
+            # chain to find the original BackendCompilerFailed / OutOfMemoryError underneath.
             if not self._compile_disabled and is_compile_backend_failure(exc):
                 model = self._reload_uncompiled()
-                with self.guard("batch_extract_entities"):
-                    return list(
-                        model.batch_extract_entities(
-                            texts,
-                            labels,
-                            threshold=self._threshold,
-                            include_spans=True,
-                            include_confidence=True,
-                            max_len=self._max_len,
-                        )
-                    )
+                return self._extract_once(model, texts, labels)
+            if is_cuda_oom(exc) and len(texts) > 1:
+                # Split the group and retry smaller — byte-identical output, lower peak VRAM. Free
+                # the OOM'd batch's fragmented blocks first so the smaller retry allocates cleanly.
+                empty_cuda_cache(provider_name=self.provider_name)
+                mid = len(texts) // 2
+                # Re-fetch the current model each half so a compile-reload inside one half is picked
+                # up by the next (self._model is the source of truth after _reload_uncompiled).
+                left = self._batch_extract(self._load_model(), texts[:mid], labels)
+                right = self._batch_extract(self._load_model(), texts[mid:], labels)
+                return left + right
             raise
 
     # -- redaction ----------------------------------------------------------
@@ -527,20 +607,30 @@ class Gliner2PIIRedactor(AdapterBase):
             for pending in detect:
                 groups.setdefault(pending.labels, []).append(pending)
             for labels, pendings in groups.items():
-                # Re-fetch per group so a prior group's W9 uncompiled reload (which updates
-                # self._model) is picked up here, not the stale compiled handle.
-                model = self._load_model()
                 texts = [p.text for p in pendings]
-                # ONE forward pass over the group (results[i] is the per-label dict for texts[i]),
-                # with the W9 inference-time compile guard: a lazy torch.compile fault degrades to
-                # the uncompiled model and retries, never a crash.
-                results_list = self._batch_extract(model, texts, list(labels))
-                if len(results_list) != len(pendings):
-                    msg = (
-                        "redaction.gliner2: batch_extract_entities returned "
-                        f"{len(results_list)} results for a batch of {len(pendings)} texts."
-                    )
-                    raise ValueError(msg)
+                # dogfood-2b-process: split the group's texts into token-budget MICRO-BATCHES and
+                # issue one ``batch_extract_entities`` call per micro-batch, concatenating results
+                # in order. This decouples the model-forward tensor from the progress-cadence
+                # ``batch_size`` — a whole group of long chunks no longer pads into ONE multi-GiB
+                # activation (the measured OOM), for ANY configured ``batch_size``/``max_len``. The
+                # output is batch-invariant (same spans/order), so this is byte-identical.
+                results_list: list[Any] = []
+                for start, end in iter_token_budget_microbatches(
+                    texts,
+                    max_len=self._max_len,
+                    max_texts=self._microbatch_max_texts,
+                    token_budget=self._microbatch_token_budget,
+                ):
+                    # Re-fetch the model per micro-batch so a prior micro-batch's W9 uncompiled
+                    # reload (which updates self._model) is picked up here, not the stale handle.
+                    micro = self._batch_extract(self._load_model(), texts[start:end], list(labels))
+                    if len(micro) != end - start:
+                        msg = (
+                            "redaction.gliner2: batch_extract_entities returned "
+                            f"{len(micro)} results for a micro-batch of {end - start} texts."
+                        )
+                        raise ValueError(msg)
+                    results_list.extend(micro)
                 for pending, raw in zip(pendings, results_list, strict=True):
                     raw_by_chunk[id(pending)] = raw
         for pending in buffer:

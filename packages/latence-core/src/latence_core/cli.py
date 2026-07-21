@@ -63,6 +63,16 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env")
 
+# The ``retrieval`` sub-command group (``latence retrieval splade-index ...``, tutorial §4.2). The
+# stateless (ADR-0048) index-time tooling that builds a retrieval signal over an existing Export —
+# today the SPLADE-v3 sparse leg. The heavy model stack lives in the ``sparse.splade`` Provider
+# package (ADR-0016); this group resolves it through the Provider registry, so the thin core names
+# the capability, not ``latence-splade``.
+retrieval_app = typer.Typer(
+    add_completion=False, help="Stateless retrieval-index tooling over an Export (ADR-0048)."
+)
+app.add_typer(retrieval_app, name="retrieval")
+
 logger = logging.getLogger("latence")
 
 
@@ -548,9 +558,10 @@ def setup(
         str | None,
         typer.Option(
             "--parser",
-            help="Parser Provider: parser.render (universal), parser.pdfplumber (PDF text), or "
-            "parser.lighton (OCR). Default: recommended from the detected file types. "
-            "Ignored by --profile enterprise-sota (which uses served-vLLM parser.lighton_vllm).",
+            help="Parser Provider. lite profile: parser.render (universal), parser.pdfplumber "
+            "(PDF text), or parser.lighton (OCR). enterprise-sota profile: parser.lighton_vllm "
+            "(served-vLLM OCR for scans/PDFs/images) or parser.plaintext (born-digital "
+            ".txt/.md/.jsonl, CPU). Default: recommended from the detected file types.",
         ),
     ] = None,
     ocr_base_url: Annotated[
@@ -622,20 +633,25 @@ def setup(
         SetupAnswers,
         SetupConfigError,
         build_stack_config,
+        detect_header_family,
+        detect_inline_family,
         llm_key_env_var,
         recommend_parser,
+        recommend_sota_parser,
         scan_source,
         validate_config_text,
     )
     from latence_core.setup.wizard import (
         _KNOWN_PARSERS,
         _KNOWN_PROFILES,
+        _KNOWN_SOTA_PARSERS,
         DEFAULT_LLM_BASE_URL,
         DEFAULT_LLM_MODEL,
         DEFAULT_OCR_BASE_URL,
         DEFAULT_OCR_MODEL,
         INTAKE_MAX_BYTES_FLOOR,
         PARSER_OCR_VLLM,
+        PARSER_PLAINTEXT,
         PROFILE_LITE,
         PROFILE_SOTA,
         SOTA_DEVICE,
@@ -703,24 +719,43 @@ def setup(
         f"file://{default_cwd}/latence-out",
     )
 
-    # d. Parser + OCR endpoint. enterprise-sota forces the served-vLLM OCR parser and prompts for
-    # the endpoint; lite recommends a parser from the detected file types (confirm/override).
+    # d. Parser + OCR endpoint. enterprise-sota recommends a parse path from the detected file types
+    # — the served-vLLM OCR parser for a scanned/PDF/image corpus, or the CPU plaintext parser for a
+    # born-digital .txt/.md/.jsonl corpus (the OCR VLM has no text passthrough, so forcing it on a
+    # text corpus makes the stack un-runnable) — and only prompts for the OCR endpoint when the OCR
+    # path is chosen. lite recommends a parser from the detected file types (confirm/override).
     ocr_base = DEFAULT_OCR_BASE_URL
     ocr_mdl = DEFAULT_OCR_MODEL
     if is_sota:
-        chosen_parser = PARSER_OCR_VLLM
-        ocr_base = ask_text(
-            ocr_base_url,
-            "OCR endpoint base URL (served vLLM, OpenAI-compatible)",
-            "the running vLLM OCR server the enterprise stack POSTs page-images to",
-            DEFAULT_OCR_BASE_URL,
+        recommended = recommend_sota_parser(extensions)
+        chosen_parser = ask_text(
+            parser,
+            f"Parser ({PARSER_PLAINTEXT} | {PARSER_OCR_VLLM})",
+            f"recommended '{recommended}' from your file types; "
+            f"plaintext=born-digital .txt/.md/.jsonl (CPU, no OCR), "
+            f"lighton_vllm=served-vLLM OCR for scans/PDFs/images",
+            recommended,
         )
-        ocr_mdl = ask_text(
-            ocr_model,
-            "OCR model id",
-            "the model your vLLM server registers (the LightOn-OCR checkpoint id)",
-            DEFAULT_OCR_MODEL,
-        )
+        if chosen_parser not in _KNOWN_SOTA_PARSERS:
+            typer.echo(
+                f"Unknown enterprise-sota parser {chosen_parser!r}; expected one of "
+                f"{sorted(_KNOWN_SOTA_PARSERS)}.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if chosen_parser == PARSER_OCR_VLLM:
+            ocr_base = ask_text(
+                ocr_base_url,
+                "OCR endpoint base URL (served vLLM, OpenAI-compatible)",
+                "the running vLLM OCR server the enterprise stack POSTs page-images to",
+                DEFAULT_OCR_BASE_URL,
+            )
+            ocr_mdl = ask_text(
+                ocr_model,
+                "OCR model id",
+                "the model your vLLM server registers (the LightOn-OCR checkpoint id)",
+                DEFAULT_OCR_MODEL,
+            )
     else:
         recommended = recommend_parser(extensions)
         chosen_parser = ask_text(
@@ -818,6 +853,33 @@ def setup(
         )
     )
 
+    # dogfood-3-inspect: enterprise-SOTA sniffs the corpus for a known structured metadata-header
+    # cross-reference family (an RFC's `Request for Comments:` + `Obsoletes:`/`Updates:` lines) and,
+    # when found, wires the deterministic `header_refs` extractor to recover those explicit edges
+    # the entity-anchored learned extractor cannot see. No family detected (or the `lite` profile)
+    # ⇒ None ⇒ no such Stage, byte-identical to before.
+    header_refs_family = detect_header_family(src) if is_sota else None
+    if header_refs_family is not None:
+        typer.echo(
+            "Detected structured cross-reference headers in the corpus: wiring the deterministic "
+            "header-reference extractor (recovers e.g. RFC Obsoletes:/Updates: edges).",
+            err=True,
+        )
+
+    # The companion of the above (the dogfood measured gap): the header-only extractor recovers a
+    # document's `Obsoletes:`/`Updates:` HEADER edges but structurally cannot see its INLINE body
+    # citations ("RFC 7230" scattered through the body) — the overwhelming majority of the corpus's
+    # gold cross-references. When the same family is detected, wire the deterministic
+    # inline-citation extractor beside it. No family (or `lite`) ⇒ None ⇒ no such Stage,
+    # byte-identical to before.
+    inline_refs_family = detect_inline_family(src) if is_sota else None
+    if inline_refs_family is not None:
+        typer.echo(
+            "Wiring the deterministic inline-citation reference extractor (recovers the body "
+            "'RFC <n>' references the header-only extractor cannot see) into the knowledge graph.",
+            err=True,
+        )
+
     answers = SetupAnswers(
         source=src,
         storage=store,
@@ -833,6 +895,8 @@ def setup(
         domain=domain_hint,
         largest_source_bytes=scan.largest_bytes,
         extensions=extensions,
+        header_refs=header_refs_family,
+        inline_refs=inline_refs_family,
     )
 
     # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.
@@ -1240,6 +1304,132 @@ def env_matrix(
     typer.echo(report.describe())
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+@retrieval_app.command("splade-index")
+def splade_index(
+    export: Annotated[
+        Path,
+        typer.Option(
+            "--export",
+            help="The Export directory to index (holds records.parquet + records.jsonl).",
+        ),
+    ],
+    out: Annotated[
+        Path,
+        typer.Option(
+            "--out", help="Where to write the splade/ artifact (index.parquet + manifest.json)."
+        ),
+    ],
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            help="The multilingual SPLADE checkpoint id (e.g. naver/splade-v3). No default is "
+            "pinned — the model is operator-selected and its license cleared (ADR-0053/0012).",
+        ),
+    ],
+    accept_noncommercial_license: Annotated[
+        bool,
+        typer.Option(
+            "--accept-noncommercial-license",
+            help="Assert you accept the model's NON-COMMERCIAL weights license (e.g. "
+            "naver/splade-v3 is CC-BY-NC-SA-4.0). MANDATORY: without it the command refuses "
+            "rather than silently defaulting to permissive.",
+        ),
+    ] = False,
+    weights_license: Annotated[
+        str,
+        typer.Option(
+            "--weights-license",
+            help="The non-commercial weights license the acceptance covers (recorded honestly in "
+            "the manifest, license_verified=false — this tool does not read the model card).",
+        ),
+    ] = "CC-BY-NC-SA-4.0",
+    max_length: Annotated[
+        int, typer.Option("--max-length", help="Max tokens per chunk fed to the SPLADE model.")
+    ] = 512,
+    batch_size: Annotated[
+        int, typer.Option("--batch-size", help="Chunks encoded per batch (O(batch) memory).")
+    ] = 64,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Build a REAL SPLADE-v3 sparse index over an Export corpus (tutorial §4.2).
+
+    Loads the operator-selected multilingual SPLADE checkpoint via the ``sparse.splade`` Provider
+    (:class:`~latence_splade.provider.SpladeCompositionEmbedder`), encodes every corpus chunk's
+    (redacted) content to a term-weight :class:`~latence_core.capability.SparseVector`, and writes a
+    ``splade/`` artifact: ``index.parquet`` (per-chunk ``record_id`` + parallel ``indices`` /
+    ``values`` for every chunk with a non-empty vector) plus a ``manifest.json`` recording the
+    checkpoint and the honest ADR-0012 license provenance (``weights_license`` /
+    ``license_verified=false`` / ``operator_accepted=true``).
+
+    ``--accept-noncommercial-license`` is MANDATORY: naver/splade-v3's weights are CC-BY-NC-SA-4.0
+    (non-commercial), so the command REFUSES without the operator's explicit acceptance rather than
+    silently treating a non-commercial model as a permissive default.
+    """
+    _configure_logging(verbose)
+
+    # License gate FIRST — before resolving or loading anything heavy, and independent of whether
+    # ``latence-splade`` is installed. A non-commercial weights license is never a silent default:
+    # the operator must accept it explicitly (ADR-0012 honesty).
+    if not accept_noncommercial_license:
+        typer.echo(
+            "refused: --accept-noncommercial-license is required. The SPLADE checkpoint's weights "
+            f"({model}) are a NON-COMMERCIAL license (e.g. naver/splade-v3 is CC-BY-NC-SA-4.0); "
+            "this command will not default a non-commercial model to permissive. Re-run with "
+            "--accept-noncommercial-license once you accept the model's non-commercial terms.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if not export.exists():
+        typer.echo(f"Export directory not found: {export}", err=True)
+        raise typer.Exit(code=2)
+
+    from latence_core.capability import ProviderRegistry
+    from latence_core.splade_index import SpladeIndexError, build_splade_index
+
+    # Resolve the real sparse signal generator through the Provider registry (ADR-0004/0049) — the
+    # thin core names the ``sparse.splade`` capability, not the provider package. A missing provider
+    # package surfaces as a clear KeyError → exit 2 (install latence-splade), not a fake fallback.
+    registry = ProviderRegistry()
+    try:
+        embedder_cls = registry.load("sparse.splade")
+    except (KeyError, TypeError) as exc:
+        typer.echo(
+            f"sparse.splade Provider unavailable [{error_category(exc)}]: {exc}. Install the "
+            "SPLADE Provider (e.g. `uv pip install -e packages/latence-splade`) so the real "
+            "naver/splade-v3 sparse leg can be generated.",
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
+    embedder = embedder_cls({"model": model, "max_length": max_length})
+
+    try:
+        result = build_splade_index(
+            export_dir=str(export),
+            out_dir=str(out),
+            embedder=embedder,
+            model_id=model,
+            weights_license=weights_license,
+            batch_size=batch_size,
+        )
+    except (SpladeIndexError, LatenceError) as exc:
+        typer.echo(f"splade-index failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        f"splade-index: {result.chunks_indexed}/{result.chunks_total} chunks indexed "
+        f"({result.chunks_empty} empty) → {result.index_uri}"
+    )
+    typer.echo(
+        f"  model={result.model_id} vocab_size={result.vocab_size} "
+        f"weights_license={result.weights_license}, "
+        f"license_verified={str(result.license_verified).lower()}, "
+        f"operator_accepted={str(result.operator_accepted).lower()}"
+    )
+    typer.echo(f"  manifest → {result.manifest_uri}")
 
 
 def main() -> None:  # pragma: no cover - console entry shim

@@ -78,6 +78,7 @@ from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
     cap_intra_op_threads,
     ensure_gliner2_on_cuda,
+    inference_context,
     is_compile_backend_failure,
     load_gliner2_optimized,
     neutralize_torch_jit,
@@ -153,6 +154,13 @@ class Gliner2FusedExtractor:
             batch tensor; the emitted mentions AND relations (offsets/labels/endpoints/order) are
             record-for-record identical for any positive batch size. Must be ``>= 1``. The clamp
             guarantees a large corpus always logs progress often enough to never *appear* hung.
+            (dogfood-2b-process: because the forward is single-chunk BY CONSTRUCTION, this extractor
+            has no padded multi-text activation to bound — so it needs no micro-batching. Its twin
+            ``redaction.gliner2`` DOES pack multiple docs into one ``batch_extract_entities`` call,
+            so it reaches the SAME bounded-forward guarantee the other way: by splitting each
+            forward into token-budget micro-batches via
+            :func:`~latence_core.providers.perf.iter_token_budget_microbatches`. Both keep
+            ``batch_size`` a genuine progress/flush knob, decoupled from the forward.)
         intra_op_threads: int  — cap on torch **intra-op** threads applied at load (W9-scaling,
             default 8; ``<= 0`` disables the cap). On a many-core host gliner2's internal batching
             oversubscribes torch's default ``os.cpu_count()`` intra-op pool to ~cpu_count threads —
@@ -463,15 +471,24 @@ class Gliner2FusedExtractor:
         crash. The fallback runs at most once (``_compile_disabled``). Any OTHER native fault (a
         genuine model/runtime error) is mapped to a typed :class:`ProviderError` carrying NO input
         text / PII (only the op + native type name — C2/C6), exactly as before.
+
+        Every forward (both the first attempt and the uncompiled retry) runs INSIDE
+        :func:`~latence_core.providers.perf.inference_context` (``torch.inference_mode()``): this is
+        an extraction-only encoder that never backpropagates, so building an autograd graph and
+        pinning its activations alive would only ACCUMULATE VRAM run-over-run to a CUDA OOM
+        (dogfood-2b-process). Under inference mode no graph is built and each forward's activations
+        free immediately — same entities/relations, bounded memory (torch-free-safe offline).
         """
         try:
-            return invoke(self._model)
+            with inference_context():
+                return invoke(self._model)
         except Exception as exc:  # noqa: BLE001 - map native → typed / compile → uncompiled retry
             if not self._compile_disabled and is_compile_backend_failure(exc):
                 model = self._reload_uncompiled()
                 # Retry once on the uncompiled model. A fault here is a genuine error (surfaced).
                 try:
-                    return invoke(model)
+                    with inference_context():
+                        return invoke(model)
                 except Exception as exc2:  # noqa: BLE001 - typed, carrying NO input text/PII
                     msg = (
                         f"fused_entity_relation.gliner2: provider failure in {op!r} "
@@ -598,9 +615,21 @@ class Gliner2FusedExtractor:
 
         mentions: list[EntityMention] = []
         by_span: dict[tuple[int, int], EntityMention] = {}
+        skipped_degenerate = 0
         for i, ent in enumerate(flat_entities):
             local_start = ent["start"]
             local_end = ent["end"]
+            # dogfood-2b-process: GLiNER2 can return a DEGENERATE span whose resolved surface
+            # text is empty (``local_start == local_end``, or a slice that yields ""). Such a span
+            # carries no entity, and an EntityMention with ``text=""`` violates its >=1-char
+            # contract (pydantic ``string_too_short``) — which crashed a full pipeline run at the
+            # extract stage. Skip it (its ids stay unique; no by_span entry means any relation
+            # endpoint referencing it is dropped, so the relation path is guarded the same way).
+            # NOT silent (ADR-0034): count skips and log the count below.
+            mention_text = chunk.content[local_start:local_end]
+            if len(mention_text) == 0:
+                skipped_degenerate += 1
+                continue
             if offset_index is not None:
                 doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
             else:
@@ -612,7 +641,7 @@ class Gliner2FusedExtractor:
                 chunk_record_id=chunk.record_id,
                 index=i,
                 label=str(ent["label"]),
-                text=chunk.content[local_start:local_end],
+                text=mention_text,
                 confidence=min(max(float(ent["confidence"]), 0.0), 1.0),
                 provenance=provenance,
                 classification=chunk.classification,
@@ -620,6 +649,16 @@ class Gliner2FusedExtractor:
             mentions.append(mention)
             # First mention wins a given span (deterministic), matching relex's by_span semantics.
             by_span.setdefault((local_start, local_end), mention)
+
+        if skipped_degenerate:
+            # ADR-0034 (no silent errors): a degenerate zero-length span carries no entity and is
+            # dropped rather than crashing the stage — but the drop is COUNTED and surfaced.
+            _log.info(
+                "fused_entity_relation.gliner2: skipped %d degenerate zero-length entity span(s) "
+                "in chunk %s (empty surface text — cannot ground a mention)",
+                skipped_degenerate,
+                chunk.record_id,
+            )
 
         # Flatten relations per type into deterministic rows carrying their rel_type label.
         flat_relations: list[dict[str, Any]] = []

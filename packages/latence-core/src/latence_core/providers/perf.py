@@ -24,14 +24,15 @@ text/labels/spans are unchanged (asserted identical on the pod; the profile carr
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.errors import ProviderError
 from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
 _log = logging.getLogger("latence.perf")
 
@@ -357,6 +358,115 @@ def is_compile_backend_failure(exc: BaseException) -> bool:
     return False
 
 
+# Class names / message fragments of a CUDA (or accelerator) out-of-memory fault. ``torch`` raises
+# ``torch.cuda.OutOfMemoryError`` (a ``RuntimeError`` subclass) whose message is ``"CUDA out of
+# memory. Tried to allocate ..."``; older torch and some backends raise a bare ``RuntimeError`` with
+# the same telltale text; the CUDA driver's own string is ``CUDA_ERROR_OUT_OF_MEMORY``. Matched
+# torch-free (by name / message), exactly like the compile-fault gate, so ``latence-core`` never
+# imports torch to reason about it.
+_OOM_FAULT_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        "OutOfMemoryError",  # torch.cuda.OutOfMemoryError / torch.OutOfMemoryError
+        "OutOfMemoryError_",
+    }
+)
+_OOM_MESSAGE_FRAGMENTS: tuple[str, ...] = (
+    "CUDA out of memory",
+    "CUDA_ERROR_OUT_OF_MEMORY",
+    "HIP out of memory",  # ROCm
+    "out of memory",  # generic torch OOM RuntimeError (lower-cased match below)
+)
+
+
+def is_cuda_oom(exc: BaseException) -> bool:
+    """Whether ``exc`` (or anything in its cause chain) is a CUDA/accelerator out-of-memory fault.
+
+    **Torch-free** — matches by exception class name (:data:`_OOM_FAULT_CLASS_NAMES`) or by a
+    telltale message fragment (:data:`_OOM_MESSAGE_FRAGMENTS`), never importing torch, and walks the
+    ``__cause__``/``__context__`` chain so it sees through a provider ``guard`` that wrapped the
+    native ``OutOfMemoryError`` in a typed ``ProviderError`` (the OOM is the ``__cause__``).
+
+    This is the single "is this an OOM" predicate the learned Providers' micro-batch backoff
+    shares: an OOM on a large forward is *recoverable* by splitting the batch and retrying smaller
+    (the output is batch-size-invariant), so the Provider halves and retries rather than crashing. A
+    fault that is NOT an OOM (a real bug, a compile failure) is not caught by the backoff and
+    surfaces as before.
+    """
+    for link in _exception_chain(exc):
+        cls = type(link)
+        if cls.__name__ in _OOM_FAULT_CLASS_NAMES:
+            return True
+        text = str(link).lower()
+        if any(frag.lower() in text for frag in _OOM_MESSAGE_FRAGMENTS):
+            return True
+    return False
+
+
+def empty_cuda_cache(*, provider_name: str = "provider") -> None:
+    """Best-effort reclaim of a just-finished model's memory — GC first, then the CUDA cache.
+
+    Two distinct, independently-useful steps, in this order:
+
+    1. ``gc.collect()`` — **run unconditionally, torch or not.** A torch ``nn.Module`` is typically
+       held alive by a reference cycle (hooks, parameter back-refs), so dropping the last Python
+       reference to a Provider does NOT free its model by refcount — the several-GiB CUDA storages
+       stay allocated until a cycle collection runs. Python's own GC is triggered by *Python*
+       object-count thresholds, which the tiny Provider wrapper never trips (its weight is off-heap
+       in CUDA), so between two model Stages the collector may never fire on its own. An explicit
+       ``gc.collect()`` is therefore what actually reclaims the previous Stage's model — the
+       cross-stage VRAM-lifecycle fix (dogfood-2b-process). It runs even on a torch-free host both
+       because the collection is the load-bearing step and so this seam's effect is observable in an
+       offline test.
+    2. ``torch.cuda.empty_cache()`` — hands the now-freed cached/fragmented blocks back to the
+       driver so the NEXT Stage's model (or a smaller OOM-retry batch) allocates from a contiguous
+       pool. Torch-free-safe (a host without torch, or without CUDA, silently skips this step).
+
+    Fully guarded — reclaiming memory is an optimisation, never a correctness step, so any failure
+    is logged at DEBUG and swallowed; it never raises.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as exc:  # noqa: BLE001 - cache clearing is best-effort, never fatal
+        _log.debug("%s: CUDA cache clear skipped (%s)", provider_name, type(exc).__name__)
+
+
+def inference_context() -> contextlib.AbstractContextManager[Any]:
+    """The context every learned Provider's model forward runs INSIDE — ``torch.inference_mode()``.
+
+    The GLiNER2 encoders here only ever run **forward** (extract/redact) — there is no backward
+    pass, ever. But a plain forward under the default (grad-enabled) mode still builds an autograd
+    graph and pins every intermediate activation alive for a backward that never comes. Across a
+    long ``latence process`` run those never-freed activation tensors ACCUMULATE — pod-measured at
+    27.28 GiB resident on a model that is only ~2-3 GB — until the next allocation CUDA-OOMs at the
+    redact stage (dogfood-2b-process). ``torch.cuda.empty_cache()`` cannot reclaim any of it: the
+    memory is held *live* by the graph, not merely cached. ``torch.inference_mode()`` is the cure
+    at the source — it disables autograd tracking for the block, so no graph is built and each
+    forward's activations free the moment they fall out of scope. Resident memory then stays at
+    model size plus one batch's transient activation instead of climbing without bound.
+
+    This does NOT change any output — ``inference_mode`` only suppresses grad bookkeeping; the
+    emitted spans/labels/records are byte-identical (the redaction floor, ADR-0044, is untouched).
+
+    **Torch-free-safe** (ADR-0016), mirroring :func:`load_perf_kwargs`/:func:`empty_cuda_cache`:
+    torch is imported lazily and defensively. On a host without torch (the offline CPU test env) it
+    returns :func:`contextlib.nullcontext` so the ``with`` block still runs — the wrap is a no-op
+    there rather than an import error. The single place a real ``torch.inference_mode()`` is
+    materialised imports torch only when this is called, so a Provider registry that merely imports
+    this module never pulls in torch.
+    """
+    try:
+        import torch  # noqa: PLC0415 - optional heavy dep, imported only when entering inference
+    except Exception:  # noqa: BLE001 - torch-free host (offline test env): degrade to a no-op context
+        return contextlib.nullcontext()
+    return cast("contextlib.AbstractContextManager[Any]", torch.inference_mode())
+
+
 def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str = "provider") -> Any:
     """``torch.compile`` the model when ``config["compile"]`` is truthy — guarded, never crashes.
 
@@ -611,7 +721,7 @@ def resolve_intra_op_threads(
     import os  # noqa: PLC0415 - stdlib, only to read the core count when a cap is requested
 
     cores = os.cpu_count() or raw
-    return min(raw, cores)
+    return min(int(raw), int(cores))
 
 
 def cap_intra_op_threads(n: int | None, *, provider_name: str = "provider") -> int | None:
@@ -746,3 +856,121 @@ def apply_gliner_max_len(model: Any, max_len: int) -> None:
             "could not set model.config.max_len=%d (window bound skipped); model default applies",
             max_len,
         )
+
+
+# ---------------------------------------------------------------------------
+# Token-budget micro-batching (dogfood-2b-process) — decouple the model-FORWARD
+# tensor batch from the progress-cadence ``batch_size`` so a learned encoder's
+# single ``batch_extract_entities`` call can never demand an OOM-sized activation.
+# ---------------------------------------------------------------------------
+#
+# The gliner2 (mdeberta-v3) span-scorer pads a group of N texts into ONE tensor and scores every
+# span position, so its peak activation scales with (N × seq_len) — NOT with N alone. A whole
+# progress-``batch_size`` group (default 32) of long chunks therefore demands a single multi-GiB
+# allocation. Measured on a 32 GB Blackwell pod (dogfood-2b-process): batch_size=32 of ~768-token
+# chunks spiked ~+17 GiB and OOM'd at redact, while batch_size=4 peaked at 21.6 GiB and passed
+# cleanly. The cure is to split each forward's texts into MICRO-BATCHES bounded by a conservative
+# token budget (and a hard text-count cap), issue one native call per micro-batch, and concatenate
+# the per-text results IN ORDER — the output is batch-invariant, so this is byte-identical while the
+# peak allocation stays bounded for ANY configured ``batch_size``/``max_len``/label count.
+
+#: The hard cap on texts packed into ONE model forward. This is the PRIMARY safety bound: gliner2
+#: pads every text in a micro-batch up to the batch's longest sequence, so the padded worst case is
+#: ``max_texts × max_len`` regardless of how short the other texts are — a token budget summed over
+#: *actual* lengths cannot see that padding. Pinned to **4** because a batch of 4 × 768-token chunks
+#: peaked at 21.6 GiB and passed on the 32 GB pod (batch_size=32 OOM'd). With the default 768 window
+#: this bounds the padded forward to 4 × 768 = 3072 token-positions — the empirically-safe point.
+DEFAULT_MICROBATCH_MAX_TEXTS = 4
+
+#: The token budget for ONE model forward: the sum of the micro-batch's per-text token lengths
+#: (each capped at ``max_len``) may not exceed this. = 4 × :data:`DEFAULT_GLINER_MAX_LEN` (3072),
+#: the pod-safe "4 texts of 768 tokens" point. This SECONDARY bound bites when texts are long but
+#: ``max_len`` is raised above the default (where ``max_texts`` alone would allow a larger padded
+#: tensor); with the default window ``max_texts`` is the tighter of the two. Both default SAFE on a
+#: modest GPU; both are overridable per-provider (:func:`resolve_microbatch_bounds`) for a box with
+#: more or less VRAM, but the defaults never assume the 32 GB card.
+DEFAULT_MICROBATCH_TOKEN_BUDGET = 4 * DEFAULT_GLINER_MAX_LEN
+
+
+def estimate_token_length(text: str, max_len: int) -> int:
+    """A conservative, torch-free estimate of a text's model-token length, capped at ``max_len``.
+
+    The real mdeberta-v3 token count needs the tokenizer (torch/transformers), which
+    ``latence-core`` must not import (ADR-0016). This proxy assumes ~4 characters per token (the
+    usual English average) and rounds UP, then caps at ``max_len`` because the provider threads
+    ``max_len`` into the native call and the model truncates past it — so a text can contribute at
+    most ``max_len`` positions to the padded batch. Over-estimating only splits micro-batches
+    *smaller* (safer); the ``max_texts`` cap is the hard guarantee regardless of this estimate.
+    """
+    if not text:
+        return 0
+    return min(-(-len(text) // 4), max_len)
+
+
+def iter_token_budget_microbatches(
+    texts: Sequence[str],
+    *,
+    max_len: int,
+    max_texts: int = DEFAULT_MICROBATCH_MAX_TEXTS,
+    token_budget: int = DEFAULT_MICROBATCH_TOKEN_BUDGET,
+    token_len: Callable[[str, int], int] = estimate_token_length,
+) -> Iterator[tuple[int, int]]:
+    """Yield ``(start, end)`` half-open index ranges partitioning ``texts`` into safe micro-batches.
+
+    Greedy and order-preserving: it walks ``texts`` once and starts a new micro-batch when adding
+    the next text WOULD exceed either the ``max_texts`` count cap or the ``token_budget`` (summed
+    per-text ``token_len``, each capped at ``max_len``). Every micro-batch holds **at least one**
+    text, so a lone text whose own length exceeds the budget still goes through in a batch of one
+    (the reactive OOM backoff is the last-resort net for that pathological case). The ranges tile
+    ``texts`` exactly and in order, so the caller can slice ``texts[start:end]`` per micro-batch and
+    concatenate the per-text results back in input order — the output is batch-invariant.
+
+    Pure index arithmetic over string lengths — no torch, no model — so ``latence-core`` stays
+    torch-free at import (ADR-0016). ``max_texts``/``token_budget`` are clamped ``>= 1`` so a
+    degenerate bound degrades to a batch of one rather than looping forever.
+    """
+    max_texts = max(1, max_texts)
+    token_budget = max(1, token_budget)
+    n = len(texts)
+    start = 0
+    while start < n:
+        end = start
+        tokens = 0
+        while end < n:
+            length = token_len(texts[end], max_len)
+            # Always admit the first text of a micro-batch (even if it alone exceeds the budget);
+            # otherwise break before a text that would overflow the count OR the token budget.
+            if end > start and (end - start >= max_texts or tokens + length > token_budget):
+                break
+            tokens += length
+            end += 1
+        yield (start, end)
+        start = end
+
+
+def resolve_microbatch_bounds(config: Mapping[str, Any]) -> tuple[int, int]:
+    """Resolve the ``(max_texts, token_budget)`` micro-batch bounds from a Provider ``config``.
+
+    Reads the optional ``microbatch_max_texts`` / ``microbatch_token_budget`` knobs, defaulting to
+    the pod-safe module constants (:data:`DEFAULT_MICROBATCH_MAX_TEXTS` /
+    :data:`DEFAULT_MICROBATCH_TOKEN_BUDGET`). A non-int or ``< 1`` value is a ValueError the caller
+    surfaces as a ConfigError (the same fail-fast discipline as ``batch_size``/``max_len``). Pure
+    config read — no torch — so the default is safe on a modest GPU and an operator with more VRAM
+    can widen it explicitly, but nothing ever silently assumes the 32 GB card.
+    """
+    max_texts = _positive_int_knob(config, "microbatch_max_texts", DEFAULT_MICROBATCH_MAX_TEXTS)
+    token_budget = _positive_int_knob(
+        config, "microbatch_token_budget", DEFAULT_MICROBATCH_TOKEN_BUDGET
+    )
+    return max_texts, token_budget
+
+
+def _positive_int_knob(config: Mapping[str, Any], key: str, default: int) -> int:
+    raw = config.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        msg = f"invalid {key} {raw!r}: must be an int >= 1"
+        raise ValueError(msg)
+    if raw < 1:
+        msg = f"invalid {key} {raw}: must be >= 1"
+        raise ValueError(msg)
+    return int(raw)

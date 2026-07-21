@@ -1,0 +1,21 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='800' height='420' viewBox='0 0 800 420' role='img' aria-label='Entities / relations funnel (extract → disambiguate)'>
+<rect x='0' y='0' width='800' height='420' fill='#ffffff'/>
+<text x='20.0' y='32.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='18' font-weight='700' fill='#1f2933' text-anchor='start'>Entities / relations funnel (extract → disambiguate)</text>
+<line x1='70.0' y1='320.0' x2='670.0' y2='320.0' stroke='#1f2933' stroke-width='1'/>
+<text x='190.0' y='50.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='14' font-weight='700' fill='#1f2933' text-anchor='start'>Entities</text>
+<rect x='110.0' y='80.0' width='90.0' height='240.0' fill='#2f6f9f'/>
+<text x='155.0' y='74.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1f2933' text-anchor='middle'>57231</text>
+<text x='155.0' y='338.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>mentions</text>
+<rect x='230.0' y='276.7' width='90.0' height='43.3' fill='#7bb0d6'/>
+<text x='275.0' y='270.7' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1f2933' text-anchor='middle'>10322</text>
+<text x='275.0' y='338.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>canonical nodes</text>
+<text x='190.0' y='362.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#c0392b' text-anchor='middle'>collapse 5.54× (57231→10322)</text>
+<text x='490.0' y='50.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='14' font-weight='700' fill='#1f2933' text-anchor='start'>Relations</text>
+<rect x='410.0' y='305.5' width='90.0' height='14.5' fill='#2f6f9f'/>
+<text x='455.0' y='299.5' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1f2933' text-anchor='middle'>3447</text>
+<text x='455.0' y='338.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>mentions</text>
+<rect x='530.0' y='305.7' width='90.0' height='14.3' fill='#7bb0d6'/>
+<text x='575.0' y='299.7' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1f2933' text-anchor='middle'>3416</text>
+<text x='575.0' y='338.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>graph edges</text>
+<text x='490.0' y='362.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#c0392b' text-anchor='middle'>collapse 1.01× (3447→3416)</text>
+</svg>

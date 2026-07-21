@@ -135,8 +135,12 @@ def _stage(text: str, name: str) -> Stage:
 
 def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None:
     """enterprise-sota: parse=lighton_vllm, disambiguate=glinker (Granite embedder), induce present
-    at corpus granularity — and the whole config passes the SAME dry validation."""
-    text = build_stack_config(_answers(tmp_path, profile=PROFILE_SOTA))
+    at corpus granularity — and the whole config passes the SAME dry validation.
+
+    The OCR parse path is requested explicitly (``parser=PARSER_OCR_VLLM``): a scanned/PDF/image
+    corpus routes to the served-vLLM OCR endpoint. (A born-digital .txt/.md/.jsonl corpus instead
+    routes to the CPU ``parser.plaintext`` — covered in ``test_setup_wizard_parser.py``.)"""
+    text = build_stack_config(_answers(tmp_path, profile=PROFILE_SOTA, parser=PARSER_OCR_VLLM))
     validate_config_text(text)  # raises on failure
 
     parse = _stage(text, "parse")

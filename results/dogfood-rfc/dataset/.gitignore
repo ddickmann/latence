@@ -1,0 +1,5 @@
+# Harvested derived-data blobs — kept on local disk (durable), not committed (large + trip the
+# corpus-content secret-scan). Reproducible via report/rfc_bench.py + the manifest.
+records.parquet
+*.parquet
+bm25-stats.json

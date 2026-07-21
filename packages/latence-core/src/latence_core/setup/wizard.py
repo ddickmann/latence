@@ -77,12 +77,22 @@ FINANCIAL_PII_LABELS: tuple[str, ...] = (
     "social security number",
 )
 
-# The three parsers the wizard chooses between, keyed by intent (matches the roster).
+# The parsers the wizard chooses between, keyed by intent (matches the roster).
 PARSER_UNIVERSAL = "parser.render"  # universal: mixed types (PDF/office/images), GPU-OCR sub
 PARSER_PDF_TEXT = "parser.pdfplumber"  # born-digital PDF text (CPU, no OCR)
 PARSER_OCR = "parser.lighton"  # OCR VLM for scans / images
 PARSER_OCR_VLLM = "parser.lighton_vllm"  # served-vLLM OCR endpoint (the enterprise-SOTA parse path)
+PARSER_PLAINTEXT = "parser.plaintext"  # born-digital text (.txt/.md/.jsonl) — CPU, no OCR, zero dep
 _KNOWN_PARSERS = frozenset({PARSER_UNIVERSAL, PARSER_PDF_TEXT, PARSER_OCR})
+
+# The two parsers the enterprise-SOTA profile chooses between. A GPU pod almost always parses
+# scanned/PDF/image corpora through the served-vLLM OCR endpoint, but an enterprise corpus is just
+# as often born-digital PLAIN TEXT (.txt/.md/.jsonl exports, log/ticket dumps). For those the OCR
+# VLM is the WRONG tool — it only rasterizes pages and POSTs images to the OCR server, it has no
+# text passthrough — so forcing it makes a text corpus un-parseable when the OCR box is (correctly)
+# not served. The wizard therefore routes a detected plaintext corpus to the CPU plaintext parser
+# and keeps every other SOTA signal (graph_features.pagerank + BM25 + Granite r2) intact.
+_KNOWN_SOTA_PARSERS = frozenset({PARSER_PLAINTEXT, PARSER_OCR_VLLM})
 
 # The two setup profiles (tiers). `lite` is the CPU-first, laptop-friendly default (unchanged); the
 # `enterprise-sota` profile emits the pod-VALIDATED composed stack (served-vLLM OCR + LLM schema
@@ -131,6 +141,11 @@ SOTA_BM25_TOKENIZER = "tokenizer.regex"
 # Extensions that read as scanned/image inputs (OCR territory) vs born-digital PDF.
 _IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"})
 _OFFICE_EXTS = frozenset({"docx", "doc", "pptx", "ppt", "xlsx", "xls", "odt", "rtf", "html", "htm"})
+
+# Extensions the plaintext Parser decodes losslessly (bytes -> text/markdown, no OCR, no office
+# rendering). A corpus whose file types are ALL in this set is born-digital text — the OCR VLM
+# would only mangle it — so the enterprise-SOTA wizard routes it to `parser.plaintext`.
+_PLAINTEXT_EXTS = frozenset({"txt", "text", "md", "markdown", "mdown", "jsonl", "ndjson"})
 
 # The default source extensions when a folder is empty / undetectable — the broad GOOD-stack set.
 _DEFAULT_EXTENSIONS: tuple[str, ...] = (
@@ -318,6 +333,21 @@ class SetupAnswers:
     # flat 2 MiB floor.
     largest_source_bytes: int = 0
     extensions: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_EXTENSIONS)
+    # dogfood-3-inspect: the detected structured-header cross-reference family's `header_refs` Stage
+    # config (from :func:`detect_header_family`), or ``None`` when the corpus carries no recognised
+    # metadata-header convention. When set (enterprise-SOTA only), the SOTA builder wires a
+    # deterministic `fused_entity_relation.header_refs` extraction Stage that recovers the corpus's
+    # explicit header cross-references (an RFC's `Obsoletes:`/`Updates:` edges) beside the learned
+    # extractor. ``None`` ⇒ NO such Stage is emitted, so config + KG are byte-identical to before.
+    header_refs: dict[str, object] | None = None
+    # The detected structured-header family's `inline_refs` Stage config (from
+    # :func:`detect_inline_family`), or ``None`` when the corpus carries no recognised family. When
+    # set (enterprise-SOTA only), the SOTA builder wires a deterministic
+    # `fused_entity_relation.inline_refs` extraction Stage that recovers the corpus's INLINE body
+    # citations (an RFC's scattered "RFC 7230" references — the dogfood measured gap the header-only
+    # extractor misses) beside the learned extractor AND the header_refs Stage. ``None`` ⇒ NO such
+    # Stage is emitted, so config + KG are byte-identical to before.
+    inline_refs: dict[str, object] | None = None
 
 
 def detect_extensions(path: str | Path) -> tuple[str, ...]:
@@ -345,6 +375,186 @@ def recommend_parser(extensions: tuple[str, ...]) -> str:
     if exts & _IMAGE_EXTS and not (exts & _OFFICE_EXTS):
         return PARSER_OCR
     return PARSER_UNIVERSAL
+
+
+def recommend_sota_parser(extensions: tuple[str, ...]) -> str:
+    """Recommend the enterprise-SOTA parser from the detected extensions (the wizard's default).
+
+    The SOTA profile is a GPU-pod stack whose production parse path is the served-vLLM OCR endpoint
+    (``parser.lighton_vllm``) — but that path ONLY rasterizes pages to images and POSTs them to the
+    OCR server; it has no plain-text passthrough. So when the scanned corpus is ENTIRELY
+    born-digital text (every detected extension in :data:`_PLAINTEXT_EXTS`), the OCR VLM is wrong
+    and, on a pod where the OCR box is intentionally not served, would degrade every document to a
+    PARSE_ERROR. Such a corpus is routed to the CPU :data:`PARSER_PLAINTEXT` parser instead; any
+    other corpus (PDF/office/image/mixed/unknown) keeps the served-OCR path. Always overridable.
+    """
+    exts = {e.lower() for e in extensions}
+    if exts and exts <= _PLAINTEXT_EXTS:
+        return PARSER_PLAINTEXT
+    return PARSER_OCR_VLLM
+
+
+# --- structured-header cross-reference recovery (dogfood-3-inspect) -----------------------------
+#
+# A document's MOST explicit relations often live in self-describing metadata headers whose targets
+# are *bare identifiers*, not entity-shaped surface strings, and whose subject is the document
+# itself (declared once, far away, in the front matter). An RFC's ``Obsoletes: 7230, 7231`` /
+# ``Updates: 3864`` lines are the canonical case: ``7230`` is never tagged as an entity and the
+# subject (``RFC 9110``) is only in the ``Request for Comments: 9110`` header — so entity-anchored
+# zero-shot RE (the learned ``fused_entity_relation.gliner2``) recovers NONE of them and the induced
+# knowledge graph misses the corpus's most explicit, load-bearing cross-reference edges. The
+# deterministic, zero-dep ``fused_entity_relation.header_refs`` Provider exists precisely to recover
+# them (self id + header targets → synthesized mentions + directed edges) — but only if the wizard
+# WIRES it. This is that wiring: the wizard sniffs the corpus for a KNOWN structured-header family
+# and, when it positively detects one, emits a ``header_refs`` extraction Stage configured for it
+# that composes beside the learned extractor (disjoint ``#href-`` id namespace; both feed the same
+# Disambiguation input). A corpus with NO recognised header family gets NO such Stage — its emitted
+# YAML and resulting KG stay byte-identical to a run without the feature.
+#
+# Each family pairs a corpus SIGNATURE (the ``self`` header + at least one relation header must both
+# appear in sampled text before we wire it) with the ready ``header_refs`` config. The relation
+# ``header`` patterns mirror the RFC-editor header grammar the benchmark's own gold-graph builder
+# parses (``^Obsoletes:\s*([\d,\s]+)`` etc.), so recovered edges line up 1:1 with the independent
+# ``_refs.jsonl`` cross-reference graph. ``id_template`` renders both endpoints as ``RFC <n>`` so a
+# synthesized node disambiguates against an in-text ``RFC 7230`` mention and reads as a real RFC
+# number to any downstream consumer.
+_RFC_HEADER_REFS_CONFIG: dict[str, object] = {
+    "self_pattern": r"(?im)^Request for Comments:\s*(\d+)",
+    "relations": {
+        "obsoletes": {"header": r"(?im)^Obsoletes:\s*([\d,\s]+)"},
+        "updates": {"header": r"(?im)^Updates:\s*([\d,\s]+)"},
+    },
+    "target_pattern": r"(\d+)",
+    "id_template": "RFC {id}",
+    "entity_label": "rfc",
+}
+
+# The companion INLINE-CITATION config (the dogfood measured gap). `header_refs` above recovers a
+# document's structured-header edges (`Obsoletes:`/`Updates:`), but the overwhelming majority of an
+# RFC corpus's gold cross-references are INLINE body citations ("RFC 7230", "[RFC9110]") scattered
+# through the document body — which the header-only extractor structurally cannot see (a body chunk
+# carries no self id). `fused_entity_relation.inline_refs` closes that: it resolves each document's
+# self id ONCE (the same `Request for Comments:` front-matter self declaration, OR the provenance
+# file name `rfcNNNN.txt`) and mines every chunk's body for the `citation_pattern`, emitting
+# `references(source_doc, cited)` edges. `exclude_relations` mirrors the header grammar so an
+# `Obsoletes:` id is not ALSO emitted as a weaker `references` edge, and `id_template` renders both
+# endpoints as `RFC <n>` so they disambiguate against the header_refs / in-text mentions. Same
+# detected corpus signature as header_refs; wired beside it.
+_RFC_INLINE_REFS_CONFIG: dict[str, object] = {
+    "self_pattern": r"(?im)^Request for Comments:\s*(\d+)",
+    "source_id_pattern": r"(?i)rfc[\s_-]?(\d+)",
+    "citation_pattern": r"(?i)RFCs?[\s-]?(\d{3,5})",
+    "relation_label": "references",
+    "id_template": "RFC {id}",
+    "entity_label": "rfc",
+    "exclude_relations": {
+        "obsoletes": {"header": r"(?im)^Obsoletes:\s*([\d,\s]+)"},
+        "updates": {"header": r"(?im)^Updates:\s*([\d,\s]+)"},
+    },
+    "target_pattern": r"(\d+)",
+}
+
+# The known structured-header families, in detection priority order. Each entry is a tuple
+# ``(name, self_regex, [relation_header_regex, ...], header_refs_config, inline_refs_config)``.
+# A corpus is detected as that family when a sampled file carries BOTH the self header AND at least
+# one relation header. Each family carries BOTH the header-edge config (mines
+# `Obsoletes:`/`Updates:`) AND the inline-citation config (mines body "RFC <n>" references) — two
+# cross-reference extractors for that family. Extend this list to teach the wizard a new family (an
+# e-mail ``In-Reply-To:``/``References:`` or a memo ``Supersedes:`` convention) — no Provider or
+# builder change needed.
+_HEADER_FAMILIES: tuple[
+    tuple[str, str, tuple[str, ...], dict[str, object], dict[str, object]], ...
+] = (
+    (
+        "rfc",
+        r"(?im)^Request for Comments:\s*\d+",
+        (r"(?im)^Obsoletes:\s*[\d,\s]+", r"(?im)^Updates:\s*[\d,\s]+"),
+        _RFC_HEADER_REFS_CONFIG,
+        _RFC_INLINE_REFS_CONFIG,
+    ),
+)
+
+# Sniffing bounds: read at most this many text files, at most this many leading bytes each. A
+# metadata header sits in a document's front matter, so the first few KiB are ample; the caps keep
+# setup fast + bounded on a large corpus and never load a whole file into memory.
+_HEADER_SNIFF_MAX_FILES = 40
+_HEADER_SNIFF_MAX_BYTES = 8192
+
+
+def detect_header_family(source: str | Path) -> dict[str, object] | None:
+    """Sniff ``source`` for a known structured-header cross-reference family (dogfood-3-inspect).
+
+    Best-effort: walk the corpus, sample the leading bytes of up to :data:`_HEADER_SNIFF_MAX_FILES`
+    plaintext files, and return the :data:`header_refs` Stage config of the FIRST family whose
+    signature (its ``self`` header AND at least one relation header) appears in a sampled file — the
+    RFC ``Request for Comments:`` + ``Obsoletes:``/``Updates:`` family today. Returns ``None`` when
+    no family is recognised (or the source is non-local / empty / unreadable), so the wizard wires
+    the deterministic ``header_refs`` extractor ONLY for a corpus that actually carries such headers
+    and every other corpus stays byte-identical. Never raises: a decode/OS error on one file skips
+    it, and a wholly-unreadable tree yields ``None``. Deterministic — the first match under a sorted
+    walk — so a given corpus always yields the same wiring (the byte-identical setup contract).
+    """
+    return _detect_family(source, which="header")
+
+
+def detect_inline_family(source: str | Path) -> dict[str, object] | None:
+    """Sniff ``source`` for a known INLINE-CITATION cross-reference family (the dogfood gap).
+
+    The companion of :func:`detect_header_family`, keyed off the SAME corpus signature (an RFC's
+    ``Request for Comments:`` self header + at least one ``Obsoletes:``/``Updates:`` relation
+    header) but returning that family's :data:`inline_refs` Stage config — the deterministic
+    ``fused_entity_relation.inline_refs`` extractor that recovers the corpus's INLINE body citations
+    ("RFC 7230", "[RFC9110]") the header-only extractor structurally cannot see. Returns ``None``
+    when no family is recognised (or the source is non-local / empty / unreadable), so the wizard
+    wires the inline extractor ONLY for a corpus that carries such references and every other corpus
+    stays byte-identical. Best-effort + deterministic + never-raises, exactly like its header twin.
+    """
+    return _detect_family(source, which="inline")
+
+
+def _detect_family(source: str | Path, *, which: str) -> dict[str, object] | None:
+    """Shared corpus sniff for both family detectors — returns the header OR inline config.
+
+    ``which`` selects which of the matched family's two configs is returned (``"header"`` ->
+    ``header_refs``, ``"inline"`` -> ``inline_refs``). Both detectors share ONE bounded, sorted,
+    never-raising walk so a given corpus yields the same wiring for each (the byte-identical setup
+    contract).
+    """
+    p = Path(str(source).removeprefix("file://"))
+    try:
+        if not p.exists() or not p.is_dir():
+            return None
+    except OSError:
+        return None
+    compiled = [
+        (
+            header_config if which == "header" else inline_config,
+            re.compile(self_pat),
+            [re.compile(rel) for rel in rel_pats],
+        )
+        for _name, self_pat, rel_pats, header_config, inline_config in _HEADER_FAMILIES
+    ]
+    sampled = 0
+    try:
+        children = sorted(p.rglob("*"))
+    except OSError:
+        return None
+    for child in children:
+        if sampled >= _HEADER_SNIFF_MAX_FILES:
+            break
+        try:
+            if not child.is_file() or child.suffix.lstrip(".").lower() not in _PLAINTEXT_EXTS:
+                continue
+            with child.open("rb") as fh:
+                head = fh.read(_HEADER_SNIFF_MAX_BYTES)
+        except OSError:
+            continue
+        sampled += 1
+        text = head.decode("utf-8", errors="ignore")
+        for config, self_re, rel_res in compiled:
+            if self_re.search(text) and any(rel_re.search(text) for rel_re in rel_res):
+                return config
+    return None
 
 
 def llm_key_env_var(base_url: str) -> str:
@@ -406,8 +616,36 @@ def _parse_stage(answers: SetupAnswers) -> dict[str, object]:
         }
     elif answers.parser == PARSER_OCR:
         stage["config"] = {"device": answers.device, "max_new_tokens": 4096}
-    # parser.pdfplumber: born-digital PDF text, no config block (CPU).
+    # parser.pdfplumber / parser.plaintext: born-digital text, no config block (CPU).
     return stage
+
+
+def _sota_parse_stage(answers: SetupAnswers) -> dict[str, object]:
+    """The enterprise-SOTA ``parse`` Stage, shaped by the chosen parser.
+
+    Two parse paths (see :data:`_KNOWN_SOTA_PARSERS`): the production served-vLLM OCR endpoint
+    (``parser.lighton_vllm`` — the base_url/model/api_key/concurrency block a scanned corpus needs),
+    OR the CPU plaintext parser for a born-digital text corpus (``parser.plaintext`` — no OCR
+    endpoint, no config). Routing the text case here is what makes the SOTA profile yield a RUNNABLE
+    stack for a .txt/.md/.jsonl corpus instead of forcing OCR at an unserved endpoint. Every other
+    SOTA Stage (GLiNER2, GLinker, Granite r2, graph_features, BM25, ULTRA) is unchanged.
+    """
+    if answers.parser == PARSER_OCR_VLLM:
+        return {
+            "name": "parse",
+            "capability": "parse",
+            "provider": PARSER_OCR_VLLM,
+            "depends_on": ["intake_screen"],
+            "config": {
+                "base_url": answers.ocr_base_url,
+                "model": answers.ocr_model,
+                "api_key": SOTA_OCR_API_KEY,
+                "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
+            },
+        }
+    # A born-digital text corpus: the CPU plaintext parser (no OCR server needed). `_parse_stage`
+    # emits the bare parse Stage for any non-OCR parser, so the SOTA text path reuses it verbatim.
+    return _parse_stage(answers)
 
 
 def _embedder_block(answers: SetupAnswers) -> dict[str, object]:
@@ -717,8 +955,11 @@ def _build_sota_stages(
 ) -> list[dict[str, object]]:
     """The ``enterprise-sota`` profile stages — the pod-VALIDATED composed stack.
 
-    Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: served
-    vLLM OCR (``parser.lighton_vllm``) → chunk[640] → LLM schema induction[corpus] → fused GLiNER2
+    Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: the
+    chosen parse path (served vLLM OCR ``parser.lighton_vllm`` for a scanned/PDF/image corpus, or
+    the CPU ``parser.plaintext`` for a born-digital .txt/.md/.jsonl corpus — see
+    :func:`recommend_sota_parser` / :func:`_sota_parse_stage`) → chunk[640] → LLM schema
+    induction[corpus] → fused GLiNER2
     entity+relation → learned PII redaction (``redaction.gliner2``, #197) → profiling → the neural
     **GLinker** disambiguator (``disambiguation.glinker`` + Granite r2 STS embedder) → canonical KG
     → **ULTRA** graph completion (skip-with-flag when absent) → KG + context-enriched RAG-corpus
@@ -767,21 +1008,11 @@ def _build_sota_stages(
         }
     )
 
-    # 3) parse — the served-vLLM LightOn-OCR endpoint (the production OCR path, ~2.7x in-process).
-    stages.append(
-        {
-            "name": "parse",
-            "capability": "parse",
-            "provider": PARSER_OCR_VLLM,
-            "depends_on": ["intake_screen"],
-            "config": {
-                "base_url": answers.ocr_base_url,
-                "model": answers.ocr_model,
-                "api_key": SOTA_OCR_API_KEY,
-                "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
-            },
-        }
-    )
+    # 3) parse — the served-vLLM LightOn-OCR endpoint for a scanned/PDF/image corpus (the production
+    # OCR path, ~2.7x in-process), OR the CPU plaintext parser for a born-digital text corpus. The
+    # wizard routes on the detected file types (recommend_sota_parser) so a .txt/.md/.jsonl corpus
+    # gets a runnable text parser instead of OCR at an endpoint that is not served for it.
+    stages.append(_sota_parse_stage(answers))
 
     # 4) chunk at 640 (the mdeberta-window-calibrated near-max).
     stages.append(
@@ -828,6 +1059,51 @@ def _build_sota_stages(
         }
     )
 
+    # 7b) deterministic structured-header cross-reference recovery (dogfood-3-inspect) — ONLY when
+    # the wizard positively detected a known metadata-header family (`answers.header_refs`). The
+    # in-core, zero-dep `fused_entity_relation.header_refs` Provider mines each document's self id +
+    # header targets (an RFC's `Request for Comments:` + `Obsoletes:`/`Updates:` lines) into
+    # synthesized identifier mentions + directed edges — exactly the explicit cross-references the
+    # entity-anchored learned extractor structurally cannot see. It reads the SAME (unmasked)
+    # chunk stream `extract` reads and, via its disjoint `#href-` id namespace, composes beside
+    # gliner2: both feed Disambiguation, whose input is the concatenation of its parents' output. No
+    # detected family ⇒ this Stage is absent and the pipeline is byte-identical to before.
+    disambiguate_inputs = ["extract"]
+    if answers.header_refs is not None:
+        stages.append(
+            {
+                "name": "header_refs",
+                "capability": "fused_entity_relation",
+                "provider": "fused_entity_relation.header_refs",
+                "depends_on": ["induce"],
+                "config": dict(answers.header_refs),
+            }
+        )
+        disambiguate_inputs.append("header_refs")
+
+    # 7c) deterministic INLINE-CITATION cross-reference recovery (the dogfood measured gap) — ONLY
+    # when the wizard positively detected a known metadata-header family (`answers.inline_refs`).
+    # The in-core, zero-dep `fused_entity_relation.inline_refs` Provider resolves each document's
+    # self id ONCE (its `Request for Comments:` self declaration OR the provenance file name
+    # `rfcNNNN.txt`) and mines every chunk's BODY for inline "RFC <n>" citations — the overwhelming
+    # majority of an RFC corpus's gold cross-references, which BOTH the entity-anchored learned
+    # extractor AND the header-only `header_refs` sibling structurally cannot see (a body chunk
+    # carries no self id). It reads the SAME (unmasked) chunk stream `extract` reads and, via its
+    # disjoint `#iref-` id namespace, composes beside gliner2 AND header_refs: all feed
+    # Disambiguation, whose input is the concatenation of its parents' output. No detected family ⇒
+    # this Stage is absent and the pipeline is byte-identical to before.
+    if answers.inline_refs is not None:
+        stages.append(
+            {
+                "name": "inline_refs",
+                "capability": "fused_entity_relation",
+                "provider": "fused_entity_relation.inline_refs",
+                "depends_on": ["induce"],
+                "config": dict(answers.inline_refs),
+            }
+        )
+        disambiguate_inputs.append("inline_refs")
+
     # 8) learned PII redaction — the PII half of the ONE toggle, on the SAME blessed Provider `lite`
     # emits (#197: `BLESSED_REDACT_PROVIDER`, the ADR-0036 W9 unified gliner2 engine this profile
     # already runs for `extract`, so `redact` adds no second model library). W16 (ADR-0042): a
@@ -868,7 +1144,7 @@ def _build_sota_stages(
             "name": "disambiguate",
             "capability": "disambiguation",
             "provider": "disambiguation.glinker",
-            "depends_on": ["extract"],
+            "depends_on": disambiguate_inputs,
             "config": {
                 "device": SOTA_DEVICE,
                 "context_window": 200,
@@ -983,14 +1259,33 @@ def _render_header(answers: SetupAnswers) -> str:
         "# `latence process`. Edit by hand freely — it is a plain, diffable stack config.",
     ]
     if answers.profile == PROFILE_SOTA:
+        if answers.parser == PARSER_PLAINTEXT:
+            parse_lines = [
+                "#   born-digital text parser (parser.plaintext, CPU — the detected corpus is all",
+                "#   .txt/.md/.jsonl, so no OCR endpoint is served or needed) +",
+            ]
+            parse_point = [
+                "#   validate` (device honesty). The corpus is plain text, so `parse` decodes it",
+                "#   on CPU (no OCR box); point `parse.provider` at parser.lighton_vllm for scans.",
+            ]
+        else:
+            parse_lines = [
+                "#   served-vLLM LightOn OCR (parser.lighton_vllm) +",
+            ]
+            parse_point = [
+                "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR",
+                "#   box.",
+            ]
         lines += [
             "#",
             "# Profile: enterprise-sota — the pod-VALIDATED composed stack (ADR-0046,",
-            "#   stacks/gpu-sota-glinker.yaml): served-vLLM LightOn OCR (parser.lighton_vllm) +",
+            "#   stacks/gpu-sota-glinker.yaml):",
+            *parse_lines,
             "#   LLM schema induction + fused GLiNER2 entity+relation + the neural GLinker",
             "#   disambiguator + IBM Granite r2 embeddings + ULTRA graph completion. Every learned",
             "#   Stage runs on CUDA; on a CPU-only host they skip-with-flag at `latence stack",
-            "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR box.",
+            *parse_point,
+            "#",
             "#   Index-time signals (CPU, deterministic, zero extra deps): graph features on",
             "#   `graph` (ADR-0051 — PageRank centrality + community, exported as graph-nodes",
             "#   columns and projected onto each chunk's context_header) and BM25 on",

@@ -40,7 +40,12 @@ from latence_sink_qdrant import (
     SinkVerificationError,
     point_id,
 )
-from latence_sink_qdrant.testing import FakeQdrantClient, FakeUnexpectedResponse
+from latence_sink_qdrant.testing import (
+    CountResult,
+    FakeQdrantClient,
+    FakeUnexpectedResponse,
+    Filter,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -597,6 +602,71 @@ def test_a_store_fault_mid_load_never_deletes_anything(tmp_path: Path) -> None:
     assert "No records were deleted" in str(excinfo.value)
     assert healthy.calls.count("delete") == 0
     assert healthy.points[_COLLECTION] == before
+
+
+class ResponseHandlingException(Exception):
+    """qdrant-client's ``ResponseHandlingException`` as the sink sees it.
+
+    Named to match the real class exactly (the sink classifies it by class name, importing nothing
+    from the optional ``qdrant_client``). It is a **client-side** response-handling failure and
+    carries **no** ``status_code`` — the distinguishing mark from a server ``UnexpectedResponse``.
+    A qdrant-client newer than the server raises exactly this from ``count`` on a version skew,
+    while every other call parses fine — the production bug (server 1.12.4 vs client 1.18.0) the
+    scroll fallback exists for.
+    """
+
+
+class _CountVersionSkewClient(FakeQdrantClient):
+    """A store whose ``count`` response the client cannot parse, while every other call works.
+
+    It stays faithful on the rejection side: a bad key still 403s and a missing collection still
+    404s (both surface *before* the skew), so only a genuine client-newer-than-server ``count``
+    parse — the one thing raw HTTP and every other call survive — trips the fallback.
+    """
+
+    def count(
+        self, collection_name: str, count_filter: Filter | None = None, exact: bool = True
+    ) -> CountResult:
+        self._enter("count")
+        self._collection(collection_name)
+        raise ResponseHandlingException(
+            "Unable to parse response: server version 1.12.4 vs client 1.18.0"
+        )
+
+
+def test_a_count_the_client_cannot_parse_falls_back_to_scroll_not_a_failed_load(
+    tmp_path: Path,
+) -> None:
+    """A qdrant-client/server version skew breaks *only* the client-side ``count`` parse.
+
+    The load is otherwise correct — the upsert lands and the collection holds every point — so the
+    reconcile guard's count must fall back to the version-robust ``scroll`` path and the load must
+    succeed, not exit 2 on a false ``count failed`` red (the tutorial §4.1 look-for is
+    ``N points upserted``). Pre-fix ``_count`` had no fallback: the ``ResponseHandlingException``
+    was mapped to ``SinkLoadError`` and the load raised.
+    """
+    client = _CountVersionSkewClient()
+    export = write_export(tmp_path, {"c1": "alpha text", "c2": "beta text"})
+
+    report = QdrantSink({"collection": _COLLECTION}, client=client).load(export)
+
+    assert (report.upserted, report.unchanged, report.deleted) == (2, 0, 0)
+    assert stored_record_ids(client) == {"c1", "c2"}
+    # the fast count was attempted, and the scroll fallback actually ran
+    assert "count" in client.calls
+    assert "scroll" in client.calls
+
+    # An idempotent re-run is equally unbothered by the broken count: no duplication...
+    again = QdrantSink({"collection": _COLLECTION}, client=client).load(export)
+    assert (again.upserted, again.unchanged, again.deleted) == (0, 2, 0)
+    assert stored_record_ids(client) == {"c1", "c2"}
+
+    # ...and the retract-and-sweep still converges through the scroll-counted guard.
+    after = QdrantSink({"collection": _COLLECTION}, client=client).load(
+        write_export(tmp_path / "v2", {"c1": "alpha text"})
+    )
+    assert after.deleted == 1
+    assert stored_record_ids(client) == {"c1"}
 
 
 def test_a_bad_api_key_is_a_typed_auth_error(tmp_path: Path) -> None:

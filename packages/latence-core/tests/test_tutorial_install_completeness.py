@@ -33,7 +33,12 @@ from pathlib import Path
 
 import pytest
 from latence_core.pipeline import Pipeline
-from latence_core.setup.wizard import PROFILE_SOTA, SetupAnswers, build_stack_config
+from latence_core.setup.wizard import (
+    PARSER_OCR_VLLM,
+    PROFILE_SOTA,
+    SetupAnswers,
+    build_stack_config,
+)
 
 # tests/  ->  latence-core/  ->  packages/  ->  repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -82,9 +87,12 @@ def _sota_providers(tmp_path: Path) -> list[str]:
     source.mkdir(exist_ok=True)
     (source / "a.pdf").write_text("a", encoding="utf-8")
     answers = SetupAnswers(
+        # The walkthrough's §3 fast path is the served-vLLM OCR parse path for a scanned/PDF corpus
+        # (parser.lighton_vllm) — that is the parser this install-completeness gate must cover. (A
+        # born-digital text corpus instead routes to parser.plaintext; see recommend_sota_parser.)
         source=f"file://{source}",
         storage=f"file://{tmp_path}/out",
-        parser="parser.render",
+        parser=PARSER_OCR_VLLM,
         device="auto",
         pii=True,
         profile=PROFILE_SOTA,

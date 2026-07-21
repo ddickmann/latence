@@ -64,6 +64,7 @@ from latence_core.observability import (
 )
 from latence_core.pipeline import CapabilityKind, ExtractOn, Pipeline, Stage
 from latence_core.providers.device import DeviceDecision, select_device
+from latence_core.providers.perf import empty_cuda_cache
 from latence_core.providers.profile import ProviderProfile, profile_of
 from latence_core.quality import (
     DriftDiagnostics,
@@ -1391,6 +1392,20 @@ class LocalRunner:
                 CapabilityKind.FUSED_ENTITY_RELATION,
             ):
                 self._fanout_by_stage[stage.name] = self._provider_fanout(provider)
+            # Cross-stage VRAM lifecycle (dogfood-2b-process). Each Stage instantiates its OWN
+            # Provider (line above) — there is no cross-stage Provider reuse — so once this Stage's
+            # dispatch has returned, nothing downstream needs this Provider's model. On a
+            # single-GPU pod the enterprise-sota stack loads a fresh multi-GiB model per learned
+            # Stage (extract, embedding, disambiguation, redaction, …); if each stays resident the
+            # last Stage OOMs with a near-full card (the redact[gliner2] 6.28 GiB forward on a
+            # 32 GB Blackwell with ~248 MiB free). Drop the strong reference and reclaim: the
+            # ``gc.collect()`` inside the seam is what actually frees the model (a torch nn.Module
+            # is cycle-held, so refcount alone never releases it), and the CUDA cache is handed back
+            # so the next Stage's model allocates from a clean pool. Torch-free/guarded (ADR-0016),
+            # best-effort, never raises — and output is byte-identical (memory only), so a run on a
+            # roomy machine is unaffected. Runs on the failure path too, which is harmless.
+            del provider
+            empty_cuda_cache(provider_name=f"stage:{stage.name}")
 
     def _dispatch_stage(
         self,

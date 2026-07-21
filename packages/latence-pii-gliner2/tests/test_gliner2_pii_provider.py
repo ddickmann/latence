@@ -16,6 +16,7 @@ and a dedicated anchor test proves a provider that mis-parses that shape as a fl
 
 from __future__ import annotations
 
+import json
 import sys
 import tomllib
 import types
@@ -34,6 +35,11 @@ from latence_core.contracts import (
     RedactionAction,
 )
 from latence_core.errors import ProviderError
+from latence_core.providers.perf import (
+    DEFAULT_MICROBATCH_MAX_TEXTS,
+    DEFAULT_MICROBATCH_TOKEN_BUDGET,
+    estimate_token_length,
+)
 from latence_pii_gliner2 import Gliner2PIIRedactor
 from latence_pii_gliner2._compat import SUPPORTED_SPEC
 
@@ -90,6 +96,16 @@ class BackendCompilerFailed(RuntimeError):
     """
 
 
+class OutOfMemoryError(RuntimeError):
+    """A stand-in for ``torch.cuda.OutOfMemoryError`` — matched by class NAME (torch-free).
+
+    ``torch`` raises this (a ``RuntimeError`` subclass) mid-forward when a CUDA allocation exceeds
+    free VRAM; the message reads ``"CUDA out of memory. Tried to allocate ..."``. The provider's
+    torch-free ``is_cuda_oom`` matches on the class name / message, so a same-named local class
+    exercises the exact micro-batch backoff without importing torch or a real GPU.
+    """
+
+
 class _FakeGLiNER2:
     """Stands in for ``gliner2.GLiNER2`` with the REAL per-label-dict ``extract_entities``.
 
@@ -115,9 +131,16 @@ class _FakeGLiNER2:
     #: when True, a model loaded with compile=True raises BackendCompilerFailed on its FIRST forward
     #: (torch.compile compiles lazily at inference) — the W9 inference-time fault the guard degrades.
     compiled_forward_raises: bool = False
+    #: a batched forward over MORE than this many texts raises a CUDA OutOfMemoryError (None = never);
+    #: models the span-scoring activation that outgrows VRAM for a large group but fits once halved.
+    oom_above_batch: int | None = None
+    #: when True, EVERY batched forward OOMs regardless of size — the genuinely-unrecoverable case
+    #: (a single chunk that will not fit) the provider must surface as a typed ProviderError.
+    oom_always: bool = False
 
     def __init__(self) -> None:
         self.batch_calls = 0
+        self.batch_sizes: list[int] = []
         self._compile_on = False
 
     @classmethod
@@ -188,10 +211,19 @@ class _FakeGLiNER2:
         # The real batched API: one forward pass over all texts; result[i] is texts[i]'s per-label
         # dict — the exact single-text shape, one per input.
         self.batch_calls += 1
+        self.batch_sizes.append(len(texts))
         type(self).last_max_len = max_len  # W12: record the threaded model-window bound
         if type(self).compiled_forward_raises and self._compile_on:
             # Mimic torch._dynamo.exc.BackendCompilerFailed on the FIRST (compiled) forward.
             raise BackendCompilerFailed("inductor backend cannot compile this model")
+        oom_ceiling = type(self).oom_above_batch
+        if type(self).oom_always or (oom_ceiling is not None and len(texts) > oom_ceiling):
+            # Mimic torch.cuda.OutOfMemoryError: the span-scoring activation for THIS many texts
+            # exceeds free VRAM. The message mirrors the real one the pod logged (dogfood-2b).
+            raise OutOfMemoryError(
+                "CUDA out of memory. Tried to allocate 6.28 GiB. "
+                "GPU 0 has a total capacity of 31.37 GiB of which 247.81 MiB is free."
+            )
         return [
             self.extract_entities(
                 text,
@@ -230,6 +262,8 @@ def fake_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER2]:
     _FakeGLiNER2.last_max_len = None
     _FakeGLiNER2.raise_on_optimized_load = False
     _FakeGLiNER2.compiled_forward_raises = False
+    _FakeGLiNER2.oom_above_batch = None
+    _FakeGLiNER2.oom_always = False
     return _FakeGLiNER2
 
 
@@ -430,6 +464,96 @@ def test_missing_gliner2_dependency_raises_clear_error(monkeypatch: pytest.Monke
         list(provider.redact([_chunk(_TEXT)]))
 
 
+# --- dogfood-2b-process: the forward runs under torch.inference_mode (kills the 27 GiB OOM) -------
+
+
+class _GradTrackingTorch(types.ModuleType):
+    """A faithful ``torch`` stand-in that models grad-enabled state around ``inference_mode()``.
+
+    ``is_grad_enabled()`` reads a flag that ``inference_mode()`` flips off for its ``with`` block and
+    restores on exit — exactly torch's own behaviour (real ``torch`` is NOT installed offline,
+    ADR-0016). A forward that records ``is_grad_enabled()`` at call time therefore proves whether it
+    ran INSIDE the inference context. This is the anti-false-green pin: if the provider does NOT enter
+    ``inference_context`` around the model call, grad stays enabled and the assertion below fails.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("torch")
+        self.grad_enabled = True
+
+        class _InferenceMode:
+            def __init__(self, owner: _GradTrackingTorch) -> None:
+                self._owner = owner
+                self._prev = True
+
+            def __enter__(self) -> Any:
+                self._prev = self._owner.grad_enabled
+                self._owner.grad_enabled = False
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                self._owner.grad_enabled = self._prev
+
+        self._inference_mode_cls = _InferenceMode
+
+    def inference_mode(self) -> Any:
+        return self._inference_mode_cls(self)
+
+    def is_grad_enabled(self) -> bool:
+        return self.grad_enabled
+
+
+class _GradRecordingModel:
+    """A gliner2-shaped model whose ``batch_extract_entities`` RECORDS grad state at forward time.
+
+    The signature is faithful to gliner2 1.3.2 (``batch_size`` is the 3rd positional, NOT
+    ``threshold``), so a mis-wired positional call fails here rather than false-greening. The forward
+    reads ``torch.is_grad_enabled()`` from the injected fake ``torch`` — the same object
+    ``inference_context`` toggled — so it observes exactly whether the provider entered the context.
+    """
+
+    def __init__(self, torch_mod: _GradTrackingTorch) -> None:
+        self._torch = torch_mod
+        self.grad_at_forward: bool | None = None
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        self.grad_at_forward = self._torch.is_grad_enabled()
+        return [{"entities": {}} for _ in texts]
+
+
+def test_extract_forward_runs_under_inference_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REGRESSION (dogfood-2b-process): the ``batch_extract_entities`` forward runs with autograd OFF.
+
+    A redaction-only encoder never backpropagates; a forward under the default grad-enabled mode
+    still builds an autograd graph and pins its activations alive, ACCUMULATING VRAM run-over-run to
+    the pod's 27.28 GiB CUDA OOM at the redact stage. The cure is running the forward inside
+    ``inference_context`` (``torch.inference_mode()``). This test injects a faithful fake ``torch``
+    whose grad flag ``inference_mode()`` toggles, and a model that records the flag at forward time —
+    proving the provider entered the context. If the ``inference_context`` wrap is removed from
+    ``_extract_once``, grad stays enabled and ``grad_at_forward`` is True, failing the assertion.
+    """
+    fake_torch = _GradTrackingTorch()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert fake_torch.is_grad_enabled() is True  # default: grad ON before any forward
+
+    provider = Gliner2PIIRedactor(_config())
+    model = _GradRecordingModel(fake_torch)
+    provider._extract_once(model, ["Reach Alice."], ["person"])
+
+    assert model.grad_at_forward is False  # the forward ran with autograd DISABLED (inference_mode)
+    assert fake_torch.is_grad_enabled() is True  # and the context restored grad on exit
+
+
 # --- W12 model-boundary guard: max_len threaded into the extract call -------------------------
 
 
@@ -612,6 +736,180 @@ def test_batch_size_must_be_positive_int() -> None:
         Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 0})
 
 
+# --- dogfood-2b-process: token-budget micro-batching decouples the forward from batch_size -----
+
+
+class _RecordingGLiNER2(_FakeGLiNER2):
+    """A faithful :class:`_FakeGLiNER2` that ALSO records the texts of every batched forward.
+
+    Instance-level ``calls`` (one entry per ``batch_extract_entities`` call = the exact list of
+    texts fed to it) lets the regression test read back BOTH the num_texts and the summed token
+    length of every native forward, and prove the provider splits a large ``batch_size`` group into
+    token-budget MICRO-BATCHES instead of one giant padded tensor (the measured 32 GB OOM). It
+    delegates to the real fake for behaviour (per-label dict shape, threshold/label filtering, the
+    OOM/compile hooks), so it rejects exactly what the real gliner2 API rejects.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: one entry per batched forward: the texts handed to it, in call order.
+        self.calls: list[list[str]] = []
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        self.calls.append(list(texts))
+        return super().batch_extract_entities(
+            texts,
+            entity_types,
+            batch_size,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )
+
+
+def _long_distinct_chunks(n: int, body_chars: int) -> list[ChunkRecord]:
+    """N distinct chunks, each padded to ``body_chars`` so its estimated token length is large.
+
+    Like :func:`_distinct_chunks` (a distinct ``PersonNNN`` at chunk-offset ``i`` → distinct spans,
+    so a mis-ordered micro-batch map is caught), but each chunk carries a long body — enough that a
+    whole ``batch_size`` group would pad into an OOM-sized activation without micro-batching.
+    """
+    filler = " lorem ipsum dolor sit amet consectetur"
+    chunks: list[ChunkRecord] = []
+    for i in range(n):
+        head = ("." * i) + f"Person{i:03d} was here."
+        pad = (filler * (body_chars // len(filler) + 1))[:body_chars]
+        chunks.append(
+            _chunk(
+                head + pad,
+                record_id=f"doc{i}#chunk:0",
+                document_record_id=f"doc{i}",
+                index=0,
+            )
+        )
+    return chunks
+
+
+@pytest.fixture()
+def recording_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_RecordingGLiNER2]:
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_RecordingGLiNER2, _PINNED_GLINER2)
+    )
+    # Reset the inherited class-level knobs (a prior test may have set them on the base class).
+    _RecordingGLiNER2.entities = []
+    _RecordingGLiNER2.per_text = None
+    _RecordingGLiNER2.raise_on_extract = False
+    _RecordingGLiNER2.last_kwargs = {}
+    _RecordingGLiNER2.last_max_len = None
+    _RecordingGLiNER2.raise_on_optimized_load = False
+    _RecordingGLiNER2.compiled_forward_raises = False
+    _RecordingGLiNER2.oom_above_batch = None
+    _RecordingGLiNER2.oom_always = False
+    return _RecordingGLiNER2
+
+
+def test_large_batch_size_split_into_token_budget_microbatches(
+    recording_gliner2: type[_RecordingGLiNER2],
+) -> None:
+    """dogfood-2b-process: a large ``batch_size`` group is split into token-budget micro-batches.
+
+    The confirmed OOM: the provider fed a whole ``batch_size`` group (default 32) of long chunks
+    into ONE ``batch_extract_entities`` call; gliner2 padded them into a single tensor whose
+    span-scoring activation (~num_texts × seq_len) demanded ~17 GiB and OOM'd on a 32 GB card. The
+    cure decouples the forward from the progress ``batch_size``: each forward carries a MICRO-BATCH
+    bounded by BOTH a text-count cap and a token budget. This test feeds a large ``batch_size`` (32)
+    of long chunks and asserts (a) MULTIPLE forwards happened, (b) NO forward exceeded either bound,
+    and (c) the output is record-for-record identical to the one-chunk-per-call reference.
+
+    It FAILS on the pre-fix code (one giant call of all 10 texts — 10 > max_texts and
+    10 × 768 tokens ≫ the budget), which is what makes it an anti-false-green regression.
+    """
+    chunks = _long_distinct_chunks(10, body_chars=4000)
+    recording_gliner2.per_text = _per_text_person_map(chunks)
+    cfg = {"pii_labels": ["person"], "batch_size": 32}
+
+    provider = Gliner2PIIRedactor(cfg)
+    batched = list(provider.redact(chunks))
+    calls = provider._model.calls
+
+    # (a) The whole group did NOT go through one giant forward — it was micro-batched.
+    assert len(calls) >= 2, f"expected multiple micro-batch forwards, got {len(calls)}"
+    max_len = 768  # the default gliner window the provider threads into the call
+    for texts in calls:
+        # (b1) the text-count cap — the PRIMARY bound on the padded worst case (max_texts × max_len)
+        assert len(texts) <= DEFAULT_MICROBATCH_MAX_TEXTS
+        # (b2) the token budget — summed per-text token length (each capped at max_len)
+        total = sum(estimate_token_length(t, max_len) for t in texts)
+        assert total <= DEFAULT_MICROBATCH_TOKEN_BUDGET
+    # every chunk was still scanned exactly once (the micro-batches tile the group in order)
+    assert sum(len(texts) for texts in calls) == len(chunks)
+
+    # (c) batch-invariance: identical to the one-chunk-per-forward path, record for record.
+    unbatched = [
+        r
+        for c in chunks
+        for r in Gliner2PIIRedactor({**cfg, "batch_size": 1}).redact([c])
+    ]
+    assert len(batched) == len(unbatched) == 10
+    for b, u in zip(batched, unbatched, strict=True):
+        assert b.record_id == u.record_id
+        assert b.masked_content == u.masked_content
+        assert [(s.char_start, s.char_end, s.pii_type) for s in b.pii_spans] == [
+            (s.char_start, s.char_end, s.pii_type) for s in u.pii_spans
+        ]
+    for i, rec in enumerate(batched):
+        assert rec.masked_content is not None
+        assert f"Person{i:03d}" not in rec.masked_content
+        assert "[PERSON]" in rec.masked_content
+
+
+def test_token_budget_bites_before_count_when_max_len_raised(
+    recording_gliner2: type[_RecordingGLiNER2],
+) -> None:
+    """The token budget (not only the count cap) bounds the forward when ``max_len`` is raised.
+
+    With a larger window each long chunk contributes more tokens, so the token budget forces
+    micro-batches SMALLER than ``max_texts`` — proving the budget is a real, independent bound (the
+    ``max_texts`` cap alone would let a bigger padded tensor through at a raised window).
+    """
+    chunks = _long_distinct_chunks(4, body_chars=12000)
+    recording_gliner2.per_text = _per_text_person_map(chunks)
+    # max_len 2048 → each chunk estimates at ~2048 tokens, so 2 per forward already exceed the 3072
+    # budget → micro-batches of ONE, well below the max_texts=4 count cap.
+    provider = Gliner2PIIRedactor(
+        {"pii_labels": ["person"], "batch_size": 32, "max_len": 2048}
+    )
+    list(provider.redact(chunks))
+    calls = provider._model.calls
+
+    assert len(calls) >= 2
+    assert max(len(texts) for texts in calls) < DEFAULT_MICROBATCH_MAX_TEXTS
+    for texts in calls:
+        total = sum(estimate_token_length(t, 2048) for t in texts)
+        assert total <= DEFAULT_MICROBATCH_TOKEN_BUDGET
+
+
+def test_microbatch_bound_config_must_be_positive_int() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="microbatch_max_texts"):
+        Gliner2PIIRedactor({"pii_labels": ["person"], "microbatch_max_texts": 0})
+    with pytest.raises(ConfigError, match="microbatch_token_budget"):
+        Gliner2PIIRedactor({"pii_labels": ["person"], "microbatch_token_budget": -1})
+
+
 class _NoBatchGLiNER2:
     """A checkpoint that exposes only the single-text ``extract_entities``, NOT the W7 batched
     ``batch_extract_entities`` — the false-green class the provider guard must catch legibly.
@@ -719,6 +1017,82 @@ def test_inference_time_compile_fault_degrades_to_uncompiled(
     assert provider._compile_disabled is True
     assert fake_gliner2.last_kwargs.get("compile") is False
     assert fake_gliner2.last_kwargs.get("quantize") is True
+
+
+# --- dogfood-2b-process: CUDA-OOM micro-batch backoff at redaction (real-hardware fix) ----------
+
+
+def test_cuda_oom_recovers_by_micro_batching(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    """REGRESSION (dogfood-2b-process): a batched forward that OOMs is split + retried, not crashed.
+
+    On the tutorial's own 32 GB Blackwell pod, ``latence process`` (enterprise-sota) died Exit 1 at
+    the redact stage with a native CUDA ``OutOfMemoryError`` — GLiNER2's span-scoring activation for
+    a whole group of long chunks demanded a single 6.28 GiB allocation the GPU could not satisfy, so
+    NO run dir / exports were ever written. Because the emitted RedactionRecords are
+    batch-size-invariant (W7), the provider must split the OOM'd group in half and retry smaller
+    until it fits — masking every chunk, never dropping one (redaction floor, ADR-0044).
+
+    Pre-fix ``_batch_extract`` issued ONE forward over the group and let the OOM propagate through the
+    guard as a ``ProviderError`` → this test FAILS (the whole redact call raises, zero records). With
+    the backoff it splits until each forward carries ``<= oom_above_batch`` texts and completes.
+    """
+    chunks = _distinct_chunks(8)
+    fake_gliner2.per_text = _per_text_person_map(chunks)
+    # A forward over > 2 texts OOMs; halving 8 -> 4 (OOM) -> 2 (fits) recovers every chunk.
+    fake_gliner2.oom_above_batch = 2
+    provider = Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 8})
+
+    recs = list(provider.redact(chunks))
+
+    assert len(recs) == 8
+    for i, rec in enumerate(recs):
+        assert rec.masked_content is not None
+        assert f"Person{i:03d}" not in rec.masked_content  # every chunk actually scanned + masked
+        assert "[PERSON]" in rec.masked_content
+    # The successful forwards ran at the recovered size (<= the OOM ceiling), proving the split bit —
+    # every text that actually got scanned went through a forward small enough to fit.
+    assert provider._model.batch_sizes  # forwards happened
+    assert any(size <= 2 for size in provider._model.batch_sizes)
+
+
+def test_cuda_oom_output_is_identical_to_the_no_oom_path(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    """The recovered output is byte-identical to the batch that never OOM'd (backoff is transparent)."""
+    chunks = _distinct_chunks(6)
+    fake_gliner2.per_text = _per_text_person_map(chunks)
+    cfg = {"pii_labels": ["person"], "batch_size": 6}
+
+    clean = list(Gliner2PIIRedactor(cfg).redact(chunks))
+    fake_gliner2.oom_above_batch = 1  # force maximal splitting on the second run
+    recovered = list(Gliner2PIIRedactor(cfg).redact(chunks))
+
+    assert len(recovered) == len(clean) == 6
+    for r, c in zip(recovered, clean, strict=True):
+        assert r.record_id == c.record_id
+        assert r.masked_content == c.masked_content
+        assert [(s.char_start, s.char_end, s.pii_type) for s in r.pii_spans] == [
+            (s.char_start, s.char_end, s.pii_type) for s in c.pii_spans
+        ]
+
+
+def test_unrecoverable_cuda_oom_surfaces_typed_error_no_dropped_chunk(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """No fake green: an OOM that persists even at batch-of-one is a typed ProviderError, not a drop.
+
+    The backoff halves down to a single chunk; if THAT still OOMs the hardware genuinely cannot run
+    the stage, so the provider must surface a typed :class:`ProviderError` (ADR-0034) — never emit a
+    chunk un-scanned or silently skip it (redaction floor, ADR-0044). The raised error carries no PII.
+    """
+    chunks = _distinct_chunks(4)
+    fake_gliner2.per_text = _per_text_person_map(chunks)
+    fake_gliner2.oom_always = True  # even a batch of one will not fit
+    provider = Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 4})
+
+    with pytest.raises(ProviderError) as excinfo:
+        list(provider.redact(chunks))
+    assert "redaction.gliner2" in str(excinfo.value)
+    # No PII leaked into the typed error message (guard discipline: type name only, no content).
+    assert "Person" not in str(excinfo.value)
 
 
 # --- W9-scaling (audit R4): compile is OFF by default on cuda too, like the twin extractor -------
@@ -1035,3 +1409,159 @@ def test_uncompiled_reload_also_placed_on_cuda(
     assert placing_gliner2.to_calls == ["cuda", "cuda"]  # initial load + uncompiled reload
     assert rec.masked_content is not None
     assert "Alice" not in rec.masked_content
+
+
+# ---------------------------------------------------------------------------
+# dogfood-2b-process: the default PII checkpoint's tokenizer_config.json stores
+# ``extra_special_tokens`` as a LIST, which transformers >= 4.57 (pulled transitively via
+# gliner2[local]) rejects at tokenizer build with
+# ``AttributeError: 'list' object has no attribute 'keys'`` — killing ``latence process`` at the
+# mandatory redact stage before any run dir / export is written. The provider now coerces that field
+# to the dict shape 4.57 requires BEFORE the load (byte-identical tokenization). These tests inject a
+# faithful ``huggingface_hub`` + a ``from_pretrained`` that reproduces the REAL transformers loader,
+# so the field crash — and its fix — are exercised deterministically and offline (no torch download).
+# ---------------------------------------------------------------------------
+
+#: The 10 GLiNER2 structural special tokens the real ``fastino/GLiNER2-Guardrails-PII-Multi``
+#: ``tokenizer_config.json`` stores as a LIST (verified against the live HF file, 2026-07-21). Every
+#: one is ALSO a ``special`` added token in that checkpoint's ``tokenizer.json``, so coercing the
+#: list to a ``{token: token}`` dict is byte-identical in tokenization — only the config *shape* changes.
+_STRUCT_TOKENS = [
+    "[SEP_STRUCT]", "[SEP_TEXT]", "[P]", "[C]", "[E]", "[R]", "[L]",
+    "[EXAMPLE]", "[OUTPUT]", "[DESCRIPTION]",
+]
+
+
+def _transformers_set_model_specific_special_tokens(extra: Any) -> list[str]:
+    """FAITHFUL stand-in for transformers >= 4.57 ``_set_model_specific_special_tokens``.
+
+    The 4.57 loader treats ``extra_special_tokens`` as a **dict** ``{name: token}`` — it calls
+    ``special_tokens.keys()`` then ``.items()`` on it. So a **list** raises exactly
+    ``AttributeError: 'list' object has no attribute 'keys'`` (the field crash), and a **dict** whose
+    values are strings is accepted — the precise accept/reject boundary the real dep enforces, so this
+    fake is not a false-green (a list is rejected here iff transformers 4.57 rejects it).
+    """
+    added = list(extra.keys())  # dies on a list with 'list' object has no attribute 'keys'
+    for key, value in extra.items():
+        if not isinstance(value, str):
+            msg = f"Special token {key} has to be either str or AddedToken but got: {type(value)}"
+            raise TypeError(msg)
+    return added
+
+
+class _TokenizerLoadingGLiNER2(_FakeGLiNER2):
+    """A ``_FakeGLiNER2`` whose ``from_pretrained`` ALSO builds the tokenizer the way transformers
+    >= 4.57 does — it resolves the checkpoint's cached ``tokenizer_config.json`` (via the injected
+    ``huggingface_hub.hf_hub_download``) and runs the faithful ``_set_model_specific_special_tokens``.
+
+    This is what reproduces the dogfood field crash offline: a list-valued config raises
+    ``AttributeError`` at load; a dict-valued one loads cleanly.
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _FakeGLiNER2:
+        from huggingface_hub import hf_hub_download
+
+        config_path = hf_hub_download(model_id, "tokenizer_config.json")
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        # The exact transformers 4.57 tokenizer-build step that crashed on the pod.
+        _transformers_set_model_specific_special_tokens(config.get("extra_special_tokens", {}))
+        return super().from_pretrained(model_id, **kwargs)
+
+
+def _fake_huggingface_hub_module(config_path: Path) -> types.ModuleType:
+    """A ``huggingface_hub`` whose ``hf_hub_download`` returns our fake-cache tokenizer_config path.
+
+    The SAME path the shim patches and the fake ``from_pretrained`` reads back — so a patch by the
+    shim is observed by the subsequent load, exactly as it is on a real shared HF cache.
+    """
+    module = types.ModuleType("huggingface_hub")
+
+    def hf_hub_download(repo_id: str, filename: str, **_kwargs: Any) -> str:
+        if filename != "tokenizer_config.json":
+            msg = f"unexpected file requested from the fake hub: {filename!r}"
+            raise FileNotFoundError(msg)
+        return str(config_path)
+
+    module.hf_hub_download = hf_hub_download  # type: ignore[attr-defined]
+    return module
+
+
+@pytest.fixture()
+def list_valued_pii_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    """A fake HF cache whose default-PII-checkpoint ``tokenizer_config.json`` is the CRASHING shape.
+
+    ``extra_special_tokens`` is a *list* (the real, field-failing shape), and both the shim and the
+    faithful ``from_pretrained`` resolve it through the injected ``huggingface_hub``. Returns the
+    config path so a test can assert it was coerced list -> dict.
+    """
+    config_path = tmp_path / "tokenizer_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "DebertaV2Tokenizer",
+                "extra_special_tokens": list(_STRUCT_TOKENS),  # the shape transformers 4.57 rejects
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", _fake_huggingface_hub_module(config_path))
+    monkeypatch.setitem(
+        sys.modules, "gliner2", _fake_gliner2_module(_TokenizerLoadingGLiNER2, _PINNED_GLINER2)
+    )
+    _FakeGLiNER2.entities = []
+    _FakeGLiNER2.per_text = None
+    _FakeGLiNER2.raise_on_extract = False
+    _FakeGLiNER2.last_kwargs = {}
+    _FakeGLiNER2.last_max_len = None
+    _FakeGLiNER2.raise_on_optimized_load = False
+    _FakeGLiNER2.compiled_forward_raises = False
+    return config_path
+
+
+def test_list_extra_special_tokens_crashes_transformers_faithful_load(
+    list_valued_pii_checkpoint: Path,  # noqa: ARG001 - fixture installs the crashing checkpoint
+) -> None:
+    """ANCHOR (anti-false-green): the offline fake must reproduce the REAL transformers >= 4.57 crash.
+
+    A LIST-valued ``extra_special_tokens`` must raise ``AttributeError: 'list' object has no attribute
+    'keys'`` at ``from_pretrained`` — the exact pod failure. If this fake ever silently tolerated a
+    list, the regression below would pass for the wrong reason (a load that never crashed), so this
+    anchor pins the fake to the real accept/reject boundary.
+    """
+    import gliner2
+
+    with pytest.raises(AttributeError, match="'list' object has no attribute 'keys'"):
+        gliner2.GLiNER2.from_pretrained("fastino/GLiNER2-Guardrails-PII-Multi")
+
+
+def test_process_survives_list_valued_extra_special_tokens(
+    list_valued_pii_checkpoint: Path,
+) -> None:
+    """REGRESSION (dogfood-2b-process): redact must NOT crash on the default PII checkpoint.
+
+    With the checkpoint's ``extra_special_tokens`` stored as a list, the pre-fix load died with a
+    ``ProviderError`` (native ``AttributeError``) at the mandatory redact stage, so ``latence process``
+    exited non-zero and wrote no run dir. The shim coerces the cached config to the dict shape
+    transformers >= 4.57 requires before the load, so redact loads the model, completes, and yields a
+    record — and the cached config is now dict-shaped.
+    """
+    a_start = _TEXT.index("Alice")
+    _TokenizerLoadingGLiNER2.entities = [
+        {"start": a_start, "end": a_start + 5, "label": "person", "confidence": 0.95},
+    ]
+
+    rec = next(iter(Gliner2PIIRedactor(_config()).redact([_chunk(_TEXT)])))
+
+    # The load no longer crashes: redact runs end-to-end and the PII is masked.
+    assert isinstance(rec, ChunkRecord)
+    assert rec.masked_content is not None
+    assert "Alice" not in rec.masked_content
+
+    # The cached tokenizer_config was coerced list -> dict — the exact shape transformers 4.57
+    # iterates, keyed token->token (every struct token preserved as a model-specific special token).
+    patched = json.loads(list_valued_pii_checkpoint.read_text(encoding="utf-8"))
+    assert patched["extra_special_tokens"] == {token: token for token in _STRUCT_TOKENS}
