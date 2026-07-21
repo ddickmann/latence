@@ -624,6 +624,7 @@ def setup(
         SetupConfigError,
         build_stack_config,
         detect_header_family,
+        detect_inline_family,
         llm_key_env_var,
         recommend_parser,
         recommend_sota_parser,
@@ -855,6 +856,20 @@ def setup(
             err=True,
         )
 
+    # The companion of the above (the dogfood measured gap): the header-only extractor recovers a
+    # document's `Obsoletes:`/`Updates:` HEADER edges but structurally cannot see its INLINE body
+    # citations ("RFC 7230" scattered through the body) — the overwhelming majority of the corpus's
+    # gold cross-references. When the same family is detected, wire the deterministic
+    # inline-citation extractor beside it. No family (or `lite`) ⇒ None ⇒ no such Stage,
+    # byte-identical to before.
+    inline_refs_family = detect_inline_family(src) if is_sota else None
+    if inline_refs_family is not None:
+        typer.echo(
+            "Wiring the deterministic inline-citation reference extractor (recovers the body "
+            "'RFC <n>' references the header-only extractor cannot see) into the knowledge graph.",
+            err=True,
+        )
+
     answers = SetupAnswers(
         source=src,
         storage=store,
@@ -871,6 +886,7 @@ def setup(
         largest_source_bytes=scan.largest_bytes,
         extensions=extensions,
         header_refs=header_refs_family,
+        inline_refs=inline_refs_family,
     )
 
     # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.

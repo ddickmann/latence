@@ -340,6 +340,14 @@ class SetupAnswers:
     # explicit header cross-references (an RFC's `Obsoletes:`/`Updates:` edges) beside the learned
     # extractor. ``None`` ⇒ NO such Stage is emitted, so config + KG are byte-identical to before.
     header_refs: dict[str, object] | None = None
+    # The detected structured-header family's `inline_refs` Stage config (from
+    # :func:`detect_inline_family`), or ``None`` when the corpus carries no recognised family. When
+    # set (enterprise-SOTA only), the SOTA builder wires a deterministic
+    # `fused_entity_relation.inline_refs` extraction Stage that recovers the corpus's INLINE body
+    # citations (an RFC's scattered "RFC 7230" references — the dogfood measured gap the header-only
+    # extractor misses) beside the learned extractor AND the header_refs Stage. ``None`` ⇒ NO such
+    # Stage is emitted, so config + KG are byte-identical to before.
+    inline_refs: dict[str, object] | None = None
 
 
 def detect_extensions(path: str | Path) -> tuple[str, ...]:
@@ -421,17 +429,48 @@ _RFC_HEADER_REFS_CONFIG: dict[str, object] = {
     "entity_label": "rfc",
 }
 
-# The known structured-header families, in detection priority order. Each entry is
-# ``(family_name, self_regex, [relation_header_regex, ...], header_refs_config)``: a corpus is
-# detected as that family when a sampled file carries BOTH the self header AND at least one relation
-# header. Extend this list to teach the wizard a new family (e-mail ``In-Reply-To:``/``References:``
-# or a memo ``Supersedes:`` convention) — no Provider or builder change needed.
-_HEADER_FAMILIES: tuple[tuple[str, str, tuple[str, ...], dict[str, object]], ...] = (
+# The companion INLINE-CITATION config (the dogfood measured gap). `header_refs` above recovers a
+# document's structured-header edges (`Obsoletes:`/`Updates:`), but the overwhelming majority of an
+# RFC corpus's gold cross-references are INLINE body citations ("RFC 7230", "[RFC9110]") scattered
+# through the document body — which the header-only extractor structurally cannot see (a body chunk
+# carries no self id). `fused_entity_relation.inline_refs` closes that: it resolves each document's
+# self id ONCE (the same `Request for Comments:` front-matter self declaration, OR the provenance
+# file name `rfcNNNN.txt`) and mines every chunk's body for the `citation_pattern`, emitting
+# `references(source_doc, cited)` edges. `exclude_relations` mirrors the header grammar so an
+# `Obsoletes:` id is not ALSO emitted as a weaker `references` edge, and `id_template` renders both
+# endpoints as `RFC <n>` so they disambiguate against the header_refs / in-text mentions. Same
+# detected corpus signature as header_refs; wired beside it.
+_RFC_INLINE_REFS_CONFIG: dict[str, object] = {
+    "self_pattern": r"(?im)^Request for Comments:\s*(\d+)",
+    "source_id_pattern": r"(?i)rfc[\s_-]?(\d+)",
+    "citation_pattern": r"(?i)RFCs?[\s-]?(\d{3,5})",
+    "relation_label": "references",
+    "id_template": "RFC {id}",
+    "entity_label": "rfc",
+    "exclude_relations": {
+        "obsoletes": {"header": r"(?im)^Obsoletes:\s*([\d,\s]+)"},
+        "updates": {"header": r"(?im)^Updates:\s*([\d,\s]+)"},
+    },
+    "target_pattern": r"(\d+)",
+}
+
+# The known structured-header families, in detection priority order. Each entry is a tuple
+# ``(name, self_regex, [relation_header_regex, ...], header_refs_config, inline_refs_config)``.
+# A corpus is detected as that family when a sampled file carries BOTH the self header AND at least
+# one relation header. Each family carries BOTH the header-edge config (mines
+# `Obsoletes:`/`Updates:`) AND the inline-citation config (mines body "RFC <n>" references) — two
+# cross-reference extractors for that family. Extend this list to teach the wizard a new family (an
+# e-mail ``In-Reply-To:``/``References:`` or a memo ``Supersedes:`` convention) — no Provider or
+# builder change needed.
+_HEADER_FAMILIES: tuple[
+    tuple[str, str, tuple[str, ...], dict[str, object], dict[str, object]], ...
+] = (
     (
         "rfc",
         r"(?im)^Request for Comments:\s*\d+",
         (r"(?im)^Obsoletes:\s*[\d,\s]+", r"(?im)^Updates:\s*[\d,\s]+"),
         _RFC_HEADER_REFS_CONFIG,
+        _RFC_INLINE_REFS_CONFIG,
     ),
 )
 
@@ -455,6 +494,32 @@ def detect_header_family(source: str | Path) -> dict[str, object] | None:
     it, and a wholly-unreadable tree yields ``None``. Deterministic — the first match under a sorted
     walk — so a given corpus always yields the same wiring (the byte-identical setup contract).
     """
+    return _detect_family(source, which="header")
+
+
+def detect_inline_family(source: str | Path) -> dict[str, object] | None:
+    """Sniff ``source`` for a known INLINE-CITATION cross-reference family (the dogfood gap).
+
+    The companion of :func:`detect_header_family`, keyed off the SAME corpus signature (an RFC's
+    ``Request for Comments:`` self header + at least one ``Obsoletes:``/``Updates:`` relation
+    header) but returning that family's :data:`inline_refs` Stage config — the deterministic
+    ``fused_entity_relation.inline_refs`` extractor that recovers the corpus's INLINE body citations
+    ("RFC 7230", "[RFC9110]") the header-only extractor structurally cannot see. Returns ``None``
+    when no family is recognised (or the source is non-local / empty / unreadable), so the wizard
+    wires the inline extractor ONLY for a corpus that carries such references and every other corpus
+    stays byte-identical. Best-effort + deterministic + never-raises, exactly like its header twin.
+    """
+    return _detect_family(source, which="inline")
+
+
+def _detect_family(source: str | Path, *, which: str) -> dict[str, object] | None:
+    """Shared corpus sniff for both family detectors — returns the header OR inline config.
+
+    ``which`` selects which of the matched family's two configs is returned (``"header"`` ->
+    ``header_refs``, ``"inline"`` -> ``inline_refs``). Both detectors share ONE bounded, sorted,
+    never-raising walk so a given corpus yields the same wiring for each (the byte-identical setup
+    contract).
+    """
     p = Path(str(source).removeprefix("file://"))
     try:
         if not p.exists() or not p.is_dir():
@@ -462,8 +527,12 @@ def detect_header_family(source: str | Path) -> dict[str, object] | None:
     except OSError:
         return None
     compiled = [
-        (config, re.compile(self_pat), [re.compile(rel) for rel in rel_pats])
-        for _name, self_pat, rel_pats, config in _HEADER_FAMILIES
+        (
+            header_config if which == "header" else inline_config,
+            re.compile(self_pat),
+            [re.compile(rel) for rel in rel_pats],
+        )
+        for _name, self_pat, rel_pats, header_config, inline_config in _HEADER_FAMILIES
     ]
     sampled = 0
     try:
@@ -1010,7 +1079,30 @@ def _build_sota_stages(
                 "config": dict(answers.header_refs),
             }
         )
-        disambiguate_inputs = ["extract", "header_refs"]
+        disambiguate_inputs.append("header_refs")
+
+    # 7c) deterministic INLINE-CITATION cross-reference recovery (the dogfood measured gap) — ONLY
+    # when the wizard positively detected a known metadata-header family (`answers.inline_refs`).
+    # The in-core, zero-dep `fused_entity_relation.inline_refs` Provider resolves each document's
+    # self id ONCE (its `Request for Comments:` self declaration OR the provenance file name
+    # `rfcNNNN.txt`) and mines every chunk's BODY for inline "RFC <n>" citations — the overwhelming
+    # majority of an RFC corpus's gold cross-references, which BOTH the entity-anchored learned
+    # extractor AND the header-only `header_refs` sibling structurally cannot see (a body chunk
+    # carries no self id). It reads the SAME (unmasked) chunk stream `extract` reads and, via its
+    # disjoint `#iref-` id namespace, composes beside gliner2 AND header_refs: all feed
+    # Disambiguation, whose input is the concatenation of its parents' output. No detected family ⇒
+    # this Stage is absent and the pipeline is byte-identical to before.
+    if answers.inline_refs is not None:
+        stages.append(
+            {
+                "name": "inline_refs",
+                "capability": "fused_entity_relation",
+                "provider": "fused_entity_relation.inline_refs",
+                "depends_on": ["induce"],
+                "config": dict(answers.inline_refs),
+            }
+        )
+        disambiguate_inputs.append("inline_refs")
 
     # 8) learned PII redaction — the PII half of the ONE toggle, on the SAME blessed Provider `lite`
     # emits (#197: `BLESSED_REDACT_PROVIDER`, the ADR-0036 W9 unified gliner2 engine this profile

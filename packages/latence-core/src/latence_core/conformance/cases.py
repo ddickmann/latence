@@ -1115,6 +1115,60 @@ def _header_refs_case() -> ConformanceCase:
     )
 
 
+def _inline_refs_case() -> ConformanceCase:
+    """Fused INLINE-CITATION cross-reference extraction (``fused_entity_relation.inline_refs``).
+
+    A pure-code, zero-dep Provider (runs for REAL on the CPU host — not stub-scoped), configured
+    over the canonical corpus: it treats ``Alice`` as the document's self identifier (front-matter
+    ``self_pattern``) and mines an inline ``Berlin`` citation out of the body, so ``extract_fused``
+    yields real synthesized identifier mentions + a directed ``references`` relation whose char/page
+    spans resolve with zero drift through the canonical page map (the ADR-0031 round-trip). The
+    adversarial input — an empty chunk with no self declaration and an unparseable file name —
+    yields no records (the S5 defined "none"), the graceful path.
+    """
+    config: dict[str, Any] = {
+        "self_pattern": r"(Alice)",
+        "citation_pattern": r"(Berlin)",
+        "relation_label": "references",
+    }
+
+    def valid_output(records: Sequence[object]) -> bool:
+        return _records_contract_valid(records, empty_ok=True) and _page_offsets_resolve(records)
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        c = fixtures.canonical_corpus()
+        fused = provider.extract_fused(c.chunks)
+        return [*fused.mentions, *fused.relations]
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        base = fixtures.canonical_corpus().chunks[0]
+        empty_chunk = ChunkRecord(
+            record_id="adv:chunk",
+            document_record_id=base.document_record_id,
+            index=0,
+            provenance=base.provenance.model_copy(update={"char_start": 0, "char_end": 0}),
+            classification=base.classification,
+            content="",
+            token_count=0,
+        )
+        return _capture_raise(
+            lambda: [
+                *provider.extract_fused([empty_chunk]).mentions,
+                *provider.extract_fused([empty_chunk]).relations,
+            ]
+        )
+
+    return ConformanceCase(
+        capability=Capability.RELATION,
+        config=config,
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+        stub_scoped=False,
+    )
+
+
 def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> ConformanceCase:
     """Redaction (W16, ADR-0042): a chunk→chunk transform — mask PII per chunk, never truncate.
 
@@ -1844,6 +1898,9 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     # The in-core deterministic header-reference extractor (dogfood-3-inspect): pure-code, so it
     # runs for REAL over the canonical corpus (not stub-scoped) — the fused extract_fused contract.
     "fused_entity_relation.header_refs": _header_refs_case(),
+    # The in-core deterministic INLINE-CITATION extractor (the dogfood measured gap): pure-code, so
+    # it runs for REAL over the canonical corpus (not stub-scoped) — the fused extract_fused seam.
+    "fused_entity_relation.inline_refs": _inline_refs_case(),
     "redaction.gliner_pii": _redaction_case(stub_scoped=True, backend="gliner"),
     "redaction.gliner2": _redaction_case(stub_scoped=True, backend="gliner2"),
     "redaction.presidio": _redaction_case(stub_scoped=True, backend="presidio"),

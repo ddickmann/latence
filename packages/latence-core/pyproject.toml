@@ -102,6 +102,16 @@ latence = "latence_core.cli:app"
 # the induced KG carries a corpus's most explicit relations (dogfood-3-inspect). Fulfils the same
 # FusedEntityRelationExtractor seam as `fused_entity_relation.gliner2`, composes alongside it.
 "fused_entity_relation.header_refs" = "latence_core.stages.header_refs:HeaderReferenceExtractor"
+# S4+S5 fused built-in: deterministic zero-shot INLINE-CITATION cross-reference extractor (pure
+# Python, no extra deps). The header-only `fused_entity_relation.header_refs` sibling recovers a
+# document's structured-header edges (RFC `Obsoletes:`/`Updates:`) but structurally cannot see a
+# document's INLINE body citations ("RFC 7230", "[RFC9110]") — a body chunk carries no self id.
+# This Provider resolves each document's self id ONCE (front-matter self declaration OR provenance
+# file name like rfc9110.txt) and mines every chunk's body for inline citations, so the induced KG
+# recovers a corpus's inline reference edges (the dogfood measured gap: ~14% -> full inline recall).
+# Fulfils the same FusedEntityRelationExtractor seam; disjoint `#iref-` id namespace composes
+# alongside gliner2 AND header_refs.
+"fused_entity_relation.inline_refs" = "latence_core.stages.inline_refs:InlineReferenceExtractor"
 # S6 built-in: deterministic hybrid-rule PII redactor (regex library + gazetteer +
 # custom patterns; policy keyed off Classification.sensitivity). Pure Python, no
 # extra deps. The learned GLiNER-PII Provider lives in latence-pii-gliner (ADR-0024).
