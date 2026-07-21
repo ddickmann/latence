@@ -181,6 +181,51 @@ def test_direct_readers_and_metrics(run_dir: Path) -> None:
     assert set(rank) == set(graph.node_ids)
 
 
+# A KG that mixes both node shapes the pipeline actually emits: an RFC-prefixed canonical name
+# ("RFC 7231") AND bare-number canonical names ("9110", "7230") on rfc-typed nodes — exactly the
+# disambiguation output that the prefix-only resolver silently dropped (finding: it undercounted
+# induced obsoletes/updates edges ~9×, rendering 10.6% recall instead of the true ~97%).
+_GRAPHML_BARE = """<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="label" for="node" attr.name="label" attr.type="string"/>
+  <key id="type" for="node" attr.name="type" attr.type="string"/>
+  <key id="rel" for="edge" attr.name="label" attr.type="string"/>
+  <graph id="G" edgedefault="directed">
+    <node id="n9110"><data key="label">9110</data><data key="type">rfc</data></node>
+    <node id="n7230"><data key="label">7230</data><data key="type">rfc</data></node>
+    <node id="n7231"><data key="label">RFC 7231</data><data key="type">rfc</data></node>
+    <node id="nport"><data key="label">8080</data><data key="type">port</data></node>
+    <edge id="e1" source="n9110" target="n7230"><data key="rel">obsoletes</data></edge>
+    <edge id="e2" source="n9110" target="n7231"><data key="rel">obsoletes</data></edge>
+    <edge id="e3" source="n9110" target="nport"><data key="rel">obsoletes</data></edge>
+  </graph>
+</graphml>
+"""
+
+
+def test_bare_number_rfc_nodes_resolve_as_induced_edges(tmp_path: Path) -> None:
+    # Regression for the §3.3 correctness-chart undercount: bare-number canonical names on rfc-typed
+    # nodes must resolve to their RFC number, so induced obsoletes/updates edges are counted.
+    run = tmp_path / "run"
+    (run / "export").mkdir(parents=True)
+    (run / "export" / "graph.graphml").write_text(_GRAPHML_BARE, encoding="utf-8")
+
+    graph = sc.load_graph(run)
+    induced = sc.induced_typed_edges(graph)
+
+    # Both bare→bare (9110→7230) and bare→prefixed (9110→"RFC 7231") edges are recovered; the
+    # non-rfc-typed "port" endpoint (8080) is NOT miscounted as an RFC number.
+    assert induced == {
+        (9110, "obsoletes", 7230),
+        (9110, "obsoletes", 7231),
+    }
+    # Direct resolver checks: the type gate is what admits a bare number.
+    assert sc._rfc_number("7230", "rfc") == 7230
+    assert sc._rfc_number("7230", "") is None  # no type tag → not an RFC endpoint
+    assert sc._rfc_number("8080", "port") is None  # bare number on a non-rfc node stays out
+    assert sc._rfc_number("RFC 7231", "rfc") == 7231  # prefixed surface still resolves
+
+
 def test_missing_refs_degrades_to_placeholder(tmp_path: Path) -> None:
     run = tmp_path / "run"
     (run / "export").mkdir(parents=True)

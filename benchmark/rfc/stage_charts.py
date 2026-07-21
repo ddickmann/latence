@@ -46,6 +46,14 @@ from xml.sax.saxutils import escape as _xml_escape
 
 # An RFC surface inside a canonical entity name, e.g. "RFC 9110" / "RFC9110" / "rfc-7230".
 _RFC_NUM = re.compile(r"\bRFC[\s-]?(\d{3,5})\b", re.IGNORECASE)
+# A canonical name that is a *bare* RFC number, e.g. "7230". Pipeline disambiguation stores ~half
+# the RFC nodes this way — canonical_name "7230" with the node's type carrying the "rfc" tag rather
+# than an "RFC" prefix on the name — so a prefix-only resolver silently drops those endpoints.
+_BARE_RFC_NUM = re.compile(r"^\s*(\d{3,5})\s*$")
+# The entity-type tag the pipeline stamps on RFC nodes (case-insensitive). Only when a node carries
+# it do we treat a bare-number canonical name as an RFC number, so an unrelated numeric name (a
+# port, a year, a section) is never miscounted as an RFC endpoint.
+_RFC_TYPE = "rfc"
 # The typed cross-reference relations the corpus authors explicitly (see build_corpus.py). These are
 # the ones the §3.1 correctness bar compares induced-vs-independent on.
 _TYPED_REL = ("obsoletes", "updates")
@@ -229,25 +237,39 @@ def load_independent_edges(refs: Path | None) -> set[tuple[int, str, int]]:
 def induced_typed_edges(graph: Graph) -> set[tuple[int, str, int]]:
     """The induced typed edges ``(src_rfc, relation, dst_rfc)`` recovered from the KG.
 
-    A graph edge counts only when its label is a typed cross-reference relation and BOTH endpoints'
-    canonical names carry a parseable RFC number — so the comparison is like-for-like with the
-    independent ``_refs.jsonl`` graph.
+    A graph edge counts only when its label is a typed cross-reference relation and BOTH endpoints
+    resolve to an RFC number — either an ``RFC``-prefixed surface in the canonical name, or a
+    bare-number name on an ``rfc``-typed node (how disambiguation stores ~half of them) — so the
+    comparison is like-for-like with the independent ``_refs.jsonl`` graph.
     """
     out: set[tuple[int, str, int]] = set()
     for src, tgt, label in graph.edges:
         rel = label.strip().lower()
         if rel not in _TYPED_REL:
             continue
-        src_rfc = _rfc_number(graph.names.get(src, ""))
-        dst_rfc = _rfc_number(graph.names.get(tgt, ""))
+        src_rfc = _rfc_number(graph.names.get(src, ""), graph.types.get(src, ""))
+        dst_rfc = _rfc_number(graph.names.get(tgt, ""), graph.types.get(tgt, ""))
         if src_rfc is not None and dst_rfc is not None:
             out.add((src_rfc, rel, dst_rfc))
     return out
 
 
-def _rfc_number(name: str) -> int | None:
+def _rfc_number(name: str, etype: str = "") -> int | None:
+    """Resolve a canonical node name to its RFC number, or ``None`` when it is not an RFC node.
+
+    Two shapes both count, because the pipeline emits both: an ``RFC``-prefixed surface anywhere in
+    the name (``"RFC 9110"`` / ``"RFC9110"`` / ``"rfc-7230"``), and — only on a node whose type is
+    tagged ``rfc`` — a bare-number canonical name (``"7230"``). The type gate keeps a stray numeric
+    name on a non-RFC node from being miscounted as an RFC endpoint.
+    """
     match = _RFC_NUM.search(name)
-    return int(match.group(1)) if match else None
+    if match:
+        return int(match.group(1))
+    if etype.strip().lower() == _RFC_TYPE:
+        bare = _BARE_RFC_NUM.match(name)
+        if bare:
+            return int(bare.group(1))
+    return None
 
 
 # ---------------------------------------------------------------------------
