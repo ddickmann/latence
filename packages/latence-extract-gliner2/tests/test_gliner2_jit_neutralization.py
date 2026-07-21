@@ -30,6 +30,7 @@ emitted mentions/relations must be record-for-record identical to a model that n
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
 from typing import Any
@@ -133,6 +134,9 @@ def fake_torch(monkeypatch: pytest.MonkeyPatch) -> Any:
     jit._state = state  # type: ignore[attr-defined]
     jit.script = script  # type: ignore[attr-defined]
     torch.jit = jit  # type: ignore[attr-defined]
+    # Real torch always exposes ``inference_mode`` (the no-grad context the provider now runs the
+    # forward inside, dogfood-2b-process); a faithful stand-in must too, or the forward would error.
+    torch.inference_mode = contextlib.nullcontext  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "torch.jit", jit)
     return torch

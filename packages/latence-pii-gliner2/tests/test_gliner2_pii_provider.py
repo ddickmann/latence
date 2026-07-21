@@ -459,6 +459,96 @@ def test_missing_gliner2_dependency_raises_clear_error(monkeypatch: pytest.Monke
         list(provider.redact([_chunk(_TEXT)]))
 
 
+# --- dogfood-2b-process: the forward runs under torch.inference_mode (kills the 27 GiB OOM) -------
+
+
+class _GradTrackingTorch(types.ModuleType):
+    """A faithful ``torch`` stand-in that models grad-enabled state around ``inference_mode()``.
+
+    ``is_grad_enabled()`` reads a flag that ``inference_mode()`` flips off for its ``with`` block and
+    restores on exit — exactly torch's own behaviour (real ``torch`` is NOT installed offline,
+    ADR-0016). A forward that records ``is_grad_enabled()`` at call time therefore proves whether it
+    ran INSIDE the inference context. This is the anti-false-green pin: if the provider does NOT enter
+    ``inference_context`` around the model call, grad stays enabled and the assertion below fails.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("torch")
+        self.grad_enabled = True
+
+        class _InferenceMode:
+            def __init__(self, owner: _GradTrackingTorch) -> None:
+                self._owner = owner
+                self._prev = True
+
+            def __enter__(self) -> Any:
+                self._prev = self._owner.grad_enabled
+                self._owner.grad_enabled = False
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                self._owner.grad_enabled = self._prev
+
+        self._inference_mode_cls = _InferenceMode
+
+    def inference_mode(self) -> Any:
+        return self._inference_mode_cls(self)
+
+    def is_grad_enabled(self) -> bool:
+        return self.grad_enabled
+
+
+class _GradRecordingModel:
+    """A gliner2-shaped model whose ``batch_extract_entities`` RECORDS grad state at forward time.
+
+    The signature is faithful to gliner2 1.3.2 (``batch_size`` is the 3rd positional, NOT
+    ``threshold``), so a mis-wired positional call fails here rather than false-greening. The forward
+    reads ``torch.is_grad_enabled()`` from the injected fake ``torch`` — the same object
+    ``inference_context`` toggled — so it observes exactly whether the provider entered the context.
+    """
+
+    def __init__(self, torch_mod: _GradTrackingTorch) -> None:
+        self._torch = torch_mod
+        self.grad_at_forward: bool | None = None
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        self.grad_at_forward = self._torch.is_grad_enabled()
+        return [{"entities": {}} for _ in texts]
+
+
+def test_extract_forward_runs_under_inference_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """REGRESSION (dogfood-2b-process): the ``batch_extract_entities`` forward runs with autograd OFF.
+
+    A redaction-only encoder never backpropagates; a forward under the default grad-enabled mode
+    still builds an autograd graph and pins its activations alive, ACCUMULATING VRAM run-over-run to
+    the pod's 27.28 GiB CUDA OOM at the redact stage. The cure is running the forward inside
+    ``inference_context`` (``torch.inference_mode()``). This test injects a faithful fake ``torch``
+    whose grad flag ``inference_mode()`` toggles, and a model that records the flag at forward time —
+    proving the provider entered the context. If the ``inference_context`` wrap is removed from
+    ``_extract_once``, grad stays enabled and ``grad_at_forward`` is True, failing the assertion.
+    """
+    fake_torch = _GradTrackingTorch()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert fake_torch.is_grad_enabled() is True  # default: grad ON before any forward
+
+    provider = Gliner2PIIRedactor(_config())
+    model = _GradRecordingModel(fake_torch)
+    provider._extract_once(model, ["Reach Alice."], ["person"])
+
+    assert model.grad_at_forward is False  # the forward ran with autograd DISABLED (inference_mode)
+    assert fake_torch.is_grad_enabled() is True  # and the context restored grad on exit
+
+
 # --- W12 model-boundary guard: max_len threaded into the extract call -------------------------
 
 

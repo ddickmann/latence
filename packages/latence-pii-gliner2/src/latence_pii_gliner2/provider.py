@@ -62,6 +62,7 @@ from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
     empty_cuda_cache,
     ensure_gliner2_on_cuda,
+    inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
     load_gliner2_optimized,
@@ -426,8 +427,14 @@ class Gliner2PIIRedactor(AdapterBase):
 
         ``results[i]`` is the per-label dict for ``texts[i]``. The guard maps any native fault to a
         typed :class:`~latence_core.errors.ProviderError` carrying no record content / PII.
+
+        The forward runs INSIDE :func:`~latence_core.providers.perf.inference_context`
+        (``torch.inference_mode()``): a redaction-only encoder never backpropagates, so building an
+        autograd graph and pinning its activations alive would only ACCUMULATE VRAM run-over-run to
+        a CUDA OOM (dogfood-2b-process). Under inference mode no graph is built and each forward's
+        activations free immediately — same spans, bounded memory (torch-free-safe offline).
         """
-        with self.guard("batch_extract_entities"):
+        with self.guard("batch_extract_entities"), inference_context():
             return list(
                 model.batch_extract_entities(
                     texts,

@@ -17,6 +17,7 @@ fixture proves the char offsets round-trip to the chunk EXACTLY — the recurrin
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
 from typing import Any
@@ -706,6 +707,9 @@ def test_compile_opt_in_still_enables_on_cuda(
 def _fake_torch_recording(calls: list[int]) -> types.ModuleType:
     module = types.ModuleType("torch")
     module.set_num_threads = calls.append  # type: ignore[attr-defined]
+    # Real torch always exposes ``inference_mode`` (the no-grad forward context the provider now
+    # runs the extract/relation forward inside, dogfood-2b-process); a faithful stand-in must too.
+    module.inference_mode = contextlib.nullcontext  # type: ignore[attr-defined]
     return module
 
 

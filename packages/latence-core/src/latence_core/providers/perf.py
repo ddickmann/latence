@@ -24,8 +24,9 @@ text/labels/spans are unchanged (asserted identical on the pod; the profile carr
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.errors import ProviderError
 from latence_core.providers.device import cuda_available
@@ -433,6 +434,37 @@ def empty_cuda_cache(*, provider_name: str = "provider") -> None:
             torch.cuda.empty_cache()
     except Exception as exc:  # noqa: BLE001 - cache clearing is best-effort, never fatal
         _log.debug("%s: CUDA cache clear skipped (%s)", provider_name, type(exc).__name__)
+
+
+def inference_context() -> contextlib.AbstractContextManager[Any]:
+    """The context every learned Provider's model forward runs INSIDE — ``torch.inference_mode()``.
+
+    The GLiNER2 encoders here only ever run **forward** (extract/redact) — there is no backward
+    pass, ever. But a plain forward under the default (grad-enabled) mode still builds an autograd
+    graph and pins every intermediate activation alive for a backward that never comes. Across a
+    long ``latence process`` run those never-freed activation tensors ACCUMULATE — pod-measured at
+    27.28 GiB resident on a model that is only ~2-3 GB — until the next allocation CUDA-OOMs at the
+    redact stage (dogfood-2b-process). ``torch.cuda.empty_cache()`` cannot reclaim any of it: the
+    memory is held *live* by the graph, not merely cached. ``torch.inference_mode()`` is the cure
+    at the source — it disables autograd tracking for the block, so no graph is built and each
+    forward's activations free the moment they fall out of scope. Resident memory then stays at
+    model size plus one batch's transient activation instead of climbing without bound.
+
+    This does NOT change any output — ``inference_mode`` only suppresses grad bookkeeping; the
+    emitted spans/labels/records are byte-identical (the redaction floor, ADR-0044, is untouched).
+
+    **Torch-free-safe** (ADR-0016), mirroring :func:`load_perf_kwargs`/:func:`empty_cuda_cache`:
+    torch is imported lazily and defensively. On a host without torch (the offline CPU test env) it
+    returns :func:`contextlib.nullcontext` so the ``with`` block still runs — the wrap is a no-op
+    there rather than an import error. The single place a real ``torch.inference_mode()`` is
+    materialised imports torch only when this is called, so a Provider registry that merely imports
+    this module never pulls in torch.
+    """
+    try:
+        import torch  # noqa: PLC0415 - optional heavy dep, imported only when entering inference
+    except Exception:  # noqa: BLE001 - torch-free host (offline test env): degrade to a no-op context
+        return contextlib.nullcontext()
+    return cast("contextlib.AbstractContextManager[Any]", torch.inference_mode())
 
 
 def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str = "provider") -> Any:

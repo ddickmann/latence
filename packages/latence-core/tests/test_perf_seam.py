@@ -27,6 +27,7 @@ from latence_core.providers.perf import (
     empty_cuda_cache,
     ensure_gliner2_on_cuda,
     flash_attn_available,
+    inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
     load_gliner2_optimized,
@@ -210,6 +211,66 @@ def test_maybe_compile_wraps_when_compile_succeeds(monkeypatch: pytest.MonkeyPat
     fake_torch.compile = _compile  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     assert maybe_compile(object(), {"compile": True}) is wrapped
+
+
+# --- inference_context: forwards run under torch.inference_mode (torch-free-safe) ----------------
+
+
+class _GradTrackingTorch(types.ModuleType):
+    """A faithful stand-in for ``torch`` that models grad-enabled state around ``inference_mode()``.
+
+    ``is_grad_enabled()`` reads a module-level flag that ``inference_mode()`` flips off for the
+    duration of its ``with`` block and restores on exit — exactly torch's own behaviour. A forward
+    that records ``is_grad_enabled()`` at call time can therefore prove it ran INSIDE the context.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("torch")
+        self.grad_enabled = True
+
+        class _InferenceMode:
+            def __init__(self, owner: _GradTrackingTorch) -> None:
+                self._owner = owner
+                self._prev = True
+
+            def __enter__(self) -> Any:
+                self._prev = self._owner.grad_enabled
+                self._owner.grad_enabled = False
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                self._owner.grad_enabled = self._prev
+
+        self._inference_mode_cls = _InferenceMode
+
+    def inference_mode(self) -> Any:
+        return self._inference_mode_cls(self)
+
+    def is_grad_enabled(self) -> bool:
+        return self.grad_enabled
+
+
+def test_inference_context_enters_inference_mode_when_torch_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With torch importable, the context IS ``torch.inference_mode()``: grad is off inside it."""
+    fake_torch = _GradTrackingTorch()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert fake_torch.is_grad_enabled() is True
+    with inference_context():
+        # This is the invariant the model forward relies on: inside the block autograd is disabled,
+        # so no graph/activations are pinned — the cure for the 27 GiB accumulation (dogfood-2b).
+        assert fake_torch.is_grad_enabled() is False
+    assert fake_torch.is_grad_enabled() is True  # restored on exit
+
+
+def test_inference_context_is_a_noop_context_without_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a torch-free host (the offline env) it degrades to a no-op context — never an ImportError."""
+    monkeypatch.setitem(sys.modules, "torch", None)  # import torch -> ImportError
+    ran = False
+    with inference_context():
+        ran = True
+    assert ran is True
 
 
 # --- load_with_fa2_fallback: FA2 load raises → sdpa retry -----------------------------------------

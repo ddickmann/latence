@@ -78,6 +78,7 @@ from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
     cap_intra_op_threads,
     ensure_gliner2_on_cuda,
+    inference_context,
     is_compile_backend_failure,
     load_gliner2_optimized,
     neutralize_torch_jit,
@@ -463,15 +464,24 @@ class Gliner2FusedExtractor:
         crash. The fallback runs at most once (``_compile_disabled``). Any OTHER native fault (a
         genuine model/runtime error) is mapped to a typed :class:`ProviderError` carrying NO input
         text / PII (only the op + native type name — C2/C6), exactly as before.
+
+        Every forward (both the first attempt and the uncompiled retry) runs INSIDE
+        :func:`~latence_core.providers.perf.inference_context` (``torch.inference_mode()``): this is
+        an extraction-only encoder that never backpropagates, so building an autograd graph and
+        pinning its activations alive would only ACCUMULATE VRAM run-over-run to a CUDA OOM
+        (dogfood-2b-process). Under inference mode no graph is built and each forward's activations
+        free immediately — same entities/relations, bounded memory (torch-free-safe offline).
         """
         try:
-            return invoke(self._model)
+            with inference_context():
+                return invoke(self._model)
         except Exception as exc:  # noqa: BLE001 - map native → typed / compile → uncompiled retry
             if not self._compile_disabled and is_compile_backend_failure(exc):
                 model = self._reload_uncompiled()
                 # Retry once on the uncompiled model. A fault here is a genuine error (surfaced).
                 try:
-                    return invoke(model)
+                    with inference_context():
+                        return invoke(model)
                 except Exception as exc2:  # noqa: BLE001 - typed, carrying NO input text/PII
                     msg = (
                         f"fused_entity_relation.gliner2: provider failure in {op!r} "
