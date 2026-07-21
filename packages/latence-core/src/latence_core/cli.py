@@ -623,6 +623,7 @@ def setup(
         SetupAnswers,
         SetupConfigError,
         build_stack_config,
+        detect_header_family,
         llm_key_env_var,
         recommend_parser,
         recommend_sota_parser,
@@ -841,6 +842,19 @@ def setup(
         )
     )
 
+    # dogfood-3-inspect: enterprise-SOTA sniffs the corpus for a known structured metadata-header
+    # cross-reference family (an RFC's `Request for Comments:` + `Obsoletes:`/`Updates:` lines) and,
+    # when found, wires the deterministic `header_refs` extractor to recover those explicit edges
+    # the entity-anchored learned extractor cannot see. No family detected (or the `lite` profile)
+    # ⇒ None ⇒ no such Stage, byte-identical to before.
+    header_refs_family = detect_header_family(src) if is_sota else None
+    if header_refs_family is not None:
+        typer.echo(
+            "Detected structured cross-reference headers in the corpus: wiring the deterministic "
+            "header-reference extractor (recovers e.g. RFC Obsoletes:/Updates: edges).",
+            err=True,
+        )
+
     answers = SetupAnswers(
         source=src,
         storage=store,
@@ -856,6 +870,7 @@ def setup(
         domain=domain_hint,
         largest_source_bytes=scan.largest_bytes,
         extensions=extensions,
+        header_refs=header_refs_family,
     )
 
     # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.

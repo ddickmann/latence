@@ -333,6 +333,13 @@ class SetupAnswers:
     # flat 2 MiB floor.
     largest_source_bytes: int = 0
     extensions: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_EXTENSIONS)
+    # dogfood-3-inspect: the detected structured-header cross-reference family's `header_refs` Stage
+    # config (from :func:`detect_header_family`), or ``None`` when the corpus carries no recognised
+    # metadata-header convention. When set (enterprise-SOTA only), the SOTA builder wires a
+    # deterministic `fused_entity_relation.header_refs` extraction Stage that recovers the corpus's
+    # explicit header cross-references (an RFC's `Obsoletes:`/`Updates:` edges) beside the learned
+    # extractor. ``None`` ⇒ NO such Stage is emitted, so config + KG are byte-identical to before.
+    header_refs: dict[str, object] | None = None
 
 
 def detect_extensions(path: str | Path) -> tuple[str, ...]:
@@ -377,6 +384,108 @@ def recommend_sota_parser(extensions: tuple[str, ...]) -> str:
     if exts and exts <= _PLAINTEXT_EXTS:
         return PARSER_PLAINTEXT
     return PARSER_OCR_VLLM
+
+
+# --- structured-header cross-reference recovery (dogfood-3-inspect) -----------------------------
+#
+# A document's MOST explicit relations often live in self-describing metadata headers whose targets
+# are *bare identifiers*, not entity-shaped surface strings, and whose subject is the document
+# itself (declared once, far away, in the front matter). An RFC's ``Obsoletes: 7230, 7231`` /
+# ``Updates: 3864`` lines are the canonical case: ``7230`` is never tagged as an entity and the
+# subject (``RFC 9110``) is only in the ``Request for Comments: 9110`` header — so entity-anchored
+# zero-shot RE (the learned ``fused_entity_relation.gliner2``) recovers NONE of them and the induced
+# knowledge graph misses the corpus's most explicit, load-bearing cross-reference edges. The
+# deterministic, zero-dep ``fused_entity_relation.header_refs`` Provider exists precisely to recover
+# them (self id + header targets → synthesized mentions + directed edges) — but only if the wizard
+# WIRES it. This is that wiring: the wizard sniffs the corpus for a KNOWN structured-header family
+# and, when it positively detects one, emits a ``header_refs`` extraction Stage configured for it
+# that composes beside the learned extractor (disjoint ``#href-`` id namespace; both feed the same
+# Disambiguation input). A corpus with NO recognised header family gets NO such Stage — its emitted
+# YAML and resulting KG stay byte-identical to a run without the feature.
+#
+# Each family pairs a corpus SIGNATURE (the ``self`` header + at least one relation header must both
+# appear in sampled text before we wire it) with the ready ``header_refs`` config. The relation
+# ``header`` patterns mirror the RFC-editor header grammar the benchmark's own gold-graph builder
+# parses (``^Obsoletes:\s*([\d,\s]+)`` etc.), so recovered edges line up 1:1 with the independent
+# ``_refs.jsonl`` cross-reference graph. ``id_template`` renders both endpoints as ``RFC <n>`` so a
+# synthesized node disambiguates against an in-text ``RFC 7230`` mention and reads as a real RFC
+# number to any downstream consumer.
+_RFC_HEADER_REFS_CONFIG: dict[str, object] = {
+    "self_pattern": r"(?im)^Request for Comments:\s*(\d+)",
+    "relations": {
+        "obsoletes": {"header": r"(?im)^Obsoletes:\s*([\d,\s]+)"},
+        "updates": {"header": r"(?im)^Updates:\s*([\d,\s]+)"},
+    },
+    "target_pattern": r"(\d+)",
+    "id_template": "RFC {id}",
+    "entity_label": "rfc",
+}
+
+# The known structured-header families, in detection priority order. Each entry is
+# ``(family_name, self_regex, [relation_header_regex, ...], header_refs_config)``: a corpus is
+# detected as that family when a sampled file carries BOTH the self header AND at least one relation
+# header. Extend this list to teach the wizard a new family (e-mail ``In-Reply-To:``/``References:``
+# or a memo ``Supersedes:`` convention) — no Provider or builder change needed.
+_HEADER_FAMILIES: tuple[tuple[str, str, tuple[str, ...], dict[str, object]], ...] = (
+    (
+        "rfc",
+        r"(?im)^Request for Comments:\s*\d+",
+        (r"(?im)^Obsoletes:\s*[\d,\s]+", r"(?im)^Updates:\s*[\d,\s]+"),
+        _RFC_HEADER_REFS_CONFIG,
+    ),
+)
+
+# Sniffing bounds: read at most this many text files, at most this many leading bytes each. A
+# metadata header sits in a document's front matter, so the first few KiB are ample; the caps keep
+# setup fast + bounded on a large corpus and never load a whole file into memory.
+_HEADER_SNIFF_MAX_FILES = 40
+_HEADER_SNIFF_MAX_BYTES = 8192
+
+
+def detect_header_family(source: str | Path) -> dict[str, object] | None:
+    """Sniff ``source`` for a known structured-header cross-reference family (dogfood-3-inspect).
+
+    Best-effort: walk the corpus, sample the leading bytes of up to :data:`_HEADER_SNIFF_MAX_FILES`
+    plaintext files, and return the :data:`header_refs` Stage config of the FIRST family whose
+    signature (its ``self`` header AND at least one relation header) appears in a sampled file — the
+    RFC ``Request for Comments:`` + ``Obsoletes:``/``Updates:`` family today. Returns ``None`` when
+    no family is recognised (or the source is non-local / empty / unreadable), so the wizard wires
+    the deterministic ``header_refs`` extractor ONLY for a corpus that actually carries such headers
+    and every other corpus stays byte-identical. Never raises: a decode/OS error on one file skips
+    it, and a wholly-unreadable tree yields ``None``. Deterministic — the first match under a sorted
+    walk — so a given corpus always yields the same wiring (the byte-identical setup contract).
+    """
+    p = Path(str(source).removeprefix("file://"))
+    try:
+        if not p.exists() or not p.is_dir():
+            return None
+    except OSError:
+        return None
+    compiled = [
+        (config, re.compile(self_pat), [re.compile(rel) for rel in rel_pats])
+        for _name, self_pat, rel_pats, config in _HEADER_FAMILIES
+    ]
+    sampled = 0
+    try:
+        children = sorted(p.rglob("*"))
+    except OSError:
+        return None
+    for child in children:
+        if sampled >= _HEADER_SNIFF_MAX_FILES:
+            break
+        try:
+            if not child.is_file() or child.suffix.lstrip(".").lower() not in _PLAINTEXT_EXTS:
+                continue
+            with child.open("rb") as fh:
+                head = fh.read(_HEADER_SNIFF_MAX_BYTES)
+        except OSError:
+            continue
+        sampled += 1
+        text = head.decode("utf-8", errors="ignore")
+        for config, self_re, rel_res in compiled:
+            if self_re.search(text) and any(rel_re.search(text) for rel_re in rel_res):
+                return config
+    return None
 
 
 def llm_key_env_var(base_url: str) -> str:
@@ -881,6 +990,28 @@ def _build_sota_stages(
         }
     )
 
+    # 7b) deterministic structured-header cross-reference recovery (dogfood-3-inspect) — ONLY when
+    # the wizard positively detected a known metadata-header family (`answers.header_refs`). The
+    # in-core, zero-dep `fused_entity_relation.header_refs` Provider mines each document's self id +
+    # header targets (an RFC's `Request for Comments:` + `Obsoletes:`/`Updates:` lines) into
+    # synthesized identifier mentions + directed edges — exactly the explicit cross-references the
+    # entity-anchored learned extractor structurally cannot see. It reads the SAME (unmasked)
+    # chunk stream `extract` reads and, via its disjoint `#href-` id namespace, composes beside
+    # gliner2: both feed Disambiguation, whose input is the concatenation of its parents' output. No
+    # detected family ⇒ this Stage is absent and the pipeline is byte-identical to before.
+    disambiguate_inputs = ["extract"]
+    if answers.header_refs is not None:
+        stages.append(
+            {
+                "name": "header_refs",
+                "capability": "fused_entity_relation",
+                "provider": "fused_entity_relation.header_refs",
+                "depends_on": ["induce"],
+                "config": dict(answers.header_refs),
+            }
+        )
+        disambiguate_inputs = ["extract", "header_refs"]
+
     # 8) learned PII redaction — the PII half of the ONE toggle, on the SAME blessed Provider `lite`
     # emits (#197: `BLESSED_REDACT_PROVIDER`, the ADR-0036 W9 unified gliner2 engine this profile
     # already runs for `extract`, so `redact` adds no second model library). W16 (ADR-0042): a
@@ -921,7 +1052,7 @@ def _build_sota_stages(
             "name": "disambiguate",
             "capability": "disambiguation",
             "provider": "disambiguation.glinker",
-            "depends_on": ["extract"],
+            "depends_on": disambiguate_inputs,
             "config": {
                 "device": SOTA_DEVICE,
                 "context_window": 200,
