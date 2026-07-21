@@ -300,6 +300,42 @@ def test_fused_emits_mentions_and_relations(fake_gliner2: type[_FakeGLiNER2]) ->
     assert rel.provenance.page_start == 2
 
 
+def test_degenerate_zero_length_span_skipped_not_crash(
+    fake_gliner2: type[_FakeGLiNER2], caplog: pytest.LogCaptureFixture
+) -> None:
+    """dogfood-2b-process: a DEGENERATE zero-length span (``start == end``) must be SKIPPED, not
+    crash the stage on the EntityMention >=1-char contract.
+
+    GLiNER2 can return a span whose resolved surface text is empty; constructing an EntityMention
+    with ``text=""`` raises pydantic ``string_too_short`` — which killed a full pipeline run at the
+    extract stage. Seed a mix (two valid spans + one degenerate ``[10, 10)`` span among them) and
+    assert: (a) no crash / no ValidationError, (b) the degenerate span produces NO mention, (c) the
+    valid spans still emit their mentions unchanged, (d) the skip is counted + logged (ADR-0034).
+
+    PRE-FIX EVIDENCE: on the unpatched provider this test FAILS with
+    ``pydantic_core.ValidationError: EntityMention.text — String should have at least 1 character``
+    raised from ``_build_records`` — exactly the pod crash. It passes only once the guard skips it.
+    """
+    # "Alice works for Acme Corp." — Alice [0,5), a DEGENERATE span at [10, 10) (empty slice), and
+    # Acme Corp [16,25). All above threshold so only the empty-text guard can drop the middle one.
+    fake_gliner2.entities = [
+        {"start": 0, "end": 5, "label": "person", "confidence": 0.95},
+        {"start": 10, "end": 10, "label": "person", "confidence": 0.9},  # degenerate: text == ""
+        {"start": 16, "end": 25, "label": "organization", "confidence": 0.9},
+    ]
+    chunk = _chunk("Alice works for Acme Corp.", char_start=100)
+    with caplog.at_level("INFO", logger="latence.provider.gliner2_fused"):
+        result = Gliner2FusedExtractor(_config()).extract_fused([chunk])
+    # (a) no crash + (b/c) the degenerate span is absent; both valid spans survive UNCHANGED.
+    assert [m.text for m in result.mentions] == ["Alice", "Acme Corp"]
+    assert all(len(m.text) >= 1 for m in result.mentions)
+    assert result.mentions[0].provenance.char_start == 100  # valid span offsets unaffected
+    # (d) the skip is COUNTED and surfaced (not silent — ADR-0034).
+    skip_logs = [r for r in caplog.records if "degenerate zero-length entity span" in r.message]
+    assert len(skip_logs) == 1
+    assert "1 degenerate" in skip_logs[0].getMessage()
+
+
 def test_offsets_round_trip_under_variable_offsets(fake_gliner2: type[_FakeGLiNER2]) -> None:
     """THE coordinate-trap tooth: entity + relation char offsets round-trip to the chunk EXACTLY.
 

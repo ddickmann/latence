@@ -615,9 +615,21 @@ class Gliner2FusedExtractor:
 
         mentions: list[EntityMention] = []
         by_span: dict[tuple[int, int], EntityMention] = {}
+        skipped_degenerate = 0
         for i, ent in enumerate(flat_entities):
             local_start = ent["start"]
             local_end = ent["end"]
+            # dogfood-2b-process: GLiNER2 can return a DEGENERATE span whose resolved surface
+            # text is empty (``local_start == local_end``, or a slice that yields ""). Such a span
+            # carries no entity, and an EntityMention with ``text=""`` violates its >=1-char
+            # contract (pydantic ``string_too_short``) — which crashed a full pipeline run at the
+            # extract stage. Skip it (its ids stay unique; no by_span entry means any relation
+            # endpoint referencing it is dropped, so the relation path is guarded the same way).
+            # NOT silent (ADR-0034): count skips and log the count below.
+            mention_text = chunk.content[local_start:local_end]
+            if len(mention_text) == 0:
+                skipped_degenerate += 1
+                continue
             if offset_index is not None:
                 doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
             else:
@@ -629,7 +641,7 @@ class Gliner2FusedExtractor:
                 chunk_record_id=chunk.record_id,
                 index=i,
                 label=str(ent["label"]),
-                text=chunk.content[local_start:local_end],
+                text=mention_text,
                 confidence=min(max(float(ent["confidence"]), 0.0), 1.0),
                 provenance=provenance,
                 classification=chunk.classification,
@@ -637,6 +649,16 @@ class Gliner2FusedExtractor:
             mentions.append(mention)
             # First mention wins a given span (deterministic), matching relex's by_span semantics.
             by_span.setdefault((local_start, local_end), mention)
+
+        if skipped_degenerate:
+            # ADR-0034 (no silent errors): a degenerate zero-length span carries no entity and is
+            # dropped rather than crashing the stage — but the drop is COUNTED and surfaced.
+            _log.info(
+                "fused_entity_relation.gliner2: skipped %d degenerate zero-length entity span(s) "
+                "in chunk %s (empty surface text — cannot ground a mention)",
+                skipped_degenerate,
+                chunk.record_id,
+            )
 
         # Flatten relations per type into deterministic rows carrying their rel_type label.
         flat_relations: list[dict[str, Any]] = []
