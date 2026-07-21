@@ -78,6 +78,7 @@ import logging
 import os
 import random
 import re
+from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.contracts import InducedLabels
@@ -158,8 +159,8 @@ class LLMLabelInducer:
         granularity: "doc" | "chunk" | "corpus"  — ``doc`` (default): one LLM call per document,
             its induced labels broadcast to all its chunks. ``chunk``: one call per chunk.
             ``corpus`` (W12): induce per-document (the same concurrent fan-out), then MERGE every
-            document's induced entity/relation/pii label sets into ONE canonical, sorted, deduped
-            schema and
+            document's induced entity/relation/pii label sets into ONE canonical, deduped,
+            document-frequency-ranked (salience-capped) schema and
             stamp that SINGLE shared schema onto EVERY chunk — one coherent vocabulary for the whole
             corpus, so entity types stay consistent across the KG with no per-chunk/per-doc drift.
             Requires a full-corpus pass (the whole chunk stream is held to build the merged schema);
@@ -399,8 +400,11 @@ class LLMLabelInducer:
              per-doc fail-open, temperature-0 determinism, index-keyed reassembly).
           2. **Merge**: union every successfully-induced document's entity/relation/pii label sets
              into ONE schema — canonical normal form (already applied per label by the sanitizer),
-             deduped, SORTED, count-capped. The sort makes the corpus schema a byte-stable function
-             of the label SET, independent of document/completion order.
+             deduped, then ranked by DOCUMENT FREQUENCY (the corpus's own salience signal) and
+             capped at ``max_labels`` (ties broken by label ascending). Ranking by frequency — not
+             alphabetical order — keeps the corpus's most-agreed-on types inside the cap; the
+             frequency→label tie-break makes the corpus schema a byte-stable function of the
+             label→frequency map, independent of document/completion order.
           3. **Broadcast**: stamp that single shared schema onto EVERY chunk — including the chunks
              of a document whose own induction failed open, so the whole corpus shares one coherent
              vocabulary and entity types stay consistent across the KG.
@@ -435,27 +439,38 @@ class LLMLabelInducer:
     def _merge_corpus_schema(
         self, induced_items: Iterable[InducedLabels | None]
     ) -> InducedLabels | None:
-        """Merge every document's induced labels into ONE canonical, sorted, capped corpus schema.
+        """Merge every document's induced labels into ONE canonical, salience-ranked, capped schema.
 
         Each input :class:`InducedLabels` already carries canonical-normal-form, per-doc-deduped
-        labels (the sanitizer ran per document), so the merge is a set-union per slot; a failed-open
-        document (``None``) contributes nothing. Each slot is then SORTED (byte-stable regardless of
-        document order) and capped at ``max_labels``. A wholly-empty merge (no document induced
-        anything) returns ``None`` so corpus mode falls back to config labels rather than stamping
-        an empty schema — the byte-identical backward-compat path.
+        labels (the sanitizer ran per document), so the merge counts, per slot, the DOCUMENT
+        FREQUENCY of each label — how many documents independently induced it — and keeps the
+        ``max_labels`` MOST salient. Ranking by frequency (not the label's alphabetical position)
+        is the fix for the corpus-wide truncation defect: when the union exceeds ``max_labels``, a
+        plain ``sorted()[:cap]`` drops every label sorting after the cut point ALPHABETICALLY,
+        silently discarding a corpus's most explicit high-frequency relations (e.g. ``obsoletes`` /
+        ``updates`` / ``references``, all sorting after ``~"c"``) while keeping rare early noise.
+        Document frequency is the corpus's own salience signal, so the cap now keeps what the corpus
+        most agrees on. Ties (equal frequency) break by canonical label ascending, so the merged
+        schema stays a byte-stable function of the label→frequency map, independent of document /
+        completion order. A wholly-empty merge (no document induced anything) returns ``None`` so
+        corpus mode falls back to config labels rather than stamping an empty schema — the
+        byte-identical backward-compat path.
         """
-        entity: set[str] = set()
-        relation: set[str] = set()
-        pii: set[str] = set()
+        entity: Counter[str] = Counter()
+        relation: Counter[str] = Counter()
+        pii: Counter[str] = Counter()
         for induced in induced_items:
             if induced is None:
                 continue
-            entity.update(induced.entity_types)
-            relation.update(induced.relation_types)
-            pii.update(induced.pii_types)
-        merged_entity = sorted(entity)[: self._max_labels]
-        merged_relation = sorted(relation)[: self._max_labels]
-        merged_pii = sorted(pii)[: self._max_labels]
+            # Each slot's labels are already per-doc deduped by the sanitizer, so one document
+            # contributes at most +1 to a label's document frequency; ``set()`` is defence-in-depth
+            # against a hand-built InducedLabels that repeats a label within one slot.
+            entity.update(set(induced.entity_types))
+            relation.update(set(induced.relation_types))
+            pii.update(set(induced.pii_types))
+        merged_entity = self._rank_and_cap(entity)
+        merged_relation = self._rank_and_cap(relation)
+        merged_pii = self._rank_and_cap(pii)
         if not merged_entity and not merged_relation and not merged_pii:
             return None
         return InducedLabels(
@@ -464,6 +479,20 @@ class LLMLabelInducer:
             pii_types=merged_pii,
             model_id=self._model,
         )
+
+    def _rank_and_cap(self, frequencies: Counter[str]) -> list[str]:
+        """The ``max_labels`` most document-frequent labels, ties broken by label ascending.
+
+        Ranks each label by DOCUMENT FREQUENCY descending (the corpus's own salience signal — how
+        many documents independently induced it), breaking ties by the canonical label ascending so
+        the result is a deterministic, byte-stable function of the frequency map (never of document
+        or completion order). Capping the salience-ranked list — rather than an alphabetically
+        ``sorted()`` one — is what keeps a corpus's most explicit, highest-agreement relations
+        (which may sort alphabetically-late, e.g. ``obsoletes`` / ``updates``) inside the cap
+        instead of silently discarding them for alphabetically-early rare noise.
+        """
+        ranked = sorted(frequencies.items(), key=lambda item: (-item[1], item[0]))
+        return [label for label, _count in ranked[: self._max_labels]]
 
     def _induce_per_chunk(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
         # One job per big-enough chunk, index-keyed by the chunk record_id (unique). Results are

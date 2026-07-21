@@ -471,7 +471,9 @@ def test_corpus_granularity_merges_all_docs_into_one_shared_schema() -> None:
         _chunk(doc_id="d2", index=0),
     ]
     # Two docs induce different, case/format-varied entity sets; the corpus schema is their
-    # canonical dedup union (sorted), identical on EVERY chunk of BOTH documents.
+    # canonical dedup union, ranked by DOCUMENT FREQUENCY, identical on EVERY chunk of BOTH
+    # documents. ``bank`` appears in both docs (freq 2) so it ranks first; the two freq-1 labels
+    # tie and break alphabetically.
     with fake.install(
         [
             fake.reply(_good_reply(entity=["Bank", "payment_product"], relation=[], pii=[])),
@@ -480,7 +482,7 @@ def test_corpus_granularity_merges_all_docs_into_one_shared_schema() -> None:
     ) as script:
         out = list(provider.induce(chunks))
     assert len(script.calls) == 2  # one induction call per document
-    expected = ["account type", "bank", "payment product"]  # canonical + sorted union
+    expected = ["bank", "account type", "payment product"]  # freq-ranked (bank=2), ties alpha
     for c in out:
         assert c.induced_labels is not None
         assert c.induced_labels.entity_types == expected
@@ -543,6 +545,42 @@ def test_corpus_granularity_is_byte_identical_two_runs() -> None:
 def test_corpus_granularity_rejected_bad_value() -> None:
     with pytest.raises(ValueError, match="'doc', 'chunk' or 'corpus'"):
         _provider(granularity="paragraph")
+
+
+def test_corpus_merge_caps_by_document_frequency_not_alphabetical_order() -> None:
+    """REGRESSION (dogfood-3-inspect): when the corpus union exceeds ``max_labels``, the cap keeps
+    the MOST DOCUMENT-FREQUENT labels, not the alphabetically-first ones.
+
+    This is the RFC-proof defect in miniature: the corpus's most explicit, highest-frequency
+    relations (``obsoletes`` / ``updates``, which sort alphabetically LATE) must survive the cap,
+    while alphabetically-early one-off noise (``aaa`` / ``bbb`` / ``ccc``) is dropped. Under the
+    old ``sorted(union)[:cap]`` merge, the cap kept ``aaa`` / ``bbb`` / ``ccc`` and dropped
+    ``obsoletes`` + ``updates`` entirely (overlap-with-corpus-gold = 0). Frequency ranking inverts
+    that.
+    """
+    provider = _provider(granularity="corpus", max_labels=3)
+    chunks = [_chunk(doc_id=f"d{i}", index=0) for i in range(4)]
+    # obsoletes: 3 docs, updates: 2 docs, each of aaa/bbb/ccc/ddd: 1 doc.
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=[], relation=["obsoletes", "updates", "aaa"], pii=[])),
+            fake.reply(_good_reply(entity=[], relation=["obsoletes", "updates", "bbb"], pii=[])),
+            fake.reply(_good_reply(entity=[], relation=["obsoletes", "ccc"], pii=[])),
+            fake.reply(_good_reply(entity=[], relation=["ddd"], pii=[])),
+        ]
+    ):
+        out = list(provider.induce(chunks))
+    schema = out[0].induced_labels
+    assert schema is not None
+    # The high-frequency, alphabetically-late relations survive the cap; the alphabetically-early
+    # one-off noise is dropped. Freq rank: obsoletes(3), updates(2), then the freq-1 tie → "aaa".
+    assert schema.relation_types == ["obsoletes", "updates", "aaa"]
+    assert "obsoletes" in schema.relation_types  # would be dropped by an alphabetical-cap merge
+    assert "updates" in schema.relation_types
+    # Every chunk carries the same shared, frequency-ranked schema.
+    for c in out:
+        assert c.induced_labels is not None
+        assert c.induced_labels.relation_types == ["obsoletes", "updates", "aaa"]
 
 
 def test_empty_run_makes_no_call() -> None:
