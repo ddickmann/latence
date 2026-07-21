@@ -83,10 +83,15 @@ python benchmark/rfc/build_corpus.py \
   arrays (the human-authored cross-reference graph, kept separate from any KG the pipeline induces —
   it is the **independent** gold signal, never fed into the pipeline).
 - The manifest prints a connectivity stat: **median out-degree ≥ 3** and **at least 15 documents that
-  are ≥ 2 hops from a seed**. If connectivity is below that, the corpus is too shallow to prove
-  multi-hop — widen `--max-docs` or add seeds. (Why it matters: the German single-book run capped real
-  multi-hop at ~2 chains because one document's induced KG is hub-heavy; a multi-document RFC graph is
-  the fix, but only if it is actually deep.)
+  are ≥ 2 hops from a seed**, with **no `WARNING: corpus is too shallow` line**. If connectivity is
+  below that, the corpus is too shallow to prove multi-hop — widen `--max-docs`, add seeds, or raise
+  `--ref-fanout`. (Why it matters: the German single-book run capped real multi-hop at ~2 chains
+  because one document's induced KG is hub-heavy; a multi-document RFC graph is the fix, but only if it
+  is actually deep. The HTTP-core seeds are reference *hubs* — RFC 9110 alone lists 67 references — so a
+  naïve breadth-first fetch fills the whole `--max-docs` budget with depth-1 documents and never reaches
+  depth 2; the builder caps how many `references` targets each document contributes to the fetch
+  frontier — `--ref-fanout`, default 8 — so the frontier advances in depth. Obsoletes/updates chains are
+  always followed in full, and `_refs.jsonl` still records every document's complete edge set.)
 
 License note: RFC texts are published under the IETF Trust's free-use terms; the build script records
 the exact terms in `/workspace/corpus-rfc/LICENSE-CORPUS.md`. Verify it exists before proceeding

@@ -21,7 +21,18 @@ import re
 import sys
 import urllib.request
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
+
+# Per-document cap on how many ``references`` targets feed the fetch frontier. Obsoletes/updates
+# (the short supersession chains) are always followed in full; ``references`` are the wide, shallow
+# hub links (RFC 9110 alone lists 67), so following *all* of them from a hub seed drowns the
+# ``--max-docs`` budget in depth-1 documents and the corpus never reaches depth 2 — making the
+# tutorial's "≥15 docs ≥2 hops from a seed" gate unsatisfiable by construction. Capping the
+# reference fanout lets the BFS frontier advance in depth instead. ``None`` disables the cap
+# (the pre-fix, hub-starved behaviour, kept for regression evidence).
+_DEFAULT_REF_FANOUT = 8
 
 _BASE = "https://www.rfc-editor.org/rfc/rfc{n}.txt"
 # Header lines look like: "Obsoletes: 2818, 7230, 7231"  /  "Updates: 3864".
@@ -43,7 +54,7 @@ https://www.rfc-editor.org/. This corpus is used only as retrieval input; no RFC
 def _fetch(n: int, timeout: float = 30.0) -> str | None:
     try:
         with urllib.request.urlopen(_BASE.format(n=n), timeout=timeout) as r:  # noqa: S310 (fixed host)
-            return r.read().decode("utf-8", errors="replace")
+            return bytes(r.read()).decode("utf-8", errors="replace")
     except Exception as exc:  # network / 404 / decode — reported, never fatal to the whole build
         print(f"  ! rfc{n}: {type(exc).__name__} {exc}", file=sys.stderr)
         return None
@@ -62,7 +73,45 @@ def _parse_refs(text: str, self_n: int) -> dict[str, list[int]]:
     return {"obsoletes": obsoletes, "updates": updates, "references": references}
 
 
-def build(out: Path, seeds: list[int], expand: set[str], max_docs: int) -> int:
+class CorpusStats(NamedTuple):
+    """The §1 connectivity gate, as computed on the assembled corpus (tutorial ✓ look-for)."""
+
+    n_docs: int
+    median_out_degree: int
+    deep: int  # documents ≥2 hops from any seed
+
+
+def _connectivity(refs: dict[int, dict[str, list[int]]], seeds: list[int]) -> CorpusStats:
+    """Compute the §1 hardness gate over the assembled cross-reference graph (pure, no I/O).
+
+    ``median_out_degree`` counts intra-corpus edges over the union of all three relations (the
+    corpus's *width*). ``deep`` is the count of documents ≥2 hops from any seed via BFS over that
+    same union (the corpus's *depth* — the thing a hub-star cannot fake).
+    """
+    present = set(refs)
+    out_degrees = sorted(len(set(r["obsoletes"] + r["updates"] + r["references"]) & present) for r in refs.values())
+    median = out_degrees[len(out_degrees) // 2] if out_degrees else 0
+    depth: dict[int, int] = {s: 0 for s in seeds if s in refs}
+    dq: deque[int] = deque(depth)
+    while dq:
+        n = dq.popleft()
+        for m in set(refs[n]["obsoletes"] + refs[n]["updates"] + refs[n]["references"]) & present:
+            if m not in depth:
+                depth[m] = depth[n] + 1
+                dq.append(m)
+    deep = sum(1 for d in depth.values() if d >= 2)
+    return CorpusStats(n_docs=len(refs), median_out_degree=median, deep=deep)
+
+
+def build(
+    out: Path,
+    seeds: list[int],
+    expand: set[str],
+    max_docs: int,
+    *,
+    ref_fanout: int | None = _DEFAULT_REF_FANOUT,
+    fetch: Callable[[int], str | None] = _fetch,
+) -> CorpusStats:
     out.mkdir(parents=True, exist_ok=True)
     refs: dict[int, dict[str, list[int]]] = {}
     seen: set[int] = set()
@@ -73,7 +122,7 @@ def build(out: Path, seeds: list[int], expand: set[str], max_docs: int) -> int:
         if n in seen:
             continue
         seen.add(n)
-        text = _fetch(n)
+        text = fetch(n)
         if text is None:
             continue
         (out / f"rfc{n}.txt").write_text(text, encoding="utf-8")
@@ -81,38 +130,35 @@ def build(out: Path, seeds: list[int], expand: set[str], max_docs: int) -> int:
         refs[n] = r
         print(f"  + rfc{n}: obsoletes={len(r['obsoletes'])} updates={len(r['updates'])} refs={len(r['references'])}")
         for edge in expand:
-            for m in r.get(edge, []):
+            targets = r.get(edge, [])
+            # Cap only the wide reference lists so a single hub cannot consume the whole budget at
+            # depth 1; obsoletes/updates supersession chains are always followed in full.
+            if edge == "references" and ref_fanout is not None:
+                targets = targets[:ref_fanout]
+            for m in targets:
                 if m not in seen:
                     q.append(m)
 
-    # Write the independent cross-reference graph (gold signal — never fed to the pipeline).
+    # Write the independent cross-reference graph (gold signal — never fed to the pipeline). The
+    # frontier cap above changes *which* documents are fetched, never the edges recorded here: every
+    # row carries the document's full obsoletes/updates/references as parsed from its own text.
     with (out / "_refs.jsonl").open("w", encoding="utf-8") as fh:
         for n in sorted(refs):
             fh.write(json.dumps({"rfc": n, **refs[n]}) + "\n")
     (out / "LICENSE-CORPUS.md").write_text(_LICENSE, encoding="utf-8")
 
-    # Connectivity stats — the hardness gate from the tutorial's §1 ✓ look-for.
-    out_degrees = sorted(len(set(r["obsoletes"] + r["updates"] + r["references"]) & set(refs)) for r in refs.values())
-    median = out_degrees[len(out_degrees) // 2] if out_degrees else 0
-    # depth from seeds (BFS over intra-corpus edges)
-    depth: dict[int, int] = {s: 0 for s in seeds if s in refs}
-    dq: deque[int] = deque(depth)
-    while dq:
-        n = dq.popleft()
-        for m in set(refs[n]["obsoletes"] + refs[n]["updates"] + refs[n]["references"]) & set(refs):
-            if m not in depth:
-                depth[m] = depth[n] + 1
-                dq.append(m)
-    deep = sum(1 for d in depth.values() if d >= 2)
-
-    print(f"\ncorpus: {len(refs)} RFCs  median_out_degree={median}  docs>=2hops_from_seed={deep}")
-    if median < 3 or deep < 15:
+    stats = _connectivity(refs, seeds)
+    print(
+        f"\ncorpus: {stats.n_docs} RFCs  median_out_degree={stats.median_out_degree}  "
+        f"docs>=2hops_from_seed={stats.deep}"
+    )
+    if stats.median_out_degree < 3 or stats.deep < 15:
         print(
             "WARNING: corpus is too shallow to prove multi-hop (need median_out_degree>=3 and "
-            ">=15 docs >=2 hops deep). Widen --max-docs or add seeds.",
+            ">=15 docs >=2 hops deep). Widen --max-docs, add seeds, or raise --ref-fanout.",
             file=sys.stderr,
         )
-    return len(refs)
+    return stats
 
 
 def main() -> None:
@@ -121,11 +167,18 @@ def main() -> None:
     ap.add_argument("--seeds", required=True, help="comma-separated RFC numbers")
     ap.add_argument("--expand", default="obsoletes,updates,references")
     ap.add_argument("--max-docs", type=int, default=80)
+    ap.add_argument(
+        "--ref-fanout",
+        type=int,
+        default=_DEFAULT_REF_FANOUT,
+        help="max reference targets per doc fed to the fetch frontier (<=0 disables the cap); "
+        "keeps a hub seed from filling the budget at depth 1",
+    )
     a = ap.parse_args()
     seeds = [int(x) for x in a.seeds.split(",") if x.strip()]
     expand = {x.strip() for x in a.expand.split(",") if x.strip()}
-    n = build(a.out, seeds, expand, a.max_docs)
-    print(f"done: {n} RFCs written to {a.out}")
+    stats = build(a.out, seeds, expand, a.max_docs, ref_fanout=(a.ref_fanout if a.ref_fanout > 0 else None))
+    print(f"done: {stats.n_docs} RFCs written to {a.out}")
 
 
 if __name__ == "__main__":
