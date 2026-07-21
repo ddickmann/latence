@@ -328,3 +328,133 @@ def test_ascii_tokenisation_is_unchanged() -> None:
         "foo",
         "bar",
     ]
+
+
+# --- from_export: build from the emitted bm25-stats.json artifact (dogfood 4d) -----------------
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+def _write_stats_artifact(
+    directory: Path,
+    *,
+    doc_count: int,
+    avgdl: float,
+    doc_freq: dict[str, int],
+    total_tokens: int = 1,
+    tokenizer: str = "regex-word",
+) -> Path:
+    """Write a ``bm25-stats.json`` in the exact emitted schema (`Bm25Stats.to_artifact`).
+
+    The emitted artifact carries ``avgdl`` (NOT ``avg_doc_len``) and a ``terms`` LIST of
+    ``{term, df, idf}`` objects (NOT a ``doc_freq`` mapping) — the schema mismatch `from_export`
+    exists to bridge. `idf` is written but must be ignored by the loader (it recomputes it).
+    """
+    artifact = {
+        "artifact": "latence.bm25.termstats",
+        "version": 1,
+        "tokenizer": tokenizer,
+        "doc_count": doc_count,
+        "total_tokens": total_tokens,
+        "avgdl": avgdl,
+        "terms": [
+            {"term": term, "df": df, "idf": -999.0}  # a poisoned idf: proves it is not consumed
+            for term, df in sorted(doc_freq.items())
+        ],
+    }
+    path = directory / "bm25-stats.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    return path
+
+
+def test_from_export_builds_a_rescorer_from_the_emitted_stats_artifact(tmp_path: Path) -> None:
+    # THE regression: pre-fix `Bm25Rescorer` has no `from_export`, so this line raises
+    # AttributeError and the tutorial's §4.4 BM25 leg cannot run at all. The emitted schema
+    # (avgdl + terms[]) must be adapted onto the rescorer's supplied-stats contract, and the
+    # resulting rescorer must reproduce the SAME global ranking as the equivalent explicit stats.
+    _write_stats_artifact(
+        tmp_path, doc_count=1000, avgdl=1.5, doc_freq={"apple": 1, "banana": 900}
+    )
+    candidates = [
+        Candidate(id="apple", score=0.0, text="apple"),
+        Candidate(id="banana", score=0.0, text="banana banana"),
+    ]
+    query = "apple banana"
+
+    from_export = Bm25Rescorer.from_export(tmp_path)
+    assert isinstance(from_export, Bm25Rescorer)
+
+    explicit = Bm25Rescorer(
+        {"stats": {"doc_count": 1000, "avg_doc_len": 1.5, "doc_freq": {"apple": 1, "banana": 900}}}
+    )
+    ranked_export = from_export.process(query, candidates)
+    ranked_explicit = explicit.process(query, candidates)
+    # The globally-rare 'apple' dominates — exactly the supplied-stats behaviour — and the scores
+    # match the explicit construction term-for-term (the poisoned stored idf was NOT used).
+    assert _ids(ranked_export) == ["apple", "banana"]
+    assert [c.score for c in ranked_export] == [
+        pytest.approx(c.score) for c in ranked_explicit
+    ]
+
+
+def test_from_export_needs_only_the_stats_file_no_corpus_or_postings(tmp_path: Path) -> None:
+    # 'No re-tokenisation': the directory holds ONLY bm25-stats.json — no records/postings parquet.
+    # from_export must still build a working global-IDF rescorer from the compact stats alone.
+    _write_stats_artifact(tmp_path, doc_count=100, avgdl=1.0, doc_freq={"zebra": 1})
+    assert [p.name for p in tmp_path.iterdir()] == ["bm25-stats.json"]
+    (scored,) = Bm25Rescorer.from_export(tmp_path).process(
+        "zebra", [Candidate(id="a", score=0.0, text="zebra")]
+    )
+    expected_idf = math.log(1.0 + (100 - 1 + 0.5) / (1 + 0.5))  # global df=1, not pool-local
+    assert scored.score == pytest.approx(expected_idf)
+
+
+def test_from_export_accepts_the_stats_file_path_directly(tmp_path: Path) -> None:
+    stats_path = _write_stats_artifact(tmp_path, doc_count=10, avgdl=1.0, doc_freq={"z": 1})
+    assert isinstance(Bm25Rescorer.from_export(stats_path), Bm25Rescorer)
+
+
+def test_from_export_passes_through_k1_b_top_k_config(tmp_path: Path) -> None:
+    _write_stats_artifact(tmp_path, doc_count=10, avgdl=1.0, doc_freq={"a": 1, "b": 1})
+    rescorer = Bm25Rescorer.from_export(tmp_path, {"top_k": 1})
+    ranked = rescorer.process(
+        "a b",
+        [Candidate(id="x", score=0.0, text="a b"), Candidate(id="y", score=0.0, text="a")],
+    )
+    assert len(ranked) == 1  # top_k truncation from config was honoured
+
+
+def test_from_export_rejects_a_stats_block_in_config(tmp_path: Path) -> None:
+    _write_stats_artifact(tmp_path, doc_count=10, avgdl=1.0, doc_freq={"a": 1})
+    with pytest.raises(ValueError, match="do not also pass a 'stats'"):
+        Bm25Rescorer.from_export(
+            tmp_path, {"stats": {"doc_count": 1, "avg_doc_len": 1.0, "doc_freq": {}}}
+        )
+
+
+def test_from_export_raises_on_a_missing_artifact(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="could not read the stats artifact"):
+        Bm25Rescorer.from_export(tmp_path)  # empty dir → no bm25-stats.json
+
+
+def test_from_export_raises_on_malformed_json(tmp_path: Path) -> None:
+    (tmp_path / "bm25-stats.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        Bm25Rescorer.from_export(tmp_path)
+
+
+def test_from_export_raises_on_a_bad_terms_shape(tmp_path: Path) -> None:
+    (tmp_path / "bm25-stats.json").write_text(
+        json.dumps({"doc_count": 5, "avgdl": 1.0, "terms": {"a": 1}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="'terms' must be a list"):
+        Bm25Rescorer.from_export(tmp_path)
+
+
+def test_from_export_propagates_stats_validation_on_a_poisoned_df(tmp_path: Path) -> None:
+    # A df above doc_count would flip the IDF negative; the shared _parse_stats gate must reject the
+    # emitted artifact loudly at construction (not silently rescore wrong at query time).
+    _write_stats_artifact(tmp_path, doc_count=5, avgdl=1.0, doc_freq={"apple": 999})
+    with pytest.raises(ValueError, match="doc_freq.*<= 'doc_count'"):
+        Bm25Rescorer.from_export(tmp_path)

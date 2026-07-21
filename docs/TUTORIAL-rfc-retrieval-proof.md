@@ -236,18 +236,52 @@ finding — hand it to the fix-fleet, which wires Qdrant `SparseVector` named ve
 test, then re-run this step.
 
 ### 4.4 BM25 + KG augmentation (already emitted; verify usable)
+The DuckDB graph source imports `duckdb` lazily on first traversal, so install the `[graph-duckdb]`
+extra once (MIT, an embedded engine — no server):
 ```bash
-python - <<'PY'
-from latence_retrieval import Bm25Rescorer, DuckDBGraphSource, MultiHopExpander
-# BM25 stats loaded from export/bm25-stats.json; graph from export/graph-edges.parquet
-print("bm25 ok:", Bm25Rescorer.from_export("_latence/runs/<run_id>/export") is not None)
-g = DuckDBGraphSource("_latence/runs/<run_id>/export/graph-edges.parquet")
-print("2-hop neighbours of a seed:", len(g.neighbors(["RFC9110"], max_hops=2)))
+uv pip install -e 'packages/latence-retrieval[graph-duckdb]'
+```
+Then verify both legs against the **real** export. Two facts drive the snippet below and are the
+usual first-run traps:
+- `Bm25Rescorer.from_export(<export>)` builds the rescorer straight from the emitted
+  `bm25-stats.json` (mapping its `avgdl`/`terms` onto the rescorer's global-IDF stats) — **no
+  re-tokenisation** of the corpus. It is a classmethod, not a bare constructor.
+- Graph `node_id`s are opaque 16-hex **content hashes**, not RFC labels, so you cannot seed the
+  traversal with the literal `"RFC9110"` — that resolves to nothing. Resolve the hub RFC's number to
+  its `node_id`(s) from `graph-nodes.parquet` (via `canonical_name`) first, then traverse.
+```bash
+export EXPORT=/workspace/latence-framework/latence-out/_latence/runs/run-0001/export
+python - <<PY
+import duckdb
+from latence_retrieval import Bm25Rescorer, DuckDBGraphSource
+
+export = "$EXPORT"
+
+# BM25 leg — rescorer built from the emitted corpus stats, no re-tokenisation.
+bm25 = Bm25Rescorer.from_export(export)
+print("bm25 ok:", bm25 is not None)
+
+# KG leg — resolve the hub RFC's number -> node_id(s) (node_ids are hashes, not 'RFC9110'),
+# then traverse graph-edges.parquet from those seeds.
+con = duckdb.connect()
+seeds = [r[0] for r in con.execute(
+    "SELECT node_id FROM read_parquet(?) "
+    "WHERE regexp_replace(lower(canonical_name), '[^0-9]', '', 'g') = '9110'",
+    [f"{export}/graph-nodes.parquet"],
+).fetchall()]
+print("resolved RFC 9110 -> node_ids:", seeds)
+
+g = DuckDBGraphSource(f"{export}/graph-edges.parquet")
+print("2-hop neighbours of RFC 9110:", len(g.neighbors(seeds, max_hops=2)))
 PY
 ```
-✓ **look for** — BM25 loads from the emitted stats (no re-tokenisation of the corpus), and the
-DuckDB graph source returns a non-trivial 2-hop neighbourhood for a hub RFC. Zero neighbours = the KG
-augmentation leg is dead → finding.
+✓ **look for** — `bm25 ok: True` (the rescorer loaded from the emitted stats, no corpus
+re-tokenisation); the resolve step prints a **non-empty** `node_ids` list for the hub RFC (on this
+corpus RFC 9110 resolves to two nodes, e.g. `43a7cfae2e4ced38` / `fd82245fd456fd29`); and the
+traversal reports a **non-trivial** 2-hop neighbourhood (hundreds of nodes — ~282 on this export).
+An empty `node_ids` list means the label→node resolution is wrong (not that the KG is dead — seeding
+with the literal `"RFC9110"` always yields zero); **zero neighbours from a correctly-resolved seed**
+= the KG augmentation leg is dead → finding.
 
 ---
 
