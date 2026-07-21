@@ -24,9 +24,11 @@ from latence_core.providers.perf import (
     TORCH_JIT_ENV,
     apply_gliner_max_len,
     cap_intra_op_threads,
+    empty_cuda_cache,
     ensure_gliner2_on_cuda,
     flash_attn_available,
     is_compile_backend_failure,
+    is_cuda_oom,
     load_gliner2_optimized,
     load_perf_kwargs,
     load_then_cast,
@@ -410,6 +412,50 @@ def test_is_compile_backend_failure_false_for_ordinary_error() -> None:
     # A genuine (non-compile) runtime fault is NOT swallowed by the guard.
     assert is_compile_backend_failure(RuntimeError("cuda oom")) is False
     assert is_compile_backend_failure(ValueError("bad shape")) is False
+
+
+# --- dogfood-2b-process: CUDA-OOM predicate (torch-free) --------------------------------------
+
+
+class _FakeCudaOOM(RuntimeError):
+    """A stand-in for torch.cuda.OutOfMemoryError (matched by class name / message, torch-free)."""
+
+
+_FakeCudaOOM.__name__ = "OutOfMemoryError"
+
+
+def test_is_cuda_oom_matches_by_name() -> None:
+    assert is_cuda_oom(_FakeCudaOOM("boom")) is True
+
+
+def test_is_cuda_oom_matches_by_message_on_plain_runtimeerror() -> None:
+    # Older torch / some backends raise a bare RuntimeError with the telltale text.
+    assert is_cuda_oom(RuntimeError("CUDA out of memory. Tried to allocate 6.28 GiB")) is True
+    assert is_cuda_oom(RuntimeError("HIP out of memory")) is True
+
+
+def test_is_cuda_oom_matches_wrapped_cause() -> None:
+    # An OOM re-raised under the adapter guard's ProviderError is still caught through the chain.
+    try:
+        try:
+            raise _FakeCudaOOM("CUDA out of memory")
+        except _FakeCudaOOM as inner:
+            raise RuntimeError("provider failure in 'batch_extract_entities'") from inner
+    except RuntimeError as outer:
+        assert is_cuda_oom(outer) is True
+
+
+def test_is_cuda_oom_false_for_ordinary_error() -> None:
+    # A non-OOM fault (including the terse "cuda oom" the compile test uses) is NOT matched.
+    assert is_cuda_oom(RuntimeError("cuda oom")) is False
+    assert is_cuda_oom(ValueError("bad shape")) is False
+    assert is_cuda_oom(RuntimeError("BackendCompilerFailed")) is False
+
+
+def test_empty_cuda_cache_is_a_noop_without_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Best-effort + guarded: on a torch-free host it must be a silent no-op, never raise.
+    monkeypatch.setitem(sys.modules, "torch", None)
+    empty_cuda_cache(provider_name="test")  # must not raise
 
 
 # --- W9-scaling: intra-op thread cap + fp16 cuda placement -------------------------------------

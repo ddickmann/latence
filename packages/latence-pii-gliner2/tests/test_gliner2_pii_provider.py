@@ -91,6 +91,16 @@ class BackendCompilerFailed(RuntimeError):
     """
 
 
+class OutOfMemoryError(RuntimeError):
+    """A stand-in for ``torch.cuda.OutOfMemoryError`` — matched by class NAME (torch-free).
+
+    ``torch`` raises this (a ``RuntimeError`` subclass) mid-forward when a CUDA allocation exceeds
+    free VRAM; the message reads ``"CUDA out of memory. Tried to allocate ..."``. The provider's
+    torch-free ``is_cuda_oom`` matches on the class name / message, so a same-named local class
+    exercises the exact micro-batch backoff without importing torch or a real GPU.
+    """
+
+
 class _FakeGLiNER2:
     """Stands in for ``gliner2.GLiNER2`` with the REAL per-label-dict ``extract_entities``.
 
@@ -116,9 +126,16 @@ class _FakeGLiNER2:
     #: when True, a model loaded with compile=True raises BackendCompilerFailed on its FIRST forward
     #: (torch.compile compiles lazily at inference) — the W9 inference-time fault the guard degrades.
     compiled_forward_raises: bool = False
+    #: a batched forward over MORE than this many texts raises a CUDA OutOfMemoryError (None = never);
+    #: models the span-scoring activation that outgrows VRAM for a large group but fits once halved.
+    oom_above_batch: int | None = None
+    #: when True, EVERY batched forward OOMs regardless of size — the genuinely-unrecoverable case
+    #: (a single chunk that will not fit) the provider must surface as a typed ProviderError.
+    oom_always: bool = False
 
     def __init__(self) -> None:
         self.batch_calls = 0
+        self.batch_sizes: list[int] = []
         self._compile_on = False
 
     @classmethod
@@ -189,10 +206,19 @@ class _FakeGLiNER2:
         # The real batched API: one forward pass over all texts; result[i] is texts[i]'s per-label
         # dict — the exact single-text shape, one per input.
         self.batch_calls += 1
+        self.batch_sizes.append(len(texts))
         type(self).last_max_len = max_len  # W12: record the threaded model-window bound
         if type(self).compiled_forward_raises and self._compile_on:
             # Mimic torch._dynamo.exc.BackendCompilerFailed on the FIRST (compiled) forward.
             raise BackendCompilerFailed("inductor backend cannot compile this model")
+        oom_ceiling = type(self).oom_above_batch
+        if type(self).oom_always or (oom_ceiling is not None and len(texts) > oom_ceiling):
+            # Mimic torch.cuda.OutOfMemoryError: the span-scoring activation for THIS many texts
+            # exceeds free VRAM. The message mirrors the real one the pod logged (dogfood-2b).
+            raise OutOfMemoryError(
+                "CUDA out of memory. Tried to allocate 6.28 GiB. "
+                "GPU 0 has a total capacity of 31.37 GiB of which 247.81 MiB is free."
+            )
         return [
             self.extract_entities(
                 text,
@@ -231,6 +257,8 @@ def fake_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_FakeGLiNER2]:
     _FakeGLiNER2.last_max_len = None
     _FakeGLiNER2.raise_on_optimized_load = False
     _FakeGLiNER2.compiled_forward_raises = False
+    _FakeGLiNER2.oom_above_batch = None
+    _FakeGLiNER2.oom_always = False
     return _FakeGLiNER2
 
 
@@ -720,6 +748,82 @@ def test_inference_time_compile_fault_degrades_to_uncompiled(
     assert provider._compile_disabled is True
     assert fake_gliner2.last_kwargs.get("compile") is False
     assert fake_gliner2.last_kwargs.get("quantize") is True
+
+
+# --- dogfood-2b-process: CUDA-OOM micro-batch backoff at redaction (real-hardware fix) ----------
+
+
+def test_cuda_oom_recovers_by_micro_batching(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    """REGRESSION (dogfood-2b-process): a batched forward that OOMs is split + retried, not crashed.
+
+    On the tutorial's own 32 GB Blackwell pod, ``latence process`` (enterprise-sota) died Exit 1 at
+    the redact stage with a native CUDA ``OutOfMemoryError`` — GLiNER2's span-scoring activation for
+    a whole group of long chunks demanded a single 6.28 GiB allocation the GPU could not satisfy, so
+    NO run dir / exports were ever written. Because the emitted RedactionRecords are
+    batch-size-invariant (W7), the provider must split the OOM'd group in half and retry smaller
+    until it fits — masking every chunk, never dropping one (redaction floor, ADR-0044).
+
+    Pre-fix ``_batch_extract`` issued ONE forward over the group and let the OOM propagate through the
+    guard as a ``ProviderError`` → this test FAILS (the whole redact call raises, zero records). With
+    the backoff it splits until each forward carries ``<= oom_above_batch`` texts and completes.
+    """
+    chunks = _distinct_chunks(8)
+    fake_gliner2.per_text = _per_text_person_map(chunks)
+    # A forward over > 2 texts OOMs; halving 8 -> 4 (OOM) -> 2 (fits) recovers every chunk.
+    fake_gliner2.oom_above_batch = 2
+    provider = Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 8})
+
+    recs = list(provider.redact(chunks))
+
+    assert len(recs) == 8
+    for i, rec in enumerate(recs):
+        assert rec.masked_content is not None
+        assert f"Person{i:03d}" not in rec.masked_content  # every chunk actually scanned + masked
+        assert "[PERSON]" in rec.masked_content
+    # The successful forwards ran at the recovered size (<= the OOM ceiling), proving the split bit —
+    # every text that actually got scanned went through a forward small enough to fit.
+    assert provider._model.batch_sizes  # forwards happened
+    assert any(size <= 2 for size in provider._model.batch_sizes)
+
+
+def test_cuda_oom_output_is_identical_to_the_no_oom_path(fake_gliner2: type[_FakeGLiNER2]) -> None:
+    """The recovered output is byte-identical to the batch that never OOM'd (backoff is transparent)."""
+    chunks = _distinct_chunks(6)
+    fake_gliner2.per_text = _per_text_person_map(chunks)
+    cfg = {"pii_labels": ["person"], "batch_size": 6}
+
+    clean = list(Gliner2PIIRedactor(cfg).redact(chunks))
+    fake_gliner2.oom_above_batch = 1  # force maximal splitting on the second run
+    recovered = list(Gliner2PIIRedactor(cfg).redact(chunks))
+
+    assert len(recovered) == len(clean) == 6
+    for r, c in zip(recovered, clean, strict=True):
+        assert r.record_id == c.record_id
+        assert r.masked_content == c.masked_content
+        assert [(s.char_start, s.char_end, s.pii_type) for s in r.pii_spans] == [
+            (s.char_start, s.char_end, s.pii_type) for s in c.pii_spans
+        ]
+
+
+def test_unrecoverable_cuda_oom_surfaces_typed_error_no_dropped_chunk(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """No fake green: an OOM that persists even at batch-of-one is a typed ProviderError, not a drop.
+
+    The backoff halves down to a single chunk; if THAT still OOMs the hardware genuinely cannot run
+    the stage, so the provider must surface a typed :class:`ProviderError` (ADR-0034) — never emit a
+    chunk un-scanned or silently skip it (redaction floor, ADR-0044). The raised error carries no PII.
+    """
+    chunks = _distinct_chunks(4)
+    fake_gliner2.per_text = _per_text_person_map(chunks)
+    fake_gliner2.oom_always = True  # even a batch of one will not fit
+    provider = Gliner2PIIRedactor({"pii_labels": ["person"], "batch_size": 4})
+
+    with pytest.raises(ProviderError) as excinfo:
+        list(provider.redact(chunks))
+    assert "redaction.gliner2" in str(excinfo.value)
+    # No PII leaked into the typed error message (guard discipline: type name only, no content).
+    assert "Person" not in str(excinfo.value)
 
 
 # --- W9-scaling (audit R4): compile is OFF by default on cuda too, like the twin extractor -------

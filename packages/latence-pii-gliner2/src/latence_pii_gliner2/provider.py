@@ -60,8 +60,10 @@ from latence_core.induced import LabelSlot, effective_labels
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
+    empty_cuda_cache,
     ensure_gliner2_on_cuda,
     is_compile_backend_failure,
+    is_cuda_oom,
     load_gliner2_optimized,
     neutralize_torch_jit,
     resolve_gliner2_knob,
@@ -419,48 +421,69 @@ class Gliner2PIIRedactor(AdapterBase):
         )
         return self._model
 
-    def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
-        """One batched forward (``batch_extract_entities``) with the W9 inference compile guard.
+    def _extract_once(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
+        """A single ``batch_extract_entities`` forward under :meth:`AdapterBase.guard` (typed).
 
-        ``labels`` is this group's effective label set (``config ∪ induced``, W12). The forward runs
-        under :meth:`AdapterBase.guard` (native fault → typed
-        :class:`~latence_core.errors.ProviderError`, no PII leak). BUT ``torch.compile`` compiles
-        lazily on the first forward, so a backend that cannot compile the model raises a
-        ``BackendCompilerFailed`` (dynamo/inductor) HERE, not at load. This wrapper catches exactly
-        that class of fault (:func:`~latence_core.providers.perf.is_compile_backend_failure`) BEFORE
-        the guard maps it, re-loads the uncompiled model ONCE (:meth:`_reload_uncompiled`; quantize
-        kept), and retries the batch — so a bad compile costs only throughput, never a crash. Any
-        OTHER native fault is surfaced through the guard as before (typed, no PII).
+        ``results[i]`` is the per-label dict for ``texts[i]``. The guard maps any native fault to a
+        typed :class:`~latence_core.errors.ProviderError` carrying no record content / PII.
+        """
+        with self.guard("batch_extract_entities"):
+            return list(
+                model.batch_extract_entities(
+                    texts,
+                    labels,
+                    threshold=self._threshold,
+                    include_spans=True,
+                    include_confidence=True,
+                    max_len=self._max_len,
+                )
+            )
+
+    def _batch_extract(self, model: Any, texts: list[str], labels: list[str]) -> list[Any]:
+        """One batched forward with the W9 compile guard AND a CUDA-OOM micro-batch backoff.
+
+        ``labels`` is this group's effective label set (``config ∪ induced``, W12).
+
+        Two inference-time faults are recovered here so ``latence process`` does not die mid-run and
+        forfeit the whole run dir (the redaction floor, ADR-0044, must hold — no chunk is ever
+        dropped or emitted un-scanned):
+
+        * **compile fault** — ``torch.compile`` compiles lazily on the first forward, so a backend
+          that cannot compile raises a ``BackendCompilerFailed`` (dynamo/inductor) HERE, not at load
+          (:func:`~latence_core.providers.perf.is_compile_backend_failure`). The provider re-loads
+          the uncompiled model ONCE (:meth:`_reload_uncompiled`; quantize kept) and retries.
+
+        * **CUDA OOM** (dogfood-2b-process) — GLiNER2's span-scoring activation for a whole group of
+          long chunks can demand a single multi-GiB allocation the GPU cannot satisfy (pod: 6.28 GiB
+          on a 32 GB Blackwell already 27 GB resident), surfacing a native ``OutOfMemoryError``
+          (:func:`~latence_core.providers.perf.is_cuda_oom`). Because the emitted RedactionRecords
+          are **batch-size-invariant** (W7 — same spans/masking/order for any positive batch size),
+          the group is split in half and each half retried recursively after a best-effort cache
+          release; the activation scales with the batch dimension, so halving shrinks the peak
+          allocation until it fits. A batch of ONE that still OOMs is genuinely unrecoverable on
+          this hardware — it surfaces as a typed ``ProviderError`` (no fake green, no dropped
+          chunk).
+
+        Any OTHER native fault is surfaced through the guard as before (typed, no PII).
         """
         try:
-            with self.guard("batch_extract_entities"):
-                # ONE forward pass over the group; results[i] is the per-label dict for texts[i].
-                return list(
-                    model.batch_extract_entities(
-                        texts,
-                        labels,
-                        threshold=self._threshold,
-                        include_spans=True,
-                        include_confidence=True,
-                        max_len=self._max_len,
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001 - intercept a compile fault before surfacing
-            # ``guard`` wraps a compile fault as ProviderError; the predicate walks the cause chain
-            # to find the original BackendCompilerFailed underneath.
+            return self._extract_once(model, texts, labels)
+        except Exception as exc:  # noqa: BLE001 - intercept recoverable faults before surfacing
+            # ``guard`` wraps the native fault as ProviderError; both predicates walk the cause
+            # chain to find the original BackendCompilerFailed / OutOfMemoryError underneath.
             if not self._compile_disabled and is_compile_backend_failure(exc):
                 model = self._reload_uncompiled()
-                with self.guard("batch_extract_entities"):
-                    return list(
-                        model.batch_extract_entities(
-                            texts,
-                            labels,
-                            threshold=self._threshold,
-                            include_spans=True,
-                            include_confidence=True,
-                            max_len=self._max_len,
-                        )
-                    )
+                return self._extract_once(model, texts, labels)
+            if is_cuda_oom(exc) and len(texts) > 1:
+                # Split the group and retry smaller — byte-identical output, lower peak VRAM. Free
+                # the OOM'd batch's fragmented blocks first so the smaller retry allocates cleanly.
+                empty_cuda_cache(provider_name=self.provider_name)
+                mid = len(texts) // 2
+                # Re-fetch the current model each half so a compile-reload inside one half is picked
+                # up by the next (self._model is the source of truth after _reload_uncompiled).
+                left = self._batch_extract(self._load_model(), texts[:mid], labels)
+                right = self._batch_extract(self._load_model(), texts[mid:], labels)
+                return left + right
             raise
 
     # -- redaction ----------------------------------------------------------

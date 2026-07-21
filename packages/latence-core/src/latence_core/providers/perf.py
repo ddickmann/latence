@@ -357,6 +357,71 @@ def is_compile_backend_failure(exc: BaseException) -> bool:
     return False
 
 
+# Class names / message fragments of a CUDA (or accelerator) out-of-memory fault. ``torch`` raises
+# ``torch.cuda.OutOfMemoryError`` (a ``RuntimeError`` subclass) whose message is ``"CUDA out of
+# memory. Tried to allocate ..."``; older torch and some backends raise a bare ``RuntimeError`` with
+# the same telltale text; the CUDA driver's own string is ``CUDA_ERROR_OUT_OF_MEMORY``. Matched
+# torch-free (by name / message), exactly like the compile-fault gate, so ``latence-core`` never
+# imports torch to reason about it.
+_OOM_FAULT_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        "OutOfMemoryError",  # torch.cuda.OutOfMemoryError / torch.OutOfMemoryError
+        "OutOfMemoryError_",
+    }
+)
+_OOM_MESSAGE_FRAGMENTS: tuple[str, ...] = (
+    "CUDA out of memory",
+    "CUDA_ERROR_OUT_OF_MEMORY",
+    "HIP out of memory",  # ROCm
+    "out of memory",  # generic torch OOM RuntimeError (lower-cased match below)
+)
+
+
+def is_cuda_oom(exc: BaseException) -> bool:
+    """Whether ``exc`` (or anything in its cause chain) is a CUDA/accelerator out-of-memory fault.
+
+    **Torch-free** — matches by exception class name (:data:`_OOM_FAULT_CLASS_NAMES`) or by a
+    telltale message fragment (:data:`_OOM_MESSAGE_FRAGMENTS`), never importing torch, and walks the
+    ``__cause__``/``__context__`` chain so it sees through a provider ``guard`` that wrapped the
+    native ``OutOfMemoryError`` in a typed ``ProviderError`` (the OOM is the ``__cause__``).
+
+    This is the single "is this an OOM" predicate the learned Providers' micro-batch backoff
+    shares: an OOM on a large forward is *recoverable* by splitting the batch and retrying smaller
+    (the output is batch-size-invariant), so the Provider halves and retries rather than crashing. A
+    fault that is NOT an OOM (a real bug, a compile failure) is not caught by the backoff and
+    surfaces as before.
+    """
+    for link in _exception_chain(exc):
+        cls = type(link)
+        if cls.__name__ in _OOM_FAULT_CLASS_NAMES:
+            return True
+        text = str(link).lower()
+        if any(frag.lower() in text for frag in _OOM_MESSAGE_FRAGMENTS):
+            return True
+    return False
+
+
+def empty_cuda_cache(*, provider_name: str = "provider") -> None:
+    """Best-effort release of cached/fragmented CUDA blocks before an OOM retry — never raises.
+
+    Runs a ``gc.collect()`` then ``torch.cuda.empty_cache()`` so the allocator can hand back the
+    freed activation blocks of the batch that just OOM'd and satisfy the smaller retry from a
+    contiguous pool. Torch-free-safe (a host without torch, or without CUDA, is a silent no-op) and
+    fully guarded — clearing the cache is an optimisation for the retry, never a correctness step,
+    so any failure here is logged at DEBUG and swallowed.
+    """
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as exc:  # noqa: BLE001 - cache clearing is best-effort, never fatal
+        _log.debug("%s: CUDA cache clear skipped (%s)", provider_name, type(exc).__name__)
+
+
 def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str = "provider") -> Any:
     """``torch.compile`` the model when ``config["compile"]`` is truthy — guarded, never crashes.
 
