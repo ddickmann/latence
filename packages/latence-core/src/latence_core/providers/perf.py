@@ -402,20 +402,33 @@ def is_cuda_oom(exc: BaseException) -> bool:
 
 
 def empty_cuda_cache(*, provider_name: str = "provider") -> None:
-    """Best-effort release of cached/fragmented CUDA blocks before an OOM retry — never raises.
+    """Best-effort reclaim of a just-finished model's memory — GC first, then the CUDA cache.
 
-    Runs a ``gc.collect()`` then ``torch.cuda.empty_cache()`` so the allocator can hand back the
-    freed activation blocks of the batch that just OOM'd and satisfy the smaller retry from a
-    contiguous pool. Torch-free-safe (a host without torch, or without CUDA, is a silent no-op) and
-    fully guarded — clearing the cache is an optimisation for the retry, never a correctness step,
-    so any failure here is logged at DEBUG and swallowed.
+    Two distinct, independently-useful steps, in this order:
+
+    1. ``gc.collect()`` — **run unconditionally, torch or not.** A torch ``nn.Module`` is typically
+       held alive by a reference cycle (hooks, parameter back-refs), so dropping the last Python
+       reference to a Provider does NOT free its model by refcount — the several-GiB CUDA storages
+       stay allocated until a cycle collection runs. Python's own GC is triggered by *Python*
+       object-count thresholds, which the tiny Provider wrapper never trips (its weight is off-heap
+       in CUDA), so between two model Stages the collector may never fire on its own. An explicit
+       ``gc.collect()`` is therefore what actually reclaims the previous Stage's model — the
+       cross-stage VRAM-lifecycle fix (dogfood-2b-process). It runs even on a torch-free host both
+       because the collection is the load-bearing step and so this seam's effect is observable in an
+       offline test.
+    2. ``torch.cuda.empty_cache()`` — hands the now-freed cached/fragmented blocks back to the
+       driver so the NEXT Stage's model (or a smaller OOM-retry batch) allocates from a contiguous
+       pool. Torch-free-safe (a host without torch, or without CUDA, silently skips this step).
+
+    Fully guarded — reclaiming memory is an optimisation, never a correctness step, so any failure
+    is logged at DEBUG and swallowed; it never raises.
     """
-    try:
-        import gc
+    import gc
 
+    gc.collect()
+    try:
         import torch
 
-        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception as exc:  # noqa: BLE001 - cache clearing is best-effort, never fatal
