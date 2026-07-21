@@ -95,6 +95,13 @@ latence = "latence_core.cli:app"
 # Python, no extra deps). The LLM + fused gliner-relex Providers live in
 # latence-relation-llm / latence-relation-gliner (ADR-0013, empirical choice).
 "relation.pattern" = "latence_core.stages.relation:PatternRelationExtractor"
+# S4+S5 fused built-in: deterministic zero-shot structured-header cross-reference extractor
+# (pure Python, no extra deps). Recovers self-anchored, bare-identifier metadata-header relations
+# (e.g. an RFC's `Obsoletes:`/`Updates:` lines) that entity-anchored RE — learned or `relation.pattern`
+# — cannot: it synthesizes the self + referenced identifier mentions AND the edges between them, so
+# the induced KG carries a corpus's most explicit relations (dogfood-3-inspect). Fulfils the same
+# FusedEntityRelationExtractor seam as `fused_entity_relation.gliner2`, composes alongside it.
+"fused_entity_relation.header_refs" = "latence_core.stages.header_refs:HeaderReferenceExtractor"
 # S6 built-in: deterministic hybrid-rule PII redactor (regex library + gazetteer +
 # custom patterns; policy keyed off Classification.sensitivity). Pure Python, no
 # extra deps. The learned GLiNER-PII Provider lives in latence-pii-gliner (ADR-0024).
