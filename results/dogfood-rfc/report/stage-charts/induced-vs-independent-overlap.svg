@@ -1,0 +1,15 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='800' height='400' viewBox='0 0 800 400' role='img' aria-label='Induced vs independent edge overlap (obsoletes/updates)'>
+<rect x='0' y='0' width='800' height='400' fill='#ffffff'/>
+<text x='20.0' y='32.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='18' font-weight='700' fill='#1f2933' text-anchor='start'>Induced vs independent edge overlap (obsoletes/updates)</text>
+<line x1='60.0' y1='330.0' x2='660.0' y2='330.0' stroke='#1f2933' stroke-width='1'/>
+<rect x='80.0' y='307.5' width='120.0' height='22.5' fill='#2f6f9f'/>
+<text x='140.0' y='299.5' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='14' font-weight='700' fill='#1f2933' text-anchor='middle'>6</text>
+<text x='140.0' y='350.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>induced only</text>
+<rect x='280.0' y='90.0' width='120.0' height='240.0' fill='#2e7d32'/>
+<text x='340.0' y='82.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='14' font-weight='700' fill='#1f2933' text-anchor='middle'>64</text>
+<text x='340.0' y='350.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>overlap (agree)</text>
+<rect x='480.0' y='322.5' width='120.0' height='7.5' fill='#c0392b'/>
+<text x='540.0' y='314.5' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='14' font-weight='700' fill='#1f2933' text-anchor='middle'>2</text>
+<text x='540.0' y='350.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='11' font-weight='400' fill='#7b8794' text-anchor='middle'>independent only</text>
+<text x='60.0' y='64.0' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='13' font-weight='600' fill='#1f2933' text-anchor='start'>independent-edge recall 97.0%  (64/66 gold edges reproduced)</text>
+</svg>

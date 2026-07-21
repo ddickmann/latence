@@ -1,0 +1,891 @@
+{
+  "n_generated": 90,
+  "n_strict_multihop": 7,
+  "aggregate_all": {
+    "dense": 0.6444444444444445,
+    "bm25": 0.6555555555555556,
+    "fused": 0.6777777777777778
+  },
+  "aggregate_strict": {
+    "dense": 0.0,
+    "bm25": 0.0,
+    "fused": 1.0
+  },
+  "kept": [
+    {
+      "a": "6838",
+      "b": "2045",
+      "q": "In the context of media type specifications and message formatting described in RFC 6838, how are the terms \"body part,\" \"body,\" \"7bit data,\" and \"8bit data\" precisely defined and distinguished within multipart message entities?",
+      "gold": "sha256:9bb251635dd37fda97dcce6c08dea019432117a0f1e389051d2ecbf7b76350b0#chunk-9",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "5246",
+      "q": "What are the specific cipher suites and their corresponding key exchange, cipher, and MAC algorithms defined for use in the TLS protocol referenced by RFC 7230?",
+      "gold": "sha256:2ebe1b8e651696aeacc8ab3848bedb465505737901ea3b691acf40c392958feb#chunk-76",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2818",
+      "b": "1958",
+      "q": "In the context of TLS and HTTPS as described in RFC 2818, how important is it for upper layer protocols to ensure that endpoint addresses remain consistent and unambiguous throughout a communication session?",
+      "gold": "sha256:4f93f2eafe9a19240a2f4c1ca9fc8e4712e163d834e0f12b3322d57f7f9cd986#chunk-7",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "5861",
+      "b": "2119",
+      "q": "What is the precise meaning and intended use of capitalized requirement-level keywords like \"MUST\" and \"SHOULD\" as referenced in the context of HTTP cache control extensions for stale responses?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "8126",
+      "b": "5226",
+      "q": "What are the different types of IANA assignment policies described in the context of managing protocol parameter namespaces in RFC 8126?",
+      "gold": "sha256:6e0ca0a06717a202eafa995ee127054342e300ae3bac75958b8747dd4082490f#chunk-12",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "6066",
+      "b": "5246",
+      "q": "What are the specific cipher suite definitions, including key exchange, cipher, and MAC algorithms, referenced in the context of TLS extensions described in RFC 6066?",
+      "gold": "sha256:2ebe1b8e651696aeacc8ab3848bedb465505737901ea3b691acf40c392958feb#chunk-76",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "5226",
+      "q": "What are the different IANA assignment policies referenced in RFC 7230 for managing protocol parameter namespaces, and how do they operate?",
+      "gold": "sha256:6e0ca0a06717a202eafa995ee127054342e300ae3bac75958b8747dd4082490f#chunk-12",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    }
+  ],
+  "all": [
+    {
+      "a": "6838",
+      "b": "5226",
+      "q": "What are the different types of IANA assignment policies described for managing media type registrations in RFC 6838?",
+      "gold": "sha256:6e0ca0a06717a202eafa995ee127054342e300ae3bac75958b8747dd4082490f#chunk-12",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "7234",
+      "b": "7232",
+      "q": "In the context of HTTP caching as described in RFC 7234, when and why should an origin server include the Last-Modified header in its responses?",
+      "gold": "sha256:3788e183becfbdaf93121082cd90ac7c1324e871fe425438805942a10207b1b4#chunk-10",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7233",
+      "b": "7234",
+      "q": "What is the official status and scope of the document that defines HTTP caching mechanisms referenced by RFC 7233?",
+      "gold": "sha256:1d084238ae6692d1e3322fa0850dbb9596812332d92b76d9a815c5ed9b600dea#chunk-0",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "7540",
+      "b": "5246",
+      "q": "What cipher suites and their key exchange, cipher, and MAC algorithms are defined for use in the TLS protocol referenced by HTTP/2 in RFC 7540?",
+      "gold": "sha256:2ebe1b8e651696aeacc8ab3848bedb465505737901ea3b691acf40c392958feb#chunk-76",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "6838",
+      "b": "2045",
+      "q": "In the context of media type specifications and message formatting described in RFC 6838, how are the terms \"body part,\" \"body,\" \"7bit data,\" and \"8bit data\" precisely defined and distinguished within multipart message entities?",
+      "gold": "sha256:9bb251635dd37fda97dcce6c08dea019432117a0f1e389051d2ecbf7b76350b0#chunk-9",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7232",
+      "b": "2616",
+      "q": "In the context of HTTP conditional requests and cache validation as described in RFC 7232, how is the \"corrected_initial_age\" of a cached response calculated to ensure conservative freshness estimation despite network delays?",
+      "gold": "sha256:10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf#chunk-109",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "2068",
+      "q": "How does HTTP/1.1 ensure accurate calculation of the Age header value across multiple caches with potentially unsynchronized clocks and network delays?",
+      "gold": "sha256:d6c4e471389f2d309ab1f90881576542c742f95b115336a346447d052e0477cf#chunk-96",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "1864",
+      "b": "1521",
+      "q": "Who were the key contributors and the working group leadership involved in the development of MIME, as referenced in the context of email extensions in RFC 1864?",
+      "gold": "sha256:375598a8927c77dafadc81477aca36b144f0f03397865a19d060ca84c371a188#chunk-66",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "6838",
+      "b": "2616",
+      "q": "How should a cache calculate the corrected initial age of a cached response to ensure conservative freshness behavior when interpreting age-related headers in media type registrations as specified in RFC 6838?",
+      "gold": "sha256:10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf#chunk-109",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2295",
+      "b": "1945",
+      "q": "In the context of implementing HTTP/1.0-based protocols as referenced by RFC 2295 for transparent content negotiation, how are the key terms \"connection,\" \"message,\" \"request,\" \"response,\" \"resource,\" and \"entity\" specifically defined?",
+      "gold": "sha256:a853054a35d956b2885698566b376505406c756c3b318c6bef04dbd900a27fce#chunk-12",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "9110",
+      "b": "1950",
+      "q": "In the context of HTTP message compression as described in RFC 9110, how does the use of a preset dictionary improve compression efficiency, and what requirements must the compressor and decompressor meet when using such a dictionary?",
+      "gold": "sha256:8f0475a5c984657bf26277f73df9456c9b97f175084f0c1748f1eb1f0b9b10b9#chunk-9",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "3749",
+      "b": "2246",
+      "q": "In the context of implementing the cryptographic protocols described in RFC 3749, what are the definitions and components of the CipherSuites used in TLS, including their key exchange methods, encryption algorithms, and hash functions?",
+      "gold": "sha256:d6489dc4c87b821146724e00db9a9ed31fb317e3bd628387a8adf50e9033eea1#chunk-49",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "1522",
+      "b": "1521",
+      "q": "Who were the key contributors and the chairman involved in the development of MIME as referenced in the context of encoding non-ASCII text in email headers?",
+      "gold": "sha256:375598a8927c77dafadc81477aca36b144f0f03397865a19d060ca84c371a188#chunk-66",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7231",
+      "b": "5234",
+      "q": "What are the exact character ranges and definitions for core elements like ALPHA, DIGIT, CRLF, and CTL used in the HTTP/1.1 protocol syntax as specified in the HTTP/1.1 semantics and content standard?",
+      "gold": "sha256:fc871020f53baa6b60fc6835c557b433f38d53c5cc41ab56d03622b084f53a12#chunk-10",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9110",
+      "b": "7235",
+      "q": "In the context of HTTP authentication as described in RFC 9110, how should a proxy handle the Authorization header in forwarded requests, and what are the requirements for the Proxy-Authenticate header in 407 responses?",
+      "gold": "sha256:abfb45a43fdebffc640b51fae46f480e65fc01238f244f94b1bcf2c20da0b862#chunk-10",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "1122",
+      "b": "793",
+      "q": "In the context of TCP implementation guidelines from RFC 1122, how should a TCP endpoint handle incoming segments with the FIN bit set when the connection is in states like CLOSE-WAIT, CLOSING, LAST-ACK, or TIME-WAIT?",
+      "gold": "sha256:e55b1faa35edbeecceb2400233a16ae81897bdf9c31d5b3031e91139e5ea8142#chunk-66",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "7231",
+      "b": "1945",
+      "q": "In the context of HTTP semantics and content as defined by RFC 7231, what are the precise definitions of key terms such as \"connection,\" \"message,\" \"request,\" \"response,\" \"resource,\" and \"entity\"?",
+      "gold": "sha256:a853054a35d956b2885698566b376505406c756c3b318c6bef04dbd900a27fce#chunk-12",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "977",
+      "b": "821",
+      "q": "In implementing the mail transfer protocol described in RFC 977, what are the rules regarding command case sensitivity, command order, and the use of the QUIT command within a session?",
+      "gold": "sha256:b7111020e63d77bc84fbcebf8adb0638a1bb0efaeed2e289def743b4fe994882#chunk-25",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2068",
+      "b": "1951",
+      "q": "In the context of HTTP/1.1 message compression, how are compressed data elements packed into bytes with respect to bit order and significance within each byte?",
+      "gold": "sha256:5ebf4b5b7fe1c3a0c0ab9aa3ac8c0f3853a7dc484905e76e03b0b0f301350009#chunk-7",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "6265",
+      "b": "5234",
+      "q": "What are the exact character ranges and definitions for core ABNF rules like ALPHA, DIGIT, and CRLF used in the syntax specifications of HTTP State Management Mechanism in RFC 6265?",
+      "gold": "sha256:fc871020f53baa6b60fc6835c557b433f38d53c5cc41ab56d03622b084f53a12#chunk-10",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "7233",
+      "q": "What is the purpose and scope of the HTTP/1.1 range requests mechanism referenced in the context of message syntax and routing in RFC 7230?",
+      "gold": "sha256:da3d69c64efad7c05bed9b92a7ccd3444d2d47702e7415af56b0beedd6883592#chunk-0",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "9113",
+      "b": "9112",
+      "q": "In the context of HTTP/3 message framing as specified in RFC 9113, where can I find the detailed grammar definitions and header field specifications referenced for HTTP/1.1 message components?",
+      "gold": "sha256:e4f426bac6206b67fdf9e0da826154f70588db2133a0a86b15cde4ff725d8937#chunk-51",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2049",
+      "b": "1590",
+      "q": "What is the procedure and administrative process for registering new MIME media types and subtypes as referenced in the context of MIME content handling in RFC 2049?",
+      "gold": "sha256:13b9c19c85a17defb795f6570c3212b0cf86d7ec3890f45f83cdcd2cecfc18c2#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "5246",
+      "b": "2119",
+      "q": "What is the standardized meaning and usage of capitalized requirement keywords like \"MUST\" and \"SHOULD\" referenced in the TLS protocol specification?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "7232",
+      "q": "In the context of HTTP message syntax and routing as defined in RFC 7230, when and why should an origin server include the Last-Modified header in its responses?",
+      "gold": "sha256:3788e183becfbdaf93121082cd90ac7c1324e871fe425438805942a10207b1b4#chunk-10",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7234",
+      "b": "5741",
+      "q": "What are the recommended initial text values for the \"Status of This Memo\" section to indicate whether an RFC 7234-related document is Informational, Historic, or Experimental?",
+      "gold": "sha256:f7dbd96d8642be229574ed6ab00ec0978534550a35970bbae6b119d97f680d19#chunk-7",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7233",
+      "b": "6838",
+      "q": "When defining a new structured syntax suffix for use in HTTP Range Requests as described in RFC 7233, what information must be included in the registration template to ensure proper media type registration and interoperability?",
+      "gold": "sha256:b08ccba7e5116e61085f2e1fe447d90eee785fb0efaa448a4b4ef6ea48b03b80#chunk-26",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "1521",
+      "b": "1123",
+      "q": "In implementing MIME message handling as specified in RFC 1521, what are the recommended practices for DNS query retries and caching to avoid excessive DNS traffic and ensure efficient resource usage?",
+      "gold": "sha256:3d019cc4777d1ead76c212711d56768bde9361312cd209846b62d2e41dd0301d#chunk-85",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "1521",
+      "b": "1049",
+      "q": "In the context of defining MIME content types as specified in RFC 1521, what are the initial standard values for the \"type\" parameter in the Content-Type header, and how is case sensitivity handled for these type values?",
+      "gold": "sha256:8e30e9f81e7ffa9ac1e15e20ab46c472985e531ba49f299392f9217b3c564b0e#chunk-5",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "1521",
+      "b": "959",
+      "q": "What are the expected FTP server response codes for the PORT, PASV, MODE, and TYPE commands referenced in the context of MIME content transfer as specified in RFC 1521?",
+      "gold": "sha256:e2eb01566e64c12ed75a0c4bd02231e62f91eebb86f596abc40999d5e8bc5a91#chunk-43",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "7230",
+      "b": "1919",
+      "q": "How can chained proxy systems handle incoming sessions and forwarding between each other to maintain user transparency in an application-specific proxy environment as described in HTTP message routing?",
+      "gold": "sha256:7f12470e3448b24a036caf9df1bdbad42cfa84ea272304f9671b9d916d8ed24a#chunk-20",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7413",
+      "b": "2119",
+      "q": "In the context of implementing TLS 1.3 as specified in RFC 7413, how should I interpret the capitalized requirement keywords like \"MUST\" and \"SHOULD\" used throughout the document?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7540",
+      "b": "5226",
+      "q": "What are the different IANA assignment policies referenced in the HTTP/2 specification for managing protocol parameter namespaces?",
+      "gold": "sha256:6e0ca0a06717a202eafa995ee127054342e300ae3bac75958b8747dd4082490f#chunk-12",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7232",
+      "b": "7234",
+      "q": "What is the scope and purpose of the caching mechanisms referenced in RFC 7232 for HTTP/1.1, and which document formally defines these cache behaviors and associated header fields?",
+      "gold": "sha256:1d084238ae6692d1e3322fa0850dbb9596812332d92b76d9a815c5ed9b600dea#chunk-0",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "793",
+      "b": "790",
+      "q": "What are the assigned decimal protocol numbers for the IP Protocol field used to identify next-level protocols in the TCP specification?",
+      "gold": "sha256:8f6e445ca9eee011ea0862cd0202e9249af44befe4a50d2042a3b39f979d4bfb#chunk-7",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "5246",
+      "q": "What are the specific cipher suites and their corresponding key exchange, cipher, and MAC algorithms defined for use in the TLS protocol referenced by RFC 7230?",
+      "gold": "sha256:2ebe1b8e651696aeacc8ab3848bedb465505737901ea3b691acf40c392958feb#chunk-76",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7235",
+      "b": "7231",
+      "q": "What are the specific HTTP status codes and header fields defined for use in HTTP semantics and content that RFC 7235 references from the HTTP/1.1 specification?",
+      "gold": "sha256:a83d026937f6f7929a0e53f8a9bfec4104285f0f89d6dbabd3927c4208a715b2#chunk-118",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2818",
+      "b": "1958",
+      "q": "In the context of TLS and HTTPS as described in RFC 2818, how important is it for upper layer protocols to ensure that endpoint addresses remain consistent and unambiguous throughout a communication session?",
+      "gold": "sha256:4f93f2eafe9a19240a2f4c1ca9fc8e4712e163d834e0f12b3322d57f7f9cd986#chunk-7",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2818",
+      "b": "2459",
+      "q": "What are some of the standard X.509 certificate extensions and their ASN.1 syntax definitions referenced when validating certificates in the context of HTTPS as described in RFC 2818?",
+      "gold": "sha256:d8eab6509ff3f7631b589419844b40f3d733adf116897a7c9e63706d08979895#chunk-100",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "7231",
+      "b": "850",
+      "q": "In the context of HTTP header field definitions in RFC 7231, how does the concept of the \"Distribution\" header line from legacy message formats influence the interpretation or restriction of message distribution scopes?",
+      "gold": "sha256:660c5d88cb473d80ebd768e43cb554386ed96ea4c427099c1c5efb551534bd19#chunk-11",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "9113",
+      "b": "9110",
+      "q": "In the context of implementing HTTP/3 as specified in RFC 9113, where can I find the detailed definitions and grammar rules for HTTP header fields like Accept, Content-Type, and Authorization?",
+      "gold": "sha256:21c1cdce6ab0e5509b04d84a28000836c7a087cf786efe6f04877ebfff47232a#chunk-244",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2817",
+      "b": "2616",
+      "q": "In the context of upgrading HTTP connections as described in RFC 2817, how should a cache accurately calculate the current age of a cached response to ensure conservative behavior despite network delays?",
+      "gold": "sha256:10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf#chunk-109",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9113",
+      "b": "793",
+      "q": "In the context of TCP behavior as described in RFC 9113, how should a TCP endpoint handle incoming segments with the FIN bit set when the connection is in states like CLOSE-WAIT, CLOSING, LAST-ACK, or TIME-WAIT?",
+      "gold": "sha256:e55b1faa35edbeecceb2400233a16ae81897bdf9c31d5b3031e91139e5ea8142#chunk-66",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2068",
+      "b": "1522",
+      "q": "How does the email header encoding method referenced in the HTTP/1.1 specification ensure compatibility with existing mail systems when representing non-ASCII text in message headers?",
+      "gold": "sha256:a84d076f5296d04f9572388d9e24372fcaee5df47ba1e3cac3a506b1d086687f#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9112",
+      "b": "1950",
+      "q": "In the context of HTTP/1.1 message compression as described in RFC 9112, how does using a preset dictionary improve compression efficiency for short input sequences, and what requirements must the compressor and decompressor meet when using such dictionaries?",
+      "gold": "sha256:8f0475a5c984657bf26277f73df9456c9b97f175084f0c1748f1eb1f0b9b10b9#chunk-9",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9110",
+      "b": "6838",
+      "q": "When defining a new structured syntax suffix for use in HTTP content negotiation as described in RFC 9110, what specific information must be included in the registration request to ensure proper documentation and interoperability?",
+      "gold": "sha256:b08ccba7e5116e61085f2e1fe447d90eee785fb0efaa448a4b4ef6ea48b03b80#chunk-26",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "5861",
+      "b": "2119",
+      "q": "What is the precise meaning and intended use of capitalized requirement-level keywords like \"MUST\" and \"SHOULD\" as referenced in the context of HTTP cache control extensions for stale responses?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "934",
+      "b": "821",
+      "q": "In implementing the SMTP protocol as described in RFC 934, how should command case sensitivity be handled for command codes and their arguments, and what is the required behavior if commands are received out of order or if the QUIT command is used improperly?",
+      "gold": "sha256:b7111020e63d77bc84fbcebf8adb0638a1bb0efaeed2e289def743b4fe994882#chunk-25",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2818",
+      "b": "2616",
+      "q": "In the context of implementing HTTPS as specified by RFC 2818, how should a caching proxy calculate the correct age of a cached HTTP response to ensure conservative freshness estimates despite network delays?",
+      "gold": "sha256:10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf#chunk-109",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "1421",
+      "b": "822",
+      "q": "In implementing secure email message formatting as specified in RFC 1421, how should linear-white-space and line folding be handled within unstructured and structured header fields?",
+      "gold": "sha256:1e7bc6c75e4c6866c54cbf26ae280b96cac9e87d6293db5a21d7aaf4ffb8bc1a#chunk-9",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2049",
+      "b": "1341",
+      "q": "What are the mandatory requirements for a MIME-conformant mail user agent to properly handle non-ASCII content in email messages according to the MIME standard referenced by RFC 2049?",
+      "gold": "sha256:6489eb63a43ada70c6db1bf5a0af6af71b529b271961537217ec76d1454e3008#chunk-59",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "3864",
+      "b": "1036",
+      "q": "In the context of RFC 3864's guidelines for reliable message transfer, what methods are recommended for forwarding Usenet news messages to ensure delivery despite remote system downtime?",
+      "gold": "sha256:712c774b227d9f7d1f9fe8a49e7af58efdc77a68fbd5b9ecd51c574de933d3f6#chunk-16",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2049",
+      "b": "2046",
+      "q": "In the context of handling media types as specified in RFC 2049, what security risks are associated with using nonstandard file operators like \"Filenameforall\" in PostScript implementations, and how should message sending and receiving software mitigate these risks?",
+      "gold": "sha256:7ac4096b9263e11a704f06892638258ac1ddc0394dd75ffdc171e7b5ba0123e0#chunk-19",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "8126",
+      "b": "6838",
+      "q": "What fields must be included in a structured syntax suffix registration request when defining a new media type suffix according to the guidelines referenced in RFC 8126?",
+      "gold": "sha256:b08ccba7e5116e61085f2e1fe447d90eee785fb0efaa448a4b4ef6ea48b03b80#chunk-26",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "1521",
+      "b": "822",
+      "q": "In the context of defining MIME headers for email messages as specified in RFC 1521, how should linear-white-space and line folding be handled within structured and unstructured header field bodies?",
+      "gold": "sha256:1e7bc6c75e4c6866c54cbf26ae280b96cac9e87d6293db5a21d7aaf4ffb8bc1a#chunk-9",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "1808",
+      "b": "822",
+      "q": "In the context of parsing URLs as specified in RFC 1808, how should linear-white-space and line folding be handled within unstructured header fields that may contain comments or other text?",
+      "gold": "sha256:1e7bc6c75e4c6866c54cbf26ae280b96cac9e87d6293db5a21d7aaf4ffb8bc1a#chunk-9",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2246",
+      "b": "2459",
+      "q": "In the context of implementing TLS as specified in RFC 2246, what ASN.1 structure and extensions are defined for handling certificate revocation lists (CRLs) and their associated fields?",
+      "gold": "sha256:d8eab6509ff3f7631b589419844b40f3d733adf116897a7c9e63706d08979895#chunk-100",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "9110",
+      "b": "2046",
+      "q": "In the context of HTTP message handling and security considerations, what risks are associated with using nonstandard file operators like wildcard file search in media types, and how should implementations mitigate these risks?",
+      "gold": "sha256:7ac4096b9263e11a704f06892638258ac1ddc0394dd75ffdc171e7b5ba0123e0#chunk-19",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2145",
+      "b": "2068",
+      "q": "In the context of HTTP message forwarding and caching as discussed in RFC 2145, how can caches accurately compute the age of a response despite network delays and potential clock differences between servers and caches?",
+      "gold": "sha256:d6c4e471389f2d309ab1f90881576542c742f95b115336a346447d052e0477cf#chunk-96",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "793",
+      "b": "761",
+      "q": "In the TCP connection state machine described in RFC 793, how should the protocol respond to a CLOSE call received in the FIN-WAIT-1, TIME-WAIT, CLOSE-WAIT, and CLOSING states?",
+      "gold": "sha256:18686117e1110d0fd4282e54dd9f913bbc5f475e65689e52c8b424560da03cd9#chunk-55",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "8126",
+      "b": "5226",
+      "q": "What are the different types of IANA assignment policies described in the context of managing protocol parameter namespaces in RFC 8126?",
+      "gold": "sha256:6e0ca0a06717a202eafa995ee127054342e300ae3bac75958b8747dd4082490f#chunk-12",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "4918",
+      "b": "2617",
+      "q": "Who were the original authors and contributing organizations responsible for defining the HTTP Basic and Digest Access Authentication methods referenced in the Web Distributed Authoring and Versioning (WebDAV) protocol?",
+      "gold": "sha256:cf5492136782d9e9fce492c254ca39e2c93328cf38c4dd006039abb5d8e27ba7#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "3864",
+      "b": "2119",
+      "q": "What is the standardized meaning and usage of capitalized requirement keywords like \"MUST\" and \"SHOULD\" referenced in the context of certificate management protocols described in RFC 3864?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "4648",
+      "b": "2119",
+      "q": "What is the precise meaning and intended use of capitalized requirement keywords like \"MUST\" and \"SHOULD\" as referenced in the Base16, Base32, and Base64 Data Encodings specification?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7231",
+      "b": "5741",
+      "q": "In the context of RFC 7231, how should the \"Status of This Memo\" section be structured to clearly indicate the document's review type and category, such as Informational, Historic, or Experimental?",
+      "gold": "sha256:f7dbd96d8642be229574ed6ab00ec0978534550a35970bbae6b119d97f680d19#chunk-7",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "6066",
+      "b": "5246",
+      "q": "What are the specific cipher suite definitions, including key exchange, cipher, and MAC algorithms, referenced in the context of TLS extensions described in RFC 6066?",
+      "gold": "sha256:2ebe1b8e651696aeacc8ab3848bedb465505737901ea3b691acf40c392958feb#chunk-76",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2145",
+      "b": "791",
+      "q": "In the context of RFC 2145's guidelines on referencing protocols, how is the byte order defined for transmitting multi-octet quantities in the Internet Protocol?",
+      "gold": "sha256:6cfb387fcecfc1b72f2f69343c5b6951b5d263d708162e2b5c66ab8f394f6265#chunk-46",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "1864",
+      "b": "1421",
+      "q": "How does the privacy enhancement mechanism described in RFC 1864 ensure compatibility with various mail transport agents and user agents across different electronic mail environments?",
+      "gold": "sha256:a31bb54b9850e3d1c474f66bf1d47b6074496afceb9ff2df43fe55e240098643#chunk-3",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "5226",
+      "q": "What are the different IANA assignment policies referenced in RFC 7230 for managing protocol parameter namespaces, and how do they operate?",
+      "gold": "sha256:6e0ca0a06717a202eafa995ee127054342e300ae3bac75958b8747dd4082490f#chunk-12",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7234",
+      "b": "6265",
+      "q": "In the context of HTTP caching as defined by RFC 7234, how should a user agent handle a Set-Cookie header with a Domain attribute that is a public suffix to prevent security risks?",
+      "gold": "sha256:dc4177094813e85a44a7897b892b76bc09160b3a03aea44f0f511f3a98f91933#chunk-26",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2046",
+      "b": "822",
+      "q": "In the context of defining media types and their headers in RFC 2046, how should linear-white-space and line folding be handled within structured and unstructured header field bodies?",
+      "gold": "sha256:1e7bc6c75e4c6866c54cbf26ae280b96cac9e87d6293db5a21d7aaf4ffb8bc1a#chunk-9",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7540",
+      "b": "6066",
+      "q": "In the context of implementing HTTP/2 over TLS as specified in RFC 7540, what are the specific TLS alert codes defined for signaling errors during the extended TLS handshake, and under what conditions must these alerts be sent?",
+      "gold": "sha256:6a33cceaa5e1b6518923d9d04ffaa738bad0417806b3c94a995484e140f5cbc0#chunk-17",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "1945",
+      "b": "977",
+      "q": "In the context of the Network News Transfer Protocol described in RFC 1945, how does NNTP improve the efficiency of news article distribution compared to traditional flooding methods?",
+      "gold": "sha256:c6c987a0a0d832344d66f07c69f13398705dd23467df205c51a97609f5bc98ae#chunk-3",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "1341",
+      "b": "1049",
+      "q": "In the context of defining MIME Content-Type headers as specified in RFC 1341, what are the initial standardized type values allowed, and how is case sensitivity handled for these type values?",
+      "gold": "sha256:8e30e9f81e7ffa9ac1e15e20ab46c472985e531ba49f299392f9217b3c564b0e#chunk-5",
+      "dense": 0.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "9114",
+      "b": "2119",
+      "q": "In the context of implementing HTTP/3 as specified in RFC 9114, what is the standardized meaning and usage of capitalized requirement keywords like \"MUST\" and \"SHOULD\" used throughout the specification?",
+      "gold": "sha256:3c2ceb7bfc84cd34720f4a5271338ab9d8280d34bdd1eb250c64306202f2ed8b#chunk-0",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "2616",
+      "b": "1808",
+      "q": "In the context of HTTP message handling as defined by RFC 2616, how should a client reliably resolve relative URLs within a document when the document's base URL may not be explicitly defined?",
+      "gold": "sha256:ea3895bbf4c7caeccb232f85b71fabd8554b2d93bd5df0260e268426f006657e#chunk-11",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9113",
+      "b": "6265",
+      "q": "In the context of HTTP state management in RFC 9113, how should a user agent handle a Set-Cookie header with a Domain attribute that is a public suffix, and what is the rationale behind this behavior?",
+      "gold": "sha256:dc4177094813e85a44a7897b892b76bc09160b3a03aea44f0f511f3a98f91933#chunk-26",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9111",
+      "b": "2616",
+      "q": "In the context of HTTP caching as specified in RFC 9111, how is the initial age of a cached response calculated to account for delays between the origin server\u2019s Date header and the cache\u2019s request and response times?",
+      "gold": "sha256:10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf#chunk-109",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9112",
+      "b": "2049",
+      "q": "In the context of HTTP/1.1 message transmission and interoperability, what guidelines should be followed when choosing an encoding format to ensure that message data survives intact across various non-conformant SMTP gateways and legacy mail transfer agents?",
+      "gold": "sha256:7b3f6345f7c9cfc8f46ec68ef5a651932803b83b475ba6b181d2e9993eab4600#chunk-6",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "4918",
+      "b": "3864",
+      "q": "In the context of extending WebDAV headers as specified in RFC 4918, what is the process and authority for registering and changing new HTTP header fields to ensure they meet IANA criteria and community standards?",
+      "gold": "sha256:eccd2d25dc110a55aff23ddc41a9b4e4aa105f567b2806546eeae3a7bd72764d#chunk-12",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2068",
+      "b": "850",
+      "q": "In the context of HTTP message handling as described in RFC 2068, how does the use of the Distribution header in Usenet control messages affect the scope of message propagation compared to the Newsgroups header?",
+      "gold": "sha256:660c5d88cb473d80ebd768e43cb554386ed96ea4c427099c1c5efb551534bd19#chunk-11",
+      "dense": 0.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9112",
+      "b": "2068",
+      "q": "In HTTP/1.1 caching as described in RFC 9112, how is the Age header value corrected to account for network delays and clock differences between caches along the response path?",
+      "gold": "sha256:d6c4e471389f2d309ab1f90881576542c742f95b115336a346447d052e0477cf#chunk-96",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9110",
+      "b": "8126",
+      "q": "In the context of HTTP semantics as defined by RFC 9110, what is the difference between \"Reserved\" and \"Unassigned\" values in IANA registries referenced by the specification?",
+      "gold": "sha256:b8b5cc1e61e78352b5a12c4a92fa0573b3400d49522a448913455a478dd87401#chunk-35",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "6066",
+      "b": "5741",
+      "q": "In the context of RFC 6066's TLS extensions, how should the \"Status of This Memo\" section be structured to clearly indicate the document's review type and category, such as Informational, Historic, or Experimental?",
+      "gold": "sha256:f7dbd96d8642be229574ed6ab00ec0978534550a35970bbae6b119d97f680d19#chunk-7",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "2616",
+      "b": "1123",
+      "q": "In the context of HTTP as defined by RFC 2616, what are the recommended behaviors for DNS resolvers and servers regarding retrying queries, caching temporary failures, and handling negative responses to prevent excessive DNS traffic?",
+      "gold": "sha256:3d019cc4777d1ead76c212711d56768bde9361312cd209846b62d2e41dd0301d#chunk-85",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7230",
+      "b": "2145",
+      "q": "In the context of HTTP message parsing and version handling as specified in RFC 7230, what guidelines should an HTTP implementation follow to ensure compliance and robustness when dealing with HTTP version numbers across different HTTP versions?",
+      "gold": "sha256:5c670bcd2b4dceb8641820aae4702585541a1ba224aac2703bddcba2ec3f3796#chunk-2",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "5861",
+      "b": "2616",
+      "q": "How should a cache implementing RFC 5861 accurately calculate the current age of a stored HTTP response using the timing values available when the response was received?",
+      "gold": "sha256:10211d2885196b97b1c78e1672f3f68ae97c294596ef2b7fd890cbd30a3427bf#chunk-109",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    },
+    {
+      "a": "9110",
+      "b": "9113",
+      "q": "In the context of HTTP/2 security requirements specified in RFC 9110, which TLS 1.2 cipher suites are explicitly prohibited and should be treated as connection errors due to inadequate security?",
+      "gold": "sha256:a00ef91b64e111a282e77ec66980f5242e77c0bb5e33e0927e3b6757080506de#chunk-77",
+      "dense": 1.0,
+      "bm25": 0.0,
+      "fused": 1.0
+    },
+    {
+      "a": "7231",
+      "b": "2817",
+      "q": "In the context of HTTP/1.1 semantics and content as defined in RFC 7231, what is the origin and rationale behind the CONNECT method and how was it standardized?",
+      "gold": "sha256:eafd56ede719efdf00c55716b5ae2f8b3d1d40d87857763e7c67099826a16306#chunk-12",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 0.0
+    },
+    {
+      "a": "7234",
+      "b": "7235",
+      "q": "In the context of HTTP caching as described in RFC 7234, what are the rules regarding modification of the Authorization header by a proxy forwarding a request?",
+      "gold": "sha256:abfb45a43fdebffc640b51fae46f480e65fc01238f244f94b1bcf2c20da0b862#chunk-10",
+      "dense": 1.0,
+      "bm25": 1.0,
+      "fused": 1.0
+    }
+  ]
+}
