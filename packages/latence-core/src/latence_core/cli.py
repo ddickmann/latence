@@ -548,9 +548,10 @@ def setup(
         str | None,
         typer.Option(
             "--parser",
-            help="Parser Provider: parser.render (universal), parser.pdfplumber (PDF text), or "
-            "parser.lighton (OCR). Default: recommended from the detected file types. "
-            "Ignored by --profile enterprise-sota (which uses served-vLLM parser.lighton_vllm).",
+            help="Parser Provider. lite profile: parser.render (universal), parser.pdfplumber "
+            "(PDF text), or parser.lighton (OCR). enterprise-sota profile: parser.lighton_vllm "
+            "(served-vLLM OCR for scans/PDFs/images) or parser.plaintext (born-digital "
+            ".txt/.md/.jsonl, CPU). Default: recommended from the detected file types.",
         ),
     ] = None,
     ocr_base_url: Annotated[
@@ -624,18 +625,21 @@ def setup(
         build_stack_config,
         llm_key_env_var,
         recommend_parser,
+        recommend_sota_parser,
         scan_source,
         validate_config_text,
     )
     from latence_core.setup.wizard import (
         _KNOWN_PARSERS,
         _KNOWN_PROFILES,
+        _KNOWN_SOTA_PARSERS,
         DEFAULT_LLM_BASE_URL,
         DEFAULT_LLM_MODEL,
         DEFAULT_OCR_BASE_URL,
         DEFAULT_OCR_MODEL,
         INTAKE_MAX_BYTES_FLOOR,
         PARSER_OCR_VLLM,
+        PARSER_PLAINTEXT,
         PROFILE_LITE,
         PROFILE_SOTA,
         SOTA_DEVICE,
@@ -703,24 +707,43 @@ def setup(
         f"file://{default_cwd}/latence-out",
     )
 
-    # d. Parser + OCR endpoint. enterprise-sota forces the served-vLLM OCR parser and prompts for
-    # the endpoint; lite recommends a parser from the detected file types (confirm/override).
+    # d. Parser + OCR endpoint. enterprise-sota recommends a parse path from the detected file types
+    # — the served-vLLM OCR parser for a scanned/PDF/image corpus, or the CPU plaintext parser for a
+    # born-digital .txt/.md/.jsonl corpus (the OCR VLM has no text passthrough, so forcing it on a
+    # text corpus makes the stack un-runnable) — and only prompts for the OCR endpoint when the OCR
+    # path is chosen. lite recommends a parser from the detected file types (confirm/override).
     ocr_base = DEFAULT_OCR_BASE_URL
     ocr_mdl = DEFAULT_OCR_MODEL
     if is_sota:
-        chosen_parser = PARSER_OCR_VLLM
-        ocr_base = ask_text(
-            ocr_base_url,
-            "OCR endpoint base URL (served vLLM, OpenAI-compatible)",
-            "the running vLLM OCR server the enterprise stack POSTs page-images to",
-            DEFAULT_OCR_BASE_URL,
+        recommended = recommend_sota_parser(extensions)
+        chosen_parser = ask_text(
+            parser,
+            f"Parser ({PARSER_PLAINTEXT} | {PARSER_OCR_VLLM})",
+            f"recommended '{recommended}' from your file types; "
+            f"plaintext=born-digital .txt/.md/.jsonl (CPU, no OCR), "
+            f"lighton_vllm=served-vLLM OCR for scans/PDFs/images",
+            recommended,
         )
-        ocr_mdl = ask_text(
-            ocr_model,
-            "OCR model id",
-            "the model your vLLM server registers (the LightOn-OCR checkpoint id)",
-            DEFAULT_OCR_MODEL,
-        )
+        if chosen_parser not in _KNOWN_SOTA_PARSERS:
+            typer.echo(
+                f"Unknown enterprise-sota parser {chosen_parser!r}; expected one of "
+                f"{sorted(_KNOWN_SOTA_PARSERS)}.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if chosen_parser == PARSER_OCR_VLLM:
+            ocr_base = ask_text(
+                ocr_base_url,
+                "OCR endpoint base URL (served vLLM, OpenAI-compatible)",
+                "the running vLLM OCR server the enterprise stack POSTs page-images to",
+                DEFAULT_OCR_BASE_URL,
+            )
+            ocr_mdl = ask_text(
+                ocr_model,
+                "OCR model id",
+                "the model your vLLM server registers (the LightOn-OCR checkpoint id)",
+                DEFAULT_OCR_MODEL,
+            )
     else:
         recommended = recommend_parser(extensions)
         chosen_parser = ask_text(

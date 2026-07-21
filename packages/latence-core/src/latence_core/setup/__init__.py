@@ -19,6 +19,7 @@ from latence_core.setup.wizard import (
     llm_key_env_var,
     normalize_domain_hint,
     recommend_parser,
+    recommend_sota_parser,
     scan_source,
     validate_config_text,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "llm_key_env_var",
     "normalize_domain_hint",
     "recommend_parser",
+    "recommend_sota_parser",
     "scan_source",
     "validate_config_text",
 ]

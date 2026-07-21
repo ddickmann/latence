@@ -77,12 +77,22 @@ FINANCIAL_PII_LABELS: tuple[str, ...] = (
     "social security number",
 )
 
-# The three parsers the wizard chooses between, keyed by intent (matches the roster).
+# The parsers the wizard chooses between, keyed by intent (matches the roster).
 PARSER_UNIVERSAL = "parser.render"  # universal: mixed types (PDF/office/images), GPU-OCR sub
 PARSER_PDF_TEXT = "parser.pdfplumber"  # born-digital PDF text (CPU, no OCR)
 PARSER_OCR = "parser.lighton"  # OCR VLM for scans / images
 PARSER_OCR_VLLM = "parser.lighton_vllm"  # served-vLLM OCR endpoint (the enterprise-SOTA parse path)
+PARSER_PLAINTEXT = "parser.plaintext"  # born-digital text (.txt/.md/.jsonl) — CPU, no OCR, zero dep
 _KNOWN_PARSERS = frozenset({PARSER_UNIVERSAL, PARSER_PDF_TEXT, PARSER_OCR})
+
+# The two parsers the enterprise-SOTA profile chooses between. A GPU pod almost always parses
+# scanned/PDF/image corpora through the served-vLLM OCR endpoint, but an enterprise corpus is just
+# as often born-digital PLAIN TEXT (.txt/.md/.jsonl exports, log/ticket dumps). For those the OCR
+# VLM is the WRONG tool — it only rasterizes pages and POSTs images to the OCR server, it has no
+# text passthrough — so forcing it makes a text corpus un-parseable when the OCR box is (correctly)
+# not served. The wizard therefore routes a detected plaintext corpus to the CPU plaintext parser
+# and keeps every other SOTA signal (graph_features.pagerank + BM25 + Granite r2) intact.
+_KNOWN_SOTA_PARSERS = frozenset({PARSER_PLAINTEXT, PARSER_OCR_VLLM})
 
 # The two setup profiles (tiers). `lite` is the CPU-first, laptop-friendly default (unchanged); the
 # `enterprise-sota` profile emits the pod-VALIDATED composed stack (served-vLLM OCR + LLM schema
@@ -131,6 +141,11 @@ SOTA_BM25_TOKENIZER = "tokenizer.regex"
 # Extensions that read as scanned/image inputs (OCR territory) vs born-digital PDF.
 _IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"})
 _OFFICE_EXTS = frozenset({"docx", "doc", "pptx", "ppt", "xlsx", "xls", "odt", "rtf", "html", "htm"})
+
+# Extensions the plaintext Parser decodes losslessly (bytes -> text/markdown, no OCR, no office
+# rendering). A corpus whose file types are ALL in this set is born-digital text — the OCR VLM
+# would only mangle it — so the enterprise-SOTA wizard routes it to `parser.plaintext`.
+_PLAINTEXT_EXTS = frozenset({"txt", "text", "md", "markdown", "mdown", "jsonl", "ndjson"})
 
 # The default source extensions when a folder is empty / undetectable — the broad GOOD-stack set.
 _DEFAULT_EXTENSIONS: tuple[str, ...] = (
@@ -347,6 +362,23 @@ def recommend_parser(extensions: tuple[str, ...]) -> str:
     return PARSER_UNIVERSAL
 
 
+def recommend_sota_parser(extensions: tuple[str, ...]) -> str:
+    """Recommend the enterprise-SOTA parser from the detected extensions (the wizard's default).
+
+    The SOTA profile is a GPU-pod stack whose production parse path is the served-vLLM OCR endpoint
+    (``parser.lighton_vllm``) — but that path ONLY rasterizes pages to images and POSTs them to the
+    OCR server; it has no plain-text passthrough. So when the scanned corpus is ENTIRELY
+    born-digital text (every detected extension in :data:`_PLAINTEXT_EXTS`), the OCR VLM is wrong
+    and, on a pod where the OCR box is intentionally not served, would degrade every document to a
+    PARSE_ERROR. Such a corpus is routed to the CPU :data:`PARSER_PLAINTEXT` parser instead; any
+    other corpus (PDF/office/image/mixed/unknown) keeps the served-OCR path. Always overridable.
+    """
+    exts = {e.lower() for e in extensions}
+    if exts and exts <= _PLAINTEXT_EXTS:
+        return PARSER_PLAINTEXT
+    return PARSER_OCR_VLLM
+
+
 def llm_key_env_var(base_url: str) -> str:
     """The env var the schema-induction LLM reads its key from (mirrors ``label_inducer.llm``).
 
@@ -406,8 +438,36 @@ def _parse_stage(answers: SetupAnswers) -> dict[str, object]:
         }
     elif answers.parser == PARSER_OCR:
         stage["config"] = {"device": answers.device, "max_new_tokens": 4096}
-    # parser.pdfplumber: born-digital PDF text, no config block (CPU).
+    # parser.pdfplumber / parser.plaintext: born-digital text, no config block (CPU).
     return stage
+
+
+def _sota_parse_stage(answers: SetupAnswers) -> dict[str, object]:
+    """The enterprise-SOTA ``parse`` Stage, shaped by the chosen parser.
+
+    Two parse paths (see :data:`_KNOWN_SOTA_PARSERS`): the production served-vLLM OCR endpoint
+    (``parser.lighton_vllm`` — the base_url/model/api_key/concurrency block a scanned corpus needs),
+    OR the CPU plaintext parser for a born-digital text corpus (``parser.plaintext`` — no OCR
+    endpoint, no config). Routing the text case here is what makes the SOTA profile yield a RUNNABLE
+    stack for a .txt/.md/.jsonl corpus instead of forcing OCR at an unserved endpoint. Every other
+    SOTA Stage (GLiNER2, GLinker, Granite r2, graph_features, BM25, ULTRA) is unchanged.
+    """
+    if answers.parser == PARSER_OCR_VLLM:
+        return {
+            "name": "parse",
+            "capability": "parse",
+            "provider": PARSER_OCR_VLLM,
+            "depends_on": ["intake_screen"],
+            "config": {
+                "base_url": answers.ocr_base_url,
+                "model": answers.ocr_model,
+                "api_key": SOTA_OCR_API_KEY,
+                "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
+            },
+        }
+    # A born-digital text corpus: the CPU plaintext parser (no OCR server needed). `_parse_stage`
+    # emits the bare parse Stage for any non-OCR parser, so the SOTA text path reuses it verbatim.
+    return _parse_stage(answers)
 
 
 def _embedder_block(answers: SetupAnswers) -> dict[str, object]:
@@ -717,8 +777,11 @@ def _build_sota_stages(
 ) -> list[dict[str, object]]:
     """The ``enterprise-sota`` profile stages — the pod-VALIDATED composed stack.
 
-    Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: served
-    vLLM OCR (``parser.lighton_vllm``) → chunk[640] → LLM schema induction[corpus] → fused GLiNER2
+    Reproduces ``stacks/gpu-sota-glinker.yaml`` (ADR-0046) with the wizard's quality spine: the
+    chosen parse path (served vLLM OCR ``parser.lighton_vllm`` for a scanned/PDF/image corpus, or
+    the CPU ``parser.plaintext`` for a born-digital .txt/.md/.jsonl corpus — see
+    :func:`recommend_sota_parser` / :func:`_sota_parse_stage`) → chunk[640] → LLM schema
+    induction[corpus] → fused GLiNER2
     entity+relation → learned PII redaction (``redaction.gliner2``, #197) → profiling → the neural
     **GLinker** disambiguator (``disambiguation.glinker`` + Granite r2 STS embedder) → canonical KG
     → **ULTRA** graph completion (skip-with-flag when absent) → KG + context-enriched RAG-corpus
@@ -767,21 +830,11 @@ def _build_sota_stages(
         }
     )
 
-    # 3) parse — the served-vLLM LightOn-OCR endpoint (the production OCR path, ~2.7x in-process).
-    stages.append(
-        {
-            "name": "parse",
-            "capability": "parse",
-            "provider": PARSER_OCR_VLLM,
-            "depends_on": ["intake_screen"],
-            "config": {
-                "base_url": answers.ocr_base_url,
-                "model": answers.ocr_model,
-                "api_key": SOTA_OCR_API_KEY,
-                "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
-            },
-        }
-    )
+    # 3) parse — the served-vLLM LightOn-OCR endpoint for a scanned/PDF/image corpus (the production
+    # OCR path, ~2.7x in-process), OR the CPU plaintext parser for a born-digital text corpus. The
+    # wizard routes on the detected file types (recommend_sota_parser) so a .txt/.md/.jsonl corpus
+    # gets a runnable text parser instead of OCR at an endpoint that is not served for it.
+    stages.append(_sota_parse_stage(answers))
 
     # 4) chunk at 640 (the mdeberta-window-calibrated near-max).
     stages.append(
@@ -983,14 +1036,33 @@ def _render_header(answers: SetupAnswers) -> str:
         "# `latence process`. Edit by hand freely — it is a plain, diffable stack config.",
     ]
     if answers.profile == PROFILE_SOTA:
+        if answers.parser == PARSER_PLAINTEXT:
+            parse_lines = [
+                "#   born-digital text parser (parser.plaintext, CPU — the detected corpus is all",
+                "#   .txt/.md/.jsonl, so no OCR endpoint is served or needed) +",
+            ]
+            parse_point = [
+                "#   validate` (device honesty). The corpus is plain text, so `parse` decodes it",
+                "#   on CPU (no OCR box); point `parse.provider` at parser.lighton_vllm for scans.",
+            ]
+        else:
+            parse_lines = [
+                "#   served-vLLM LightOn OCR (parser.lighton_vllm) +",
+            ]
+            parse_point = [
+                "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR",
+                "#   box.",
+            ]
         lines += [
             "#",
             "# Profile: enterprise-sota — the pod-VALIDATED composed stack (ADR-0046,",
-            "#   stacks/gpu-sota-glinker.yaml): served-vLLM LightOn OCR (parser.lighton_vllm) +",
+            "#   stacks/gpu-sota-glinker.yaml):",
+            *parse_lines,
             "#   LLM schema induction + fused GLiNER2 entity+relation + the neural GLinker",
             "#   disambiguator + IBM Granite r2 embeddings + ULTRA graph completion. Every learned",
             "#   Stage runs on CUDA; on a CPU-only host they skip-with-flag at `latence stack",
-            "#   validate` (device honesty). Point `parse.config.base_url` at your vLLM OCR box.",
+            *parse_point,
+            "#",
             "#   Index-time signals (CPU, deterministic, zero extra deps): graph features on",
             "#   `graph` (ADR-0051 — PageRank centrality + community, exported as graph-nodes",
             "#   columns and projected onto each chunk's context_header) and BM25 on",
