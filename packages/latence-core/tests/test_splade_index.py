@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -81,7 +81,8 @@ def _write_export(tmp_path: Path, rows: list[tuple[str, str]]) -> Path:
 
 
 def _read_index(index_path: Path) -> list[dict[str, object]]:
-    return pq.read_table(index_path).to_pylist()  # type: ignore[no-untyped-call]
+    rows = pq.read_table(index_path).to_pylist()  # type: ignore[no-untyped-call]
+    return cast("list[dict[str, object]]", rows)
 
 
 def test_build_splade_index_writes_per_chunk_vectors_and_manifest(tmp_path: Path) -> None:
@@ -111,8 +112,8 @@ def test_build_splade_index_writes_per_chunk_vectors_and_manifest(tmp_path: Path
     index_rows = _read_index(out / "index.parquet")
     assert {row["record_id"] for row in index_rows} == {"sha256:a", "sha256:b"}
     for row in index_rows:
-        indices = row["indices"]
-        values = row["values"]
+        indices = cast("list[int]", row["indices"])
+        values = cast("list[float]", row["values"])
         assert indices == sorted(indices), "sparse indices must be canonical ascending"
         assert len(indices) == len(values)
         assert len(indices) >= 1
