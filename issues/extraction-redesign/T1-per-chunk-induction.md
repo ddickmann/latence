@@ -31,6 +31,15 @@ them), and the broadcast schema means every chunk is extracted against ~40 mostl
 3. Type consistency is no longer the induction stage's job — it moves to T3. Update the provider
    docstring accordingly (today it claims corpus-mode "keeps entity types consistent across the KG";
    after T3 that guarantee comes from disambiguation).
+4. **Add a first-class "predefined-only" mode.** When the operator supplies a fixed label set and
+   opts into predefined-only, the `induce` stage is **skipped entirely** (no LLM call) and extraction
+   runs each chunk against the fixed config labels. This is the escape hatch for corpora with a known
+   schema (compliance taxonomies, fixed entity sets) — induction is per-chunk *by default*, off by
+   choice. The wizard exposes it.
+5. **Enforce the phase-boundary invariant:** with corpus-merge removed, `induce` is now chunk-level,
+   so no corpus-level operation runs before `redact`. Add a pipeline-order assertion (a
+   `latence stack validate` check or a runner invariant) that no corpus-aggregating stage is scheduled
+   before `redact` in the SOTA profile — the front half is chunk/doc-level by construction.
 
 ## Acceptance criteria
 - [ ] `latence setup --profile enterprise-sota` emits `induce.config.granularity: chunk`.
@@ -40,6 +49,10 @@ them), and the broadcast schema means every chunk is extracted against ~40 mostl
       difference; this is the recall-loss the redesign fixes).
 - [ ] The per-chunk count safety-ceiling is configurable; default does not silently drop a chunk's
       own legitimate labels.
+- [ ] **Predefined-only mode:** with a fixed label set + the flag, no `induce` LLM call is made and
+      extraction uses the fixed labels per chunk (test asserts zero induction calls).
+- [ ] **Phase boundary:** `latence stack validate` (or a runner invariant) rejects any corpus-level
+      stage scheduled before `redact` in the SOTA profile; the front half is chunk/doc-level.
 - [ ] `ruff` + `mypy --strict` clean; `verify-local` green.
 
 ## Affected files

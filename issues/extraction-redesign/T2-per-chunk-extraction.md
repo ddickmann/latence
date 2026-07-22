@@ -33,15 +33,31 @@ set — but tighten two things:
    "irrelevant" chunk must still be caught). So the floor is not a "relevance" label and must NOT be
    subsetted. Only the *induced* PII types become per-chunk. See T5-note: the floor is ~9 fixed
    labels, so PII label counts stay small regardless.
-3. `guardrail` (`content_screen` / `screening.content_keyword`) is deterministic keyword screening,
-   not a GLiNER2 model — **no change**; it is unaffected by label count. (Noted so the redesign scope
-   is explicit.)
+3. **Guardrailing follows the SAME per-chunk rule where it is learned.** Two distinct things carry the
+   "guardrail" name, and they are handled differently:
+   - **The learned guardrail categories** — the GLiNER2 model the redactor uses is
+     `fastino/GLiNER2-Guardrails-PII-Multi`; its *guardrail* categories (like its PII categories) must
+     be **per-chunk induced** and applied per chunk, exactly like PII. And, exactly like the PII floor,
+     any **always-on safety categories** (harmful content, injection) form a **universal guard floor**
+     that is NOT subsetted per chunk — it applies to every chunk because it is a security invariant.
+     So: learned guard categories = per-chunk induced ∪ a small universal guard floor.
+   - **The deterministic keyword pre-filter** (`content_screen` / `screening.content_keyword`) is not a
+     learned model and has no label-count / OOM concern — it stays a per-chunk deterministic screen,
+     **exempt** by nature. It runs before extraction as today.
+   This closes the reviewer's "same goes for guardrailing" requirement precisely: wherever a GLiNER2
+   model applies guard/PII labels, the per-chunk rule + universal safety floor apply; the keyword
+   screen is exempt.
 
 ## Acceptance criteria
 - [ ] With per-chunk induction, gliner2's per-chunk label count equals the chunk's induced set (+ the
       opt-in floor), NOT the corpus union — asserted by a test that counts labels passed to the model.
 - [ ] Redact: the financial floor still masks a planted card/IBAN/SSN in a chunk whose induced PII
       types do NOT include finance (proves the floor stays universal); induced PII types are per-chunk.
+- [ ] Guardrail: the learned guard categories are per-chunk; a planted always-on-safety hit (e.g.
+      injection) is caught in a chunk whose induced guard categories omit it (proves the guard floor is
+      universal); the keyword `content_screen` is unchanged.
+- [ ] Predefined-only mode (from T1): extraction/redaction run against the fixed labels per chunk with
+      no induction — verified end-to-end.
 - [ ] Output for a given chunk is unchanged vs. running that chunk's own labels directly (no regression
       from the floor change beyond the intended scope reduction).
 - [ ] `ruff` + `mypy --strict` clean; redaction floor (ADR-0044) invariant preserved; `verify-local` green.
