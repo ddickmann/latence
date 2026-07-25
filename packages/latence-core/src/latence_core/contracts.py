@@ -164,7 +164,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # mirroring the risk_markers/induced_labels/context_header annotation precedent. The document-level
 # :class:`RedactionRecord` contract is RETAINED but DEPRECATED (the superseded doc-level path). See
 # ADR-0042.
-SCHEMA_VERSION = 16
+#
+# v17 (T3 type canonicalization): per-chunk induction makes the corpus's TYPE vocabulary drift
+# (chunk A induces ``org``, chunk B ``organization``, chunk C ``company``), so a corpus-level
+# Type-Consolidation Stage canonicalizes the vocabulary DOWNSTREAM — consistency is earned in the
+# resolution phase, never imposed on induction by capping. :class:`EntityMention` and
+# :class:`RelationMention` each gain an additive, defaulted ``raw_label: str | None``: when the
+# Stage rewrites ``label`` to its canonical form it keeps the extractor's raw induced type here, so
+# every remap is auditable on the record itself. ``None`` ⇒ never remapped (a stack with no
+# Type-Consolidation Stage never populates it). The canonical vocabulary itself is a
+# :class:`TypeVocabulary` — persistable (the Runner writes it beside the checkpoint) and MERGEABLE
+# (an incremental delta run extends it without churning existing canonical entries).
+SCHEMA_VERSION = 17
 
 
 class Provenance(BaseModel):
@@ -902,6 +913,18 @@ class EntityMention(Record):
     label: str = Field(..., min_length=1, description="Zero-shot entity type (per-Pipeline label).")
     text: str = Field(..., min_length=1, description="The mention's exact surface string.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+    # T3 (type canonicalization): the label the EXTRACTOR produced, kept verbatim when a
+    # corpus-level Type-Consolidation Stage rewrites ``label`` to its canonical form. The audit
+    # trail for the remap — an operator reading a mention can always see which raw induced type it
+    # came from, so a consolidation decision is inspectable and correctable, never silent.
+    # ``None`` means "never remapped" (``label`` IS the raw label), so a stack with no
+    # Type-Consolidation Stage is byte-identical to before the field existed apart from the
+    # explicit ``null``.
+    raw_label: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The pre-canonicalization induced type, when a Type-Consolidation Stage ran.",
+    )
 
     @model_validator(mode="after")
     def _span_present(self) -> EntityMention:
@@ -969,6 +992,13 @@ class RelationMention(Record):
     head_text: str = Field(..., min_length=1, description="Head mention surface string.")
     tail_text: str = Field(..., min_length=1, description="Tail mention surface string.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+    # T3: the raw induced relation type, kept for audit when a Type-Consolidation Stage rewrote
+    # ``label`` to its canonical form (the EntityMention.raw_label rationale, relation side).
+    raw_label: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The pre-canonicalization induced type, when a Type-Consolidation Stage ran.",
+    )
 
     @model_validator(mode="after")
     def _relation_valid(self) -> RelationMention:
@@ -992,6 +1022,208 @@ class RelationMention(Record):
             msg = "A RelationMention's Provenance must carry a page_start and page_end."
             raise ValueError(msg)
         return self
+
+
+# -- T3: corpus-wide TYPE canonicalization -----------------------------------
+
+
+class TypeKind(StrEnum):
+    """Which label vocabulary a :class:`CanonicalType` belongs to.
+
+    Entity types and relation types are canonicalized in the SAME pass but never mixed: an
+    entity type ``organization`` and a relation type ``organization of`` are different
+    vocabularies, and folding one into the other would corrupt the graph. Every lookup is
+    therefore keyed by ``(kind, label)``.
+    """
+
+    ENTITY = "entity"
+    RELATION = "relation"
+
+
+class CanonicalType(BaseModel):
+    """One canonical type and every raw induced label folded into it (T3).
+
+    Per-chunk induction produces type drift — ``org`` here, ``organization`` there,
+    ``company`` in a third chunk — because each chunk induces its own labels. The
+    Type-Consolidation Stage clusters those synonymous surfaces and elects ONE canonical
+    label per cluster; this record is the cluster.
+
+    ``aliases`` holds every OTHER raw label in the cluster (sorted, canonical excluded), so the
+    alias→canonical map an operator reads on the Quality Report is exactly
+    ``{alias: canonical for alias in aliases}``. ``strategies`` names the clustering rungs that
+    produced the folds (``normalized``/``alias``/``acronym``/``prefix``/``head_noun``/
+    ``embedding``), so a suspicious merge is traceable to the rule that made it — the audit the
+    entity resolver's ``merge_decisions`` provides on the entity side. ``mention_count`` is how
+    many mentions/relations carried a member label, the salience signal an operator sorts by.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    kind: TypeKind
+    canonical: str = Field(..., min_length=1, description="The elected human-facing type label.")
+    aliases: list[str] = Field(
+        default_factory=list, description="Every other raw label folded here (sorted)."
+    )
+    mention_count: int = Field(
+        default=0, ge=0, description="Mentions/relations that carried a member label."
+    )
+    strategies: list[str] = Field(
+        default_factory=list, description="Clustering rungs that produced the folds (sorted)."
+    )
+
+    @model_validator(mode="after")
+    def _canonical_not_aliased(self) -> CanonicalType:
+        if self.canonical in self.aliases:
+            msg = (
+                f"CanonicalType {self.canonical!r} lists itself as an alias — the alias set is "
+                "the OTHER labels folded into the canonical one."
+            )
+            raise ValueError(msg)
+        if len(set(self.aliases)) != len(self.aliases):
+            msg = f"CanonicalType {self.canonical!r} has duplicate aliases."
+            raise ValueError(msg)
+        return self
+
+    @property
+    def labels(self) -> list[str]:
+        """Every raw label this cluster covers — the canonical one plus its aliases."""
+        return [self.canonical, *self.aliases]
+
+
+class TypeVocabulary(BaseModel):
+    """The corpus's canonical type vocabulary + its alias map (T3) — persistable and mergeable.
+
+    The artifact the Type-Consolidation Stage emits: the ``M`` canonical types the run's ``N``
+    raw induced types collapsed to, each with the aliases folded into it. It is a plain
+    serializable model (not a :class:`Record`) because it describes the corpus's SCHEMA, not a
+    span of a document — it has no Provenance to carry. The Runner persists it beside the
+    Stage's checkpoint, which is what makes it survive the run (ADR-0017: files are the source
+    of truth).
+
+    **Mergeability is a first-class property** (designed for the T4 incremental-delta lane): a
+    later run merges its freshly-induced vocabulary INTO the persisted one with
+    :meth:`merge`, which is deliberately *append-don't-churn* — an existing canonical label is
+    NEVER renamed by a later run (that would rewrite the type of every node already in the KG);
+    new aliases attach to the existing cluster and genuinely new types are appended.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    types: list[CanonicalType] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _one_cluster_per_label(self) -> TypeVocabulary:
+        """A raw label may belong to exactly ONE cluster per kind (the map must be a function)."""
+        seen: set[tuple[TypeKind, str]] = set()
+        for entry in self.types:
+            for label in entry.labels:
+                key = (entry.kind, label)
+                if key in seen:
+                    msg = (
+                        f"Type label {label!r} ({entry.kind.value}) appears in more than one "
+                        "cluster — the alias→canonical map would be ambiguous."
+                    )
+                    raise ValueError(msg)
+                seen.add(key)
+        return self
+
+    def of_kind(self, kind: TypeKind) -> list[CanonicalType]:
+        """The clusters of one kind, in emission order (canonical-label order)."""
+        return [entry for entry in self.types if entry.kind is kind]
+
+    def alias_map(self, kind: TypeKind) -> dict[str, str]:
+        """``{raw label: canonical label}`` for one kind — the operator-facing consolidation map.
+
+        Only genuine ALIASES appear (a type that was already canonical maps to itself and is
+        omitted), so the map an operator reads on the Quality Report is exactly the set of
+        rewrites the run performed — an empty map means nothing was consolidated.
+        """
+        return {
+            alias: entry.canonical
+            for entry in self.types
+            if entry.kind is kind
+            for alias in entry.aliases
+        }
+
+    def canonical_for(self, kind: TypeKind, label: str) -> str:
+        """The canonical label for a raw ``label``; the label itself when it is unknown.
+
+        Unknown-is-identity keeps the remap TOTAL: a label the vocabulary never saw (a delta
+        run's brand-new type, a hand-written relation label) passes through unchanged rather
+        than being dropped or mapped to a wrong cluster.
+        """
+        for entry in self.types:
+            if entry.kind is kind and (label == entry.canonical or label in entry.aliases):
+                return entry.canonical
+        return label
+
+    def merge(self, other: TypeVocabulary) -> TypeVocabulary:
+        """Fold ``other`` into this vocabulary — append-don't-churn (the T4 delta contract).
+
+        For every cluster in ``other``: if any of its labels already belongs to a cluster of the
+        same kind here, that EXISTING cluster absorbs it — the existing canonical label is kept
+        (renaming it would silently retype every node already in the KG), its aliases are
+        unioned, counts are summed and strategies unioned. Otherwise the cluster is appended
+        verbatim. When a cluster in ``other`` bridges two existing clusters, the first match (in
+        this vocabulary's order) wins and the bridged labels join it — deterministic, and it
+        never splits an existing cluster.
+
+        The result is ordered by ``(kind, canonical)`` and every alias list sorted, so merging
+        is associative in outcome and byte-stable: the same pair of vocabularies always merges
+        to the identical document.
+        """
+        merged: list[dict[str, Any]] = [
+            {
+                "kind": e.kind,
+                "canonical": e.canonical,
+                "aliases": set(e.aliases),
+                "mention_count": e.mention_count,
+                "strategies": set(e.strategies),
+            }
+            for e in self.types
+        ]
+        for entry in other.types:
+            labels = set(entry.labels)
+            target = next(
+                (
+                    slot
+                    for slot in merged
+                    if slot["kind"] is entry.kind
+                    and (labels & ({str(slot["canonical"])} | set(slot["aliases"])))
+                ),
+                None,
+            )
+            if target is None:
+                merged.append(
+                    {
+                        "kind": entry.kind,
+                        "canonical": entry.canonical,
+                        "aliases": set(entry.aliases),
+                        "mention_count": entry.mention_count,
+                        "strategies": set(entry.strategies),
+                    }
+                )
+                continue
+            canonical = str(target["canonical"])
+            target["aliases"] = (set(target["aliases"]) | labels) - {canonical}
+            target["mention_count"] = int(target["mention_count"]) + entry.mention_count
+            target["strategies"] = set(target["strategies"]) | set(entry.strategies)
+        return TypeVocabulary(
+            types=[
+                CanonicalType(
+                    kind=slot["kind"],
+                    canonical=str(slot["canonical"]),
+                    aliases=sorted(set(slot["aliases"])),
+                    mention_count=int(slot["mention_count"]),
+                    strategies=sorted(set(slot["strategies"])),
+                )
+                for slot in sorted(
+                    merged, key=lambda s: (str(TypeKind(s["kind"]).value), str(s["canonical"]))
+                )
+            ]
+        )
 
 
 # -- S6: Redaction (PII) -----------------------------------------------------
