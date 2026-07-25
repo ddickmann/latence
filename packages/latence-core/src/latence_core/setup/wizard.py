@@ -1127,8 +1127,11 @@ def _build_sota_stages(
     The ONE PII toggle and the W18 mask-before-extract option ride exactly as in ``lite``: PII adds
     ``content_screen`` + ``redact`` and wires ``redact → enrich → export_corpus`` (W16 chunk-level
     masking); ``masked_extract`` moves ``extract`` after ``redact``. The GLinker/GLiNER2 provider
-    defaults (embedding-merge OFF, fuzzy+distinguishing-token-guard ON, ``compile=False``) are left
-    to ride — so the ER is precise by default and the config stays minimal.
+    defaults (embedding-merge OFF, fuzzy+distinguishing-token-guard ON, and — since T7 — gliner2's
+    native ``compile`` resolving True on cuda / False on cpu) are left to ride, so the ER is precise
+    by default and the config stays minimal. The wizard deliberately does NOT pin ``compile`` in the
+    emitted YAML: the Provider owns that decision device-by-device, so a stack emitted for a GPU box
+    and later run on cpu degrades correctly instead of forcing a pointless compile.
     """
     stages: list[dict[str, object]] = []
 
@@ -1199,8 +1202,10 @@ def _build_sota_stages(
     # 7) fused NER+RE in ONE pass (GLiNER2) — T2: the labels are a PER-CHUNK relevance floor
     # (each chunk is scored against its own induced types; these are the fallback when a chunk
     # induced nothing). T1: in predefined-only mode there is nothing to union — the config labels
-    # ARE the schema. threshold 0.3 (the SOTA recall floor); compile defaults to False in the
-    # provider (left to ride).
+    # ARE the schema. threshold 0.3 (the SOTA recall floor). T7: the extractor buckets each batch by
+    # label set and runs ONE native batched forward per bucket, and gliner2's native `compile` rides
+    # its own cuda default — deliberately NOT pinned here, so the Provider decides per device and a
+    # stack emitted for a GPU box degrades correctly if it is later run on cpu.
     extract_input = "redact" if masked_extract else labels_from
     stages.append(
         {

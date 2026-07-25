@@ -71,6 +71,7 @@ from latence_core.providers.perf import (
     inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
+    iter_label_buckets,
     iter_token_budget_microbatches,
     load_gliner2_optimized,
     neutralize_torch_jit,
@@ -131,11 +132,6 @@ class _PendingChunk:
 # Apache-2.0 weights (verified 2026-07-09, HF model card, not gated). Multilingual PII NER over
 # an mdeberta-v3 encoder via the fastino GLiNER2 framework.
 _DEFAULT_MODEL = "fastino/GLiNER2-Guardrails-PII-Multi"
-
-# W9-scaling: torch.compile is OPT-IN for the gliner2 engine (see __init__) — gliner2's
-# ``dynamic=True`` compile recompile-thrashes on varied-length production chunks. Same default, same
-# reason, as the twin ``fused_entity_relation.gliner2`` extractor.
-_COMPILE_DEFAULT = False
 
 # T2: this Provider's config ``pii_labels`` are a UNIVERSAL SAFETY FLOOR, not a relevance floor —
 # the one place in the redesign where the per-chunk rule does NOT apply to the config list. Induced
@@ -216,12 +212,15 @@ class Gliner2PIIRedactor(AdapterBase):
             default ``auto`` → True on cuda / False on cpu). Pod-measured 2.83× at byte-identical
             PII. Guarded: a quantize fault degrades to a plain load, never a crash.
         compile: bool | 'auto'  — ``torch.compile`` + fused GPU kernels via the gliner2 native
-            ``compile`` kwarg (W9). **OPT-IN: defaulted OFF even on cuda** (W9-scaling), because
-            gliner2 compiles with ``dynamic=True`` and recompile-thrashes on varied-length
-            production chunks (pod-measured: worker at ~290% CPU, GPU 0%, no progress) — the same
-            default the twin ``fused_entity_relation.gliner2`` extractor forces. Set it explicitly
-            to enable it (worth it only for a homogeneous / uniform-length workload). Guarded like
-            ``quantize``: a compile/warmup fault degrades to a plain load.
+            ``compile`` kwarg. ``auto`` (the default) resolves **True on cuda / False on cpu** —
+            T7 unlocked it. It was forced OFF because gliner2 compiles with
+            ``torch.compile(dynamic=True)`` and a fresh (label-count, batch) shape family per
+            forward thrashed dynamo (pod-measured: worker at ~290% CPU, GPU 0%, no progress).
+            Bucketing by label set pins the label dimension within a bucket and the micro-batch caps
+            the batch dimension, so that precondition is gone. Guarded twice, like the twin
+            extractor: a compile fault at LOAD degrades to a plain load, and the lazy
+            ``BackendCompilerFailed`` on the first forward trips the reload-uncompiled latch. Set
+            ``compile: false`` to pin it off.
         device: str  — ``auto`` (default) / ``cpu`` / ``cuda``; routed by the device seam.
 
     The model is loaded lazily and cached on first use, so constructing the Provider never
@@ -305,9 +304,11 @@ class Gliner2PIIRedactor(AdapterBase):
             perf_note=(
                 "gliner2 native quantize (fp16) on cuda, off on cpu (W9; pod-measured 2.83× PII at "
                 "byte-identical output; guarded → plain load on any fault). compile "
-                "(torch.compile + fused GPU kernels) is OPT-IN, defaulted OFF even on cuda "
-                "(W9-scaling: gliner2's dynamic=True compile recompile-thrashes on varied-length "
-                "production chunks)"
+                "(torch.compile + fused GPU kernels) rides the cuda default since T7: chunks are "
+                "bucketed by label set and each bucket micro-batched, so the label + batch "
+                "dimensions are constant per forward and gliner2's torch.compile(dynamic=True) no "
+                "longer recompile-thrashes; guarded at load AND by the inference-time "
+                "reload-uncompiled latch"
             ),
         )
 
@@ -322,19 +323,14 @@ class Gliner2PIIRedactor(AdapterBase):
             raise ValueError(msg)
         # AdapterBase resolves the device seam (compute="either") against the declared profile.
         super().__init__(config)
-        # W9-scaling (audit R4): default torch.compile OFF for this Provider (opt-in only), exactly
-        # as the twin ``fused_entity_relation.gliner2`` extractor does. gliner2 compiles with
-        # ``dynamic=True``, which recompile-thrashes on the varied-length production chunks this
-        # redactor streams through ``batch_extract_entities`` — pod-measured to pin the worker at
-        # ~290% CPU with the GPU at 0% and no progress. Without this the generic
-        # ``resolve_gliner2_knob`` default (``auto`` → True on cuda) silently turned compile ON for
-        # every GPU stack the wizard emits (it emits ``device: cuda`` and no ``compile`` key), and
-        # the ``_reload_uncompiled`` latch cannot catch it: the thrash is silent slowness, not a
-        # ``BackendCompilerFailed``. ``quantize`` is untouched (the fp16 win stays on for cuda). An
-        # operator who sets ``compile`` explicitly still gets it. Injected into ``self._config`` —
-        # the single source of truth read by BOTH the eager validation below and the lazy load.
-        if "compile" not in self._config:
-            self._config["compile"] = _COMPILE_DEFAULT
+        # T7: ``compile`` no longer carries a forced-OFF Provider default — it rides the shared
+        # ``auto`` resolution (True on cuda / False on cpu), exactly like the twin
+        # ``fused_entity_relation.gliner2`` extractor. The R4 forced-off default existed because
+        # gliner2 compiles with ``torch.compile(dynamic=True)`` and a fresh (label-count, batch)
+        # shape family per forward thrashed dynamo — pod-measured to pin the worker at ~290% CPU
+        # with the GPU at 0%. Both varying dimensions are now pinned: chunks are BUCKETED by label
+        # set (so the label dimension is constant within a bucket) and each bucket is split into
+        # token-budget micro-batches (so the batch dimension is capped). ``quantize`` is unchanged.
         self._labels = [str(label) for label in pii_labels]
         # T2: the PII floor is universal and non-negotiable — reject any attempt to subset it.
         self._reject_floor_subsetting(config)
@@ -765,13 +761,13 @@ class Gliner2PIIRedactor(AdapterBase):
             # without 'batch_extract_entities' has already failed as a typed ProviderError there,
             # so by here the method is guaranteed callable. The pod script's Gate 0 asserts the
             # same on the real checkpoint before any throughput number.
-            # Group by effective label set (one label set per batched call). Order-stable: a dict
-            # preserves first-seen group order, and emission below re-walks the buffer in input
-            # order.
-            groups: dict[tuple[tuple[str, ...], frozenset[str]], list[_PendingChunk]] = {}
-            for pending in detect:
-                groups.setdefault((pending.labels, pending.guard), []).append(pending)
-            for (labels, _guard), pendings in groups.items():
+            # Bucket by effective label set (one label set per batched call) through the SHARED T7
+            # seam — the same primitive the twin fused extractor buckets with, so the two Providers
+            # cannot drift on bucket ORDER (first-seen) or index order (ascending), which is what
+            # keeps both byte-identical run-over-run.
+            keys = [pending.labels for pending in detect]
+            for labels, indices in iter_label_buckets(keys):
+                pendings = [detect[i] for i in indices]
                 texts = [p.text for p in pendings]
                 # dogfood-2b-process: split the group's texts into token-budget MICRO-BATCHES and
                 # issue one ``batch_extract_entities`` call per micro-batch, concatenating results

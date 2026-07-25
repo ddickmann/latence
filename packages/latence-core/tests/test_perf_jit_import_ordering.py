@@ -120,6 +120,11 @@ class _MdebertaModel:
         """
         return {"entities": {}}
 
+    def batch_extract_relations(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG002
+        """Inert, same reason: ``Gliner2FusedExtractor._load_model`` asserts BOTH batched entry
+        points exist at LOAD since T7 (it drives one native batched forward per label bucket)."""
+        return {"relation_extraction": {}}
+
     def forward(self, text: str) -> None:
         """The encoder forward — consults the relative-position helper, like mdeberta does."""
         self.relative_position(len(text), 0)

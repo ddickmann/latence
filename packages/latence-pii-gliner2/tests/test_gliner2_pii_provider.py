@@ -1363,25 +1363,35 @@ def test_unrecoverable_cuda_oom_surfaces_typed_error_no_dropped_chunk(
     assert "Person" not in str(excinfo.value)
 
 
-# --- W9-scaling (audit R4): compile is OFF by default on cuda too, like the twin extractor -------
+# --- T7: compile rides the cuda default now that forwards are bucketed by label set --------------
 
 
-def test_compile_defaults_off_even_on_cuda(
+def test_compile_is_enabled_on_cuda_for_the_bucketed_path(
     fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R4 regression: compile is defaulted OFF (opt-in) EVEN on cuda — the recompile-thrash guard.
+    """T7: ``compile`` rides the shared cuda default, exactly like the twin extractor.
 
-    The redactor drives ``batch_extract_entities`` over the same varied-length production chunk
-    stream the twin ``fused_entity_relation.gliner2`` extractor does, and gliner2 compiles with
-    ``dynamic=True`` — pod-measured to pin the worker at ~290% CPU with the GPU at 0% and no
-    progress. The extractor forces ``compile=False`` at construction for exactly this reason; the
-    redactor must too. Pre-fix this Provider had no default of its own, so the generic
-    ``resolve_gliner2_knob`` default (``auto`` → True on cuda) turned compile ON. ``quantize`` is
-    untouched: the fp16 win still resolves True on cuda.
+    The R4 forced-off default existed because gliner2 compiles with
+    ``torch.compile(dynamic=True)`` and a fresh (label-count, batch) shape family per forward
+    thrashed dynamo — pod-measured to pin the worker at ~290% CPU with the GPU at 0%. Both varying
+    dimensions are now pinned: chunks are BUCKETED by label set (constant label dimension within a
+    bucket) and each bucket is micro-batched (capped batch dimension). ``quantize`` is unchanged.
     """
     monkeypatch.setenv("LATENCE_CUDA", "1")
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     cfg = {**_config(), "device": "cuda"}
+    list(Gliner2PIIRedactor(cfg).redact([_chunk("Alice waved.")]))
+    assert fake_gliner2.last_kwargs.get("quantize") is True
+    assert fake_gliner2.last_kwargs.get("compile") is True
+
+
+def test_compile_can_still_be_pinned_off(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A default, not a mandate: an operator can still pin compile off on cuda.
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    cfg = {**_config(), "device": "cuda", "compile": False}
     list(Gliner2PIIRedactor(cfg).redact([_chunk("Alice waved.")]))
     assert fake_gliner2.last_kwargs.get("quantize") is True
     assert fake_gliner2.last_kwargs.get("compile") is False
@@ -1390,7 +1400,7 @@ def test_compile_defaults_off_even_on_cuda(
 def test_compile_opt_in_still_enables_on_cuda(
     fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The knob is defaulted off, not removed: an operator who explicitly asks for compile gets it.
+    # An explicit compile: true is honoured verbatim (unchanged by the default flip).
     monkeypatch.setenv("LATENCE_CUDA", "1")
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     cfg = {**_config(), "device": "cuda", "compile": True}
@@ -1399,15 +1409,15 @@ def test_compile_opt_in_still_enables_on_cuda(
 
 
 @pytest.mark.parametrize("profile", ["lite", "enterprise-sota"])
-def test_wizard_blessed_redact_config_never_enables_compile(
+def test_wizard_blessed_redact_config_leaves_compile_to_the_provider(
     fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
 ) -> None:
-    """The REAL emitted config, not a hand-written dict: the blessed redact stage never compiles.
+    """The REAL emitted config, not a hand-written dict: the wizard never PINS ``compile``.
 
     ``latence setup --profile enterprise-sota --pii`` emits the redact stage with ``device: cuda``
-    and no ``compile`` key, so on the documented GPU pod the knob resolved True and the redact Stage
-    thrashed. The ``_reload_uncompiled`` latch cannot save it — the thrash is silent slowness, not a
-    ``BackendCompilerFailed``. This drives the wizard's own output through the Provider.
+    and no ``compile`` key ON PURPOSE — the Provider decides per device, so the same YAML degrades
+    correctly if it is later run on cpu. On the documented GPU pod that resolves compile ON (T7:
+    safe because the forward is bucketed), which this drives end-to-end through the Provider.
     """
     from latence_core.pipeline import Pipeline
     from latence_core.setup.wizard import (
@@ -1437,7 +1447,7 @@ def test_wizard_blessed_redact_config_never_enables_compile(
     assert "compile" not in stage.config  # the wizard stays silent; the Provider owns the default
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     list(Gliner2PIIRedactor(dict(stage.config)).redact([_chunk("Alice waved.")]))
-    assert fake_gliner2.last_kwargs.get("compile") is False
+    assert fake_gliner2.last_kwargs.get("compile") is True
 
 
 # ---------------------------------------------------------------------------

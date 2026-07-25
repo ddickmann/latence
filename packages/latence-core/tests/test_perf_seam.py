@@ -774,3 +774,72 @@ def test_load_gliner2_optimized_neutralizes_the_jit_on_the_optimized_path(
     )
     assert model.kwargs == {"quantize": True, "compile": True}
     assert model.forward(5, 2) == 3
+
+
+# --- T7 label-set bucketing: the seam that makes per-chunk labels batchable -----------------------
+
+
+def test_label_buckets_group_identical_label_sets_together() -> None:
+    """The T7 primitive: items sharing a label set become ONE bucket the caller batches in one call.
+
+    Six items in two label sets → two buckets, holding the item INDICES so the caller can slice its
+    own texts and scatter the per-text results back by index.
+    """
+    from latence_core.providers.perf import iter_label_buckets
+
+    keys = [("person",), ("person",), ("org", "loc"), ("person",), ("org", "loc"), ("person",)]
+    assert list(iter_label_buckets(keys)) == [
+        (("person",), [0, 1, 3, 5]),
+        (("org", "loc"), [2, 4]),
+    ]
+
+
+def test_label_buckets_are_first_seen_ordered_and_index_ascending() -> None:
+    """Determinism (ADR-0033): bucket order is FIRST-SEEN, indices ascend — never hash/set order.
+
+    Byte-identical output run-over-run and host-over-host depends on this: the bucket sequence
+    decides the forward order, and the index order decides each forward's text order.
+    """
+    from latence_core.providers.perf import iter_label_buckets
+
+    keys = [("z",), ("a",), ("z",), ("m",), ("a",)]
+    assert [key for key, _ in iter_label_buckets(keys)] == [("z",), ("a",), ("m",)]
+    for _, indices in iter_label_buckets(keys):
+        assert indices == sorted(indices)
+
+
+def test_label_buckets_tile_the_input_exactly_once() -> None:
+    """Every item lands in exactly one bucket — no item extracted twice, none silently dropped."""
+    from latence_core.providers.perf import iter_label_buckets
+
+    keys = [(str(i % 3),) for i in range(11)]
+    covered = [i for _, indices in iter_label_buckets(keys) for i in indices]
+    assert sorted(covered) == list(range(11))
+
+
+def test_label_order_is_part_of_the_bucket_key() -> None:
+    """Two items differing only in label ORDER do NOT share a bucket.
+
+    The label list is handed to the model verbatim and its per-label output dict is keyed by it, so
+    a differently-ordered set is a different question. Collapsing them would silently change what
+    one of the two chunks was asked.
+    """
+    from latence_core.providers.perf import iter_label_buckets
+
+    assert [key for key, _ in iter_label_buckets([("a", "b"), ("b", "a")])] == [
+        ("a", "b"),
+        ("b", "a"),
+    ]
+
+
+def test_no_items_means_no_bucket_and_no_forward() -> None:
+    from latence_core.providers.perf import iter_label_buckets
+
+    assert list(iter_label_buckets([])) == []
+
+
+def test_one_distinct_label_set_is_a_single_bucket() -> None:
+    """The no-induction / predefined-only case: one bucket ⇒ the whole window is ONE forward."""
+    from latence_core.providers.perf import iter_label_buckets
+
+    assert list(iter_label_buckets([("person",)] * 4)) == [(("person",), [0, 1, 2, 3])]
