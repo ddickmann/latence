@@ -599,12 +599,27 @@ class DeltaRunner:
         double-count every record. Export checkpoints are therefore skipped; the producing Stage
         (Disambiguation/Graph/Parse/…) is the single source of truth. A record is de-duplicated by
         ``record_id`` defensively so a fan-out DAG never double-feeds the delta.
+
+        **A Type-Consolidation Stage is skipped for the same reason, and one more** (T4). It also
+        re-emits its input carrier — but over ``fresh ∪ reused``, so its checkpoint carries the
+        REUSED documents' mentions as well. Those reused mentions are added to the manifest a
+        second time by the caller (which appends ``reuse_records``), which doubled every reused
+        document's derived texts, flipped its content hash, and got it classified UPDATED on every
+        delta: ``documents_unchanged`` went to zero and the affected set became the whole corpus,
+        silently undoing the ADR-0018 bound for any stack wiring the Stage (the enterprise-SOTA
+        one does). Skipping it is also the better manifest: change detection then hashes the
+        extractor's RAW labels, which are a function of the document alone, rather than canonical
+        labels that legitimately move as the corpus grows and would flip an untouched document's
+        hash.
         """
         storage = Storage.for_uri(pipeline.storage_uri)
         seen: set[str] = set()
         collected: list[StageOutput] = []
         for stage in pipeline.stages:
-            if stage.capability is CapabilityKind.EXPORT:
+            if stage.capability in (
+                CapabilityKind.EXPORT,
+                CapabilityKind.TYPE_CONSOLIDATION,
+            ):
                 continue
             ckpt = (
                 f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"

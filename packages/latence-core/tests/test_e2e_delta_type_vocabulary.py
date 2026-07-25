@@ -232,6 +232,41 @@ def test_a_second_delta_keeps_growing_the_vocabulary_monotonically(tmp_path: Pat
         assert set(aliases) <= set(second[canonical]), "an alias must never be un-mapped"
 
 
+def test_an_untouched_document_stays_unchanged_and_the_affected_set_stays_bounded(
+    tmp_path: Path,
+) -> None:
+    """A Type-Consolidation Stage must not make every reused document look EDITED.
+
+    It is the one corpus-level Stage that re-emits its input carrier, so its checkpoint spans the
+    REUSED documents' mentions as well as the fresh ones. Feeding those into the change-detection
+    manifest — which already carries the reused records — doubled every reused document's derived
+    texts and flipped its content hash, so ``documents_unchanged`` was 0, every untouched document
+    was classified UPDATED, and the affected-set recompute widened to the whole corpus: ADR-0018's
+    "recompute only the affected set" bound, silently undone for the enterprise-SOTA stack.
+
+    The witnesses are the churn's own classification and the affected-set/corpus ratio.
+    """
+    docs = _base_corpus(tmp_path)
+    (docs / "x.txt").write_text("Alice works at Acme Corporation again.\n", encoding="utf-8")
+    (docs / "y.txt").write_text(
+        "Bob joined International Business Machines in March.\n", encoding="utf-8"
+    )
+    store = f"file://{tmp_path}/store"
+    DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v0")
+
+    (docs / "c.txt").write_text("Carol works at Globex.\n", encoding="utf-8")
+    report = DeltaRunner().apply_delta(_pipeline(store, docs), run_id="v1")
+    churn = report.delta
+    assert churn is not None
+    assert churn.documents_added == 1
+    assert churn.documents_updated == 0, "an untouched document must not be classified as edited"
+    assert churn.documents_unchanged == 4
+    assert not churn.reconciliation_triggered
+    assert churn.affected_set_size < churn.corpus_record_count, (
+        "an incremental delta must re-resolve less than the whole corpus"
+    )
+
+
 def test_reinduce_recanonicalizes_from_scratch(tmp_path: Path) -> None:
     """THE CONTROL ARM: ``--reinduce`` drops the seed, so the dominant surface DOES take over.
 
