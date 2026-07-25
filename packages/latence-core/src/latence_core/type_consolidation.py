@@ -41,9 +41,16 @@ model call, a network dependency and a determinism risk for a decision the corpu
 usage already answers. The vocabulary is emitted as data, so an operator who disagrees corrects it
 through the ``aliases`` config — a review loop, not a hidden model.)
 
+**Incremental runs (T4).** A ``seed`` vocabulary — the one a prior run committed — makes the pass
+*extend* rather than recompute: its labels join the clustering (so a delta's new surface can fold
+into a committed cluster), its own folds are replayed, and its canonical labels are pinned in the
+election. The corpus's type space therefore grows monotonically: a matching type aliases in, a
+genuinely new type appends, and nothing already in the KG is retyped.
+
 **Determinism.** Every rung is order-independent (labels are processed in sorted order, folds go
 through Union-Find, alias lists and the emitted vocabulary are sorted), so identical inputs give a
-byte-identical vocabulary.
+byte-identical vocabulary — and a seeded run is idempotent: applying the same delta twice yields
+the identical vocabulary, counts included.
 """
 
 from __future__ import annotations
@@ -63,6 +70,10 @@ __all__ = ["TypeCanonicalizer", "normalize_type"]
 # Rung names stamped on a cluster's ``strategies`` (the audit trail).
 _RUNG_NORMALIZED = "normalized"
 _RUNG_ALIAS = "alias"
+# T4: the fold a PERSISTED vocabulary already decided. Not a rule — a memory. It is stamped like a
+# rung so an operator reading the audit can tell "this cluster came from the committed corpus"
+# apart from "this run's cascade folded it".
+_RUNG_SEED = "seed"
 _RUNG_ACRONYM = "acronym"
 _RUNG_PREFIX = "prefix"
 _RUNG_EMBEDDING = "embedding"
@@ -139,9 +150,13 @@ class TypeCanonicalizer:
             (synonyms no lexical rule can see). ``None`` ⇒ the rung never runs.
         embedding_threshold: cosine floor for that rung (default 0.86 — deliberately strict; an
             over-merged TYPE retypes every node of that type, a costlier error than drift).
-        seed: a previously persisted :class:`TypeVocabulary` (T4 incremental runs). The freshly
-            built vocabulary is merged INTO it with the append-don't-churn rule, so an existing
-            canonical label is never renamed by a later run.
+        seed: a previously persisted :class:`TypeVocabulary` (T4 incremental runs). Its labels
+            are clustered TOGETHER with this run's — so a delta's brand-new surface (``org``)
+            folds into the committed cluster (``organization``) through the ordinary rungs
+            instead of appending a second canonical type — its own folds are replayed first (a
+            committed cluster stays clustered), and its canonical labels are PINNED in the
+            election, so an existing canonical label is never renamed by a later run. Genuinely
+            new types simply append.
     """
 
     def __init__(
@@ -196,7 +211,16 @@ class TypeCanonicalizer:
     # -- clustering --------------------------------------------------------
 
     def _cluster(self, kind: TypeKind, counts: Mapping[str, int]) -> list[CanonicalType]:
-        labels = sorted(counts)
+        # T4: cluster the run's labels TOGETHER with the persisted vocabulary's labels, not
+        # separately. A delta's genuinely new surface (``org``, first seen on this delta) shares no
+        # label with the committed ``organization`` cluster, so a post-hoc merge — which folds only
+        # on label overlap — would append it as a SECOND canonical type and the KG would drift
+        # exactly where T4 promises it cannot. Running the cascade over ``fresh ∪ persisted`` lets
+        # the ordinary rungs see the pair and fold it, and the election below then pins the
+        # persisted canonical so the fold aliases INTO the committed type rather than renaming it.
+        seed_types = self._seed.of_kind(kind) if self._seed is not None else []
+        seed_counts = {entry.canonical: entry.mention_count for entry in seed_types}
+        labels = sorted(set(counts) | {label for entry in seed_types for label in entry.labels})
         if not labels:
             return []
         aliases = self._aliases if kind is TypeKind.ENTITY else self._relation_aliases
@@ -209,6 +233,13 @@ class TypeCanonicalizer:
             if folds.union(left, right):
                 root = folds.find(left)
                 strategies.setdefault(root, set()).add(rung)
+
+        # 0. the persisted vocabulary's own folds, replayed first: a committed cluster stays a
+        # cluster even if the rule that built it (an operator alias since removed, an embedding
+        # rung since disabled) would no longer fire — un-folding it would retype committed nodes.
+        for entry in seed_types:
+            for alias in entry.aliases:
+                fold(entry.canonical, alias, _RUNG_SEED)
 
         # 1. normalized-surface equality, and 2. the operator alias map (both purely lexical and
         # pairwise, so one sorted double loop covers them without an ordering dependency).
@@ -230,7 +261,7 @@ class TypeCanonicalizer:
             rolled.setdefault(folds.find(member), set()).update(rungs)
 
         return [
-            self._canonical_type(kind, members, counts, sorted(rolled.get(root, ())))
+            self._canonical_type(kind, members, counts, sorted(rolled.get(root, ())), seed_counts)
             for root, members in sorted(folds.groups().items())
         ]
 
@@ -296,6 +327,7 @@ class TypeCanonicalizer:
         members: Sequence[str],
         counts: Mapping[str, int],
         strategies: Sequence[str],
+        seed_counts: Mapping[str, int],
     ) -> CanonicalType:
         """Elect the cluster's canonical label and package it as a :class:`CanonicalType`.
 
@@ -303,7 +335,32 @@ class TypeCanonicalizer:
         the entity resolver uses for an entity's type — with deterministic tiebreaks: more
         tokens, then more characters (an expansion reads better than an abbreviation when both
         are equally frequent), then lexicographic order.
+
+        **A persisted canonical label always outranks the vote** (T4). ``seed_counts`` holds the
+        canonical labels of the vocabulary this run was seeded with; if the cluster contains one,
+        it stays canonical no matter how strongly the current corpus prefers another surface,
+        because re-electing it would silently retype every node already in the KG. Among several
+        (two committed clusters the cascade has now bridged) the same total order decides, read
+        over the PERSISTED counts. This is the append-don't-churn rule, enforced at election time
+        rather than patched up afterwards.
         """
+        pinned = [label for label in members if label in seed_counts]
+        if pinned:
+            return self._package(
+                kind,
+                min(
+                    pinned,
+                    key=lambda label: (
+                        -seed_counts.get(label, 0),
+                        -len(label.split()),
+                        -len(label),
+                        label,
+                    ),
+                ),
+                members,
+                counts,
+                strategies,
+            )
         canonical = min(
             members,
             key=lambda label: (
@@ -313,6 +370,17 @@ class TypeCanonicalizer:
                 label,
             ),
         )
+        return self._package(kind, canonical, members, counts, strategies)
+
+    @staticmethod
+    def _package(
+        kind: TypeKind,
+        canonical: str,
+        members: Sequence[str],
+        counts: Mapping[str, int],
+        strategies: Sequence[str],
+    ) -> CanonicalType:
+        """Assemble the elected cluster; ``mention_count`` is THIS run's observation of it."""
         return CanonicalType(
             kind=kind,
             canonical=canonical,

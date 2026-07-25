@@ -1026,15 +1026,24 @@ do **not** write a Python script. Three CLI commands drive the corpus forward, e
 next **Corpus Version** (immutable, inspectable, rollback-able). They take the **same stack YAML**
 `latence run` takes.
 
-> **Extraction is now incremental too (W17, ADR-0043).** Since W17 a delta's **extraction compute**
-> is O(changed), not O(corpus): the induced corpus schema is frozen in the Corpus Version, each
-> **unchanged** document (matched by content-addressed `document_id`) **skips its doc-level Stages**
-> (parse/chunk/extract/redact) and **reuses its committed records**, and only new/changed documents
-> are extracted. The corpus-level Stages (disambiguate/graph/…) then run over the UNION of reused +
-> freshly-extracted records. The churn's `extraction: N extracted, M reused` line is the witness.
-> The one escape hatch is `--reinduce`, which re-runs induction over the full current corpus and
-> re-extracts every document — the correct-by-construction O(corpus) fallback when you want the
-> induced vocabulary to move with the corpus.
+> **Extraction is incremental too (W17, ADR-0043).** A delta's **extraction compute** is
+> O(changed), not O(corpus): each **unchanged** document (matched by content-addressed
+> `document_id`) **skips its doc-level Stages** (parse/chunk/extract/redact) and **reuses its
+> committed records**, and only new/changed documents are extracted — so only their chunks are
+> **induced**, too. The corpus-level Stages (disambiguate/graph/…) then run over the UNION of
+> reused + freshly-extracted records. The churn's `extraction: N extracted, M reused` line is the
+> witness.
+>
+> **How a delta stays consistent with the base run (T4).** Labels are induced *per chunk*, so there
+> is no single corpus schema to freeze. What the corpus carries forward instead is its **canonical
+> type vocabulary**: the delta's freshly-induced types are canonicalized *against* the committed
+> one, so a drifted surface (`org` where the corpus says `organization`) **aliases into the existing
+> type** and a genuinely new type **appends** a new one. Existing canonical type names never change,
+> so nothing already in your knowledge graph is retyped, and the churn's
+> `canonical types: +N new, +M aliased into existing` line shows you exactly what grew.
+> The one escape hatch is `--reinduce`: the **full rebuild** — re-induce every chunk and
+> re-canonicalize the type vocabulary from scratch, re-extracting every document. It is the only
+> path that may re-elect a canonical type label, which is why it is not the default.
 
 ### 8.1 `latence delta` — add / update (the source folder changed)
 
@@ -1046,7 +1055,8 @@ Drop new or edited files into the source folder, then:
 latence delta stacks/my-corpus.yaml
 # or, explicit:
 latence delta stacks/my-corpus.yaml --run-id delta-2026-07-13
-# force the full O(corpus) re-induce + re-extract (move the induced vocabulary with the corpus):
+# full rebuild: re-induce every chunk AND re-canonicalize the type vocabulary from scratch
+# (lets the vocabulary move with the corpus — canonical type names may be re-elected):
 latence delta stacks/my-corpus.yaml --reinduce
 ```
 

@@ -314,6 +314,51 @@ def test_a_delta_run_aliases_a_new_type_into_the_existing_cluster_without_renami
     assert {m.label for m in result.mentions} == {"organization"}
 
 
+def test_a_drifted_surface_first_seen_on_the_delta_folds_into_the_committed_cluster() -> None:
+    """The T4 case a post-hoc merge cannot reach: no shared label between seed and delta.
+
+    The base corpus only ever wrote ``organization``; the delta only ever writes ``org``. The two
+    vocabularies share no label, so folding them AFTER the fact (which can only match on label
+    overlap) would append ``org`` as a SECOND canonical entity type and the KG would drift exactly
+    where T4 promises it cannot. The seed must therefore take part in the CLUSTERING, not only in
+    a post-hoc merge.
+    """
+    seed = CascadeTypeConsolidator({}).consolidate(
+        [_mention("organization", "IBM"), _mention("organization", "Acme")]
+    ).vocabulary
+    assert seed is not None
+    assert seed.of_kind(TypeKind.ENTITY)[0].aliases == [], "the seed never saw ``org``"
+
+    delta = CascadeTypeConsolidator({})
+    delta.seed_with(seed)
+    result = delta.consolidate([_mention("org", "Globex"), _mention("org", "Initech")])
+    assert result.vocabulary is not None
+    entity_types = result.vocabulary.of_kind(TypeKind.ENTITY)
+    assert [t.canonical for t in entity_types] == ["organization"], (
+        "``org`` must alias into the committed cluster, not become a second canonical type"
+    )
+    assert entity_types[0].aliases == ["org"]
+    assert {m.label for m in result.mentions} == {"organization"}
+
+
+def test_a_committed_cluster_stays_clustered_when_the_rule_that_built_it_is_gone() -> None:
+    """A persisted fold is a decision, not a rule application — a later run must not undo it."""
+    seed = CascadeTypeConsolidator({"aliases": {"company": "organization"}}).consolidate(
+        [_mention("organization", "IBM"), _mention("company", "Acme")]
+    ).vocabulary
+    assert seed is not None
+    assert seed.of_kind(TypeKind.ENTITY)[0].aliases == ["company"]
+
+    # The operator alias is gone from config; without the replay, ``company`` would split back out
+    # and every node typed ``organization`` because of it would be retyped.
+    delta = CascadeTypeConsolidator({})
+    delta.seed_with(seed)
+    result = delta.consolidate([_mention("company", "Globex")])
+    assert result.vocabulary is not None
+    assert [t.canonical for t in result.vocabulary.of_kind(TypeKind.ENTITY)] == ["organization"]
+    assert {m.label for m in result.mentions} == {"organization"}
+
+
 def test_merging_a_genuinely_new_type_appends_it() -> None:
     seed = CascadeTypeConsolidator({}).consolidate([_mention("organization", "IBM")]).vocabulary
     assert seed is not None
@@ -325,6 +370,57 @@ def test_merging_a_genuinely_new_type_appends_it() -> None:
         "organization",
         "statute",
     }
+
+
+def test_the_seed_vocabulary_arrives_through_config_not_only_through_seed_with() -> None:
+    """T4: the DeltaRunner injects the committed vocabulary as Stage CONFIG.
+
+    The Pipeline is the run's whole input — a seed passed out-of-band would not appear in the
+    persisted manifest, so replaying the YAML would canonicalize against a different vocabulary.
+    """
+    seed = CascadeTypeConsolidator({}).consolidate(
+        [_mention("organization", "IBM"), _mention("organization", "Acme")]
+    ).vocabulary
+    assert seed is not None
+    delta = CascadeTypeConsolidator({"seed_vocabulary": seed.model_dump(mode="json")})
+    result = delta.consolidate([_mention("org", "Y"), _mention("org", "Z")])
+    assert result.vocabulary is not None
+    assert [t.canonical for t in result.vocabulary.of_kind(TypeKind.ENTITY)] == ["organization"]
+    assert {m.label for m in result.mentions} == {"organization"}
+
+
+def test_a_malformed_seed_vocabulary_fails_loudly_instead_of_canonicalizing_from_scratch() -> None:
+    """ADR-0034: silently dropping the seed would re-elect (and rename) committed type labels."""
+    with pytest.raises(ConfigError, match="seed_vocabulary"):
+        CascadeTypeConsolidator({"seed_vocabulary": "organization"})
+    with pytest.raises(ConfigError, match="seed_vocabulary"):
+        CascadeTypeConsolidator({"seed_vocabulary": {"types": [{"kind": "nonsense"}]}})
+
+
+def test_applying_the_same_delta_twice_reports_the_same_mention_counts() -> None:
+    """T4 idempotency: a seeded merge must not accumulate the SAME corpus's mentions twice.
+
+    The consolidation Stage is corpus-level, so on every delta it rebuilds its vocabulary over the
+    WHOLE live corpus — the same mentions the seed already counted. Summing the two would report a
+    multiple of the true salience on the Quality Report and would keep growing with every delta;
+    re-applying an identical delta would report different numbers than the first application.
+    """
+    corpus = [_mention("organization", "IBM"), _mention("organization", "Acme")]
+    first = CascadeTypeConsolidator({}).consolidate(corpus).vocabulary
+    assert first is not None
+    assert first.of_kind(TypeKind.ENTITY)[0].mention_count == 2
+
+    second = CascadeTypeConsolidator(
+        {"seed_vocabulary": first.model_dump(mode="json")}
+    ).consolidate(corpus).vocabulary
+    assert second is not None
+    assert second.of_kind(TypeKind.ENTITY)[0].mention_count == 2, (
+        "re-observing the same corpus must not double the count"
+    )
+    third = CascadeTypeConsolidator(
+        {"seed_vocabulary": second.model_dump(mode="json")}
+    ).consolidate(corpus).vocabulary
+    assert third == second, "the same delta applied again yields the identical vocabulary"
 
 
 def test_a_vocabulary_round_trips_through_json() -> None:

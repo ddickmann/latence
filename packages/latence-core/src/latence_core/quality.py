@@ -109,6 +109,15 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # that makes per-chunk induction safe: every fold is visible and correctable through the Stage's
 # ``aliases`` config. Type labels + counts only (never document text), safe to persist. Additive
 # and defaulted None, so a v19 report still validates.
+# v20c (T4, incremental delta reconciliation): :class:`~latence_core.contracts.DeltaChurn` gains
+# ``canonical_types_added`` / ``type_aliases_added`` / ``canonical_types_total`` — how the delta
+# EXTENDED the corpus's canonical type vocabulary (a genuinely new type vs a drifted surface that
+# aliased into an existing one). It replaces the frozen-schema story for per-chunk induction, so
+# the operator can see the KG's type space growing monotonically. Counts only. Additive and
+# defaulted 0, and the rendered churn line is emitted only when the corpus HAS a vocabulary, so a
+# report from a pipeline without a Type-Consolidation Stage is byte-identical. No number bump: the
+# extraction-redesign report changes ship in one revision (same rule as ADR-0043's own additive
+# DeltaChurn fields, which also did not bump).
 QUALITY_SCHEMA_VERSION = 20
 
 
@@ -964,5 +973,13 @@ class QualityReport(BaseModel):
                 f"- extraction: {dc.documents_extracted} extracted, "
                 f"{dc.documents_reused} reused (doc-level Stages skipped)"
             )
+            # T4: the canonical type vocabulary the delta EXTENDED. Rendered only when the corpus
+            # has one, so a pipeline without a Type-Consolidation Stage reads exactly as before.
+            if dc.canonical_types_total:
+                lines.append(
+                    f"- canonical types: +{dc.canonical_types_added} new, "
+                    f"+{dc.type_aliases_added} aliased into existing "
+                    f"({dc.canonical_types_total} total)"
+                )
             lines.append(f"- drift: {dc.drift:.3f}")
         return "\n".join(lines) + "\n"

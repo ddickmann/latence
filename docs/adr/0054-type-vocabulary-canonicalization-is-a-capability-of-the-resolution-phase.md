@@ -148,6 +148,26 @@ types are appended. Renaming an existing canonical label would silently retype e
 the KG, which is exactly the churn a delta run must not cause. The result is ordered by
 `(kind, canonical)` with sorted alias lists, so merging is byte-stable.
 
+**Resolved by T4** (this section was written before the delta lane landed; what shipped is stated
+here so the two do not drift):
+
+* **The Corpus Version, not just the run sidecar, is the durable home.** A delta reads the head
+  Version's `type-vocabulary.json` and seeds the Stage through its `seed_vocabulary` **config** (so
+  the persisted run manifest records which vocabulary the run canonicalized against), and commits
+  the extended one in the same WAL transaction as the records.
+* **Seeding happens at CLUSTERING time, not only afterwards.** A post-hoc `merge` can only fold on
+  *label overlap*, so a delta whose documents write `org` where the committed corpus wrote
+  `organization` — sharing no label — would have appended a SECOND canonical type. The seed's labels
+  therefore join the clustering (the ordinary rungs fold the pair), the seed's own folds are
+  replayed first (a committed cluster stays clustered even if the rule that built it is gone from
+  config), and the seed's canonical labels are **pinned in the election** so the fold aliases into
+  the committed type instead of renaming it. `merge` remains the reconciling backstop.
+* **`mention_count` is the latest observation, not a running sum.** The Stage is corpus-level, so on
+  every delta it re-counts the whole live corpus — the mentions the seed already counted. Summing
+  would report a multiple of the true salience on the Quality Report, grow without bound, and make
+  two applications of the same delta disagree. A cluster the run observed takes the run's count; one
+  it did not keeps its persisted count.
+
 ### 7. Entity and relation vocabularies are canonicalized together but never mixed
 
 An entity type `organization` and a relation type `organization of` are different vocabularies;

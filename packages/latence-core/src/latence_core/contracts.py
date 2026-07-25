@@ -189,6 +189,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Type-Consolidation Stage never populates it). The canonical vocabulary itself is a
 # :class:`TypeVocabulary` — persistable (the Runner writes it beside the checkpoint) and MERGEABLE
 # (an incremental delta run extends it without churning existing canonical entries).
+#
+# v17c (T4 incremental delta reconciliation): :class:`DeltaChurn` gains ``canonical_types_added`` /
+# ``type_aliases_added`` / ``canonical_types_total`` — the witness that a delta EXTENDED the
+# corpus's canonical type vocabulary rather than recomputing it. Additive and defaulted 0, and the
+# vocabulary itself is Corpus-Version state (an additive file), so no number bump — the same rule
+# ADR-0043's own additive ``documents_reused`` / ``documents_extracted`` fields followed.
 SCHEMA_VERSION = 17
 
 
@@ -1195,11 +1201,20 @@ class TypeVocabulary(BaseModel):
 
         For every cluster in ``other``: if any of its labels already belongs to a cluster of the
         same kind here, that EXISTING cluster absorbs it — the existing canonical label is kept
-        (renaming it would silently retype every node already in the KG), its aliases are
-        unioned, counts are summed and strategies unioned. Otherwise the cluster is appended
-        verbatim. When a cluster in ``other`` bridges two existing clusters, the first match (in
-        this vocabulary's order) wins and the bridged labels join it — deterministic, and it
-        never splits an existing cluster.
+        (renaming it would silently retype every node already in the KG), its aliases are unioned
+        and strategies unioned. Otherwise the cluster is appended verbatim. When a cluster in
+        ``other`` bridges two existing clusters, the first match (in this vocabulary's order) wins
+        and the bridged labels join it — deterministic, and it never splits an existing cluster.
+
+        **``mention_count`` is the LATEST observation, not a running sum** (T4). ``self`` is the
+        vocabulary persisted by an earlier run and ``other`` the one a later run built over the
+        whole CURRENT corpus, so the two count the same mentions: summing them would report a
+        multiple of the true corpus salience on the Quality Report, and would grow without bound
+        as deltas accumulate — the count would also differ between two applications of the same
+        delta, breaking idempotency. So a cluster ``other`` observed takes ``other``'s count
+        (several ``other`` clusters folding into ONE existing cluster do sum, because those are
+        disjoint observations *within* one run), and a cluster ``other`` never observed keeps the
+        count it was persisted with.
 
         The result is ordered by ``(kind, canonical)`` and every alias list sorted, so merging
         is associative in outcome and byte-stable: the same pair of vocabularies always merges
@@ -1215,18 +1230,23 @@ class TypeVocabulary(BaseModel):
             }
             for e in self.types
         ]
+        # Which slots ``other`` has already contributed a count to in THIS merge — the first
+        # contribution REPLACES the persisted count (same corpus, re-counted), later ones add to
+        # it (two of ``other``'s clusters folding into one existing cluster are disjoint counts).
+        recounted: set[int] = set()
         for entry in other.types:
             labels = set(entry.labels)
             target = next(
                 (
-                    slot
-                    for slot in merged
+                    (index, slot)
+                    for index, slot in enumerate(merged)
                     if slot["kind"] is entry.kind
                     and (labels & ({str(slot["canonical"])} | set(slot["aliases"])))
                 ),
                 None,
             )
             if target is None:
+                recounted.add(len(merged))
                 merged.append(
                     {
                         "kind": entry.kind,
@@ -1237,10 +1257,16 @@ class TypeVocabulary(BaseModel):
                     }
                 )
                 continue
-            canonical = str(target["canonical"])
-            target["aliases"] = (set(target["aliases"]) | labels) - {canonical}
-            target["mention_count"] = int(target["mention_count"]) + entry.mention_count
-            target["strategies"] = set(target["strategies"]) | set(entry.strategies)
+            index, slot = target
+            canonical = str(slot["canonical"])
+            slot["aliases"] = (set(slot["aliases"]) | labels) - {canonical}
+            slot["mention_count"] = (
+                int(slot["mention_count"]) + entry.mention_count
+                if index in recounted
+                else entry.mention_count
+            )
+            recounted.add(index)
+            slot["strategies"] = set(slot["strategies"]) | set(entry.strategies)
         return TypeVocabulary(
             types=[
                 CanonicalType(
@@ -2220,6 +2246,9 @@ class DeltaChurn(BaseModel):
     canonical entities (a bridging doc that MERGES two clusters, a deleted doc that SPLITS
     one); ``edges_added`` / ``edges_retracted`` the graph patch. ``records_retracted`` /
     ``records_purged`` count the soft-tombstoned vs physically-erased derived records.
+    ``canonical_types_added`` / ``type_aliases_added`` / ``canonical_types_total`` are the T4
+    type-vocabulary churn: how the delta EXTENDED the persisted canonical type vocabulary (new
+    canonical entries vs raw labels that aliased into an existing one).
     ``drift`` is the metric and ``reconciliation_triggered`` whether it forced a full recompute,
     with ``deletion_mode`` recording how deletes were handled. ``from_version`` / ``to_version``
     bracket the transaction.
@@ -2251,6 +2280,17 @@ class DeltaChurn(BaseModel):
     # ``documents_reused == 0`` and every document is extracted.
     documents_reused: int = 0
     documents_extracted: int = 0
+    # T4 (ADR-0043 amended): the canonical TYPE-vocabulary churn. Per-chunk induction produces no
+    # single corpus schema to freeze, so what a delta carries across runs is the canonical type
+    # vocabulary (ADR-0054), PERSISTED in the Corpus Version and EXTENDED — never recomputed —
+    # by each delta. ``canonical_types_added`` counts the genuinely new canonical entries this
+    # delta appended; ``type_aliases_added`` the raw labels that folded INTO an existing canonical
+    # cluster (the no-churn half: they aliased instead of renaming anything);
+    # ``canonical_types_total`` the size of the committed vocabulary afterwards. All three are
+    # zero for a pipeline with no Type-Consolidation Stage.
+    canonical_types_added: int = Field(default=0, ge=0)
+    type_aliases_added: int = Field(default=0, ge=0)
+    canonical_types_total: int = Field(default=0, ge=0)
     entities_created: int = 0
     entities_merged: int = 0
     entities_split: int = 0

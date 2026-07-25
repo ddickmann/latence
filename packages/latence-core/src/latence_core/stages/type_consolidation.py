@@ -43,8 +43,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from pydantic import ValidationError
+
 from latence_core.capability import TypeConsolidation
-from latence_core.contracts import EntityMention, RelationMention, TypeKind
+from latence_core.contracts import EntityMention, RelationMention, TypeKind, TypeVocabulary
 from latence_core.errors import ConfigError
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_core.type_consolidation import TypeCanonicalizer
@@ -53,7 +55,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from latence_core.capability import Embedder
-    from latence_core.contracts import TypeVocabulary
 
 # The two label-bearing mention carriers the remap rewrites. Constrained (not bound) so a remapped
 # EntityMention stays an EntityMention to the type checker — the Stage must not silently widen a
@@ -95,6 +96,16 @@ class CascadeTypeConsolidator:
             model.
         consolidate_relations: bool — also canonicalize the RELATION type vocabulary. Default
             True; relations flow through untouched when off.
+        seed_vocabulary: the JSON dump of a previously committed
+            :class:`~latence_core.contracts.TypeVocabulary` (T4). The incremental
+            :class:`~latence_core.delta_runner.DeltaRunner` injects the Corpus Version's
+            persisted vocabulary here, and this run's freshly-built one is merged INTO it under
+            the append-don't-churn rule — so a delta's new type either aliases to an existing
+            canonical entry or appends a new one, and an existing canonical label is never
+            renamed (renaming it would retype every node already in the KG). It is config rather
+            than a side channel because the Pipeline is the run's whole input: the same YAML
+            replays the same vocabulary, which is what makes a delta reproducible. Absent ⇒ the
+            full-run path (canonicalize from scratch), which is also what ``--reinduce`` selects.
 
     A note on LLM canonical NAMING (T3's optional step): it is deliberately not wired as a
     default. The corpus's own dominant usage already answers "which surface should this cluster be
@@ -143,7 +154,9 @@ class CascadeTypeConsolidator:
         self._embedding_threshold = float(cfg.get("embedding_threshold", 0.86))
         self._embedder_spec = cfg.get("embedder")
         self._consolidate_relations = bool(cfg.get("consolidate_relations", True))
-        self._seed: TypeVocabulary | None = None
+        self._seed: TypeVocabulary | None = _seed_vocabulary(
+            cfg.get("seed_vocabulary"), self.provider_name
+        )
         self._embedder: Embedder | None = None
 
     @property
@@ -153,11 +166,13 @@ class CascadeTypeConsolidator:
     def seed_with(self, vocabulary: TypeVocabulary | None) -> None:
         """Seed the next :meth:`consolidate` with a previously persisted vocabulary (T4).
 
-        An incremental delta run reads the vocabulary its full run wrote and hands it here; the
-        freshly-induced vocabulary is then merged INTO it under the append-don't-churn rule
+        The programmatic form of the ``seed_vocabulary`` config key, for an embedder of this
+        Provider that already holds the vocabulary object (the DeltaRunner goes through config,
+        so the Pipeline stays the run's whole input). The freshly-induced vocabulary is merged
+        INTO the seed under the append-don't-churn rule
         (:meth:`~latence_core.contracts.TypeVocabulary.merge`), so a new type aliases into an
         existing canonical cluster without renaming — and therefore without retyping every node
-        already in the KG. Not calling it is the full-run path.
+        already in the KG. Passing ``None`` restores the full-run path.
         """
         self._seed = vocabulary
 
@@ -339,6 +354,31 @@ def _relabel(record: _R, table: Mapping[str, str], /) -> _R:
     if canonical is None:
         return record
     return record.model_copy(update={"label": canonical, "raw_label": record.label})
+
+
+def _seed_vocabulary(value: object, provider: str) -> TypeVocabulary | None:
+    """Validate the ``seed_vocabulary`` config into a :class:`TypeVocabulary`, loudly (ADR-0034).
+
+    A malformed seed must NOT degrade silently to "no seed": that would canonicalize the delta's
+    corpus from scratch and could rename a canonical type already in the KG — exactly the churn
+    T4 exists to prevent — while the run reported success. So a wrong shape is a typed
+    :class:`~latence_core.errors.ConfigError`, not a fallback.
+    """
+    if value is None:
+        return None
+    if isinstance(value, TypeVocabulary):
+        return value
+    if not isinstance(value, dict):
+        msg = (
+            f"{provider}: config 'seed_vocabulary' must be a TypeVocabulary JSON object "
+            f"(as committed in the Corpus Version); got {type(value).__name__}."
+        )
+        raise ConfigError(msg)
+    try:
+        return TypeVocabulary.model_validate(value)
+    except ValidationError as exc:
+        msg = f"{provider}: config 'seed_vocabulary' is not a valid TypeVocabulary: {exc}"
+        raise ConfigError(msg) from exc
 
 
 def _str_map(value: object, key: str, provider: str) -> dict[str, str]:
