@@ -70,6 +70,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0037](0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md) | Graph Completion is an OPTIONAL post-Assembly Capability; predicted edges are inferred-marked |
 | [0038](0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md) | Schema Induction is an OPTIONAL LLM Stage; induced labels are additive |
 | [0039](0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md) | Context Enrichment projects the KG onto chunks into the EMBEDDING input only |
+| [0054](0054-type-vocabulary-canonicalization-is-a-capability-of-the-resolution-phase.md) | Type-vocabulary canonicalization is its own Capability in the resolution phase (per-chunk induction's downstream fix) |
 
 ## The Quality Report, deltas & operations
 

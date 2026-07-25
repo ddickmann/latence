@@ -148,6 +148,10 @@ _EXPECTED_PROVIDERS = frozenset(
         "profiling.lightweight",
         "disambiguation.cascade",
         "disambiguation.exact_surface",
+        # T3 (ADR-0054): the corpus-level TYPE-vocabulary canonicalizer + its exact-surface
+        # second reference — the resolution phase's type-side twin of the disambiguators.
+        "type_consolidation.cascade",
+        "type_consolidation.exact_surface",
         "disambiguation.embedding",
         "disambiguation.glinker",
         "graph.canonical",
@@ -200,12 +204,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 56 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 58 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 56
+    assert len(names) == 58
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
