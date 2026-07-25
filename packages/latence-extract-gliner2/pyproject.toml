@@ -33,15 +33,22 @@ classifiers = [
 # H-G1 dep cap: 'gliner2' is a released 1.x library (latest 1.3.2, verified 2026-07-10), so it
 # carries a major-boundary upper cap ('<2') so a downstream install can't silently pull an
 # API-breaking 2.x release. The [local] extra is REQUIRED (the base dist ships no torch/
-# transformers; local inference — GLiNER2.from_pretrained(...).extract_entities/extract_relations
-# — needs them), exactly like latence-pii-gliner2.
+# transformers; local inference — GLiNER2.from_pretrained(...).batch_extract_entities /
+# batch_extract_relations — needs them), exactly like latence-pii-gliner2.
+# T7 raised the LOWER bound to 1.3 (was 1.0): the Provider now drives the BATCHED entry points
+# (one native forward per label bucket), and that slice does not exist across the whole 1.x line —
+# 1.0.x has no batch_extract_* at all, 1.1.x has no include_spans/max_len (and without spans there
+# are no char offsets to ground on), 1.2.0-1.2.5 have no max_len. 1.3.x is the pod-validated line,
+# the same floor latence-pii-gliner2 pins. Resolution is the primary gate; the Provider ALSO checks
+# the loaded object exposes both batched methods, so a hand-installed older gliner2 is a typed
+# ProviderError rather than a native AttributeError.
 # 'peft' is a REQUIRED runtime dep (pod-found, 2026-07-10): gliner2's relation inference engine
 # (gliner2.inference.engine -> gliner2.training.trainer) imports peft, which the 'gliner2[local]'
 # extra does NOT declare — real extract_relations fails with ModuleNotFoundError: No module named
 # 'peft' without it. peft is Apache-2.0 (github.com/huggingface/peft, verified 2026-07-10).
 dependencies = [
     "latence-core",
-    "gliner2[local]>=1.0,<2",
+    "gliner2[local]>=1.3,<2",
     "peft>=0.10",
 ]
 

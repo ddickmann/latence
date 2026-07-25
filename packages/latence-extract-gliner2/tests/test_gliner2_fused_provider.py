@@ -81,8 +81,8 @@ class BackendCompilerFailed(RuntimeError):
 
 
 class _FakeGLiNER2:
-    """Stands in for ``gliner2.GLiNER2`` with the REAL nested ``extract_entities`` +
-    ``extract_relations`` dict shapes (pod-validated, W9).
+    """Stands in for ``gliner2.GLiNER2`` with the REAL nested ``batch_extract_entities`` +
+    ``batch_extract_relations`` list-of-dict shapes (pod-validated, W9/T7).
 
     ``entities`` is a flat list of ``{start, end, label, confidence}`` rows the test seeds;
     ``extract_entities`` reshapes it into the real ``{"entities": {label: [{text, confidence,
@@ -114,8 +114,9 @@ class _FakeGLiNER2:
     compiled_forward_raises: bool = False
 
     def __init__(self) -> None:
-        self.extract_entities_calls = 0
-        self.extract_relations_calls = 0
+        #: one increment per NATIVE BATCHED forward (T7: counted against BUCKETS, not chunks).
+        self.batch_entity_calls = 0
+        self.batch_relation_calls = 0
         self._compile_on = False
 
     @classmethod
@@ -142,20 +143,9 @@ class _FakeGLiNER2:
     def _rows(self, source: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
         return [r for r in source if r.get("end", 0) <= len(text)]
 
-    def extract_entities(
-        self,
-        text: str,
-        entity_types: list[str],
-        threshold: float = 0.5,
-        include_spans: bool = False,  # noqa: ARG002 - API parity; the fake always spans
-        include_confidence: bool = False,  # noqa: ARG002 - API parity
-        max_len: int = 768,
+    def _entities_for(
+        self, text: str, entity_types: list[str], threshold: float
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
-        self.extract_entities_calls += 1
-        type(self).last_max_len = max_len  # W12: record the threaded model-window bound
-        self._maybe_compile_fault()
-        if type(self).raise_on_extract:
-            raise RuntimeError(f"cuda oom while extracting {text!r}")  # must NOT leak into the error
         by_label: dict[str, list[dict[str, Any]]] = {}
         for e in self._rows(type(self).entities, text):
             label = e["label"]
@@ -171,18 +161,9 @@ class _FakeGLiNER2:
             )
         return {"entities": by_label}
 
-    def extract_relations(
-        self,
-        text: str,
-        relation_types: list[str],
-        threshold: float = 0.5,
-        include_spans: bool = False,  # noqa: ARG002 - API parity
-        include_confidence: bool = False,  # noqa: ARG002 - API parity
-        max_len: int = 768,
+    def _relations_for(
+        self, text: str, relation_types: list[str]
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
-        self.extract_relations_calls += 1
-        type(self).last_max_len = max_len  # W12: record the threaded model-window bound
-        self._maybe_compile_fault()
         by_rel: dict[str, list[dict[str, Any]]] = {}
         for r in type(self).relations:
             rel_type = r["relation"]
@@ -193,6 +174,95 @@ class _FakeGLiNER2:
                 {"head": dict(r["head"]), "tail": dict(r["tail"])}
             )
         return {"relation_extraction": by_rel}
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,  # noqa: ARG002 - API parity: gliner2's internal sub-batch knob
+        threshold: float = 0.5,
+        format_results: bool = True,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        include_spans: bool = False,  # noqa: ARG002 - API parity; the fake always spans
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        """The REAL gliner2 1.3.2 batched entry point: ONE schema, N texts, N results IN ORDER.
+
+        Signature mirrored from ``gliner2.inference.engine.Extractor.batch_extract_entities``
+        (positional ``batch_size`` third, ``max_len`` keyword-last). Like the real one it takes a
+        SINGLE ``entity_types`` schema for the whole call — which is exactly the constraint T7's
+        label-set bucketing exists to satisfy — and returns one per-text result dict in input order.
+        """
+        self.batch_entity_calls += 1
+        type(self).last_max_len = max_len  # W12: record the threaded model-window bound
+        self._maybe_compile_fault()
+        if type(self).raise_on_extract:
+            # must NOT leak into the typed error
+            raise RuntimeError(f"cuda oom while extracting {texts!r}")
+        return [self._entities_for(text, entity_types, threshold) for text in texts]
+
+    def batch_extract_relations(
+        self,
+        texts: list[str],
+        relation_types: list[str],
+        batch_size: int = 8,  # noqa: ARG002 - API parity: gliner2's internal sub-batch knob
+        threshold: float = 0.5,  # noqa: ARG002 - API parity; the fake filters on head/tail scores
+        format_results: bool = True,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        include_spans: bool = False,  # noqa: ARG002 - API parity; the fake always spans
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        """The REAL gliner2 1.3.2 batched relation entry point (same shape rules as the entity one)."""
+        self.batch_relation_calls += 1
+        type(self).last_max_len = max_len  # W12: record the threaded model-window bound
+        self._maybe_compile_fault()
+        return [self._relations_for(text, relation_types) for text in texts]
+
+    # The single-text entry points exist in gliner2 only as thin wrappers over the batched ones
+    # (``extract`` → ``batch_extract([text], …)[0]``). Mirrored here so a provider that reached for
+    # the single-text API would still work — and so the fake cannot accidentally make the batched
+    # path look like the ONLY path when it is not.
+    def extract_entities(
+        self,
+        text: str,
+        entity_types: list[str],
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return self.batch_extract_entities(
+            [text],
+            entity_types,
+            1,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )[0]
+
+    def extract_relations(
+        self,
+        text: str,
+        relation_types: list[str],
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return self.batch_extract_relations(
+            [text],
+            relation_types,
+            1,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )[0]
 
 
 @pytest.fixture()
@@ -473,37 +543,63 @@ def test_extract_half_returns_only_mentions(fake_gliner2: type[_FakeGLiNER2]) ->
 
 
 class _CapturingGLiNER2(_FakeGLiNER2):
-    """Records the (entity_types, relation_types) each call is asked for (the W4 slot capture)."""
+    """Records the (entity_types, relation_types) each BATCHED forward is asked for.
+
+    Captured at the batched entry point, which is the only place the Provider asks the model
+    anything since T7 — so one entry per forward (i.e. per label BUCKET × micro-batch), not per
+    chunk. ``captured_entity_texts`` pairs each captured schema with the texts it was asked over,
+    which is what lets a test assert "one forward per bucket, at the bucket's own labels".
+    """
 
     captured_entities: list[list[str]] = []
     captured_relations: list[list[str]] = []
+    captured_entity_texts: list[list[str]] = []
 
-    def extract_entities(
+    def batch_extract_entities(
         self,
-        text: str,
+        texts: list[str],
         entity_types: list[str],
+        batch_size: int = 8,
         threshold: float = 0.5,
-        include_spans: bool = False,
+        format_results: bool = True,
         include_confidence: bool = False,
-        max_len: int = 768,
-    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
         type(self).captured_entities.append(list(entity_types))
-        return super().extract_entities(
-            text, entity_types, threshold, include_spans, include_confidence, max_len
+        type(self).captured_entity_texts.append(list(texts))
+        return super().batch_extract_entities(
+            texts,
+            entity_types,
+            batch_size,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
         )
 
-    def extract_relations(
+    def batch_extract_relations(
         self,
-        text: str,
+        texts: list[str],
         relation_types: list[str],
+        batch_size: int = 8,
         threshold: float = 0.5,
-        include_spans: bool = False,
+        format_results: bool = True,
         include_confidence: bool = False,
-        max_len: int = 768,
-    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
         type(self).captured_relations.append(list(relation_types))
-        return super().extract_relations(
-            text, relation_types, threshold, include_spans, include_confidence, max_len
+        return super().batch_extract_relations(
+            texts,
+            relation_types,
+            batch_size,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
         )
 
 
@@ -516,6 +612,7 @@ def capturing_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_CapturingGLiNER2
     _CapturingGLiNER2.relations = []
     _CapturingGLiNER2.captured_entities = []
     _CapturingGLiNER2.captured_relations = []
+    _CapturingGLiNER2.captured_entity_texts = []
     _CapturingGLiNER2.raise_on_optimized_load = False
     _CapturingGLiNER2.raise_on_extract = False
     return _CapturingGLiNER2
@@ -619,17 +716,21 @@ def test_predefined_only_mode_runs_the_fixed_labels_per_chunk(
     the extractor with ``induced_labels is None``. Each chunk must then be scored against exactly
     the operator's fixed lists — under EITHER floor policy, so flipping the knob cannot change a
     predefined-only run.
+
+    T7: because both chunks carry the SAME label set they land in ONE bucket and go through ONE
+    batched forward over both texts — the schema asked for is still exactly the fixed lists.
     """
     chunks = [_chunk("Alice works for Acme Corp."), _chunk("Bob works for Beta Ltd.")]
     for floor in ("per_chunk", "universal"):
         capturing_gliner2.captured_entities = []
         capturing_gliner2.captured_relations = []
+        capturing_gliner2.captured_entity_texts = []
         Gliner2FusedExtractor({**_config(), "label_floor": floor}).extract_fused(chunks)
-        assert capturing_gliner2.captured_entities == [
-            ["person", "organization"],
-            ["person", "organization"],
+        assert capturing_gliner2.captured_entities == [["person", "organization"]]
+        assert capturing_gliner2.captured_relations == [["works_for"]]
+        assert capturing_gliner2.captured_entity_texts == [
+            ["Alice works for Acme Corp.", "Bob works for Beta Ltd."]
         ]
-        assert capturing_gliner2.captured_relations == [["works_for"], ["works_for"]]
 
 
 def test_per_chunk_output_equals_running_that_chunks_labels_directly(
@@ -843,18 +944,32 @@ def test_inference_time_compile_fault_runs_fallback_once_across_chunks(
 # --- fp16 cuda placement). CPU-testable via LATENCE_CUDA + a fake torch / a fake that records. ---
 
 
-def test_compile_defaults_off_even_on_cuda(
+def test_compile_is_enabled_on_cuda_for_the_bucketed_path(
     fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """W9-scaling fix #1: compile is defaulted OFF (opt-in) EVEN on cuda (recompile-thrash guard).
+    """T7: ``compile`` rides the cuda default now that the forward is bucketed.
 
-    Forces the cuda load path (LATENCE_CUDA=1): quantize 'auto' still resolves True, but compile is
-    forced False by the provider default — so from_pretrained gets compile=False, NOT True. This is
-    the whole fix for the compile=True recompile-thrash hang: the safe default, not the crash latch.
+    It was forced OFF while each forward was one varied-length chunk against a corpus-wide ~40-label
+    schema: gliner2 compiles with ``torch.compile(dynamic=True)`` and a fresh (label-count, batch)
+    shape family per chunk thrashed dynamo. Bucketing pins the label dimension within a bucket and
+    the micro-batch pins the batch dimension, so the thrash precondition is gone and the pod-measured
+    fused-kernel win is back on. Forces the cuda load path (LATENCE_CUDA=1) — on cpu both knobs
+    still resolve False (``test_cpu_default_loads_plain_no_optimized_kwargs``).
     """
     monkeypatch.setenv("LATENCE_CUDA", "1")
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
+    assert fake_gliner2.last_kwargs.get("quantize") is True
+    assert fake_gliner2.last_kwargs.get("compile") is True
+
+
+def test_compile_can_still_be_pinned_off(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The knob is a default, not a mandate: an operator can still pin compile off on cuda.
+    monkeypatch.setenv("LATENCE_CUDA", "1")
+    fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    Gliner2FusedExtractor({**_config(), "compile": False}).extract_fused([_chunk("Alice waved.")])
     assert fake_gliner2.last_kwargs.get("quantize") is True
     assert fake_gliner2.last_kwargs.get("compile") is False
 
@@ -862,7 +977,7 @@ def test_compile_defaults_off_even_on_cuda(
 def test_compile_opt_in_still_enables_on_cuda(
     fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # An operator who explicitly asks for compile still gets it (the knob is opt-in, not removed).
+    # An explicit compile: true is honoured verbatim (unchanged by the default flip).
     monkeypatch.setenv("LATENCE_CUDA", "1")
     fake_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     Gliner2FusedExtractor({**_config(), "compile": True}).extract_fused([_chunk("Alice waved.")])
@@ -1011,3 +1126,387 @@ def test_no_cuda_no_move(
     placing_gliner2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
     Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
     assert placing_gliner2.to_calls == []
+
+
+# ---------------------------------------------------------------------------
+# T7 — efficient per-chunk extraction: bucket by label set, ONE native batched
+# forward per bucket. The tension this closes: per-chunk induction gives every
+# chunk its own schema, but gliner2's batched entry point takes ONE schema per
+# call — so the naive readings are "a call per chunk" (no batching) or "union
+# the labels" (back to the ~40-label degradation + the ~17 GiB OOM tensor).
+# ---------------------------------------------------------------------------
+
+
+def _bucket_chunk(
+    index: int,
+    content: str,
+    *,
+    entity_types: list[str] | None = None,
+    relation_types: list[str] | None = None,
+) -> ChunkRecord:
+    """A distinct chunk (own record_id + content) optionally carrying its own induced label sets."""
+    chunk = _chunk(content).model_copy(
+        update={"record_id": f"doc1#chunk-{index}", "index": index}
+    )
+    if entity_types is None and relation_types is None:
+        return chunk
+    return chunk.model_copy(
+        update={
+            "induced_labels": InducedLabels(
+                model_id="test-model",
+                entity_types=entity_types or [],
+                relation_types=relation_types or [],
+                pii_types=[],
+            )
+        }
+    )
+
+
+def _seed_person_spans(fake: type[_FakeGLiNER2]) -> None:
+    """One 'Alice'-shaped span at [0,5) plus an org at [16,25), matching every fixture text."""
+    fake.entities = [
+        {"start": 0, "end": 5, "label": "person", "confidence": 0.95},
+        {"start": 0, "end": 5, "label": "location", "confidence": 0.95},
+        {"start": 16, "end": 25, "label": "organization", "confidence": 0.9},
+    ]
+
+
+def _bucket_corpus() -> list[ChunkRecord]:
+    """Six chunks in TWO label buckets (4 × {location}, 2 × {person, organization})."""
+    texts = [f"Alice works for Acme Corp {i}." for i in range(6)]
+    return [
+        _bucket_chunk(i, text, entity_types=["location"], relation_types=["located_in"])
+        if i < 4
+        else _bucket_chunk(i, text, entity_types=["person"], relation_types=["works_for"])
+        for i, text in enumerate(texts)
+    ]
+
+
+def test_a_label_bucket_is_one_batched_forward_not_one_call_per_chunk(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """THE T7 acceptance criterion: forwards are counted against BUCKETS, never against chunks.
+
+    Six chunks fall into TWO induced label sets, so the stage must issue TWO native
+    ``batch_extract_entities`` forwards (and two ``batch_extract_relations``), not six of each.
+
+    PRE-CHANGE EVIDENCE (run against the un-bucketed provider, which called the single-text
+    ``extract_entities``/``extract_relations`` once per chunk — and those delegate to the batched
+    entry point with a one-element list in both the fake AND real gliner2):
+        E       assert 6 == 2
+        E        +  where 6 = <_FakeGLiNER2 object>.batch_entity_calls
+    """
+    _seed_person_spans(fake_gliner2)
+    provider = Gliner2FusedExtractor({**_config(), "batch_size": 16})
+    provider.extract_fused(_bucket_corpus())
+    assert provider._model.batch_entity_calls == 2
+    assert provider._model.batch_relation_calls == 2
+
+
+def test_a_bucket_is_asked_only_its_own_labels_never_the_batch_union(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """Bucketing must not re-inflate the label count — the whole point of the per-chunk redesign.
+
+    Each forward carries exactly one bucket's own small schema. A provider that unioned the window's
+    labels to get one wide batch would be asked ``[location, person]`` here — the ~40-label
+    degradation (and the ``batch × positions × LABELS`` OOM tensor) in miniature.
+    """
+    Gliner2FusedExtractor({**_config(), "batch_size": 16}).extract_fused(_bucket_corpus())
+    assert capturing_gliner2.captured_entities == [["location"], ["person"]]
+    assert capturing_gliner2.captured_relations == [["located_in"], ["works_for"]]
+    # ...and the texts really were batched together, four then two.
+    assert [len(texts) for texts in capturing_gliner2.captured_entity_texts] == [4, 2]
+
+
+def test_entity_and_relation_slots_bucket_independently(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """A chunk can share the ENTITY schema and not the RELATION one — each slot buckets on its own.
+
+    Two chunks with the same induced entity type but different relation types must batch together
+    for entities (ONE forward) and separately for relations (TWO) — maximal batch width per slot,
+    rather than the coarser "bucket once by the pair" shortcut.
+    """
+    chunks = [
+        _bucket_chunk(0, "Alice works for Acme Corp.", entity_types=["person"],
+                      relation_types=["works_for"]),
+        _bucket_chunk(1, "Bob works for Beta Ltd.", entity_types=["person"],
+                      relation_types=["located_in"]),
+    ]
+    Gliner2FusedExtractor({**_config(), "batch_size": 16}).extract_fused(chunks)
+    assert capturing_gliner2.captured_entities == [["person"]]
+    assert capturing_gliner2.captured_relations == [["works_for"], ["located_in"]]
+
+
+def _records(result: FusedExtraction) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    mentions = [
+        (
+            m.record_id,
+            m.chunk_record_id,
+            m.index,
+            m.label,
+            m.text,
+            m.confidence,
+            m.provenance.char_start,
+            m.provenance.char_end,
+            m.provenance.page_start,
+        )
+        for m in result.mentions
+    ]
+    relations = [
+        (
+            r.record_id,
+            r.index,
+            r.label,
+            r.head_mention_id,
+            r.tail_mention_id,
+            r.head_text,
+            r.tail_text,
+            r.confidence,
+            r.provenance.char_start,
+            r.provenance.char_end,
+        )
+        for r in result.relations
+    ]
+    return mentions, relations
+
+
+def test_bucketed_output_is_identical_to_a_per_chunk_unbatched_reference(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """Bucket-invariance: the emitted records equal a strictly per-chunk (batch_size=1) reference.
+
+    The correctness contract that makes batching a pure throughput change — same mentions, same
+    relations, same offsets, same ids, same ORDER. A provider that scattered a bucket's per-text
+    results back by output position instead of by index would permute one chunk's spans onto
+    another and fail here.
+    """
+    _seed_person_spans(fake_gliner2)
+    fake_gliner2.relations = [
+        {
+            "head": {"start": 0, "end": 5, "text": "Alice", "confidence": 0.95},
+            "tail": {"start": 16, "end": 25, "text": "Acme Corp", "confidence": 0.9},
+            "relation": "works_for",
+        }
+    ]
+    chunks = _bucket_corpus()
+    batched = Gliner2FusedExtractor({**_config(), "batch_size": 16}).extract_fused(chunks)
+    reference = FusedExtraction(mentions=[], relations=[])
+    for chunk in chunks:
+        one = Gliner2FusedExtractor({**_config(), "batch_size": 1}).extract_fused([chunk])
+        reference.mentions.extend(one.mentions)
+        reference.relations.extend(one.relations)
+    assert _records(batched) == _records(reference)
+    assert batched.mentions  # the comparison is not vacuously empty
+
+
+def test_a_large_bucket_is_split_into_token_budget_micro_batches(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """The safety net survives bucketing: ONE forward is still capped at ``microbatch_max_texts``.
+
+    Ten chunks share a label set, so they are ONE bucket — but gliner2 pads a micro-batch to its
+    longest sequence, so the padded activation must stay bounded regardless of bucket size. The
+    default cap (4 texts) means ceil(10/4) = 3 forwards for that single bucket.
+    """
+    chunks = [
+        _bucket_chunk(i, f"Alice works for Acme Corp {i}.", entity_types=["person"])
+        for i in range(10)
+    ]
+    Gliner2FusedExtractor({**_config(), "batch_size": 16}).extract_fused(chunks)
+    assert len(capturing_gliner2.captured_entity_texts) == 3
+    assert [len(t) for t in capturing_gliner2.captured_entity_texts] == [4, 4, 2]
+    # every forward carried the bucket's own labels, not a widened set
+    assert capturing_gliner2.captured_entities == [["person"]] * 3
+
+
+def test_micro_batch_bound_config_must_be_a_positive_int() -> None:
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="microbatch_max_texts"):
+        Gliner2FusedExtractor({**_config(), "microbatch_max_texts": 0})
+    with pytest.raises(ConfigError, match="microbatch_token_budget"):
+        Gliner2FusedExtractor({**_config(), "microbatch_token_budget": "lots"})
+
+
+def test_compile_fault_in_the_bucketed_path_degrades_and_still_emits_every_bucket(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """T7 graceful degradation: a backend that cannot compile costs throughput, never records.
+
+    ``compile`` now rides the cuda default, so the guard matters more than before: the FIRST bucket's
+    forward raises ``BackendCompilerFailed`` (torch.compile compiles lazily at inference), the
+    provider re-loads uncompiled ONCE, and every bucket — including the ones after the reload — must
+    still emit its records, byte-identical to a run that never compiled.
+    """
+    _seed_person_spans(fake_gliner2)
+    fake_gliner2.compiled_forward_raises = True
+    chunks = _bucket_corpus()
+    cfg = {**_config(), "quantize": True, "compile": True, "batch_size": 16}
+    provider = Gliner2FusedExtractor(cfg)
+    degraded = provider.extract_fused(chunks)
+
+    assert provider._compile_disabled is True
+    assert fake_gliner2.last_kwargs.get("compile") is False  # the uncompiled reload
+    fake_gliner2.compiled_forward_raises = False
+    never_compiled = Gliner2FusedExtractor({**_config(), "batch_size": 16}).extract_fused(chunks)
+    assert _records(degraded) == _records(never_compiled)
+    assert degraded.mentions
+
+
+class OutOfMemoryError(RuntimeError):
+    """A stand-in for ``torch.cuda.OutOfMemoryError`` — matched by class NAME + message.
+
+    ``torch`` raises this (a RuntimeError subclass) whose message is ``"CUDA out of memory. Tried to
+    allocate …"``; the perf seam's ``is_cuda_oom`` matches it torch-free, so a same-named local class
+    with the same message exercises the exact backoff without importing torch.
+    """
+
+
+class _OomingGLiNER2(_FakeGLiNER2):
+    """Refuses any entity forward wider than ``oom_above`` texts with a CUDA OutOfMemoryError.
+
+    Faithful to the real failure: gliner2 pads a micro-batch into ONE span-scoring tensor, so an
+    over-wide batch raises ``torch.cuda.OutOfMemoryError`` ("CUDA out of memory. Tried to
+    allocate…") from inside the forward — matched torch-free by the perf seam's ``is_cuda_oom``.
+    """
+
+    oom_above: int = 2
+
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        if len(texts) > type(self).oom_above:
+            msg = "CUDA out of memory. Tried to allocate 6.28 GiB"
+            raise OutOfMemoryError(msg)
+        return super().batch_extract_entities(
+            texts,
+            entity_types,
+            batch_size,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )
+
+
+@pytest.fixture()
+def ooming_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_OomingGLiNER2]:
+    module = types.ModuleType("gliner2")
+    module.GLiNER2 = _OomingGLiNER2  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gliner2", module)
+    _OomingGLiNER2.entities = []
+    _OomingGLiNER2.relations = []
+    _OomingGLiNER2.last_kwargs = {}
+    _OomingGLiNER2.last_max_len = None
+    _OomingGLiNER2.raise_on_optimized_load = False
+    _OomingGLiNER2.raise_on_extract = False
+    _OomingGLiNER2.compiled_forward_raises = False
+    _OomingGLiNER2.oom_above = 2
+    return _OomingGLiNER2
+
+
+def test_cuda_oom_inside_a_bucket_halves_and_output_stays_identical(
+    ooming_gliner2: type[_OomingGLiNER2],
+) -> None:
+    """The last-resort net now covers the extractor too — and it changes no record.
+
+    T7 makes this near-dead code (per-chunk labels collapse the label dimension that made the tensor
+    ~17 GiB), but a bucket that still OOMs must be halved and retried, never dropped. Because the
+    output is batch-invariant the halved run is record-for-record identical to a run that never
+    OOM'd. A batch of one that still OOMs is genuinely unrecoverable and surfaces typed — asserted
+    separately below.
+    """
+    _seed_person_spans(ooming_gliner2)
+    chunks = [
+        _bucket_chunk(i, f"Alice works for Acme Corp {i}.", entity_types=["person"])
+        for i in range(4)
+    ]
+    # One bucket of 4 → one micro-batch of 4 → OOM at width 4, halved to 2 + 2 (both fit).
+    ooming_gliner2.oom_above = 2
+    provider = Gliner2FusedExtractor({**_config(), "batch_size": 16})
+    halved = provider.extract_fused(chunks)
+    # Two SUCCEEDING forwards of 2 texts each (the refused width-4 call raises before the fake's
+    # own counter, so it is not counted) — versus ONE forward on hardware that never OOMs, below.
+    assert provider._model.batch_entity_calls == 2
+
+    # The same run on hardware that never OOMs: ONE forward, and the identical records.
+    ooming_gliner2.oom_above = 99
+    clean_provider = Gliner2FusedExtractor({**_config(), "batch_size": 16})
+    clean = clean_provider.extract_fused(chunks)
+    assert clean_provider._model.batch_entity_calls == 1
+    assert _records(halved) == _records(clean)
+    assert halved.mentions
+
+
+def test_unrecoverable_cuda_oom_surfaces_typed_never_a_dropped_chunk(
+    ooming_gliner2: type[_OomingGLiNER2],
+) -> None:
+    from latence_core.errors import ProviderError
+
+    ooming_gliner2.oom_above = 0  # even a batch of ONE cannot fit
+    _seed_person_spans(ooming_gliner2)
+    chunks = [_bucket_chunk(i, f"Alice works for Acme {i}.", entity_types=["person"]) for i in (0, 1)]
+    with pytest.raises(ProviderError) as excinfo:
+        Gliner2FusedExtractor({**_config(), "batch_size": 16}).extract_fused(chunks)
+    assert "batch_extract_entities" in str(excinfo.value)
+    assert "Alice" not in str(excinfo.value)  # no chunk text in the typed error (C2/C6)
+
+
+class _NoBatchGLiNER2:
+    """A gliner2 too old (or a ``from_api`` CLOUD client) — single-text methods only, no batching."""
+
+    @classmethod
+    def from_pretrained(cls, model_id: str, **kwargs: Any) -> _NoBatchGLiNER2:  # noqa: ARG003
+        return cls()
+
+    def extract_entities(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"entities": {}}
+
+
+def test_model_without_the_batched_api_is_a_typed_error_at_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#192's lesson applied to the extractor: a missing batched method is typed, not native.
+
+    The field failure on the twin redactor was a raw ``AttributeError`` an operator could not act
+    on. Checked at LOAD, so it fires before any forward, and the message names the supported range.
+    """
+    from latence_core.errors import ProviderError
+
+    module = types.ModuleType("gliner2")
+    module.GLiNER2 = _NoBatchGLiNER2  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gliner2", module)
+    with pytest.raises(ProviderError) as excinfo:
+        Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice waved.")])
+    message = str(excinfo.value)
+    assert "batch_extract_entities" in message
+    assert "gliner2 >=1.3,<2" in message
+
+
+def test_package_pins_the_batched_capable_gliner2_range() -> None:
+    """Resolution is the PRIMARY gate for the batched API (T7) — the metadata pin must say so.
+
+    The Provider drives ``batch_extract_entities`` / ``batch_extract_relations`` with
+    ``include_spans`` + ``max_len``; that slice does not exist across the whole gliner2 1.x line
+    (1.0.x has no batched methods, 1.1.x no include_spans/max_len, 1.2.0-1.2.5 no max_len). A pin
+    that still admitted 1.0 would let a fresh install resolve a gliner2 this Provider cannot drive
+    and only fail at load — exactly the #192 field failure on the twin redactor.
+    """
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    deps = [d for d in data["project"]["dependencies"] if d.startswith("gliner2")]
+    assert deps == ["gliner2[local]>=1.3,<2"]
