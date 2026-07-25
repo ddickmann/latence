@@ -40,6 +40,7 @@ from latence_core.capability import (
     RelationExtractor,
     ScreeningOutcome,
     Source,
+    TypeConsolidator,
 )
 from latence_core.contracts import (
     ChunkRecord,
@@ -54,6 +55,7 @@ from latence_core.contracts import (
     RedactionRecord,
     RelationMention,
     ScreeningFinding,
+    TypeVocabulary,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
 from latence_core.observability import (
@@ -148,6 +150,10 @@ _CHECKPOINT_READ_BATCH_RECORDS = 1024
 # doc-level records simultaneously.
 _ACCUMULATOR_KINDS = (
     CapabilityKind.PROFILING,
+    # T3 (ADR-0054): Type Consolidation is corpus-level by construction — a canonical type
+    # vocabulary cannot be elected from a prefix of the labels, only from all of them. Its own
+    # output is bounded by the mention set it re-emits (1:1, relabelled), not by corpus text.
+    CapabilityKind.TYPE_CONSOLIDATION,
     CapabilityKind.DISAMBIGUATION,
     CapabilityKind.GRAPH_ASSEMBLY,
     # W2-linkpred: Graph Completion consumes the whole assembled graph (NODE + EDGE GraphRecords),
@@ -582,7 +588,13 @@ class LocalRunner:
             # Graph Assembly, marked properties.inferred=True), so its checkpoint reads back as
             # GraphRecord and its predicted edges flow to Export alongside the asserted graph.
             return GraphRecord
-        if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+        if stage.capability in (
+            CapabilityKind.FUSED_ENTITY_RELATION,
+            # T3: Type Consolidation is a mention→mention transform that re-emits BOTH carriers
+            # (mentions and relations, relabelled), so it checkpoints the same MIXED carrier a
+            # fused extractor does.
+            CapabilityKind.TYPE_CONSOLIDATION,
+        ):
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
             return Record
@@ -697,7 +709,12 @@ class LocalRunner:
             parent = by_name.get(name)
             if parent is None:  # pragma: no cover - validated DAG
                 continue
-            if parent.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+            if parent.capability in (
+                CapabilityKind.FUSED_ENTITY_RELATION,
+                # T3: same MIXED carrier — a Stage downstream of Type Consolidation reads back
+                # both relabelled mentions and relabelled relations from one checkpoint.
+                CapabilityKind.TYPE_CONSOLIDATION,
+            ):
                 return Record
             if parent.capability is CapabilityKind.PROFILING:
                 return FeatureRecord
@@ -1583,6 +1600,45 @@ class LocalRunner:
             )
             return list(provider.profile(profile_docs, profile_mentions))
 
+        if stage.capability is CapabilityKind.TYPE_CONSOLIDATION:
+            if not isinstance(provider, TypeConsolidator):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the TypeConsolidator capability."
+                )
+                raise ContractError(msg)
+            # T3 (ADR-0054): Type Consolidation is the corpus-level TYPE-vocabulary resolver,
+            # the type-side twin of Disambiguation. It is corpus-level and multi-input like
+            # Disambiguation: an Entity-Extraction (or fused) parent supplies the EntityMentions
+            # whose labels it canonicalizes (REQUIRED — the labels ARE the vocabulary), and an
+            # optional Relation-Extraction (or fused) parent supplies the RelationMentions whose
+            # labels it canonicalizes alongside them. It re-emits BOTH carriers, relabelled, so a
+            # Disambiguation Stage wired to it reads canonical types — which matters because the
+            # entity resolver votes a cluster's type from its members' labels and gates its
+            # low-precision rungs on type compatibility.
+            #
+            # NOT streamed (unlike Profiling/Disambiguation): the Stage's contract is to return the
+            # SAME records relabelled, so it holds them regardless; a lazy input would only move
+            # the materialisation inside the Provider. The retained set is the mention set, which
+            # the extraction Stages' own checkpoints already bound.
+            self._require_type_consolidation_inputs_streamed(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            tc_mentions = self._stream_inputs_of_type(
+                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            tc_relations = self._stream_inputs_of_type(
+                stage, outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            consolidated = provider.consolidate(tc_mentions, tc_relations)
+            # The vocabulary is not a Record and never enters the DAG — it describes the corpus's
+            # SCHEMA, not a span of a document. It is persisted beside the run's checkpoints as a
+            # sidecar (ADR-0017: files are the source of truth), which is what makes it survive
+            # the run and lets an incremental delta run seed from it (T4).
+            self._persist_type_vocabulary(storage, pipeline, run_id, stage, consolidated.vocabulary)
+            typed: list[StageOutput] = [*consolidated.mentions, *consolidated.relations]
+            return typed
+
         if stage.capability is CapabilityKind.DISAMBIGUATION:
             if not isinstance(provider, Disambiguator):
                 msg = (
@@ -1775,6 +1831,46 @@ class LocalRunner:
         msg = f"Unknown capability {stage.capability!r} for stage {stage.name!r}."
         # An unknown capability is a malformed-Pipeline config error (#73), formerly a ValueError.
         raise ConfigError(msg)
+
+    # -- Type-vocabulary sidecar (T3, off the DAG) --------------------------
+
+    def _type_vocabulary_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
+        return f"{self._run_dir(pipeline, run_id)}/type-vocabulary/{stage_name}.json"
+
+    def _persist_type_vocabulary(
+        self,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+        stage: Stage,
+        vocabulary: TypeVocabulary | None,
+    ) -> None:
+        """Persist a Type-Consolidation Stage's canonical vocabulary for audit + delta reuse (T3).
+
+        Written even when the run consolidated nothing (an empty vocabulary is the honest answer
+        to "what did this Stage decide", not a missing file), so a reader never has to
+        distinguish "no file" from "no consolidation".
+        """
+        payload = (vocabulary if vocabulary is not None else TypeVocabulary()).model_dump_json(
+            indent=2
+        )
+        storage.write_atomic(
+            self._type_vocabulary_uri(pipeline, run_id, stage.name), payload.encode("utf-8")
+        )
+
+    def read_type_vocabulary(
+        self, storage: Storage, pipeline: Pipeline, run_id: str, stage_name: str
+    ) -> TypeVocabulary | None:
+        """Read back a run's persisted canonical type vocabulary; ``None`` when none was written.
+
+        The seam an incremental delta run (T4) reads its predecessor's vocabulary through before
+        seeding the next consolidation — so a delta aliases a new type INTO an existing canonical
+        cluster instead of re-electing (and thereby renaming) one.
+        """
+        uri = self._type_vocabulary_uri(pipeline, run_id, stage_name)
+        if not storage.exists(uri):
+            return None
+        return TypeVocabulary.model_validate_json(storage.read_text(uri))
 
     # -- Screening sidecars (quarantine + findings, off the DAG) ------------
 
@@ -2325,6 +2421,38 @@ class LocalRunner:
                 f"(got: {', '.join(got)}). A Disambiguation Stage must depend on an "
                 f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
                 f"the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+
+    def _require_type_consolidation_inputs_streamed(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> None:
+        """A Type-Consolidation Stage must be wired to an Entity-Extraction parent (T3).
+
+        The mentions' labels ARE the vocabulary it canonicalizes, so the mention side is REQUIRED
+        (the relation side is optional — an entity-only stack is valid). A non-empty input that
+        carries no EntityMention means the Pipeline wired the Stage to the wrong parent; that is a
+        typed wiring error, never a silent pass-through that would leave the KG's types drifted
+        while the report claimed consolidation ran (ADR-0034). An empty run is legitimately empty.
+        """
+        present, names = self._scan_input_carriers(
+            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+        if not present:
+            return
+        if EntityMention not in present:
+            got = sorted(names)
+            msg = (
+                f"Stage {stage.name!r} (type_consolidation) received no EntityMentions "
+                f"(got: {', '.join(got)}). A Type-Consolidation Stage must depend on an "
+                f"Entity-Extraction (or fused) Stage (the mentions whose types it "
+                f"canonicalizes). Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)
 

@@ -126,6 +126,9 @@ class TypeCanonicalizer:
 
         aliases: ``{raw label: target label}`` — the always-wins operator fold (both sides are
             matched on their normalized form, so ``Org.`` and ``org`` are the same key).
+        relation_aliases: the same, for the RELATION vocabulary — kept separate because entity
+            and relation types are different vocabularies (an entity ``organization`` and a
+            relation ``organization of`` must never fold together). ``None`` ⇒ ``aliases``.
         enable_acronym / enable_prefix: turn those lexical rungs off for a strict posture.
         max_abbreviation_len / min_expansion_ratio: the ``prefix`` rung's precision gates — a
             candidate abbreviation must be at most ``max_abbreviation_len`` characters AND the
@@ -144,6 +147,7 @@ class TypeCanonicalizer:
         self,
         *,
         aliases: Mapping[str, str] | None = None,
+        relation_aliases: Mapping[str, str] | None = None,
         enable_acronym: bool = True,
         enable_prefix: bool = True,
         max_abbreviation_len: int = 5,
@@ -152,9 +156,12 @@ class TypeCanonicalizer:
         embedding_threshold: float = 0.86,
         seed: TypeVocabulary | None = None,
     ) -> None:
-        self._aliases = {
-            normalize_type(k): normalize_type(v) for k, v in (aliases or {}).items()
-        }
+        self._aliases = {normalize_type(k): normalize_type(v) for k, v in (aliases or {}).items()}
+        self._relation_aliases = (
+            {normalize_type(k): normalize_type(v) for k, v in relation_aliases.items()}
+            if relation_aliases is not None
+            else self._aliases
+        )
         self._enable_acronym = enable_acronym
         self._enable_prefix = enable_prefix
         self._max_abbreviation_len = max_abbreviation_len
@@ -191,6 +198,7 @@ class TypeCanonicalizer:
         labels = sorted(counts)
         if not labels:
             return []
+        aliases = self._aliases if kind is TypeKind.ENTITY else self._relation_aliases
         folds = _UnionFind(labels)
         # Rung strategies are tracked per FOLD and rolled up per cluster, so the audit says which
         # rule(s) built a cluster rather than which rules merely ran.
@@ -206,7 +214,7 @@ class TypeCanonicalizer:
         normalized = {label: normalize_type(label) for label in labels}
         for i, left in enumerate(labels):
             for right in labels[i + 1 :]:
-                rung = self._lexical_rung(normalized[left], normalized[right])
+                rung = self._lexical_rung(normalized[left], normalized[right], aliases)
                 if rung is not None:
                     fold(left, right, rung)
 
@@ -225,11 +233,11 @@ class TypeCanonicalizer:
             for root, members in sorted(folds.groups().items())
         ]
 
-    def _lexical_rung(self, left: str, right: str) -> str | None:
+    def _lexical_rung(self, left: str, right: str, aliases: Mapping[str, str]) -> str | None:
         """The first lexical rung that folds two NORMALIZED labels, or ``None``."""
         if left == right:
             return _RUNG_NORMALIZED
-        if self._aliases.get(left) == right or self._aliases.get(right) == left:
+        if aliases.get(left) == right or aliases.get(right) == left:
             return _RUNG_ALIAS
         if self._enable_acronym and (_is_acronym_of(left, right) or _is_acronym_of(right, left)):
             return _RUNG_ACRONYM
@@ -324,8 +332,8 @@ def _is_acronym_of(candidate: str, expansion: str) -> bool:
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     """Cosine similarity of two equal-width vectors; ``0.0`` when either is a zero vector."""
     dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = sum(a * a for a in left) ** 0.5
-    right_norm = sum(b * b for b in right) ** 0.5
+    left_norm = float(sum(a * a for a in left)) ** 0.5
+    right_norm = float(sum(b * b for b in right)) ** 0.5
     if left_norm == 0.0 or right_norm == 0.0:
         return 0.0
-    return dot / (left_norm * right_norm)
+    return float(dot) / (left_norm * right_norm)
