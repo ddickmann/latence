@@ -254,3 +254,69 @@ def test_render_marks_failed_contracts() -> None:
         ),
     )
     assert "contracts complete: FAIL" in report.render()
+
+
+# -- T5: induction cost is in the human-readable report, not only the JSON ----
+
+
+def test_render_carries_the_induction_cost_line() -> None:
+    """REGRESSION (T5): the report an operator READS states what per-chunk induction cost.
+
+    Per-chunk induction is one call per DISTINCT chunk text. Without this line the redesign's cost
+    is only reachable by parsing JSON, which is how a runaway bill goes unnoticed.
+    """
+    report = QualityReport(
+        pipeline_name="p",
+        run_id="r",
+        stages=[
+            StageMetrics(
+                name="induce",
+                capability="schema_induction",
+                provider="label_inducer.llm",
+                induction_documents=10,
+                induction_calls=4,
+                induction_cache_hits=6,
+                induction_prompt_tokens=1200,
+                induction_completion_tokens=300,
+                induction_fallbacks=0,
+            ),
+            StageMetrics(name="chunk", capability="chunk", provider="chunk.markdown"),
+        ],
+    )
+    rendered = report.render()
+    assert "## Induction cost" in rendered
+    assert "4 call(s) for 10 item(s)" in rendered
+    assert "cache hits 6 (60.0%)" in rendered
+    assert "1200 prompt + 300 completion" in rendered
+    # A non-induction Stage contributes no line (no zero-noise for every stage in the stack).
+    assert "- chunk:" not in rendered.split("## Induction cost")[1]
+    # And a budget that did NOT bind says nothing (only the loud state is printed).
+    assert "BUDGET BOUND" not in rendered
+
+
+def test_render_shouts_when_the_induction_budget_bound_the_run() -> None:
+    report = QualityReport(
+        pipeline_name="p",
+        run_id="r",
+        stages=[
+            StageMetrics(
+                name="induce",
+                capability="schema_induction",
+                provider="label_inducer.llm",
+                induction_documents=100,
+                induction_calls=10,
+                induction_fallbacks=90,
+                induction_budget_exhausted=True,
+            )
+        ],
+    )
+    assert "BUDGET BOUND this run" in report.render()
+
+
+def test_a_run_without_induction_renders_no_induction_section() -> None:
+    report = QualityReport(
+        pipeline_name="p",
+        run_id="r",
+        stages=[StageMetrics(name="chunk", capability="chunk", provider="chunk.markdown")],
+    )
+    assert "## Induction cost" not in report.render()

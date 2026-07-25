@@ -691,6 +691,43 @@ class GoldSetEvaluation(BaseModel):
     stages: list[StageScore] = Field(default_factory=list)
 
 
+def _render_induction_cost(stages: list[StageMetrics]) -> list[str]:
+    """The human-readable induction-cost section (T5); empty when the run induced nothing.
+
+    Per-chunk induction is one call per DISTINCT chunk text, so "what did induction cost?" is the
+    first question an enterprise evaluator asks about the redesign — and the honest answer has to be
+    in the report an operator already reads, not derivable from JSON they have to go find. Rendered
+    only for Stages that actually attempted an induction, so a stack without a ``schema_induction``
+    Stage renders byte-identically to before.
+
+    The cache-hit RATE is ``cache_hits / documents`` — the fraction of items answered for free by
+    the chunk-text dedup, i.e. the size of the saving. A ``0 tokens`` reading next to a non-zero
+    call count is an endpoint that reports no usage (an honest unknown), NOT a free run; a ``0
+    calls`` reading next to a non-zero document count is a Provider that makes none (the
+    deterministic tagger). The budget line is printed only when a budget actually BOUND the run,
+    because that is the one state an operator must not miss.
+    """
+    active = [m for m in stages if m.induction_documents or m.induction_calls]
+    if not active:
+        return []
+    lines = ["", "## Induction cost"]
+    for m in active:
+        rate = (m.induction_cache_hits / m.induction_documents) if m.induction_documents else 0.0
+        lines.append(
+            f"- {m.name}: {m.induction_calls} call(s) for {m.induction_documents} item(s); "
+            f"cache hits {m.induction_cache_hits} ({rate:.1%}); "
+            f"tokens {m.induction_prompt_tokens} prompt + {m.induction_completion_tokens} "
+            f"completion (as reported by the endpoint); "
+            f"fell back {m.induction_fallbacks}"
+        )
+        if m.induction_budget_exhausted:
+            lines.append(
+                f"  - BUDGET BOUND this run: item(s) beyond `max_induction_calls` made no call "
+                f"and fell back to the config-label floor (see {m.name}.induction_fallbacks)"
+            )
+    return lines
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -799,6 +836,7 @@ class QualityReport(BaseModel):
         if present:
             lines.append("")
             lines.append(f"## Stage metrics present: {', '.join(present)}")
+        lines.extend(_render_induction_cost(self.stages))
         if self.context_enrichment is not None:
             ce = self.context_enrichment
             lines.append("")
