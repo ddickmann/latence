@@ -21,8 +21,18 @@ an :class:`~latence_core.contracts.InducedLabels`:
   * cap each label's length at :data:`MAX_LABEL_LEN` (64) characters — the anti-smuggle bound;
   * de-duplicate on the canonical form while preserving first-seen order (``Person``, ``person`` and
     ``PERSON`` all collapse to one ``person``);
-  * cap the COUNT per type at :data:`MAX_LABELS` (40) — the anti-bloat bound; the overflow is
-    reported (not silently truncated) so the drop is auditable.
+  * cap the COUNT per type at the caller-supplied ``max_labels`` (default :data:`MAX_LABELS`, 40) —
+    the anti-bloat bound; the overflow is reported (not silently truncated) so the drop is
+    auditable.
+
+**The count cap is a caller decision, because it means two different things** (the extraction
+redesign, T1). At *corpus* granularity the cap is a **salience cap**: the merged corpus union is
+ranked by document frequency and truncated to the most-agreed-on :data:`MAX_LABELS` types. At
+*chunk* granularity there is no union and no salience question — a chunk's own induced set is
+naturally small — so capping at 40 would be a silent recall loss on a chunk that legitimately
+evidences more. The chunk path therefore passes :data:`CHUNK_LABEL_CEILING` (64), a **safety
+ceiling** against a degenerate reply, not a salience cap, and :data:`MAX_LABEL_CEILING` (256) is the
+absolute anti-bloat bound no configuration may exceed.
 
 Deterministic + order-stable (first-seen order), so a seeded run is byte-reproducible (Baseline
 bar). Nothing here raises on bad input — a wholly-invalid list sanitizes to ``[]`` (the Provider
@@ -37,8 +47,17 @@ from dataclasses import dataclass
 
 #: The per-label character cap (anti-smuggle): a label longer than this is truncated.
 MAX_LABEL_LEN = 64
-#: The per-type label-count cap (anti-bloat): labels beyond this are dropped and reported.
+#: The DEFAULT per-type label-count cap (anti-bloat): labels beyond this are dropped and reported.
+#: This is the CORPUS-salience cap — the bound on the document-frequency-ranked merged schema.
 MAX_LABELS = 40
+#: The default per-type count cap on the PER-CHUNK induction path (T1). A chunk's own induced set
+#: is naturally small, so this is a **safety ceiling** against a degenerate/hostile reply, NOT a
+#: salience cap: a chunk that legitimately evidences 50 types keeps all 50. Deliberately generous.
+CHUNK_LABEL_CEILING = 64
+#: The absolute per-type count ceiling no configuration may exceed (the hard anti-bloat bound). A
+#: configured ``label_ceiling`` above this is clamped down to it — an operator cannot turn the
+#: safety ceiling off, only raise it within a bound that keeps the extractor prompt finite.
+MAX_LABEL_CEILING = 256
 #: The character cap on the operator's ``domain`` hint (anti-bloat): a hint longer than this is
 #: truncated. 512 chars is ample for a real description ("German customs law: tariff classification,
 #: binding tariff information, export-control rulings") while bounding what an operator — or a
@@ -145,18 +164,23 @@ def sanitize_domain(raw: object) -> str:
     return text
 
 
-def sanitize_labels(raw_labels: object) -> SanitizeResult:
+def sanitize_labels(raw_labels: object, *, max_labels: int = MAX_LABELS) -> SanitizeResult:
     """Sanitize a whole candidate list into a bounded, deduped, order-stable label set (W4 §5).
 
     A non-list ``raw_labels`` (the model returned a string / dict / null for a slot) yields an empty
     result — the schema-validation safety net rejects that shape upstream, but sanitizing defends in
     depth. Each item is cleaned by :func:`sanitize_label` into its canonical normal form; usable
     items are de-duplicated on that form (so ``Person`` / ``person`` / ``PERSON`` collapse to one
-    ``person``) preserving first-seen order, and the count is capped at :data:`MAX_LABELS`, with the
+    ``person``) preserving first-seen order, and the count is capped at ``max_labels``, with the
     overflow reported in :attr:`SanitizeResult.dropped_for_count`.
+
+    ``max_labels`` defaults to :data:`MAX_LABELS` (the corpus-salience cap, the pre-T1 behaviour);
+    the per-chunk induction path passes :data:`CHUNK_LABEL_CEILING` instead, because on that path
+    the count bound is a safety ceiling and not a salience decision (see the module docstring).
     """
     if not isinstance(raw_labels, list):
         return SanitizeResult(labels=[], dropped_for_count=0)
+    ceiling = max(1, min(int(max_labels), MAX_LABEL_CEILING))
     seen: set[str] = set()
     kept: list[str] = []
     dropped_for_count = 0
@@ -167,7 +191,7 @@ def sanitize_labels(raw_labels: object) -> SanitizeResult:
         # ``cleaned`` is already the canonical normal form, so it IS the dedup key.
         if cleaned in seen:
             continue
-        if len(kept) >= MAX_LABELS:
+        if len(kept) >= ceiling:
             # Anti-bloat: cap the count, but count the drop (no silent truncation) so the Provider
             # can log + surface how many labels the cap removed.
             dropped_for_count += 1

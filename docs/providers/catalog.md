@@ -95,7 +95,8 @@ connector a plugin rather than a fork.
 | Provider | Package | Model / technique | License | Compute |
 | --- | --- | --- | --- | --- |
 | `graph_completion.ultra` | `latence-linkpred-ultra` | Inductive ULTRA (`ultra_3g`) zero-shot scorer + PyKEEN fallback | MIT | either |
-| `label_inducer.llm` | `latence-schema-inducer` | Any small OpenAI-compatible LLM induces the label schema | Apache-2.0 (client) | either (endpoint) |
+| `label_inducer.llm` | `latence-schema-inducer` | Any small OpenAI-compatible LLM induces each chunk's label schema (hosted, OpenRouter, or a LOCAL vLLM/Ollama box — `base_url` only) | Apache-2.0 (client) | either (endpoint) |
+| `label_inducer.lexicon` | `latence-schema-inducer` | Deterministic zero-network tagger over an operator-declared candidate type space — the non-frontier per-chunk option (no model, no calls) | Apache-2.0 | cpu |
 
 ## Embedders
 

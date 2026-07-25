@@ -2,10 +2,28 @@
 
 Restores the "point it at a folder and it discovers its own schema" property: an OPTIONAL
 ``schema_induction`` Stage that uses a small OpenAI-compatible LLM with **structured JSON output**
-to induce, per document, the entity / relation / PII **types** actually evidenced in the data, then
-annotates every :class:`~latence_core.contracts.ChunkRecord` of that document with an
+to induce the entity / relation / PII **types** actually evidenced in the data, then annotates every
+:class:`~latence_core.contracts.ChunkRecord` with an
 :class:`~latence_core.contracts.InducedLabels` carrier. The extraction Stages then UNION those
 induced types onto their config labels (the ``latence_core.induced`` seam) — no extractor rewrite.
+
+**Induction is PER CHUNK (T1).** Each chunk is induced against its own text and keeps its own
+small, relevant label set, because that is what the extractor downstream actually needs: a chunk
+scored against ~5 relevant types beats the same chunk scored against a ~40-type corpus union on
+both recall (no salience cap dropped the rare-but-critical type this chunk needed) and zero-shot
+precision (no label competition from ~35 types that are not in it). It is also what keeps the
+gliner2 span-scoring tensor small — the corpus-union label dimension was the root cause of the
+CUDA-OOM, not the batch size.
+
+The historical argument for the ``corpus`` granularity was **type consistency** — induce per chunk
+and you get ``org`` here and ``organization`` there, and the KG's types drift. That guarantee does
+NOT come from this Stage any more: consistency is **earned downstream**, by corpus-wide type-
+vocabulary canonicalization in the resolution phase (T3), alongside the entity canonicalization
+that already lives there. Imposing it here — before extraction — bought consistency by paying
+recall, and this module no longer makes that trade for you. ``corpus`` mode remains selectable for
+an operator who wants one frozen vocabulary, but it is a corpus-level operation inside what is
+otherwise a chunk-level front half (see the phase-boundary check in
+:mod:`latence_core.stacks.phase_boundary`), and it is not what ``latence setup`` emits.
 
 Model-agnostic seam (HARD REQUIREMENT): the call goes through the official ``openai`` SDK with
 config ``model`` / ``base_url`` / ``api_key`` — the SAME pattern ``relation.llm`` uses — so a client
@@ -32,7 +50,9 @@ The LLM is UNTRUSTED output — every safety net is mandatory (the run NEVER cra
   4. **Schema validation**: the parsed object MUST be ``{entity_types,relation_types,pii_types}``,
      each a list of strings; anything else → reject → fall back. Extra keys are ignored.
   5. **Label sanitization** (:mod:`~latence_schema_inducer.sanitize`): strip control chars, cap
-     length ≤ 64, drop empties, dedupe case-insensitively, cap count ≤ 40 (dropped items logged).
+     length ≤ 64, drop empties, dedupe case-insensitively, cap count at the configured
+     ``label_ceiling`` — a SAFETY ceiling (64 on the per-chunk path), not a salience cap (dropped
+     items logged).
      Unicode/German label text (e.g. ``Rechnungsnummer``) is preserved — only control/format chars
      are stripped, so a valid non-ASCII schema is never dropped to empty.
   6. **Empty-induction recovery (the robustness net)**: a reply that parses + validates but
@@ -92,7 +112,13 @@ from latence_schema_inducer.prompts import (
     EMPTY_RECOVERY_INSTRUCTION,
     REPAIR_INSTRUCTION,
 )
-from latence_schema_inducer.sanitize import MAX_LABELS, sanitize_domain, sanitize_labels
+from latence_schema_inducer.sanitize import (
+    CHUNK_LABEL_CEILING,
+    MAX_LABEL_CEILING,
+    MAX_LABELS,
+    sanitize_domain,
+    sanitize_labels,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -156,19 +182,42 @@ class LLMLabelInducer:
             / air-gapped) to swap substrate with no code change.
         api_key: str | None  — the key; falls back to ``$OPENAI_API_KEY``. A local vLLM accepts any
             placeholder.
-        granularity: "doc" | "chunk" | "corpus"  — ``doc`` (default): one LLM call per document,
-            its induced labels broadcast to all its chunks. ``chunk``: one call per chunk.
-            ``corpus`` (W12): induce per-document (the same concurrent fan-out), then MERGE every
-            document's induced entity/relation/pii label sets into ONE canonical, deduped,
-            document-frequency-ranked (salience-capped) schema and
-            stamp that SINGLE shared schema onto EVERY chunk — one coherent vocabulary for the whole
-            corpus, so entity types stay consistent across the KG with no per-chunk/per-doc drift.
-            Requires a full-corpus pass (the whole chunk stream is held to build the merged schema);
-            acceptable for the induction Stage (small LLM calls) and the same shape a two-phase
-            collect→broadcast would take.
+        granularity: "doc" | "chunk" | "corpus"  — ``chunk`` (what ``latence setup`` emits, T1):
+            one call per DISTINCT chunk text, and that chunk keeps its OWN small, relevant label
+            set — the extraction path (a chunk is then extracted against few, relevant types
+            instead of a broadcast ~40-type union). ``doc``: one LLM call per document, its induced
+            labels broadcast to all its chunks. ``corpus`` (W12): induce per-document (the same
+            concurrent fan-out), then MERGE every document's induced entity/relation/pii label sets
+            into ONE canonical, deduped, document-frequency-ranked (salience-capped) schema and
+            stamp that SINGLE shared schema onto EVERY chunk. Requires a full-corpus pass (the whole
+            chunk stream is held to build the merged schema). NOTE (T1/T3): corpus mode is NOT how
+            the KG earns a consistent type vocabulary — see the module docstring; it imposes
+            consistency upstream at the cost of recall, and it is a corpus-level operation inside
+            the chunk-level front half.
         max_tokens: int  — the completion budget (default 2048); a truncated reply retries at
-        double.        max_labels: int  — the per-type label-count cap forwarded to the prompt +
-        sanitizer (default            40).
+            double.
+        max_labels: int  — the per-type SALIENCE cap: the number the prompt asks for and the bound
+            the corpus merge's document-frequency ranking truncates to (default 40, hard max 40).
+        label_ceiling: int  — the per-type SAFETY ceiling the sanitizer enforces on ONE induction's
+            reply. Defaults to :data:`~latence_schema_inducer.sanitize.CHUNK_LABEL_CEILING` (64) at
+            ``chunk`` granularity and to ``max_labels`` at doc/corpus granularity, and is clamped to
+            :data:`~latence_schema_inducer.sanitize.MAX_LABEL_CEILING` (256). Split from
+            ``max_labels`` because the two are different decisions (T1): capping a chunk's own
+            induced set at the corpus-salience number silently drops labels that chunk needs.
+        dedup: bool  — induce once per DISTINCT job text and fan the result to its duplicates
+            (default True, T5). Boilerplate/templated chunks are common in enterprise corpora, so
+            this removes a large fraction of the per-chunk calls at zero quality cost: at
+            temperature 0 identical prompts induce identical schemas, so a duplicate receives the
+            byte-identical :class:`InducedLabels` it would have been sent anyway. Set False only
+            for a non-deterministic endpoint where that equality does not hold.
+        max_induction_calls: int | None  — a per-run BUDGET on how many distinct induction jobs may
+            be dispatched (default None ⇒ unbounded). Jobs beyond the budget make no call and fail
+            open to the config-label floor, with ``induction_budget_exhausted`` set and ONE loud
+            WARNING — a bounded, visible degrade instead of a silent runaway bill. Enforced on the
+            deterministic input-order job prefix, so a budgeted run is still byte-reproducible.
+            (A *token* budget is deliberately NOT enforced mid-flight: which jobs it would cut
+            depends on completion order, which would make the run's OUTPUT non-deterministic.
+            Tokens are reported, not enforced.)
         temperature: float  — sampling temperature (default 0.0 for determinism).
         system_prompt / user_prompt_template: str  — override the default prompts (the template
             carries ``{text}`` / ``{max_labels}`` placeholders).
@@ -251,6 +300,24 @@ class LLMLabelInducer:
         )
         self._max_tokens = max(1, int(config.get("max_tokens", _DEFAULT_MAX_TOKENS)))
         self._max_labels = max(1, min(int(config.get("max_labels", MAX_LABELS)), MAX_LABELS))
+        # T1: the SAFETY ceiling the sanitizer enforces on ONE reply, split from the salience cap.
+        # On the per-chunk path the corpus-salience number (40) is the WRONG bound — a chunk's own
+        # induced set is naturally small, so a cap there only ever drops labels that chunk actually
+        # evidenced (silent recall loss). Default: the generous CHUNK_LABEL_CEILING on the chunk
+        # path, ``max_labels`` on doc/corpus (byte-identical to pre-T1 there). Clamped to the hard
+        # MAX_LABEL_CEILING so an operator can raise the ceiling but never remove it.
+        default_ceiling = CHUNK_LABEL_CEILING if granularity == "chunk" else self._max_labels
+        self._label_ceiling = max(
+            1, min(int(config.get("label_ceiling", default_ceiling)), MAX_LABEL_CEILING)
+        )
+        # T5: induce once per DISTINCT job text, fanning the result to duplicates. Deterministic
+        # and lossless at temperature 0 (identical prompt ⇒ identical schema), so it is ON by
+        # default; the escape hatch is for a non-deterministic endpoint.
+        self._dedup = bool(config.get("dedup", True))
+        # T5: the per-run call budget (None ⇒ unbounded). See the class docstring for why this is a
+        # CALL budget and not a token budget (determinism).
+        budget = config.get("max_induction_calls")
+        self._max_induction_calls = None if budget is None else max(0, int(budget))
         # The minimum TOTAL induced labels (entity + relation + pii) a successful induction must
         # yield; below this the result is "empty / near-empty after sanitization" → the Provider
         # RE-PROMPTS once before falling back (the robustness fix — an empty induction is the
@@ -299,6 +366,26 @@ class LLMLabelInducer:
         # surfaced on its own Quality-Report field so an operator SEES "the corpus induced nothing"
         # rather than only reading a generic fallback count. 0 when every induction produced labels.
         self.induction_empty_after_sanitization = 0
+        # T5 — the INDUCTION COST columns the Runner folds into the Quality Report, so per-chunk
+        # induction is affordable *and visibly* affordable (an operator must be able to read what a
+        # run cost, not infer it). All counts only, never content:
+        #   ``induction_calls``       — logical chat-completion requests issued (one per attempt;
+        #                               a truncation / repair / empty-recovery re-prompt is its own
+        #                               request. Transport-level retries are counted separately on
+        #                               ``endpoint_retries``, so the two do not double-count).
+        #   ``induction_cache_hits``  — jobs served from the chunk-text dedup cache (no call made).
+        #                               ``hits / (hits + distinct jobs)`` is the cache-hit rate.
+        #   ``induction_prompt_tokens`` / ``induction_completion_tokens`` — summed from each
+        #                               response's ``usage`` block when the endpoint reports one.
+        #                               An endpoint that reports no usage leaves them 0 — an honest
+        #                               "unknown", never an estimated/fabricated token count.
+        #   ``induction_budget_exhausted`` — True iff ``max_induction_calls`` bound the run (jobs
+        #                               were dropped to the config-label floor). The LOUD bit.
+        self.induction_calls = 0
+        self.induction_cache_hits = 0
+        self.induction_prompt_tokens = 0
+        self.induction_completion_tokens = 0
+        self.induction_budget_exhausted = False
 
     # -- lazy client --------------------------------------------------------
 
@@ -393,6 +480,11 @@ class LLMLabelInducer:
     def _induce_corpus(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
         """Induce per document, MERGE all docs into ONE canonical schema, stamp it on EVERY chunk.
 
+        NOT the default path (T1): this is the opt-in "one frozen vocabulary for the whole corpus"
+        mode. Its salience cap drops rare-but-locally-critical types and its broadcast schema scores
+        every chunk against types that are not in it; the type consistency it buys is now earned
+        downstream by type canonicalization in the resolution phase (T3) instead.
+
         The W12 corpus mode, a clean collect→broadcast two-phase over the same async fan-out:
 
           1. **Collect**: assemble each document's text (chunk order) and induce a schema per
@@ -406,8 +498,15 @@ class LLMLabelInducer:
              frequency→label tie-break makes the corpus schema a byte-stable function of the
              label→frequency map, independent of document/completion order.
           3. **Broadcast**: stamp that single shared schema onto EVERY chunk — including the chunks
-             of a document whose own induction failed open, so the whole corpus shares one coherent
-             vocabulary and entity types stay consistent across the KG.
+             of a document whose own induction failed open, so the whole corpus is extracted
+             against one vocabulary.
+
+        What this mode does NOT do any more (T1/T3): it is no longer how the KG earns a consistent
+        type vocabulary. That guarantee now comes from corpus-wide type canonicalization in the
+        resolution phase, downstream of extraction, where it costs no recall. Corpus mode here only
+        trades recall (the salience cap drops what a single chunk needed) and zero-shot precision
+        (every chunk is scored against types that are not in it) for an upstream uniformity the
+        pipeline no longer depends on.
 
         Requires the whole chunk stream in one pass (to build the merged schema before
         broadcasting); acceptable for the small-LLM-call induction Stage. When NO document induced
@@ -495,6 +594,14 @@ class LLMLabelInducer:
         return [label for label, _count in ranked[: self._max_labels]]
 
     def _induce_per_chunk(self, chunk_list: list[ChunkRecord]) -> Iterator[ChunkRecord]:
+        """The T1 extraction path: every chunk keeps ONLY the types induced for that chunk.
+
+        No corpus merge and no salience cap — a chunk that legitimately evidences 15 types keeps
+        all 15 (bounded only by the ``label_ceiling`` safety net), and a type that appears in
+        exactly one chunk of the corpus survives on that chunk instead of being ranked out of a
+        corpus-wide top-40. Cost is bounded by the dedup + budget layers in :meth:`_induce_all`,
+        not by throwing labels away.
+        """
         # One job per big-enough chunk, index-keyed by the chunk record_id (unique). Results are
         # reassembled in input order below, so completion order never perturbs the output.
         jobs: list[tuple[str, str]] = []
@@ -513,41 +620,81 @@ class LLMLabelInducer:
     def _induce_all(self, jobs: list[tuple[str, str]]) -> dict[str, InducedLabels | None]:
         """Induce every job's schema CONCURRENTLY (bounded), keyed by its key for order-stable use.
 
-        The W6 fan-out: each ``(key, text)`` job's LLM induction runs under an
-        ``asyncio.Semaphore(max_concurrency)`` and they are gathered with ``return_exceptions=True``
-        so one item's failure fails open for THAT item only (never aborts the batch). One event loop
-        per ``induce`` run via a single :func:`asyncio.run`. The wall-clock is
-        ``ceil(len(jobs) / max_concurrency) × latency`` (proven by the timing test).
-        ``induction_documents`` counts every attempted job. Reassembly is index-keyed (the returned
-        dict), so the caller re-emits in input order — byte-identical whatever the completion order.
+        Three layers, in this order — the cost path (T5) wraps the W6 fan-out:
+
+        1. **Text dedup** (``dedup``, on by default): the jobs are collapsed to their DISTINCT
+           texts in first-seen order, one induction runs per distinct text, and every duplicate
+           receives that same :class:`InducedLabels` object. Lossless at temperature 0 (identical
+           prompt ⇒ identical schema) and the single largest cost lever on a real corpus, where
+           boilerplate headers/footers and templated clauses repeat across thousands of chunks.
+           ``induction_cache_hits`` records how many jobs were served without a call.
+        2. **Budget** (``max_induction_calls``): only the first N distinct jobs — the deterministic
+           input-order prefix — are dispatched; the rest fail open to the config-label floor with
+           ``induction_budget_exhausted`` and ONE loud WARNING. Taking a *prefix* (rather than
+           whichever jobs happened to finish first) is what keeps a budget-bound run reproducible.
+        3. **Fan-out** (W6): each surviving job's induction runs under an
+           ``asyncio.Semaphore(max_concurrency)``, gathered with ``return_exceptions=True`` so one
+           item's failure fails open for THAT item only (never aborts the batch). One event loop
+           per ``induce`` run via a single :func:`asyncio.run`.
+
+        ``induction_documents`` counts every attempted job (deduped or not) — the denominator an
+        operator reads the fallback count against. Reassembly is key-indexed (the returned dict), so
+        the caller re-emits in input order — byte-identical whatever the completion order.
         """
         if not jobs:
             return {}
         self.induction_documents += len(jobs)
-        client = self._get_client()
 
-        async def _run() -> list[tuple[str, InducedLabels | None]]:
+        # -- 1. dedup: distinct texts in first-seen order ------------------------
+        # ``slot_of_job[i]`` is the index in ``distinct`` whose induction answers job i. With dedup
+        # off every job gets its own slot, so the rest of the method is one code path either way.
+        distinct: list[str] = []
+        slot_of_text: dict[str, int] = {}
+        slot_of_job: list[int] = []
+        for _key, text in jobs:
+            slot = slot_of_text.get(text) if self._dedup else None
+            if slot is None:
+                slot = len(distinct)
+                distinct.append(text)
+                slot_of_text[text] = slot
+            slot_of_job.append(slot)
+        self.induction_cache_hits += len(jobs) - len(distinct)
+
+        # -- 2. budget: the deterministic input-order prefix ---------------------
+        dispatched = distinct
+        if self._max_induction_calls is not None and len(distinct) > self._max_induction_calls:
+            dispatched = distinct[: self._max_induction_calls]
+            self._record_budget_exhausted(len(distinct) - len(dispatched))
+
+        client = self._get_client() if dispatched else None
+
+        async def _run() -> list[InducedLabels | None]:
             semaphore = asyncio.Semaphore(self._max_concurrency)
 
-            async def _one(key: str, text: str) -> tuple[str, InducedLabels | None]:
+            async def _one(text: str) -> InducedLabels | None:
                 async with semaphore:
-                    return key, await self._induce_one(client, text)
+                    return await self._induce_one(client, text)
 
             gathered = await asyncio.gather(
-                *(_one(key, text) for key, text in jobs), return_exceptions=True
+                *(_one(text) for text in dispatched), return_exceptions=True
             )
             # return_exceptions=True: a genuinely-unexpected exception that escaped _induce_one's
             # own fail-open guard (belt-and-suspenders) fails open for THAT item — never the batch.
-            resolved: list[tuple[str, InducedLabels | None]] = []
-            for (key, _text), outcome in zip(jobs, gathered, strict=True):
+            resolved: list[InducedLabels | None] = []
+            for outcome in gathered:
                 if isinstance(outcome, BaseException):
                     self._record_fallback(f"unexpected concurrent error ({type(outcome).__name__})")
-                    resolved.append((key, None))
+                    resolved.append(None)
                 else:
                     resolved.append(outcome)
             return resolved
 
-        return dict(asyncio.run(_run()))
+        induced = asyncio.run(_run()) if dispatched else []
+        # Budget-dropped jobs fail open (None), exactly like any other safety-net miss.
+        induced.extend([None] * (len(distinct) - len(induced)))
+
+        # -- 3. fan the per-text result back to every job that carried that text --
+        return {key: induced[slot] for (key, _text), slot in zip(jobs, slot_of_job, strict=True)}
 
     async def _induce_one(self, client: Any, text: str) -> InducedLabels | None:
         """Induce one document's label schema with EVERY safety net; None ⇒ fall back to config.
@@ -629,6 +776,25 @@ class LLMLabelInducer:
         """
         self.induction_empty_after_sanitization += 1
         self._record_fallback("empty after sanitization (persisted through the recovery re-prompt)")
+
+    def _record_budget_exhausted(self, skipped: int) -> None:
+        """Record the T5 call-budget bound: N jobs dropped to the config-label floor, ONE warning.
+
+        A budget that silently ate a third of a corpus's induction would be exactly the invisible
+        degrade this Provider exists to prevent, so the bound sets its own Quality-Report flag
+        (``induction_budget_exhausted``) AND tallies the dropped jobs as fallbacks (they DID fall
+        back). One aggregate WARNING rather than one per job — a bounded run must not also produce
+        an unbounded log.
+        """
+        self.induction_budget_exhausted = True
+        self.induction_fallbacks += skipped
+        _LOG.warning(
+            "schema_induction budget exhausted: %d job(s) beyond max_induction_calls=%s fell back "
+            "to config labels (model=%s)",
+            skipped,
+            self._max_induction_calls,
+            self._model,
+        )
 
     # -- the structured call + truncation + repair (safety nets #1, #2, #3) --
 
@@ -722,6 +888,8 @@ class LLMLabelInducer:
             {"role": "user", "content": user},
         ]
 
+        self.induction_calls += 1
+
         async def do_call() -> tuple[str, str | None]:
             try:
                 response = await client.chat.completions.create(
@@ -733,6 +901,7 @@ class LLMLabelInducer:
                 )
             except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError
                 raise _classify_exception(exc) from exc
+            self._count_usage(response)
             choice = response.choices[0]
             content = choice.message.content or ""
             finish_reason = getattr(choice, "finish_reason", None)
@@ -753,28 +922,55 @@ class LLMLabelInducer:
     def _count_retry(self) -> None:
         self.endpoint_retries += 1
 
+    def _count_usage(self, response: Any) -> None:
+        """Add one response's reported token usage to the run's induction-cost tally (T5).
+
+        Read DEFENSIVELY off the OpenAI ``usage`` block (``prompt_tokens`` / ``completion_tokens``):
+        OpenAI and OpenRouter always report it, but an on-prem vLLM can be configured not to. A
+        missing / non-int field contributes 0 — the honest "the endpoint did not tell us", never an
+        estimated token count dressed up as a measured one (a fabricated cost figure is worse than
+        an absent one, and an operator reading 0 tokens next to N calls can tell the difference).
+        """
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        prompt = getattr(usage, "prompt_tokens", 0)
+        completion = getattr(usage, "completion_tokens", 0)
+        if isinstance(prompt, int):
+            self.induction_prompt_tokens += prompt
+        if isinstance(completion, int):
+            self.induction_completion_tokens += completion
+
     # -- schema validation (#4) + sanitization (#5) -------------------------
 
     def _sanitize_to_induced(self, validated: dict[str, list[str]]) -> InducedLabels | None:
         """Sanitize each slot's labels + build an :class:`InducedLabels`; ``None`` if wholly empty.
 
         Every slot is bounded by :mod:`~latence_schema_inducer.sanitize` (control-char strip, length
-        ≤ 64, dedupe, count ≤ ``max_labels``). A wholly-empty result (the model returned only junk /
-        nothing usable) returns ``None``; the caller then RE-PROMPTS once (empty-recovery) before
-        falling back to config labels — an empty schema is never silently accepted.
+        ≤ 64, dedupe, count ≤ ``label_ceiling``). A wholly-empty result (the model returned only
+        junk / nothing usable) returns ``None``; the caller then RE-PROMPTS once (empty-recovery)
+        before falling back to config labels — an empty schema is never silently accepted.
         Dropped-for-count overflow is logged (no silent drop).
+
+        The count bound here is the SAFETY ceiling (``label_ceiling``), not the salience cap
+        (``max_labels``) — see the class docstring. On the per-chunk path they differ deliberately:
+        the salience cap belongs to the corpus merge, and applying it to one chunk's own reply is
+        the silent recall loss T1 removes.
         """
-        results = {slot: sanitize_labels(validated.get(slot, [])) for slot in _SLOTS}
+        results = {
+            slot: sanitize_labels(validated.get(slot, []), max_labels=self._label_ceiling)
+            for slot in _SLOTS
+        }
         total_dropped = sum(r.dropped_for_count for r in results.values())
         if total_dropped:
             _LOG.info(
-                "schema_induction capped %d label(s) at the per-type count limit (%d)",
+                "schema_induction capped %d label(s) at the per-type safety ceiling (%d)",
                 total_dropped,
-                self._max_labels,
+                self._label_ceiling,
             )
-        entity = results["entity_types"].labels[: self._max_labels]
-        relation = results["relation_types"].labels[: self._max_labels]
-        pii = results["pii_types"].labels[: self._max_labels]
+        entity = results["entity_types"].labels
+        relation = results["relation_types"].labels
+        pii = results["pii_types"].labels
         if not entity and not relation and not pii:
             return None
         return InducedLabels(
