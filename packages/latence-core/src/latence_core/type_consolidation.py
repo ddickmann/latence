@@ -48,6 +48,7 @@ byte-identical vocabulary.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from latence_core.contracts import CanonicalType, TypeKind, TypeVocabulary
@@ -332,8 +333,8 @@ def _is_acronym_of(candidate: str, expansion: str) -> bool:
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     """Cosine similarity of two equal-width vectors; ``0.0`` when either is a zero vector."""
     dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = float(sum(a * a for a in left)) ** 0.5
-    right_norm = float(sum(b * b for b in right)) ** 0.5
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
     if left_norm == 0.0 or right_norm == 0.0:
         return 0.0
-    return float(dot) / (left_norm * right_norm)
+    return dot / (left_norm * right_norm)
