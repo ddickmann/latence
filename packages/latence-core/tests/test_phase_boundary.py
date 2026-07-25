@@ -239,3 +239,30 @@ def test_induction_level_follows_its_granularity_not_its_kind() -> None:
         )
         levels[key] = is_corpus_level(pipeline.stages[0])
     assert levels == {"chunk": False, "doc": False, "corpus": True, "absent": False}
+
+
+# -- every shipped stack -------------------------------------------------------
+
+
+def test_every_committed_stack_satisfies_the_phase_boundary() -> None:
+    """`latence stack validate` now reports this check, so every stack in `stacks/` must pass it.
+
+    Without this, adding the check to the harness could turn a committed stack red only once CI ran
+    the (slow, device-gated) full validation. It is also the guard against the check itself drifting
+    into a false positive: if a future kind lands in ``CORPUS_LEVEL_KINDS`` by mistake, the blessed
+    stacks say so immediately.
+    """
+    root = Path(__file__).resolve().parents[3] / "stacks"
+    stack_files = sorted(root.glob("*.yaml"))
+    assert stack_files, f"no stacks found under {root}"
+    offenders: dict[str, str] = {}
+    for path in stack_files:
+        text = (
+            path.read_text(encoding="utf-8")
+            .replace("{CORPUS_DIR}", "file:///tmp/corpus")
+            .replace("{STORAGE_URI}", "file:///tmp/storage")
+        )
+        violations = check_phase_boundary(Pipeline.from_yaml_text(text))
+        if violations:
+            offenders[path.name] = "; ".join(v.describe() for v in violations)
+    assert offenders == {}

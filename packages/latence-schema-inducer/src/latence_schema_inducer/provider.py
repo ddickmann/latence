@@ -498,8 +498,15 @@ class LLMLabelInducer:
              frequency→label tie-break makes the corpus schema a byte-stable function of the
              label→frequency map, independent of document/completion order.
           3. **Broadcast**: stamp that single shared schema onto EVERY chunk — including the chunks
-             of a document whose own induction failed open, so the whole corpus shares one coherent
-             vocabulary and entity types stay consistent across the KG.
+             of a document whose own induction failed open, so the whole corpus is extracted
+             against one vocabulary.
+
+        What this mode does NOT do any more (T1/T3): it is no longer how the KG earns a consistent
+        type vocabulary. That guarantee now comes from corpus-wide type canonicalization in the
+        resolution phase, downstream of extraction, where it costs no recall. Corpus mode here only
+        trades recall (the salience cap drops what a single chunk needed) and zero-shot precision
+        (every chunk is scored against types that are not in it) for an upstream uniformity the
+        pipeline no longer depends on.
 
         Requires the whole chunk stream in one pass (to build the merged schema before
         broadcasting); acceptable for the small-LLM-call induction Stage. When NO document induced
