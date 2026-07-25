@@ -11,12 +11,15 @@ from latence_core.contracts import (
     Provenance,
 )
 from latence_core.induced import (
+    LabelFloor,
     LabelSlot,
     effective_labels,
     induced_for_slot,
     induced_labels_by_document,
     project_induced_onto_documents,
+    resolve_label_floor,
 )
+from latence_core.redaction_policy import GUARD_SAFETY_FLOOR, guard_category
 
 
 def _induced(
@@ -105,7 +108,74 @@ def test_induced_labels_defaults_are_empty_lists() -> None:
     assert labels.entity_types == []
     assert labels.relation_types == []
     assert labels.pii_types == []
+    assert labels.guard_types == []
     assert labels.confidences == {}
+
+
+# -- T2: the floor POLICY (relevance labels per chunk, safety floors universal) ---------------
+
+
+def test_per_chunk_floor_returns_only_the_records_own_induced_labels() -> None:
+    """The core of the redesign: an inducing record is prompted with ITS OWN types, nothing else."""
+    induced = _induced(entity_types=["vessel", "port"])
+    assert effective_labels(
+        ["person", "organization"], induced, LabelSlot.ENTITY, floor=LabelFloor.PER_CHUNK
+    ) == ["vessel", "port"]
+
+
+def test_universal_floor_is_the_default_and_still_unions() -> None:
+    """Every pre-existing caller passes no ``floor`` and must keep the union — byte-identical."""
+    induced = _induced(entity_types=["vessel"])
+    assert effective_labels(["person"], induced, LabelSlot.ENTITY) == ["person", "vessel"]
+    assert effective_labels(
+        ["person"], induced, LabelSlot.ENTITY, floor=LabelFloor.UNIVERSAL
+    ) == ["person", "vessel"]
+
+
+def test_per_chunk_floor_falls_back_to_config_when_the_slot_is_empty() -> None:
+    """An empty induced slot must never yield an EMPTY prompt — the config floor is the net."""
+    induced = _induced(entity_types=["vessel"])  # entity induced, relation slot empty
+    assert effective_labels(
+        ["works for"], induced, LabelSlot.RELATION, floor=LabelFloor.PER_CHUNK
+    ) == ["works for"]
+    assert effective_labels(["person"], None, LabelSlot.ENTITY, floor=LabelFloor.PER_CHUNK) == [
+        "person"
+    ]
+
+
+def test_per_chunk_floor_dedupes_the_induced_set_case_insensitively() -> None:
+    induced = _induced(entity_types=["Vessel", "vessel", "port"])
+    assert effective_labels(
+        ["person"], induced, LabelSlot.ENTITY, floor=LabelFloor.PER_CHUNK
+    ) == ["Vessel", "port"]
+
+
+def test_guard_slot_is_read_like_any_other() -> None:
+    induced = InducedLabels(model_id="m", guard_types=["toxicity"])
+    assert induced_for_slot(induced, LabelSlot.GUARD) == ["toxicity"]
+    assert effective_labels(list(GUARD_SAFETY_FLOOR), induced, LabelSlot.GUARD) == [
+        "prompt injection",
+        "harmful content",
+        "toxicity",
+    ]
+
+
+def test_resolve_label_floor_defaults_and_rejects_typos() -> None:
+    """A typo'd policy must be loud: a silently ignored key would leave the other policy running."""
+    assert resolve_label_floor({}, default=LabelFloor.PER_CHUNK) is LabelFloor.PER_CHUNK
+    assert (
+        resolve_label_floor({"label_floor": "universal"}, default=LabelFloor.PER_CHUNK)
+        is LabelFloor.UNIVERSAL
+    )
+    with pytest.raises(ValueError, match="label_floor must be one of"):
+        resolve_label_floor({"label_floor": "per-chunk"}, default=LabelFloor.PER_CHUNK)
+
+
+def test_guard_category_maps_the_floor_to_the_screening_vocabulary() -> None:
+    """The guard floor reports under the SAME categories screening.content_keyword emits."""
+    assert guard_category("prompt injection") == "prompt_injection"
+    assert guard_category("Harmful  Content") == "harmful"
+    assert guard_category("Malware Instructions") == "malware_instructions"
 
 
 # -- chunk→document bridge (W4 redaction seam) --------------------------------

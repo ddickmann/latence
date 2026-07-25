@@ -55,8 +55,14 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from latence_core.contracts import RiskMarker
 from latence_core.errors import ConfigError
-from latence_core.induced import LabelSlot, effective_labels
+from latence_core.induced import (
+    LABEL_FLOOR_CONFIG_KEY,
+    LabelFloor,
+    LabelSlot,
+    effective_labels,
+)
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
@@ -74,9 +80,11 @@ from latence_core.providers.perf import (
 )
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
+    GUARD_SAFETY_FLOOR,
     ChunkRedactionPlan,
     RedactionPolicy,
     finalize_redacted_chunk,
+    guard_category,
     parse_action,
     plan_chunk_redaction,
 )
@@ -100,18 +108,25 @@ class _PendingChunk:
     """A chunk's model-independent redaction context, resolved before the batched call (W7/W16).
 
     The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy action/allow-list, the
-    skip/near-empty decision, the chunk offset/page maps) and the effective PII label set (``config
-    ∪ induced``, W12) are per-chunk and model-independent, so they are computed once up front; a
-    flush then groups the detect-needing chunks by their ``labels`` and issues one
-    ``batch_extract_entities`` call per label group, mapping each per-text result back to its chunk
-    by identity, keeping emission in input-chunk order and the output record-for-record identical to
-    the per-chunk path.
+    skip/near-empty decision, the chunk offset/page maps) and the effective label sets are per-chunk
+    and model-independent, so they are computed once up front; a flush then groups the
+    detect-needing chunks by their label sets and issues one ``batch_extract_entities`` call per
+    group, mapping each per-text result back to its chunk by identity, keeping emission in
+    input-chunk order and the output record-for-record identical to the per-chunk path.
+
+    ``labels`` is the single list handed to the model: the effective PII types FOLLOWED BY the
+    effective guardrail categories (T2), so one forward covers both. ``guard`` is the casefolded
+    subset of those labels that must be read back as GUARDRAIL hits (a
+    :class:`~latence_core.contracts.RiskMarker` on the chunk) rather than PII spans to mask — a
+    label in both sets counts as a guard label, because dropping a security screen is the worse
+    error. ``guard`` is empty when guardrailing is off, and then ``labels`` is exactly the PII set.
     """
 
     chunk: ChunkRecord
     text: str
     plan: ChunkRedactionPlan
     labels: tuple[str, ...]
+    guard: frozenset[str] = frozenset()
 
 # Apache-2.0 weights (verified 2026-07-09, HF model card, not gated). Multilingual PII NER over
 # an mdeberta-v3 encoder via the fastino GLiNER2 framework.
@@ -121,6 +136,17 @@ _DEFAULT_MODEL = "fastino/GLiNER2-Guardrails-PII-Multi"
 # ``dynamic=True`` compile recompile-thrashes on varied-length production chunks. Same default, same
 # reason, as the twin ``fused_entity_relation.gliner2`` extractor.
 _COMPILE_DEFAULT = False
+
+# T2: this Provider's config ``pii_labels`` are a UNIVERSAL SAFETY FLOOR, not a relevance floor —
+# the one place in the redesign where the per-chunk rule does NOT apply to the config list. Induced
+# ``pii_types`` are scoped per chunk (they are relevance labels: what this chunk is likely to
+# contain); the configured floor is stamped onto EVERY chunk regardless of what that chunk induced,
+# because a leaked card/IBAN/SSN in a chunk whose induced types happen to omit finance is exactly
+# the leak a per-chunk-only screen would ship. The floor is ~9 fixed labels (the wizard's
+# ADR-0044 financial set), so PII label counts stay small either way and the zero-shot/label-count
+# argument that justifies PER_CHUNK for entity/relation extraction does not buy enough to trade a
+# security invariant for. Deliberately NOT configurable: see ``_reject_floor_subsetting``.
+_PII_LABEL_FLOOR = LabelFloor.UNIVERSAL
 
 
 class Gliner2PIIRedactor(AdapterBase):
@@ -134,6 +160,26 @@ class Gliner2PIIRedactor(AdapterBase):
         pii_labels: list[str]  — REQUIRED. The PII entity types to detect (e.g.
             ``["person", "email", "phone number"]``). GLiNER2 works best with lower-case,
             natural-language type names.
+        guardrails: bool  — screen each chunk for the LEARNED guardrail categories the
+            guardrails+PII checkpoint also covers (T2, default ``False`` ⇒ off, byte-identical to a
+            stack without it). ON: every chunk is screened for the UNIVERSAL guard floor
+            (:data:`~latence_core.redaction_policy.GUARD_SAFETY_FLOOR`) UNIONed with
+            ``guard_labels`` and with the categories induced for THAT chunk
+            (``induced_labels.guard_types``). The
+            floor is never subsetted per chunk — same rule, same reason, as the PII floor. A hit is
+            recorded as a :class:`~latence_core.contracts.RiskMarker` on the chunk (the
+            ``screening.content_keyword`` vocabulary, so consumers filter one category set), NOT
+            masked: guard categories mark risky content, they are not identifiers to redact.
+            Orthogonal to the deterministic keyword ``content_screen`` Stage, which is a separate
+            pre-filter and is untouched.
+        guard_labels: list[str]  — extra learned guardrail categories on top of the universal floor
+            (requires ``guardrails: true``; supplying them without it is a ConfigError, never a
+            silent no-op). A label that collides with a configured ``pii_labels`` entry is a
+            ConfigError.
+        label_floor: str  — accepted ONLY as ``universal`` (T2). Unlike the sibling extractor, this
+            Provider's config labels are SAFETY floors, not relevance labels, so they are applied to
+            every chunk and the knob cannot subset them; any other value is a ConfigError rather
+            than a silently ignored key.
         model: str  — the checkpoint id (default ``fastino/GLiNER2-Guardrails-PII-Multi``,
             Apache-2.0).
         threshold: float  — score threshold; spans below it are dropped (default 0.5).
@@ -181,12 +227,18 @@ class Gliner2PIIRedactor(AdapterBase):
     The model is loaded lazily and cached on first use, so constructing the Provider never
     downloads weights.
 
-    Induced labels (W12, ADR-0038): the detection label set is ``effective_labels(config ∪
-    induced)`` per document — the SAME seam the twin ``redaction.gliner_pii`` and the extractors
-    use — so a ``pii_type`` an upstream ``schema_induction`` Stage induced (e.g. a corpus-wide
-    ``IBAN`` / ``tax id``) is actually redacted. The config ``pii_labels`` floor stays mandatory
-    (validated non-empty at construction); induction only EXTENDS it. Absent induction the effective
-    set is exactly the config labels, byte-identical to before.
+    Induced labels (W12, ADR-0038; T2 floor policy): the detection label set is
+    ``effective_labels(config ∪ induced)`` per CHUNK — the SAME seam the twin
+    ``redaction.gliner_pii`` and the extractors use — so a ``pii_type`` an upstream
+    ``schema_induction`` Stage induced (e.g. an ``IBAN`` / ``tax id``) is actually redacted. The
+    per-chunk redesign scopes the INDUCED half to the chunk that induced it, and deliberately does
+    NOT scope the config half: the ``pii_labels`` floor and the guardrail floor are
+    :data:`~latence_core.induced.LabelFloor.UNIVERSAL` safety floors applied to every chunk, because
+    a leaked card in a chunk whose induced types omit finance is precisely the leak a per-chunk-only
+    screen would ship. That asymmetry — relevance labels scoped per chunk, safety floors universal —
+    is the T2 rule, and it is enforced here (``label_floor`` cannot subset it) and again,
+    model-independently, by the deterministic ADR-0044 regex floor at ``finalize_redacted_chunk``.
+    Absent induction the effective set is exactly the config labels, byte-identical to before.
 
     Batching (W7, ADR-0036 §1 / ADR-0033): GLiNER2 (mdeberta-v3) is an ENCODER, so a per-document
     ``extract_entities`` loop under-feeds the GPU. This Provider buffers up to ``batch_size``
@@ -284,6 +336,13 @@ class Gliner2PIIRedactor(AdapterBase):
         if "compile" not in self._config:
             self._config["compile"] = _COMPILE_DEFAULT
         self._labels = [str(label) for label in pii_labels]
+        # T2: the PII floor is universal and non-negotiable — reject any attempt to subset it.
+        self._reject_floor_subsetting(config)
+        # T2 guardrails: the learned guard categories this Provider's guardrails+PII checkpoint is
+        # also asked about. OFF by default, so an existing stack is byte-identical (no extra labels,
+        # no risk markers). ON ⇒ every chunk carries the UNIVERSAL guard floor, plus any operator
+        # categories, plus the categories induced FOR THAT CHUNK.
+        self._guardrails, self._guard_labels = self._resolve_guard_config(config)
         self._model_id = str(config.get("model", _DEFAULT_MODEL))
         self._threshold = float(config.get("threshold", 0.5))
         self._min_chars = int(config.get("min_chars", 1))
@@ -324,6 +383,76 @@ class Gliner2PIIRedactor(AdapterBase):
     def provider_name(self) -> str:
         """The registered entry-point name, used only to tag typed errors (never carries PII)."""
         return "redaction.gliner2"
+
+    def _reject_floor_subsetting(self, config: dict[str, Any]) -> None:
+        """Refuse a ``label_floor`` that would scope this Redactor's SAFETY floors per chunk (T2).
+
+        The sibling extractor exposes ``label_floor`` because entity/relation labels are relevance
+        labels. Here they are not: the configured ``pii_labels`` (the ADR-0044 financial set the
+        wizard emits) and the universal guard floor are security invariants that apply to every
+        chunk. Rather than accept the key and quietly ignore it — which would leave an operator
+        believing they had narrowed the PII screen when they had not, or vice versa — an attempt to
+        set it to anything but ``universal`` is a loud :class:`ConfigError` (ADR-0034). The
+        no-op ``universal`` value is accepted so a shared/templated config that states the policy
+        explicitly still loads.
+        """
+        raw = config.get(LABEL_FLOOR_CONFIG_KEY)
+        if raw is None or raw == LabelFloor.UNIVERSAL.value:
+            return
+        msg = (
+            f"{self.provider_name}: {LABEL_FLOOR_CONFIG_KEY}={raw!r} is not accepted — a "
+            "Redactor's config PII labels and its guardrail floor are UNIVERSAL safety floors "
+            "applied to every chunk, not per-chunk relevance labels (a leaked card in an "
+            "'irrelevant' chunk must still be masked). Only the INDUCED pii/guard types are "
+            f"scoped per chunk. Omit the key, or set {LABEL_FLOOR_CONFIG_KEY}: "
+            f"{LabelFloor.UNIVERSAL.value!r}."
+        )
+        raise ConfigError(msg)
+
+    def _resolve_guard_config(self, config: dict[str, Any]) -> tuple[bool, list[str]]:
+        """Resolve ``guardrails`` / ``guard_labels`` → (enabled, universal guard floor + extras).
+
+        Two knobs rather than one, so neither can silently do nothing: ``guardrails`` is the master
+        switch (default OFF ⇒ no guard labels reach the model and no risk marker is emitted, so an
+        existing stack is byte-identical), and ``guard_labels`` adds operator categories on top.
+        Supplying ``guard_labels`` WITHOUT ``guardrails: true`` is a :class:`ConfigError`, never a
+        silently ignored list (ADR-0034).
+
+        When enabled the returned list ALWAYS starts with the universal
+        :data:`~latence_core.redaction_policy.GUARD_SAFETY_FLOOR` categories — the guard twin of the
+        PII floor, applied to every chunk and not subsettable. A guard label that collides with a
+        configured PII label is a ConfigError too: the same string cannot both be masked as PII and
+        recorded as a guardrail hit, and resolving that silently would make one of the two controls
+        vanish.
+        """
+        enabled = config.get("guardrails", False)
+        if not isinstance(enabled, bool):
+            msg = f"{self.provider_name}: guardrails must be a bool (got {enabled!r})"
+            raise ConfigError(msg)
+        extra_raw = config.get("guard_labels", [])
+        if not isinstance(extra_raw, list):
+            msg = f"{self.provider_name}: guard_labels must be a list (got {extra_raw!r})"
+            raise ConfigError(msg)
+        extra = [str(label) for label in extra_raw if str(label).strip()]
+        if extra and not enabled:
+            msg = (
+                f"{self.provider_name}: guard_labels was supplied but guardrails is off, so the "
+                "categories would never be screened for. Set guardrails: true (or drop "
+                "guard_labels)."
+            )
+            raise ConfigError(msg)
+        if not enabled:
+            return False, []
+        pii_keys = {label.casefold() for label in self._labels}
+        collisions = sorted({label for label in extra if label.casefold() in pii_keys})
+        if collisions:
+            msg = (
+                f"{self.provider_name}: guard_labels {collisions} are also configured as "
+                "pii_labels; a category cannot be both masked as PII and recorded as a guardrail "
+                "hit. Rename one of them."
+            )
+            raise ConfigError(msg)
+        return True, [*GUARD_SAFETY_FLOOR, *extra]
 
     def _validate_perf_knobs(self) -> None:
         """Resolve the W9 ``quantize``/``compile`` knobs eagerly → ConfigError on a bad value.
@@ -557,9 +686,21 @@ class Gliner2PIIRedactor(AdapterBase):
         """Resolve everything a chunk needs BEFORE the (possibly batched) model call (W7/W16).
 
         The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy resolution, the
-        near-empty/skip decision, the chunk offset/page maps) and the effective PII label set are
+        near-empty/skip decision, the chunk offset/page maps) and the effective label sets are
         per-chunk and model-independent, so they are computed here up front; the flush then issues
         one batched model call per label group over the detect-needing chunks.
+
+        The T2 rule, both halves, in one place:
+
+        * **PII** — ``config floor ∪ induced[pii_types]`` under
+          :data:`_PII_LABEL_FLOOR` (``UNIVERSAL``). The induced half is per chunk; the configured
+          floor is NOT subsetted, so a chunk whose induction never mentioned finance is still
+          screened for the whole ADR-0044 set. (The deterministic regex floor at
+          ``finalize_redacted_chunk`` is the second, model-independent layer of the same
+          guarantee.)
+        * **GUARDRAILS** — ``universal guard floor ∪ config guard_labels ∪ induced[guard_types]``,
+          same policy, same reason: the induced categories are this chunk's relevance labels, the
+          floor is the security invariant. Empty when guardrailing is off.
         """
         plan = plan_chunk_redaction(
             chunk,
@@ -571,12 +712,36 @@ class Gliner2PIIRedactor(AdapterBase):
         # W12 label-source seam (ADR-0038): UNION the config PII floor with any pii_types the
         # OPTIONAL schema_induction Stage induced for this chunk (``induced_labels``), deduped +
         # order-stable — the SAME seam the twin ``redaction.gliner_pii`` and the extractors use, so
-        # a corpus-induced IBAN/tax-id label is actually redacted. Absent (the default, every
-        # existing stack) these are exactly the config labels — byte-identical. The config floor
-        # stays mandatory (``pii_labels`` is validated non-empty in __init__); induction only
-        # EXTENDS it.
-        pii_labels = effective_labels(self._labels, chunk.induced_labels, LabelSlot.PII)
-        return _PendingChunk(chunk=chunk, text=chunk.content, plan=plan, labels=tuple(pii_labels))
+        # an induced IBAN/tax-id label is actually redacted. Absent (the default, every existing
+        # stack) these are exactly the config labels — byte-identical. The config floor stays
+        # mandatory (``pii_labels`` is validated non-empty in __init__); induction only EXTENDS it.
+        pii_labels = effective_labels(
+            self._labels, chunk.induced_labels, LabelSlot.PII, floor=_PII_LABEL_FLOOR
+        )
+        guard_labels = (
+            effective_labels(
+                self._guard_labels, chunk.induced_labels, LabelSlot.GUARD, floor=_PII_LABEL_FLOOR
+            )
+            if self._guardrails
+            else []
+        )
+        guard_keys = {label.casefold() for label in guard_labels}
+        # ONE forward covers both: the guard categories ride the same batched call as the PII types
+        # (the checkpoint is a guardrails+PII model). A label claimed by BOTH sets is read back as a
+        # guard hit — dropping a security screen is worse than losing one mask, and the config-level
+        # collision is already a ConfigError, so this only arbitrates INDUCED overlap.
+        pii_keys = {label.casefold() for label in pii_labels}
+        labels = [
+            *pii_labels,
+            *(label for label in guard_labels if label.casefold() not in pii_keys),
+        ]
+        return _PendingChunk(
+            chunk=chunk,
+            text=chunk.content,
+            plan=plan,
+            labels=tuple(labels),
+            guard=frozenset(guard_keys),
+        )
 
     def _flush_buffer(self, buffer: list[_PendingChunk]) -> Iterator[ChunkRecord]:
         """Batch the detect-needing chunks (grouped by label set), then emit in input order (W16).
@@ -603,10 +768,10 @@ class Gliner2PIIRedactor(AdapterBase):
             # Group by effective label set (one label set per batched call). Order-stable: a dict
             # preserves first-seen group order, and emission below re-walks the buffer in input
             # order.
-            groups: dict[tuple[str, ...], list[_PendingChunk]] = {}
+            groups: dict[tuple[tuple[str, ...], frozenset[str]], list[_PendingChunk]] = {}
             for pending in detect:
-                groups.setdefault(pending.labels, []).append(pending)
-            for labels, pendings in groups.items():
+                groups.setdefault((pending.labels, pending.guard), []).append(pending)
+            for (labels, _guard), pendings in groups.items():
                 texts = [p.text for p in pendings]
                 # dogfood-2b-process: split the group's texts into token-budget MICRO-BATCHES and
                 # issue one ``batch_extract_entities`` call per micro-batch, concatenating results
@@ -635,19 +800,35 @@ class Gliner2PIIRedactor(AdapterBase):
                     raw_by_chunk[id(pending)] = raw
         for pending in buffer:
             accepted: list[tuple[int, int, str, str, str, float]] = []
+            markers: list[RiskMarker] = []
             if pending.plan.needs_detection:
+                raw = raw_by_chunk[id(pending)]
                 accepted = self._accepted_from_raw(
                     pending.text,
-                    raw_by_chunk[id(pending)],
+                    raw,
                     pending.plan.allowed,
+                    guard=pending.guard,
                 )
-            yield finalize_redacted_chunk(pending.chunk, pending.plan, accepted, self._salt)
+                markers = _guard_markers(raw, pending.guard)
+            redacted = finalize_redacted_chunk(pending.chunk, pending.plan, accepted, self._salt)
+            # A guard hit is FLAGGED, not masked: it marks the chunk's *content* as risky (the
+            # screening.content_keyword precedent — a RiskMarker that survives into the corpus so a
+            # RAG consumer can exclude the chunk), whereas masking would silently corrupt the text.
+            # No hits ⇒ the record is returned untouched, so a guardrail-off (or clean) run is
+            # byte-identical.
+            yield (
+                redacted.model_copy(update={"risk_markers": [*redacted.risk_markers, *markers]})
+                if markers
+                else redacted
+            )
 
     @staticmethod
     def _accepted_from_raw(
         text: str,
         raw: Any,
         allowed: set[str] | None,
+        *,
+        guard: frozenset[str] = frozenset(),
     ) -> list[tuple[int, int, str, str, str, float]]:
         """Build an ordered, non-overlapping candidate list from THIS chunk's raw GLiNER2 output.
 
@@ -661,6 +842,11 @@ class Gliner2PIIRedactor(AdapterBase):
         results. Returns ``(local_start, local_end, pii_type, value, detector, confidence)`` tuples
         (chunk-content offsets); :func:`~latence_core.redaction_policy.finalize_redacted_chunk`
         derives spans + pages + placeholders + masking.
+
+        ``guard`` (T2) is the casefolded set of GUARDRAIL categories this chunk was screened for.
+        Those labels rode the same forward but are NOT PII: they are read out separately by
+        :func:`_guard_markers` as risk markers, so they are dropped here rather than masked. Empty
+        (guardrailing off) ⇒ this method behaves exactly as before.
         """
         # Faithful parse of the REAL gliner2 shape: a top-level {"entities": {label: [rows]}}
         # dict. A flat-list mis-parse (the gliner-library shape) would find no per-label rows
@@ -680,6 +866,8 @@ class Gliner2PIIRedactor(AdapterBase):
             pii_type = str(label)
             if not pii_type:
                 continue
+            if pii_type.casefold() in guard:
+                continue  # a guardrail category — flagged, never masked (see _guard_markers)
             if allowed is not None and pii_type not in allowed:
                 continue
             for row in rows:
@@ -700,3 +888,52 @@ class Gliner2PIIRedactor(AdapterBase):
             accepted.append((start, end, pii_type, value, f"gliner2:{pii_type}", score))
             last_end = end
         return accepted
+
+
+def _guard_markers(raw: Any, guard: frozenset[str]) -> list[RiskMarker]:
+    """The GUARDRAIL half of one chunk's raw GLiNER2 output → :class:`RiskMarker`s (T2).
+
+    The guardrails+PII checkpoint returns guard categories in the SAME per-label dict as PII types,
+    so this reads the guard labels back out of ``raw`` and records ONE marker per category that
+    fired: ``score`` is the strongest hit for that category (a chunk with three weak injection
+    fragments is not three separate risks), ``category`` is the canonical screening vocabulary
+    (:func:`~latence_core.redaction_policy.guard_category`, the same values
+    ``screening.content_keyword`` emits, so a consumer filters ONE set), and markers are emitted in
+    sorted category order so the record is deterministic.
+
+    The ``reason`` deliberately carries the category, the hit count and the chunk-local offsets and
+    **never the matched text** (C2/C6): a marker survives into the exported corpus, and echoing the
+    harmful/injected string into it would re-publish exactly what was flagged.
+
+    Returns ``[]`` when guardrailing is off or nothing fired — the byte-identical path.
+    """
+    if not guard:
+        return []
+    by_label: Any = raw["entities"] if isinstance(raw, dict) else raw
+    if not isinstance(by_label, dict):
+        # The same faithful-shape contract _accepted_from_raw enforces; it runs first on every
+        # chunk, so an unexpected shape has already surfaced as a typed error before this point.
+        return []
+    hits: dict[str, tuple[float, int]] = {}
+    for label, rows in by_label.items():
+        label_str = str(label)
+        if label_str.casefold() not in guard or not isinstance(rows, list):
+            continue
+        scores = [min(max(float(row.get("confidence", 1.0)), 0.0), 1.0) for row in rows]
+        if not scores:
+            continue
+        category = guard_category(label_str)
+        best, count = hits.get(category, (0.0, 0))
+        hits[category] = (max(best, *scores), count + len(scores))
+    return [
+        RiskMarker(
+            category=category,
+            detector="redaction.gliner2:guardrail",
+            score=score,
+            reason=(
+                f"learned guardrail category {category!r} matched {count} span(s) in this chunk "
+                "(flagged, not masked; the matched text is deliberately not echoed)"
+            ),
+        )
+        for category, (score, count) in sorted(hits.items())
+    ]

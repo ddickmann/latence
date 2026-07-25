@@ -188,7 +188,10 @@ def test_schema_version_is_current() -> None:
     # 13 the H-C1 §4 redaction no-op floor (RedactionRecord gains
     # ``redaction_disabled_for_sensitive``); 12 the DeltaChurn affected-set-witness fields (issue
     # #42); 11 the S4 offset-map coordinate fix; 10 the S11 incremental-delta contracts.
-    assert SCHEMA_VERSION == 16
+    # 17 is T2 per-chunk extraction: InducedLabels gains the ``guard_types`` slot (guardrail
+    # categories, the learned twin of ``pii_types``), so every learned label set a Provider prompts
+    # with has a per-record slot. Additive + defaulted to [].
+    assert SCHEMA_VERSION == 17
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

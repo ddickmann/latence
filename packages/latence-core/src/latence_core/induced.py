@@ -22,12 +22,20 @@ present (in its given order). Dedup is **case-insensitive** (on ``casefold()``, 
 depth): the inducing Provider emits its labels in a canonical casefolded normal form, but config
 labels keep their given surface form, so a config ``Bank`` and an induced ``bank`` collapse to one
 (``Bank``, the config surface form kept) rather than prompting the extractor with both.
+
+**T2 (per-chunk extraction).** With per-chunk induction, unioning a global config floor onto every
+chunk re-inflates exactly the label count the redesign shrank. So the union is now a POLICY the
+caller states, :class:`LabelFloor`: ``UNIVERSAL`` (the default — config labels are a non-subsettable
+SAFETY floor: a Redactor's PII floor, the universal guard floor) or ``PER_CHUNK`` (config labels are
+a RELEVANCE floor: a recall net used only when the chunk induced nothing, so an inducing chunk is
+scored against its OWN types alone). Relevance labels are scoped per chunk; safety floors are
+universal — that asymmetry is the whole rule, and it lives here rather than in each Provider.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -39,13 +47,75 @@ class LabelSlot(StrEnum):
     """Which slot of an :class:`~latence_core.contracts.InducedLabels` an extractor reads.
 
     An Entity extractor unions the induced ``entity_types``; a Relation extractor the
-    ``relation_types``; a Redaction (PII) extractor the ``pii_types`` — named so a caller picks its
-    slot explicitly rather than passing a raw attribute name.
+    ``relation_types``; a Redaction (PII) extractor the ``pii_types``; a guardrails-capable
+    Redaction Provider the ``guard_types`` — named so a caller picks its slot explicitly rather
+    than passing a raw attribute name.
     """
 
     ENTITY = "entity_types"
     RELATION = "relation_types"
     PII = "pii_types"
+    GUARD = "guard_types"
+
+
+class LabelFloor(StrEnum):
+    """Whether a Stage's CONFIG labels are a UNIVERSAL safety floor or a PER-CHUNK relevance floor.
+
+    This is the one decision the per-chunk extraction redesign turns on, and it is deliberately
+    NOT a global setting: the two kinds of label are governed by opposite rules.
+
+    * ``UNIVERSAL`` — the config labels are a **safety floor**. They are applied to EVERY record no
+      matter what that record induced, because they encode a security invariant rather than a
+      relevance judgement: a leaked card number in a chunk "about" shipping logistics must still be
+      masked, and a prompt injection hidden in an "irrelevant" chunk must still be flagged. A
+      Redaction Provider's PII floor (ADR-0044) and the universal guard floor
+      (:data:`~latence_core.redaction_policy.GUARD_SAFETY_FLOOR`) are UNIVERSAL, and a Provider
+      that owns one must not expose a knob that subsets it. This is the historical behaviour of
+      :func:`effective_labels` and stays the DEFAULT, so every existing caller is unchanged.
+
+    * ``PER_CHUNK`` — the config labels are a **relevance floor**: a recall safety net for the case
+      where induction produced nothing for this record. When the record DID induce labels for the
+      slot, the record's own induced set is the whole effective set and the config floor is not
+      unioned on. This is the per-chunk extraction path: zero-shot NER/RE precision degrades as the
+      label count grows, so scoring a chunk against types it has no business containing is a pure
+      tax. The trade is explicit — ``UNIVERSAL`` buys recall insurance at the cost of label-count
+      purity; ``PER_CHUNK`` buys precision (and a far smaller span-scoring tensor) at the cost of
+      that insurance. For ENTITY/RELATION labels, which are relevance labels by nature, precision
+      is the SOTA choice; for PII/guardrail labels it would be a security regression.
+
+    Under ``PER_CHUNK`` a record that induced NOTHING for the slot still falls back to the config
+    labels: an extractor prompted with an EMPTY label set would silently extract nothing, which is
+    a worse failure than an over-broad one. That fallback is also what keeps every stack WITHOUT a
+    ``schema_induction`` Stage byte-identical under either policy.
+    """
+
+    UNIVERSAL = "universal"
+    PER_CHUNK = "per_chunk"
+
+
+#: The config key every Provider exposes the :class:`LabelFloor` policy under, so an operator
+#: writes the same knob whichever extraction Provider a Pipeline runs.
+LABEL_FLOOR_CONFIG_KEY = "label_floor"
+
+
+def resolve_label_floor(config: dict[str, Any], *, default: LabelFloor) -> LabelFloor:
+    """Read the ``label_floor`` knob out of a Provider config → a :class:`LabelFloor`.
+
+    Absent ⇒ ``default`` (each Provider states its own, because the right default differs: a
+    relevance-label extractor defaults ``PER_CHUNK``, a safety-floor Redactor is pinned
+    ``UNIVERSAL``). Any value that is not one of the enum's is a ``ValueError`` naming the accepted
+    values — a typo must be a loud operator error, never a silently ignored key that leaves the
+    stack running the other policy (ADR-0034).
+    """
+    if LABEL_FLOOR_CONFIG_KEY not in config:
+        return default
+    raw = config[LABEL_FLOOR_CONFIG_KEY]
+    for candidate in LabelFloor:
+        if raw == candidate.value:
+            return candidate
+    accepted = ", ".join(repr(candidate.value) for candidate in LabelFloor)
+    msg = f"{LABEL_FLOOR_CONFIG_KEY} must be one of {accepted} (got {raw!r})"
+    raise ValueError(msg)
 
 
 def induced_for_slot(induced: InducedLabels | None, slot: LabelSlot) -> list[str]:
@@ -61,32 +131,52 @@ def induced_for_slot(induced: InducedLabels | None, slot: LabelSlot) -> list[str
     return list(value) if isinstance(value, list) else []
 
 
-def effective_labels(
-    config_labels: list[str], induced: InducedLabels | None, slot: LabelSlot
-) -> list[str]:
-    """``config_labels ∪ induced[slot]`` — config floor first, then new induced, deduped, ordered.
-
-    The order-stable union an extractor prompts with: every config label in its given order, then
-    each induced label of ``slot`` not already present, in its given order. Dedup is
-    CASE-INSENSITIVE (on ``casefold()``, W12): a config ``Bank`` and an induced ``bank`` collapse to
-    one entry (the config surface form is kept, since config labels come first). A record with no
-    induced labels (``induced is None`` or an empty slot) returns the config labels **unchanged**
-    (same list contents + order) — so an existing stack with no ``schema_induction`` Stage is
-    byte-identical (a config list is only ever deduped against itself, case-insensitively).
-    """
+def _dedup_ordered(labels: Iterable[str]) -> list[str]:
+    """``labels`` with case-insensitive duplicates removed, first surface form + order kept."""
     seen: set[str] = set()
     out: list[str] = []
-    for label in config_labels:
-        key = label.casefold()
-        if key not in seen:
-            seen.add(key)
-            out.append(label)
-    for label in induced_for_slot(induced, slot):
+    for label in labels:
         key = label.casefold()
         if key not in seen:
             seen.add(key)
             out.append(label)
     return out
+
+
+def effective_labels(
+    config_labels: list[str],
+    induced: InducedLabels | None,
+    slot: LabelSlot,
+    *,
+    floor: LabelFloor = LabelFloor.UNIVERSAL,
+) -> list[str]:
+    """The label set an extractor prompts this record with, deduped and order-stable.
+
+    ``floor`` decides what the config labels MEAN (see :class:`LabelFloor`), and it is the only
+    knob:
+
+    * ``LabelFloor.UNIVERSAL`` (the default, unchanged behaviour) — ``config_labels ∪
+      induced[slot]``: every config label in its given order, then each induced label of ``slot``
+      not already present, in its given order. The config labels are a SAFETY floor applied to
+      every record.
+    * ``LabelFloor.PER_CHUNK`` — the record's OWN ``induced[slot]`` when it induced any, else the
+      config labels. The config labels are a RELEVANCE floor: a recall net for a record induction
+      said nothing about, not a set stamped onto every record.
+
+    Dedup is CASE-INSENSITIVE (on ``casefold()``, W12): under ``UNIVERSAL`` a config ``Bank`` and an
+    induced ``bank`` collapse to one entry and the CONFIG surface form is kept (config labels come
+    first); under ``PER_CHUNK`` the induced surface form is kept, since the induced set is the whole
+    set. A record with no induced labels (``induced is None`` or an empty slot) returns the config
+    labels **unchanged** (same contents + order) under EITHER policy — so an existing stack with no
+    ``schema_induction`` Stage is byte-identical whichever floor a Provider chooses (a config list
+    is only ever deduped against itself, case-insensitively).
+    """
+    induced_slot = induced_for_slot(induced, slot)
+    if floor is LabelFloor.PER_CHUNK and induced_slot:
+        # The chunk's own set IS the effective set — no global floor re-inflates it. Empty-induced
+        # falls through to the config labels below (never an empty prompt: see LabelFloor).
+        return _dedup_ordered(induced_slot)
+    return _dedup_ordered([*config_labels, *induced_slot])
 
 
 def induced_labels_by_document(

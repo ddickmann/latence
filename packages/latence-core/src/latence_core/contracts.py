@@ -164,7 +164,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # mirroring the risk_markers/induced_labels/context_header annotation precedent. The document-level
 # :class:`RedactionRecord` contract is RETAINED but DEPRECATED (the superseded doc-level path). See
 # ADR-0042.
-SCHEMA_VERSION = 16
+#
+# v17 (T2 per-chunk extraction): :class:`InducedLabels` gains a fourth slot, ``guard_types`` — the
+# GUARDRAIL categories induced for a chunk, the learned-guardrail twin of ``pii_types``. The
+# blessed Redaction checkpoint (``fastino/GLiNER2-Guardrails-PII-Multi``) is a guardrails+PII
+# model, so its guard categories follow the SAME per-chunk rule the redesign applies to every
+# LEARNED label set: induced per chunk, UNIONed onto a small UNIVERSAL guard safety floor that is
+# never subsetted (a security invariant, not a relevance label — see
+# :data:`latence_core.redaction_policy.GUARD_SAFETY_FLOOR`). Additive and defaulted to ``[]``, so a
+# record produced without guard induction carries an empty slot and every extractor behaves exactly
+# as before; the deterministic keyword ``screening.content_keyword`` pre-filter is a SEPARATE stage
+# and is untouched.
+SCHEMA_VERSION = 17
 
 
 class Provenance(BaseModel):
@@ -484,6 +495,13 @@ class InducedLabels(BaseModel):
     it (audit); ``confidences`` maps a label to the model's 0..1 score for it (auditable, optional
     — a label with no score is simply absent from the map). A slot the model evidenced no types for
     is an empty list, not a fabricated one.
+
+    v17 adds the fourth slot ``guard_types`` (guardrail categories), so every LEARNED label set a
+    downstream Provider prompts with — entity, relation, PII, guardrail — has a per-record slot.
+    Whether a slot's config labels are a droppable RELEVANCE floor or a non-subsettable UNIVERSAL
+    SAFETY floor is the consumer's decision, expressed at the
+    :func:`latence_core.induced.effective_labels` seam via
+    :class:`~latence_core.induced.LabelFloor`.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -497,6 +515,16 @@ class InducedLabels(BaseModel):
     )
     pii_types: list[str] = Field(
         default_factory=list, description="Sanitized PII types induced for the document."
+    )
+    guard_types: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Sanitized GUARDRAIL categories induced for the record (v17) — the learned-guardrail "
+            "twin of ``pii_types``, consumed by a guardrails-capable Redaction Provider. Like "
+            "every other slot these are RELEVANCE labels scoped to the record; the UNIVERSAL guard "
+            "safety floor (latence_core.redaction_policy.GUARD_SAFETY_FLOOR) is unioned on top and "
+            "is never subsetted. Empty (default) ⇒ no guard induction ran."
+        ),
     )
     model_id: str = Field(
         ..., min_length=1, description="The LLM that induced these labels (audit)."
