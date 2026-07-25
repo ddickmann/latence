@@ -1302,6 +1302,34 @@ def _build_sota_stages(
         }
     )
 
+    # 9b) T3 (ADR-0054) — corpus-level TYPE-vocabulary canonicalization, the resolution phase's
+    # type-side twin of the disambiguator. This stack induces its label schema PER CHUNK, which is
+    # what gives each chunk a small, relevant, uncapped label set (the recall + precision win, and
+    # the fix for the label-dimension OOM) — and what makes chunk A say `org` where chunk B says
+    # `organization` and chunk C `company`. This Stage folds that drift into ONE canonical
+    # vocabulary and remaps every mention + relation onto it BEFORE `disambiguate`, because the
+    # entity resolver votes a cluster's type from its members' labels and gates its low-precision
+    # rungs on type compatibility: drifted types in ⇒ split clusters and mistyped entities out.
+    # The semantic rung is ON here (it is the only rung that can see `org` ≡ `company`), riding the
+    # SAME Granite r2 embedder block the resolver already loads over the handful of type STRINGS —
+    # a negligible marginal cost, no second model. The raw induced label survives on each record
+    # and the alias map lands on the Quality Report, so the operator sees and can correct every
+    # fold. It becomes the disambiguator's sole mention/relation source, so the drifted labels
+    # cannot reach the KG by a side path.
+    stages.append(
+        {
+            "name": "consolidate_types",
+            "capability": "type_consolidation",
+            "provider": "type_consolidation.cascade",
+            "depends_on": disambiguate_inputs,
+            "config": {
+                "use_embedding_merge": True,
+                "embedder": _sota_embedder_block(),
+            },
+        }
+    )
+    disambiguate_inputs = ["consolidate_types"]
+
     # 10) the enterprise GLinker disambiguator (ADR-0046) — neural L2→L3→L4→L0 linking + the audited
     # 5-strategy resolver. Granite r2 embedder attached (opt-in STS rung). use_embedding_merge /
     # min_similarity are NOT set — the provider defaults (embedding-merge OFF, fuzzy + the

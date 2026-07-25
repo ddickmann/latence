@@ -60,6 +60,7 @@ class Capability(StrEnum):
     RELATION = "relation"
     REDACTION = "redaction"
     PROFILING = "profiling"
+    TYPE_CONSOLIDATION = "type_consolidation"
     DISAMBIGUATION = "disambiguation"
     GRAPH = "graph"
     GRAPH_COMPLETION = "graph_completion"
@@ -93,6 +94,7 @@ _PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     "fused_entity_relation": Capability.RELATION,
     "redaction": Capability.REDACTION,
     "profiling": Capability.PROFILING,
+    "type_consolidation": Capability.TYPE_CONSOLIDATION,
     "disambiguation": Capability.DISAMBIGUATION,
     "graph": Capability.GRAPH,
     "graph_completion": Capability.GRAPH_COMPLETION,
@@ -1263,6 +1265,43 @@ def _profiling_case() -> ConformanceCase:
     )
 
 
+def _type_consolidation_case() -> ConformanceCase:
+    """Type Consolidation: the run's mentions + relations back, relabelled onto one vocabulary.
+
+    The output carrier is the INPUT carrier (a mention→mention transform), so C1 audits the same
+    contract-valid mentions/relations the extractors emit — which is exactly the point: a
+    consolidator that corrupted a record on the way through would fail C1 here rather than in the
+    graph. An empty corpus yields an empty consolidation and an empty vocabulary, never a crash.
+    """
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        c = fixtures.canonical_corpus()
+        result = provider.consolidate(c.mentions, c.relations)
+        out: list[Record] = [*result.mentions, *result.relations]
+        return out
+
+    def valid_output(records: Sequence[object]) -> bool:
+        return _records_contract_valid(records, empty_ok=False)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # Flattened to the records the empty corpus produced (none), the shape the graceful-path
+        # classifier reads — an empty corpus is a defined empty, never a crash.
+        def _empty() -> list[Record]:
+            result = provider.consolidate([], [])
+            out: list[Record] = [*result.mentions, *result.relations]
+            return out
+
+        return _capture_raise(_empty)
+
+    return ConformanceCase(
+        capability=Capability.TYPE_CONSOLIDATION,
+        config={},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+    )
+
+
 def _disambiguation_case() -> ConformanceCase:
     """Disambiguation: canonical entities/relations from mentions; no mentions → none (graceful)."""
 
@@ -1862,6 +1901,7 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
     Capability.RELATION: _relation_case(stub_scoped=False, gliner=False),
     Capability.REDACTION: _redaction_case(stub_scoped=False),
     Capability.PROFILING: _profiling_case(),
+    Capability.TYPE_CONSOLIDATION: _type_consolidation_case(),
     Capability.DISAMBIGUATION: _disambiguation_case(),
     Capability.GRAPH: _graph_case(),
     Capability.GRAPH_COMPLETION: _graph_completion_case(),

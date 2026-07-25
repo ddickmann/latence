@@ -67,7 +67,7 @@ executable by any **Runner**. Every record at every Stage carries immutable
   Run a stack, run a bake-off, tune per device, serve OCR with vLLM.
 
 - :material-scale-balance: **[Decision Log (ADRs)](adr/index.md)**
-  The 52 architecture decisions behind the framework.
+  The 53 architecture decisions behind the framework.
 
 </div>
 

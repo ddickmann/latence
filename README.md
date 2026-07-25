@@ -10,7 +10,7 @@ The framework defines the **stack and the orchestration contracts**. It does **n
 > security review, reliability/chaos (crash-resume, Delta idempotency), a
 > performance baseline, and determinism ([`issues/gate/G1-RESULTS.md`](./issues/gate/G1-RESULTS.md)).
 > The grilled architecture lives in [`CONTEXT.md`](./CONTEXT.md) (the glossary)
-> and [`docs/adr/`](./docs/adr/) (52 architecture decisions), with
+> and [`docs/adr/`](./docs/adr/) (53 architecture decisions), with
 > [`docs/PORTING-MAP.md`](./docs/PORTING-MAP.md) recording what was mined from four
 > private production repos. **Not yet 1.0:** performance-at-scale and deeper
 > structural file validation are flagged as Phase-2 hardening; see the honest
@@ -167,7 +167,7 @@ distribution, and each one has its own README.
 ## Documentation & governance
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary; the canonical language of the project.
-- [`docs/adr/`](./docs/adr/) — the 52 architecture decisions.
+- [`docs/adr/`](./docs/adr/) — the 53 architecture decisions.
 - [`docs/TUTORIAL-fresh-pod-walkthrough.md`](./docs/TUTORIAL-fresh-pod-walkthrough.md) — guided setup (`latence setup` → `latence process`) and the full stage-by-stage walkthrough.
 - [`docs/running-a-stack.md`](./docs/running-a-stack.md) — run + validate a full-spine stack (`latence stack validate`).
 - [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) — run a per-Stage provider bake-off (`latence bake-off`).

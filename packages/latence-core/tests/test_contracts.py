@@ -181,16 +181,21 @@ def _chunk_provenance() -> Provenance:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 16 by W16 chunk-level redaction (ChunkRecord gains the additive ``masked_content`` +
+    # Bumped to 17 by T3 corpus-wide TYPE canonicalization (EntityMention +
+    # RelationMention gain the additive, defaulted ``raw_label`` — the pre-canonicalization
+    # induced type kept for audit when a Type-Consolidation Stage rewrote ``label``, ADR-0054);
+    # 16 was W16 chunk-level redaction (ChunkRecord gains the additive ``masked_content`` +
     # ``pii_spans`` + ``redaction_disabled_for_sensitive`` fields; Redaction becomes a chunk→chunk
     # transform, ADR-0042); 15 was W13 context enrichment (ContextHeader + ChunkRecord's additive
     # ``context_header``); 14 the W4 schema induction (InducedLabels + additive ``induced_labels``);
     # 13 the H-C1 §4 redaction no-op floor (RedactionRecord gains
     # ``redaction_disabled_for_sensitive``); 12 the DeltaChurn affected-set-witness fields (issue
     # #42); 11 the S4 offset-map coordinate fix; 10 the S11 incremental-delta contracts.
-    # 17 is T2 per-chunk extraction: InducedLabels gains the ``guard_types`` slot (guardrail
-    # categories, the learned twin of ``pii_types``), so every learned label set a Provider prompts
-    # with has a per-record slot. Additive + defaulted to [].
+    # 17 also carries T2 per-chunk extraction: InducedLabels gains the ``guard_types`` slot
+    # (guardrail categories, the learned twin of ``pii_types``), so every learned label set a
+    # Provider prompts with has a per-record slot. Additive + defaulted to []. Both T2's and T3's
+    # additions ship in the SAME revision — they land together, so no record carries one without
+    # the other.
     assert SCHEMA_VERSION == 17
 
 

@@ -69,6 +69,16 @@ class CapabilityKind(StrEnum):
     ONLY — the stored chunk text stays byte-unchanged. It depends_on the chunk stream AND Graph
     Assembly and is genuinely optional — a stack without it is byte-identical to today (the
     ``context_header`` field defaults None and the Export prepends nothing).
+    T3 (ADR-0054) adds the OPTIONAL ``TYPE_CONSOLIDATION`` Capability: a corpus-level
+    mention→mention Stage placed between extraction and Disambiguation that canonicalizes the
+    run's TYPE vocabulary. Per-chunk label induction gives each chunk a small, relevant, uncapped
+    label set — and produces type drift (``org``/``organization``/``company``), because nothing
+    forces one schema upstream any more. This Stage folds the drifted labels into canonical
+    clusters, rewrites every mention's and relation's ``label`` (keeping the raw induced label on
+    ``raw_label`` for audit) and emits a :class:`~latence_core.contracts.TypeVocabulary`. It is
+    the type-side twin of Disambiguation: consistency is EARNED downstream in the resolution
+    phase, never IMPOSED upstream by capping a corpus schema. Genuinely optional — a stack
+    without it is byte-identical to today (``raw_label`` defaults None and no label is rewritten).
     """
 
     SOURCE = "source"
@@ -82,6 +92,7 @@ class CapabilityKind(StrEnum):
     FUSED_ENTITY_RELATION = "fused_entity_relation"
     REDACTION = "redaction"
     PROFILING = "profiling"
+    TYPE_CONSOLIDATION = "type_consolidation"
     DISAMBIGUATION = "disambiguation"
     GRAPH_ASSEMBLY = "graph_assembly"
     GRAPH_COMPLETION = "graph_completion"

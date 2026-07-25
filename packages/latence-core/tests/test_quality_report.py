@@ -29,9 +29,12 @@ from latence_core.runner import LocalRunner
 
 
 def test_schema_version_is_v20() -> None:
-    # v20 (T5): StageMetrics gained the induction COST columns (calls / dedup cache hits /
-    # endpoint-reported tokens / budget-exhausted), so per-chunk induction's cost is readable in
-    # the report. v19 (W13, ADR-0039): the report gained an optional ``context_enrichment`` roll-up
+    # v20 carries BOTH extraction-redesign additions (they ship in the same revision). T5:
+    # StageMetrics gained the induction COST columns (calls / dedup cache hits / endpoint-reported
+    # tokens / budget-exhausted), so per-chunk induction's cost is readable in the report. T3
+    # (ADR-0054): the report gained an optional ``type_consolidation`` roll-up (N raw induced types
+    # -> M canonical types + the alias->canonical map applied).
+    # v19 (W13, ADR-0039): the report gained an optional ``context_enrichment`` roll-up
     # (chunks_enriched / avg_neighbors_per_chunk / hub_entities_capped). v18 (H-C1 §4):
     # RedactionQuality gained ``redaction_disabled_for_sensitive``. v17 (P3-F3) added the optional
     # ``conformance`` roll-up; v16 (P3-F1) the StageMetrics profile/device columns.

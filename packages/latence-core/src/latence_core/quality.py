@@ -94,12 +94,21 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # a :class:`ContextEnrichmentQuality` roll-up (``chunks_enriched`` / ``avg_neighbors_per_chunk`` /
 # ``hub_entities_capped``), counts-only (no content), present only when the run had a
 # ``context_enrichment`` Stage. Additive and defaulted None, so a v18 report still validates.
-# v20 (T5, per-chunk induction cost): :class:`StageMetrics` gains the induction COST columns —
+# v20 (the extraction redesign) carries TWO additive report changes that ship in the SAME revision —
+# they land together, so no report ever exists with one and not the other:
+# v20a (T5, per-chunk induction cost): :class:`StageMetrics` gains the induction COST columns —
 # ``induction_calls`` / ``induction_cache_hits`` / ``induction_prompt_tokens`` /
 # ``induction_completion_tokens`` / ``induction_budget_exhausted``. Per-chunk induction is one LLM
 # call per distinct chunk text, so a run's induction cost has to be readable in the report rather
 # than inferred; the dedup cache-hit count is what shows the saving. Additive and defaulted
 # 0/False, so a v19 report still validates.
+# v20b (T3 type canonicalization, ADR-0054): the report gains an optional ``type_consolidation`` —
+# a :class:`TypeConsolidationQuality` roll-up ("N raw induced types -> M canonical types" plus the
+# alias->canonical map actually applied, for entities and relations), present only when the run had
+# a ``type_consolidation`` Stage. It is the operator's window onto the downstream canonicalization
+# that makes per-chunk induction safe: every fold is visible and correctable through the Stage's
+# ``aliases`` config. Type labels + counts only (never document text), safe to persist. Additive
+# and defaulted None, so a v19 report still validates.
 QUALITY_SCHEMA_VERSION = 20
 
 
@@ -494,6 +503,39 @@ class ProfilingQuality(BaseModel):
     top_co_occurrences: dict[str, int] = Field(default_factory=dict)
 
 
+class TypeConsolidationQuality(BaseModel):
+    """Type-Consolidation quality: how much TYPE drift the run collapsed (T3, ADR-0054).
+
+    Emitted when a run had a Type-Consolidation Stage. This is the operator-facing half of the
+    T3 contract: per-chunk induction is only safe if a human can SEE what the downstream
+    canonicalization did and correct it, so the report carries both the headline (``N`` raw
+    induced types → ``M`` canonical types) and the full ``alias → canonical`` map that produced
+    it. An operator who disagrees with a fold sets the Stage's ``aliases`` config and the next run
+    is different — deterministically, and without touching a model.
+
+    Every number here is DERIVED FROM THE EMITTED RECORDS (each mention's ``raw_label`` next to
+    its canonical ``label``), not from the Stage's self-report, so the report cannot claim a
+    consolidation the records do not show.
+
+    ``raw_entity_types`` / ``canonical_entity_types`` are the distinct entity-type counts before
+    and after (equal ⇒ nothing was folded); the relation pair is the same for relation types.
+    ``entity_alias_map`` / ``relation_alias_map`` are the rewrites actually applied, sorted.
+    ``mentions_remapped`` / ``relations_remapped`` count the records whose label changed.
+    Counts + type labels only (never document text), so it is safe to persist.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw_entity_types: int = 0
+    canonical_entity_types: int = 0
+    raw_relation_types: int = 0
+    canonical_relation_types: int = 0
+    mentions_remapped: int = 0
+    relations_remapped: int = 0
+    entity_alias_map: dict[str, str] = Field(default_factory=dict)
+    relation_alias_map: dict[str, str] = Field(default_factory=dict)
+
+
 class DisambiguationQuality(BaseModel):
     """Disambiguation-Stage quality: merge + link + normalisation statistics (S8).
 
@@ -754,6 +796,10 @@ class QualityReport(BaseModel):
     redaction: RedactionQuality | None = None
     # Present when the run had a Profiling Stage.
     profiling: ProfilingQuality | None = None
+    # T3 (ADR-0054): present when the run had a Type-Consolidation Stage — how much TYPE drift
+    # per-chunk induction produced and how much of it the resolution phase collapsed, with the
+    # alias->canonical map an operator reviews and corrects. None otherwise.
+    type_consolidation: TypeConsolidationQuality | None = None
     # Present when the run had a Disambiguation Stage.
     disambiguation: DisambiguationQuality | None = None
     # Present when the run had a Graph Assembly Stage.
@@ -828,6 +874,7 @@ class QualityReport(BaseModel):
             ("Relations", self.relations),
             ("Redaction", self.redaction),
             ("Profiling", self.profiling),
+            ("TypeConsolidation", self.type_consolidation),
             ("Disambiguation", self.disambiguation),
             ("Graph", self.graph),
             ("ContextEnrichment", self.context_enrichment),
@@ -837,6 +884,31 @@ class QualityReport(BaseModel):
             lines.append("")
             lines.append(f"## Stage metrics present: {', '.join(present)}")
         lines.extend(_render_induction_cost(self.stages))
+        if self.type_consolidation is not None:
+            # The T3 operator-facing section: the headline collapse, then the full alias map so a
+            # human SEES every rewrite and can correct it in config. Rendered before the alias
+            # lines so a large map never buries the number that matters.
+            tc = self.type_consolidation
+            lines.append("")
+            lines.append("## Type consolidation")
+            lines.append(
+                f"- entity types: {tc.raw_entity_types} raw -> "
+                f"{tc.canonical_entity_types} canonical "
+                f"({tc.mentions_remapped} mentions remapped)"
+            )
+            lines.append(
+                f"- relation types: {tc.raw_relation_types} raw -> "
+                f"{tc.canonical_relation_types} canonical "
+                f"({tc.relations_remapped} relations remapped)"
+            )
+            for title, amap in (
+                ("entity aliases", tc.entity_alias_map),
+                ("relation aliases", tc.relation_alias_map),
+            ):
+                if not amap:
+                    continue
+                lines.append(f"- {title}:")
+                lines.extend(f"  - {alias} -> {canonical}" for alias, canonical in amap.items())
         if self.context_enrichment is not None:
             ce = self.context_enrichment
             lines.append("")
