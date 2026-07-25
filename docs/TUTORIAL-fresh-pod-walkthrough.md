@@ -156,11 +156,16 @@ Model default is `openai/gpt-4.1-mini` reached via `base_url: https://openrouter
 base URL to `http://<vllm-host>:8000/v1` for an on-prem vLLM (any placeholder key), or leave it
 `null` for direct OpenAI with `$OPENAI_API_KEY`.
 
-> **Warning — GLiNER2 `compile` defaults OFF on GPU, and keep it off at scale.** The provider's
-> `torch.compile` knob is **off by default** (opt-in). gliner2 compiles with `dynamic=True`, which
-> **recompile-thrashes on varied-length production chunks** (pod-measured: the worker pinned ~290%
-> CPU, GPU 0%, no progress). Leave `compile: false` (the default) for a real mixed corpus; enable it
-> ONLY for a homogeneous / uniform-length workload.
+> **GLiNER2 `compile` is ON by default on GPU again (T7), and it is now safe.** It was forced OFF
+> because gliner2 compiles with `torch.compile(dynamic=True)` and, while each forward was one
+> varied-length chunk scored against a corpus-wide ~40-label schema, a fresh (label-count, batch)
+> shape family per chunk **recompile-thrashed** (pod-measured: worker pinned ~290% CPU, GPU 0%, no
+> progress). The extraction redesign removes both varying dimensions: chunks are **bucketed by label
+> set** (constant label dimension within a bucket) and each bucket is **micro-batched** (capped batch
+> dimension), so dynamo sees one shape family per bucket. Two guards remain, so a backend that cannot
+> compile costs throughput only: a compile fault at load degrades to a plain load, and a lazy
+> `BackendCompilerFailed` on the first forward re-loads the uncompiled model once. Pin
+> `compile: false` if you want it off.
 
 ### 1.4 Verify the install
 
@@ -302,7 +307,7 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 >   chunk keeps only its OWN small, relevant label set; `dedup` induces once per DISTINCT chunk
 >   text, so a corpus's boilerplate costs one call, not one per occurrence.
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
->   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner2`**
+>   `[person, organization]`, `compile` on by default on GPU — T7) and **redact → `redaction.gliner2`**
 >   (#197, ADR-0041 §7a — the SAME GLiNER2 engine `extract` runs, so redaction adds no second
 >   model library; chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus`
 >   dataflow).
@@ -436,7 +441,8 @@ stages:
 
   # 7) Fused NER+RE in ONE pass (GLiNER2). config labels are a FLOOR; the induced entity/relation
   #    types are UNIONed on per corpus (config ∪ induced). threshold 0.3 = the SOTA recall floor.
-  #    `compile` is left OFF (the provider default — it recompile-thrashes on varied chunks; §1.3).
+  #    `compile` is left to the provider default (T7: ON on cuda — the forward is bucketed by label
+  #    set, so it no longer recompile-thrashes; §1.3).
   - name: extract
     capability: fused_entity_relation
     provider: fused_entity_relation.gliner2
@@ -1127,7 +1133,7 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 | `FlashInfer requires sm75+` when starting vLLM on Blackwell | FlashInfer's capability check misparses `sm_120` as `12` and rejects a capable device | `export VLLM_USE_FLASHINFER_SAMPLER=0` before the serve — disables only the *sampler*, cudagraphs stay ON (§2). **Not** `--enforce-eager`: it clears the abort by killing cudagraphs and flooring throughput. |
 | Model downloads hang / error on `hf_xet` (Blackwell pod) | the Hugging Face XET transfer backend is flaky on some SM 12.x pods | `export HF_HUB_DISABLE_XET=1` before downloading (§1.3). |
 | `nvrtc: failed to open libnvrtc-builtins.so.13.0` (GLiNER2/DeBERTa crash) | torch JIT on SM 12.x / cu13x | `export PYTORCH_JIT=0` before running (§1.3). |
-| Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompile-thrashes on varied-length chunks | leave `compile` at its **default OFF**; enable only for a homogeneous / uniform-length workload (§1.3). |
+| Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompiles per distinct (label-count, batch) shape | T7 removed the cause (label-set bucketing + micro-batching pin both dimensions), so compile is on by default again; if you still see it, pin `compile: false` and report the chunk-length/label-set spread (§1.3). |
 | `error: externally-managed-environment` on `pip install` | RunPod PEP-668 system Python | add `--break-system-packages` (§1.2), or use a venv. |
 | `ModuleNotFoundError: peft` / `glinker` / `flashdeberta` / `gliner` at run time | a `--no-deps` editable install skipped a hidden dep | reinstall the package **without** `--no-deps` and `pip install ...` the runtime deps (§1.2). |
 | `disambiguation.glinker` prints `MISSING` at verify (§1.4) | the separate `latence-disambig-glinker` heavy package wasn't installed | `pip install -e packages/latence-disambig-glinker` + `pip install glinker flashdeberta` (ADR-0016). |

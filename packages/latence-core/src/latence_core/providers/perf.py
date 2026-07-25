@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from latence_core.errors import ProviderError
 from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 
 _log = logging.getLogger("latence.perf")
 
@@ -963,6 +963,60 @@ def resolve_microbatch_bounds(config: Mapping[str, Any]) -> tuple[int, int]:
         config, "microbatch_token_budget", DEFAULT_MICROBATCH_TOKEN_BUDGET
     )
     return max_texts, token_budget
+
+
+# ---------------------------------------------------------------------------
+# Label-set BUCKETING (T7-efficient-batching) — how a per-chunk label set and a
+# native batched forward stop being mutually exclusive.
+# ---------------------------------------------------------------------------
+#
+# The extraction redesign gives every chunk its OWN small, induced label set (T1/T2). gliner2's
+# batched entry points (``batch_extract_entities`` / ``batch_extract_relations``) take ONE label
+# schema for the whole call. The two naive readings are both bad:
+#
+#   * one native call per chunk — correct labels, no batching, terrible throughput;
+#   * union the batch's labels — maximal batch width, but back to the ~40-label schema whose
+#     precision degradation and (batch × positions × LABELS) span-scoring activation are exactly
+#     what the redesign exists to remove (the measured ~17 GiB → CUDA-OOM).
+#
+# BUCKETING is the third reading, and it dominates both: partition the batch by label set, then
+# run ONE native batched forward per bucket. Chunks that share a label set — on a real corpus,
+# most chunks within a document or topic — batch together at THEIR OWN small label count; chunks
+# with distinct sets form their own buckets. Maximal batch width, never the corpus union.
+#
+# Two second-order wins fall out, and they are the reason ``compile`` is now safe to default on
+# (see :func:`resolve_gliner2_knob` callers): within a bucket the label dimension is CONSTANT, and
+# the token-budget micro-batch caps the batch dimension — so gliner2's
+# ``torch.compile(..., dynamic=True)`` sees one shape family per bucket instead of a fresh one per
+# chunk, which is what made it recompile-thrash before.
+
+
+_BucketKey = TypeVar("_BucketKey", bound="Hashable")
+
+
+def iter_label_buckets(keys: Sequence[_BucketKey]) -> Iterator[tuple[_BucketKey, list[int]]]:
+    """Partition ``range(len(keys))`` into buckets of indices that share the same ``keys[i]``.
+
+    ``keys[i]`` is item ``i``'s label set (a hashable — in practice a ``tuple[str, ...]`` of the
+    chunk's effective labels, order-significant because it is also the order handed to the model).
+    Yields ``(key, indices)`` pairs; the caller slices its own texts by ``indices``, issues ONE
+    native batched forward per bucket with ``key`` as the schema, and scatters the per-text results
+    back by index — so emission stays in input order regardless of bucketing.
+
+    **Deterministic** (ADR-0033 / the byte-identical bar): buckets are yielded in FIRST-SEEN key
+    order and each bucket's indices ascend, so the same input produces the same bucket sequence and
+    the same per-bucket text order on every run and every host — no set iteration, no sort by a
+    hash. Pure index arithmetic over hashables: no torch, no model, so ``latence-core`` stays
+    torch-free at import (ADR-0016).
+
+    An empty ``keys`` yields nothing (no bucket, no forward). A single distinct key yields exactly
+    one bucket — which is the no-induction / predefined-only case, i.e. every chunk shares the
+    config label set and the whole batch is ONE forward, byte-identical to the un-bucketed path.
+    """
+    buckets: dict[_BucketKey, list[int]] = {}
+    for index, key in enumerate(keys):
+        buckets.setdefault(key, []).append(index)
+    yield from buckets.items()
 
 
 def _positive_int_knob(config: Mapping[str, Any], key: str, default: int) -> int:

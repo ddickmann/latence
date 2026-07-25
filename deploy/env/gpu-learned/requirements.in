@@ -15,10 +15,8 @@ fsspec>=2024.2
     # via latence-core
 gliner>=0.2.5,<0.3
     # via latence-pii-gliner
-gliner2[local]>=1.0,<2
-    # via latence-extract-gliner2
 gliner2[local]>=1.3,<2
-    # via latence-pii-gliner2
+    # via latence-extract-gliner2, latence-pii-gliner2
 glinker>=0.1,<0.2
     # via latence-disambig-glinker
 huggingface-hub>=0.23,<1

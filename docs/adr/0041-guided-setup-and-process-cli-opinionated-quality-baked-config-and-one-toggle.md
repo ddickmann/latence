@@ -105,7 +105,8 @@ option, determinism, and the dry-validation contract all carry over unchanged:
   defaults to `EMPTY`, `max_concurrency` to `8`. This is the one new per-deployment input the SOTA
   profile adds (it replaces lite's parser-recommendation prompt).
 * **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
-  `[person, organization]`, `compile` left to the provider default `False`); **redact →
+  `[person, organization]`, `compile` left to the provider default — `auto` → True on cuda since
+  T7, see the perf-knob bullet below); **redact →
   `redaction.gliner2`** (§7a — the same Provider `lite` emits, and the same W16 chunk-level
   `redact → enrich → export_corpus` dataflow).
 * **disambiguate → `disambiguation.glinker`** — the neural GLinker linker + audited resolver
@@ -147,16 +148,20 @@ is a defect, not a preference. The decision, and why:
   `stacks/schema-induction.yaml` — are unchanged and still valid. This is a decision about what the
   **guided setup blesses**, so the enterprise-sota profile now differs from `gpu-sota-glinker.yaml`
   on exactly this one Stage (a deliberate, recorded delta, noted in `_build_sota_stages`).
-* **The perf knobs must match the blessed extractor (audit R4).** Blessing the gliner2 engine for
-  `redact` also inherits its perf seam, and that seam's generic `compile` default is `auto` → **True
-  on cuda** — so the emitted `device: cuda` redact stage (which carries no `compile` key, by design:
-  the Provider owns the default) silently enabled `torch.compile`. gliner2 compiles with
-  `dynamic=True` and recompile-thrashes on varied-length production chunks (pod-measured: worker at
-  ~290% CPU, GPU 0%, no progress), which is exactly why `fused_entity_relation.gliner2` forces
-  `compile=False` at construction. The redactor streams the same chunk distribution through
-  `batch_extract_entities`, so it now injects the same off-by-default (`quantize` untouched — the
-  fp16 win stays). The inference-time `_reload_uncompiled` latch does **not** cover this: the thrash
-  is silent slowness, not a `BackendCompilerFailed`. The knob stays opt-in, not removed.
+* **The perf knobs must match the blessed extractor (audit R4 → revised by T7).** Blessing the
+  gliner2 engine for `redact` also inherits its perf seam, whose generic `compile` default is
+  `auto` → **True on cuda** — so the emitted `device: cuda` redact stage (which carries no `compile`
+  key, by design: the Provider owns the default) enabled `torch.compile`. R4 forced it OFF in BOTH
+  gliner2 Providers because gliner2 compiles with `dynamic=True` and recompile-thrashed on
+  varied-length production chunks (pod-measured: worker at ~290% CPU, GPU 0%, no progress), and the
+  inference-time `_reload_uncompiled` latch does not cover that (the thrash is silent slowness, not
+  a `BackendCompilerFailed`). **T7 removed the cause, so the forced-off default is gone.** The thrash
+  needed a fresh `(label-count, batch)` shape family per forward; the extraction redesign gives every
+  chunk a small induced label set, both Providers now BUCKET chunks by label set (constant label
+  dimension within a bucket) and split each bucket into token-budget micro-batches (capped batch
+  dimension), so dynamo sees one shape family per bucket. Both Providers therefore let `compile`
+  ride the shared `auto` resolution again; the wizard still emits no `compile` key, deliberately, so
+  the decision stays per-device and a stack emitted for a GPU box degrades correctly on cpu.
 * **Licensing verified separately (ADR-0012).** `gliner2` framework **code** is Apache-2.0
   (github.com/fastino-ai/GLiNER2 LICENSE + the PyPI OSI classifier); the default checkpoint
   `fastino/GLiNER2-Guardrails-PII-Multi` **weights** are Apache-2.0 and ungated (HF model card).
