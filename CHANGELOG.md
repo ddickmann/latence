@@ -11,6 +11,36 @@ workspace are versioned and released together under one version number.
 
 ### Added
 
+- **T7 — efficient per-chunk extraction: label-set bucketing + gliner2's native batched forward
+  (`fused_entity_relation.gliner2`, `redaction.gliner2`, `latence_core.providers.perf`).** Per-chunk
+  induction (T1/T2) gives every chunk its own small label set, but gliner2's batched entry points
+  take ONE schema per call — so the naive readings were "one native call per chunk" (correct labels,
+  no batching) or "union the batch's labels" (maximal width, but back to the ~40-label degradation
+  and the ~17 GiB span-scoring tensor the redesign exists to remove). Both Providers now BUCKET each
+  streaming window by label set through one shared, torch-free seam
+  (`perf.iter_label_buckets`, first-seen bucket order, ascending indices) and run **one native
+  batched forward per bucket** at that bucket's own small label count — maximal batch width, never
+  the corpus union. The fused extractor was the un-batched half: it now drives
+  `batch_extract_entities` / `batch_extract_relations` (bucketed independently per slot, since a
+  chunk can share the entity schema and not the relation one), scatters per-text results back **by
+  index**, and inherits the token-budget micro-batch bound plus the CUDA-OOM halving backoff its
+  twin already had. Output is bucket- and batch-INVARIANT (asserted record-for-record against a
+  strictly per-chunk reference). **This is the root fix for the CUDA-OOM**: the tensor was
+  `batch × ~768 tokens × ~40 corpus-wide labels`; per-chunk labels collapse the label dimension, so
+  it never forms — the reactive backoff stays only as a last-resort net. gliner2's native
+  **`compile` is unlocked** as a consequence: it was forced OFF because a fresh (label-count, batch)
+  shape family per forward recompile-thrashed `torch.compile(dynamic=True)`, and bucketing +
+  micro-batching pin both dimensions, so it rides the shared `auto` default (True on cuda) again,
+  behind the load-time guard AND the inference-time reload-uncompiled latch. `latence-extract-gliner2`
+  raises its `gliner2` pin to `>=1.3,<2` (the batched slice does not exist across the whole 1.x
+  line) and checks both batched methods at LOAD, so an out-of-range install is a typed
+  `ProviderError`, never a native `AttributeError`. **Honest framing:** gliner2 ships no
+  self-hostable inference server — its only server surface is `from_api`, a client for fastino's
+  *cloud* API — so the throughput here is the native batched forward + compile + quantize,
+  in-process. The eager-vs-compiled number and the peak-VRAM / backoff-count evidence are a GPU
+  measurement: the harness is `scripts/validate-gliner2-unified-on-gpu.md` §7, unmeasured (never
+  fabricated) until the pod run.
+
 - **Blackwell / CUDA-13 compatibility matrix, machine-checked (#199, ADR-0016/0036/0030/0012).**
   `deploy/env/compatibility-matrix.yaml` maps every learned Provider and serving dependency of the
   enterprise-sota stack against every pinned environment (#195/#196/#198), and

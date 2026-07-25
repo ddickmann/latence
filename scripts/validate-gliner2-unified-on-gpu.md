@@ -235,3 +235,79 @@ LATENCE_CUDA=1 latence stack validate stacks/gpu-sota-pod.yaml
 Record the real offsets/relations from step 3, the byte-identical-under-optimization result + the
 measured speedup from step 4, back into ADR-0036 (folded in after the pod run, flagged "pending pod
 validation" until then — never fabricated).
+
+---
+
+## 7. T7 — the numbers this redesign owes the pod (eager vs compiled, peak VRAM, backoff count)
+
+Three claims of `issues/extraction-redesign/T7-efficient-batching.md` can only be settled on a real
+GPU. They are **not** measured offline and are **not** guessed here — run this and fold the real
+numbers into `PERF-RESULTS.md` / ADR-0036.
+
+**Claim A — one native batched forward per label BUCKET, not per chunk.** Offline this is asserted
+against a faithful fake by counting `batch_extract_entities` calls; on the pod, count them against
+the real model over a real corpus.
+
+**Claim B — eager vs compiled throughput.** T7 unlocked gliner2's native `compile` because label-set
+bucketing + micro-batching pin the two dimensions whose variation made `torch.compile(dynamic=True)`
+recompile-thrash. That claim is a *throughput* claim and needs a measured pair.
+
+**Claim C — peak VRAM is a fraction of the corpus-mode ~21.6 GiB, and the reactive micro-batch/OOM
+backoff fires ZERO (or near-zero) times.** Per-chunk induction collapses the label dimension of the
+`batch × positions × labels` span-scoring tensor — the ~17 GiB spike that OOM'd redact. If the
+backoff still fires often, the root fix did NOT land and the micro-batch net is carrying the run.
+
+```bash
+# Count every native batched forward + every reactive backoff, then A/B compile on the SAME corpus.
+python - <<'PY'
+import os, time, logging
+os.environ["LATENCE_CUDA"] = "1"
+import torch
+from latence_extract_gliner2.provider import Gliner2FusedExtractor
+
+# A real, VARIED-length chunk stream with per-chunk induced label sets (that is the regime under
+# test — a uniform-length uniform-label corpus proves nothing about the thrash this replaced).
+chunks = ...   # load the RFC corpus chunks the redesign run produced (parquet under the run dir)
+
+def run(compile_on: bool) -> tuple[float, int, int]:
+    torch.cuda.reset_peak_memory_stats()
+    prov = Gliner2FusedExtractor({
+        "labels": ["person", "organization"], "relation_labels": ["works for"],
+        "threshold": 0.3, "device": "cuda", "quantize": True, "compile": compile_on,
+    })
+    model_calls = {"n": 0}
+    t0 = time.perf_counter()
+    result = prov.extract_fused(chunks)
+    elapsed = time.perf_counter() - t0
+    peak = torch.cuda.max_memory_allocated() / 2**30
+    print(f"compile={compile_on}: {elapsed:.1f}s, peak {peak:.2f} GiB, "
+          f"mentions={len(result.mentions)}, relations={len(result.relations)}, "
+          f"compile_fell_back={prov._compile_disabled}")
+    return elapsed, peak, len(result.mentions)
+
+# Claim C: watch for the reactive backoff. It logs nothing by itself, so count the OOM retries by
+# tapping the perf seam's cache-release (called ONLY on the OOM path).
+import latence_core.providers.perf as perf
+backoffs = {"n": 0}
+_real = perf.empty_cuda_cache
+def counted(**kw):
+    backoffs["n"] += 1
+    return _real(**kw)
+perf.empty_cuda_cache = counted
+
+eager_s, eager_peak, eager_mentions = run(False)
+comp_s,  comp_peak,  comp_mentions  = run(True)
+
+print(f"T7 compile speedup: {eager_s / comp_s:.2f}x   (eager {eager_s:.1f}s vs compiled {comp_s:.1f}s)")
+print(f"T7 peak VRAM: eager {eager_peak:.2f} GiB / compiled {comp_peak:.2f} GiB "
+      f"(corpus-mode baseline was 21.6 GiB)")
+print(f"T7 OOM backoff fired {backoffs['n']} time(s) — MUST be 0 or near-0; a high count means the "
+      "root fix did not land and the reactive net is carrying the run")
+assert eager_mentions == comp_mentions, "compile changed the record count — NOT throughput-only"
+PY
+```
+
+**Report honestly.** If compiled is *slower*, say so and pin `compile: false` in the blessed stack —
+the point of T7 is that bucketing makes compile *safe to try*, not that it is guaranteed to win.
+Likewise, if the backoff fires more than a handful of times, the label dimension did not collapse
+as designed; investigate the induced label-set sizes before claiming the OOM is root-fixed.
