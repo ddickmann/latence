@@ -127,11 +127,18 @@ def test_sota_pipeline_wires_header_refs_stage(tmp_path: Path) -> None:
     assert header_stage.provider == "fused_entity_relation.header_refs"
     assert header_stage.depends_on == ["induce"]
 
+    # Both extractors feed the resolution phase (the Runner concatenates parents' records by
+    # carrier type). Since ADR-0054 they feed it through the type-consolidation Stage, which
+    # canonicalizes the drifted induced TYPE vocabulary before entity resolution reads it — so
+    # `disambiguate` reads that Stage, and it is the one that gathers both extractors.
+    consolidate = _stage(text, "consolidate_types")
+    assert consolidate is not None
+    assert "extract" in consolidate.depends_on
+    assert "header_refs" in consolidate.depends_on
+
     disambiguate = _stage(text, "disambiguate")
     assert disambiguate is not None
-    # Both extractors feed Disambiguation (the Runner concatenates parents' records by carrier type).
-    assert "extract" in disambiguate.depends_on
-    assert "header_refs" in disambiguate.depends_on
+    assert disambiguate.depends_on == ["consolidate_types"]
 
 
 def test_sota_pipeline_omits_header_refs_when_no_family(tmp_path: Path) -> None:
@@ -139,7 +146,8 @@ def test_sota_pipeline_omits_header_refs_when_no_family(tmp_path: Path) -> None:
     off-by-default, byte-identical-wiring invariant)."""
     text = build_stack_config(_answers(_plain_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, header_refs=None))
     assert _stage(text, "header_refs") is None
-    assert _stage(text, "disambiguate").depends_on == ["extract"]
+    assert _stage(text, "consolidate_types").depends_on == ["extract"]
+    assert _stage(text, "disambiguate").depends_on == ["consolidate_types"]
 
 
 def test_lite_profile_never_wires_header_refs(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 52 records numbered 0001–0053.
+    the sequence simply skipped it), so the log holds 53 records numbered 0001–0054.
 
 ## Foundations & scope
 

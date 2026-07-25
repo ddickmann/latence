@@ -1284,7 +1284,14 @@ def _type_consolidation_case() -> ConformanceCase:
         return _records_contract_valid(records, empty_ok=False)
 
     def adversarial(provider: Any) -> AdversarialOutcome:
-        return _capture_raise(lambda: provider.consolidate([], []))
+        # Flattened to the records the empty corpus produced (none), the shape the graceful-path
+        # classifier reads — an empty corpus is a defined empty, never a crash.
+        def _empty() -> list[Record]:
+            result = provider.consolidate([], [])
+            out: list[Record] = [*result.mentions, *result.relations]
+            return out
+
+        return _capture_raise(_empty)
 
     return ConformanceCase(
         capability=Capability.TYPE_CONSOLIDATION,

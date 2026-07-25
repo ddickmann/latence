@@ -14,6 +14,8 @@ one. See ``test_e2e_type_consolidation`` for the end-to-end proof through the Ru
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
+
 import pytest
 from latence_core.capability import Embedder
 from latence_core.contracts import (
@@ -109,12 +111,15 @@ class _SynonymEmbedder:
     def dimension(self) -> int:
         return 3
 
-    def embed(self, texts):  # type: ignore[no-untyped-def]
+    def embed(self, texts: Iterable[str]) -> Iterator[list[float]]:
         batch = list(texts)
         self.calls.append(batch)
         for text in batch:
             if text not in self._VECTORS:
-                msg = f"_SynonymEmbedder has no vector for {text!r} — the test embedded something unintended."
+                msg = (
+                    f"_SynonymEmbedder has no vector for {text!r} — "
+                    "the test embedded something unintended."
+                )
                 raise KeyError(msg)
         return iter([list(self._VECTORS[t]) for t in batch])
 
@@ -377,11 +382,11 @@ def test_an_embedder_that_breaks_its_contract_is_rejected() -> None:
         def dimension(self) -> int:
             return 3
 
-        def embed(self, texts):  # type: ignore[no-untyped-def]
+        def embed(self, texts: Iterable[str]) -> Iterator[list[float]]:
             list(texts)
             return iter([[1.0, 0.0, 0.0]])
 
     provider = CascadeTypeConsolidator({"use_embedding_merge": True})
-    provider._embedder = _ShortEmbedder()  # type: ignore[assignment]  # noqa: SLF001
+    provider._embedder = _ShortEmbedder()  # noqa: SLF001
     with pytest.raises(ValueError, match="one vector per input"):
         provider.consolidate([_mention("org", "Acme"), _mention("company", "Globex")])

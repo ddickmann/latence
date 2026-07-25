@@ -276,7 +276,7 @@ capability wiring — the SAME machinery `latence stack validate` builds on, no 
 ```text
 source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
   → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
-  → profiling → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
+  → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
   → enrich(context) → export_kg + export_corpus[Granite r2, context_columns, bm25]
 ```
 
@@ -362,7 +362,7 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 # stacks/my-corpus.yaml — the enterprise-SOTA stack:
 #   source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
 #     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
-#     → profiling → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
+#     → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
 #     → enrich(context) → export_kg + export_corpus[Granite r2 + bm25]
 #
 # {CORPUS_DIR} / {STORAGE_URI} are placeholders — fill them in §4.1 before `latence run`.
@@ -463,6 +463,26 @@ stages:
     provider: profiling.statistical
     depends_on: [parse, extract]
 
+  # 9b) Type consolidation: canonicalize the corpus's TYPE vocabulary (T3, ADR-0054). Labels are
+  #     induced PER CHUNK above, which is what keeps each chunk's label set small, relevant and
+  #     uncapped — and what makes one chunk say `org` where another says `organization` or
+  #     `company`. This Stage folds that drift into ONE canonical vocabulary and rewrites every
+  #     mention's + relation's label onto it BEFORE the resolver runs (the resolver votes a
+  #     cluster's type from its members' labels and gates its low-precision rungs on type
+  #     compatibility, so drifted types in = split clusters and mistyped entities out). The
+  #     semantic rung rides the SAME Granite embedder over a few dozen type STRINGS — no second
+  #     model. The raw induced label stays on each record and the alias map lands on the Quality
+  #     Report, so every fold is visible and correctable via `aliases`.
+  - name: consolidate_types
+    capability: type_consolidation
+    provider: type_consolidation.cascade
+    depends_on: [extract]
+    config:
+      use_embedding_merge: true
+      embedder:
+        provider: embedding.sentence_transformers
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
+
   # 10) Disambiguation: the enterprise GLinker entity-linker + audited resolver (ADR-0046).
   #     Neural L2→L3→L4→L0 linking (gliner-linker biencoder + reranker + FlashDeBERTa) LINKS each
   #     mention to its canonical entry, then the audited resolver FUSES by exact/alias/acronym/
@@ -473,7 +493,7 @@ stages:
   - name: disambiguate
     capability: disambiguation
     provider: disambiguation.glinker
-    depends_on: [extract]
+    depends_on: [consolidate_types]
     config:
       device: cuda
       context_window: 200          # ±chars of chunk context for the neural linker input
