@@ -81,10 +81,12 @@ stages:
     )
 
 
-def _induced_labels_in_run(store: str, run_id: str) -> list[InducedLabels]:
+def _induced_labels_in_run(
+    store: str, run_id: str, *, stage: str = "induce"
+) -> list[InducedLabels]:
     """Every non-None induced_labels carrier in a run's induce-Stage checkpoint."""
     storage = Storage.for_uri(store)
-    uri = f"{store}/_latence/runs/{run_id}/checkpoints/induce.jsonl"
+    uri = f"{store}/_latence/runs/{run_id}/checkpoints/{stage}.jsonl"
     if not storage.exists(uri):
         return []
     out: list[InducedLabels] = []
@@ -136,6 +138,77 @@ def test_a_per_chunk_delta_induces_only_the_added_documents_chunks(tmp_path: Pat
     assert fresh, "the added document's chunk was induced"
     assert all(set(lbl.entity_types) == {"statute"} for lbl in fresh), (
         "a per-chunk delta must not stamp the base run's schema on the new chunk"
+    )
+
+
+def _mixed_granularity_pipeline(store: str, docs_dir: Path) -> Pipeline:
+    """A pipeline holding BOTH induction models — the case that separates them behaviourally."""
+    return Pipeline.from_yaml_text(
+        f"""
+name: mixed-granularity
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config: {{path: 'file://{docs_dir}', sensitivity: internal, extensions: [txt]}}
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: induce_corpus
+    capability: schema_induction
+    provider: label_inducer.llm
+    depends_on: [chunk]
+    config: {{granularity: corpus, api_key: test-key}}
+  - name: induce_chunk
+    capability: schema_induction
+    provider: label_inducer.llm
+    depends_on: [induce_corpus]
+    config: {{granularity: chunk, api_key: test-key}}
+  - name: export
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [induce_chunk]
+"""
+    )
+
+
+def test_a_frozen_corpus_schema_is_not_stamped_on_a_per_chunk_induction_stage(
+    tmp_path: Path,
+) -> None:
+    """T4: the freeze is scoped to the coupling it exists to break, not to the Stage KIND.
+
+    The frozen schema is injected into every ``schema_induction`` Stage's config by capability
+    alone, so in a pipeline holding both models the PER-CHUNK Stage was handed the parent Version's
+    corpus union and stamped it verbatim — silently re-imposing the broadcast the redesign removes,
+    on the one path that is supposed to be chunk-local. Scoped by granularity, the per-chunk Stage
+    induces the new chunk normally and the chunk keeps its OWN labels.
+
+    Pre-change this asserted ``0`` induction calls and ``{'company', 'person'}`` on the new chunk.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    (docs / "a.txt").write_text("Acme employs Alice.\n", encoding="utf-8")
+    (docs / "b.txt").write_text("Globex employs Bob.\n", encoding="utf-8")
+    with fake.install([fake.reply(_SCHEMA_REPLY)] * 4):
+        DeltaRunner().apply_delta(_mixed_granularity_pipeline(store, docs), run_id="v0")
+    assert CorpusStore(Storage.for_uri(store), store).head_schema() is not None
+
+    (docs / "c.txt").write_text("Initech supersedes the statute.\n", encoding="utf-8")
+    with fake.install([fake.reply(_DELTA_REPLY)]) as script:
+        DeltaRunner().apply_delta(_mixed_granularity_pipeline(store, docs), run_id="v1")
+        calls = len(script.calls)
+    assert calls == 1, "the corpus Stage is frozen (0 calls); the per-chunk Stage still induces"
+    fresh = _induced_labels_in_run(store, "v1", stage="induce_chunk")
+    assert fresh
+    assert all(set(lbl.entity_types) == {"statute"} for lbl in fresh), (
+        "a per-chunk Stage must not be handed the frozen CORPUS schema"
     )
 
 
