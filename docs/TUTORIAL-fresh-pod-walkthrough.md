@@ -297,8 +297,10 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 >
 > - **parse → `parser.lighton_vllm`** — the served-vLLM LightOn OCR endpoint (§2). The wizard writes
 >   your `base_url` + `model`, with `api_key: EMPTY` and `max_concurrency: 8`.
-> - **induce → `label_inducer.llm`** at **corpus** granularity (`max_labels 40`, `temperature 0`) —
->   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
+> - **induce → `label_inducer.llm`** at **chunk** granularity (`dedup: true`, `temperature 0`) —
+>   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above). Each
+>   chunk keeps only its OWN small, relevant label set; `dedup` induces once per DISTINCT chunk
+>   text, so a corpus's boilerplate costs one call, not one per occurrence.
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
 >   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner2`**
 >   (#197, ADR-0041 §7a — the SAME GLiNER2 engine `extract` runs, so redaction adds no second
@@ -347,8 +349,11 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 > **Why this config matters more than the model.** With generic English labels, a low threshold, and
 > no schema induction, the output is noisy — pronouns/laws/products get mistyped as entities and the
 > relations are garbage. Turn schema induction **on** (the LLM discovers the domain's real labels per
-> corpus), use **`granularity: corpus`** (one shared canonical schema, so entity types stay
-> consistent across the whole KG), give redaction real **financial-PII** labels, cap chunks at
+> corpus), use **`granularity: chunk`** (each chunk keeps only its own relevant types — a
+> corpus-wide merged schema has to be salience-capped, which drops the rare-but-critical type from
+> the one chunk that needed it and scores every other chunk against types that are not in it; type
+> consistency is earned downstream in the resolution phase), give redaction real **financial-PII**
+> labels, cap chunks at
 > **`max_tokens: 640`**, and let the GLinker disambiguator's precision defaults ride. Then entities
 > are correctly typed and the relations are meaningful.
 >
@@ -410,9 +415,11 @@ stages:
     provider: screening.content_keyword
     depends_on: [chunk]
 
-  # 6) Schema induction (the quality lever): a small LLM discovers the corpus's own
-  #    {entity, relation, pii} types. granularity: corpus → ONE shared, canonical, deduped schema
-  #    stamped on every chunk (no per-chunk/per-doc type drift across the KG).
+  # 6) Schema induction (the quality lever): a small LLM discovers each CHUNK's own
+  #    {entity, relation, pii} types. granularity: chunk → every chunk carries only the types that
+  #    are actually in it (best recall AND best zero-shot precision; the small label set is also
+  #    what keeps the GLiNER2 span-scoring tensor small). Corpus-wide type consistency is earned
+  #    downstream in the resolution phase, not bought here with a salience cap.
   - name: induce
     capability: schema_induction
     provider: label_inducer.llm
@@ -421,7 +428,8 @@ stages:
       model: openai/gpt-4.1-mini             # OpenRouter model id (openai/ prefix). Direct OpenAI: gpt-4.1-mini
       base_url: https://openrouter.ai/api/v1 # null ⇒ OpenAI; http://<vllm-host>:8000/v1 ⇒ on-prem vLLM
       # api_key comes from $OPENROUTER_API_KEY (falls back to $OPENAI_API_KEY). NEVER inline it here.
-      granularity: corpus                    # one shared canonical schema for the whole corpus
+      granularity: chunk                     # per-chunk induction: each chunk keeps its own types
+      dedup: true                            # induce once per DISTINCT chunk text (the cost lever)
       max_tokens: 2048                        # truncated reply retries at double, then fails open
       max_labels: 40
       temperature: 0.0                        # deterministic
@@ -702,7 +710,8 @@ PY
 
 ### 5.5 `induce` → `induce.jsonl` (chunks stamped with the DISCOVERED schema)
 This is the payoff of schema induction — the domain labels the LLM found for **your** corpus. In
-`granularity: corpus` every chunk carries the **same** merged `induced_labels`:
+`granularity: chunk` each chunk carries its OWN `induced_labels`, so you should see MANY distinct
+schemas (one per distinct chunk text); a single distinct schema would mean corpus mode:
 ```bash
 python - <<PY
 import json
@@ -710,7 +719,7 @@ seen=set()
 for l in open("$CK/induce.jsonl"):
     il=json.loads(l).get("induced_labels")
     if il: seen.add(json.dumps({k:il[k] for k in ("entity_types","relation_types","pii_types")}, sort_keys=True))
-print("distinct induced schemas:", len(seen))          # corpus mode → 1
+print("distinct induced schemas:", len(seen))          # chunk mode → many; corpus mode → 1
 for s in list(seen)[:1]: print(json.dumps(json.loads(s), indent=2))
 PY
 # look for: sensible domain types (e.g. bank, law, payment_product / owns, regulated_by / iban, tax_id),

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from latence_core.setup.wizard import (
     FINANCIAL_PII_LABELS,
+    PREDEFINED_LABEL_SLOTS,
     CorpusScan,
     SetupAnswers,
     SetupConfigError,
@@ -20,6 +21,7 @@ from latence_core.setup.wizard import (
     intake_max_bytes,
     llm_key_env_var,
     normalize_domain_hint,
+    parse_predefined_labels,
     recommend_parser,
     recommend_sota_parser,
     scan_source,
@@ -28,6 +30,7 @@ from latence_core.setup.wizard import (
 
 __all__ = [
     "FINANCIAL_PII_LABELS",
+    "PREDEFINED_LABEL_SLOTS",
     "CorpusScan",
     "SetupAnswers",
     "SetupConfigError",
@@ -38,6 +41,7 @@ __all__ = [
     "intake_max_bytes",
     "llm_key_env_var",
     "normalize_domain_hint",
+    "parse_predefined_labels",
     "recommend_parser",
     "recommend_sota_parser",
     "scan_source",

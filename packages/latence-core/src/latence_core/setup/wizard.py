@@ -4,7 +4,7 @@ Given a resolved :class:`SetupAnswers` (from the interactive prompts OR the ``--
 flags — the SAME struct either way), :func:`build_stack_config` emits a full-spine stack YAML that
 reproduces the pod-validated GOOD stack (see ``docs/TUTORIAL-fresh-pod-walkthrough.md`` §3):
 
-    source → intake_screen → parse → chunk[640] → [content_screen] → induce[corpus]
+    source → intake_screen → parse → chunk[640] → [content_screen] → induce[chunk]
       → extract[gliner2, thr 0.5] → [redact[gliner2, financial-PII]] → profiling
       → disambiguate → graph → enrich(context) → export_kg + export_corpus(context_columns)
 
@@ -293,6 +293,67 @@ class SetupConfigError(ValueError):
     """
 
 
+#: The three label slots a predefined (fixed) schema may declare — the same slots the inducer
+#: induces, so predefined-only is a drop-in replacement for induction rather than a parallel
+#: vocabulary. Any other key is REJECTED (a typo like ``entities`` would otherwise silently
+#: contribute nothing and the operator would ship a stack with the profile defaults).
+PREDEFINED_LABEL_SLOTS: tuple[str, ...] = ("entity_types", "relation_types", "pii_types")
+
+
+def parse_predefined_labels(raw: object) -> dict[str, list[str]]:
+    """Validate an operator-supplied FIXED label schema into the generator's normalized mapping.
+
+    Predefined-only mode (T1) is the escape hatch for a corpus with a KNOWN schema — a compliance
+    taxonomy, a fixed entity set — where discovery is not merely unnecessary but undesirable. The
+    schema arrives as a JSON/YAML mapping of :data:`PREDEFINED_LABEL_SLOTS` to label lists; this
+    turns it into ``{slot: [label, ...]}`` with empty slots omitted.
+
+    Every failure is TYPED and loud (:class:`SetupConfigError`), never coerced: a non-mapping, an
+    unknown slot, a non-list slot, a non-string label, or a schema that declares no labels at all
+    all raise. Silently accepting a typo'd slot would emit a stack that looks operator-configured
+    but runs the profile's DEFAULT labels — the worst possible failure for a fixed-taxonomy corpus.
+
+    Labels keep the operator's own ORDER (deduped, first-seen) — the generator never sorts them
+    behind their back, so the emitted YAML is a byte-stable function of what was supplied.
+    """
+    if not isinstance(raw, dict):
+        slots = ", ".join(PREDEFINED_LABEL_SLOTS)
+        msg = (
+            f"predefined labels must be a mapping of {{{slots}}} to lists of strings, "
+            f"got {type(raw).__name__}."
+        )
+        raise SetupConfigError(msg)
+    unknown = sorted(k for k in raw if k not in PREDEFINED_LABEL_SLOTS)
+    if unknown:
+        msg = (
+            f"predefined labels carry unknown slot(s) {unknown}; "
+            f"expected only {list(PREDEFINED_LABEL_SLOTS)}."
+        )
+        raise SetupConfigError(msg)
+    parsed: dict[str, list[str]] = {}
+    for slot in PREDEFINED_LABEL_SLOTS:
+        if slot not in raw:
+            continue
+        values = raw[slot]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            msg = f"predefined labels slot {slot!r} must be a list of strings."
+            raise SetupConfigError(msg)
+        kept: list[str] = []
+        for value in values:
+            label = value.strip()
+            if label and label not in kept:
+                kept.append(label)
+        if kept:
+            parsed[slot] = kept
+    if not parsed:
+        msg = (
+            "predefined labels declare no usable labels — predefined-only mode would emit a stack "
+            "with NO schema at all. Supply at least one label, or drop the flag to induce."
+        )
+        raise SetupConfigError(msg)
+    return parsed
+
+
 @dataclass(frozen=True)
 class SetupAnswers:
     """The fully-resolved answers the generator turns into a stack config.
@@ -348,6 +409,18 @@ class SetupAnswers:
     # extractor misses) beside the learned extractor AND the header_refs Stage. ``None`` ⇒ NO such
     # Stage is emitted, so config + KG are byte-identical to before.
     inline_refs: dict[str, object] | None = None
+    # T1 — PREDEFINED-ONLY mode: the operator supplies a FIXED label schema and opts out of
+    # induction entirely. ``None`` (the default) ⇒ induction is on and per-chunk. When set (a
+    # ``{"entity_types": [...], "relation_types": [...], "pii_types": [...]}`` mapping, any slot
+    # optional) the generator emits **NO `induce` Stage at all** — not a disabled one, not a
+    # short-circuited Provider: the stage is absent, so the run makes ZERO induction LLM calls and
+    # every extraction Stage runs each chunk against the operator's fixed labels (the config-label
+    # floor, which is what an inducer-free pipeline already uses). This is the escape hatch for a
+    # corpus with a KNOWN schema — a compliance taxonomy, a fixed entity set — where discovery is
+    # not merely unnecessary but undesirable. The ADR-0044 financial-PII floor is still UNIONed onto
+    # the redactor's labels: a fixed relevance schema is an operator's choice, the safety floor is
+    # not (README invariant 3).
+    predefined_labels: dict[str, list[str]] | None = None
 
 
 def detect_extensions(path: str | Path) -> tuple[str, ...]:
@@ -568,7 +641,20 @@ def llm_key_env_var(base_url: str) -> str:
 
 
 def _induce_stage(answers: SetupAnswers, *, depends_on: str) -> dict[str, object]:
-    """The ``induce`` Stage (LLM schema induction at corpus granularity) — shared by both profiles.
+    """The ``induce`` Stage (LLM schema induction at CHUNK granularity) — shared by both profiles.
+
+    **Per-chunk (T1).** Each chunk is induced against its own text and carries only its own small,
+    relevant label set. That is what the extractor downstream needs: the alternative — inducing per
+    document, merging every document's labels into one corpus schema, ranking by document frequency
+    and capping at 40 — drops the rare-but-locally-critical type from the chunks that needed it AND
+    scores every chunk against ~35 types that are not in it. Type consistency across the KG is
+    earned DOWNSTREAM by type canonicalization in the resolution phase, not bought here with
+    recall. ``granularity: corpus`` / ``doc`` remain selectable by hand-editing the emitted config.
+
+    ``dedup: true`` is emitted explicitly (it is also the Provider default) because it is the lever
+    that makes per-chunk induction affordable — one call per DISTINCT chunk text, so a corpus's
+    boilerplate costs one call, not one per occurrence — and an operator reading the stack should
+    see it rather than have to know it.
 
     The operator's ``--domain`` hint is threaded onto the Stage's ``domain`` config key, which the
     inducer Provider injects into its OWN prompt (the Provider owns its prompt engineering — the
@@ -579,7 +665,8 @@ def _induce_stage(answers: SetupAnswers, *, depends_on: str) -> dict[str, object
     config: dict[str, object] = {
         "model": answers.llm_model,
         "base_url": answers.llm_base_url,
-        "granularity": "corpus",
+        "granularity": "chunk",
+        "dedup": True,
         "max_tokens": 2048,
         "max_labels": 40,
         "temperature": 0.0,
@@ -594,6 +681,60 @@ def _induce_stage(answers: SetupAnswers, *, depends_on: str) -> dict[str, object
         "depends_on": [depends_on],
         "config": config,
     }
+
+
+def _wire_induction(
+    answers: SetupAnswers, stages: list[dict[str, object]], *, depends_on: str
+) -> str:
+    """Append the ``induce`` Stage (or NOT, in predefined-only mode) and name the label source.
+
+    Returns the Stage name every label-consuming Stage (extract, redact, enrich, the deterministic
+    reference extractors) should depend on: ``"induce"`` normally, and — in predefined-only mode —
+    the stage that WOULD have fed induction, because there is no induce Stage to depend on.
+
+    Predefined-only is an OMISSION, not a flag: no Stage, no Provider, no client, no call. That is
+    the only implementation of "induction is skipped entirely" that cannot regress into a quiet LLM
+    call, and it makes the emitted stack self-evidently free of one.
+    """
+    if answers.predefined_labels is not None:
+        return depends_on
+    stages.append(_induce_stage(answers, depends_on=depends_on))
+    return "induce"
+
+
+def _entity_labels(answers: SetupAnswers, default: list[str]) -> list[str]:
+    """The extraction Stage's entity labels: the operator's fixed set, else the profile default.
+
+    In predefined-only mode the config labels are no longer a floor that induced types union onto —
+    they are the WHOLE schema, so they must be the operator's own. Order is preserved as given
+    (deterministic YAML), never sorted behind the operator's back.
+    """
+    fixed = (answers.predefined_labels or {}).get("entity_types")
+    return list(fixed) if fixed else list(default)
+
+
+def _relation_labels(answers: SetupAnswers, default: list[str]) -> list[str]:
+    """The extraction Stage's relation labels: the operator's fixed set, else the profile
+    default."""
+    fixed = (answers.predefined_labels or {}).get("relation_types")
+    return list(fixed) if fixed else list(default)
+
+
+def _pii_labels(answers: SetupAnswers) -> list[str]:
+    """The redactor's PII labels: the ADR-0044 financial FLOOR, plus any operator-fixed PII types.
+
+    The floor is UNIVERSAL and is never subsetted by a mode switch (README invariant 3): predefined
+    -only lets an operator fix the *relevance* schema, not opt out of the safety schema. A leaked
+    card number in a chunk the operator considers irrelevant must still be masked. Operator types
+    are appended after the floor, deduped, order-stable.
+    """
+    labels = list(FINANCIAL_PII_LABELS)
+    seen = set(labels)
+    for label in (answers.predefined_labels or {}).get("pii_types", []):
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return labels
 
 
 def _parse_stage(answers: SetupAnswers) -> dict[str, object]:
@@ -818,14 +959,15 @@ def _build_lite_stages(
         )
         induce_input = "content_screen"
 
-    # 6) schema induction (mandatory quality lever) — one shared canonical schema for the corpus.
-    stages.append(_induce_stage(answers, depends_on=induce_input))
+    # 6) schema induction (PER CHUNK, T1) — or NOTHING at all in predefined-only mode.
+    labels_from = _wire_induction(answers, stages, depends_on=induce_input)
 
-    # 7) fused NER+RE in ONE pass (GLiNER2); config labels are a FLOOR, induced types union on.
+    # 7) fused NER+RE in ONE pass (GLiNER2); config labels are a FLOOR, induced types union on
+    # (in predefined-only mode there is nothing to union — the config labels ARE the schema).
     # W18: in `extract_on: masked` mode the extractor reads the REDACTED chunk stream (depends_on
     # `redact`, which sets each chunk's masked_content) so PII never reaches the KG; default
-    # `unmasked` keeps the pre-W18 wiring (depends_on `induce`), so the KG keeps the real entities.
-    extract_input = "redact" if masked_extract else "induce"
+    # `unmasked` keeps the pre-W18 wiring, so the KG keeps the real entities.
+    extract_input = "redact" if masked_extract else labels_from
     stages.append(
         {
             "name": "extract",
@@ -834,8 +976,8 @@ def _build_lite_stages(
             "depends_on": [extract_input],
             "config": {
                 "device": answers.device,
-                "labels": ["organization", "person"],
-                "relation_labels": ["works for", "partner of"],
+                "labels": _entity_labels(answers, ["organization", "person"]),
+                "relation_labels": _relation_labels(answers, ["works for", "partner of"]),
                 "threshold": 0.5,
                 "max_len": 768,
             },
@@ -854,10 +996,10 @@ def _build_lite_stages(
                 "name": "redact",
                 "capability": "redaction",
                 "provider": BLESSED_REDACT_PROVIDER,
-                "depends_on": ["induce"],
+                "depends_on": [labels_from],
                 "config": {
                     "device": answers.device,
-                    "pii_labels": list(FINANCIAL_PII_LABELS),
+                    "pii_labels": _pii_labels(answers),
                     "max_len": 768,
                     "threshold": 0.5,
                 },
@@ -905,7 +1047,7 @@ def _build_lite_stages(
     # masked_content), so the exported corpus row is masked AND enriched; with PII OFF there is no
     # redact stage, so enrich reads the induced chunk stream directly. This mirrors the blessed
     # stacks/context-enrichment.yaml `redact → enrich → export_corpus` dataflow.
-    enrich_chunk_source = "redact" if answers.pii else "induce"
+    enrich_chunk_source = "redact" if answers.pii else labels_from
     stages.append(
         {
             "name": "enrich",
@@ -959,7 +1101,7 @@ def _build_sota_stages(
     chosen parse path (served vLLM OCR ``parser.lighton_vllm`` for a scanned/PDF/image corpus, or
     the CPU ``parser.plaintext`` for a born-digital .txt/.md/.jsonl corpus — see
     :func:`recommend_sota_parser` / :func:`_sota_parse_stage`) → chunk[640] → LLM schema
-    induction[corpus] → fused GLiNER2
+    induction[chunk] (T1; absent entirely in predefined-only mode) → fused GLiNER2
     entity+relation → learned PII redaction (``redaction.gliner2``, #197) → profiling → the neural
     **GLinker** disambiguator (``disambiguation.glinker`` + Granite r2 STS embedder) → canonical KG
     → **ULTRA** graph completion (skip-with-flag when absent) → KG + context-enriched RAG-corpus
@@ -1038,12 +1180,14 @@ def _build_sota_stages(
         )
         induce_input = "content_screen"
 
-    # 6) LLM schema induction (corpus granularity) — the one shared canonical schema.
-    stages.append(_induce_stage(answers, depends_on=induce_input))
+    # 6) LLM schema induction PER CHUNK (T1) — each chunk keeps its own small, relevant label set —
+    # or NOTHING at all in predefined-only mode (the operator's fixed schema, zero LLM calls).
+    labels_from = _wire_induction(answers, stages, depends_on=induce_input)
 
-    # 7) fused NER+RE in ONE pass (GLiNER2) — labels are a FLOOR, induced types union on. threshold
+    # 7) fused NER+RE in ONE pass (GLiNER2) — labels are a FLOOR, induced types union on (in
+    # predefined-only mode there is nothing to union — the config labels ARE the schema). threshold
     # 0.3 (the SOTA recall floor); compile defaults to False in the provider (left to ride).
-    extract_input = "redact" if masked_extract else "induce"
+    extract_input = "redact" if masked_extract else labels_from
     stages.append(
         {
             "name": "extract",
@@ -1052,8 +1196,8 @@ def _build_sota_stages(
             "depends_on": [extract_input],
             "config": {
                 "device": SOTA_DEVICE,
-                "labels": ["person", "organization"],
-                "relation_labels": ["works for", "partner of"],
+                "labels": _entity_labels(answers, ["person", "organization"]),
+                "relation_labels": _relation_labels(answers, ["works for", "partner of"]),
                 "threshold": 0.3,
             },
         }
@@ -1075,7 +1219,7 @@ def _build_sota_stages(
                 "name": "header_refs",
                 "capability": "fused_entity_relation",
                 "provider": "fused_entity_relation.header_refs",
-                "depends_on": ["induce"],
+                "depends_on": [labels_from],
                 "config": dict(answers.header_refs),
             }
         )
@@ -1098,7 +1242,7 @@ def _build_sota_stages(
                 "name": "inline_refs",
                 "capability": "fused_entity_relation",
                 "provider": "fused_entity_relation.inline_refs",
-                "depends_on": ["induce"],
+                "depends_on": [labels_from],
                 "config": dict(answers.inline_refs),
             }
         )
@@ -1115,10 +1259,10 @@ def _build_sota_stages(
                 "name": "redact",
                 "capability": "redaction",
                 "provider": BLESSED_REDACT_PROVIDER,
-                "depends_on": ["induce"],
+                "depends_on": [labels_from],
                 "config": {
                     "device": SOTA_DEVICE,
-                    "pii_labels": list(FINANCIAL_PII_LABELS),
+                    "pii_labels": _pii_labels(answers),
                     "max_len": 768,
                     "threshold": 0.5,
                 },
@@ -1195,7 +1339,7 @@ def _build_sota_stages(
     # 13) W13 context enrichment — project the KG back onto each (redacted, induced) chunk. With PII
     # ON, enrich reads the REDACTED chunk stream (redact → enrich → export_corpus, W16); with PII
     # OFF there is no redact stage, so enrich reads the induced chunk stream directly.
-    enrich_chunk_source = "redact" if answers.pii else "induce"
+    enrich_chunk_source = "redact" if answers.pii else labels_from
     stages.append(
         {
             "name": "enrich",
@@ -1319,18 +1463,43 @@ def _render_header(answers: SetupAnswers) -> str:
             "#   PII never reaches entity/relation extraction or the KG (the stricter privacy",
             "#   posture). `extract` depends_on `redact`. Default `unmasked` (KG keeps entities).",
         ]
-    lines += [
-        "#",
-        f"# Schema-induction LLM key: read from ${key_var} at run (never stored here).",
-    ]
+    if answers.predefined_labels is None:
+        lines += [
+            "#",
+            "# Schema induction: PER CHUNK (`induce.config.granularity: chunk`, T1) — every chunk",
+            "#   is induced against its OWN text and carries only its own small, relevant label",
+            "#   set, which the extractor unions onto the config floor. That is what the extractor",
+            "#   needs: a corpus-merged, salience-capped schema drops the rare-but-critical",
+            "#   type from the chunks that needed it AND scores every chunk against types that are",
+            "#   not in it. Type consistency across the KG is earned DOWNSTREAM (resolution), not",
+            "#   bought here with recall. Cost is bounded by `induce.config.dedup` (one call per",
+            "#   DISTINCT chunk text) and, optionally, `max_induction_calls` (a per-run call",
+            "#   budget); the Quality Report reports calls, cache hits, and tokens.",
+            "#",
+            f"# Schema-induction LLM key: read from ${key_var} at run (never stored here).",
+        ]
+    else:
+        lines += [
+            "#",
+            "# Schema induction: OFF (predefined-only) — you supplied a FIXED label schema, so",
+            "#   there is NO `induce` stage in this stack at all and the run makes ZERO induction",
+            "#   LLM calls (no key needed). `extract.config.labels` / `relation_labels` ARE the",
+            "#   schema. The `redact.config.pii_labels` still carry the ADR-0044 financial floor:",
+            "#   a fixed RELEVANCE schema is your choice, the SAFETY floor is not.",
+            "#   Delete `predefined_labels` from your setup flags to get per-chunk induction back.",
+        ]
     domain = normalize_domain_hint(answers.domain)
     if domain:
         # Provenance AND a pointer at where it acts: the same hint rides `induce.config.domain`,
-        # where the inducer Provider folds it into its prompt to steer the induced schema.
+        # where the inducer Provider folds it into its prompt to steer the induced schema. In
+        # predefined-only mode there IS no induce stage, so the hint is provenance only — say so
+        # rather than pointing at a key that is not in the file.
         lines += [
             "#",
             f"# Domain hint: {domain}",
-            "#   (also threaded into `induce.config.domain` — it steers the induced schema.)",
+            "#   (also threaded into `induce.config.domain` — it steers the induced schema.)"
+            if answers.predefined_labels is None
+            else "#   (provenance only — predefined-only mode emits no `induce` stage to steer.)",
         ]
     lines += ["#", ""]
     return "\n".join(lines)
@@ -1363,9 +1532,15 @@ def validate_config_text(text: str) -> None:
        structurally checks each INSTALLED Provider's class against the Protocol its Stage's
        Capability declares (torch-free, no instantiation). An un-installed heavy Provider is
        skipped (device-honesty), never a spurious failure — so this passes on a CPU-only host.
+    3. **phase boundary** (T1) — ``check_phase_boundary`` (in ``stacks.phase_boundary``) rejects a
+       stack that schedules a corpus-aggregating Stage before the chunk-level front half has
+       finished. Checked HERE, at generation time, and not only in ``latence stack validate``,
+       because the wizard's emitted config is the one stack most adopters will ever run: the
+       invariant should be impossible to ship, not merely detectable later.
     """
     from latence_core.pipeline import Pipeline
     from latence_core.stacks.capability_guard import check_stack_capabilities
+    from latence_core.stacks.phase_boundary import check_phase_boundary
 
     try:
         pipeline = Pipeline.from_yaml_text(text)
@@ -1377,4 +1552,10 @@ def validate_config_text(text: str) -> None:
     if findings:
         detail = "; ".join(f.describe() for f in findings)
         msg = f"generated config has capability-wiring errors: {detail}"
+        raise SetupConfigError(msg)
+
+    violations = check_phase_boundary(pipeline)
+    if violations:
+        detail = "; ".join(v.describe() for v in violations)
+        msg = f"generated config violates the chunk-level phase boundary: {detail}"
         raise SetupConfigError(msg)

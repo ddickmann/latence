@@ -135,7 +135,7 @@ def _stage(text: str, name: str) -> Stage:
 
 def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None:
     """enterprise-sota: parse=lighton_vllm, disambiguate=glinker (Granite embedder), induce present
-    at corpus granularity — and the whole config passes the SAME dry validation.
+    at CHUNK granularity (T1) — and the whole config passes the SAME dry validation.
 
     The OCR parse path is requested explicitly (``parser=PARSER_OCR_VLLM``): a scanned/PDF/image
     corpus routes to the served-vLLM OCR endpoint. (A born-digital .txt/.md/.jsonl corpus instead
@@ -152,8 +152,11 @@ def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None
 
     induce = _stage(text, "induce")
     assert induce.provider == "label_inducer.llm"
-    assert induce.config["granularity"] == "corpus"
+    # T1: per-chunk, not corpus — each chunk carries only its own small, relevant label set.
+    assert induce.config["granularity"] == "chunk"
     assert induce.config["max_labels"] == 40
+    # T5: the cost lever the per-chunk path rides on is emitted explicitly, not left implicit.
+    assert induce.config["dedup"] is True
 
     extract = _stage(text, "extract")
     assert extract.provider == "fused_entity_relation.gliner2"
