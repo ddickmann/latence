@@ -1055,9 +1055,10 @@ def delta(
         typer.Option(
             "--reinduce",
             help=(
-                "Re-run schema induction over the full current corpus and re-extract EVERY "
-                "document (the O(corpus) escape hatch). Default reuses the frozen induced schema "
-                "+ unchanged documents' records, so only new/changed documents are extracted."
+                "Full rebuild: re-induce EVERY chunk and re-canonicalize the type vocabulary "
+                "from scratch, re-extracting every document (the O(corpus) escape hatch, and the "
+                "one path that may re-elect canonical type labels). Default induces only the "
+                "new/changed chunks and EXTENDS the corpus's canonical type vocabulary."
             ),
         ),
     ] = False,
@@ -1067,10 +1068,13 @@ def delta(
 
     The user added, changed, or removed files in the source folder; this detects them by
     content-hash against the last committed Corpus Version and commits Version N+1 with the
-    affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: the induced schema
-    is frozen in the Corpus Version and each UNCHANGED document's doc-level records are reused, so
-    only NEW/CHANGED documents run parse/chunk/extract/redact — the compute is O(changed documents),
-    not O(corpus). ``--reinduce`` re-inducts over the whole corpus and re-extracts everything.
+    affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: each UNCHANGED
+    document's doc-level records are reused, so only NEW/CHANGED documents run
+    parse/chunk/extract/redact (and only their chunks are induced) — the compute is O(changed
+    documents), not O(corpus). Consistency with the base run comes from the corpus's canonical
+    TYPE vocabulary, which the delta EXTENDS rather than recomputes (T4/ADR-0054): a new type
+    aliases into an existing canonical entry or appends a new one, and existing canonical types
+    never churn. ``--reinduce`` is the full rebuild — re-induce and re-canonicalize from scratch.
     """
     _configure_logging(verbose)
     pipeline = _load_pipeline(pipeline_path)

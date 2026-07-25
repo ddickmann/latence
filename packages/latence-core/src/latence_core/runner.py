@@ -2012,6 +2012,30 @@ class LocalRunner:
         """
         return self._reuse_overlay_by_type.get(expected, [])  # type: ignore[return-value]
 
+    @staticmethod
+    def _parent_reemits_overlay(stage: Stage, pipeline: Pipeline, expected: type[_T]) -> bool:
+        """True when a parent Stage has ALREADY folded the reuse overlay into this carrier (T4).
+
+        The overlay must reach each corpus-level accumulator exactly once. Almost every
+        corpus-level Stage transforms its input into a DIFFERENT carrier (Disambiguation emits
+        DisambiguationRecords, Graph Assembly GraphRecords), so appending the reused mentions to
+        its stream is the only way it sees them. **Type Consolidation is the exception**: it is a
+        corpus-level accumulator whose output carrier IS its input carrier — it consumes
+        ``fresh ∪ overlay`` and re-emits all of it, relabelled. A downstream Stage that then
+        appended the overlay AGAIN would see every reused mention twice, which surfaces as a
+        ``CanonicalEntity`` whose ``member_mention_ids`` are duplicated (the resolver's
+        no-double-counting contract) — a delta that crashes rather than silently mis-counts, but a
+        crash all the same. So the overlay is suppressed for a carrier a parent already re-emitted.
+        """
+        if expected not in (EntityMention, RelationMention):
+            return False
+        by_name = {s.name: s for s in pipeline.stages}
+        return any(
+            (parent := by_name.get(name)) is not None
+            and parent.capability is CapabilityKind.TYPE_CONSOLIDATION
+            for name in stage.depends_on
+        )
+
     def _stream_inputs_of_type(
         self,
         stage: Stage,
@@ -2041,8 +2065,10 @@ class LocalRunner:
                 if isinstance(record, expected):
                     yield record
         # W17: append the reused doc-level records of this carrier so the accumulator folds in the
-        # unchanged documents' Stage outputs alongside the freshly-extracted ones (fresh ∪ reused).
-        yield from self._overlay_of_type(expected)
+        # unchanged documents' Stage outputs alongside the freshly-extracted ones (fresh ∪ reused)
+        # — unless a parent already re-emitted them (:meth:`_parent_reemits_overlay`, T4).
+        if not self._parent_reemits_overlay(stage, pipeline, expected):
+            yield from self._overlay_of_type(expected)
 
     def _stream_all_records_of_type(
         self,

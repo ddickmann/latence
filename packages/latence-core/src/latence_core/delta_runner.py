@@ -18,20 +18,32 @@ delta machinery on top of it, without forking the Runner (ADR-0018 reuses the ex
   the records in the blocking neighborhoods the delta touched are re-resolved and spliced, every
   untouched cluster is carried forward verbatim (byte-identical), and the churn records the
   affected-set size as the perf witness. **Since W17 the extraction pass is incremental too.** A
-  delta FREEZES the induced corpus schema in the Corpus Version (so extraction labels are stable
-  across the delta) and REUSES each unchanged document's persisted doc-level records
-  (parse/chunk/extract/redact) from the prior Version, excluding those documents at Source so
-  only NEW/CHANGED documents run the doc-level Stages. The corpus-level Stages
+  delta REUSES each unchanged document's persisted doc-level records (parse/chunk/extract/redact)
+  from the prior Version, excluding those documents at Source so only NEW/CHANGED documents run
+  the doc-level Stages — which is also why only the new/changed chunks are ever INDUCED. The
+  corpus-level Stages
   (disambiguate/graph/…) then run over the UNION of reused + freshly-extracted records — via the
   Runner's reuse overlay (:meth:`LocalRunner.run`'s ``reuse``) — so the committed corpus is
   byte-identical to a from-scratch run of the whole source, while the *extraction cost* is
   O(changed documents), not O(corpus). The churn's ``documents_reused`` / ``documents_extracted``
-  are the measurable witness. **The one caveat**: an explicit ``--reinduce`` (or a first run with
-  no frozen schema) re-runs induction over the full current corpus and re-extracts every document
-  — the correct-by-construction fallback to the old O(corpus) behavior, by design. Reuse also
-  falls back to full extraction for a pipeline whose stages are not purely per-document
-  reproducible (a ``context_enrichment`` Stage — its per-chunk output depends on the mutable
-  graph — see :meth:`DeltaRunner._reuse_supported`).
+  are the measurable witness.
+
+  **How a delta stays consistent with the base run (T4 replaces the frozen schema).** ADR-0043
+  originally froze the ONE induced corpus schema and stamped it on the delta's chunks. Per-chunk
+  induction (T1) produces no such schema — each chunk induces its own labels from its own text —
+  so what a delta carries across runs is the **canonical TYPE vocabulary** (ADR-0054): the Corpus
+  Version persists it, and a delta SEEDS its ``type_consolidation`` Stage with it so the new
+  chunks' induced types canonicalize AGAINST it (a matching type aliases into the existing
+  canonical entry; a genuinely new type appends one; **existing canonical ids/labels never
+  churn**, so the KG's type space grows monotonically without rewriting history). The churn's
+  ``canonical_types_added`` / ``type_aliases_added`` are the witness. The frozen schema survives
+  only for an explicit ``granularity: corpus`` induction Stage, where the single shared vocabulary
+  IS a genuine cross-document coupling. **``--reinduce``** now means *re-canonicalize from
+  scratch*: no seed, no schema reuse, no doc-level reuse — the full O(corpus) rebuild, the rare
+  path. Reuse also falls back to full extraction for a pipeline whose stages are not purely
+  per-document reproducible (a ``context_enrichment`` Stage — its per-chunk output depends on the
+  mutable graph — see :meth:`DeltaRunner._reuse_supported`); the vocabulary is still seeded there,
+  because type stability is not a function of doc-level reuse.
 * **Retraction** (:meth:`retract`) is the default soft deletion: the deleted documents' derived
   records are tombstoned (excluded from the live set, retained on Storage for audit and
   rollback), affected clusters re-resolved, a new Version committed.
@@ -45,6 +57,7 @@ Version N intact (the WAL), and any prior Version is inspectable.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from latence_core.capability import DeltaProcessor, DocumentEnumerator, ProviderRegistry
@@ -61,6 +74,8 @@ from latence_core.contracts import (
     GraphRecord,
     InducedLabels,
     RelationMention,
+    TypeKind,
+    TypeVocabulary,
 )
 from latence_core.pipeline import CapabilityKind, Pipeline
 from latence_core.runner import LocalRunner, StageOutput, topological_order
@@ -85,6 +100,21 @@ _CORPUS_LEVEL = (DisambiguationRecord, GraphRecord)
 # are reproducible from a document's own bytes + the frozen schema (parse/chunk/extract/redact),
 # so an unchanged document's records are reused across a delta instead of re-extracted.
 _DOC_LEVEL = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
+
+# The Stage kinds whose checkpoint the reuse store must NOT read (T4). Every one of them is either
+# a sink that re-emits its input verbatim (Export) or a CORPUS-LEVEL accumulator — and a
+# corpus-level accumulator can ride a doc-level carrier: Type Consolidation re-emits the whole
+# run's mentions/relations relabelled, so its checkpoint spans the REUSED documents too. See
+# :meth:`DeltaRunner._doc_level_records` for why that distinction has to be drawn by Stage kind
+# rather than by carrier type.
+_CORPUS_LEVEL_KINDS = (
+    CapabilityKind.PROFILING,
+    CapabilityKind.TYPE_CONSOLIDATION,
+    CapabilityKind.DISAMBIGUATION,
+    CapabilityKind.GRAPH_ASSEMBLY,
+    CapabilityKind.GRAPH_COMPLETION,
+    CapabilityKind.EXPORT,
+)
 
 
 class DeltaRunner:
@@ -115,23 +145,28 @@ class DeltaRunner:
         """Run the Pipeline on the current source and commit the resulting Corpus Version.
 
         The Runner executes the DAG over the current source with **incremental extraction** (W17,
-        ADR-0043): each UNCHANGED document (its content-addressed id matches a document committed in
-        the prior Version, and the induced schema is frozen) is excluded at Source and its
-        persisted doc-level records are REUSED, so only NEW/CHANGED documents run
-        parse/chunk/extract/redact; the corpus-level Stages then run over the UNION (reused ∪
-        freshly-extracted) via the Runner's reuse overlay. This method then computes the
+        ADR-0043): each UNCHANGED document (its content-addressed id matches a document committed
+        in the prior Version) is excluded at Source and its persisted doc-level records are REUSED,
+        so only NEW/CHANGED documents run parse/chunk/extract/redact — and, since ``induce`` is one
+        of those doc-level Stages, only their chunks are induced. The corpus-level Stages then run
+        over the UNION (reused ∪ freshly-extracted) via the Runner's reuse overlay, with the
+        ``type_consolidation`` Stage SEEDED from the Corpus Version's persisted canonical type
+        vocabulary (T4) so the fresh chunks' induced types canonicalize against the committed type
+        space instead of re-electing it. This method then computes the
         :class:`~latence_core.contracts.Delta` of the current (union) manifest against the last
         committed Version, applies the blocking-neighborhood affected-set recompute +
         drift-triggered Reconciliation to produce the *committed* corpus-level set (untouched
         clusters carried forward verbatim), commits Version N+1 with the refreshed doc-level reuse
-        store + frozen schema, and folds the :class:`~latence_core.contracts.DeltaChurn` (with the
-        ``documents_reused`` / ``documents_extracted`` witness) into the Quality Report. Returns
-        that report.
+        store + the EXTENDED type vocabulary, and folds the
+        :class:`~latence_core.contracts.DeltaChurn` (with the ``documents_reused`` /
+        ``documents_extracted`` and ``canonical_types_added`` / ``type_aliases_added`` witnesses)
+        into the Quality Report. Returns that report.
 
-        ``reinduce`` (the ``--reinduce`` escape hatch): re-run schema induction over the full
-        current corpus and re-extract every document — the correct-by-construction fallback to the
-        old O(corpus) behavior when the operator wants the induced vocabulary to move with the
-        data. It reuses nothing (``documents_reused == 0``).
+        ``reinduce`` (the ``--reinduce`` escape hatch) is the **full rebuild**: re-induce every
+        chunk AND re-canonicalize the type vocabulary from scratch (no seed), re-extracting every
+        document. It is the correct-by-construction fallback for when the operator wants the
+        vocabulary to move with the data — accepting that canonical type labels may be re-elected,
+        which is exactly why it is not the default. It reuses nothing (``documents_reused == 0``).
         """
         store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
         parent_version = store.head_version()
@@ -151,6 +186,14 @@ class DeltaRunner:
             parent_version is not None and not reinduce and self._reuse_supported(pipeline)
         )
         frozen_schema = store.head_schema() if reuse_on else None
+        # T4: the canonical TYPE vocabulary the committed corpus already uses. It is read
+        # independently of ``reuse_on`` — vocabulary stability is not a function of doc-level
+        # reuse: a pipeline that cannot reuse documents (context enrichment) must STILL not rename
+        # the canonical types its committed KG is built from. Only ``--reinduce`` drops it, which
+        # is precisely what "re-canonicalize from scratch" means.
+        seed_vocabulary = (
+            store.head_type_vocabulary() if parent_version is not None and not reinduce else None
+        )
         committed_doclevel = store.head_doclevel() if reuse_on else []
         committed_doc_ids = {r.provenance.document_id for r in committed_doclevel}
         current_doc_ids = self._current_document_ids(pipeline, sorted(prior_deletions))
@@ -162,10 +205,14 @@ class DeltaRunner:
         # Run only the NEW/CHANGED documents through the doc-level Stages: exclude the reused
         # documents (and the durable prior deletions) at Source, freeze the induced schema so the
         # fresh documents extract under the SAME labels as the reused ones, and hand the Runner the
-        # reused doc-level records as the corpus-level overlay.
+        # reused doc-level records as the corpus-level overlay. T4: the new/changed documents'
+        # chunks are induced PER CHUNK by the induce Stage itself (the unchanged ones are excluded
+        # at Source, so they are never re-induced), and the Type-Consolidation Stage is seeded with
+        # the committed vocabulary so those fresh types canonicalize AGAINST it.
         run_excluded = sorted(prior_deletions | reusable_ids)
         effective = self._with_source_exclusions(pipeline, run_excluded)
         effective = self._apply_frozen_schema(effective, frozen_schema)
+        effective = self._apply_seed_vocabulary(effective, seed_vocabulary)
         report = self._runner.run(effective, run_id=run_id, reuse=reuse_records)
         outputs = self._collect_outputs(effective, run_id)
 
@@ -182,6 +229,11 @@ class DeltaRunner:
         # reused when present, else captured from this run's fresh chunks (first run / --reinduce).
         new_doclevel = [*self._doc_level_records(effective, run_id), *reuse_records]
         new_schema = frozen_schema or self._captured_schema(effective, run_id)
+        # T4: the EXTENDED canonical type vocabulary this run emitted (the seed merged with the new
+        # chunks' induced types, append-don't-churn). A pipeline with no Type-Consolidation Stage
+        # emits none — carry the seed forward untouched rather than dropping it, so adding, then
+        # removing, then re-adding the Stage never loses the corpus's committed type space.
+        new_vocabulary = self._captured_type_vocabulary(effective, run_id) or seed_vocabulary
         churn = self._commit(
             store=store,
             parent_version=parent_version,
@@ -195,6 +247,8 @@ class DeltaRunner:
             deletion_mode=deletion_mode,
             doclevel_records=new_doclevel,
             induced_schema=new_schema,
+            parent_vocabulary=seed_vocabulary,
+            type_vocabulary=new_vocabulary,
             documents_reused=len(reusable_ids),
             # Derived from the documents this run ACTUALLY produced (the union manifest), not
             # from the discovery pass: a Source whose cheap enumeration is partial — SharePoint
@@ -278,6 +332,17 @@ class DeltaRunner:
             self._purge_derived_tables(pipeline)
         all_deleted = sorted(set(deleted) | self._prior_deletions(store, parent_version))
         excluded_pipeline = self._with_source_exclusions(pipeline, all_deleted)
+        # T4: a RETRACTION seeds the survivors' re-canonicalization with the committed vocabulary
+        # — the surviving KG keeps its type names, so a soft delete never retypes nodes it did not
+        # touch. A PURGE deliberately does NOT seed: a hard GDPR erasure re-derives the survivors'
+        # schema from the survivors alone, so no cluster the purged documents created can persist
+        # by carry-forward. Both then commit the vocabulary the re-run actually emitted.
+        parent_vocabulary = (
+            store.read_type_vocabulary(parent_version)
+            if deletion_mode is DeletionMode.RETRACTION
+            else None
+        )
+        excluded_pipeline = self._apply_seed_vocabulary(excluded_pipeline, parent_vocabulary)
         report = self._runner.run(excluded_pipeline, run_id=run_id)
         current_records = self._corpus_level(self._collect_outputs(excluded_pipeline, run_id))
         # W17: the deletion path re-extracts the survivors from scratch (it does not reuse — a
@@ -302,6 +367,10 @@ class DeltaRunner:
             intentional_deletion=True,
             doclevel_records=surviving_doclevel,
             induced_schema=store.read_schema(parent_version),
+            parent_vocabulary=parent_vocabulary,
+            type_vocabulary=(
+                self._captured_type_vocabulary(excluded_pipeline, run_id) or parent_vocabulary
+            ),
             documents_extracted=len(current_manifest),
         )
         if deletion_mode is DeletionMode.PURGE and deleted:
@@ -435,6 +504,8 @@ class DeltaRunner:
         intentional_deletion: bool = False,
         doclevel_records: list[Record] | None = None,
         induced_schema: InducedLabels | None = None,
+        parent_vocabulary: TypeVocabulary | None = None,
+        type_vocabulary: TypeVocabulary | None = None,
         documents_reused: int = 0,
         documents_extracted: int = 0,
     ) -> DeltaChurn:
@@ -469,8 +540,10 @@ class DeltaRunner:
             reconciled=drift.triggered,
             doclevel_records=doclevel_records,
             induced_schema=induced_schema,
+            type_vocabulary=type_vocabulary,
         )
 
+        vocab_churn = _type_vocabulary_churn(parent_vocabulary, type_vocabulary)
         records_purged = len(outcome.retracted) if deletion_mode is DeletionMode.PURGE else 0
         records_retracted = (
             len(outcome.retracted) if deletion_mode is DeletionMode.RETRACTION else 0
@@ -484,6 +557,9 @@ class DeltaRunner:
             documents_unchanged=len(diff_unchanged),
             documents_reused=documents_reused,
             documents_extracted=documents_extracted,
+            canonical_types_added=vocab_churn.canonical_added,
+            type_aliases_added=vocab_churn.aliases_added,
+            canonical_types_total=vocab_churn.canonical_total,
             entities_created=outcome.entities_created,
             entities_merged=outcome.entities_merged,
             entities_split=outcome.entities_split,
@@ -623,23 +699,73 @@ class DeltaRunner:
     def _apply_frozen_schema(
         pipeline: Pipeline, schema: InducedLabels | None
     ) -> Pipeline:
-        """Return a Pipeline whose ``schema_induction`` Stage stamps the FROZEN schema (W17).
+        """Stamp the FROZEN CORPUS schema on a ``granularity: corpus`` induction Stage (W17/T4).
 
-        When a frozen corpus schema is being reused, every ``schema_induction`` Stage's config is
-        given ``frozen_induced_labels`` so its Provider stamps that single schema on every chunk
-        and makes NO LLM call (:meth:`LLMLabelInducer.induce`) — the freshly-extracted documents
-        then use the SAME labels as the reused ones, keeping the unchanged documents' extraction
-        valid (the coupling ADR-0043 breaks). ``schema is None`` (first run, ``--reinduce``, or a
-        pipeline with no induction) returns the Pipeline unchanged, so induction runs normally.
+        The freeze exists to break ONE coupling: at ``granularity: corpus`` a single vocabulary is
+        induced from ALL chunks, so adding a document could shift it and invalidate the unchanged
+        documents' extraction. Freezing it makes the fresh documents extract under the SAME labels
+        as the reused ones. ``frozen_induced_labels`` short-circuits induction entirely (no LLM
+        call, :meth:`LLMLabelInducer.induce`).
+
+        **T4 scopes the freeze to exactly that coupling.** Under per-chunk induction (the default
+        since T1) a chunk's labels are a function of its own text alone, so there is no corpus
+        coupling to break: an unchanged document's records are byte-identical to re-extracting it
+        with no freeze at all, and freezing would be actively wrong — it would stamp the parent's
+        corpus union on the delta's chunks and reintroduce the very label broadcast the redesign
+        removed. Cross-run consistency for the per-chunk path comes from the PERSISTED CANONICAL
+        TYPE VOCABULARY instead (:meth:`_apply_seed_vocabulary`), which earns it downstream rather
+        than imposing it upstream. So a non-corpus induction Stage is left untouched even when the
+        parent Version froze a corpus schema (a pipeline can hold both kinds of Stage).
+
+        ``schema is None`` (first run, ``--reinduce``, a per-chunk-only or induction-free pipeline)
+        returns the Pipeline unchanged, so induction runs normally.
         """
         if schema is None:
             return pipeline
         data = pipeline.model_dump()
         touched = False
         for stage in data["stages"]:
-            if stage["capability"] == CapabilityKind.SCHEMA_INDUCTION.value:
+            if stage["capability"] != CapabilityKind.SCHEMA_INDUCTION.value:
+                continue
+            config = dict(stage.get("config") or {})
+            if str(config.get("granularity", "doc")).lower() != "corpus":
+                continue
+            config["frozen_induced_labels"] = schema.model_dump(mode="json")
+            stage["config"] = config
+            touched = True
+        return Pipeline.model_validate(data) if touched else pipeline
+
+    @staticmethod
+    def _apply_seed_vocabulary(
+        pipeline: Pipeline, vocabulary: TypeVocabulary | None
+    ) -> Pipeline:
+        """Seed every ``type_consolidation`` Stage with the committed type vocabulary (T4).
+
+        The per-chunk replacement for "freeze one schema". A delta induces the new/changed chunks'
+        labels freshly (per chunk — that is the whole point of the redesign), which means the
+        delta's raw type surfaces are NOT drawn from the parent run's vocabulary. Canonicalizing
+        them from scratch would re-elect canonical labels over the delta's own salience and could
+        RENAME a type the committed KG is already built from. Seeding forbids that: the Stage
+        merges its fresh vocabulary INTO the committed one (append-don't-churn), so a fresh type
+        that matches an existing cluster aliases to it, a genuinely new type appends a new
+        canonical entry, and no existing canonical id/label moves. The corpus's type space
+        therefore grows monotonically without rewriting history.
+
+        Injected as Stage config (rather than handed to the Provider object) because the Pipeline
+        is the run's whole input: the persisted manifest then records exactly which vocabulary the
+        run canonicalized against, and replaying it reproduces the run.
+
+        ``vocabulary is None`` (first run, ``--reinduce`` ⇒ re-canonicalize from scratch, or a
+        parent that committed none) returns the Pipeline unchanged.
+        """
+        if vocabulary is None:
+            return pipeline
+        data = pipeline.model_dump()
+        touched = False
+        for stage in data["stages"]:
+            if stage["capability"] == CapabilityKind.TYPE_CONSOLIDATION.value:
                 config = dict(stage.get("config") or {})
-                config["frozen_induced_labels"] = schema.model_dump(mode="json")
+                config["seed_vocabulary"] = vocabulary.model_dump(mode="json")
                 stage["config"] = config
                 touched = True
         return Pipeline.model_validate(data) if touched else pipeline
@@ -653,12 +779,21 @@ class DeltaRunner:
         topological order**, so a chunk→…→redact chain persists the FINAL (masked) chunk variant —
         the one that flows to a doc-level Export — never the earlier raw one. DocumentRecords /
         mentions / relations have unique ids across Stages, so the order is immaterial for them.
-        Export checkpoints are skipped (a sink re-emits its input verbatim — double-counting).
+
+        **Only doc-level Stages are read** (``_CORPUS_LEVEL_KINDS`` are skipped). An Export sink
+        re-emits its input verbatim, so reading it would double-count. More subtly, a corpus-level
+        accumulator can re-emit a DOC-LEVEL CARRIER: Type Consolidation consumes ``fresh ∪ reused``
+        mentions and returns all of them relabelled, so its checkpoint holds the REUSED documents'
+        mentions too — collecting from it would put every reused document's records into the store
+        twice (once here, once via the caller's ``reuse_records``), and the next delta would then
+        feed the resolver duplicate mentions. Skipping it is also the semantically right line: the
+        reuse store substitutes for RE-RUNNING the doc-level Stages, and a corpus-level decision is
+        not a doc-level Stage output — it is recomputed (over the seeded vocabulary) every run.
         """
         storage = Storage.for_uri(pipeline.storage_uri)
         collected: dict[str, Record] = {}
         for stage in topological_order(list(pipeline.stages)):
-            if stage.capability is CapabilityKind.EXPORT:
+            if stage.capability in _CORPUS_LEVEL_KINDS:
                 continue
             ckpt = (
                 f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
@@ -699,6 +834,33 @@ class DeltaRunner:
                 if isinstance(record, ChunkRecord) and record.induced_labels is not None:
                     return record.induced_labels
         return None
+
+    def _captured_type_vocabulary(
+        self, pipeline: Pipeline, run_id: str
+    ) -> TypeVocabulary | None:
+        """The canonical TYPE vocabulary this run emitted, to commit in the Corpus Version (T4).
+
+        Read from the Type-Consolidation Stage's persisted sidecar (ADR-0054 §6 / ADR-0017: files
+        are the source of truth) rather than recomputed, so what is committed is exactly what the
+        Stage decided and what the records were remapped onto. When the run was SEEDED the sidecar
+        already holds seed ⊕ fresh — the merge happens inside the Provider — so this is the
+        EXTENDED vocabulary, not the delta's own.
+
+        A pipeline with several Type-Consolidation Stages (an unusual but legal DAG) commits the
+        union in Stage order, since each Stage canonicalizes a different slice of the same corpus
+        and the committed vocabulary must describe all of it. ``None`` when the pipeline has no
+        such Stage — the caller then carries the parent's vocabulary forward untouched.
+        """
+        storage = Storage.for_uri(pipeline.storage_uri)
+        captured: TypeVocabulary | None = None
+        for stage in pipeline.stages:
+            if stage.capability is not CapabilityKind.TYPE_CONSOLIDATION:
+                continue
+            emitted = self._runner.read_type_vocabulary(storage, pipeline, run_id, stage.name)
+            if emitted is None:
+                continue
+            captured = emitted if captured is None else captured.merge(emitted)
+        return captured
 
     # -- manifest -----------------------------------------------------------
 
@@ -809,6 +971,55 @@ class DeltaRunner:
         )
         storage.write_atomic(report_uri, report.to_json().encode("utf-8"))
         return report
+
+
+@dataclass(frozen=True)
+class _TypeVocabularyChurn:
+    """How a delta EXTENDED the committed canonical type vocabulary (T4 churn, counts only)."""
+
+    canonical_added: int = 0
+    aliases_added: int = 0
+    canonical_total: int = 0
+
+
+def _type_vocabulary_churn(
+    parent: TypeVocabulary | None, current: TypeVocabulary | None
+) -> _TypeVocabularyChurn:
+    """Diff the committed type vocabularies into the delta's churn counters (T4).
+
+    ``canonical_added`` is the number of canonical entries in ``current`` whose ``(kind,
+    canonical)`` key the parent did not have — the genuinely NEW types this delta introduced.
+    ``aliases_added`` is the number of raw labels that are new to the vocabulary but landed in a
+    cluster that already existed — the append-don't-churn half, i.e. the drifted surfaces that
+    aliased INTO the committed type space instead of renaming anything. Measured from the two
+    committed vocabularies, so a Stage that silently failed to extend reports zeros rather than
+    claiming an extension the corpus does not show.
+    """
+    if current is None:
+        return _TypeVocabularyChurn()
+    parent_canonicals = (
+        set() if parent is None else {(t.kind, t.canonical) for t in parent.types}
+    )
+    parent_labels: set[tuple[TypeKind, str]] = (
+        set()
+        if parent is None
+        else {(t.kind, label) for t in parent.types for label in t.labels}
+    )
+    canonical_added = sum(
+        1 for t in current.types if (t.kind, t.canonical) not in parent_canonicals
+    )
+    aliases_added = sum(
+        1
+        for t in current.types
+        if (t.kind, t.canonical) in parent_canonicals
+        for label in t.labels
+        if (t.kind, label) not in parent_labels
+    )
+    return _TypeVocabularyChurn(
+        canonical_added=canonical_added,
+        aliases_added=aliases_added,
+        canonical_total=len(current.types),
+    )
 
 
 def _entry(

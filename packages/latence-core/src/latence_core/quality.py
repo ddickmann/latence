@@ -964,5 +964,13 @@ class QualityReport(BaseModel):
                 f"- extraction: {dc.documents_extracted} extracted, "
                 f"{dc.documents_reused} reused (doc-level Stages skipped)"
             )
+            # T4: the canonical type vocabulary the delta EXTENDED. Rendered only when the corpus
+            # has one, so a pipeline without a Type-Consolidation Stage reads exactly as before.
+            if dc.canonical_types_total:
+                lines.append(
+                    f"- canonical types: +{dc.canonical_types_added} new, "
+                    f"+{dc.type_aliases_added} aliased into existing "
+                    f"({dc.canonical_types_total} total)"
+                )
             lines.append(f"- drift: {dc.drift:.3f}")
         return "\n".join(lines) + "\n"
