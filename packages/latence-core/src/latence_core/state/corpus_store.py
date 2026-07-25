@@ -17,6 +17,10 @@ Layout under ``<storage_uri>/_latence/corpus/``:
 * ``wal/v<N>/MANIFEST.json`` — the WAL commit manifest (the linearisation point);
 * ``wal/v<N>/records.jsonl`` — the committed derived record set for Version N;
 * ``wal/v<N>/version.json`` — the :class:`~latence_core.contracts.CorpusVersion` contract;
+* ``wal/v<N>/doclevel.jsonl`` — the cross-run doc-level reuse store (W17, ADR-0043);
+* ``wal/v<N>/schema.json`` — the frozen induced CORPUS schema, if any (W17, ADR-0043 §1);
+* ``wal/v<N>/type-vocabulary.json`` — the canonical TYPE vocabulary a delta extends (T4,
+  ADR-0043 §1b / ADR-0054);
 * ``wal/HEAD`` — a pointer to the highest committed version (a fast-path read; the WAL scan
   is authoritative and used to rebuild HEAD on recovery).
 
