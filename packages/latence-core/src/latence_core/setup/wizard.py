@@ -821,7 +821,10 @@ def _build_lite_stages(
     # 6) schema induction (mandatory quality lever) — one shared canonical schema for the corpus.
     stages.append(_induce_stage(answers, depends_on=induce_input))
 
-    # 7) fused NER+RE in ONE pass (GLiNER2); config labels are a FLOOR, induced types union on.
+    # 7) fused NER+RE in ONE pass (GLiNER2). T2: the config labels are a PER-CHUNK RELEVANCE
+    # floor — a chunk that induced its own types is scored against THOSE ALONE (zero-shot
+    # precision degrades with label count); a chunk that induced nothing falls back to these.
+    # `label_floor: universal` on the extract config restores the config ∪ induced union.
     # W18: in `extract_on: masked` mode the extractor reads the REDACTED chunk stream (depends_on
     # `redact`, which sets each chunk's masked_content) so PII never reaches the KG; default
     # `unmasked` keeps the pre-W18 wiring (depends_on `induce`), so the KG keeps the real entities.
@@ -858,6 +861,13 @@ def _build_lite_stages(
                 "config": {
                     "device": answers.device,
                     "pii_labels": list(FINANCIAL_PII_LABELS),
+                    # T2: the blessed checkpoint is a GUARDRAILS+PII model, so the guard half is
+                    # switched on too. Every chunk carries the universal guard floor (prompt
+                    # injection / harmful content — a security invariant, never subsetted per
+                    # chunk) UNIONed with whatever guard categories that chunk induced. A hit is
+                    # FLAGGED as a RiskMarker in the corpus, never masked; the deterministic
+                    # keyword content_screen Stage above is a separate, earlier pre-filter.
+                    "guardrails": True,
                     "max_len": 768,
                     "threshold": 0.5,
                 },
@@ -1041,8 +1051,10 @@ def _build_sota_stages(
     # 6) LLM schema induction (corpus granularity) — the one shared canonical schema.
     stages.append(_induce_stage(answers, depends_on=induce_input))
 
-    # 7) fused NER+RE in ONE pass (GLiNER2) — labels are a FLOOR, induced types union on. threshold
-    # 0.3 (the SOTA recall floor); compile defaults to False in the provider (left to ride).
+    # 7) fused NER+RE in ONE pass (GLiNER2) — T2: the labels are a PER-CHUNK relevance floor
+    # (each chunk is scored against its own induced types; these are the fallback when a chunk
+    # induced nothing). threshold 0.3 (the SOTA recall floor); compile defaults to False in the
+    # provider (left to ride).
     extract_input = "redact" if masked_extract else "induce"
     stages.append(
         {
@@ -1119,6 +1131,13 @@ def _build_sota_stages(
                 "config": {
                     "device": SOTA_DEVICE,
                     "pii_labels": list(FINANCIAL_PII_LABELS),
+                    # T2: the blessed checkpoint is a GUARDRAILS+PII model, so the guard half is
+                    # switched on too. Every chunk carries the universal guard floor (prompt
+                    # injection / harmful content — a security invariant, never subsetted per
+                    # chunk) UNIONed with whatever guard categories that chunk induced. A hit is
+                    # FLAGGED as a RiskMarker in the corpus, never masked; the deterministic
+                    # keyword content_screen Stage above is a separate, earlier pre-filter.
+                    "guardrails": True,
                     "max_len": 768,
                     "threshold": 0.5,
                 },
@@ -1300,7 +1319,8 @@ def _render_header(answers: SetupAnswers) -> str:
         lines += [
             f"#   Redactor: `{BLESSED_REDACT_PROVIDER}` (#197, ADR-0036 W9) — the SAME GLiNER2",
             "#   engine `extract` runs, so PII detection adds no second model library. Its",
-            "#   `pii_labels` are the ADR-0044 financial floor; the induced pii_types UNION on top",
+            "#   `pii_labels` are the ADR-0044 financial floor — UNIVERSAL, applied to EVERY",
+            "#   chunk and never subsetted (T2); the per-chunk induced pii_types UNION on top",
             "#   at run (ADR-0038), and the universal financial floor masks card/iban/ssn even",
             "#   when",
             "#   the model misses them. Any other Redaction Provider drops in behind the same",
