@@ -68,23 +68,36 @@ page alignment so any later result can be traced back to its exact source locati
 checkpoint, *after* chunking: a guardrail against prompt-injection, harmful content, and sensitivity
 escalation. Chunks that trip it are quarantined or flagged, not silently dropped.
 
-**6 · Schema induction** — `label_inducer.llm`. Here the pipeline does something most stacks skip: before
-extracting anything, it derives **one shared schema for the whole corpus** — the entity types, relation
-types, and PII categories that actually occur in *your* data.
-- **Model: `openai/gpt-4.1-mini` via OpenRouter** — an LLM endpoint, used once at corpus granularity,
-  not per chunk. You can point it at any OpenAI-compatible endpoint (OpenRouter, a local vLLM, Azure).
-  A free-text `domain` hint steers it.
-- Why it matters: extraction with a *consistent, corpus-derived* schema is what makes the downstream
-  knowledge graph coherent instead of a pile of ad-hoc labels. This is the difference between "we ran
-  NER" and "we built a graph whose types mean something across the whole corpus."
+**6 · Schema induction — per chunk** — `label_inducer.llm`. Before extracting anything, the pipeline
+induces the label schema **per chunk**: for each chunk it derives exactly the entity types, relation
+types, and PII categories present *in that chunk* — a small, relevant set, not a corpus-wide catalog.
+- **Model: `openai/gpt-4.1-mini` via OpenRouter** — any OpenAI-compatible endpoint (OpenRouter, a
+  local vLLM, Azure); a free-text `domain` hint steers it. A **predefined-only** mode skips induction
+  entirely when you already have a fixed schema (compliance taxonomies, known entity sets).
+- **Why per chunk, not corpus-wide.** A single global schema forces two bad choices: cap it — and
+  silently drop the rare-but-critical types a corpus-frequency cap discards — or apply all of it to
+  every chunk, drowning each chunk's extraction in dozens of irrelevant labels. Zero-shot extractors
+  lose precision as the label count grows, so a global schema taxes every chunk to serve none of them
+  well. Per-chunk induction avoids both: each chunk sees only what is relevant to it.
+- **Consistency is deliberately *not* this stage's job.** It is earned later, in the phase built for
+  it (stage 10). Cost at scale is bounded by de-duplicating identical/boilerplate chunk texts and by a
+  swappable, cheaper inducer for the per-chunk pass.
 
-**7 · Extraction (fused NER + relations)** — `fused_entity_relation.gliner2`. Entities *and* the
-relations between them, in a single pass.
+**7 · Extraction (fused NER + relations) — per chunk** — `fused_entity_relation.gliner2`. Entities
+*and* the relations between them, in a single pass, against **that chunk's own small label set**.
 - **Model: `fastino/gliner2-multi-v1`** — a zero-shot GLiNER2 model on an **mdeberta-v3** backbone,
   running in-process (GPU here, CPU-viable on a laptop). Zero-shot means it extracts the induced schema
   without task-specific fine-tuning.
-- The config-declared labels are a *floor*; the induced types union on top. Output: `EntityMention` and
-  `RelationMention` records carrying true original-document offsets.
+- **Why the small per-chunk set matters — twice over.** Quality: zero-shot precision degrades with
+  label count, so a handful of relevant labels beats dozens of mostly-irrelevant ones. Cost: the
+  model's span-scoring tensor scales with `batch × tokens × labels`, so collapsing the label dimension
+  is what keeps memory flat — a global schema is what turns a routine batch into a multi-gigabyte
+  allocation.
+- **Efficient batching.** Chunks are bucketed by their induced label set — most chunks in a document
+  or topic share one — and each bucket runs as a *single* native batched forward. Small, stable shapes
+  per bucket also make the model's own `compile` and `quantize` paths safe to switch on, which
+  variable-width global schemas prevented. Full batch throughput at each chunk's own label count.
+- Output: `EntityMention` and `RelationMention` records carrying true original-document offsets.
 
 **7b/7c · Reference extraction** — `header_refs` and `inline_refs`. This is where the framework captures
 the structure that turns a pile of documents into a connected graph, and it earned its place the hard
@@ -101,27 +114,47 @@ sentence*; it does **not** see a document's cross-references — the "Obsoletes:
 - Both are deterministic and compose *beside* the learned extractor; if no structured-header family is
   detected in your corpus, they simply aren't in the pipeline, and the output is byte-identical.
 
-**8 · Redaction** — `redaction.gliner2`. Learned PII masking as a chunk→chunk transform: it reads the
-induced chunk stream and sets each chunk's `masked_content`, which every downstream stage then reads —
-so the exported corpus is genuinely PII-safe *and* still enriched.
+**8 · Redaction and guardrails — per chunk** — `redaction.gliner2`. Learned PII masking as a
+chunk→chunk transform: it reads the induced chunk stream and sets each chunk's `masked_content`, which
+every downstream stage then reads — so the exported corpus is genuinely PII-safe *and* still enriched.
 - **Model: `fastino/GLiNER2-Guardrails-PII-Multi`** — the *same* GLiNER2 engine family the extractor
-  uses, so redaction adds no second model library.
-- The load-bearing guarantee: beneath the learned model sits a **universal financial-PII floor**
-  (person, email, phone, address, IBAN, credit-card, tax id, bank account, SSN) enforced at the shared
-  `finalize_redacted_chunk` seam **every** redaction provider funnels through. It is non-bypassable by
-  model choice — if the learned model misses a card or IBAN, the deterministic floor still masks it.
-  Induced PII types union on top. This is what makes the PII claim defensible rather than best-effort.
+  uses, so redaction adds no second model library. Induced PII and guardrail categories are per chunk,
+  bucketed and batched exactly like extraction.
+- **The floors are the exception, and deliberately so.** Beneath the learned model sit two *universal*
+  sets that are never narrowed per chunk: the **financial-PII floor** (person, email, phone, address,
+  IBAN, credit-card, tax id, bank account, SSN) and the always-on **safety categories**. These are
+  security invariants, not relevance labels — a leaked card number must be caught in a chunk *about
+  something else*. They are enforced at the shared `finalize_redacted_chunk` seam **every** redaction
+  provider funnels through, so they are non-bypassable by model choice: if the learned model misses a
+  card or IBAN, the deterministic floor still masks it.
+- **The rule, stated once:** relevance labels are scoped per chunk; safety floors are universal.
+
+> **The phase boundary.** Redaction is the *last* chunk-level stage. Everything from source through
+> redaction operates on a single chunk or document at a time — no corpus-wide state, no global schema,
+> nothing that has to see the whole dataset. Only after this line does the pipeline go corpus-level.
+> This is what keeps the heavy model work bounded, parallel, and independent of corpus size.
 
 **9 · Profiling** — `profiling.statistical`. Corpus-level quality and statistical features (density,
 readability, entity-frequency, co-occurrence) that feed the Quality Report. Deterministic.
 
-**10 · Disambiguation** — `disambiguation.glinker`. Mentions become **canonical entities**: the same
-organization named three ways across five documents is resolved to one node, corpus-wide.
-- **Models: `knowledgator/gliner-linker-large-v1.0` (linker) + `knowledgator/gliner-linker-rerank-v1.0`
-  (reranker)** — in-process encoders (FlashDeBERTa with graceful fallback), backed by an audited
-  multi-strategy resolver.
-- Without this step the graph would be full of duplicate nodes and the cross-document reasoning in Act
-  IV would fall apart — you can only traverse from A to B if A and B are *single, resolved* nodes.
+**10 · Resolution — where corpus-level consistency is earned** — `disambiguation.glinker`. This is the
+first corpus-wide stage, and it does two jobs.
+- **Entities are resolved.** The same organization named three ways across five documents becomes one
+  canonical node. **Models: `knowledgator/gliner-linker-large-v1.0` (linker) +
+  `knowledgator/gliner-linker-rerank-v1.0` (reranker)** — in-process encoders (FlashDeBERTa with
+  graceful fallback), backed by an audited multi-strategy resolver (exact / alias / acronym / substring
+  / fuzzy, with an optional embedding rung).
+- **Types are canonicalized.** Per-chunk induction means chunk A may say `org`, chunk B
+  `organization`, chunk C `company`. Here those collapse into one canonical type, with an
+  alias→canonical map applied to every mention and reported on the Quality Report. The raw induced
+  label is kept for audit, so the mapping is inspectable rather than magic.
+- **This is the trade the whole design turns on.** Consistency is *earned downstream*, by a stage that
+  can see the entire corpus and resolve ambiguity with evidence — not *imposed upstream* by forcing one
+  global schema and capping it. Upstream you get complete, precise, chunk-local extraction; here you
+  get one coherent vocabulary. Both, instead of trading one for the other.
+- Without this step the graph would carry duplicate nodes and drifting types, and the cross-document
+  reasoning in Act IV would fall apart — you can only traverse from A to B if A and B are *single,
+  resolved* nodes of *comparable* type.
 
 **11 · Graph assembly (+ centrality)** — `graph.canonical` with `graph_features.pagerank`. The canonical,
 evidence-linked knowledge graph is assembled: nodes are resolved entities, edges are extracted and
@@ -180,6 +213,32 @@ Three properties make it usable, not decorative:
 Centrality and community (stage 11) add the final ingredient: the graph knows which nodes are *hubs*
 (cited by everything, like a foundational standard) versus *specific*. Retrieval uses this to avoid
 being swamped by hubs when it expands, and to prefer diverse, non-redundant evidence when it packs.
+
+### The ordering principle: extract narrow, resolve wide
+
+The pipeline has one structural rule, and Act I is shaped entirely by it:
+
+| | Source → Redaction | Resolution → Export |
+|---|---|---|
+| **Scope** | one chunk at a time | the whole corpus |
+| **Goal** | completeness + precision | consistency + deduplication |
+| **Labels** | each chunk's own small set | one canonical vocabulary |
+| **Scales with** | number of workers | corpus size, once |
+
+Most stacks invert this — they fix a global schema first, then extract against it. That looks tidier
+and costs you twice: the schema must be capped (so rare-but-critical types vanish), and every chunk is
+scored against labels that have nothing to do with it (so precision drops and memory balloons).
+
+Extracting narrow and resolving wide is strictly better because the two problems have different
+natures. *Extraction* is a local question — "what is in this chunk?" — best answered with local
+context and nothing else. *Consistency* is a global question — "are these two things the same?" — and
+cannot be answered well before you have seen everything. Answering the global question first, by
+guessing a schema up front, is what forces the cap. Answering it last, with all the evidence on the
+table, is what makes both answers good.
+
+It also makes the expensive half **embarrassingly parallel and independent of corpus size**: every
+chunk's extraction is self-contained, so throughput is a function of how many workers you run, not how
+large the corpus is. The corpus-wide pass happens once, on already-extracted records, not on raw text.
 
 ---
 
