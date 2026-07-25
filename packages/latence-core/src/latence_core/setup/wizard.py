@@ -962,8 +962,11 @@ def _build_lite_stages(
     # 6) schema induction (PER CHUNK, T1) — or NOTHING at all in predefined-only mode.
     labels_from = _wire_induction(answers, stages, depends_on=induce_input)
 
-    # 7) fused NER+RE in ONE pass (GLiNER2); config labels are a FLOOR, induced types union on
-    # (in predefined-only mode there is nothing to union — the config labels ARE the schema).
+    # 7) fused NER+RE in ONE pass (GLiNER2). T2: the config labels are a PER-CHUNK RELEVANCE
+    # floor — a chunk that induced its own types is scored against THOSE ALONE (zero-shot
+    # precision degrades with label count); a chunk that induced nothing falls back to these.
+    # `label_floor: universal` on the extract config restores the config ∪ induced union.
+    # T1: in predefined-only mode there is nothing to union — the config labels ARE the schema.
     # W18: in `extract_on: masked` mode the extractor reads the REDACTED chunk stream (depends_on
     # `redact`, which sets each chunk's masked_content) so PII never reaches the KG; default
     # `unmasked` keeps the pre-W18 wiring, so the KG keeps the real entities.
@@ -999,7 +1002,16 @@ def _build_lite_stages(
                 "depends_on": [labels_from],
                 "config": {
                     "device": answers.device,
+                    # T1: the ADR-0044 financial floor, plus any operator-fixed pii_types
+                    # (predefined-only fixes the RELEVANCE schema, never the SAFETY schema).
                     "pii_labels": _pii_labels(answers),
+                    # T2: the blessed checkpoint is a GUARDRAILS+PII model, so the guard half is
+                    # switched on too. Every chunk carries the universal guard floor (prompt
+                    # injection / harmful content — a security invariant, never subsetted per
+                    # chunk) UNIONed with whatever guard categories that chunk induced. A hit is
+                    # FLAGGED as a RiskMarker in the corpus, never masked; the deterministic
+                    # keyword content_screen Stage above is a separate, earlier pre-filter.
+                    "guardrails": True,
                     "max_len": 768,
                     "threshold": 0.5,
                 },
@@ -1184,9 +1196,11 @@ def _build_sota_stages(
     # or NOTHING at all in predefined-only mode (the operator's fixed schema, zero LLM calls).
     labels_from = _wire_induction(answers, stages, depends_on=induce_input)
 
-    # 7) fused NER+RE in ONE pass (GLiNER2) — labels are a FLOOR, induced types union on (in
-    # predefined-only mode there is nothing to union — the config labels ARE the schema). threshold
-    # 0.3 (the SOTA recall floor); compile defaults to False in the provider (left to ride).
+    # 7) fused NER+RE in ONE pass (GLiNER2) — T2: the labels are a PER-CHUNK relevance floor
+    # (each chunk is scored against its own induced types; these are the fallback when a chunk
+    # induced nothing). T1: in predefined-only mode there is nothing to union — the config labels
+    # ARE the schema. threshold 0.3 (the SOTA recall floor); compile defaults to False in the
+    # provider (left to ride).
     extract_input = "redact" if masked_extract else labels_from
     stages.append(
         {
@@ -1262,7 +1276,16 @@ def _build_sota_stages(
                 "depends_on": [labels_from],
                 "config": {
                     "device": SOTA_DEVICE,
+                    # T1: the ADR-0044 financial floor, plus any operator-fixed pii_types
+                    # (predefined-only fixes the RELEVANCE schema, never the SAFETY schema).
                     "pii_labels": _pii_labels(answers),
+                    # T2: the blessed checkpoint is a GUARDRAILS+PII model, so the guard half is
+                    # switched on too. Every chunk carries the universal guard floor (prompt
+                    # injection / harmful content — a security invariant, never subsetted per
+                    # chunk) UNIONed with whatever guard categories that chunk induced. A hit is
+                    # FLAGGED as a RiskMarker in the corpus, never masked; the deterministic
+                    # keyword content_screen Stage above is a separate, earlier pre-filter.
+                    "guardrails": True,
                     "max_len": 768,
                     "threshold": 0.5,
                 },
@@ -1444,7 +1467,8 @@ def _render_header(answers: SetupAnswers) -> str:
         lines += [
             f"#   Redactor: `{BLESSED_REDACT_PROVIDER}` (#197, ADR-0036 W9) — the SAME GLiNER2",
             "#   engine `extract` runs, so PII detection adds no second model library. Its",
-            "#   `pii_labels` are the ADR-0044 financial floor; the induced pii_types UNION on top",
+            "#   `pii_labels` are the ADR-0044 financial floor — UNIVERSAL, applied to EVERY",
+            "#   chunk and never subsetted (T2); the per-chunk induced pii_types UNION on top",
             "#   at run (ADR-0038), and the universal financial floor masks card/iban/ssn even",
             "#   when",
             "#   the model misses them. Any other Redaction Provider drops in behind the same",

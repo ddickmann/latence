@@ -455,6 +455,13 @@ stages:
   #    sets each chunk's masked_content (each chunk ≤ the model window, so no PII is truncated). It
   #    depends_on induce so the induced pii_types UNION onto this floor; enrich then reads THIS
   #    redacted chunk stream, so export_corpus is masked AND enriched.
+  #    T2: the `pii_labels` floor is UNIVERSAL — applied to every chunk, never subsetted by what a
+  #    chunk induced (a leaked card in an "irrelevant" chunk must still be masked); only the induced
+  #    pii_types are per chunk. `guardrails: true` turns on the GUARDRAILS half of the same
+  #    checkpoint under the same rule: every chunk carries the universal guard floor (prompt
+  #    injection / harmful content) unioned with its own induced guard_types, and a hit is FLAGGED
+  #    as a RiskMarker in the corpus, never masked. The deterministic keyword content_screen Stage
+  #    above is a separate, earlier pre-filter and is untouched.
   - name: redact
     capability: redaction
     provider: redaction.gliner2
@@ -462,6 +469,7 @@ stages:
     config:
       device: cuda
       pii_labels: [person, email, phone number, address, iban, credit card number, tax id, bank account number, social security number]
+      guardrails: true
       max_len: 768
       threshold: 0.5
 

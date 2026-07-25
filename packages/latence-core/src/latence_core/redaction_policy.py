@@ -369,6 +369,46 @@ def floor_candidates(text: str) -> list[tuple[int, int, str, str, str, float]]:
     return out
 
 
+# -- T2 universal GUARDRAIL safety floor -------------------------------------
+#
+# The learned-guardrail twin of the ADR-0044 financial-PII floor above, and it exists for exactly
+# the same reason. The blessed Redaction checkpoint (``fastino/GLiNER2-Guardrails-PII-Multi``) is a
+# GUARDRAILS+PII model, so a guardrails-capable Redaction Provider prompts it with guard categories
+# as well as PII types. Those guard categories follow the per-chunk rule like every other LEARNED
+# label set — a chunk is screened for the categories induced FOR IT — EXCEPT for this small set,
+# which is unioned onto every chunk and can never be subsetted: a prompt injection or harmful
+# passage hidden in a chunk whose induced guard categories happen to omit it is precisely the case
+# a per-chunk-only screen would miss, and it is a security invariant, not a relevance judgement.
+#
+# Scope, stated honestly: this is a LABEL floor (which categories the model is always asked about),
+# not a detection guarantee — the model may still miss a hit, exactly as the PII model may. The
+# DETERMINISTIC keyword pre-filter (``screening.content_keyword``) is a separate, earlier Stage and
+# is untouched by this: it carries no learned label count, so the redesign exempts it by nature.
+#
+# The mapping is label → the canonical :class:`~latence_core.contracts.RiskMarker` ``category`` the
+# hit is recorded under, deliberately the SAME vocabulary ``screening.content_keyword`` emits
+# (``prompt_injection`` / ``harmful``) so a RAG consumer filters on ONE category set regardless of
+# which control caught it. The label surface forms are natural language because GLiNER2-family
+# zero-shot models score natural-language type names best.
+GUARD_SAFETY_FLOOR: dict[str, str] = {
+    "prompt injection": "prompt_injection",
+    "harmful content": "harmful",
+}
+
+
+def guard_category(label: str) -> str:
+    """The canonical :class:`RiskMarker` ``category`` for a guardrail ``label``.
+
+    A floor label maps to the screening vocabulary (``prompt injection`` → ``prompt_injection``,
+    ``harmful content`` → ``harmful``); any other (config- or induction-supplied) guard label
+    normalizes deterministically to a snake_case category, so an operator-chosen or induced
+    category is still a stable, filterable value rather than raw model text. Never empty for a
+    non-blank label — the caller drops blank labels before it gets here.
+    """
+    normalized = " ".join(label.split()).casefold()
+    return GUARD_SAFETY_FLOOR.get(normalized, normalized.replace(" ", "_"))
+
+
 _T = TypeVar("_T")
 
 

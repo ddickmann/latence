@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError, ProviderError
-from latence_core.induced import LabelSlot, effective_labels
+from latence_core.induced import LabelFloor, LabelSlot, effective_labels, resolve_label_floor
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
@@ -122,6 +122,30 @@ _MAX_BATCH_SIZE = 64
 # default is the real fix, not the latch.
 _COMPILE_DEFAULT = False
 
+# T2 (per-chunk extraction): entity + relation labels are RELEVANCE labels, so this Provider's
+# config labels are a PER-CHUNK floor, not a universal one — a chunk that induced its own types is
+# scored against THOSE ALONE, and the config floor is the recall net for a chunk induction said
+# nothing about. This is the SOTA choice for a zero-shot span-scoring model and it is not close:
+#
+#   * PRECISION. GLiNER2 scores every candidate span against every label; recall/precision degrade
+#     as the label count grows because irrelevant types compete for the same spans. Unioning a
+#     corpus-wide floor onto a chunk that already induced its own 5 types buys nothing on that
+#     chunk and taxes every span decision on it.
+#   * MEMORY. The span-scoring activation is (batch × positions × LABELS); the label dimension is
+#     what turned a routine forward into a multi-GiB allocation. Small per-chunk label sets are the
+#     ROOT fix for that, not the reactive micro-batch backoff.
+#   * The trade, stated honestly: a UNIVERSAL floor is recall insurance — a chunk whose induction
+#     under-called (missed ``person``) would still be scored for it. PER_CHUNK forfeits that
+#     insurance in exchange for label-count purity, and the redesign accepts it BECAUSE the front
+#     half now induces per chunk (the induced set is derived from the chunk's own text) and the
+#     type vocabulary is reconciled downstream, not imposed upstream. An operator who wants the
+#     insurance back sets ``label_floor: universal`` — one knob, no code change.
+#
+# A chunk with NO induced labels falls back to the config floor under either policy, so every stack
+# without a ``schema_induction`` Stage (and predefined-only mode, where induction is skipped
+# entirely) is byte-identical: exactly its config labels, per chunk.
+_DEFAULT_LABEL_FLOOR = LabelFloor.PER_CHUNK
+
 
 class Gliner2FusedExtractor:
     """Fused zero-shot Entity+Relation Extractor backed by a GLiNER2 checkpoint (W9).
@@ -137,6 +161,15 @@ class Gliner2FusedExtractor:
             ``["organization", "person"]``). GLiNER2 works best with lower/title case.
         relation_labels: list[str]  — REQUIRED. The zero-shot relation types to extract between
             the entities (e.g. ``["works for", "located in"]``).
+        label_floor: str  — ``per_chunk`` (default) or ``universal``: what the config ``labels`` /
+            ``relation_labels`` MEAN for a chunk that carries induced types (T2). ``per_chunk``
+            treats them as a RELEVANCE floor — a chunk that induced its own types is scored against
+            THOSE ALONE, and the config lists are the recall net for a chunk induction said nothing
+            about. ``universal`` restores the historical union (config ∪ induced) on every chunk.
+            Default ``per_chunk``: zero-shot precision AND the span-scoring activation both degrade
+            with label count, so stamping a global floor onto a chunk that already induced its own
+            types is a pure tax (see :data:`_DEFAULT_LABEL_FLOOR` for the full trade). A chunk with
+            no induced labels uses exactly the config lists under either value.
         model: str  — the checkpoint id (default ``fastino/gliner2-multi-v1``, Apache-2.0).
         threshold: float  — score threshold; entities/relations below it are dropped (default 0.5).
         min_chars: int  — a chunk whose stripped length is below this is skipped without invoking
@@ -185,10 +218,13 @@ class Gliner2FusedExtractor:
     its NER half. The model is loaded lazily and cached on first use, so constructing the Provider
     never downloads weights.
 
-    Labels (W4 seam, ADR-0038): the entity + relation label sets are the config floors UNIONed with
-    any types the OPTIONAL ``schema_induction`` Stage induced for a chunk's document (induced ∪
-    config, deduped + order-stable, per slot) — exactly like relex. Absent (the default, every
-    existing stack) these are exactly the config labels.
+    Labels (W4 seam, ADR-0038; T2 floor policy): the per-chunk entity + relation label sets come
+    from the shared :func:`~latence_core.induced.effective_labels` seam. Under the default
+    ``label_floor: per_chunk`` a chunk that carries induced types is scored against ITS OWN types;
+    under ``label_floor: universal`` the config floor is unioned onto every chunk (the historical
+    behaviour, kept as a knob). Either way a chunk with no induced labels — every stack without a
+    ``schema_induction`` Stage, and predefined-only mode where induction is skipped entirely — is
+    scored against exactly the config labels.
     """
 
     @classmethod
@@ -264,6 +300,15 @@ class Gliner2FusedExtractor:
         # extract_entities/extract_relations take a native ``max_len``; past it the model silently
         # truncates (tail entities/relations lost, offsets unreliable). Explicit + configurable.
         self._max_len = resolve_max_len(config)
+        # T2: is the config label list a PER-CHUNK relevance floor (default — see
+        # _DEFAULT_LABEL_FLOOR) or a UNIVERSAL one stamped onto every chunk? Validated eagerly, so a
+        # typo'd value is an operator ConfigError at construction rather than a silently ignored key
+        # that leaves the run on the other policy.
+        try:
+            self._label_floor = resolve_label_floor(config, default=_DEFAULT_LABEL_FLOOR)
+        except ValueError as exc:
+            msg = f"fused_entity_relation.gliner2: {exc}"
+            raise ConfigError(msg) from exc
         # Streaming progress cadence, clamped to _MAX_BATCH_SIZE so a large configured value can
         # never let the stage run for minutes with no visible progress (W9-scaling): a corpus always
         # checkpoints/logs at least every _MAX_BATCH_SIZE chunks.
@@ -430,13 +475,22 @@ class Gliner2FusedExtractor:
                 self._load_model()
                 loaded = True
             for chunk in batch:
-                # W4 label-source seam (ADR-0038): UNION the config labels with the chunk's induced
-                # entity/relation types, deduped + order-stable, per slot. Absent ⇒ config labels.
+                # W4 label-source seam (ADR-0038) under the T2 per-chunk floor policy: with the
+                # default PER_CHUNK floor a chunk that induced its own entity/relation types is
+                # scored against THOSE ALONE (no global floor re-inflating the label count); a chunk
+                # that induced nothing — and every predefined-only / no-induction stack — falls back
+                # to exactly the config labels. ``label_floor: universal`` restores the union.
                 entity_labels = effective_labels(
-                    self._labels, chunk.induced_labels, LabelSlot.ENTITY
+                    self._labels,
+                    chunk.induced_labels,
+                    LabelSlot.ENTITY,
+                    floor=self._label_floor,
                 )
                 relation_labels = effective_labels(
-                    self._relation_labels, chunk.induced_labels, LabelSlot.RELATION
+                    self._relation_labels,
+                    chunk.induced_labels,
+                    LabelSlot.RELATION,
+                    floor=self._label_floor,
                 )
                 # The forward reads self._model (so an inference-time compile fallback that re-loads
                 # the uncompiled model is picked up transparently on the next call, W9).

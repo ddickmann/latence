@@ -521,20 +521,31 @@ def capturing_gliner2(monkeypatch: pytest.MonkeyPatch) -> type[_CapturingGLiNER2
     return _CapturingGLiNER2
 
 
-def test_induced_labels_union_onto_both_slots(
-    capturing_gliner2: type[_CapturingGLiNER2],
-) -> None:
-    chunk = _chunk("Alice works for Acme Corp.").model_copy(
+def _induced_chunk(
+    content: str = "Alice works for Acme Corp.",
+    *,
+    entity_types: list[str] | None = None,
+    relation_types: list[str] | None = None,
+) -> ChunkRecord:
+    return _chunk(content).model_copy(
         update={
             "induced_labels": InducedLabels(
                 model_id="test-model",
-                entity_types=["location"],  # NOT in the config entity floor
-                relation_types=["located_in"],  # NOT in the config relation floor
+                entity_types=["location"] if entity_types is None else entity_types,
+                relation_types=["located_in"] if relation_types is None else relation_types,
                 pii_types=[],
             )
         }
     )
-    Gliner2FusedExtractor(_config()).extract_fused([chunk])
+
+
+def test_induced_labels_union_onto_both_slots_under_universal_floor(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    # The OPT-IN historical policy: config floor ∪ induced, on every chunk (T2 `label_floor`).
+    Gliner2FusedExtractor({**_config(), "label_floor": "universal"}).extract_fused(
+        [_induced_chunk()]
+    )
     assert capturing_gliner2.captured_entities == [["person", "organization", "location"]]
     assert capturing_gliner2.captured_relations == [["works_for", "located_in"]]
 
@@ -545,6 +556,124 @@ def test_no_induced_labels_asks_for_config_floor_only(
     Gliner2FusedExtractor(_config()).extract_fused([_chunk("Alice works for Acme Corp.")])
     assert capturing_gliner2.captured_entities == [["person", "organization"]]
     assert capturing_gliner2.captured_relations == [["works_for"]]
+
+
+# --- T2: a chunk is extracted against ITS OWN induced labels, not a global floor -------------
+
+
+def test_per_chunk_floor_asks_only_for_the_chunks_own_induced_labels(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """T2 AC1: the label set handed to the model IS the chunk's own induced set.
+
+    Pre-change this asked for ``config ∪ induced`` on every chunk — with corpus-granularity
+    induction that is the whole ~40-type corpus schema stamped onto every chunk, which is the
+    zero-shot precision tax (and the label dimension of the OOM'd span-scoring tensor) the redesign
+    removes. Asserted on the labels ACTUALLY passed to the model, not on a config flag.
+    """
+    Gliner2FusedExtractor(_config()).extract_fused([_induced_chunk()])
+    assert capturing_gliner2.captured_entities == [["location"]]
+    assert capturing_gliner2.captured_relations == [["located_in"]]
+
+
+def test_per_chunk_floor_gives_each_chunk_a_different_label_set(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """Two chunks with different induced types are scored against different, small sets.
+
+    The corpus-union failure mode is invisible on ONE chunk (the union of one chunk's labels is
+    that chunk's labels); it only shows up when two chunks disagree. Here each chunk must see its
+    own types and NEITHER may see the other's — the property "no corpus-level operation inflates a
+    chunk's label set" reduces to.
+    """
+    chunks = [
+        _induced_chunk(entity_types=["location"], relation_types=["located_in"]),
+        _induced_chunk(entity_types=["product"], relation_types=["sells"]),
+    ]
+    Gliner2FusedExtractor(_config()).extract_fused(chunks)
+    assert capturing_gliner2.captured_entities == [["location"], ["product"]]
+    assert capturing_gliner2.captured_relations == [["located_in"], ["sells"]]
+
+
+def test_per_chunk_floor_falls_back_to_config_when_a_slot_induced_nothing(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """An empty induced slot falls back to the config floor — never an EMPTY label prompt.
+
+    A chunk whose induction returned no relation types must not be scored against zero relation
+    labels (which would silently extract nothing); the config list is the recall net for exactly
+    that case. Per slot: the entity slot induced, so it keeps its own set.
+    """
+    chunk = _induced_chunk(entity_types=["location"], relation_types=[])
+    Gliner2FusedExtractor(_config()).extract_fused([chunk])
+    assert capturing_gliner2.captured_entities == [["location"]]
+    assert capturing_gliner2.captured_relations == [["works_for"]]
+
+
+def test_predefined_only_mode_runs_the_fixed_labels_per_chunk(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """T2 AC4 (extract half): predefined-only ⇒ no induced labels ⇒ exactly the fixed set per chunk.
+
+    In predefined-only mode the ``induce`` Stage is skipped entirely (T1), so every chunk reaches
+    the extractor with ``induced_labels is None``. Each chunk must then be scored against exactly
+    the operator's fixed lists — under EITHER floor policy, so flipping the knob cannot change a
+    predefined-only run.
+    """
+    chunks = [_chunk("Alice works for Acme Corp."), _chunk("Bob works for Beta Ltd.")]
+    for floor in ("per_chunk", "universal"):
+        capturing_gliner2.captured_entities = []
+        capturing_gliner2.captured_relations = []
+        Gliner2FusedExtractor({**_config(), "label_floor": floor}).extract_fused(chunks)
+        assert capturing_gliner2.captured_entities == [
+            ["person", "organization"],
+            ["person", "organization"],
+        ]
+        assert capturing_gliner2.captured_relations == [["works_for"], ["works_for"]]
+
+
+def test_per_chunk_output_equals_running_that_chunks_labels_directly(
+    capturing_gliner2: type[_CapturingGLiNER2],
+) -> None:
+    """T2 AC5: the emitted records equal a run configured with that chunk's own labels directly.
+
+    The scope reduction is the ONLY intended change: extracting a chunk whose induced set is
+    {location, located_in} must produce exactly what a Provider configured with
+    ``labels=[location] / relation_labels=[located_in]`` produces on the same, uninduced chunk.
+    """
+    content = "Alice works for Acme Corp."
+    capturing_gliner2.entities = [
+        {"start": 0, "end": 5, "label": "location", "confidence": 0.95},
+        {"start": 16, "end": 25, "label": "location", "confidence": 0.9},
+    ]
+    capturing_gliner2.relations = [
+        {
+            "head": {"start": 0, "end": 5, "text": "Alice", "confidence": 0.95},
+            "tail": {"start": 16, "end": 25, "text": "Acme Corp", "confidence": 0.9},
+            "relation": "located_in",
+        }
+    ]
+    induced = Gliner2FusedExtractor(_config()).extract_fused(
+        [_induced_chunk(content, entity_types=["location"], relation_types=["located_in"])]
+    )
+    direct = Gliner2FusedExtractor(
+        {"labels": ["location"], "relation_labels": ["located_in"]}
+    ).extract_fused([_chunk(content)])
+    assert [m.model_dump() for m in induced.mentions] == [
+        m.model_dump() for m in direct.mentions
+    ]
+    assert [r.model_dump() for r in induced.relations] == [
+        r.model_dump() for r in direct.relations
+    ]
+    assert induced.mentions and induced.relations  # the comparison is not vacuously empty
+
+
+def test_unknown_label_floor_value_is_a_config_error() -> None:
+    """A typo'd policy is a loud ConfigError, never a silently ignored key (ADR-0034)."""
+    from latence_core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="label_floor must be one of"):
+        Gliner2FusedExtractor({**_config(), "label_floor": "per-chunk"})
 
 
 # --- anti-false-green teeth (the paddle/relex lesson) ----------------------------------------

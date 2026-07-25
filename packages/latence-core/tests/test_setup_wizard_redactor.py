@@ -37,6 +37,7 @@ from latence_core.conformance import stub as stubs
 from latence_core.contracts import (
     ChunkRecord,
     Classification,
+    InducedLabels,
     OffsetMap,
     OffsetSegment,
     Provenance,
@@ -215,3 +216,42 @@ def test_financial_floor_masks_the_iban_the_blessed_model_missed(tmp_path: Path)
     assert rec.masked_content is not None
     assert _IBAN not in rec.masked_content
     assert [(s.pii_type, s.detector) for s in rec.pii_spans] == [("iban", "floor:iban")]
+
+
+# ---------------------------------------------------------------------------
+# T2 — the UNIVERSAL guardrail floor rides the blessed Provider's emitted config
+# ---------------------------------------------------------------------------
+
+
+def test_emitted_redact_config_turns_the_learned_guardrails_on(tmp_path: Path) -> None:
+    """Both tiers wire the guardrails half of the guardrails+PII checkpoint (T2)."""
+    for profile in (PROFILE_LITE, PROFILE_SOTA):
+        _, config = _redact_stage(tmp_path, profile=profile)
+        assert config["guardrails"] is True
+
+
+def test_guard_floor_flags_an_injection_in_a_chunk_that_induced_no_guard_types(
+    tmp_path: Path,
+) -> None:
+    """T2 as BEHAVIOUR through the blessed Provider + the emitted config, not from a flag.
+
+    The chunk's induced schema names PII types and NO guard categories at all — under a purely
+    per-chunk guard screen the model would never be asked about prompt injection here. The
+    UNIVERSAL guard floor asks anyway, and the chunk comes back carrying a ``prompt_injection``
+    RiskMarker with its text UNMODIFIED (a guard hit is flagged, never masked).
+    """
+    _, config = _redact_stage(tmp_path, profile=PROFILE_SOTA)
+    config["device"] = "cpu"  # offline: the profile pins cuda; the floor is device-independent
+    cls = ProviderRegistry().load(BLESSED_REDACT_PROVIDER)
+    chunk = _chunk().model_copy(
+        update={"induced_labels": InducedLabels(model_id="m", pii_types=["invoice number"])}
+    )
+    rows = [{"start": 0, "end": 8, "label": "prompt injection", "confidence": 0.9}]
+
+    with stubs.install_gliner2(entities=rows):
+        rec = next(iter(cls(config).redact([chunk])))
+
+    assert isinstance(rec, ChunkRecord)
+    assert [m.category for m in rec.risk_markers] == ["prompt_injection"]
+    assert rec.masked_content is not None
+    assert rec.masked_content.startswith("Rechnung")  # flagged, not masked
