@@ -189,6 +189,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Type-Consolidation Stage never populates it). The canonical vocabulary itself is a
 # :class:`TypeVocabulary` — persistable (the Runner writes it beside the checkpoint) and MERGEABLE
 # (an incremental delta run extends it without churning existing canonical entries).
+#
+# v17c (T4 incremental delta reconciliation): :class:`DeltaChurn` gains ``canonical_types_added`` /
+# ``type_aliases_added`` / ``canonical_types_total`` — the witness that a delta EXTENDED the
+# corpus's canonical type vocabulary rather than recomputing it. Additive and defaulted 0, and the
+# vocabulary itself is Corpus-Version state (an additive file), so no number bump — the same rule
+# ADR-0043's own additive ``documents_reused`` / ``documents_extracted`` fields followed.
 SCHEMA_VERSION = 17
 
 

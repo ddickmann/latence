@@ -109,6 +109,15 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # that makes per-chunk induction safe: every fold is visible and correctable through the Stage's
 # ``aliases`` config. Type labels + counts only (never document text), safe to persist. Additive
 # and defaulted None, so a v19 report still validates.
+# v20c (T4, incremental delta reconciliation): :class:`~latence_core.contracts.DeltaChurn` gains
+# ``canonical_types_added`` / ``type_aliases_added`` / ``canonical_types_total`` — how the delta
+# EXTENDED the corpus's canonical type vocabulary (a genuinely new type vs a drifted surface that
+# aliased into an existing one). It replaces the frozen-schema story for per-chunk induction, so
+# the operator can see the KG's type space growing monotonically. Counts only. Additive and
+# defaulted 0, and the rendered churn line is emitted only when the corpus HAS a vocabulary, so a
+# report from a pipeline without a Type-Consolidation Stage is byte-identical. No number bump: the
+# extraction-redesign report changes ship in one revision (same rule as ADR-0043's own additive
+# DeltaChurn fields, which also did not bump).
 QUALITY_SCHEMA_VERSION = 20
 
 
