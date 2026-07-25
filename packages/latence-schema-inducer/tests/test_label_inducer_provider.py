@@ -23,10 +23,21 @@ from latence_core.contracts import (
     Provenance,
 )
 from latence_schema_inducer.provider import LLMLabelInducer
-from latence_schema_inducer.sanitize import MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_LABELS
+from latence_schema_inducer.sanitize import (
+    MAX_DOMAIN_LEN,
+    MAX_LABEL_CEILING,
+    MAX_LABEL_LEN,
+    MAX_LABELS,
+)
 
 
-def _chunk(doc_id: str = "doc-1", index: int = 0, content: str = "Alice works for Acme Corp.") -> ChunkRecord:
+def _chunk(doc_id: str = "doc-1", index: int = 0, content: str | None = None) -> ChunkRecord:
+    # DISTINCT text per (doc, index) by default — real chunks differ, and since T5 the Provider
+    # induces once per DISTINCT chunk text, so a fixture whose chunks all carry the SAME string
+    # would be exercising the dedup cache rather than the behaviour under test. A test that WANTS
+    # duplicate text (the dedup tests) passes ``content=`` explicitly.
+    if content is None:
+        content = f"Alice works for Acme Corp; memo {doc_id} part {index}."
     prov = Provenance(
         source_uri="mem://t/doc.txt",
         file_name="doc.txt",
@@ -620,7 +631,7 @@ def test_domain_hint_is_sent_in_the_induction_prompt() -> None:
     assert out[0].induced_labels is not None
     sent = _user_message(script)
     assert hint in sent  # the hint genuinely reaches the model
-    assert "Alice works for Acme Corp." in sent  # ...alongside, not instead of, the document
+    assert "Alice works for Acme Corp" in sent  # ...alongside, not instead of, the document
 
 
 def test_no_domain_hint_leaves_the_prompt_byte_identical() -> None:
@@ -686,3 +697,223 @@ def test_domain_hint_does_not_break_the_json_contract() -> None:
     assert script.calls[0]["temperature"] == 0.0
     assert out[0].induced_labels is None  # fail-open to config labels, never a crash
     assert provider.induction_fallbacks == 1
+
+
+# ---------------------------------------------------------------------------
+# T1 — per-chunk induction is the extraction path: no corpus salience cap on it.
+# ---------------------------------------------------------------------------
+
+
+def test_rare_type_survives_per_chunk_but_the_corpus_cap_drops_it() -> None:
+    """REGRESSION (T1): a type present in exactly ONE chunk survives per-chunk induction and is
+    RANKED OUT of the corpus-merged schema — the silent recall loss the redesign removes.
+
+    Both halves run against the SAME corpus and the SAME model replies; only the granularity
+    differs. Under ``corpus`` the document-frequency ranking keeps the 40 types every document
+    agrees on and drops the one type that only the third chunk evidenced, so that chunk is then
+    extracted WITHOUT the type it actually needed. Under ``chunk`` it keeps it.
+    """
+    common = [f"type {i:02d}" for i in range(MAX_LABELS)]  # 40 types every doc induces
+    rare = "hazardous material code"  # only the third document evidences it
+    chunks = [_chunk(doc_id=f"d{i}", index=0) for i in range(3)]
+    replies = [
+        fake.reply(_good_reply(entity=common, relation=[], pii=[])),
+        fake.reply(_good_reply(entity=common, relation=[], pii=[])),
+        fake.reply(_good_reply(entity=[rare], relation=[], pii=[])),
+    ]
+
+    with fake.install(list(replies)):
+        corpus_out = list(_provider(granularity="corpus").induce(chunks))
+    corpus_schema = corpus_out[2].induced_labels
+    assert corpus_schema is not None
+    # The salience cap keeps the 40 corpus-frequent types and drops the locally-critical one.
+    assert len(corpus_schema.entity_types) == MAX_LABELS
+    assert rare not in corpus_schema.entity_types
+
+    with fake.install(list(replies)):
+        chunk_out = list(_provider(granularity="chunk").induce(chunks))
+    chunk_schema = chunk_out[2].induced_labels
+    assert chunk_schema is not None
+    assert chunk_schema.entity_types == [rare]  # kept, and NOTHING irrelevant alongside it
+
+
+def test_per_chunk_keeps_more_labels_than_the_corpus_salience_cap() -> None:
+    """REGRESSION (T1): a chunk that legitimately evidences > ``MAX_LABELS`` types keeps them all.
+
+    Pre-T1 the sanitizer's count cap was hard-wired to the corpus salience number (40), so this
+    chunk's own 50 induced types were truncated to 40 and 10 were dropped with only an INFO log.
+    The per-chunk path now bounds by the SAFETY ceiling (64) instead.
+    """
+    many = [f"type {i:02d}" for i in range(50)]
+    provider = _provider(granularity="chunk")
+    with fake.install([fake.reply(_good_reply(entity=many, relation=[], pii=[]))]):
+        out = list(provider.induce([_chunk()]))
+    schema = out[0].induced_labels
+    assert schema is not None
+    assert schema.entity_types == many  # all 50, in order — nothing silently dropped
+
+
+def test_label_ceiling_is_configurable_and_absolutely_bounded() -> None:
+    # Configurable DOWN (an operator who wants a tighter bound) ...
+    many = [f"type {i:02d}" for i in range(50)]
+    with fake.install([fake.reply(_good_reply(entity=many, relation=[], pii=[]))]):
+        out = list(_provider(granularity="chunk", label_ceiling=5).induce([_chunk()]))
+    schema = out[0].induced_labels
+    assert schema is not None
+    assert schema.entity_types == many[:5]
+    # ... and clamped UP at the hard anti-bloat ceiling: a degenerate 400-label reply is bounded
+    # even when the operator asked for an unbounded one.
+    degenerate = [f"t{i:03d}" for i in range(400)]
+    with fake.install([fake.reply(_good_reply(entity=degenerate, relation=[], pii=[]))]):
+        out = list(_provider(granularity="chunk", label_ceiling=10_000).induce([_chunk()]))
+    schema = out[0].induced_labels
+    assert schema is not None
+    assert len(schema.entity_types) == MAX_LABEL_CEILING
+
+
+def test_doc_and_corpus_granularity_still_cap_at_the_salience_number() -> None:
+    # The ceiling default is granularity-aware: doc/corpus keep the pre-T1 salience cap exactly,
+    # so an existing stack's output is byte-identical.
+    many = [f"type {i:02d}" for i in range(50)]
+    with fake.install([fake.reply(_good_reply(entity=many, relation=[], pii=[]))]):
+        out = list(_provider(granularity="doc").induce([_chunk()]))
+    schema = out[0].induced_labels
+    assert schema is not None
+    assert schema.entity_types == many[:MAX_LABELS]
+
+
+# ---------------------------------------------------------------------------
+# T5 — bounded induction cost: chunk-text dedup, budget, cost reporting.
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_chunk_texts_induce_once_and_share_the_identical_schema() -> None:
+    """REGRESSION (T5): boilerplate chunks cost ONE call, and every duplicate gets the same set.
+
+    Pre-T5 per-chunk induction was one call per chunk regardless of content, so a corpus of
+    templated/boilerplate chunks paid N calls for one distinct question. Dedup is keyed on the
+    chunk text, so it is deterministic and lossless.
+    """
+    boiler = "This document is confidential. (c) Acme Corp. All rights reserved."
+    chunks = [
+        _chunk(doc_id="d1", index=0, content=boiler),
+        _chunk(doc_id="d1", index=1, content="Alice joined the Berlin office in March."),
+        _chunk(doc_id="d2", index=0, content=boiler),
+        _chunk(doc_id="d3", index=0, content=boiler),
+    ]
+    provider = _provider(granularity="chunk")
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=["organization"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["person", "location"], relation=[], pii=[])),
+        ]
+    ) as script:
+        out = list(provider.induce(chunks))
+    assert len(script.calls) == 2  # 4 chunks, 2 DISTINCT texts
+    labels = [c.induced_labels for c in out]
+    assert all(label is not None for label in labels)
+    # The three duplicates carry the byte-identical induced set; the distinct chunk keeps its own.
+    assert labels[0] == labels[2] == labels[3]
+    assert labels[0].entity_types == ["organization"]  # type: ignore[union-attr]
+    assert labels[1].entity_types == ["person", "location"]  # type: ignore[union-attr]
+    # ...and the saving is REPORTED, not silent.
+    assert provider.induction_calls == 2
+    assert provider.induction_cache_hits == 2
+    assert provider.induction_documents == 4
+
+
+def test_dedup_can_be_turned_off_for_a_nondeterministic_endpoint() -> None:
+    boiler = "This document is confidential. (c) Acme Corp."
+    chunks = [_chunk(doc_id="d1", index=i, content=boiler) for i in range(3)]
+    provider = _provider(granularity="chunk", dedup=False)
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=["a"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["b"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["c"], relation=[], pii=[])),
+        ]
+    ) as script:
+        out = list(provider.induce(chunks))
+    assert len(script.calls) == 3
+    assert provider.induction_cache_hits == 0
+    assert [c.induced_labels.entity_types for c in out] == [["a"], ["b"], ["c"]]  # type: ignore[union-attr]
+
+
+def test_dedup_is_deterministic_across_two_runs() -> None:
+    boiler = "Boilerplate footer."
+    chunks = [
+        _chunk(doc_id="d1", index=0, content=boiler),
+        _chunk(doc_id="d1", index=1, content="Alice works in Berlin."),
+        _chunk(doc_id="d2", index=0, content=boiler),
+    ]
+    dumps = []
+    for _ in range(2):
+        provider = _provider(granularity="chunk")
+        with fake.install(
+            [
+                fake.reply(_good_reply(entity=["organization"], relation=[], pii=[])),
+                fake.reply(_good_reply(entity=["person"], relation=[], pii=[])),
+            ]
+        ):
+            dumps.append([c.model_dump_json() for c in provider.induce(chunks)])
+    assert dumps[0] == dumps[1]
+
+
+def test_call_budget_bounds_the_run_loudly_and_deterministically() -> None:
+    """REGRESSION (T5): a per-run call budget bounds cost, fails open, and SAYS SO.
+
+    Jobs beyond the budget make no call and fall back to the config-label floor, with the LOUD
+    ``induction_budget_exhausted`` flag set. The cut is the deterministic input-order prefix, so a
+    budgeted run is still byte-reproducible.
+    """
+    chunks = [_chunk(doc_id=f"d{i}", index=0) for i in range(5)]
+    provider = _provider(granularity="chunk", max_induction_calls=2)
+    with fake.install(
+        [
+            fake.reply(_good_reply(entity=["a"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["b"], relation=[], pii=[])),
+        ]
+    ) as script:
+        out = list(provider.induce(chunks))
+    assert len(script.calls) == 2  # the budget really bound the network, not just the report
+    assert [c.induced_labels for c in out][2:] == [None, None, None]  # fail-open, never a crash
+    assert out[0].induced_labels.entity_types == ["a"]  # type: ignore[union-attr]
+    assert out[1].induced_labels.entity_types == ["b"]  # type: ignore[union-attr]
+    assert provider.induction_budget_exhausted is True
+    assert provider.induction_fallbacks == 3
+    assert provider.induction_documents == 5
+
+
+def test_unbudgeted_run_never_flags_exhaustion() -> None:
+    provider = _provider(granularity="chunk")
+    with fake.install([fake.reply(_good_reply())]):
+        list(provider.induce([_chunk()]))
+    assert provider.induction_budget_exhausted is False
+
+
+def test_induction_cost_reports_calls_and_endpoint_reported_tokens() -> None:
+    """REGRESSION (T5): the run's induction cost (calls + tokens) is measured, not guessed."""
+    provider = _provider(granularity="chunk")
+    with fake.install(
+        [
+            fake.reply("not json"),  # forces a repair re-prompt: a SECOND real request
+            fake.reply(_good_reply()),
+            fake.reply(_good_reply(entity=["gene"])),
+        ]
+    ) as script:
+        list(provider.induce([_chunk(index=0), _chunk(index=1)]))
+    # Every request counts — the repair re-prompt is a real call an operator pays for.
+    assert provider.induction_calls == 3 == len(script.calls)
+    # Tokens are the endpoint's OWN reported usage, summed — not an estimate.
+    assert provider.induction_prompt_tokens > 0
+    assert provider.induction_completion_tokens > 0
+
+
+def test_endpoint_without_usage_reports_zero_tokens_not_an_estimate() -> None:
+    provider = _provider(granularity="chunk")
+    with fake.install([fake.reply(_good_reply())], report_usage=False):
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is not None  # the induction itself is unaffected
+    assert provider.induction_calls == 1
+    assert provider.induction_prompt_tokens == 0  # honest "unknown", never a fabricated number
+    assert provider.induction_completion_tokens == 0
