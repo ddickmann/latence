@@ -50,14 +50,7 @@ from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
-from latence_core.providers.perf import (
-    apply_gliner_max_len,
-    load_then_cast,
-    maybe_compile,
-    neutralize_torch_jit,
-    place_on_device,
-    resolve_max_len,
-)
+from latence_core.providers.perf import load_gliner_model, resolve_max_len
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -73,6 +66,28 @@ _DEFAULT_MODEL = "urchade/gliner_multi-v2.1"
 # outputs are record-for-record identical to a per-chunk loop for any positive batch size
 # (ADR-0033: the in-flight tensor is bounded to ``batch_size``, never the whole corpus).
 _DEFAULT_BATCH_SIZE = 16
+
+
+def _import_gliner() -> Any:
+    """Return the ``GLiNER`` class — the backbone-import factory the perf seam calls (#190).
+
+    Handed to :func:`~latence_core.providers.perf.load_gliner_model` rather than called here, so the
+    TorchScript JIT is provably dead **before** this import evaluates: it transitively pulls in
+    transformers' ``deberta_v2`` module, whose relative-position helpers are compiled by
+    ``@torch.jit.script`` AT IMPORT and can never be un-scripted afterwards (the Blackwell/CUDA-13
+    ``libnvrtc-builtins.so.13.0`` crash, #190). Passing the import as a factory is what makes that
+    ordering un-gettable-wrong: this package still owns the native dependency and its install hint
+    (ADR-0036 §2) — only the INSTANT the import runs moved into the seam.
+    """
+    try:
+        from gliner import GLiNER
+    except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        msg = (
+            "The 'gliner' package is required to run GlinerEntityExtractor. "
+            "Install it with: pip install latence-ner-gliner"
+        )
+        raise ImportError(msg) from exc
+    return GLiNER
 
 
 class GlinerEntityExtractor:
@@ -211,50 +226,24 @@ class GlinerEntityExtractor:
     # -- lazy model load ----------------------------------------------------
 
     def _load_model(self) -> Any:
-        """Import ``gliner`` and load the checkpoint on first use (cached).
+        """Load the checkpoint on first use (cached) via the shared load choreography (C4).
 
-        Deferred so Provider discovery (importing this module) never needs torch,
-        and a missing optional dependency surfaces as a clear install hint only when
-        the Provider is actually run — not at registry enumeration time.
+        One call. :func:`~latence_core.providers.perf.load_gliner_model` owns the whole ordered
+        sequence — skip-decision → JIT kill → intra-op thread cap → backbone import → plain load +
+        bf16 cast → placement on the resolved device WITH read-back verification → mdeberta window
+        bound → guarded compile — so none of those five "before" constraints is this Provider's to
+        remember. They used to be: this body was copy-paste identical across the three plain-gliner
+        Providers modulo one string, and #190 (JIT after the import) and #191 (placement wired to
+        one Provider of three) are what a hand-copied sequence costs.
         """
-        if self._model is not None:
-            return self._model
-        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner import — that
-        # import transitively pulls in transformers' deberta_v2 modeling module, whose
-        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
-        # (inside load_then_cast) cannot un-script them: the env switch is read by torch only at
-        # ITS import, and jit._state.disable() only affects FUTURE script() calls — so the
-        # scripted helpers would still die in nvrtc (libnvrtc-builtins.so.13.0) on the first
-        # forward on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
-        neutralize_torch_jit(provider_name="entity.gliner")
-        try:
-            from gliner import GLiNER
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
-            msg = (
-                "The 'gliner' package is required to run GlinerEntityExtractor. "
-                "Install it with: pip install latence-ner-gliner"
+        if self._model is None:
+            self._model = load_gliner_model(
+                _import_gliner,
+                self._model_id,
+                self._config,
+                self._device,
+                provider_name="entity.gliner",
             )
-            raise ImportError(msg) from exc
-        if self._device.skipped or self._device.device is None:
-            # #191: ``device: cuda`` on a host with no CUDA used to fall through to a CPU load and a
-            # ~11.5 s/chunk run with the GPU idle and NO warning. The seam's skip decision is now
-            # surfaced as an operator error — honour the resolved device or fail loudly (ADR-0036).
-            msg = f"entity.gliner: {self._device.reason}"
-            raise ConfigError(msg)
-        device = self._device.device
-        # W8 perf seam (pod-corrected): the plain ``gliner`` library (0.2.27) REJECTS
-        # ``torch_dtype``/``attn_implementation`` in ``from_pretrained`` and its encoder has no
-        # FA2/FlashDeBERTa — so load PLAIN, then ``.to(bf16)`` on cuda (measured 1.36× faster,
-        # byte-identical entities); the cast is a no-op on CPU / fp32. The dtype keys off the
-        # RESOLVED device, not a bare availability probe.
-        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, device)
-        # #191: plain ``gliner`` does NOT auto-place — ``from_pretrained`` loads on CPU. Place the
-        # model on the resolved device HERE, at load, and verify it landed (a mismatch raises).
-        place_on_device(model, device, provider_name="entity.gliner")
-        # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
-        # guard). gliner silently truncates past config.max_len — set it explicitly + configurably.
-        apply_gliner_max_len(model, self._max_len)
-        self._model = maybe_compile(model, self._config, provider_name="entity.gliner")
         return self._model
 
     # -- extraction ---------------------------------------------------------

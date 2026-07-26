@@ -1095,7 +1095,8 @@ def _require_device(decision: DeviceDecision, provider_name: str) -> str | None:
 
     The first step of every load choreography, and the #191 contract in one place:
     ``select_device`` returns a **skip-with-flag** decision when a GPU-only Provider is asked for on
-    a CPU-only host (or CPU is pinned for a GPU-only Provider). Before this, each Provider re-derived
+    a CPU-only host (or CPU is pinned for a GPU-only Provider). Before this, each Provider
+    re-derived
     that check by hand — and the two that forgot fell through to a CPU load with the GPU idle, at
     ~11.5 s/chunk, with NO warning. Honour the resolved device or fail loudly (ADR-0036).
 
@@ -1120,11 +1121,13 @@ def _import_backbone(
     1. :func:`neutralize_torch_jit` — sets ``PYTORCH_JIT=0`` (read by torch **at torch import**) and
        disables the runtime state. Must precede step 3, because the backbone import transitively
        evaluates transformers' ``deberta_v2`` module whose relative-position helpers carry
-       ``@torch.jit.script``; once they are ``ScriptFunction``s no lever can un-script them, and on a
+       ``@torch.jit.script``; once they are ``ScriptFunction``s no lever can un-script them, and
+       on a
        Blackwell/CUDA-13 box they die in nvrtc on the FIRST forward.
     2. :func:`cap_intra_op_threads` — the many-core oversubscription guard (~520% CPU spin with the
-       GPU at 0%). It imports torch, which is *why* it must come after step 1 and not before: the env
-       switch has to be in place for the import torch reads it at. Applied for EVERY family, not just
+       GPU at 0%). It imports torch, which is *why* it must come after step 1 and not before: the
+       env switch has to be in place for the import torch reads it at. Applied for EVERY family,
+       not just
        the one Provider that happened to wire it: the blessed stack runs two mdeberta backbones in
        one process on one many-core host, and protecting only one of them protects neither.
     3. ``import_model_cls()`` — the Provider's own factory. It stays with the Provider because the
@@ -1234,7 +1237,8 @@ def load_gliner2_model(
 
     **The two knobs now key off the RESOLVED device, not a bare CUDA probe** — the (a) defect this
     entry point closes. ``fused_entity_relation.gliner2``, the Provider carrying the heaviest Stage,
-    bypassed the device seam completely: it probed ``cuda_available()`` directly, so ``device: cuda``
+    bypassed the device seam completely: it probed ``cuda_available()`` directly, so
+    ``device: cuda``
     was a no-op and, worse, ``device: cpu`` on a GPU box was silently overridden — it still resolved
     ``quantize=True`` and still moved the model to cuda. That is #191's failure class reappearing.
     Here ``quantize``/``compile`` resolve against ``decision.device`` and cuda placement happens
@@ -1249,9 +1253,10 @@ def load_gliner2_model(
         model_id,
         provider_name,
     )
-    # Best-effort (never raises), unlike the plain-gliner placement: ``from_pretrained``/``quantize``
-    # may already have placed the model, the GLiNER2 wrapper's placement API is pod-validated rather
-    # than contractual, and a wrapper that exposes no ``.to`` is not a fault. What it is NOT any more
+    # Best-effort (never raises), unlike the plain-gliner placement: ``from_pretrained``/
+    # ``quantize`` may already have placed the model, the GLiNER2 wrapper's placement API is
+    # pod-validated rather than contractual, and a wrapper that exposes no ``.to`` is not a fault.
+    # What it is NOT any more
     # is keyed off a bare availability probe.
     ensure_gliner2_on_cuda(model, cuda=device == "cuda", provider_name=provider_name)
     return model
