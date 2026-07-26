@@ -56,6 +56,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
+from latence_core.capability_descriptor import descriptors
 from latence_core.contracts import (
     ChunkRecord,
     DisambiguationRecord,
@@ -73,7 +74,7 @@ from latence_core.contracts import (
     ScreeningCheckpoint,
     ScreeningFinding,
 )
-from latence_core.errors import ConfigError
+from latence_core.errors import ConfigError, ContractError
 from latence_core.goldset import (
     ConfusionCounts,
     GoldSet,
@@ -104,7 +105,7 @@ from latence_core.quality import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from pydantic import BaseModel
 
@@ -266,10 +267,10 @@ class QualityAggregator(Protocol):
     * *No side effects.* ``finish`` returns a value; it never writes.
 
     Adding a Stage's quality metric is one module implementing this Protocol plus one entry in
-    :data:`QUALITY_AGGREGATORS` — ``build()`` is not edited. Lane L2's ``CapabilityDescriptor``
-    will own the per-Capability factory reference; because
-    :class:`QualityReportBuilder` takes the factory tuple as a dependency, that wiring replaces the
-    default tuple and changes nothing else here.
+    :data:`QUALITY_AGGREGATORS` — ``build()`` is not edited. What relates that entry to the
+    Capability it reports on is :func:`check_aggregator_coverage`, which holds this registry
+    against the ``quality_section`` every
+    :class:`~latence_core.capability_descriptor.CapabilityDescriptor` declares.
     """
 
     section_field: ClassVar[str]
@@ -318,8 +319,9 @@ class QualityReportBuilder:
             fanout_by_stage if fanout_by_stage is not None else {}
         )
         # The registry is a DEPENDENCY, not a hard-wired table (C5): the default is the built-in
-        # section set, and lane L2's CapabilityDescriptor will supply the per-Capability factories
-        # instead. Every caller that does not care passes nothing and learns nothing.
+        # section set, and a caller with its own sections supplies them here. Every caller that
+        # does not care passes nothing and learns nothing. (See QUALITY_AGGREGATORS for why this
+        # is NOT sourced from a per-Capability factory on the CapabilityDescriptor.)
         self._aggregators: tuple[QualityAggregatorFactory, ...] = (
             aggregators if aggregators is not None else QUALITY_AGGREGATORS
         )
@@ -1568,9 +1570,17 @@ def _stage_score(
 #: subscribers, which is irrelevant to every section's arithmetic but is one less thing that can
 #: drift between runs.
 #:
-#: Lane L2's ``CapabilityDescriptor`` will own a per-Capability ``quality_aggregator`` factory; the
-#: wiring is to pass ``aggregators=`` to :class:`QualityReportBuilder` with the descriptors'
-#: factories instead of this default. Nothing else in this module changes.
+#: This registry is deliberately NOT a per-Capability factory field on L2's
+#: :class:`~latence_core.capability_descriptor.CapabilityDescriptor`, which is what C5 anticipated
+#: before C2 landed. The shipped relation is many-to-many in both directions and a factory per
+#: Capability would be wrong, not merely redundant: :class:`_ScreeningAggregator` subscribes to NO
+#: kind at all (it folds the quarantine sidecars, not DAG records), :class:`_ChunkAggregator` and
+#: :class:`_DriftAggregator` both subscribe to ``CHUNK`` while filling different sections,
+#: :class:`_GraphAggregator` folds ``GRAPH_ASSEMBLY`` and ``GRAPH_COMPLETION`` into ONE section
+#: (constructing it once per Capability would double-count), and ``goldset`` belongs to no
+#: Capability. What the descriptor does own is the *section a Capability claims*
+#: (``quality_section``), and :func:`check_aggregator_coverage` below holds those two declarations
+#: against each other at import so neither can go stale.
 QUALITY_AGGREGATORS: tuple[QualityAggregatorFactory, ...] = (
     _ParseAggregator.for_run,
     _ChunkAggregator.for_run,
@@ -1586,3 +1596,46 @@ QUALITY_AGGREGATORS: tuple[QualityAggregatorFactory, ...] = (
     _DriftAggregator.for_run,
     _GoldSetAggregator.for_run,
 )
+
+
+def check_aggregator_coverage(
+    aggregators: Sequence[QualityAggregatorFactory] = QUALITY_AGGREGATORS,
+) -> None:
+    """Refuse a registry that leaves a Capability's declared Quality section unfilled.
+
+    The cross-lane gate between L2's descriptors and this registry. A Capability declares which
+    report section it contributes to (``CapabilityDescriptor.quality_section``); this module
+    declares which sections are actually folded. Before, those two lists lived in different files
+    with nothing relating them, so adding a Capability with a ``quality_section`` no aggregator
+    fills produced a section that was silently and permanently ``None`` — a Quality Report that
+    under-reports rather than fails.
+
+    Checked at import, like :func:`~latence_core.capability_descriptor.index_descriptors`, and for
+    the same reason: the failure mode being closed is silence, so the check has to run without
+    anyone remembering to call it. It intentionally does NOT require the converse — an aggregator
+    may fill a section no Capability claims (``drift`` and ``goldset`` are cross-cutting folds over
+    Stages that claim other sections), and may subscribe to kinds outside its own section (the
+    chunk-drift fold reads ``CHUNK``).
+
+    Raises :class:`~latence_core.errors.ContractError` — typed, never a bare assert (ADR-0034) —
+    naming every unfilled section at once.
+    """
+    # Each registered factory is a bound ``for_run`` classmethod, so its ``__self__`` is the
+    # aggregator class carrying the ``section_field`` ClassVar. A factory that is a plain function
+    # declares no section and simply contributes nothing to the cover.
+    filled = {
+        getattr(getattr(factory, "__self__", factory), "section_field", None)
+        for factory in aggregators
+    }
+    claimed = {d.quality_section for d in descriptors() if d.quality_section is not None}
+    unfilled = sorted(claimed - filled)
+    if unfilled:
+        msg = (
+            f"no QualityAggregator fills the report section(s) {', '.join(unfilled)} claimed by a "
+            f"CapabilityDescriptor; every Capability that declares a quality_section must have an "
+            f"aggregator registered in latence_core.quality_report_builder.QUALITY_AGGREGATORS"
+        )
+        raise ContractError(msg)
+
+
+check_aggregator_coverage()

@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pytest
 from latence_core import ProviderRegistry
@@ -131,8 +131,8 @@ def test_records_are_streamed_not_materialised(tmp_path: Path) -> None:
     class _SpyRunner(LocalRunner):
         def _stream_batches(
             self,
+            fh: IO[bytes],
             storage: Storage,
-            tmp: str,
             records: Iterable[Any],
             **kwargs: Any,
         ) -> tuple[int, int]:
@@ -142,7 +142,7 @@ def test_records_are_streamed_not_materialised(tmp_path: Path) -> None:
                         yielded_at_first_write.append(provider_holder[0].records_yielded)
                     yield record
 
-            return super()._stream_batches(storage, tmp, _watch(), **kwargs)
+            return super()._stream_batches(fh, storage, _watch(), **kwargs)
 
     runner = _SpyRunner(registry=_registry("parser.counting", _Spy))
     runner.run(_pipeline(store, docs, parser="parser.counting"), run_id="r")

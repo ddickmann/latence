@@ -262,8 +262,10 @@ def test_schema_induction_level_still_follows_its_granularity() -> None:
 
 
 # -- 3. the descriptor's facts agree with what the Runner actually does today -------------------
-# The Runner's four tables are wired to the descriptor separately (it is a hot file). These pin the
-# descriptor's declarations to the Runner's live behaviour, so that wiring is a substitution.
+# These pinned the descriptor's declarations to the Runner's pre-wiring behaviour so the wiring
+# could be a pure substitution. It has since been done — ``_output_type``, ``_export_carrier`` and
+# ``_ACCUMULATOR_KINDS`` now READ the descriptor — so these are the regression line on that
+# substitution: they still fail if a declaration changes what the Runner does to a checkpoint.
 
 
 def test_declared_carriers_match_the_runners_checkpoint_carrier() -> None:
