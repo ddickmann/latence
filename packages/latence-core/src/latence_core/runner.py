@@ -16,9 +16,11 @@ spine (Source→Parse→Export) the order is linear, but the DAG machinery is re
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import time
+from itertools import chain
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from latence_core.capability import (
@@ -65,9 +67,6 @@ from latence_core.observability import (
     dataset_for_uri,
 )
 from latence_core.pipeline import CapabilityKind, ExtractOn, Pipeline, Stage
-from latence_core.providers.device import DeviceDecision, select_device
-from latence_core.providers.perf import empty_cuda_cache
-from latence_core.providers.profile import ProviderProfile, profile_of
 from latence_core.quality import (
     DriftDiagnostics,
     QualityReport,
@@ -91,6 +90,7 @@ from latence_core.quality_report_builder import (
 from latence_core.quality_report_builder import (
     _fingerprint_salt as _fingerprint_salt,
 )
+from latence_core.stage_execution import StageContext, StageExecution
 from latence_core.storage import Storage
 from latence_core.tracing import RunTracer, SpanSink
 
@@ -288,21 +288,6 @@ class LocalRunner:
         # (or a downstream tracer, or a test) passes a CollectingSpanSink / their own SpanSink to
         # capture the per-Stage spans. Kept a thin seam — no OTel dep in core (ADR-0016).
         self._span_sink = span_sink
-        # Per-Stage endpoint-retry tally, drained into that Stage's StageMetrics (S12). An
-        # endpoint-backed performance Provider exposes an ``endpoint_retries`` int attribute (how
-        # many transient failures it retried through); the Runner reads it after the Stage runs and
-        # resets for the next. A CPU/in-process Provider has no such attribute → 0.
-        self._last_stage_retries = 0
-        # W4 (ADR-0038): per-Stage schema-induction fail-open tally, drained into that Stage's
-        # StageMetrics. A LabelInducer Provider exposes ``induction_fallbacks`` /
-        # ``induction_documents`` int attributes (how many documents fell back to config labels out
-        # of how many attempted); the Runner reads them after the Stage runs and resets. A
-        # non-induction Provider → an empty map. Carries the loud empty-after-sanitization subset
-        # (documents that induced NOTHING usable even after the recovery re-prompt) AND the T5
-        # induction COST columns (calls / dedup cache hits / endpoint-reported tokens / whether the
-        # call budget bound the run). A dict rather than a tuple because it is a growing set of
-        # optional columns fed straight into StageMetrics by name.
-        self._last_stage_induction: dict[str, int | bool] = {}
         # Per-Stage relation fan-out-guard tally, keyed by Stage name: (output-capped docs,
         # relations dropped [ADR-0033 / #63], input-capped docs, mentions dropped [#68]). A
         # RelationExtractor Provider exposes ``fanout_capped_documents``/
@@ -311,13 +296,15 @@ class LocalRunner:
         # the Stage runs and folds them into the Quality Report's RelationQuality. A Provider
         # without them contributes (0, 0, 0, 0).
         self._fanout_by_stage: dict[str, tuple[int, int, int, int]] = {}
-        # #69: when True, a doc-level Stage's retained output is released from the in-memory
-        # ``outputs`` dict once its last consumer has run (and a doc-level sink's output the moment
-        # it commits) — the accumulators + Quality Report then read that output back from its
-        # checkpoint. This bounds corpus-level memory to the KG state (ADR-0033's honest boundary)
-        # rather than O(all doc-level records). Setting it False keeps every Stage's output
-        # retained (the pre-#69 behavior) — a parity/debug knob; the on-disk output, resume, and
-        # report are byte-identical either way, only peak memory differs.
+        # #69 + C6: when True (the default), a Stage's records are STREAMED from its Provider
+        # straight into its checkpoint and never retained in the in-memory ``outputs`` dict at all
+        # — the finalized checkpoint is the source of truth (ADR-0017) and every later reader
+        # (a downstream Stage's gather, an accumulator's stream, the Quality Report) reads it back
+        # batch-by-batch through :meth:`_stage_records`. That is what completes ADR-0033's bound:
+        # the executor's per-Stage transient is O(checkpoint batch), not O(the Stage's records).
+        # Setting it False materialises and retains every Stage's output (the pre-#69 behaviour) —
+        # a parity/debug knob; the on-disk output, resume, and report are byte-identical either
+        # way, only peak memory differs.
         self._release_doc_level_outputs = True
         # W17 (ADR-0043): the cross-run doc-level REUSE OVERLAY, keyed by carrier type. A delta
         # excludes an unchanged document at Source (so its doc-level Stages never run) and hands
@@ -341,6 +328,15 @@ class LocalRunner:
         # relocatable module reused by both Runners through the public interface rather than via a
         # private reach-through. ``_build_report`` / ``_final_records`` below are thin delegators.
         self._report_builder = QualityReportBuilder(self, fanout_by_stage=self._fanout_by_stage)
+        # C3: the Stage-execution module. Everything it takes to run ONE Stage — provider load,
+        # device routing, skip-with-flag, the dispatch, the Provider tally drains (AFTER the
+        # record stream is consumed), typed-error categorisation and the full StageMetrics
+        # assembly — now lives behind ``execute(stage, ctx) -> StageOutcome``. This loop supplies
+        # only scheduling + the files-on-Storage substrate; a second Runner supplies its own and
+        # gets identical metrics for free, because it shares this object (see ``stage_execution``).
+        self._stage_execution = StageExecution(
+            self, self._registry, fanout_by_stage=self._fanout_by_stage
+        )
 
     @property
     def quality_report_builder(self) -> QualityReportBuilder:
@@ -354,141 +350,72 @@ class LocalRunner:
         """
         return self._report_builder
 
-    def _drain_retry_count(self) -> int:
-        """Read and reset the endpoint-retry tally the just-executed Stage's Provider reported."""
-        count = self._last_stage_retries
-        self._last_stage_retries = 0
-        return count
+    @property
+    def stage_execution(self) -> StageExecution:
+        """The Stage-execution module every Runner runs its Stages through (C3).
 
-    def _drain_induction_tally(self) -> dict[str, int | bool]:
-        """Read + reset the schema-induction columns the just-run Stage reported (W4 + T5).
-
-        Returns the ``StageMetrics`` field map: the W4 fail-open tally (``induction_fallbacks`` /
-        ``induction_documents`` / the loud ``induction_empty_after_sanitization``) plus the T5 cost
-        columns (``induction_calls`` / ``induction_cache_hits`` / the endpoint-reported token
-        counts / ``induction_budget_exhausted``). Empty for every non-induction Stage.
+        Public because it IS the Runner seam: a second Runner (Airflow, Delta, an adopter's own)
+        calls ``stage_execution.execute(stage, ctx)`` and gets device routing, the skip-with-flag
+        posture, the Provider tally drains and a fully-populated
+        :class:`~latence_core.quality.StageMetrics` — identical to this engine's, because it is
+        the same code, not a re-implementation. Bound to this engine's registry, its dispatch and
+        its live fan-out tally, so a Quality Report built off either Runner carries the same
+        columns (ADR-0003: the identical Stages under a pluggable Runner).
         """
-        tally = self._last_stage_induction
-        self._last_stage_induction = {}
-        return tally
+        return self._stage_execution
 
-    @staticmethod
-    def _provider_fanout(provider: object) -> tuple[int, int, int, int]:
-        """The relation fan-out-guard tally a Provider exposes.
+    def dispatch_stage(
+        self,
+        stage: Stage,
+        provider: object,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+        incoming: list[StageOutput],
+        outputs: dict[str, list[StageOutput]],
+    ) -> Iterator[StageOutput]:
+        """The :class:`~latence_core.stage_execution.StageDispatch` half this engine supplies.
 
-        Returns ``(output-capped-docs, dropped-relations, input-capped-docs,
-        dropped-mentions)``. A RelationExtractor Provider enforcing the ADR-0033 / #63
-        per-document relation OUTPUT cap tallies it in
-        ``fanout_capped_documents``/``fanout_dropped_relations``; the #68 per-document
-        mention INPUT cap tallies it in ``mention_capped_documents``/
-        ``mention_dropped_mentions``. Any Provider without an attribute (or with a non-int)
-        contributes ``0`` for it — read defensively so the seam names no base class (ADR-0004).
+        An internal collaborator of :class:`~latence_core.stage_execution.StageExecution`, not part
+        of its interface — a Runner adapter never calls this. Public only because the executor is a
+        separate module and reaching a private name across it is exactly the reach-through this
+        refactor removes.
         """
-
-        def _int_attr(name: str) -> int:
-            value = getattr(provider, name, 0)
-            return value if isinstance(value, int) else 0
-
-        return (
-            _int_attr("fanout_capped_documents"),
-            _int_attr("fanout_dropped_relations"),
-            _int_attr("mention_capped_documents"),
-            _int_attr("mention_dropped_mentions"),
+        return self._dispatch_stage(
+            stage, provider, storage, pipeline, run_id, incoming, outputs
         )
 
-    @staticmethod
-    def _provider_retry_count(provider: object) -> int:
-        """The endpoint-retry count a Provider exposes, or 0 if it exposes none.
+    def _retaining(
+        self,
+        outputs: dict[str, list[StageOutput]],
+        stage: Stage,
+        records: Iterator[StageOutput],
+    ) -> Iterator[StageOutput]:
+        """Pass a Stage's record stream through, retaining it only under the parity knob (C6).
 
-        An endpoint-backed performance Provider (``latence-*-endpoint``) tallies how many transient
-        endpoint failures it retried through in an ``endpoint_retries`` int attribute; an
-        in-process/CPU Provider has no such attribute. Read defensively so any Provider shape is
-        accepted (the seam names no base class — ADR-0004).
+        Default (``_release_doc_level_outputs``): yields straight through, so the Stage's records
+        go Provider→checkpoint without ever existing as a list — the O(batch) bound. Nothing lands
+        in ``outputs``; the finalized checkpoint is the source of truth (ADR-0017) and every later
+        reader goes through :meth:`_stage_records`, which falls back to it transparently.
+
+        With the knob OFF, the stream is materialised and retained exactly as the pre-#69 executor
+        did — the parity/debug path, whose only difference is peak memory.
         """
-        value = getattr(provider, "endpoint_retries", 0)
-        return value if isinstance(value, int) else 0
+        if self._release_doc_level_outputs:
+            return records
+        retained = list(records)
+        outputs[stage.name] = retained
+        return iter(retained)
 
-    @staticmethod
-    def _provider_induction_tally(provider: object) -> dict[str, int | bool]:
-        """The schema-induction columns a LabelInducer Provider exposes (W4 ADR-0038, T5 cost).
-
-        Two families, read off the SAME optional-attribute seam:
-
-        * **fail-open** (W4): how many documents fell back to config labels (a safety-net bit —
-          malformed/truncated/schema-invalid/empty output, or an unreachable endpoint) out of how
-          many the Stage attempted, and the LOUD subset that induced NOTHING usable even after the
-          empty-recovery re-prompt (the quality-cliff signal).
-        * **cost** (T5): the requests actually issued, the items the chunk-text dedup cache
-          answered for free, the endpoint's own reported token usage, and whether a configured
-          call budget bound the run. Per-chunk induction is one call per distinct chunk text, so
-          this is what makes its cost readable instead of feared.
-
-        A Provider exposing none of them (every non-induction Provider) contributes an EMPTY map —
-        read defensively so the seam names no base class (ADR-0004), the same discipline as
-        ``_provider_retry_count`` / ``_provider_fanout``. Absent columns simply keep their
-        ``StageMetrics`` defaults rather than being written as zeros.
-        """
-        counters = (
-            "induction_fallbacks",
-            "induction_documents",
-            "induction_empty_after_sanitization",
-            "induction_calls",
-            "induction_cache_hits",
-            "induction_prompt_tokens",
-            "induction_completion_tokens",
-        )
-        tally: dict[str, int | bool] = {}
-        for name in counters:
-            value = getattr(provider, name, None)
-            # bool is an int subclass — exclude it so a mis-typed flag never lands in a count.
-            if isinstance(value, int) and not isinstance(value, bool):
-                tally[name] = value
-        exhausted = getattr(provider, "induction_budget_exhausted", None)
-        if isinstance(exhausted, bool):
-            tally["induction_budget_exhausted"] = exhausted
-        return tally
-
-    # -- device routing (P3-F1, ADR-0036 §2) -------------------------------
-
-    def _route_device(
-        self, stage: Stage, profile: ProviderProfile | None
-    ) -> DeviceDecision:
-        """Route a Stage's requested device against its Provider's declared profile.
-
-        Reads the ``device`` config value (``auto|cpu|cuda``, default ``auto``) and calls
-        the dep-light :func:`~latence_core.providers.device.select_device` seam against the
-        Provider's declared :class:`~latence_core.providers.profile.ProviderProfile`
-        (``None`` when it declares none). Device *placement* stays the adapter's job
-        (ADR-0003/0036 §2) — the Runner only routes + records the decision. The returned
-        :class:`~latence_core.providers.device.DeviceDecision` drives the G1 skip-with-flag
-        posture: a GPU-only Provider on a CPU-only host is skipped (flagged), never crashed.
-        """
-        requested = stage.config.get("device", "auto")
-        # ``select_device`` validates the requested string (a bad value is a ConfigError-y
-        # ValueError); a non-string config value is coerced to its str form first so a typo
-        # surfaces as an "unknown device" message rather than a TypeError.
-        return select_device(str(requested), profile)
-
-    @staticmethod
-    def _profile_metric_fields(
-        profile: ProviderProfile | None, requested: str, decision: DeviceDecision
-    ) -> dict[str, object]:
-        """The StageMetrics profile/device columns for a Stage (P3-F1).
-
-        Surfaces the declared profile's ``compute``/``model_id``/``license`` (all ``None``
-        when the Provider declares no profile — never fabricated) plus the device routing:
-        the requested ``device``, the ``device_selected`` the seam resolved, and the
-        ``skipped``/``skip_reason`` skip-with-flag markers.
-        """
-        return {
-            "compute": profile.compute if profile is not None else None,
-            "model_id": profile.model_id if profile is not None else None,
-            "license": profile.license if profile is not None else None,
-            "device": requested,
-            "device_selected": decision.device,
-            "skipped": decision.skipped,
-            "skip_reason": decision.reason if decision.skipped else None,
-        }
+    def _retain(
+        self,
+        outputs: dict[str, list[StageOutput]],
+        stage: Stage,
+        records: Iterator[StageOutput],
+    ) -> None:
+        """Drain a Stage's record stream (resume path), retaining it only under the parity knob."""
+        for _ in self._retaining(outputs, stage, records):
+            pass
 
     # -- state layout ------------------------------------------------------
 
@@ -807,6 +734,35 @@ class LocalRunner:
         tmp = storage.temp_uri(uri)
         total = 0
         batch_index = 0
+        try:
+            total, batch_index = self._stream_batches(
+                storage, tmp, records, wal_uri=wal_uri, stage_name=stage_name, tracer=tracer
+            )
+        except BaseException:
+            # C6: under streaming, the Provider now runs INSIDE this write, so a Stage failure
+            # surfaces here with a half-written temp file. The final ``uri`` is still never
+            # published (the temp→rename below is not reached), so resume is unaffected — but drop
+            # the partial temp file so a failed Stage leaves no orphan beside the checkpoints.
+            # Best-effort: a cleanup failure must never mask the real Stage failure.
+            with contextlib.suppress(Exception):
+                storage.remove(tmp)
+            raise
+        storage.finalize_atomic(tmp, uri)
+        return total
+
+    def _stream_batches(
+        self,
+        storage: Storage,
+        tmp: str,
+        records: Iterable[StageOutput],
+        *,
+        wal_uri: str | None,
+        stage_name: str | None,
+        tracer: RunTracer | None,
+    ) -> tuple[int, int]:
+        """Serialize ``records`` into ``tmp`` in bounded batches; return (records, batches)."""
+        total = 0
+        batch_index = 0
         with storage.open(tmp, "wb") as fh:
             batch: list[str] = []
             for record in records:
@@ -831,8 +787,8 @@ class LocalRunner:
                     self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
                 if tracer is not None and stage_name is not None:
                     tracer.stage_batch(stage_name, batch_index=batch_index, records_so_far=total)
-        storage.finalize_atomic(tmp, uri)
-        return total
+                batch_index += 1
+        return total, batch_index
 
     def _read_checkpoint(
         self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
@@ -1071,85 +1027,31 @@ class LocalRunner:
             if lineage is not None:
                 lineage_in, lineage_out = self._lineage_io(pipeline, run_id, stage, by_name)
 
-            # P3-F1 (ADR-0036 §2) + P3-F2 (§2, the malformed-profile fix): the requested device
-            # + the Provider's declared profile are re-derived on BOTH the resume and the fresh
-            # path so the profile/device columns (incl. a skip flag) are STICKY across resume —
-            # reading the profile is a cached, cheap class import, and re-routing never executes
-            # the Provider. Three distinct outcomes, kept distinct (issue P3-F2 §2):
-            #
-            #   * load/import error (unknown provider, missing heavy dep) → DEFER: fall through
-            #     to the normal execution path, which re-loads inside the execution ``try`` and
-            #     re-raises with full failure handling (a FAIL report + a typed-error span). We do
-            #     NOT map or skip it here — that would double-handle or mask the real load error.
-            #   * profile declared but MALFORMED (``profile_of`` raises ``TypeError``) → FAIL
-            #     LOUD: an author bug that must surface as a typed ``ConfigError`` + a FAIL report,
-            #     not silently read as "no profile" and run normally (the P3-F1 deferred defect).
-            #     Captured here and raised inside the execution ``try`` below so it flows through
-            #     the exact same failure handling (span + FAIL report) as any Stage failure.
-            #   * absent profile (declares none) → ``None``: follow the request (unchanged).
-            requested_device = str(stage.config.get("device", "auto"))
-            stage_profile = None
-            load_ok = True
-            malformed_profile_error: ConfigError | None = None
-            try:
-                provider_cls = self._registry.load(stage.provider)
-            except Exception:  # noqa: BLE001 - a load/import error re-surfaces on the execution path
-                # Load/import failure — deferred, NOT mapped (it must re-surface as the real
-                # error when execution re-loads). Route the columns as "no profile", non-skip.
-                load_ok = False
-            else:
-                try:
-                    stage_profile = profile_of(provider_cls)
-                except Exception as exc:  # noqa: BLE001 - any profile-declaration/-computation error is an author bug
-                    # An author bug in the profile declaration — the provider class LOADED fine
-                    # (that is handled above), so anything ``profile_of`` raises now is the profile
-                    # itself being wrong. Two shapes, same disposition: a MALFORMED declaration
-                    # (wrong return type → ``profile_of`` raises ``TypeError``), OR a ``profile()``
-                    # classmethod whose BODY raises while building the descriptor (e.g. constructing
-                    # an invalid ``ProviderProfile`` → pydantic ``ValidationError``). Both must fail
-                    # the stage loud as a typed ConfigError (not run silently as "no profile").
-                    # Capture it and raise it inside the execution ``try`` so it gets the FAIL
-                    # report + typed-error span, exactly like an executed-Stage failure — never
-                    # skipped-with-flag (which would mask it).
-                    malformed_profile_error = ConfigError(
-                        f"Provider {stage.provider!r} for stage {stage.name!r} declares a "
-                        f"malformed ProviderProfile (invalid declaration or profile() error): {exc}"
-                    )
-                    stage_profile = None
-            if load_ok and malformed_profile_error is None:
-                device_decision = self._route_device(stage, stage_profile)
-            else:
-                device_decision = DeviceDecision(
-                    device=None, skipped=False, reason="provider load deferred to execution"
-                )
-            profile_fields = self._profile_metric_fields(
-                stage_profile, requested_device, device_decision
+            ctx = StageContext(
+                storage=storage,
+                pipeline=pipeline,
+                run_id=run_id,
+                incoming=incoming,
+                outputs=outputs,
+                runner=runner_name,
             )
 
             if storage.exists(ckpt_uri):
-                # Resume: this Stage already completed. Reload ITS OWN output into
-                # the dict and skip re-running. A downstream Stage still reads this
-                # value as one of its parents' outputs. The profile/device columns
-                # (re-derived above) are re-surfaced so a skipped GPU Stage still
-                # reports skipped=True + its profile columns on resume — sticky, not
-                # silently dropped to a plain non-skipped Stage.
-                own_output = self._read_checkpoint(
-                    storage, ckpt_uri, self._output_type(stage, pipeline)
+                # Resume: this Stage already completed, so replay its checkpoint through the SAME
+                # executor rather than hand-building a metrics row. That is what keeps the
+                # profile/device columns (including a skip flag) STICKY across a resume — the
+                # executor re-routes the device from the Provider's declared profile without ever
+                # executing it, so a skipped GPU Stage still reports skipped=True on resume instead
+                # of quietly reappearing as an ordinary Stage.
+                resumed = self._stage_execution.execute(
+                    stage,
+                    ctx,
+                    replay=self._stream_checkpoint(
+                        storage, ckpt_uri, self._output_type(stage, pipeline)
+                    ),
                 )
-                outputs[stage.name] = own_output
-                stage_metrics.append(
-                    StageMetrics(
-                        name=stage.name,
-                        capability=stage.capability.value,
-                        provider=stage.provider,
-                        records_in=records_in,
-                        records_out=len(own_output),
-                        duration_seconds=0.0,
-                        from_checkpoint=True,
-                        runner=runner_name,
-                        **profile_fields,  # type: ignore[arg-type]
-                    )
-                )
+                self._retain(outputs, stage, resumed.records)
+                stage_metrics.append(resumed.metrics(records_in=records_in))
                 # #185: a resumed Stage still belongs in the lineage graph — its dataset edges are
                 # real (the checkpoint exists and downstream reads it). Flagged ``from_checkpoint``
                 # so a catalog can tell a re-executed Stage from a replayed one.
@@ -1158,65 +1060,11 @@ class LocalRunner:
                         lineage,
                         stage,
                         records_in=records_in,
-                        records_out=len(own_output),
+                        records_out=resumed.records_out,
                         duration_ms=0.0,
                         inputs=lineage_in,
                         outputs=lineage_out,
                         from_checkpoint=True,
-                    )
-                _release_dead_parents(stage)
-                continue
-
-            # P3-F1 (ADR-0036 §2): the requested device + declared profile were routed above
-            # (before the resume check) so the profile/device columns are sticky across resume.
-            # A GPU-only Provider on a CPU-only host is skipped-with-flag (the G1 posture) — the
-            # Stage produces an empty output, an (empty) checkpoint is written so the skip is
-            # sticky on resume, and the skip is recorded in the Quality Report — never crashed,
-            # never a fabricated GPU number. Device *placement* stays the adapter's job; the
-            # Runner only routes + records. A Provider that declares no profile follows the
-            # request; a malformed declaration / unknown provider (load_ok=False) is forced onto
-            # the non-skip path below, where execution re-loads and re-raises the real error.
-            if device_decision.skipped:
-                # Skip-with-flag: do not instantiate/run the Provider. Emit an empty output +
-                # empty checkpoint so a resume sees the Stage as already handled (the skip is
-                # sticky), and record the skip in the Stage's metrics. Downstream Stages read an
-                # empty parent output — the stack harness reads the skip flag from the report.
-                empty_output: list[StageOutput] = []
-                outputs[stage.name] = empty_output
-                self._write_checkpoint(
-                    storage,
-                    ckpt_uri,
-                    empty_output,
-                    wal_uri=wal_uri,
-                    stage_name=stage.name,
-                    tracer=tracer,
-                )
-                self._wal_append(storage, wal_uri, _WAL_STAGE_COMMIT, stage.name)
-                stage_metrics.append(
-                    StageMetrics(
-                        name=stage.name,
-                        capability=stage.capability.value,
-                        provider=stage.provider,
-                        records_in=records_in,
-                        records_out=0,
-                        duration_seconds=0.0,
-                        runner=runner_name,
-                        **profile_fields,  # type: ignore[arg-type]
-                    )
-                )
-                # #185: a device-skipped Stage produced an (empty) dataset — recorded honestly as
-                # a COMPLETE with ``skipped=True`` and zero records out, never omitted (which would
-                # leave a hole in the catalog's graph) and never faked as a real execution.
-                if lineage is not None:
-                    self._emit_stage_lineage(
-                        lineage,
-                        stage,
-                        records_in=records_in,
-                        records_out=0,
-                        duration_ms=0.0,
-                        inputs=lineage_in,
-                        outputs=lineage_out,
-                        skipped=True,
                     )
                 _release_dead_parents(stage)
                 continue
@@ -1237,34 +1085,43 @@ class LocalRunner:
                     inputs=lineage_in,
                     outputs=lineage_out,
                 )
-            started = time.perf_counter()
+            # C3 + C6: resolve inputs → execute → persist → release. The executor owns provider
+            # load, device routing, the skip-with-flag posture (ADR-0036 §2), the dispatch, the
+            # Provider tally drains and the whole StageMetrics row; this loop owns scheduling and
+            # the files-on-Storage substrate and nothing else. The Stage's records are STREAMED
+            # from the Provider straight into the checkpoint writer — never materialised into a
+            # list — and the executor's teardown fires when that stream is exhausted, which is why
+            # the tallies below read the Provider's real counters rather than zeros.
+            outcome = self._stage_execution.execute(stage, ctx)
             try:
-                # P3-F2 §2: a malformed ProviderProfile declaration is fatal — raise the captured
-                # typed ConfigError HERE, inside the execution ``try``, so it flows through the
-                # exact same failure handling as any Stage failure (a FAIL Quality Report + a
-                # typed-error ``config`` span + re-raise), never silently read as "no profile"
-                # and run normally (the P3-F1 deferred defect). It fires before the Provider is
-                # instantiated — a bad declaration never gets to run.
-                if malformed_profile_error is not None:
-                    raise malformed_profile_error
-                own_output = self._execute_stage(
-                    stage, storage, pipeline, run_id, incoming, outputs
+                # Batch-granular streamed checkpoint write (ADR-0033 / #63 + C6): the write
+                # transient is O(batch), not O(all-records); batch progress lands in the WAL; the
+                # final file is published atomically (temp→rename) so resume stays exact at Stage
+                # granularity. A device-skipped Stage streams zero records, so this writes the
+                # empty checkpoint that makes the skip sticky on resume — same code path, no
+                # special case.
+                self._write_checkpoint(
+                    storage,
+                    ckpt_uri,
+                    self._retaining(outputs, stage, outcome.records),
+                    wal_uri=wal_uri,
+                    stage_name=stage.name,
+                    tracer=tracer,
                 )
             except BaseException as exc:
                 # #73: a Stage failure emits a *failed* stage_end span stamped with the typed-error
                 # category (contract/config/provider/storage/screening/unknown) + message, then
                 # re-raises — the Runner never swallows a Stage failure (no torn commit), it just
                 # makes the failure kind observable first. Counts + category only, never content.
-                duration = time.perf_counter() - started
-                category = error_category(exc)
+                failed = outcome.metrics(records_in=records_in, error=exc)
                 tracer.stage_end(
                     stage.name,
                     capability=stage.capability.value,
                     provider=stage.provider,
                     records_in=records_in,
                     records_out=0,
-                    duration_ms=round(duration * 1000.0, 3),
-                    error_category=category,
+                    duration_ms=round(failed.duration_seconds * 1000.0, 3),
+                    error_category=failed.error_category,
                     error_message=str(exc),
                 )
                 # #185: the FAIL RunEvent. It carries the stable typed *category* and nothing else
@@ -1277,38 +1134,23 @@ class LocalRunner:
                         provider=stage.provider,
                         records_in=records_in,
                         records_out=0,
-                        duration_ms=round(duration * 1000.0, 3),
+                        duration_ms=round(failed.duration_seconds * 1000.0, 3),
                         inputs=lineage_in,
                         outputs=lineage_out,
-                        error_category=category,
+                        error_category=failed.error_category,
                     )
                 # #73: the taxonomy is surfaced in the report *and* the logs — so record the failed
                 # Stage's typed-error metric (error_count=1 + the stable category tag, counts only,
                 # never the exception message) and persist a FAIL Quality Report before re-raising.
-                # This is the report half of #73's "surfaced in the report + logs": a persisted
-                # report now carries the failed Stage's error_count, not only a transient span.
                 #
                 # No-torn-write is preserved: the failed Stage's *checkpoint* is still never
-                # finalized (we never reached ``_write_checkpoint``), so a resume re-runs it.
-                # The report is not a resume gate (resume keys off per-Stage checkpoints, not the
-                # report), so a subsequent successful resume overwrites this FAIL report atomically.
-                # Persisting must never mask the real failure: if the report build itself raises we
-                # swallow *that* and re-raise the original Stage exception.
-                stage_metrics.append(
-                    StageMetrics(
-                        name=stage.name,
-                        capability=stage.capability.value,
-                        provider=stage.provider,
-                        records_in=records_in,
-                        records_out=0,
-                        duration_seconds=round(duration, 6),
-                        runner=runner_name,
-                        endpoint_retries=self._drain_retry_count(),
-                        error_count=1,
-                        error_category=category,
-                        **profile_fields,  # type: ignore[arg-type]
-                    )
-                )
+                # finalized (the streamed write publishes temp→rename only after the last record,
+                # and discards the temp file on failure), so a resume re-runs it. The report is not
+                # a resume gate (resume keys off per-Stage checkpoints, not the report), so a
+                # subsequent successful resume overwrites this FAIL report atomically. Persisting
+                # must never mask the real failure: if the report build itself raises we swallow
+                # *that* and re-raise the original Stage exception.
+                stage_metrics.append(failed)
                 try:
                     fail_report = self._build_report(
                         pipeline,
@@ -1328,59 +1170,33 @@ class LocalRunner:
                 except Exception:  # noqa: BLE001 - never mask the real Stage failure
                     pass
                 raise
-            duration = time.perf_counter() - started
-
-            outputs[stage.name] = own_output
-            # Batch-granular streamed checkpoint write (ADR-0033 / #63): the write transient is
-            # O(batch), not O(all-records); batch progress lands in the WAL; the final file is
-            # published atomically (temp→rename) so resume stays exact at Stage granularity.
-            self._write_checkpoint(
-                storage,
-                ckpt_uri,
-                own_output,
-                wal_uri=wal_uri,
-                stage_name=stage.name,
-                tracer=tracer,
-            )
             self._wal_append(storage, wal_uri, _WAL_STAGE_COMMIT, stage.name)
+            metrics = outcome.metrics(records_in=records_in)
             tracer.stage_end(
                 stage.name,
                 capability=stage.capability.value,
                 provider=stage.provider,
                 records_in=records_in,
-                records_out=len(own_output),
-                duration_ms=round(duration * 1000.0, 3),
+                records_out=outcome.records_out,
+                duration_ms=round(metrics.duration_seconds * 1000.0, 3),
             )
             if lineage is not None:
                 self._emit_stage_lineage(
                     lineage,
                     stage,
                     records_in=records_in,
-                    records_out=len(own_output),
-                    duration_ms=round(duration * 1000.0, 3),
+                    records_out=outcome.records_out,
+                    duration_ms=round(metrics.duration_seconds * 1000.0, 3),
                     inputs=lineage_in,
                     outputs=lineage_out,
                     emit_start=False,
+                    skipped=outcome.skipped,
                 )
-
-            stage_metrics.append(
-                StageMetrics(
-                    name=stage.name,
-                    capability=stage.capability.value,
-                    provider=stage.provider,
-                    records_in=records_in,
-                    records_out=len(own_output),
-                    duration_seconds=round(duration, 6),
-                    runner=runner_name,
-                    endpoint_retries=self._drain_retry_count(),
-                    **self._drain_induction_tally(),  # type: ignore[arg-type]
-                    **profile_fields,  # type: ignore[arg-type]
-                )
-            )
+            stage_metrics.append(metrics)
             # #69: release any doc-level parent whose last consumer just ran — its checkpoint is
             # the source of truth for the end-of-run Quality Report, which reads it back
-            # (bounded) via _stage_records. This is what drops the retained doc-level executor
-            # transient the ADR flagged as remaining.
+            # (bounded) via _stage_records. Under the default (streaming) knob nothing was
+            # retained in the first place, so this is a no-op; it is what the parity knob needs.
             _release_dead_parents(stage)
 
         final_records = self._final_records(
@@ -1392,53 +1208,6 @@ class LocalRunner:
         storage.write_atomic(self._report_uri(pipeline, run_id), report.to_json().encode("utf-8"))
         return report
 
-    def _execute_stage(
-        self,
-        stage: Stage,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-        incoming: list[StageOutput],
-        outputs: dict[str, list[StageOutput]],
-    ) -> list[StageOutput]:
-        """Run one Stage and record any endpoint retries its Provider reported (S12).
-
-        Delegates the capability dispatch to :meth:`_dispatch_stage`, then reads the endpoint-retry
-        tally off the (endpoint-backed) Provider so ``run()`` can fold it into that Stage's metrics.
-        Kept as the single seam a second Runner adapter reuses — identical Stage semantics + the
-        same retry accounting under any substrate (ADR-0003), no fork. ``outputs`` is threaded so a
-        corpus-level accumulator's dispatch can stream its input from parents' checkpoints (#69)
-        rather than receiving it pre-materialised in ``incoming`` (which is empty for accumulators).
-        """
-        provider_cls = self._registry.load(stage.provider)
-        provider = provider_cls(stage.config)
-        try:
-            return self._dispatch_stage(
-                stage, provider, storage, pipeline, run_id, incoming, outputs
-            )
-        finally:
-            self._last_stage_retries = self._provider_retry_count(provider)
-            self._last_stage_induction = self._provider_induction_tally(provider)
-            if stage.capability in (
-                CapabilityKind.RELATION_EXTRACTION,
-                CapabilityKind.FUSED_ENTITY_RELATION,
-            ):
-                self._fanout_by_stage[stage.name] = self._provider_fanout(provider)
-            # Cross-stage VRAM lifecycle (dogfood-2b-process). Each Stage instantiates its OWN
-            # Provider (line above) — there is no cross-stage Provider reuse — so once this Stage's
-            # dispatch has returned, nothing downstream needs this Provider's model. On a
-            # single-GPU pod the enterprise-sota stack loads a fresh multi-GiB model per learned
-            # Stage (extract, embedding, disambiguation, redaction, …); if each stays resident the
-            # last Stage OOMs with a near-full card (the redact[gliner2] 6.28 GiB forward on a
-            # 32 GB Blackwell with ~248 MiB free). Drop the strong reference and reclaim: the
-            # ``gc.collect()`` inside the seam is what actually frees the model (a torch nn.Module
-            # is cycle-held, so refcount alone never releases it), and the CUDA cache is handed back
-            # so the next Stage's model allocates from a clean pool. Torch-free/guarded (ADR-0016),
-            # best-effort, never raises — and output is byte-identical (memory only), so a run on a
-            # roomy machine is unaffected. Runs on the failure path too, which is harmless.
-            del provider
-            empty_cuda_cache(provider_name=f"stage:{stage.name}")
-
     def _dispatch_stage(
         self,
         stage: Stage,
@@ -1448,13 +1217,26 @@ class LocalRunner:
         run_id: str,
         incoming: list[StageOutput],
         outputs: dict[str, list[StageOutput]],
-    ) -> list[StageOutput]:
+    ) -> Iterator[StageOutput]:
+        """Narrow a Stage's input to its capability's carrier and return the Provider's STREAM.
+
+        C6: every Capability Protocol is already ``Iterable``-in/``Iterator``-out, so the
+        Provider's iterator is handed back **uncollapsed** — the Runner writes it record-by-record
+        into the checkpoint and the Stage's output never exists as a list. The capability checks,
+        input narrowing and wiring validation above each ``return`` still run EAGERLY (a mis-wired
+        Pipeline raises its typed ContractError before a single record is produced); only the
+        record production is lazy.
+
+        The two exceptions are inherent, not oversights: Export must hold the records it
+        materialises (it writes a file), and the fused/consolidating Stages return two carriers
+        from one call. Both are bounded by what the Provider itself already held.
+        """
         if stage.capability is CapabilityKind.SOURCE:
             if not isinstance(provider, Source):
                 msg = f"Provider {stage.provider!r} does not satisfy the Source capability."
                 raise ContractError(msg)
             # A Source is a root: it reads Storage, not upstream records.
-            return list(provider.produce(storage))
+            return iter(provider.produce(storage))
 
         if stage.capability is CapabilityKind.INTAKE_SCREENING:
             if not isinstance(provider, IntakeScreener):
@@ -1468,21 +1250,21 @@ class LocalRunner:
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, intake_outcome)
             # Only the passed raw inputs proceed to Parse; the quarantined ones are
             # removed from the DAG (persisted for audit above), never reaching Parse.
-            return list(intake_outcome.passed)
+            return iter(intake_outcome.passed)
 
         if stage.capability is CapabilityKind.PARSE:
             if not isinstance(provider, Parser):
                 msg = f"Provider {stage.provider!r} does not satisfy the Parser capability."
                 raise ContractError(msg)
             parser_inputs = self._as_type(stage, incoming, ParserInput)
-            return list(provider.parse(parser_inputs))
+            return iter(provider.parse(parser_inputs))
 
         if stage.capability is CapabilityKind.CHUNK:
             if not isinstance(provider, Chunker):
                 msg = f"Provider {stage.provider!r} does not satisfy the Chunker capability."
                 raise ContractError(msg)
             doc_records = self._as_type(stage, incoming, DocumentRecord)
-            return list(provider.chunk(doc_records))
+            return iter(provider.chunk(doc_records))
 
         if stage.capability is CapabilityKind.CONTENT_SCREENING:
             if not isinstance(provider, ContentScreener):
@@ -1496,7 +1278,7 @@ class LocalRunner:
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, content_outcome)
             # Passed chunks (some now carrying propagated RiskMarkers) proceed to
             # Export; quarantined chunks are removed and persisted for audit.
-            return list(content_outcome.passed)
+            return iter(content_outcome.passed)
 
         if stage.capability is CapabilityKind.SCHEMA_INDUCTION:
             if not isinstance(provider, LabelInducer):
@@ -1515,7 +1297,7 @@ class LocalRunner:
             # also wires this chunk stream into ``redact`` the Runner projects each document's
             # induced labels onto its DocumentRecord (the bridge in the REDACTION dispatch below).
             induce_chunks = self._as_type(stage, incoming, ChunkRecord)
-            return list(provider.induce(induce_chunks))
+            return iter(provider.induce(induce_chunks))
 
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             if not isinstance(provider, EntityExtractor):
@@ -1527,7 +1309,7 @@ class LocalRunner:
             chunk_records = self._extract_input_chunks(
                 pipeline, self._as_type(stage, incoming, ChunkRecord)
             )
-            return list(provider.extract(chunk_records))
+            return iter(provider.extract(chunk_records))
 
         if stage.capability is CapabilityKind.RELATION_EXTRACTION:
             if not isinstance(provider, RelationExtractor):
@@ -1544,7 +1326,7 @@ class LocalRunner:
             rel_mentions = [r for r in incoming if isinstance(r, EntityMention)]
             self._require_relation_inputs(stage, incoming, rel_chunks, rel_mentions)
             rel_chunks = self._extract_input_chunks(pipeline, rel_chunks)
-            return list(provider.relate(rel_chunks, rel_mentions))
+            return iter(provider.relate(rel_chunks, rel_mentions))
 
         if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
             if not isinstance(provider, FusedEntityRelationExtractor):
@@ -1560,8 +1342,7 @@ class LocalRunner:
                 pipeline, self._as_type(stage, incoming, ChunkRecord)
             )
             fused = provider.extract_fused(fused_chunks)
-            out: list[StageOutput] = [*fused.mentions, *fused.relations]
-            return out
+            return chain(fused.mentions, fused.relations)
 
         if stage.capability is CapabilityKind.REDACTION:
             if not isinstance(provider, PIIDetector):
@@ -1585,7 +1366,7 @@ class LocalRunner:
             # its config floor per chunk.
             redaction_chunks = self._as_type(stage, incoming, ChunkRecord)
             self._require_redaction_inputs(stage, incoming, redaction_chunks)
-            return list(provider.redact(redaction_chunks))
+            return iter(provider.redact(redaction_chunks))
 
         if stage.capability is CapabilityKind.PROFILING:
             if not isinstance(provider, Profiler):
@@ -1613,7 +1394,7 @@ class LocalRunner:
             profile_mentions = self._stream_inputs_of_type(
                 stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
             )
-            return list(provider.profile(profile_docs, profile_mentions))
+            return iter(provider.profile(profile_docs, profile_mentions))
 
         if stage.capability is CapabilityKind.TYPE_CONSOLIDATION:
             if not isinstance(provider, TypeConsolidator):
@@ -1651,8 +1432,7 @@ class LocalRunner:
             # sidecar (ADR-0017: files are the source of truth), which is what makes it survive
             # the run and lets an incremental delta run seed from it (T4).
             self._persist_type_vocabulary(storage, pipeline, run_id, stage, consolidated.vocabulary)
-            typed: list[StageOutput] = [*consolidated.mentions, *consolidated.relations]
-            return typed
+            return chain(consolidated.mentions, consolidated.relations)
 
         if stage.capability is CapabilityKind.DISAMBIGUATION:
             if not isinstance(provider, Disambiguator):
@@ -1693,7 +1473,7 @@ class LocalRunner:
             disambig_chunks = self._stream_all_records_of_type(
                 outputs, ChunkRecord, storage=storage, pipeline=pipeline, run_id=run_id
             )
-            return list(
+            return iter(
                 provider.disambiguate(disambig_mentions, disambig_relations, disambig_chunks)
             )
 
@@ -1723,7 +1503,7 @@ class LocalRunner:
                 pipeline=pipeline,
                 run_id=run_id,
             )
-            return list(provider.assemble(graph_records))
+            return iter(provider.assemble(graph_records))
 
         if stage.capability is CapabilityKind.GRAPH_COMPLETION:
             if not isinstance(provider, GraphCompleter):
@@ -1753,7 +1533,7 @@ class LocalRunner:
                 pipeline=pipeline,
                 run_id=run_id,
             )
-            return list(provider.complete(assembled))
+            return iter(provider.complete(assembled))
 
         if stage.capability is CapabilityKind.CONTEXT_ENRICHMENT:
             if not isinstance(provider, ContextEnricher):
@@ -1791,7 +1571,7 @@ class LocalRunner:
             enrich_mentions = self._stream_all_records_of_type(
                 outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
             )
-            return list(provider.enrich(enrich_chunks, enrich_mentions, enrich_graph))
+            return iter(provider.enrich(enrich_chunks, enrich_mentions, enrich_graph))
 
         if stage.capability is CapabilityKind.EXPORT:
             if not isinstance(provider, Export):
@@ -1824,7 +1604,7 @@ class LocalRunner:
             provider.export(materialized, storage, out_dir)
             # Export is a sink: it passes its input records through unchanged. (The overlay records
             # are exportable Records, so the cast to the StageOutput carrier is exact.)
-            return cast("list[StageOutput]", materialized)
+            return iter(cast("list[StageOutput]", materialized))
 
         if stage.capability is CapabilityKind.EMBEDDING:
             # Embedding is an opt-in *Export augmentation* (ADR-0017), not a standalone DAG node:
