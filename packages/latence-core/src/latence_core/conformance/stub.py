@@ -569,14 +569,26 @@ class _StubSpladeMaskedLM:
     Emits a positive logit at each token's own vocab id (zero elsewhere), so the adapter's real
     SPLADE pooling (``max_t log(1+relu)``) yields a genuine non-empty term-weight map keyed by the
     tokens present — a faithful shape, not a passthrough that lies.
+
+    Faithful about placement too, since ``sparse.splade`` joined the shared load choreography: a
+    real ``nn.Module`` is resident on **cpu** after ``from_pretrained`` and is moved by ``.to()``,
+    reporting the result via ``.device``. A stub without those is *less capable* than the dependency
+    it stands in for, which makes the seam's "prove it landed or raise" step fail against the stub
+    rather than against a real defect.
     """
 
     def __init__(self) -> None:
         self.config = _StubSpladeConfig()
+        self.device = "cpu"
 
     @classmethod
     def from_pretrained(cls, _model_id: str, **_kwargs: Any) -> _StubSpladeMaskedLM:
         return cls()
+
+    def to(self, target: Any) -> _StubSpladeMaskedLM:
+        if isinstance(target, str):
+            self.device = target
+        return self
 
     def eval(self) -> _StubSpladeMaskedLM:
         return self

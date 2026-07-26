@@ -1,5 +1,26 @@
 """The shared **performance seam** every learned Provider loads its model through (W8-perf-accel).
 
+**Start here: the three entry points.** A learned Provider does not assemble this module's steps —
+it calls exactly ONE function, keyed by the native library its adapter owns:
+
+* :func:`load_gliner_model` — the plain ``gliner`` library (``entity.gliner``,
+  ``redaction.gliner_pii``, ``relation.gliner_relex``);
+* :func:`load_gliner2_model` — the ``gliner2`` framework (``fused_entity_relation.gliner2``,
+  ``redaction.gliner2``);
+* :func:`load_transformers_model` — plain ``transformers`` models (the OCR VLMs, SPLADE).
+
+Each takes ``(import_model_cls, model_id, config, decision, *, provider_name)`` and returns a model
+that is ready to run. The **ordering** of JIT neutralization, backbone import, device check,
+dtype/quantize, load, placement + verification, window bound, thread cap and compile lives inside
+them — a caller cannot get it wrong, because a caller never sees it. The backbone import in
+particular is handed in as a factory precisely so "neutralize before import" (#190) is a straight
+line of code here rather than a rule enforced by linting the callers' source. See the C4 section at
+the bottom of this module for the full reasoning.
+
+Everything between here and that section is a STEP of those sequences. The steps stay public
+because the P8 autotuner and the OOM/compile-fault predicates are used on their own — but a
+Provider that reaches for them individually to build a load is re-opening #190/#191 by hand.
+
 Enterprise throughput has one cross-cutting shape repeated across every learned Provider: pick a
 load **dtype** (bf16 on a GPU, fp32 on CPU — the fp32-on-GPU default is a ~2× miss), pick an
 **attention implementation** (``sdpa`` by default, ``flash_attention_2`` only when the
@@ -28,11 +49,22 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from latence_core.errors import ProviderError
+from latence_core.errors import ConfigError, LatenceError, ProviderError
 from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
+    from typing import TypeAlias
+
+    from latence_core.providers.device import DeviceDecision
+
+    #: A caller-supplied typed-error policy for the native load: ``guard(op)`` returns a context
+    #: manager that maps whatever the block raises into the ADR-0034 taxonomy.
+    #: :meth:`~latence_core.providers.adapter.AdapterBase.guard` satisfies it exactly. It is a
+    #: PARAMETER rather than an import because the dependency runs the other way (``adapter``
+    #: imports ``perf``), and because a Provider that is not an ``AdapterBase`` can pass ``None``
+    #: and take the default mapping.
+    LoadGuard: TypeAlias = Callable[[str], contextlib.AbstractContextManager[Any]]
 
 _log = logging.getLogger("latence.perf")
 
@@ -1028,3 +1060,275 @@ def _positive_int_knob(config: Mapping[str, Any], key: str, default: int) -> int
         msg = f"invalid {key} {raw}: must be >= 1"
         raise ValueError(msg)
     return int(raw)
+
+
+# ---------------------------------------------------------------------------
+# The LOAD CHOREOGRAPHY (C4) — three deep entry points, one per native-library
+# family. Everything above this line is a STEP; everything below is the whole
+# SEQUENCE, so a Provider author never has to know the ordering at all.
+# ---------------------------------------------------------------------------
+#
+# Why this exists. The seven steps a learned Provider used to perform by hand —
+#
+#   neutralize the JIT → import the backbone → check the DeviceDecision → load+cast →
+#   place on the resolved device → bound the token window → compile
+#
+# — carry FIVE "before" constraints, and not one of them was expressible in a signature. The only
+# thing holding them was an AST linter that parsed each Provider's SOURCE and asserted the calls
+# were present and correctly sequenced. When the only way to hold an invariant is to lint the
+# callers, the invariant belongs INSIDE the module. Three field bugs came out of that gap:
+#
+#   * #190 — the JIT kill sat inside the loader, i.e. AFTER ``from gliner import GLiNER`` had
+#     already let transformers script the deberta_v2 relative-position helpers. The "fix" was a
+#     SECOND, EARLIER call copy-pasted into every Provider.
+#   * #191 — ``place_on_device`` was wired to one Provider of three; the other two cast to bf16 off
+#     a bare availability probe while the weights stayed resident on CPU.
+#   * the OCR parsers used a bare ``model.to(device)``, so "prove it landed or raise" covered 3 of
+#     5 model-placing Providers.
+#
+# The fix that removes the CLASS of bug: the backbone import is not something the Provider does and
+# then tells us about — it is a ``Callable[[], Any]`` factory the Provider HANDS IN, which these
+# entry points call at the one instant that is correct. "Neutralize before import" stops being a
+# rule and becomes a straight line of code that a caller cannot reorder because the caller never
+# sees it.
+#
+# What deliberately did NOT move: the config knobs (still read from the Provider's own ``config``),
+# the native dependency (each package still owns and imports its own), and the placement CALL
+# (``place_on_device`` still runs against the model object the Provider's library produced) —
+# ADR-0036 §2's "device placement stays the adapter's job" is about WHO owns the native dep and the
+# model object, not about who holds the ordering. Only the SEQUENCING moved inward.
+
+
+def _require_device(decision: DeviceDecision, provider_name: str) -> str | None:
+    """The resolved device to place on, or a loud :class:`ConfigError` — never a silent fallback.
+
+    The first step of every load choreography, and the #191 contract in one place:
+    ``select_device`` returns a **skip-with-flag** decision when a GPU-only Provider is asked for on
+    a CPU-only host (or CPU is pinned for a GPU-only Provider). Before this, each Provider
+    re-derived
+    that check by hand — and the two that forgot fell through to a CPU load with the GPU idle, at
+    ~11.5 s/chunk, with NO warning. Honour the resolved device or fail loudly (ADR-0036).
+
+    A non-skipped decision whose ``device`` is ``None`` (a Provider that resolves no device and lets
+    its library auto-place) is legal and returns ``None`` — placement then reads back the resident
+    device for verification only.
+    """
+    if decision.skipped:
+        msg = f"{provider_name}: {decision.reason}"
+        raise ConfigError(msg)
+    return decision.device
+
+
+def _import_backbone(
+    import_model_cls: Callable[[], Any], config: Mapping[str, Any], provider_name: str
+) -> Any:
+    """Kill the TorchScript JIT, cap the intra-op threads, THEN evaluate the backbone import.
+
+    The ordering that #190 cost two rounds to learn, expressed as three consecutive statements a
+    caller cannot get between:
+
+    1. :func:`neutralize_torch_jit` — sets ``PYTORCH_JIT=0`` (read by torch **at torch import**) and
+       disables the runtime state. Must precede step 3, because the backbone import transitively
+       evaluates transformers' ``deberta_v2`` module whose relative-position helpers carry
+       ``@torch.jit.script``; once they are ``ScriptFunction``s no lever can un-script them, and
+       on a
+       Blackwell/CUDA-13 box they die in nvrtc on the FIRST forward.
+    2. :func:`cap_intra_op_threads` — the many-core oversubscription guard (~520% CPU spin with the
+       GPU at 0%). It imports torch, which is *why* it must come after step 1 and not before: the
+       env switch has to be in place for the import torch reads it at. Applied for EVERY family,
+       not just
+       the one Provider that happened to wire it: the blessed stack runs two mdeberta backbones in
+       one process on one many-core host, and protecting only one of them protects neither.
+    3. ``import_model_cls()`` — the Provider's own factory. It stays with the Provider because the
+       native dependency and its install hint do (ADR-0036 §2); only the INSTANT it is called moved
+       here. An ``ImportError`` from it propagates unwrapped — a missing optional dep is an
+       actionable operator message ("pip install latence-…"), not a runtime provider fault.
+    """
+    neutralize_torch_jit(provider_name=provider_name)
+    cap_intra_op_threads(resolve_intra_op_threads(config), provider_name=provider_name)
+    return import_model_cls()
+
+
+def _typed_load(
+    load: Callable[[], Any],
+    model_id: str,
+    provider_name: str,
+    guard: LoadGuard | None,
+) -> Any:
+    """Run a native model load, mapping any native fault to a typed error (ADR-0034).
+
+    ``guard`` is the caller's own typed-error policy — in practice ``AdapterBase.guard``, whose
+    ``config_exceptions`` decide which native types mean "the operator's config is wrong"
+    (a bad ``model`` id → :class:`~latence_core.errors.ConfigError`) versus "the provider failed"
+    (→ :class:`~latence_core.errors.ProviderError`). That policy is per-adapter, so it stays with
+    the adapter; what this seam owns is applying it at the RIGHT INSTANT — around the native load
+    and **nothing else**, so a missing-dependency ``ImportError`` from the backbone-import factory
+    (raised before this call) still reaches the operator as its actionable "pip install …" hint
+    instead of being relabelled a provider failure.
+
+    A caller with no such policy (a Provider that is not an :class:`AdapterBase`) passes ``None``
+    and gets the default: any native fault becomes a :class:`~latence_core.errors.ProviderError`
+    naming the provider, the model id and the native exception's TYPE NAME — never its message,
+    which can echo an input (the same no-PII discipline ``AdapterBase.guard`` follows). A framework
+    :class:`~latence_core.errors.LatenceError` passes through unwrapped either way.
+    """
+    if guard is not None:
+        with guard("load_model"):
+            return load()
+    try:
+        return load()
+    except LatenceError:
+        raise
+    except Exception as exc:
+        msg = (
+            f"{provider_name}: could not load model {model_id!r} "
+            f"(native {type(exc).__name__})"
+        )
+        raise ProviderError(msg) from exc
+
+
+def load_gliner_model(
+    import_model_cls: Callable[[], Any],
+    model_id: str,
+    config: Mapping[str, Any],
+    decision: DeviceDecision,
+    *,
+    provider_name: str,
+    guard: LoadGuard | None = None,
+) -> Any:
+    """Load a plain-``gliner``-library model, ready to run — the WHOLE sequence, one call.
+
+    The single entry point the three plain-``gliner`` Providers (``entity.gliner``,
+    ``redaction.gliner_pii``, ``relation.gliner_relex``) load through. Their ``_load_model`` bodies
+    were copy-paste identical modulo one provider-name string; this is that body, once.
+
+    **Interface** — everything a caller must know:
+
+    * ``import_model_cls`` — a zero-arg factory returning the ``GLiNER`` class. It is called at the
+      one correct instant (after the JIT is dead); a missing dep's ``ImportError`` propagates
+      unwrapped so the "pip install …" hint survives.
+    * ``model_id`` / ``config`` — the checkpoint and the Provider's own config mapping. Every perf
+      knob (``dtype``, ``compile``, ``max_len``, ``intra_op_threads``) is read from ``config`` here;
+      an invalid value raises :class:`ValueError` (the caller surfaces it as a ConfigError, as it
+      already does for ``batch_size``).
+    * ``decision`` — the :class:`~latence_core.providers.device.DeviceDecision` from
+      ``select_device``. A **skipped** decision is a :class:`~latence_core.errors.ConfigError` here,
+      not a silent CPU fallback (#191).
+    * returns the ready model. Raises :class:`~latence_core.errors.ConfigError` (skip / bad knob),
+      :class:`~latence_core.errors.ProviderError` (native load fault, or a model that reports a
+      different device than the one it was placed on), or ``ImportError`` (missing dep).
+    * **no ordering to know.** That is the point.
+
+    Behind it, in order: skip check → JIT kill → thread cap → backbone import → plain load then
+    ``.to(bf16)`` (the plain library REJECTS ``torch_dtype``/``attn_implementation`` — pod-proven) →
+    placement on the resolved device **with read-back verification** → the mdeberta token-window
+    bound (before any compile wrap, so it lands on the underlying module) → guarded
+    ``torch.compile``. Output is byte-identical throughout: every step here is throughput or
+    fail-loud, never a change to the emitted spans/labels (ADR-0044's redaction floor untouched).
+    """
+    device = _require_device(decision, provider_name)
+    model_cls = _import_backbone(import_model_cls, config, provider_name)
+    model = _typed_load(
+        lambda: load_then_cast(model_cls.from_pretrained, model_id, config, device),
+        model_id,
+        provider_name,
+        guard,
+    )
+    place_on_device(model, device, provider_name=provider_name)
+    # BEFORE the compile wrap: the bound must land on the underlying module, not on a compiled
+    # wrapper that may not forward attribute writes to it.
+    apply_gliner_max_len(model, resolve_max_len(dict(config)))
+    return maybe_compile(model, config, provider_name=provider_name)
+
+
+def load_gliner2_model(
+    import_model_cls: Callable[[], Any],
+    model_id: str,
+    config: Mapping[str, Any],
+    decision: DeviceDecision,
+    *,
+    provider_name: str,
+    guard: LoadGuard | None = None,
+) -> Any:
+    """Load a ``gliner2``-framework model, ready to run — the WHOLE sequence, one call.
+
+    Same interface as :func:`load_gliner_model` (see it for the parameter contract); the difference
+    is the native family, and it is entirely internal:
+
+    * the ``gliner2`` framework's ``from_pretrained`` **accepts** native ``quantize`` (fp16) and
+      ``compile`` (``torch.compile`` + fused kernels) kwargs, so the load goes through
+      :func:`load_gliner2_optimized` (guarded: a quantize/compile fault degrades to a plain load)
+      rather than the load-then-cast path — and there is no separate :func:`maybe_compile`, which
+      would compile a model gliner2 already compiled.
+    * the token window is a per-call native ``max_len`` argument on ``extract_entities`` /
+      ``batch_extract_entities``, not a ``model.config`` attribute, so it is threaded by the caller
+      at forward time instead of stamped on the model here.
+
+    **The two knobs now key off the RESOLVED device, not a bare CUDA probe** — the (a) defect this
+    entry point closes. ``fused_entity_relation.gliner2``, the Provider carrying the heaviest Stage,
+    bypassed the device seam completely: it probed ``cuda_available()`` directly, so
+    ``device: cuda``
+    was a no-op and, worse, ``device: cpu`` on a GPU box was silently overridden — it still resolved
+    ``quantize=True`` and still moved the model to cuda. That is #191's failure class reappearing.
+    Here ``quantize``/``compile`` resolve against ``decision.device`` and cuda placement happens
+    **iff** the resolved device is cuda, so an operator's ``device: cpu`` is honoured.
+    """
+    device = _require_device(decision, provider_name)
+    model_cls = _import_backbone(import_model_cls, config, provider_name)
+    model = _typed_load(
+        lambda: load_gliner2_optimized(
+            model_cls.from_pretrained, model_id, device, config, provider_name=provider_name
+        ),
+        model_id,
+        provider_name,
+        guard,
+    )
+    # Best-effort (never raises), unlike the plain-gliner placement: ``from_pretrained``/
+    # ``quantize`` may already have placed the model, the GLiNER2 wrapper's placement API is
+    # pod-validated rather than contractual, and a wrapper that exposes no ``.to`` is not a fault.
+    # What it is NOT any more
+    # is keyed off a bare availability probe.
+    ensure_gliner2_on_cuda(model, cuda=device == "cuda", provider_name=provider_name)
+    return model
+
+
+def load_transformers_model(
+    import_model_cls: Callable[[], Any],
+    model_id: str,
+    config: Mapping[str, Any],
+    decision: DeviceDecision,
+    *,
+    provider_name: str,
+    guard: LoadGuard | None = None,
+) -> Any:
+    """Load a plain ``transformers`` model (VLM / MaskedLM), ready to run — one call.
+
+    Same interface as :func:`load_gliner_model`; the native family here ACCEPTS the perf kwargs, so
+    the load spreads :func:`load_perf_kwargs` (bf16-on-GPU + ``sdpa``/FA2) into ``from_pretrained``
+    through :func:`load_with_fa2_fallback` — a FA2 load that raises is retried once on ``sdpa``.
+
+    Two verified defects this closes:
+
+    * the OCR parsers (``parser.lighton``, ``parser.glm``) used a bare ``model = model.to(device)``,
+      so #191's "prove it landed or raise" covered 3 of the 5 model-placing Providers. They now get
+      the same verified placement as everyone else.
+    * ``sparse.splade`` got NOTHING from this seam: a bare ``AutoModelForMaskedLM.from_pretrained``
+      (fp32 on a GPU — the ~2× miss) and no placement at all. It is a registered learned Provider
+      running real transformer forwards; the AST guard's curated list simply never included it.
+
+    The JIT kill runs for this family too. A multilingual SPLADE / VLM backbone may or may not be
+    DeBERTa-derived — but the neutralization is throughput-only and byte-identical, so applying it
+    unconditionally costs nothing and removes "is this backbone mdeberta?" from the set of questions
+    a Provider author has to answer correctly.
+    """
+    device = _require_device(decision, provider_name)
+    model_cls = _import_backbone(import_model_cls, config, provider_name)
+    perf = load_perf_kwargs(device, config)
+    model = _typed_load(
+        lambda: load_with_fa2_fallback(model_cls.from_pretrained, model_id, perf),
+        model_id,
+        provider_name,
+        guard,
+    )
+    place_on_device(model, device, provider_name=provider_name)
+    return maybe_compile(model, config, provider_name=provider_name)

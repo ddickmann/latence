@@ -439,3 +439,54 @@ Tests: `resolve_max_len` default/override/clamp + `apply_gliner_max_len` set + g
 long input is handled without a crash; a stack-lint (`test_gliner_stacks_keep_chunk_within_the_
 mdeberta_window`) asserts every shipped gliner-feeding stack caps chunk `max_tokens` ≤ 640. The real
 truncation-avoidance numbers are the pod maintainer's to re-measure — never fabricated here.
+
+## Amendment — the load CHOREOGRAPHY moves inside the seam (C4, 2026-07-26)
+
+**Amends the W8/W9/W9-jit/W9-scaling/W12 status notes above.** The perf seam's *steps* are unchanged
+and still do exactly what those notes describe; what changes is **who holds their ordering**.
+
+**The friction that warrants reopening it.** Those notes accumulated seven ordered steps a learned
+Provider had to perform by hand — neutralize the JIT → import the backbone → check the
+`DeviceDecision` → load+cast → place on the resolved device → bound the token window → compile —
+carrying five real "before" constraints, **none of which is expressible in a signature**. The only
+thing holding them was an AST linter (`test_perf_fp32_regression_guard.py`, 829 lines) that parsed
+each Provider's *source*. That arrangement produced three field bugs (#190, #191, and the OCR
+parsers' bare `model.to(device)`), and its curated `_LEARNED_PROVIDER_SOURCES` list silently excluded
+`sparse.splade` — a registered learned Provider that consequently shipped a bare fp32 load with no
+device placement at all, fully green. When the only way to hold an invariant is to lint the callers,
+the invariant belongs inside the module.
+
+**What is now normative.** Three deep entry points in `latence_core.providers.perf`, one per
+native-library family — `load_gliner_model`, `load_gliner2_model`, `load_transformers_model` — each
+taking `(import_model_cls, model_id, config, decision, *, provider_name, guard=None)` and returning a
+model ready to run. A learned Provider calls exactly one of them and knows no ordering.
+
+**Specifically superseding the W9-jit requirement** ("each of the five mdeberta Providers … calls the
+one shared `neutralize_torch_jit()` **before its own backbone import**"): the *property* that
+requirement protects is unchanged and non-negotiable — the TorchScript JIT must be dead at the
+instant the backbone module is imported, or transformers' `@torch.jit.script`-decorated `deberta_v2`
+relative-position helpers become `ScriptFunction`s that die in nvrtc on the first forward. The
+*mechanism* changes: the Provider no longer calls `neutralize_torch_jit()` and then imports; it hands
+the seam a zero-arg **import factory**, and the seam kills the JIT, caps the intra-op threads and
+*then* calls the factory. The ordering stops being a rule a Provider can violate and becomes three
+consecutive statements a caller never sees. The behavioural proof is unchanged and still
+authoritative: `test_perf_jit_import_ordering.py`, whose fake `gliner`/`gliner2`/`glinker` scripts at
+**module import** — the only shape that can distinguish "neutralized before the import" from "after"
+— passes against every Provider. `disambiguation.glinker`, which owns no `from_pretrained` (it hands
+the checkpoint to the glinker library's own DAG), still calls the shared `neutralize_torch_jit()`
+directly before its import; that call site is unchanged.
+
+**Consequently deleted:** the AST ordering scans and the routing/accept-list scans. The sequence is
+tested through the interface with a recording fake that asserts the observed ORDER of real effects
+(`test_perf_load_choreography.py`). One lint-shaped rule survives, and is now DISCOVERED by globbing
+`packages/*/src` rather than listed: *a learned model's `from_pretrained` may be referenced only
+inside the perf seam*. That rule needs no ordering analysis and no list of Providers — which is
+precisely why it could not have missed `sparse.splade`.
+
+**§2 "device placement stays the adapter's job" is preserved.** The adapter still owns its native
+dependency, its install hint, the model object and the `DeviceDecision` it resolved from its own
+declared profile; `place_on_device` continues to run against the model the adapter's library
+produced, exactly as before. Only the sequencing of shared helpers moved inward. The typed-error
+policy stayed with the adapter too, which is why the entry points take an optional `guard`: an
+adapter's `config_exceptions` decide "bad model id" versus "provider failure", while a missing
+optional dependency must still surface as its raw `pip install …` `ImportError`.

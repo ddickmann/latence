@@ -17,13 +17,16 @@ implementation.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from latence_core.errors import ConfigError, ProviderError
+from latence_core.providers.device import DeviceDecision
+from latence_core.providers.perf import inference_context, load_transformers_model
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 _DEFAULT_MAX_LENGTH = 512
 
@@ -91,6 +94,31 @@ def splade_reduce(
     return out
 
 
+def _import_transformers() -> tuple[Any, Any]:
+    """Return the (``AutoModelForMaskedLM``, ``AutoTokenizer``) pair — the import factory.
+
+    Deferred so Provider discovery never needs transformers/torch (ADR-0016); the install hint stays
+    in this package because the native dependency does (ADR-0036 2). The model half is handed to
+    :func:`~latence_core.providers.perf.load_transformers_model` as a factory rather than imported
+    inline, so the seam evaluates it at the one instant that is correct (after the TorchScript JIT
+    is dead) instead of that being a rule this module has to remember.
+    """
+    try:
+        from transformers import AutoModelForMaskedLM, AutoTokenizer
+    except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        msg = (
+            "The 'transformers' package is required to run sparse.splade. Install it with: "
+            "pip install latence-splade"
+        )
+        raise ImportError(msg) from exc
+    return AutoModelForMaskedLM, AutoTokenizer
+
+
+def _import_masked_lm() -> Any:
+    """The model class alone — the shape :func:`load_transformers_model` expects."""
+    return _import_transformers()[0]
+
+
 class TransformersSpladeModel:
     """The real :class:`SpladeModel` — a config-selected multilingual SPLADE checkpoint via HF.
 
@@ -105,7 +133,14 @@ class TransformersSpladeModel:
     :class:`~latence_core.errors.ProviderError` carrying no raw text.
     """
 
-    def __init__(self, model_id: str, *, max_length: int = _DEFAULT_MAX_LENGTH) -> None:
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        max_length: int = _DEFAULT_MAX_LENGTH,
+        device: DeviceDecision | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
         if not model_id:
             msg = (
                 "sparse.splade requires a 'model' (a multilingual SPLADE checkpoint id): ADR-0053 "
@@ -117,28 +152,69 @@ class TransformersSpladeModel:
             raise ConfigError(msg)
         self._model_id = model_id
         self._max_length = max_length
+        # (c): this adapter got NOTHING from the perf seam — a bare
+        # ``AutoModelForMaskedLM.from_pretrained(model_id)`` (fp32 on a GPU, the ~2x miss) and no
+        # placement at all, because the fp32 regression guard's CURATED provider list never included
+        # ``sparse.splade``. It is a registered learned Provider running real transformer forwards.
+        # The DeviceDecision + config are now threaded in so the load goes through the same
+        # choreography as every other learned Provider; ``None`` (a caller that resolves no device,
+        # e.g. an offline test) keeps the pre-existing no-placement behaviour.
+        self._device = device or DeviceDecision(
+            device=None, skipped=False, reason="no device resolved by the caller"
+        )
+        self._config: dict[str, Any] = dict(config or {})
         self._tokenizer: Any = None
         self._model: Any = None
         self._vocab_size: int | None = None
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _config_error_guard(op: str) -> Iterator[None]:
+        """Map a bad/unavailable checkpoint id to a typed :class:`ConfigError`, not a crash.
+
+        The typed-error policy this adapter has always had, now handed to the load choreography as
+        a ``guard`` so it applies around the native load and nothing else. ``OSError`` /
+        ``ValueError`` / ``KeyError`` from transformers mean the operator named a checkpoint that
+        does not exist or
+        cannot be read — their config, not a runtime fault. Anything else stays a ProviderError from
+        the seam. The native message is never interpolated (no content leak), only its type name.
+        """
+        try:
+            yield
+        except (OSError, ValueError, KeyError) as exc:
+            msg = f"sparse.splade could not load model in {op!r}: {type(exc).__name__}."
+            raise ConfigError(msg) from exc
+
+    def _load_tokenizer(self) -> Any:
+        """Load the tokenizer — no perf kwargs, no placement, same ConfigError mapping."""
+        tokenizer_cls = _import_transformers()[1]
+        with self._config_error_guard("load_tokenizer"):
+            return tokenizer_cls.from_pretrained(self._model_id)
+
     def _load(self) -> None:
+        """Load tokenizer + model on first use, the model through the shared load choreography.
+
+        The model half is :func:`~latence_core.providers.perf.load_transformers_model`: JIT kill ->
+        intra-op thread cap -> backbone import -> bf16-on-GPU + sdpa/FA2 perf kwargs (graceful
+        FA2->sdpa) -> guarded load -> **verified** placement on the resolved device -> guarded
+        compile. Before this it was a bare ``AutoModelForMaskedLM.from_pretrained(model_id)``: fp32
+        on a GPU and resident wherever ``from_pretrained`` happened to leave it.
+
+        The bad-checkpoint-id -> :class:`~latence_core.errors.ConfigError` mapping is preserved by
+        handing the seam a ``guard``: the same operator-facing distinction, applied around the
+        native load only, so the missing-``transformers`` ``ImportError`` still surfaces raw.
+        """
         if self._model is not None:
             return
-        try:
-            from transformers import AutoModelForMaskedLM, AutoTokenizer
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
-            msg = (
-                "The 'transformers' package is required to run sparse.splade. Install it with: "
-                "pip install latence-splade"
-            )
-            raise ImportError(msg) from exc
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(self._model_id)
-            model = AutoModelForMaskedLM.from_pretrained(self._model_id)
-        except (OSError, ValueError, KeyError) as exc:
-            # A bad/unavailable checkpoint id is an operator config error, not a runtime fault.
-            msg = f"sparse.splade could not load model {self._model_id!r}: {type(exc).__name__}."
-            raise ConfigError(msg) from exc
+        model = load_transformers_model(
+            _import_masked_lm,
+            self._model_id,
+            self._config,
+            self._device,
+            provider_name="sparse.splade",
+            guard=self._config_error_guard,
+        )
+        tokenizer = self._load_tokenizer()
         if hasattr(model, "eval"):
             model.eval()
         self._tokenizer = tokenizer
@@ -175,13 +251,21 @@ class TransformersSpladeModel:
         return splade_reduce(logits, attention_mask)
 
     def _forward(self, encoding: Any) -> Any:
-        model = self._model
-        try:
-            import torch
-        except ImportError:  # pragma: no cover - torch present in the real runtime env
-            return model(**encoding)
-        with torch.no_grad():
-            return model(**encoding)
+        """One MLM forward under :func:`~latence_core.providers.perf.inference_context`.
+
+        (c): this used ``torch.no_grad()``, which is STRICTLY WEAKER. ``no_grad`` stops gradients
+        being *computed*, but the forward still builds an autograd graph and pins every intermediate
+        activation alive for a backward that never comes; across a long run those never-freed
+        activations accumulate (pod-measured 27.28 GiB resident on a ~2-3 GB model) until the next
+        allocation CUDA-OOMs, and ``empty_cache()`` cannot reclaim any of it because it is held
+        LIVE. ``inference_mode`` is what killed that OOM: no graph is built at all, so each
+        forward's activations free the moment they fall out of scope. A SPLADE forward never
+        backpropagates, so
+        this is free — and byte-identical: inference mode only suppresses grad bookkeeping.
+        Torch-free-safe (the offline env gets a null context).
+        """
+        with inference_context():
+            return self._model(**encoding)
 
     def term_ids(self, term: str) -> list[int]:
         self._load()
