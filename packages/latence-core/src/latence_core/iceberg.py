@@ -471,8 +471,8 @@ class IcebergCorpusTable:
           already committed, that file belongs to that run's snapshot and is never touched (the
           caller gates on ``published_here``). ``published_here`` is a NECESSARY but not a
           SUFFICIENT condition, which is why the catalog is asked as well (audit
-          R7-data_contracts_sinks-4): it is decided by ``exists(data_uri)`` followed by
-          ``finalize_atomic(...)``, a check-then-act pair. Two concurrent Exports of IDENTICAL
+          R7-data_contracts_sinks-4): it is decided by ``exists(data_uri)`` followed by the
+          publish, a check-then-act pair. Two concurrent Exports of IDENTICAL
           corpus content content-address onto the SAME path; if both evaluate ``exists()`` before
           either rename lands, both observe ``False``, both finalize that path and BOTH claim
           authorship. A failed commit then deleted a file the other run had already committed a
