@@ -801,55 +801,63 @@ class IcebergCorpusTable:
         :meth:`_data_location`); the copy therefore streams through memory rather than asking either
         store for a server-side copy it may not be able to perform across the boundary.
         """
-        dst_storage.makedirs(data_dir)
-        # Copy into a temp sibling while hashing, THEN name the destination from the digest: the
-        # content is only knowable once it has been read, and reading it twice (hash pass + copy
-        # pass) would double the I/O on a full corpus for nothing.
-        tmp_uri = dst_storage.temp_uri(f"{data_dir}/{basename}.parquet")
+        digest = sha256()
+        data_uri = ""
+        created = False
+
+        def _content_addressed_name() -> str | None:
+            """The publish target, resolved once the bytes (and therefore the digest) exist.
+
+            ``Storage.atomic_writer`` calls this after the copy has closed: the content is only
+            knowable once it has been read, and reading it twice (hash pass + copy pass) would
+            double the I/O on a full corpus for nothing. Returning ``None`` publishes nothing — an
+            identical data file is already there (its bytes are identical by construction) and a
+            file a previous snapshot may point at must not be replaced underneath the catalog.
+            """
+            nonlocal data_uri, created
+            data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
+            created = not dst_storage.exists(data_uri)
+            return data_uri if created else None
+
         try:
-            digest = sha256()
-            with src_storage.open(parquet_uri, "rb") as src, dst_storage.open(tmp_uri, "wb") as dst:
+            with (
+                dst_storage.atomic_writer(
+                    f"{data_dir}/{basename}.parquet", destination=_content_addressed_name
+                ) as dst,
+                src_storage.open(parquet_uri, "rb") as src,
+            ):
                 while chunk := src.read(_COPY_CHUNK_BYTES):
                     digest.update(chunk)
                     dst.write(chunk)
-            data_uri = f"{data_dir}/{basename}-{digest.hexdigest()}.parquet"
-            if dst_storage.exists(data_uri):
-                dst_storage.remove(tmp_uri)
-                return data_uri, False
-            dst_storage.finalize_atomic(tmp_uri, data_uri)
-        except Exception as exc:  # noqa: BLE001 - normalise, and sweep the half-published copy
-            raise ProviderError(self._publication_failed(dst_storage, tmp_uri, exc)) from exc
-        return data_uri, True
+        except Exception as exc:  # noqa: BLE001 - normalise into the typed Provider failure
+            raise ProviderError(self._publication_failed(exc)) from exc
+        return data_uri, created
 
-    def _publication_failed(self, storage: Storage, tmp_uri: str, exc: BaseException) -> str:
-        """Sweep the temp copy a failed publication left behind; return the typed message.
+    def _publication_failed(self, exc: BaseException) -> str:
+        """The typed message for a failed publication, carrying Storage's disposal of the copy.
 
-        The publication's half of :meth:`_discard_unreferenced`, and for the same reason. Between
-        ``temp_uri`` and ``finalize_atomic`` the temp path already holds the ENTIRE corpus, chunk
-        ``content`` included; a transport drop, an ENOSPC or a permission-denied rename in that
-        window used to leave it in the customer's warehouse where no snapshot references it, no
+        The publication's half of :meth:`_discard_unreferenced`, and for the same reason. While the
+        copy is in flight the temp path already holds the ENTIRE corpus, chunk ``content``
+        included; a transport drop, an ENOSPC or a permission-denied rename in that window used to
+        leave it in the customer's warehouse where no snapshot references it, no
         ``expire_snapshots`` can collect it, and only a manual ``remove_orphan_files`` would ever
-        reach it. Worse than the committed case: ``Storage.temp_uri`` mints a fresh random token per
-        call, so every retry against a flaky store dropped ANOTHER full-corpus copy — unbounded
-        growth, not one recoverable file.
+        reach it — and because each temp name carries a fresh random token, every retry against a
+        flaky store dropped ANOTHER full-corpus copy.
 
-        There is no ambiguity to respect here (unlike ``CommitStateUnknownException``): the catalog
-        has not been told about this path and no snapshot can possibly reference a temp name, so
-        deleting it can never corrupt a table. Removal is best-effort and never masks the original
-        failure — a failed sweep is appended to the same typed error so the operator learns the
-        exact path still holding the corpus text (ADR-0034).
+        The sweep itself is no longer this module's job: :meth:`Storage.atomic_writer` owns it, so
+        the Runner's checkpoints and the Export's deliverable get the same protection this table
+        used to have alone. There is no ambiguity to respect (unlike
+        ``CommitStateUnknownException``): the catalog has not been told about the path and no
+        snapshot can possibly reference a temp name, so deleting it can never corrupt a table.
+        Storage's removal is best-effort and never masks the original failure — it records the
+        outcome as PEP-678 notes on the propagating exception, which are folded in here so the
+        operator reads the disposal (and, when the store refused the delete, the exact path still
+        holding the corpus text) on the one typed error (ADR-0034).
         """
-        try:
-            storage.remove(tmp_uri)
-            disposal = f"the partial copy {tmp_uri!r} was removed (no snapshot could reference it)"
-        except Exception as cleanup_exc:  # noqa: BLE001 - never mask the failure being reported
-            disposal = (
-                f"the partial copy {tmp_uri!r} holds this run's corpus and could not be removed "
-                f"({cleanup_exc}); delete it manually"
-            )
+        disposal = " ".join(getattr(exc, "__notes__", ()))
         return (
             f"Iceberg data file for {'.'.join(self._target.identifier)} could not be published "
-            f"into {self._target.uri!r}: {exc}. Nothing was registered and {disposal}."
+            f"into {self._target.uri!r}: {exc}. Nothing was registered. {disposal}".rstrip()
         )
 
 

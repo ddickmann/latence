@@ -9,7 +9,9 @@ framework never stores secrets.
 
 from __future__ import annotations
 
+import contextlib
 import os
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any
 
@@ -18,7 +20,8 @@ import fsspec
 from latence_core.errors import ConfigError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from contextlib import AbstractContextManager
 
 # Storage schemes the framework permits by default. Every entry is a
 # cloud-agnostic file/object store fsspec fulfils (ADR-0009); network-fetch
@@ -125,37 +128,191 @@ class Storage:
         self.write_bytes(uri, text.encode(encoding))
 
     def write_atomic(self, uri: str, data: bytes) -> None:
-        """Write via temp-file + rename so a reader never sees a partial file.
+        """Write ``data`` to ``uri`` so a reader never sees a partial file.
 
-        This is the WAL discipline the Runner relies on for durable, resumable
-        checkpoints (ADR-0010): the destination either does not exist or is the
-        complete previous/next version, never a torn write.
+        The buffered face of :meth:`atomic_writer` — same publish-or-nothing guarantee, same
+        temp-file sweep on failure, for a payload that already fits in one ``bytes`` buffer.
+        This is the WAL discipline the Runner relies on for durable, resumable checkpoints
+        (ADR-0010): the destination either does not exist or is the complete previous/next
+        version, never a torn write, and a failure leaves no ``.tmp`` sibling behind.
+
+        See :meth:`atomic_writer` for what "atomic" does and does not mean per backend.
         """
-        tmp = f"{uri}.{_token()}.tmp"
-        self.write_bytes(tmp, data)
-        # fsspec's local filesystem rename maps to os.replace (atomic on POSIX);
-        # object stores implement move as an atomic server-side copy+delete.
-        self._fs.mv(self._check(tmp), self._check(uri))
+        with self.atomic_writer(uri) as fh:
+            fh.write(data)
+
+    @contextmanager
+    def atomic_writer(
+        self,
+        uri: str,
+        *,
+        destination: Callable[[], str | None] | None = None,
+    ) -> Iterator[IO[bytes]]:
+        """Stream bytes into ``uri``: publish on clean exit, sweep the partial write on failure.
+
+        The one-call streaming write-atomic primitive (ADR-0010/0033). It opens a unique temp
+        sibling of ``uri``, creates ``uri``'s parent directory, yields the open binary handle,
+        and on clean exit closes it and renames it onto ``uri``. A reader never sees the temp
+        path under ``uri`` and never sees a torn ``uri`` — the same guarantee as
+        :meth:`write_atomic`, without materialising the payload in memory first::
+
+            with storage.atomic_writer(uri) as fh:
+                for batch in batches:
+                    fh.write(batch)
+
+        **The cleanup obligation lives here, not in the caller.** The two-call
+        :meth:`temp_uri` / :meth:`finalize_atomic` protocol this replaces pushed onto every
+        caller a duty its signature never stated: sweep the temp path when the write dies
+        between the two calls. One of three callers actually did it, and the cost of the other
+        two was silent: each temp name carries a fresh random token, so on a flaky store *every
+        retry stranded another full-size copy* — unbounded growth of unreferenced, billable
+        objects that no lifecycle policy and no ``expire_snapshots`` knows about, still holding
+        the run's (possibly sensitive) bytes. On any exception the temp file is removed
+        best-effort and the **original error is re-raised untouched** (ADR-0034: the failure is
+        never masked by its own cleanup).
+
+        The sweep is *reported, not silent*: the propagating exception carries a PEP-678 note
+        (``exc.__notes__``) saying either that the partial write was removed and nothing was
+        published, or — when the store refused the delete — naming the exact path that still
+        holds the bytes so an operator can delete it by hand. A caller that wraps the failure in
+        its own typed error can fold those notes into its message.
+
+        ``destination`` is for a **content-addressed** artifact whose final name is only knowable
+        once its bytes have been written (the Iceberg data file, named after the sha256 of its own
+        content). It is called after the handle is closed and its return value replaces ``uri`` as
+        the publish target; returning ``None`` publishes nothing and sweeps the temp file (the
+        "an identical file is already there, leave it alone" case). ``uri`` still names the temp
+        sibling, so the in-flight write lands next to where it is going.
+
+        **What "atomic" means per backend** — this is interface, not trivia:
+
+        * *Local / POSIX*: fsspec's rename maps to ``os.replace``, a genuinely atomic
+          same-filesystem operation.
+        * *Object stores (S3, GCS, Azure)*: there is no rename. fsspec's ``mv`` is a server-side
+          **copy followed by a delete — two operations, not one atomic one.** What still holds is
+          the guarantee callers actually depend on: a single-object write is atomic and
+          read-after-write consistent on all three stores, so a reader of ``uri`` sees either the
+          old object or the whole new one, never a torn one. What does *not* hold is the rest of
+          the rename contract: a crash between the copy and the delete leaves the temp object
+          behind (this method's sweep is best-effort and cannot run if the process is killed), and
+          two publishers racing onto one ``uri`` both succeed with a last-writer-wins result rather
+          than one losing. Sizes matter too: S3 caps a single ``CopyObject`` at 5 GB, so a larger
+          artifact is copied as a multipart upload whose failure can leave an incomplete multipart
+          upload the bucket's lifecycle policy — not this method — has to reap.
+        """
+        with self._atomic_publication([uri], [destination]) as handles:
+            yield handles[0]
+
+    def atomic_writers(self, uris: Sequence[str]) -> AbstractContextManager[tuple[IO[bytes], ...]]:
+        """Stream a **set** of sibling files, publishing all of them only once all are complete.
+
+        The multi-file face of :meth:`atomic_writer`, for a deliverable that is a *group* of files
+        which must not appear one-by-one — the Export's ``records.jsonl`` + ``records.parquet`` (+
+        the optional multi-vector and BM25 sidecars), which a downstream reader treats as one
+        corpus (ADR-0033/0050). Every handle is written to its own temp sibling; not one byte is
+        published until *every* handle has closed cleanly, so a write error part-way through the
+        corpus can no longer leave a published ``records.parquet`` next to a missing
+        ``records.jsonl``. On any exception every temp file is swept, exactly as
+        :meth:`atomic_writer` sweeps its one.
+
+        Handles are yielded in the order of ``uris`` and must all be used inside the block::
+
+            with storage.atomic_writers([jsonl_uri, parquet_uri]) as (jsonl, parquet):
+                ...
+
+        Honest limit: the publish phase is still N renames, not one transaction. No store the
+        framework targets offers a cross-object commit, so a failure *during* the publish loop
+        leaves the already-renamed siblings in place and sweeps the rest; the exception's notes
+        name what landed. This is strictly stronger than publishing as you go and is the most any
+        of file/S3/GCS/Azure can actually give — a retried run rewrites the whole set.
+        """
+        return self._atomic_publication(list(uris), [None] * len(uris))
+
+    @contextmanager
+    def _atomic_publication(
+        self,
+        uris: Sequence[str],
+        destinations: Sequence[Callable[[], str | None] | None],
+    ) -> Iterator[tuple[IO[bytes], ...]]:
+        """The shared engine behind :meth:`atomic_writer` / :meth:`atomic_writers`.
+
+        Internal, deliberately: the two public faces are the whole interface, and the temp-name
+        minting, the parent ``makedirs`` (a streaming ``open`` does not create one, unlike
+        :meth:`write_bytes`), the publish loop and the sweep are implementation.
+        """
+        tmp_uris = [self.temp_uri(uri) for uri in uris]
+        for uri in uris:
+            parent = uri.rsplit("/", 1)[0] if "/" in uri else ""
+            if parent and parent != uri:
+                self.makedirs(parent)
+        try:
+            with contextlib.ExitStack() as stack:
+                handles = tuple(stack.enter_context(self.open(tmp, "wb")) for tmp in tmp_uris)
+                yield handles
+            # Past here every handle is closed and every temp file is complete on the store.
+        except BaseException as exc:
+            self._sweep(tmp_uris, exc)
+            raise
+        published = 0
+        try:
+            for tmp, uri, destination in zip(tmp_uris, uris, destinations, strict=True):
+                target = uri if destination is None else destination()
+                if target is None:
+                    self.remove(tmp)
+                else:
+                    self.finalize_atomic(tmp, target)
+                published += 1
+        except BaseException as exc:
+            # Whatever already landed stays landed (there is no cross-object rollback); sweep
+            # only the siblings this run never published.
+            self._sweep(tmp_uris[published:], exc)
+            raise
+
+    def _sweep(self, tmp_uris: Iterable[str], exc: BaseException) -> None:
+        """Best-effort remove the temp files of a failed publication, reporting on ``exc``.
+
+        Never raises and never masks ``exc`` — a cleanup failure is appended as a PEP-678 note
+        (ADR-0034: no silent errors, and the operator is told the exact path still holding the
+        bytes rather than being left to discover it on a storage bill).
+        """
+        for tmp in tmp_uris:
+            try:
+                existed = self.exists(tmp)
+                self.remove(tmp)
+            except Exception as cleanup_exc:  # noqa: BLE001 - never mask the failure being reported
+                exc.add_note(
+                    f"latence.Storage: the partial write {tmp!r} could not be removed "
+                    f"({cleanup_exc}); it still holds this run's bytes — delete it manually."
+                )
+            else:
+                if existed:
+                    exc.add_note(
+                        f"latence.Storage: nothing was published; the partial write {tmp!r} "
+                        f"was removed."
+                    )
 
     def temp_uri(self, uri: str) -> str:
         """A unique sibling temp path for ``uri`` (the write side of :meth:`finalize_atomic`).
 
-        The write-atomic discipline (ADR-0010) for a *streamed* artifact too large to hold in
-        one ``bytes`` buffer (ADR-0033 incremental Export): a caller opens this temp path, writes
-        it incrementally (JSONL append / a Parquet ``ParquetWriter`` row-group stream), then
-        atomically publishes it with :meth:`finalize_atomic`. A reader never sees the temp path
-        under ``uri`` and never sees a torn ``uri`` — same guarantee as :meth:`write_atomic`,
-        without materialising the whole payload in memory first.
+        .. deprecated:: superseded by :meth:`atomic_writer` / :meth:`atomic_writers`.
+
+           This is half of a two-call protocol that leaks a cleanup obligation the interface
+           never states — the caller, not this module, is left holding the duty to sweep the temp
+           path when the write between the two calls fails. :meth:`atomic_writer` owns that duty.
+           Retained only until the last remaining caller (the Runner's checkpoint writer) moves
+           across; it is not part of the interface a new caller should learn.
         """
         return f"{uri}.{_token()}.tmp"
 
     def finalize_atomic(self, tmp_uri: str, uri: str) -> None:
         """Atomically publish a fully-written temp file (from :meth:`temp_uri`) as ``uri``.
 
-        The rename half of the streamed write-atomic discipline: fsspec's local rename maps to
-        ``os.replace`` (atomic on POSIX); object stores implement move as an atomic server-side
-        copy+delete. After this returns the destination is the complete new file, never a torn
-        write — so an incremental Export (ADR-0033) is as crash-safe as the buffered path.
+        The rename half of the two-call streamed write. See :meth:`atomic_writer` for what
+        "atomic" actually means on each backend (on an object store this is a copy **and** a
+        delete — two operations — not a rename).
+
+        .. deprecated:: superseded by :meth:`atomic_writer` / :meth:`atomic_writers`, which own
+           the cleanup obligation this pairing pushes onto its callers.
         """
         self._fs.mv(self._check(tmp_uri), self._check(uri))
 
@@ -237,6 +394,19 @@ class Storage:
         escape check is applied here rather than relying on a walk flag. Only the
         local filesystem has symlinks; on object/in-memory stores the filter is a
         no-op because ``os.path.realpath`` leaves non-local paths unchanged.
+
+        **Memory characteristic — this is interface, not an implementation detail.** Despite
+        returning an ``Iterator``, this is NOT a streaming listing: the whole recursive listing is
+        accumulated and sorted before the first path is yielded, so peak memory is O(number of
+        files under ``uri``) and the first result costs a full prefix walk. That is deliberate and
+        load-bearing rather than an oversight: the framework's determinism invariant requires a
+        stable document order, and ``fsspec``'s ``walk`` inherits its per-directory order from
+        ``ls`` (``os.listdir`` order locally, the store's paging order remotely), which is not
+        stable across hosts or runs. A globally sorted order cannot be produced without seeing
+        every path, and a per-directory sort would yield a *different* (if deterministic) order
+        than the global one, silently changing every downstream artifact. Callers pointing this at
+        a bucket prefix with millions of objects should scope the prefix; a paged listing would be
+        a different, order-weakening method, not a change to this one.
         """
         checked = self._check(uri)
         # fsspec's local walk strips the URI scheme and yields bare filesystem

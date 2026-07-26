@@ -605,12 +605,15 @@ class JsonlParquetExport:
         Incremental (ADR-0033 / #63): the input is consumed in bounded batches of
         ``_EXPORT_BATCH_ROWS``; each batch is dumped, (optionally) embedded, JSONL-appended,
         and written as one Parquet row group — so the Export's peak memory is O(batch), not the
-        old O(corpus) ``from_pylist(whole)`` transient (peak RSS coincided with it). Both files
-        are written to sibling temp paths and atomically published (:meth:`Storage.temp_uri` +
-        :meth:`Storage.finalize_atomic`), so a crash mid-Export leaves the previous file or the
-        complete new one, never a torn write — the same WAL guarantee as the buffered path. The
-        bytes are identical to the buffered path: same per-row Pydantic JSON dumps, same
-        sorted-key JSONL line order + trailing-newline rule, same flat Parquet schema + values.
+        old O(corpus) ``from_pylist(whole)`` transient (peak RSS coincided with it). Every file of
+        the deliverable rides ONE :meth:`Storage.atomic_writers` block, so a crash mid-Export
+        leaves the previous files or the complete new set, never a torn write and never a
+        half-published set — and, unlike the two-call ``temp_uri``/``finalize_atomic`` protocol it
+        replaces, never a fleet of orphaned ``.tmp`` siblings either: an exception between opening
+        the (up to four) streams and publishing them used to close the handles and abandon every
+        temp file, once per failed attempt. The bytes are identical to the buffered path: same
+        per-row Pydantic JSON dumps, same sorted-key JSONL line order + trailing-newline rule,
+        same flat Parquet schema + values.
         """
         embed = self._embedder is not None
         sparse = self._sparse is not None
@@ -619,18 +622,12 @@ class JsonlParquetExport:
         schema = self._parquet_schema(embed, self._context_columns, sparse=sparse, fde=fde)
 
         out_dir = out_dir.rstrip("/")
-        # Streaming opens bypass write_bytes' implicit parent-makedirs, so ensure the export
-        # directory exists before opening the temp files (a fresh run has no export/ yet).
-        storage.makedirs(out_dir)
         jsonl_uri = f"{out_dir}/{self._basename}.jsonl"
         parquet_uri = f"{out_dir}/{self._basename}.parquet"
-        jsonl_tmp = storage.temp_uri(jsonl_uri)
-        parquet_tmp = storage.temp_uri(parquet_uri)
         # ADR-0050: raw multi-vectors ride a SIDECAR (heavy, different access pattern), never
         # ``records.parquet``. Written only when ``keep_multivectors`` is set.
         sidecar_uri = f"{out_dir}/multivectors.parquet"
         sidecar_schema = self._sidecar_schema() if sidecar else None
-        sidecar_tmp = storage.temp_uri(sidecar_uri) if sidecar else None
         # #164: the BM25 forward postings stream into a sidecar parquet (one row group per batch, so
         # the per-document postings stay O(batch)); the corpus df/avgdl fold into the accumulator
         # (O(vocab)) and become ``bm25-stats.json`` at finalize. Both only when ``bm25`` is wired.
@@ -643,35 +640,45 @@ class JsonlParquetExport:
         postings_uri = f"{out_dir}/bm25-postings.parquet"
         stats_uri = f"{out_dir}/bm25-stats.json"
         postings_schema = self._bm25_postings_schema() if bm25 else None
-        postings_tmp = storage.temp_uri(postings_uri) if bm25 else None
+        # The deliverable is ONE file set, so it rides ONE atomic publication: Storage opens each
+        # stream on its own temp sibling (creating ``out_dir`` on the way — a fresh run has no
+        # export/ yet), publishes nothing until every stream has closed cleanly, and sweeps every
+        # temp file if anything raises in between. The export owns none of that.
+        stream_uris = [jsonl_uri, parquet_uri]
+        if sidecar:
+            stream_uris.append(sidecar_uri)
+        if bm25:
+            stream_uris.append(postings_uri)
 
         wrote_any = False
         # #184: the record schema_versions this run actually carried — stamped onto the optional
         # Iceberg table so it never claims a contract version its own rows do not have. Folded from
         # the rows already in hand (O(distinct versions), normally one), never a second pass.
         record_versions: set[int] = set()
-        # Streamed writers, all to temp paths, atomically published on success. The JSONL is
-        # byte-stable: one sorted-key object per line, and the trailing newline is written per line
-        # (an N-line file ends in exactly one "\n"; an empty file is empty). The Parquet + sidecar
-        # writers are handed the temp file handle directly (pyarrow streams row groups into any
-        # binary file-like), so they go through the same Storage seam. An ExitStack registers each
-        # writer's close BEFORE its file handle closes (LIFO), so the pyarrow footer is flushed
-        # before the handle shuts — the same ordering the old ``finally: writer.close()`` gave.
-        with contextlib.ExitStack() as stack:
-            jsonl_fh = stack.enter_context(storage.open(jsonl_tmp, "wb"))
-            parquet_fh = stack.enter_context(storage.open(parquet_tmp, "wb"))
+        # Streamed writers over the one atomic publication. The JSONL is byte-stable: one
+        # sorted-key object per line, and the trailing newline is written per line (an N-line file
+        # ends in exactly one "\n"; an empty file is empty). The Parquet + sidecar writers are
+        # handed their Storage handle directly (pyarrow streams row groups into any binary
+        # file-like), so they go through the same Storage seam. The inner ExitStack holds only the
+        # pyarrow writer closes and unwinds FIRST (rightmost context exits first), so every footer
+        # is flushed before ``atomic_writers`` closes the handles and publishes.
+        with (
+            storage.atomic_writers(stream_uris) as streams,
+            contextlib.ExitStack() as stack,
+        ):
+            jsonl_fh = streams[0]
             # pyarrow ships no type stubs; the writer calls are dynamically typed.
-            writer = pq.ParquetWriter(parquet_fh, schema)  # type: ignore[no-untyped-call]
+            writer = pq.ParquetWriter(streams[1], schema)  # type: ignore[no-untyped-call]
             stack.callback(writer.close)
+            next_stream = 2
             sidecar_writer = None
-            if sidecar and sidecar_schema is not None and sidecar_tmp is not None:
-                sidecar_fh = stack.enter_context(storage.open(sidecar_tmp, "wb"))
-                sidecar_writer = pq.ParquetWriter(sidecar_fh, sidecar_schema)  # type: ignore[no-untyped-call]
+            if sidecar and sidecar_schema is not None:
+                sidecar_writer = pq.ParquetWriter(streams[next_stream], sidecar_schema)  # type: ignore[no-untyped-call]
                 stack.callback(sidecar_writer.close)
+                next_stream += 1
             postings_writer = None
-            if bm25 and postings_schema is not None and postings_tmp is not None:
-                postings_fh = stack.enter_context(storage.open(postings_tmp, "wb"))
-                postings_writer = pq.ParquetWriter(postings_fh, postings_schema)  # type: ignore[no-untyped-call]
+            if bm25 and postings_schema is not None:
+                postings_writer = pq.ParquetWriter(streams[next_stream], postings_schema)  # type: ignore[no-untyped-call]
                 stack.callback(postings_writer.close)
 
             for batch_rows in self._batched(records, _EXPORT_BATCH_ROWS):
@@ -711,22 +718,19 @@ class JsonlParquetExport:
                 if postings_writer is not None and postings_schema is not None:
                     postings_writer.write_table(postings_schema.empty_table())  # type: ignore[no-untyped-call]
 
-        storage.finalize_atomic(jsonl_tmp, jsonl_uri)
-        storage.finalize_atomic(parquet_tmp, parquet_uri)
+        # Past the block above every stream is published (or none of them is, and this line was
+        # never reached).
         out_uris = [jsonl_uri, parquet_uri]
-        if sidecar and sidecar_tmp is not None:
-            storage.finalize_atomic(sidecar_tmp, sidecar_uri)
+        if sidecar:
             out_uris.append(sidecar_uri)
-        if bm25 and bm25_acc is not None and postings_tmp is not None:
-            # The postings parquet is flushed (its writer closed with the ExitStack above); now
-            # publish it, then write the corpus stats JSON from the completed fold. Both atomically.
-            storage.finalize_atomic(postings_tmp, postings_uri)
-            stats_tmp = storage.temp_uri(stats_uri)
+        if bm25 and bm25_acc is not None:
+            # The postings parquet was published with the rest of the set; the corpus stats JSON is
+            # a small buffered artifact derived from the completed fold, so it is written after —
+            # atomically, and only once the postings it describes actually exist.
             stats_json = json.dumps(
                 bm25_acc.stats().to_artifact(), sort_keys=True, ensure_ascii=False
             )
-            storage.write_text(stats_tmp, stats_json)
-            storage.finalize_atomic(stats_tmp, stats_uri)
+            storage.write_atomic(stats_uri, stats_json.encode("utf-8"))
             out_uris.extend([postings_uri, stats_uri])
         if self._iceberg is not None:
             # #184: LAST, and only after the Parquet deliverable is atomically published — the
