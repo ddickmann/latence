@@ -38,12 +38,18 @@ from latence_core.capability import (
     SparseEmbedder,
     SparseSignals,
     Tokenizer,
-    satisfies_capability,
 )
 from latence_core.contracts import SCHEMA_VERSION
-from latence_core.errors import ConfigError, ContractError
+from latence_core.errors import ConfigError
 from latence_core.iceberg import build_iceberg_output
+from latence_core.pipeline import CapabilityKind
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.subprovider import (
+    build_sub_provider,
+    owner_label,
+    resolve_sub_provider,
+    sub_provider_ref,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -61,6 +67,10 @@ if TYPE_CHECKING:
 # (same per-row dumps, same sorted-key JSONL, same flat Parquet schema + values) — only the
 # transient footprint changes.
 _EXPORT_BATCH_ROWS = 1024
+
+# The message prefix this Stage's nested-block errors carry ("Export config 'embedder' …"), read
+# from the one slot declaration so it cannot drift from what the offline checker reports.
+_OWNER = owner_label(CapabilityKind.EXPORT)
 
 
 def _context_header_text(header: dict[str, Any]) -> str:
@@ -495,36 +505,31 @@ class JsonlParquetExport:
         # One shared registry for every opt-in signal generator this Export resolves, so the same
         # roster (and cache) backs the embedder + the retrieval-signal generators.
         registry = registry or ProviderRegistry()
-        self._embedder = self._resolve_signal(
-            config.get("embedder"), registry, Embedder, "embedder"
-        )
+        self._embedder: Embedder | None = self._resolve("embedder", config, registry)
         # W13 (ADR-0039): opt-in Parquet projection of the ContextHeader (byte-identical schema when
         # absent — the genuinely-optional guarantee).
         self._context_columns = bool(config.get("context_columns", False))
         # ADR-0049/0050: the three opt-in index-time retrieval-signal generators. Each is additive —
         # absent ⇒ no column/sidecar, and the export is byte-identical to today.
-        self._sparse = self._resolve_signal(
-            config.get("sparse_embedder"), registry, SparseEmbedder, "sparse_embedder"
+        self._sparse: SparseEmbedder | None = self._resolve("sparse_embedder", config, registry)
+        self._multivector: MultiVectorEmbedder | None = self._resolve(
+            "multivector_embedder", config, registry
         )
-        self._multivector = self._resolve_signal(
-            config.get("multivector_embedder"),
-            registry,
-            MultiVectorEmbedder,
-            "multivector_embedder",
-        )
-        self._fde = self._resolve_signal(
-            config.get("fde_converter"), registry, FdeConverter, "fde_converter"
-        )
+        self._fde: FdeConverter | None = self._resolve("fde_converter", config, registry)
         self._keep_multivectors = bool(config.get("keep_multivectors", False))
         # #164 (ADR-0048/0049): the opt-in BM25 term-statistics exporter. Its varying seam is a
         # Tokenizer; the presence of the ``bm25`` block turns it on (additive — absent ⇒ no files,
         # byte-identical export). The tokenizer's provider NAME is stamped into the artifact so it
         # is self-describing (a store must analyse queries the same way).
-        bm25_spec = config.get("bm25")
-        self._bm25 = self._resolve_signal(bm25_spec, registry, Tokenizer, "bm25")
-        self._bm25_tokenizer_name = (
-            str(bm25_spec["provider"]) if isinstance(bm25_spec, dict) else ""
+        bm25_ref = sub_provider_ref(
+            config.get("bm25"), capability=CapabilityKind.EXPORT, key="bm25"
         )
+        self._bm25: Tokenizer | None = (
+            None
+            if bm25_ref is None
+            else build_sub_provider(bm25_ref, registry=registry, owner=_OWNER)
+        )
+        self._bm25_tokenizer_name = "" if bm25_ref is None else bm25_ref.provider
         # #184 (ADR-0017): the OPTIONAL Iceberg-table output. ``None`` unless an ``iceberg``
         # block is configured — off by default, so the default Export never touches pyiceberg
         # and its files stay byte-identical. Parsed HERE (at wiring time) so a malformed catalog
@@ -548,56 +553,25 @@ class JsonlParquetExport:
             raise ConfigError(msg)
 
     @staticmethod
-    def _resolve_signal(
-        spec: Any,
-        registry: ProviderRegistry,
-        protocol: type,
-        key: str,
-    ) -> Any | None:
-        """Resolve one opt-in signal generator from a ``{"provider", "config"}`` config block.
+    def _resolve(key: str, config: dict[str, Any], registry: ProviderRegistry) -> Any | None:  # noqa: ANN401 - the concrete type is the slot's declared Protocol
+        """Resolve one opt-in signal generator from its nested ``{"provider", "config"}`` block.
 
-        The single resolver shared by the dense Embedder and the three retrieval-signal generators
-        (ADR-0049): ``spec`` is ``None`` (the signal is off) or a ``{"provider", "config"}`` map.
-        The named Provider is loaded from the ``latence.providers`` registry and built, then checked
-        against ``protocol`` (:class:`Embedder` / :class:`SparseEmbedder` /
-        :class:`MultiVectorEmbedder` / :class:`FdeConverter`) so a mis-named Provider fails **loudly
-        at wiring time** — a :class:`~latence_core.errors.ContractError` (a ``TypeError``) — rather
-        than silently emitting no signal. A malformed ``spec`` shape is a
-        :class:`~latence_core.errors.ConfigError`.
-
-        The capability check is :func:`~latence_core.capability.satisfies_capability`, NOT plain
-        ``isinstance`` (audit R6): several of these Protocols declare a property, and a
-        ``runtime_checkable`` ``isinstance`` calls ``hasattr`` — which would *invoke* it and pull a
-        Provider's heavy backend (``sparse.splade`` loads a Hugging Face checkpoint from
-        ``vocab_size``) at **wiring** time, breaking ADR-0016's defer-to-first-use contract and
-        making config validation reach the network.
+        The block's shape, its Provider resolution and its capability check all live in
+        :mod:`latence_core.subprovider`, which is also what the offline ``latence stack check``,
+        the device-skip pre-flight and the envspec walker read — so the Protocol each slot demands
+        is declared ONCE (``EXPORT`` → ``embedder``/``sparse_embedder``/``multivector_embedder``/
+        ``fde_converter``/``bm25``) instead of being re-stated at every call site. Failure modes
+        are unchanged: a malformed shape is a :class:`~latence_core.errors.ConfigError`, a Provider
+        that does not satisfy the slot's Protocol a :class:`~latence_core.errors.ContractError`,
+        both at wiring time and never a silently-absent signal (ADR-0034).
         """
-        if spec is None:
-            return None
-        if not isinstance(spec, dict):
-            msg = (
-                f"Export config {key!r} must be a mapping "
-                "{'provider': <name>, 'config': {...}} or absent; "
-                f"got {type(spec).__name__}."
-            )
-            raise ConfigError(msg)
-        provider_name = spec.get("provider")
-        if not isinstance(provider_name, str) or not provider_name:
-            msg = f"Export config {key!r} requires a non-empty string 'provider' entry-point name."
-            raise ConfigError(msg)
-        provider_config = spec.get("config", {})
-        if not isinstance(provider_config, dict):
-            msg = f"Export config '{key}.config' must be a mapping if present."
-            raise ConfigError(msg)
-        provider_cls = registry.load(provider_name)
-        provider = provider_cls(provider_config)
-        if not satisfies_capability(provider, protocol):
-            msg = (
-                f"Provider {provider_name!r} named in Export config {key!r} does not satisfy the "
-                f"{protocol.__name__} capability."
-            )
-            raise ContractError(msg)
-        return provider
+        return resolve_sub_provider(
+            config.get(key),
+            capability=CapabilityKind.EXPORT,
+            key=key,
+            registry=registry,
+            owner=_OWNER,
+        )
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         """Materialize records to ``<basename>.jsonl`` + ``<basename>.parquet``, streaming.
