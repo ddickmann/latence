@@ -502,16 +502,19 @@ class GLinkerBackend(InferenceBackend):
 
     @staticmethod
     def _empty_cache() -> None:
-        try:
-            import gc
+        """Reclaim the just-finished model's memory — the SHARED seam, not a local copy.
 
-            import torch
+        (d): this used to be a line-for-line reimplementation of
+        :func:`~latence_core.providers.perf.empty_cuda_cache`, down to the same
+        ``gc.collect()``-before-``empty_cache()`` ordering — and that ordering is the load-bearing
+        part (a torch ``nn.Module`` is held alive by a reference cycle, so dropping the last Python
+        reference frees nothing until a cycle collection runs; ``empty_cache()`` alone reclaims
+        nothing). A second copy of a subtle ordering is a second place for it to drift. The import
+        is local, matching this module's lazy-heavy-dep discipline (ADR-0016).
+        """
+        from latence_core.providers.perf import empty_cuda_cache
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:  # noqa: BLE001 - cache clearing is best-effort
-            logger.debug("cache clear skipped: %s", e)
+        empty_cuda_cache(provider_name="disambiguation.glinker")
 
     def warmup(self, entity_kb: list[dict[str, Any]]) -> None:
         """Load entities into the GLinker executor and precompute BiEncoder label embeddings.
