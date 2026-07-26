@@ -17,8 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _setup_stack import stage, stage_names
 from latence_core.cli import app
-from latence_core.pipeline import Pipeline, Stage
+from latence_core.pipeline import Pipeline
 from latence_core.setup import (
     FINANCIAL_PII_LABELS,
     SetupAnswers,
@@ -129,9 +130,9 @@ def test_generated_config_validates(tmp_path: Path) -> None:
 # -- the enterprise-sota profile ----------------------------------------------
 
 
-def _stage(text: str, name: str) -> Stage:
-    return next(s for s in Pipeline.from_yaml_text(text).stages if s.name == name)
-
+# Stage lookups come from the shared `_setup_stack` helper (C7): this module asserts on the whole
+# emitted DOCUMENT (determinism, dry validation, the spine, the DAG). Assertions about ONE
+# Stage's config belong on its contribution — see test_setup_recipe.py.
 
 def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None:
     """enterprise-sota: parse=lighton_vllm, disambiguate=glinker (Granite embedder), induce present
@@ -143,14 +144,14 @@ def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None
     text = build_stack_config(_answers(tmp_path, profile=PROFILE_SOTA, parser=PARSER_OCR_VLLM))
     validate_config_text(text)  # raises on failure
 
-    parse = _stage(text, "parse")
+    parse = stage(text, "parse")
     assert parse.provider == PARSER_OCR_VLLM
     assert parse.config["base_url"] == "http://localhost:8000/v1"
     assert parse.config["model"] == "lightonocr"
     assert parse.config["api_key"] == "EMPTY"  # pragma: allowlist secret  (vLLM placeholder)
     assert parse.config["max_concurrency"] == 8
 
-    induce = _stage(text, "induce")
+    induce = stage(text, "induce")
     assert induce.provider == "label_inducer.llm"
     # T1: per-chunk, not corpus — each chunk carries only its own small, relevant label set.
     assert induce.config["granularity"] == "chunk"
@@ -158,12 +159,12 @@ def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None
     # T5: the cost lever the per-chunk path rides on is emitted explicitly, not left implicit.
     assert induce.config["dedup"] is True
 
-    extract = _stage(text, "extract")
+    extract = stage(text, "extract")
     assert extract.provider == "fused_entity_relation.gliner2"
     assert extract.config["threshold"] == 0.3
     assert extract.config["device"] == "cuda"
 
-    disambiguate = _stage(text, "disambiguate")
+    disambiguate = stage(text, "disambiguate")
     assert disambiguate.provider == "disambiguation.glinker"
     assert disambiguate.config["device"] == "cuda"
     assert disambiguate.config["context_window"] == 200
@@ -180,11 +181,11 @@ def test_sota_profile_emits_the_validated_composed_stack(tmp_path: Path) -> None
 
     # The blessed redactor (#197, ADR-0041 §7a: the SAME gliner2 engine `extract` runs, in BOTH
     # profiles) + ULTRA graph completion + Granite corpus vectors.
-    assert _stage(text, "redact").provider == BLESSED_REDACT_PROVIDER
-    complete = _stage(text, "complete")
+    assert stage(text, "redact").provider == BLESSED_REDACT_PROVIDER
+    complete = stage(text, "complete")
     assert complete.provider == "graph_completion.ultra"
     assert complete.config["skip_if_unavailable"] is True
-    export_corpus = _stage(text, "export_corpus")
+    export_corpus = stage(text, "export_corpus")
     assert (
         export_corpus.config["embedder"]["config"]["model"]
         == "ibm-granite/granite-embedding-311m-multilingual-r2"
@@ -216,8 +217,8 @@ def test_sota_non_interactive_is_byte_identical(tmp_path: Path) -> None:
     validate_config_text(out1.read_text(encoding="utf-8"))
     # The SOTA parse + disambiguate Providers actually landed in the saved file.
     saved = out1.read_text(encoding="utf-8")
-    assert _stage(saved, "parse").provider == PARSER_OCR_VLLM
-    assert _stage(saved, "disambiguate").provider == "disambiguation.glinker"
+    assert stage(saved, "parse").provider == PARSER_OCR_VLLM
+    assert stage(saved, "disambiguate").provider == "disambiguation.glinker"
 
 
 def test_lite_profile_is_unchanged_and_default(tmp_path: Path) -> None:
@@ -238,14 +239,10 @@ def test_lite_profile_is_unchanged_and_default(tmp_path: Path) -> None:
 # -- the ONE PII toggle -------------------------------------------------------
 
 
-def _stage_names(text: str) -> list[str]:
-    return [s.name for s in Pipeline.from_yaml_text(text).stages]
-
-
 def test_pii_toggle_adds_or_omits_exactly_content_screen_and_redact(tmp_path: Path) -> None:
     """PII on vs off differ by EXACTLY {content_screen, redact} — nothing else moves."""
-    on = set(_stage_names(build_stack_config(_answers(tmp_path, pii=True))))
-    off = set(_stage_names(build_stack_config(_answers(tmp_path, pii=False))))
+    on = set(stage_names(build_stack_config(_answers(tmp_path, pii=True))))
+    off = set(stage_names(build_stack_config(_answers(tmp_path, pii=False))))
     assert on - off == {"content_screen", "redact"}
     assert off - on == set()
 
@@ -356,7 +353,7 @@ def _big_source(tmp_path: Path, size: int) -> tuple[str, int]:
 
 
 def _intake_cap(text: str) -> int:
-    return int(_stage(text, "intake_screen").config["max_bytes"])
+    return int(stage(text, "intake_screen").config["max_bytes"])
 
 
 def test_setup_admits_the_largest_file_in_the_scanned_corpus(tmp_path: Path) -> None:
@@ -470,7 +467,7 @@ def test_sota_profile_sizes_the_cap_too(tmp_path: Path) -> None:
 # induced schema (wired-but-dead).
 
 
-def test_domain_hint_reaches_the_induce_stage(tmp_path: Path) -> None:
+def test_domain_hint_reaches_the_inducestage(tmp_path: Path) -> None:
     """`--domain` lands on `induce.config.domain` (where the inducer Provider reads it), not only in
     a comment — so it genuinely steers schema induction."""
     out = tmp_path / "d.stack.yaml"
@@ -492,7 +489,7 @@ def test_domain_hint_reaches_the_induce_stage(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     text = out.read_text(encoding="utf-8")
-    induce = _stage(text, "induce")
+    induce = stage(text, "induce")
     assert induce.config["domain"] == hint  # the Provider's own config key
     assert f"# Domain hint: {hint}" in text  # provenance comment KEPT
     validate_config_text(text)
@@ -501,7 +498,7 @@ def test_domain_hint_reaches_the_induce_stage(tmp_path: Path) -> None:
 def test_no_domain_hint_is_byte_identical_to_before(tmp_path: Path) -> None:
     """Backward compatibility: no hint ⇒ no `domain` key and no header note at all."""
     text = build_stack_config(_answers(tmp_path))
-    assert "domain" not in _stage(text, "induce").config
+    assert "domain" not in stage(text, "induce").config
     assert "Domain hint" not in text
 
 
@@ -516,7 +513,7 @@ def test_multiline_domain_hint_stays_one_comment_line(tmp_path: Path) -> None:
     )
     text = build_stack_config(answers)
     validate_config_text(text)  # would raise if the hint escaped the comment
-    assert _stage(text, "induce").config["domain"] == "customs law stages: []"
+    assert stage(text, "induce").config["domain"] == "customs law stages: []"
 
 
 # -- parser recommendation ----------------------------------------------------

@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from _setup_stack import try_stage
 from latence_core.contracts import ChunkRecord, Classification, Provenance
-from latence_core.pipeline import Pipeline
 from latence_core.setup import SetupAnswers, build_stack_config, detect_inline_family
 from latence_core.setup.wizard import PROFILE_LITE, PROFILE_SOTA
 from latence_core.stages.inline_refs import InlineReferenceExtractor
@@ -76,9 +76,10 @@ def _answers(
     )
 
 
-def _stage(text: str, name: str) -> Any:
-    return next((s for s in Pipeline.from_yaml_text(text).stages if s.name == name), None)
-
+# Stage lookups come from the shared `_setup_stack` helper (C7): five setup test modules used
+# to re-implement this same render-parse-search one-liner. Where a test is about ONE Stage's
+# config rather than the whole document, prefer asserting the contribution's block directly —
+# see `test_setup_recipe.py`.
 
 # --- detection -------------------------------------------------------------
 
@@ -115,7 +116,7 @@ def test_sota_pipeline_wires_inline_refs_stage(tmp_path: Path) -> None:
     text = build_stack_config(
         _answers(_rfc_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, inline_refs=config)
     )
-    stage = _stage(text, "inline_refs")
+    stage = try_stage(text, "inline_refs")
     assert stage is not None, "the enterprise-sota pipeline must wire an inline_refs Stage"
     assert stage.provider == "fused_entity_relation.inline_refs"
     assert stage.depends_on == ["induce"]
@@ -123,12 +124,12 @@ def test_sota_pipeline_wires_inline_refs_stage(tmp_path: Path) -> None:
     # Both extractors feed the resolution phase. Since ADR-0054 they feed it through the
     # type-consolidation Stage, which canonicalizes the drifted induced TYPE vocabulary before
     # entity resolution reads it — so that Stage gathers the extractors and `disambiguate` reads it.
-    consolidate = _stage(text, "consolidate_types")
+    consolidate = try_stage(text, "consolidate_types")
     assert consolidate is not None
     assert "extract" in consolidate.depends_on
     assert "inline_refs" in consolidate.depends_on
 
-    disambiguate = _stage(text, "disambiguate")
+    disambiguate = try_stage(text, "disambiguate")
     assert disambiguate is not None
     assert disambiguate.depends_on == ["consolidate_types"]
 
@@ -139,9 +140,9 @@ def test_sota_pipeline_omits_inline_refs_when_no_family(tmp_path: Path) -> None:
     text = build_stack_config(
         _answers(_plain_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, inline_refs=None)
     )
-    assert _stage(text, "inline_refs") is None
-    assert _stage(text, "consolidate_types").depends_on == ["extract"]
-    assert _stage(text, "disambiguate").depends_on == ["consolidate_types"]
+    assert try_stage(text, "inline_refs") is None
+    assert try_stage(text, "consolidate_types").depends_on == ["extract"]
+    assert try_stage(text, "disambiguate").depends_on == ["consolidate_types"]
 
 
 def test_lite_profile_never_wires_inline_refs(tmp_path: Path) -> None:
@@ -149,7 +150,7 @@ def test_lite_profile_never_wires_inline_refs(tmp_path: Path) -> None:
     text = build_stack_config(
         _answers(_rfc_corpus(tmp_path), tmp_path, profile=PROFILE_LITE, inline_refs=None)
     )
-    assert _stage(text, "inline_refs") is None
+    assert try_stage(text, "inline_refs") is None
 
 
 # --- end-to-end: the EMITTED config recovers real inline edges (no fake) ----
@@ -187,7 +188,7 @@ def test_emitted_config_recovers_inline_body_citations(tmp_path: Path) -> None:
     text = build_stack_config(
         _answers(_rfc_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, inline_refs=config)
     )
-    emitted = _stage(text, "inline_refs").config
+    emitted = try_stage(text, "inline_refs").config
 
     provider = InlineReferenceExtractor(dict(emitted))
     chunks = [

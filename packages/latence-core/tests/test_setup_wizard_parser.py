@@ -17,9 +17,9 @@ the fix: the SOTA profile routes a detected plaintext corpus to the CPU ``parser
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from latence_core.pipeline import Pipeline
+from _setup_stack import stage
 from latence_core.setup import (
     SetupAnswers,
     build_stack_config,
@@ -48,9 +48,10 @@ def _sota_answers(tmp_path: Path, *, parser: str, extensions: tuple[str, ...]) -
     )
 
 
-def _stage(text: str, name: str) -> dict[str, Any]:
-    stage = next(s for s in Pipeline.from_yaml_text(text).stages if s.name == name)
-    return {"provider": stage.provider, "config": dict(stage.config)}
+# Stage lookups come from the shared `_setup_stack` helper (C7): five setup test modules used
+# to re-implement this same render-parse-search one-liner. Where a test is about ONE Stage's
+# config rather than the whole document, prefer asserting the contribution's block directly —
+# see `test_setup_recipe.py`.
 
 
 def test_recommend_sota_parser_routes_plaintext_vs_ocr() -> None:
@@ -76,11 +77,11 @@ def test_sota_plaintext_corpus_emits_a_runnable_text_parser(tmp_path: Path) -> N
     text = build_stack_config(
         _sota_answers(tmp_path, parser="parser.plaintext", extensions=("jsonl", "md", "txt"))
     )
-    parse = _stage(text, "parse")
-    assert parse["provider"] == "parser.plaintext"
+    parse = stage(text, "parse")
+    assert parse.provider == "parser.plaintext"
     # The plaintext parser needs NO served OCR endpoint — no base_url / api_key leaks into its config.
-    assert "base_url" not in parse["config"]
-    assert "api_key" not in parse["config"]
+    assert "base_url" not in parse.config
+    assert "api_key" not in parse.config
 
 
 def test_sota_plaintext_keeps_every_other_sota_signal(tmp_path: Path) -> None:
@@ -88,13 +89,13 @@ def test_sota_plaintext_keeps_every_other_sota_signal(tmp_path: Path) -> None:
     text = build_stack_config(
         _sota_answers(tmp_path, parser="parser.plaintext", extensions=("txt",))
     )
-    graph = _stage(text, "graph")
-    export = _stage(text, "export_corpus")
-    assert graph["config"]["graph_features"]["provider"] == "graph_features.pagerank"
-    assert "bm25" in export["config"]
-    assert "granite" in str(export["config"]["embedder"]).lower()
+    graph = stage(text, "graph")
+    export = stage(text, "export_corpus")
+    assert graph.config["graph_features"]["provider"] == "graph_features.pagerank"
+    assert "bm25" in export.config
+    assert "granite" in str(export.config["embedder"]).lower()
     # The neural GLinker disambiguator is still wired (this is the composed pod stack).
-    assert _stage(text, "disambiguate")["provider"] == "disambiguation.glinker"
+    assert stage(text, "disambiguate").provider == "disambiguation.glinker"
 
 
 def test_sota_ocr_corpus_still_emits_the_served_vllm_parser(tmp_path: Path) -> None:
@@ -102,10 +103,10 @@ def test_sota_ocr_corpus_still_emits_the_served_vllm_parser(tmp_path: Path) -> N
     text = build_stack_config(
         _sota_answers(tmp_path, parser="parser.lighton_vllm", extensions=("pdf", "png"))
     )
-    parse = _stage(text, "parse")
-    assert parse["provider"] == "parser.lighton_vllm"
-    assert parse["config"]["base_url"]  # the served endpoint is wired
-    assert parse["config"]["model"]
+    parse = stage(text, "parse")
+    assert parse.provider == "parser.lighton_vllm"
+    assert parse.config["base_url"]  # the served endpoint is wired
+    assert parse.config["model"]
 
 
 def test_sota_plaintext_stack_dry_validates(tmp_path: Path) -> None:
