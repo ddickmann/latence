@@ -399,7 +399,10 @@ class QualityReportBuilder:
         # records are never decoded — the cheapest possible answer for a narrow stack.
         subscribers: dict[CapabilityKind, list[QualityAggregator]] = {}
         for aggregator in aggregators:
-            for kind in aggregator.kinds:
+            # ``dict.fromkeys`` de-duplicates while preserving the declared order: an aggregator
+            # that repeats a Capability in ``kinds`` must still observe each record exactly once,
+            # or its counts silently double.
+            for kind in dict.fromkeys(aggregator.kinds):
                 subscribers.setdefault(kind, []).append(aggregator)
 
         for stage in ordered:
