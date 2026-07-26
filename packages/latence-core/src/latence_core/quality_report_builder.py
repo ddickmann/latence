@@ -218,8 +218,8 @@ class QualityAggregator(Protocol):
     * ``section_field`` — the :class:`~latence_core.quality.QualityReport` field it fills. One
       aggregator owns one field; the report keeps its typed, named sections (a discriminated list
       would be worse for every consumer of the artifact).
-    * ``kinds`` — the :class:`~latence_core.pipeline.CapabilityKind`\\ s whose Stage output it wants.
-      The builder streams each subscribed Stage's records ONCE and fans them out to every
+    * ``kinds`` — the :class:`~latence_core.pipeline.CapabilityKind`\\ s whose Stage output it
+      wants. The builder streams each subscribed Stage's records ONCE and fans them out to every
       subscriber, so two sections reading the same stream cost one decode, not two.
 
     and implements:
@@ -1250,8 +1250,9 @@ class _GraphAggregator:
     """Graph-Assembly KG statistics (S9) + the separately-counted inferred edges (W2-linkpred).
 
     Constructed only when the Pipeline has a Graph Assembly Stage. The ASSERTED stream is that
-    Stage's mix of NODE-scope and EDGE-scope :class:`~latence_core.contracts.GraphRecord`s: node/edge
-    counts; nodes by entity type and edges by relation label; KB-linked node count; and — the S9
+    Stage's mix of NODE-scope and EDGE-scope :class:`~latence_core.contracts.GraphRecord`s:
+    node/edge counts; nodes by entity type and edges by relation label; KB-linked node count; and
+    — the S9
     acceptance criterion — evidence coverage, the fraction of edges whose Evidence names at least
     one source mention (1.0 = every edge is justified).
 

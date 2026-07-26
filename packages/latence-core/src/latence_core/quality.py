@@ -8,6 +8,8 @@ per-Stage quality metrics, KG statistics, and gold-set precision/recall.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from latence_core.conformance.report import ConformanceReport
@@ -790,7 +792,8 @@ def _render_induction_cost(stages: list[StageMetrics]) -> list[str]:
 #:
 #: It rides ``json_schema_extra`` because that is pydantic's supported per-field metadata channel;
 #: it is inert for ``model_dump``/``model_dump_json``, so no report byte moves.
-SECTION: dict[str, bool] = {"quality_section": True}
+# Typed ``dict[str, Any]`` because that is pydantic's ``JsonDict``; the value is a bool.
+SECTION: dict[str, Any] = {"quality_section": True}
 
 
 def _section_fields() -> list[tuple[str, str]]:
