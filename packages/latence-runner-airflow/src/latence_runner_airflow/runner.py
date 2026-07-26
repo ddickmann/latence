@@ -4,8 +4,9 @@ The framework core is a library of typed Stages; execution is delegated to inter
 (ADR-0003). This is the proof of that seam's generality: an adapter that runs the **identical**
 Pipeline Stages inside **Apache Airflow**, so an adopter keeps their own orchestrator instead of
 adopting ours. The Stage *semantics* are not re-implemented — the adapter reuses
-:class:`latence_core.runner.LocalRunner`'s :meth:`~latence_core.runner.LocalRunner._execute_stage`
-Stage-execution seam verbatim (no fork) and builds its Quality Report through the engine's
+:class:`latence_core.runner.LocalRunner`'s public
+:class:`~latence_core.stage_execution.StageExecution` seam verbatim (no fork) and builds its
+Quality Report through the engine's
 **public** :class:`~latence_core.quality_report_builder.QualityReportBuilder`
 (:attr:`~latence_core.runner.LocalRunner.quality_report_builder`) — the report concern is a
 relocatable unit reused through the interface, not a private reach-through (H-F1). What differs is
@@ -40,12 +41,12 @@ runs offline and deterministically in CI.
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Any
 
 from latence_core.pipeline import Pipeline
 from latence_core.quality import StageMetrics
 from latence_core.runner import LocalRunner, StageOutput, topological_order
+from latence_core.stage_execution import StageContext
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
@@ -160,39 +161,13 @@ class AirflowRunner:
         storage: Storage,
         xcom: XComBackend,
     ) -> StageMetrics:
-        """The per-Stage task body — identical whether driven in-process or by an Airflow operator.
-
-        Gathers the Stage's inputs from its parents' XCom, runs the Stage through the shared engine
-        (identical semantics + endpoint-retry accounting), pushes the output to XCom, and returns
-        the Stage's metrics stamped with this Runner's name. A raised exception propagates so the
-        surrounding scheduler (Airflow's task retry, or the in-process driver) handles it — the
-        adapter never swallows a Stage failure, so a corrupt commit is impossible.
-        """
-        incoming = xcom.gather(stage)
-        # #69: a corpus-level accumulator streams its input from the parents' records rather than
-        # the materialised ``incoming`` list; supply those parents' XCom outputs as the ``outputs``
-        # map the engine streams from. (For every other Stage the engine reads ``incoming``, so the
-        # map is unused.) Under Airflow the XCom store IS the substrate — nothing is released, so
-        # the engine finds each parent in the map and never falls back to a checkpoint.
-        parent_outputs: dict[str, list[StageOutput]] = {
-            parent: xcom.pull(parent) for parent in stage.depends_on
-        }
-        started = time.perf_counter()
-        own_output = self._engine._execute_stage(  # noqa: SLF001
-            stage, storage, pipeline, run_id, incoming, parent_outputs
+        """The in-process driver's per-Stage task body — the same one the operator callable runs."""
+        records, metrics = _execute(
+            self._engine, pipeline, run_id, stage, storage, xcom.gather(stage),
+            {parent: xcom.pull(parent) for parent in stage.depends_on},
         )
-        duration = time.perf_counter() - started
-        xcom.push(stage.name, own_output)
-        return StageMetrics(
-            name=stage.name,
-            capability=stage.capability.value,
-            provider=stage.provider,
-            records_in=len(incoming),
-            records_out=len(own_output),
-            duration_seconds=round(duration, 6),
-            runner=RUNNER_NAME,
-            endpoint_retries=self._engine._drain_retry_count(),  # noqa: SLF001
-        )
+        xcom.push(stage.name, records)
+        return metrics
 
     # -- real Airflow DAG construction (for an adopter's deployment) --------
 
@@ -301,22 +276,10 @@ class AirflowRunner:
                 parent_records = _deserialize(engine, parent_stage, pipeline, raw)
                 parent_outputs[parent] = parent_records
                 incoming.extend(parent_records)
-            started = time.perf_counter()
-            own_output = engine._execute_stage(  # noqa: SLF001
-                stage, storage, pipeline, run_id, incoming, parent_outputs
+            records, metrics = _execute(
+                engine, pipeline, run_id, stage, storage, incoming, parent_outputs
             )
-            duration = time.perf_counter() - started
-            metrics = StageMetrics(
-                name=stage.name,
-                capability=stage.capability.value,
-                provider=stage.provider,
-                records_in=len(incoming),
-                records_out=len(own_output),
-                duration_seconds=round(duration, 6),
-                runner=RUNNER_NAME,
-                endpoint_retries=engine._drain_retry_count(),  # noqa: SLF001
-            )
-            ti.xcom_push(key="return_value", value=[r.model_dump_json() for r in own_output])
+            ti.xcom_push(key="return_value", value=[r.model_dump_json() for r in records])
             ti.xcom_push(key="metrics", value=metrics.model_dump_json())
 
         return _task
@@ -364,6 +327,47 @@ class AirflowRunner:
             )
 
         return _task
+
+
+def _execute(
+    engine: LocalRunner,
+    pipeline: Pipeline,
+    run_id: str,
+    stage: Stage,
+    storage: Storage,
+    incoming: list[StageOutput],
+    parent_outputs: dict[str, list[StageOutput]],
+) -> tuple[list[StageOutput], StageMetrics]:
+    """Run ONE Stage through the shared executor. The single per-Stage task body (C3).
+
+    Both entry points — the in-process driver and the real Airflow ``PythonOperator`` callable —
+    go through here, so there is exactly one copy of "what a Stage task does" in this adapter
+    instead of the three that had drifted apart.
+
+    Everything that used to be re-derived by hand is now derived by the engine's
+    :class:`~latence_core.stage_execution.StageExecution`: the Provider's device is routed against
+    its declared profile, a GPU-only Provider on a CPU-only host is **skipped-with-flag** (an empty
+    stream + ``skipped=True``) exactly as under the local Runner rather than crashing this DAG, and
+    the returned :class:`~latence_core.quality.StageMetrics` carries EVERY column — the profile
+    (``compute``/``model_id``/``license``), the device routing, the schema-induction tally and the
+    relation fan-out — not the seven this adapter used to know how to fill in. It cannot forget a
+    column because it never names one.
+
+    XCom is a materialised substrate by construction (a task's return value is a value), so the
+    Stage's lazily-streamed records are collected here — at the adapter, which is where the
+    substrate's shape belongs, not in the shared executor.
+    """
+    ctx = StageContext(
+        storage=storage,
+        pipeline=pipeline,
+        run_id=run_id,
+        incoming=incoming,
+        outputs=parent_outputs,
+        runner=RUNNER_NAME,
+    )
+    outcome = engine.stage_execution.execute(stage, ctx)
+    records = list(outcome.records)
+    return records, outcome.metrics(records_in=len(incoming))
 
 
 def _stage_by_name(pipeline: Pipeline, name: str) -> Stage:

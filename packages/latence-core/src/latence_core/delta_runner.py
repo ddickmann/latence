@@ -78,12 +78,14 @@ from latence_core.contracts import (
     TypeKind,
     TypeVocabulary,
 )
+from latence_core.observability import OpenLineageEmitter
 from latence_core.pipeline import CapabilityKind, Pipeline
 from latence_core.runner import LocalRunner, StageOutput, topological_order
 from latence_core.state.corpus_store import CorpusStore
 from latence_core.state.delta_detector import DeltaDetector, ManifestEntry, content_hash
 from latence_core.state.incremental import compute_drift
 from latence_core.storage import Storage
+from latence_core.tracing import SpanSink
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -127,9 +129,16 @@ class DeltaRunner:
         *,
         drift_threshold: float = 0.5,
         delta_provider: str = DEFAULT_DELTA_PROVIDER,
+        span_sink: SpanSink | None = None,
+        lineage: OpenLineageEmitter | None = None,
     ) -> None:
         self._registry = registry or ProviderRegistry()
-        self._runner = LocalRunner(self._registry)
+        # C3: the delta's own Runner is a fully-configured Runner, not a stripped one. Before this
+        # the DeltaRunner constructed ``LocalRunner(registry)`` with no way to pass either
+        # observability seam, so ``latence delta`` — the DAILY enterprise path — structurally could
+        # not emit OpenLineage or per-Stage spans while ``latence process`` could. Both default to
+        # ``None`` (off), so an un-wired delta run is byte- and behaviour-identical to before.
+        self._runner = LocalRunner(self._registry, span_sink=span_sink, lineage=lineage)
         self._drift_threshold = drift_threshold
         self._delta_provider = delta_provider
 
@@ -629,7 +638,12 @@ class DeltaRunner:
             if not storage.exists(ckpt):
                 continue
             record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
-            for record in self._runner._read_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+            # C6: STREAM the checkpoint rather than buffering it. ``_read_checkpoint`` returned
+            # the whole Stage's records as a list before this line even began filtering them, so
+            # peak memory was O(largest checkpoint) on top of the collected set — in the one
+            # operation whose entire purpose is to be O(changed). ``_stream_checkpoint`` decodes
+            # one line at a time and yields byte-identical records in the same order.
+            for record in self._runner._stream_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
                 # A ParserInput (Source/Intake output) carries no record_id; key it by its
                 # source document id. Everything else is a Record keyed by record_id.
                 rid = getattr(record, "record_id", None) or record.provenance.document_id
@@ -818,7 +832,8 @@ class DeltaRunner:
             if not storage.exists(ckpt):
                 continue
             record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
-            for record in self._runner._read_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+            # C6: streamed, not buffered — same reason as ``_collect_outputs``.
+            for record in self._runner._stream_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
                 if not isinstance(record, _DOC_LEVEL):
                     continue
                 collected[f"{type(record).__name__}:{record.record_id}"] = record
