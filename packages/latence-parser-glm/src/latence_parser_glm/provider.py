@@ -85,7 +85,7 @@ from latence_core.contracts import (
 from latence_core.errors import LatenceError, ProviderError
 from latence_core.language import detect_language
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.perf import load_with_fa2_fallback
+from latence_core.providers.perf import load_transformers_model
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -152,6 +152,29 @@ _IMAGE_MAGIC: tuple[bytes, ...] = (
     b"MM\x00*",  # TIFF big-endian
     b"BM",  # BMP
 )
+
+
+def _import_ocr_backbone() -> tuple[Any, Any]:
+    """Return the (model class, processor class) pair — the import factory the perf seam calls.
+
+    The model half is handed to :func:`~latence_core.providers.perf.load_transformers_model` rather
+    than imported inline, so the whole load choreography (JIT kill -> thread cap -> import -> perf
+    kwargs -> guarded load -> **verified** placement -> compile) runs in one place and in one order.
+    The processor takes no perf kwargs and is loaded by the Provider itself. The native dependency
+    and its install hint stay in this package (ADR-0036 2); only the instant of the import moved.
+    """
+    try:
+        from transformers import (
+            AutoProcessor,
+            GlmOcrForConditionalGeneration,
+        )
+    except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        msg = (
+            "The 'transformers' package (with GLM-OCR support) is required to run "
+            "GlmOcrParser. Install it with: pip install latence-parser-glm"
+        )
+        raise ImportError(msg) from exc
+    return GlmOcrForConditionalGeneration, AutoProcessor
 
 
 class GlmOcrParser(AdapterBase):
@@ -619,30 +642,23 @@ class GlmOcrParser(AdapterBase):
         """
         if self._model is not None and self._processor is not None:
             return self._model, self._processor
-        try:
-            from transformers import (
-                AutoProcessor,
-                GlmOcrForConditionalGeneration,
-            )
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
-            msg = (
-                "The 'transformers' package (with GLM-OCR support) is required to run "
-                "GlmOcrParser. Install it with: pip install latence-parser-glm"
-            )
-            raise ImportError(msg) from exc
-        device = self.device.device
-        # W8 perf seam: bf16-on-GPU + sdpa/FA2 (graceful FA2→sdpa) into the VLM load, instead of the
-        # fp32/eager default (the ~2× miss). The processor takes no perf kwargs. After placement the
-        # model is optionally compiled (guarded, off by default).
-        perf = self.load_perf_kwargs()
+        # C4: one call owns the whole ordered sequence — skip-decision → JIT kill → intra-op thread
+        # cap → backbone import → bf16-on-GPU + sdpa/FA2 perf kwargs (graceful FA2→sdpa) → placement
+        # on the resolved device WITH read-back verification → guarded compile. The placement is the
+        # fix that was still open here: this Provider used a bare ``model = model.to(device)``, so
+        # #191's "prove it landed or raise" covered 3 of the 5 model-placing Providers and a model
+        # that silently reported a different device than the one requested ran anyway.
+        model = load_transformers_model(
+            lambda: _import_ocr_backbone()[0],
+            self._model_id,
+            self._config,
+            self.device,
+            provider_name=self.provider_name,
+            guard=self.guard,
+        )
+        # The processor takes no perf kwargs and is not placed — a plain load under the guard.
         with self.guard("load_model"):
-            model = load_with_fa2_fallback(
-                GlmOcrForConditionalGeneration.from_pretrained, self._model_id, perf
-            )
-            if device is not None:
-                model = model.to(device)
-            processor = AutoProcessor.from_pretrained(self._model_id)
-        model = self.maybe_compile(model)
+            processor = _import_ocr_backbone()[1].from_pretrained(self._model_id)
         self._model = model
         self._processor = processor
         return model, processor

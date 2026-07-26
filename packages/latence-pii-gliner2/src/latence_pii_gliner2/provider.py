@@ -534,6 +534,7 @@ class Gliner2PIIRedactor(AdapterBase):
             self._config,
             self.device,
             provider_name=self.provider_name,
+            guard=self.guard,
         )
         # #192: the loaded object must expose the batched-entity API this Provider drives. Checked
         # at LOAD (not at the first flush) so an API mismatch is a typed, actionable ProviderError
@@ -569,6 +570,7 @@ class Gliner2PIIRedactor(AdapterBase):
             cfg,
             self.device,
             provider_name=self.provider_name,
+            guard=self.guard,
         )
         return self._model
 

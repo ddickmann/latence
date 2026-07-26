@@ -54,8 +54,17 @@ from latence_core.providers.device import cuda_available
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
+    from typing import TypeAlias
 
     from latence_core.providers.device import DeviceDecision
+
+    #: A caller-supplied typed-error policy for the native load: ``guard(op)`` returns a context
+    #: manager that maps whatever the block raises into the ADR-0034 taxonomy.
+    #: :meth:`~latence_core.providers.adapter.AdapterBase.guard` satisfies it exactly. It is a
+    #: PARAMETER rather than an import because the dependency runs the other way (``adapter``
+    #: imports ``perf``), and because a Provider that is not an ``AdapterBase`` can pass ``None``
+    #: and take the default mapping.
+    LoadGuard: TypeAlias = Callable[[str], contextlib.AbstractContextManager[Any]]
 
 _log = logging.getLogger("latence.perf")
 
@@ -1140,15 +1149,32 @@ def _import_backbone(
     return import_model_cls()
 
 
-def _typed_load(load: Callable[[], Any], model_id: str, provider_name: str) -> Any:
+def _typed_load(
+    load: Callable[[], Any],
+    model_id: str,
+    provider_name: str,
+    guard: LoadGuard | None,
+) -> Any:
     """Run a native model load, mapping any native fault to a typed error (ADR-0034).
 
-    No silent errors, and no leaked content: the native exception's TYPE NAME is reported, never its
-    message (which can echo a model id's surrounding context or an input), exactly as
-    ``AdapterBase.guard`` does — the native exception is attached as ``__cause__`` for a maintainer.
-    A framework :class:`~latence_core.errors.LatenceError` raised from inside (a Provider's own
-    contract check) passes through unwrapped rather than being relabelled.
+    ``guard`` is the caller's own typed-error policy — in practice ``AdapterBase.guard``, whose
+    ``config_exceptions`` decide which native types mean "the operator's config is wrong"
+    (a bad ``model`` id → :class:`~latence_core.errors.ConfigError`) versus "the provider failed"
+    (→ :class:`~latence_core.errors.ProviderError`). That policy is per-adapter, so it stays with
+    the adapter; what this seam owns is applying it at the RIGHT INSTANT — around the native load
+    and **nothing else**, so a missing-dependency ``ImportError`` from the backbone-import factory
+    (raised before this call) still reaches the operator as its actionable "pip install …" hint
+    instead of being relabelled a provider failure.
+
+    A caller with no such policy (a Provider that is not an :class:`AdapterBase`) passes ``None``
+    and gets the default: any native fault becomes a :class:`~latence_core.errors.ProviderError`
+    naming the provider, the model id and the native exception's TYPE NAME — never its message,
+    which can echo an input (the same no-PII discipline ``AdapterBase.guard`` follows). A framework
+    :class:`~latence_core.errors.LatenceError` passes through unwrapped either way.
     """
+    if guard is not None:
+        with guard("load_model"):
+            return load()
     try:
         return load()
     except LatenceError:
@@ -1168,6 +1194,7 @@ def load_gliner_model(
     decision: DeviceDecision,
     *,
     provider_name: str,
+    guard: LoadGuard | None = None,
 ) -> Any:
     """Load a plain-``gliner``-library model, ready to run — the WHOLE sequence, one call.
 
@@ -1205,6 +1232,7 @@ def load_gliner_model(
         lambda: load_then_cast(model_cls.from_pretrained, model_id, config, device),
         model_id,
         provider_name,
+        guard,
     )
     place_on_device(model, device, provider_name=provider_name)
     # BEFORE the compile wrap: the bound must land on the underlying module, not on a compiled
@@ -1220,6 +1248,7 @@ def load_gliner2_model(
     decision: DeviceDecision,
     *,
     provider_name: str,
+    guard: LoadGuard | None = None,
 ) -> Any:
     """Load a ``gliner2``-framework model, ready to run — the WHOLE sequence, one call.
 
@@ -1252,6 +1281,7 @@ def load_gliner2_model(
         ),
         model_id,
         provider_name,
+        guard,
     )
     # Best-effort (never raises), unlike the plain-gliner placement: ``from_pretrained``/
     # ``quantize`` may already have placed the model, the GLiNER2 wrapper's placement API is
@@ -1269,6 +1299,7 @@ def load_transformers_model(
     decision: DeviceDecision,
     *,
     provider_name: str,
+    guard: LoadGuard | None = None,
 ) -> Any:
     """Load a plain ``transformers`` model (VLM / MaskedLM), ready to run — one call.
 
@@ -1297,6 +1328,7 @@ def load_transformers_model(
         lambda: load_with_fa2_fallback(model_cls.from_pretrained, model_id, perf),
         model_id,
         provider_name,
+        guard,
     )
     place_on_device(model, device, provider_name=provider_name)
     return maybe_compile(model, config, provider_name=provider_name)
