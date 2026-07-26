@@ -13,14 +13,19 @@ behind its own Capability seam:
         embedder: {provider: embedding.hashing, config: {dimension: 64}}
         bm25:     {provider: tokenizer.regex,   config: {}}
 
-That ``{provider, config}`` block is a real concept and it used to have no module. It was parsed
-in six places — the Export's four signal slots, the Graph Assembly's ``graph_features``, the Type
-Consolidator's semantic ``embedder``, the capability guard, the ``stack validate`` device
-pre-flight and the envspec walker — each with its own hard-coded key list, its own shape
-validation, and its own error strings. The consequence was measurable: the blessed SOTA stack
-emits two of these blocks (``graph.config.graph_features`` and ``export_corpus.config.bm25``) and
-NEITHER was capability-checked, device-skip-checked, or seen by the placement probe, so a typo in
-``graph_features.pagerannk`` sailed through ``latence setup`` and died at run time.
+That ``{provider, config}`` block is a real concept and it used to have no module. A grep for its
+readers found **ten** independent implementations: the Export's five signal slots, the Graph
+Assembly's ``graph_features``, the Type Consolidator's semantic ``embedder``, the universal
+Parser's ``ocr``, both neural resolvers' ``embedder``, the capability guard, the ``stack validate``
+device pre-flight, the envspec walker and the autotune overlay — each with its own hard-coded key
+list, its own shape validation, and its own error strings. They disagreed: the same mistake raised
+``ConfigError`` in one and ``ContractError`` in another; four of them knew only about ``embedder``.
+
+The consequence was measurable. The blessed SOTA stack emits two of these blocks
+(``graph.config.graph_features`` and ``export_corpus.config.bm25``) and NEITHER was
+capability-checked, device-skip-checked, or seen by the placement probe, so a typo in
+``graph_features.pagerannk`` sailed through ``latence setup`` and died at run time; and a block
+written under a Capability that declares no such slot was read by nobody at all, silently.
 
 This module is the one place that knows about the block:
 
