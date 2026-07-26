@@ -29,12 +29,21 @@ Report — lives here, once.
    :class:`~latence_core.contracts.DocumentRecord`\\ s, which are the authoritative,
    already-persisted copy (ADR-0017: files are the source of truth). This is the route a
    Runner should use when it has the Documents checkpoint in hand.
-2. **Absorbed from the stream** — a lookup whose document is not yet known will adopt
-   the ``page_map`` the passed :class:`~latence_core.contracts.ChunkRecord` carries, if
-   any, and memoise it. This is what makes the seam work for a Provider whose Capability
+2. **Absorbed from the stream** — :meth:`PageIndexResolver.observe` adopts the
+   ``page_map`` a :class:`~latence_core.contracts.ChunkRecord` carries, if any, and
+   memoises it. This is what makes the seam work for a Provider whose Capability
    signature is ``(chunks)`` and nothing else: the Chunk Stage stamps the map on a
    document's **first** chunk only (schema v18) and every later chunk of that document
    resolves from the memoised index.
+
+   **A Stage MUST ``observe`` every chunk it is handed**, at the top of its loop, before
+   it decides whether that chunk is interesting. A document's first chunk is very often
+   the *least* interesting one — too short for the extractor's ``min_chars`` floor, no
+   self-declaration to match, no PII to mask — and if the resolver only saw the chunks a
+   Stage actually queried, the map would be skipped exactly when the document's first
+   chunk produced nothing, silently degrading every later chunk of that document to its
+   inherited page range. (A lookup also absorbs, as a backstop, so a forgotten
+   ``observe`` costs completeness rather than correctness on the chunks it did see.)
 
 Route 2 is why the map no longer has to ride on all N chunks. For a 519-page document
 chunked at 640 tokens that is ~30 KB of JSON on 1 record instead of ~399 — ~92% of every
@@ -97,6 +106,17 @@ class PageIndexResolver:
         chunks, if any, simply resolve to ``None`` and the caller degrades.
         """
         return cls({doc.record_id: doc.page_map for doc in documents if doc.page_map is not None})
+
+    # -- ingestion ----------------------------------------------------------
+
+    def observe(self, chunk: ChunkRecord) -> None:
+        """Adopt the page map ``chunk`` carries, if any (idempotent, ~free when known).
+
+        Call this for EVERY chunk a Stage is handed, before deciding whether the chunk is
+        worth processing — see the module docstring for why skipping the uninteresting
+        ones silently loses the document's map.
+        """
+        self._index_for(chunk)
 
     # -- resolution ---------------------------------------------------------
 

@@ -246,6 +246,9 @@ class HeaderReferenceExtractor:
         # index is built on the first chunk that carries it and reused for all the rest.
         resolver = PageIndexResolver()
         for chunk in chunks:
+            # Observe BEFORE the self-match filter: the chunk carrying the document's page
+            # map (its first, v18) frequently has no self declaration of its own.
+            resolver.observe(chunk)
             chunk_mentions, chunk_relations = self._extract_chunk(chunk, resolver)
             mentions.extend(chunk_mentions)
             relations.extend(chunk_relations)

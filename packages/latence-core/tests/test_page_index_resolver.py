@@ -214,6 +214,37 @@ def test_entity_stage_resolves_pages_from_the_documents_first_chunk() -> None:
     assert straddling, "fixture no longer exercises a page-straddling chunk"
 
 
+def test_pages_stay_exact_when_the_map_carrying_chunk_yields_nothing() -> None:
+    """The map is absorbed from the FIRST chunk even when that chunk produces no mention.
+
+    Caught by the ``test_docstage_hardening`` markup property: leading markup makes the
+    Chunker emit a tiny first chunk (below the extractor's ``min_chars`` floor), so a
+    resolver that only absorbed during a *lookup* never saw the document's page map and
+    every later chunk silently degraded to its inherited page range.
+    """
+    doc = _document()
+    assert doc.page_map is not None
+    chunks = _chunks(doc)
+    # A first chunk too short to yield any mention, still carrying the document's map.
+    tiny = chunks[0].model_copy(
+        update={
+            "record_id": "doc-1#chunk-tiny",
+            "content": "x",
+            "token_count": 1,
+            "offset_map": None,
+        }
+    )
+    stream = [tiny, *(c.model_copy(update={"page_map": None}) for c in chunks[1:])]
+
+    truth = PageOffsetIndex(doc.page_map)
+    mentions = list(GazetteerEntityExtractor(_CONFIG).extract(stream))
+    assert mentions
+    for mention in mentions:
+        start = mention.provenance.char_start
+        assert start is not None
+        assert mention.provenance.page_start == truth.page_for_offset(start)
+
+
 # -- the seam itself ----------------------------------------------------------
 
 

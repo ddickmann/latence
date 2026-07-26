@@ -489,6 +489,10 @@ class GazetteerEntityExtractor:
         # a document is built on its first chunk and reused for every later chunk of it.
         resolver = PageIndexResolver()
         for chunk in chunks:
+            # Observe BEFORE the min_chars filter: a document's first chunk is the one
+            # carrying its page map (v18) and is often too short to yield any mention, so
+            # absorbing only from chunks that produce mentions would lose the map.
+            resolver.observe(chunk)
             yield from self._extract_one(chunk, resolver)
 
     def _extract_one(

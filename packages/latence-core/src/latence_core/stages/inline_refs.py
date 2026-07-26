@@ -285,6 +285,10 @@ class InlineReferenceExtractor:
         # cached at all, and even it re-derived an index per CHUNK rather than per document.
         resolver = PageIndexResolver()
         for doc_chunks in self._group_by_document(chunks):
+            # Observe EVERY chunk of the document, not just the ones a citation lands in:
+            # the page map rides the first chunk (v18), which often cites nothing.
+            for chunk in doc_chunks:
+                resolver.observe(chunk)
             doc_mentions, doc_relations = self._extract_document(doc_chunks, resolver)
             mentions.extend(doc_mentions)
             relations.extend(doc_relations)

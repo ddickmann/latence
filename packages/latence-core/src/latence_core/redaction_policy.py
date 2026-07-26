@@ -254,6 +254,10 @@ def plan_chunk_redaction(
     disabled_for_sensitive = not would_run_detectors and sensitivity in sensitive_set
     offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
     base_char_start = chunk.provenance.char_start or 0
+    page_resolver = resolver if resolver is not None else PageIndexResolver()
+    # Planning happens for EVERY chunk (before detection, before the skip decision), which
+    # makes it the one place guaranteed to see the chunk that carries the document's map.
+    page_resolver.observe(chunk)
     return ChunkRedactionPlan(
         action=action,
         allowed=allowed,
@@ -261,7 +265,7 @@ def plan_chunk_redaction(
         needs_detection=needs_detection,
         disabled_for_sensitive=disabled_for_sensitive,
         chunk=chunk,
-        resolver=resolver if resolver is not None else PageIndexResolver(),
+        resolver=page_resolver,
         offset_index=offset_index,
         base_char_start=base_char_start,
     )
