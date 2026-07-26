@@ -261,6 +261,23 @@ workspace are versioned and released together under one version number.
 
 ### Changed
 
+- **The document page map stops riding every chunk — one `PageIndexResolver` seam replaces five
+  hand-rolled per-chunk indices (`SCHEMA_VERSION` 17 → 18).** `PageMap` is DOCUMENT-scoped state,
+  invariant across every chunk of its document, yet `ChunkRecord` carried it by value on all N
+  chunks: measured on a 519-page document chunked at 640 tokens that is ~30 KB of JSON on each of
+  ~399 records — **~92% of every chunk checkpoint line**, ~12 MB redundant per document, paid again
+  on every checkpoint write, every streaming read-back and every decode. The Chunk Stage now stamps
+  `page_map` on a document's **first** chunk only, and offset→page resolution moves behind
+  `latence_core.page_index.PageIndexResolver` — a narrow, document-keyed seam that memoises ONE
+  `PageOffsetIndex` per `document_record_id`, owns the half-open-span end clamp, and aggregates
+  drift corpus-wide (previously each throwaway per-chunk index carried its own diagnostics and
+  nobody summed them). Five core call sites (`stages/entity`, `stages/header_refs`,
+  `stages/inline_refs`, `stages/relation`, `redaction_policy`) re-derived that knowledge; exactly
+  one of them cached, and only per chunk. Provenance is unchanged — offsets and pages are exact
+  (ADR-0021/0031) — and the field stays optional, so a pre-v18 stream (map on every chunk) resolves
+  identically: the resolver adopts whichever record carries the map first, or is seeded straight
+  from the parsed `DocumentRecord`s (`PageIndexResolver.from_documents`, ADR-0017). Degradation is
+  now COUNTED (`resolver.unresolved`) instead of a silent per-caller fallback.
 - **The benchmark guide no longer describes numbers the results page does not carry (audit
   R1-docs_truth-9, #187).** `docs/running-the-benchmarks.md` said in the present tense that the
   Entity/Relation Extraction, Disambiguation and Redaction slices were published on

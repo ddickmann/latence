@@ -149,6 +149,7 @@ from latence_core.observability import (
     validate_run_event,
 )
 from latence_core.offsetmap import OffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers import (
@@ -321,6 +322,7 @@ __all__ = [
     "OffsetMap",
     "OffsetSegment",
     "PageDriftDiagnostics",
+    "PageIndexResolver",
     "PageMap",
     "PageMapAssembly",
     "PageOffsetIndex",

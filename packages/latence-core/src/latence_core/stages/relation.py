@@ -25,7 +25,7 @@ Each emitted :class:`~latence_core.contracts.RelationMention` carries:
   source offsets;
 * Provenance ``page_start``/``page_end`` — the source page(s) that covering span
   falls on, resolved from the parent document's page map (carried on the mentions'
-  chunks) via :class:`~latence_core.pagemap.PageOffsetIndex` — the S5 round-trip
+  chunks) via :class:`~latence_core.page_index.PageIndexResolver` — the S5 round-trip
   (relation → offset → original page); degrading to the endpoints' own recorded
   pages when no page map is available;
 * the parent document's Classification, inherited unchanged.
@@ -81,13 +81,13 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import ChunkRecord, EntityMention, PageMap, Provenance
+    from latence_core.contracts import ChunkRecord, EntityMention, Provenance
 
 
 class _Rule:
@@ -327,7 +327,11 @@ class PatternRelationExtractor:
         # trigger phrase be tested against the real between-mention text, and lets a
         # relation's covering span resolve to a page.
         doc_text = self._document_texts(chunk_list)
-        doc_page_map = self._document_page_maps(chunk_list)
+        # ONE resolver for the whole call, memoising a page index per document. It replaces
+        # the hand-rolled ``dict`` keyed by document_record_id this Provider used to build:
+        # the same idea, but now the seam every Stage shares rather than one local fix.
+        resolver = PageIndexResolver()
+        doc_anchor = self._document_anchor_chunks(chunk_list)
 
         mentions_by_doc: dict[str, list[EntityMention]] = {}
         doc_order: list[str] = []
@@ -344,7 +348,8 @@ class PatternRelationExtractor:
                 doc_id,
                 mentions_by_doc[doc_id],
                 doc_text.get(doc_id, ""),
-                doc_page_map.get(doc_id),
+                doc_anchor.get(doc_id),
+                resolver,
             )
 
     def _relate_one_document(
@@ -352,7 +357,8 @@ class PatternRelationExtractor:
         doc_id: str,
         mentions: list[EntityMention],
         text: str,
-        page_map: PageMap | None,
+        anchor: ChunkRecord | None,
+        resolver: PageIndexResolver,
     ) -> Iterator[RelationMention]:
         if len(mentions) < 2:
             # Fewer than two mentions ⇒ no relatable pair (S5 AC: no error).
@@ -385,10 +391,15 @@ class PatternRelationExtractor:
             self.fanout_dropped_relations += len(candidates) - cap
             self.fanout_capped_documents += 1
             candidates = candidates[:cap]
-        page_index = PageOffsetIndex(page_map) if page_map is not None else None
         for i, (rule, head, tail, span_start, span_end) in enumerate(candidates):
             provenance = self._relation_provenance(
-                head, tail, span_start, span_end, page_index
+                head,
+                tail,
+                span_start,
+                span_end,
+                None
+                if anchor is None
+                else resolver.pages_for_span(anchor, span_start, span_end),
             )
             yield RelationMention(
                 record_id=f"{doc_id}#relation-{i}",
@@ -512,13 +523,22 @@ class PatternRelationExtractor:
         return texts
 
     @staticmethod
-    def _document_page_maps(chunks: list[ChunkRecord]) -> dict[str, PageMap | None]:
-        """The parent page map per document (carried on chunks since S4), if present."""
-        maps: dict[str, PageMap | None] = {}
+    def _document_anchor_chunks(chunks: list[ChunkRecord]) -> dict[str, ChunkRecord]:
+        """One representative chunk per document — the resolver's key for that document.
+
+        A relation's covering span is document-scoped, so it is not resolved against any
+        particular chunk; the anchor exists only to name the document to the
+        :class:`~latence_core.page_index.PageIndexResolver`. A chunk that CARRIES the page
+        map is preferred (since v18 that is the document's first chunk, and in a pre-v18
+        stream it is every chunk), so the resolver can adopt the map even when it was not
+        seeded from the parsed documents.
+        """
+        anchors: dict[str, ChunkRecord] = {}
         for chunk in chunks:
-            if chunk.document_record_id not in maps and chunk.page_map is not None:
-                maps[chunk.document_record_id] = chunk.page_map
-        return maps
+            existing = anchors.get(chunk.document_record_id)
+            if existing is None or (existing.page_map is None and chunk.page_map is not None):
+                anchors[chunk.document_record_id] = chunk
+        return anchors
 
     @staticmethod
     def _relation_provenance(
@@ -526,23 +546,22 @@ class PatternRelationExtractor:
         tail: EntityMention,
         span_start: int,
         span_end: int,
-        page_index: PageOffsetIndex | None,
+        pages: tuple[int, int] | None,
     ) -> Provenance:
         """Provenance for a relation: shared lineage + the covering span AND its page.
 
-        The char span covers both endpoints (``[span_start, span_end)``). The page
-        span is re-resolved from that covering span through the parent's page map so
-        the relation cites the page(s) its endpoints actually fall on (``page_end``
-        from the last included character so a relation straddling a page boundary
-        records both pages). Absent a page map, it degrades to the union of the two
-        mentions' own recorded pages. Source-document identity is inherited from the
-        head mention (head and tail share a document).
+        The char span covers both endpoints (``[span_start, span_end)``). ``pages`` is what
+        the :class:`~latence_core.page_index.PageIndexResolver` resolved for that covering
+        span, so the relation cites the page(s) its endpoints actually fall on (a relation
+        straddling a page boundary records both). ``None`` (no page map available for the
+        document) degrades to the union of the two mentions' own recorded pages.
+        Source-document identity is inherited from the head mention (head and tail share a
+        document).
         """
         base = head.provenance
         update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-        if page_index is not None:
-            update["page_start"] = page_index.page_for_offset(span_start)
-            update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
+        if pages is not None:
+            update["page_start"], update["page_end"] = pages
         else:
             head_ps = head.provenance.page_start
             tail_ps = tail.provenance.page_start

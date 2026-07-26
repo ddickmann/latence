@@ -40,6 +40,7 @@ from latence_core.contracts import PIISpan, RedactionAction
 if TYPE_CHECKING:
     from latence_core.contracts import ChunkRecord
     from latence_core.offsetmap import OffsetIndex
+    from latence_core.page_index import PageIndexResolver
     from latence_core.pagemap import PageOffsetIndex
 
 # The mask token per PII type used by a MASK action: ``[EMAIL]``, ``[PERSON]``, …
@@ -208,7 +209,8 @@ class ChunkRedactionPlan:
     policy_name: str
     needs_detection: bool
     disabled_for_sensitive: bool
-    page_index: PageOffsetIndex | None
+    chunk: ChunkRecord
+    resolver: PageIndexResolver
     offset_index: OffsetIndex | None
     base_char_start: int
 
@@ -220,6 +222,7 @@ def plan_chunk_redaction(
     detector_types: set[str],
     sensitive_set: set[str],
     min_chars: int,
+    resolver: PageIndexResolver | None = None,
 ) -> ChunkRedactionPlan:
     """Resolve everything a chunk needs BEFORE detection (policy, no-op floor, page/offset maps).
 
@@ -227,13 +230,20 @@ def plan_chunk_redaction(
     coverage the applied policy narrows) — used by the §4 no-op floor to tell "control ran no
     detectors" (empty intersection with the policy allow-list) apart from "genuinely no PII found".
     A chunk classified in ``sensitive_set`` whose control runs no detector carries
-    ``disabled_for_sensitive=True`` (the LOUD H-C1 §4 signal). ``page_index``/``offset_index`` are
-    built from the chunk's page_map/offset_map so a chunk-content span resolves to its ORIGINAL
-    source page; both are ``None`` when the chunk carries no such map (page resolution degrades, the
-    same fallback the doc-level path used).
+    ``disabled_for_sensitive=True`` (the LOUD H-C1 §4 signal). ``offset_index`` is built from the
+    chunk's offset_map (chunk-scoped, so genuinely per chunk); page resolution goes through
+    ``resolver``, the DOCUMENT-scoped :class:`~latence_core.page_index.PageIndexResolver`, so a
+    chunk-content span resolves to its ORIGINAL source page.
+
+    **Pass a resolver that outlives the chunk loop.** A Provider redacting a stream of chunks
+    should build ONE :class:`~latence_core.page_index.PageIndexResolver` per ``redact`` call and
+    hand it to every ``plan_chunk_redaction``: since v18 a document's page map rides its FIRST
+    chunk only, so a per-chunk resolver can only resolve pages for that first chunk. Omitting it
+    creates a throwaway resolver — correct, and byte-identical on a pre-v18 stream where every
+    chunk carried the map, but it forfeits page resolution on later chunks of a v18 stream.
     """
     from latence_core.offsetmap import OffsetIndex
-    from latence_core.pagemap import PageOffsetIndex
+    from latence_core.page_index import PageIndexResolver
 
     sensitivity = chunk.classification.sensitivity
     action, allowed, skip, policy_name = policy.resolve(sensitivity)
@@ -242,16 +252,20 @@ def plan_chunk_redaction(
         detector_types if allowed is None else detector_types & allowed
     )
     disabled_for_sensitive = not would_run_detectors and sensitivity in sensitive_set
-    page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
     offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
     base_char_start = chunk.provenance.char_start or 0
+    page_resolver = resolver if resolver is not None else PageIndexResolver()
+    # Planning happens for EVERY chunk (before detection, before the skip decision), which
+    # makes it the one place guaranteed to see the chunk that carries the document's map.
+    page_resolver.observe(chunk)
     return ChunkRedactionPlan(
         action=action,
         allowed=allowed,
         policy_name=policy_name,
         needs_detection=needs_detection,
         disabled_for_sensitive=disabled_for_sensitive,
-        page_index=page_index,
+        chunk=chunk,
+        resolver=page_resolver,
         offset_index=offset_index,
         base_char_start=base_char_start,
     )
@@ -274,22 +288,21 @@ def build_chunk_span(
     :func:`apply_masking` masks in, so they are stored verbatim on the span). The source page(s) are
     resolved by mapping the local offset back to its ORIGINAL-markdown offset through the chunk's
     :class:`~latence_core.offsetmap.OffsetIndex` (identity ``base_char_start + local`` when the
-    chunk carries no offset_map) and then to a page through the chunk's
-    :class:`~latence_core.pagemap.PageOffsetIndex`. The raw ``value`` derives the deterministic
-    placeholder and is never stored (S6 AC).
+    chunk carries no offset_map) and then to a page through the plan's document-scoped
+    :class:`~latence_core.page_index.PageIndexResolver`. Both pages are ``None`` when no page map
+    is available for the document — the same degradation the doc-level path used, now counted on
+    the resolver rather than silently branched on here. The raw ``value`` derives the
+    deterministic placeholder and is never stored (S6 AC).
     """
     placeholder = placeholder_for(pii_type, value, action, salt)
-    page_start: int | None = None
-    page_end: int | None = None
-    if plan.page_index is not None:
-        if plan.offset_index is not None:
-            orig_start = plan.offset_index.resolve(local_start)
-            orig_end = plan.offset_index.resolve(max(local_end - 1, local_start))
-        else:
-            orig_start = plan.base_char_start + local_start
-            orig_end = plan.base_char_start + max(local_end - 1, local_start)
-        page_start = plan.page_index.page_for_offset(orig_start)
-        page_end = plan.page_index.page_for_offset(orig_end)
+    if plan.offset_index is not None:
+        orig_start = plan.offset_index.resolve(local_start)
+        orig_end = plan.offset_index.resolve(max(local_end - 1, local_start))
+    else:
+        orig_start = plan.base_char_start + local_start
+        orig_end = plan.base_char_start + max(local_end - 1, local_start)
+    page_start = plan.resolver.page_for(plan.chunk, orig_start)
+    page_end = plan.resolver.page_for(plan.chunk, orig_end)
     return PIISpan(
         pii_type=pii_type,
         detector=detector,

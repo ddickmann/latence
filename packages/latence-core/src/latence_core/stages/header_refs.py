@@ -35,9 +35,10 @@ order, so identical input + config yields byte-identical output (the Baseline ba
 pages are resolved EXACTLY like the learned providers — chunk-local model offsets are lifted to true
 original-markdown offsets through the chunk's stripped-``content``->original ``offset_map`` via
 :class:`~latence_core.offsetmap.OffsetIndex` (a pre-v11 chunk degrades to the ``char_start + local``
-shift), and each span's source page is resolved through the parent's page map via
-:class:`~latence_core.pagemap.PageOffsetIndex` (degrading to the chunk's inherited page range when
-no map is present). The self id and a relation's header line are matched **within one chunk** — for
+shift), and each span's source page is resolved through the document-scoped
+:class:`~latence_core.page_index.PageIndexResolver` (degrading to the chunk's inherited page range
+when no page map is available for the document). The self id and a relation's header line are
+matched **within one chunk** — for
 front-matter metadata headers (RFC, e-mail, memo) the self declaration and the header lines are
 co-located in the same leading chunk, so this is exact; a chunk carrying header lines but no self
 declaration yields nothing (never an error, never a dangling edge).
@@ -51,13 +52,13 @@ from typing import TYPE_CHECKING, Any
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from latence_core.contracts import ChunkRecord, PageMap, Provenance
+    from latence_core.contracts import ChunkRecord, Provenance
 
 # Default per-relation, per-chunk target fan-out cap: at most this many referenced ids are mined out
 # of one header line for one relation, so a pathological header (a comma list of thousands) cannot
@@ -241,8 +242,14 @@ class HeaderReferenceExtractor:
         """
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
+        # ONE resolver for the whole call: the page map is document-scoped, so a document's
+        # index is built on the first chunk that carries it and reused for all the rest.
+        resolver = PageIndexResolver()
         for chunk in chunks:
-            chunk_mentions, chunk_relations = self._extract_chunk(chunk)
+            # Observe BEFORE the self-match filter: the chunk carrying the document's page
+            # map (its first, v18) frequently has no self declaration of its own.
+            resolver.observe(chunk)
+            chunk_mentions, chunk_relations = self._extract_chunk(chunk, resolver)
             mentions.extend(chunk_mentions)
             relations.extend(chunk_relations)
         return FusedExtraction(mentions=mentions, relations=relations)
@@ -252,7 +259,7 @@ class HeaderReferenceExtractor:
         return self.extract_fused(chunks).mentions
 
     def _extract_chunk(
-        self, chunk: ChunkRecord
+        self, chunk: ChunkRecord, resolver: PageIndexResolver
     ) -> tuple[list[EntityMention], list[RelationMention]]:
         content = chunk.content
         self_match = self._self_re.search(content)
@@ -265,7 +272,6 @@ class HeaderReferenceExtractor:
 
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
 
         mentions: list[EntityMention] = []
         by_text: dict[str, EntityMention] = {}
@@ -289,7 +295,10 @@ class HeaderReferenceExtractor:
                 text=text,
                 confidence=1.0,
                 provenance=_span_provenance(
-                    chunk.provenance, doc_start, doc_end, page_index, chunk.page_map
+                    chunk.provenance,
+                    doc_start,
+                    doc_end,
+                    resolver.pages_for_span(chunk, doc_start, doc_end),
                 ),
                 classification=chunk.classification,
             )
@@ -330,7 +339,7 @@ class HeaderReferenceExtractor:
                     emitted_for_header += 1
                     relations.append(
                         self._relation(
-                            chunk, len(relations), rule, head, tail, page_index
+                            chunk, len(relations), rule, head, tail, resolver
                         )
                     )
         return mentions, relations
@@ -342,7 +351,7 @@ class HeaderReferenceExtractor:
         rule: _RelationRule,
         head: EntityMention,
         tail: EntityMention,
-        page_index: PageOffsetIndex | None,
+        resolver: PageIndexResolver,
     ) -> RelationMention:
         span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
         span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
@@ -357,7 +366,10 @@ class HeaderReferenceExtractor:
             tail_text=tail.text,
             confidence=min(max(rule.confidence, 0.0), 1.0),
             provenance=_span_provenance(
-                head.provenance, span_start, span_end, page_index, chunk.page_map
+                head.provenance,
+                span_start,
+                span_end,
+                resolver.pages_for_span(chunk, span_start, span_end),
             ),
             classification=chunk.classification,
         )
@@ -377,21 +389,20 @@ def _span_provenance(
     base: Provenance,
     doc_char_start: int,
     doc_char_end: int,
-    page_index: PageOffsetIndex | None,
-    page_map: PageMap | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
     """A synthesized record's Provenance: the chunk lineage + the resolved char/page span.
 
     The char span is the true original-markdown span of the surface (or, for a relation, the
-    covering span of both endpoints). The page span is re-resolved from that span through the
-    parent's page map so the record cites the page(s) it actually falls on; absent a page map it
-    inherits the chunk's own recorded ``page_start``/``page_end`` (never left ``None`` — the mention
-    contract requires a page span).
+    covering span of both endpoints). ``pages`` is what the
+    :class:`~latence_core.page_index.PageIndexResolver` resolved for that span, so the record
+    cites the page(s) it actually falls on; ``None`` (no page map available for the document)
+    inherits the chunk's own recorded ``page_start``/``page_end`` (never left ``None`` — the
+    mention contract requires a page span).
     """
     update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-    if page_index is not None and page_map is not None:
-        update["page_start"] = page_index.page_for_offset(doc_char_start)
-        update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     else:
         if base.page_start is not None:
             update["page_start"] = base.page_start
