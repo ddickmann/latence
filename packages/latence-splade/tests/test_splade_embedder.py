@@ -363,12 +363,26 @@ class _FakeOutput:
 
 
 class _FakeMaskedLM:
+    """A faithful stand-in for a transformers ``AutoModelForMaskedLM``.
+
+    Faithful in the two ways the load choreography now depends on: a real ``nn.Module`` HAS a
+    ``.to(device)`` and reports a ``.device``, so the fake does too — otherwise the seam's "prove it
+    landed or raise" step would fail here against a fake that is simply less capable than the real
+    dependency, which is a fake bug, not a seam bug. ``device`` starts at ``"cpu"`` exactly like a
+    freshly ``from_pretrained``-ed model (which is the whole reason placement has to happen at all).
+    """
+
     def __init__(self) -> None:
         self.config = _FakeConfig()
+        self.device = "cpu"
 
     @classmethod
     def from_pretrained(cls, _model_id: str, **_kw: Any) -> _FakeMaskedLM:
         return cls()
+
+    def to(self, device: str) -> _FakeMaskedLM:
+        self.device = device
+        return self
 
     def eval(self) -> _FakeMaskedLM:
         return self
