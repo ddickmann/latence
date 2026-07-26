@@ -29,9 +29,11 @@ map carried since v11) via :class:`~latence_core.offsetmap.OffsetIndex` — so a
 offset is EXACT even when markdown markup was stripped before it (``char_start + local``
 is only a lower bound; ADR-0022 corrected, ADR-0031; a pre-v11 chunk degrades to that
 shift). A relation's covering span is the min/max of its resolved endpoints, so it
-inherits the correction. Each page span is re-resolved through the parent's page map
-(carried on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` — the S4/S5
-round-trip. Because a fused
+inherits the correction. Each page span is re-resolved through the document-scoped
+:class:`~latence_core.page_index.PageIndexResolver` — the S4/S5 round-trip. ONE resolver
+serves the whole ``extract_fused`` call, so a chunk that carries no page map (every
+non-first chunk since schema v18) still resolves from the map its document's first chunk
+carried, and a document's index is built once rather than once per chunk. Because a fused
 Stage emits both carriers together, the Runner threads mentions AND relations
 downstream from one Stage without running a separate Entity-Extraction Stage (no
 double-extraction).
@@ -50,7 +52,7 @@ from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import load_gliner_model, resolve_max_len
@@ -276,6 +278,9 @@ class GlinerRelexExtractor:
         relations: list[RelationMention] = []
         batch: list[ChunkRecord] = []
         batch_labels: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's
+        # index is built on the first chunk of it we see and reused for every later chunk.
+        resolver = PageIndexResolver()
 
         def flush() -> None:
             nonlocal model, batch, batch_labels
@@ -313,7 +318,7 @@ class GlinerRelexExtractor:
                 batch, entities_per_text, relations_per_text, strict=True
             ):
                 chunk_mentions, chunk_relations = self._build_records(
-                    chunk, list(raw_ents), list(raw_rels)
+                    chunk, list(raw_ents), list(raw_rels), resolver
                 )
                 mentions.extend(chunk_mentions)
                 relations.extend(chunk_relations)
@@ -321,6 +326,10 @@ class GlinerRelexExtractor:
             batch_labels = None
 
         for chunk in chunks:
+            # Observe BEFORE the min_chars filter: a document's page map rides its FIRST chunk
+            # (schema v18) and that chunk is very often the one this filter drops, so absorbing
+            # only from chunks that reach the model would lose the map for the whole document.
+            resolver.observe(chunk)
             if len(chunk.content.strip()) < self._min_chars:
                 continue
             # W4 label-source seam (ADR-0038): UNION the config labels with any entity/relation
@@ -355,6 +364,7 @@ class GlinerRelexExtractor:
         chunk: ChunkRecord,
         raw_entities: list[dict[str, Any]],
         raw_relations: list[dict[str, Any]],
+        resolver: PageIndexResolver,
     ) -> tuple[list[EntityMention], list[RelationMention]]:
         # ``raw_entities`` / ``raw_relations`` are THIS chunk's fused output, mapped back by index
         # from the batched ``inference`` call (W7). Their shape is the REAL gliner-relex contract
@@ -371,7 +381,8 @@ class GlinerRelexExtractor:
         # only a lower bound); a pre-v11 chunk with no map degrades to that shift.
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Each record's page span comes from the DOCUMENT-scoped resolver, so a chunk carrying
+        # no page map (every non-first chunk since v18) still resolves its own pages.
 
         mentions: list[EntityMention] = []
         # Map the model's chunk-local (start, end) to the stamped mention, so a
@@ -388,7 +399,7 @@ class GlinerRelexExtractor:
                 chunk.provenance,
                 doc_start,
                 doc_end,
-                page_index,
+                resolver.pages_for_span(chunk, doc_start, doc_end),
             )
             mention = EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
@@ -414,7 +425,13 @@ class GlinerRelexExtractor:
                 continue
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
-            rel_prov = _relation_provenance(head, tail, span_start, span_end, page_index)
+            rel_prov = _relation_provenance(
+                head,
+                tail,
+                span_start,
+                span_end,
+                resolver.pages_for_span(chunk, span_start, span_end),
+            )
             relations.append(
                 RelationMention(
                     record_id=f"{chunk.record_id}#relation-{emitted}",
@@ -459,12 +476,13 @@ def _mention_provenance(
     chunk_prov: Provenance,
     doc_char_start: int,
     doc_char_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
+    """``pages`` is what the :class:`~latence_core.page_index.PageIndexResolver` resolved for the
+    mention's own span; ``None`` (no page map available) degrades to the chunk's inherited range."""
     update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(doc_char_start)
-        update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     return chunk_prov.model_copy(update=update)
 
 
@@ -473,13 +491,12 @@ def _relation_provenance(
     tail: EntityMention,
     span_start: int,
     span_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
     base = head.provenance
     update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(span_start)
-        update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     else:
         hp, tp = head.provenance, tail.provenance
         starts = [p for p in (hp.page_start, tp.page_start) if p is not None]

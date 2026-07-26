@@ -302,6 +302,88 @@ def test_mention_page_resolves_to_its_own_page_in_multipage_chunk(
     assert (by_text["Bob"].provenance.page_start, by_text["Bob"].provenance.page_end) == (2, 2)
 
 
+def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
+    """A v18 document stream: the page map rides the FIRST chunk only (schema v18).
+
+    Page 1 is ``[0,16)``, page 2 is ``[16,33)``. Chunk 0 covers page 1 and carries the map;
+    chunk 1 STRADDLES the boundary (doc ``[13,33)``, inherited page range ``1..2``) and
+    carries NO map — exactly what the Chunk Stage now emits. A mention at doc ``[16,19)``
+    ("Bob") lies wholly on page 2, so its Provenance must say ``(2, 2)``, not the chunk's
+    inherited ``(1, 2)``.
+    """
+    assembly = PageMap.from_page_texts(["Alice is here.", "Bob is over here."])
+
+    def _mk(
+        *, index: int, char_start: int, char_end: int, pages: tuple[int, int], carry: bool
+    ) -> ChunkRecord:
+        return ChunkRecord(
+            record_id=f"doc1#chunk-{index}",
+            document_record_id="doc1",
+            index=index,
+            provenance=Provenance(
+                source_uri="file:///c/a.txt",
+                file_name="a.txt",
+                file_type="txt",
+                file_size=1000,
+                document_id="sha256:doc1",
+                char_start=char_start,
+                char_end=char_end,
+                page_start=pages[0],
+                page_end=pages[1],
+            ),
+            classification=Classification(language="en", sensitivity="internal"),
+            content=assembly.text[char_start:char_end],
+            token_count=4,
+            page_map=assembly.page_map if carry else None,
+            offset_map=None,
+        )
+
+    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1), carry=True)
+    second = _mk(index=1, char_start=13, char_end=33, pages=(1, 2), carry=False)
+    return first, second
+
+
+def test_mention_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+    fake_gliner: type[_FakeGLiNER],
+) -> None:
+    """v18: only chunk 0 carries the page map — a later chunk must still resolve its OWN page.
+
+    Reading ``chunk.page_map`` per chunk silently degrades every non-first chunk to the
+    chunk's inherited page range (ADR-0021/0031 provenance regression). The document-scoped
+    :class:`~latence_core.page_index.PageIndexResolver` memoises the map from chunk 0.
+    """
+    first, second = _v18_two_chunk_document()
+    fake_gliner.per_text = {
+        first.content: [{"start": 0, "end": 5, "label": "person", "score": 0.9}],
+        # "Bob" is at doc [16,19) → chunk-local [3,6) of the straddling chunk.
+        second.content: [{"start": 3, "end": 6, "label": "person", "score": 0.9}],
+    }
+    mentions = list(GlinerEntityExtractor({"labels": ["person"]}).extract([first, second]))
+    by_text = {m.text: m for m in mentions}
+    assert (by_text["Alice"].provenance.page_start, by_text["Alice"].provenance.page_end) == (1, 1)
+    # The whole point: page 2, NOT the chunk's inherited (1, 2).
+    assert (by_text["Bob"].provenance.page_start, by_text["Bob"].provenance.page_end) == (2, 2)
+
+
+def test_page_map_is_absorbed_even_when_the_first_chunk_is_below_min_chars(
+    fake_gliner: type[_FakeGLiNER],
+) -> None:
+    """The map rides the first chunk — which is often the one ``min_chars`` skips.
+
+    If the resolver only saw the chunks that survive the filter, the document's map would be
+    lost exactly when its first chunk is too short, degrading every later chunk.
+    """
+    first, second = _v18_two_chunk_document()
+    assert len(first.content.strip()) == 14  # below the min_chars floor set below
+    fake_gliner.per_text = {
+        second.content: [{"start": 3, "end": 6, "label": "person", "score": 0.9}],
+    }
+    extractor = GlinerEntityExtractor({"labels": ["person"], "min_chars": 15})
+    mentions = list(extractor.extract([first, second]))
+    assert [m.text for m in mentions] == ["Bob"]
+    assert (mentions[0].provenance.page_start, mentions[0].provenance.page_end) == (2, 2)
+
+
 def test_mention_offset_resolves_through_offset_map_past_stripped_markup(
     fake_gliner: type[_FakeGLiNER],
 ) -> None:

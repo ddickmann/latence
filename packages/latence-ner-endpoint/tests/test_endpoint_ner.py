@@ -128,6 +128,76 @@ def test_extracts_and_resolves_offsets(fake_openai: None) -> None:
     assert m.classification.sensitivity == "internal"
 
 
+def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
+    """A v18 document stream: the page map rides the FIRST chunk only (schema v18).
+
+    Page 1 is ``[0,16)``, page 2 is ``[16,33)``. Chunk 0 covers page 1 and carries the map;
+    chunk 1 STRADDLES the boundary (doc ``[13,33)``, inherited page range ``1..2``) and
+    carries NO map. A chunk-local ``[3,6)`` span is ``"ce "`` on page 1 in chunk 0 and
+    ``"Bob"`` at doc ``[16,19)`` — wholly on page 2 — in chunk 1.
+    """
+    assembly = PageMap.from_page_texts(["Alice is here.", "Bob is over here."])
+
+    def _mk(
+        *, index: int, char_start: int, char_end: int, pages: tuple[int, int], carry: bool
+    ) -> ChunkRecord:
+        return ChunkRecord(
+            record_id=f"d1#chunk-{index}",
+            document_record_id="d1",
+            index=index,
+            provenance=Provenance(
+                source_uri="file:///c/a.txt",
+                file_name="a.txt",
+                file_type="txt",
+                file_size=1000,
+                document_id="sha256:d1",
+                char_start=char_start,
+                char_end=char_end,
+                page_start=pages[0],
+                page_end=pages[1],
+            ),
+            classification=Classification(language="en", sensitivity="internal"),
+            content=assembly.text[char_start:char_end],
+            token_count=4,
+            page_map=assembly.page_map if carry else None,
+            offset_map=None,
+        )
+
+    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1), carry=True)
+    second = _mk(index=1, char_start=13, char_end=33, pages=(1, 2), carry=False)
+    return first, second
+
+
+def test_mention_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+    fake_openai: None,
+) -> None:
+    """v18: only chunk 0 carries the page map — a later chunk must still resolve its OWN page.
+
+    Reading ``chunk.page_map`` per chunk silently degrades every non-first chunk to the
+    chunk's inherited page range (ADR-0021/0031). The second half also proves the map is
+    absorbed when ``min_chars`` drops the very chunk that carries it.
+    """
+    first, second = _v18_two_chunk_document()
+    _FakeCompletions.reply = json.dumps(
+        {"entities": [{"start": 3, "end": 6, "label": "person", "confidence": 0.9}]}
+    )
+    out = list(EndpointEntityExtractor({"labels": ["person"]}).extract([first, second]))
+    by_chunk = {m.chunk_record_id: m for m in out}
+    assert set(by_chunk) == {"d1#chunk-0", "d1#chunk-1"}
+    assert by_chunk["d1#chunk-1"].text == "Bob"
+    # The whole point: page 2, NOT the chunk's inherited (1, 2).
+    pages = by_chunk["d1#chunk-1"].provenance
+    assert (pages.page_start, pages.page_end) == (2, 2)
+
+    # Observe-before-filter: the map rides the first chunk, which min_chars often drops.
+    assert len(first.content.strip()) == 14
+    filtered = list(
+        EndpointEntityExtractor({"labels": ["person"], "min_chars": 15}).extract([first, second])
+    )
+    assert [m.chunk_record_id for m in filtered] == ["d1#chunk-1"]
+    assert (filtered[0].provenance.page_start, filtered[0].provenance.page_end) == (2, 2)
+
+
 def test_mention_offset_resolves_through_offset_map_past_stripped_markup(
     fake_openai: None,
 ) -> None:

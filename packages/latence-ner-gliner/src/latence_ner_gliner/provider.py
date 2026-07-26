@@ -27,11 +27,14 @@ so a mention resolves back to its EXACT source offset even when markdown markup 
 stripped before it within the chunk. (Chunk ``content`` is markup-stripped, so the
 naive ``char_start + local`` shift is only a lower bound — ADR-0022 corrected,
 ADR-0031.) A pre-v11 chunk with no offset map degrades to that shift. From the
-resolved offset the page span is re-resolved through the parent's page map (carried
-on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` to its original
-source page(s) (the S4 round-trip) — a mention on a later page of a multi-page chunk
-cites that page, not the chunk's first page, degrading to the chunk's inherited
-range only when no page map is present. An empty/near-empty chunk yields no mentions
+resolved offset the page span is re-resolved through the document-scoped
+:class:`~latence_core.page_index.PageIndexResolver` to its original source page(s)
+(the S4 round-trip) — a mention on a later page of a multi-page chunk cites that
+page, not the chunk's first page, degrading to the chunk's inherited range only when
+no page map is available for the document. ONE resolver serves the whole ``extract``
+call, so a document's page index is built once (not once per chunk) and a chunk that
+carries no map — every non-first chunk since schema v18 — still resolves from the map
+its document's first chunk carried. An empty/near-empty chunk yields no mentions
 (S4 AC).
 
 The ``gliner`` import is deferred to first use so importing this module (for
@@ -47,7 +50,7 @@ from latence_core.contracts import EntityMention
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import load_gliner_model, resolve_max_len
@@ -264,6 +267,9 @@ class GlinerEntityExtractor:
         model = None
         batch: list[ChunkRecord] = []
         batch_labels: tuple[str, ...] | None = None
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's
+        # index is built on the first chunk of it we see and reused for every later chunk.
+        resolver = PageIndexResolver()
 
         def flush() -> Iterator[EntityMention]:
             nonlocal model, batch, batch_labels
@@ -278,11 +284,15 @@ class GlinerEntityExtractor:
                 texts, labels, threshold=self._threshold
             )
             for chunk, raw in zip(batch, results, strict=True):
-                yield from self._mentions_for(chunk, list(raw))
+                yield from self._mentions_for(chunk, list(raw), resolver)
             batch = []
             batch_labels = None
 
         for chunk in chunks:
+            # Observe BEFORE the min_chars filter: a document's page map rides its FIRST chunk
+            # (schema v18) and that chunk is very often the one this filter drops, so absorbing
+            # only from chunks that reach the model would lose the map for the whole document.
+            resolver.observe(chunk)
             if len(chunk.content.strip()) < self._min_chars:
                 # Empty / near-empty chunk: no mentions, no model call (S4 AC).
                 continue
@@ -301,7 +311,7 @@ class GlinerEntityExtractor:
         yield from flush()
 
     def _mentions_for(
-        self, chunk: ChunkRecord, raw: list[dict[str, Any]]
+        self, chunk: ChunkRecord, raw: list[dict[str, Any]], resolver: PageIndexResolver
     ) -> Iterator[EntityMention]:
         # ``raw`` is this chunk's entity list (chunk-local 'start'/'end', 'label', 'score') — the
         # same shape ``predict_entities`` returned per chunk, now sourced from the batched call and
@@ -313,9 +323,10 @@ class GlinerEntityExtractor:
         # lower bound — ADR-0031); a pre-v11 chunk with no map degrades to that shift.
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        # Re-resolve each mention's OWN page from the parent's page map (carried on
-        # the chunk), not just inherit the chunk's page range. Built once per chunk.
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Re-resolve each mention's OWN page, not just inherit the chunk's page range. The
+        # resolver owns the document→index memoisation, so a chunk that carries no page map
+        # (every non-first chunk since v18) still resolves; ``None`` from it means no map is
+        # available for this document at all → inherit the chunk range.
         for i, ent in enumerate(raw):
             local_start = int(ent["start"])
             local_end = int(ent["end"])
@@ -328,7 +339,7 @@ class GlinerEntityExtractor:
                 chunk.provenance,
                 doc_char_start=doc_char_start,
                 doc_char_end=doc_char_end,
-                page_index=page_index,
+                pages=resolver.pages_for_span(chunk, doc_char_start, doc_char_end),
             )
             yield EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
@@ -347,19 +358,18 @@ class GlinerEntityExtractor:
         chunk_prov: Provenance,
         doc_char_start: int,
         doc_char_end: int,
-        page_index: PageOffsetIndex | None,
+        pages: tuple[int, int] | None,
     ) -> Provenance:
         """Provenance for a mention: chunk lineage + the mention's own span AND page.
 
         The char span is narrowed to the mention's own ``[start, end)`` in the parent
-        document's assembled markdown. The page span is re-resolved from that offset
-        through the parent's page map (``page_index``) so a mention on a later page of
-        a multi-page chunk cites its own page (``page_end`` from the last included
-        character so a boundary-straddling mention records both pages). Absent a page
-        map, the mention degrades to inheriting the chunk's page range.
+        document's assembled markdown. ``pages`` is what the
+        :class:`~latence_core.page_index.PageIndexResolver` resolved for that span — so a
+        mention on a later page of a multi-page chunk cites its own page, and one straddling
+        a page boundary records both. ``None`` (no page map available for the document)
+        degrades to inheriting the chunk's page range.
         """
         update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-        if page_index is not None:
-            update["page_start"] = page_index.page_for_offset(doc_char_start)
-            update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+        if pages is not None:
+            update["page_start"], update["page_end"] = pages
         return chunk_prov.model_copy(update=update)

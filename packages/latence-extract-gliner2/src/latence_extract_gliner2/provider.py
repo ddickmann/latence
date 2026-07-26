@@ -52,8 +52,11 @@ Offsets (the recurring coordinate trap, ADR-0031): the chunk-local model offsets
 TRUE original-markdown offsets through the chunk's stripped→original ``offset_map`` via
 :class:`~latence_core.offsetmap.OffsetIndex` (``char_start + local`` is only a lower bound once
 markdown markup was stripped; a pre-v11 chunk with no map degrades to that shift). Each page span is
-re-resolved through the parent's page map via :class:`~latence_core.pagemap.PageOffsetIndex`. A
-relation's covering span is the min/max of its resolved endpoints, so it inherits the correction.
+re-resolved through the document-scoped :class:`~latence_core.page_index.PageIndexResolver`; ONE
+resolver serves the whole ``extract_fused`` call, so a chunk that carries no page map (every
+non-first chunk since schema v18) still resolves from the map its document's first chunk carried,
+and a document's index is built once rather than once per chunk. A relation's covering span is the
+min/max of its resolved endpoints, so it inherits the correction.
 
 Licensing (ADR-0012 / research-diligence, verified 2026-07-10 — weights AND code, separately):
     * ``gliner2`` library (PyPI + github.com/fastino-ai/GLiNER2): **Apache-2.0** (code) — LICENSE
@@ -88,7 +91,7 @@ from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.induced import LabelFloor, LabelSlot, effective_labels, resolve_label_floor
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import (
@@ -623,9 +626,13 @@ class Gliner2FusedExtractor:
         #: cumulative (chunks_processed, mentions, relations) recorded per batch — the progress
         #: trail an operator (or a test) reads to confirm the stage streams incrementally.
         self._progress = []
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's index
+        # is built on the first chunk of it we see and reused for every later chunk. It is handed
+        # to _iter_batches so it observes EVERY chunk, including the ones min_chars drops.
+        resolver = PageIndexResolver()
 
         for batch_count, batch in enumerate(
-            _iter_batches(chunks, self._batch_size, self._min_chars), start=1
+            _iter_batches(chunks, self._batch_size, self._min_chars, resolver), start=1
         ):
             if not loaded:
                 self._load_model()
@@ -634,7 +641,9 @@ class Gliner2FusedExtractor:
             raw_entities = self._bucketed_forward(pending, _ENTITY_SLOT)
             raw_relations = self._bucketed_forward(pending, _RELATION_SLOT)
             for item, ents, rels in zip(pending, raw_entities, raw_relations, strict=True):
-                chunk_mentions, chunk_relations = self._build_records(item.chunk, ents, rels)
+                chunk_mentions, chunk_relations = self._build_records(
+                    item.chunk, ents, rels, resolver
+                )
                 mentions.extend(chunk_mentions)
                 relations.extend(chunk_relations)
                 processed += 1
@@ -803,6 +812,7 @@ class Gliner2FusedExtractor:
         chunk: ChunkRecord,
         entities_by_label: dict[str, list[dict[str, Any]]],
         relations_by_type: dict[str, list[dict[str, Any]]],
+        resolver: PageIndexResolver,
     ) -> tuple[list[EntityMention], list[RelationMention]]:
         """Map the REAL gliner2 per-label/per-relation dicts → the framework mention/relation set.
 
@@ -837,7 +847,8 @@ class Gliner2FusedExtractor:
 
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Each record's page span comes from the DOCUMENT-scoped resolver, so a chunk carrying
+        # no page map (every non-first chunk since v18) still resolves its own pages.
 
         mentions: list[EntityMention] = []
         by_span: dict[tuple[int, int], EntityMention] = {}
@@ -860,7 +871,12 @@ class Gliner2FusedExtractor:
                 doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
             else:
                 doc_start, doc_end = chunk_char_start + local_start, chunk_char_start + local_end
-            provenance = _mention_provenance(chunk.provenance, doc_start, doc_end, page_index)
+            provenance = _mention_provenance(
+                chunk.provenance,
+                doc_start,
+                doc_end,
+                resolver.pages_for_span(chunk, doc_start, doc_end),
+            )
             mention = EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
                 document_record_id=chunk.document_record_id,
@@ -907,7 +923,13 @@ class Gliner2FusedExtractor:
                 continue
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
-            rel_prov = _relation_provenance(head, tail, span_start, span_end, page_index)
+            rel_prov = _relation_provenance(
+                head,
+                tail,
+                span_start,
+                span_end,
+                resolver.pages_for_span(chunk, span_start, span_end),
+            )
             relations.append(
                 RelationMention(
                     record_id=f"{chunk.record_id}#relation-{emitted}",
@@ -928,7 +950,10 @@ class Gliner2FusedExtractor:
 
 
 def _iter_batches(
-    chunks: Iterable[ChunkRecord], batch_size: int, min_chars: int
+    chunks: Iterable[ChunkRecord],
+    batch_size: int,
+    min_chars: int,
+    resolver: PageIndexResolver,
 ) -> Iterable[list[ChunkRecord]]:
     """Group the (lazy) chunk stream into bounded batches of processable chunks (W9-scaling).
 
@@ -942,6 +967,10 @@ def _iter_batches(
     """
     batch: list[ChunkRecord] = []
     for chunk in chunks:
+        # Observe BEFORE the min_chars drop: a document's page map rides its FIRST chunk (schema
+        # v18) and that chunk is very often the one dropped here, so absorbing only from chunks
+        # that reach the model would lose the map for the whole document.
+        resolver.observe(chunk)
         if len(chunk.content.strip()) < min_chars:
             continue
         batch.append(chunk)
@@ -996,12 +1025,13 @@ def _mention_provenance(
     chunk_prov: Provenance,
     doc_char_start: int,
     doc_char_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
+    """``pages`` is what the :class:`~latence_core.page_index.PageIndexResolver` resolved for the
+    mention's own span; ``None`` (no page map available) degrades to the chunk's inherited range."""
     update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(doc_char_start)
-        update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     return chunk_prov.model_copy(update=update)
 
 
@@ -1010,13 +1040,12 @@ def _relation_provenance(
     tail: EntityMention,
     span_start: int,
     span_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
     base = head.provenance
     update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(span_start)
-        update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     else:
         hp, tp = head.provenance, tail.provenance
         starts = [p for p in (hp.page_start, tp.page_start) if p is not None]

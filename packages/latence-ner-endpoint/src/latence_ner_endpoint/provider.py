@@ -14,9 +14,12 @@ chunk-local offsets, resolved to their TRUE original offsets through the chunk's
 stripped-``content``→original ``offset_map`` (carried since v11) via
 :class:`~latence_core.offsetmap.OffsetIndex` (so a mention resolves to its exact source offset even
 when markdown markup was stripped before it — ADR-0022 corrected, ADR-0031; a pre-v11 chunk degrades
-to the ``char_start + local`` shift), then re-resolved to the source page(s) through the parent's
-page map via :class:`~latence_core.pagemap.PageOffsetIndex` (the S4 round-trip) — byte-for-byte the
-same contract the CPU learned Provider produces, so the output is identical modulo the model.
+to the ``char_start + local`` shift), then re-resolved to the source page(s) through the
+document-scoped :class:`~latence_core.page_index.PageIndexResolver` (the S4 round-trip) —
+byte-for-byte the same contract the CPU learned Provider produces, so the output is identical modulo
+the model. ONE resolver serves the whole ``extract`` call, so a chunk that carries no page map
+(every non-first chunk since schema v18) still resolves from the map its document's first chunk
+carried, and a document's index is built once rather than once per chunk.
 
 Fault tolerance is the ported endpoint machinery (:mod:`latence_core.endpoint`): a shared
 reference-counted :class:`~latence_core.endpoint.EndpointLease` means N Stages against one served
@@ -40,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import EntityMention
 from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
@@ -154,7 +157,17 @@ class EndpointEntityExtractor:
     # -- extraction ---------------------------------------------------------
 
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
-        chunk_list = [c for c in chunks if len(c.content.strip()) >= self._min_chars]
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's index
+        # is built on the first chunk of it we see and reused for every later chunk. Observe
+        # BEFORE the min_chars filter — the map rides a document's FIRST chunk (schema v18) and
+        # that chunk is very often the one the filter drops, which would lose the map for the
+        # whole document.
+        resolver = PageIndexResolver()
+        chunk_list: list[ChunkRecord] = []
+        for chunk in chunks:
+            resolver.observe(chunk)
+            if len(chunk.content.strip()) >= self._min_chars:
+                chunk_list.append(chunk)
         if not chunk_list:
             # Every chunk empty/near-empty (or no chunks): no mentions, no endpoint call (S4 AC).
             return
@@ -165,11 +178,13 @@ class EndpointEntityExtractor:
         self._lease.acquire()
         try:
             for chunk in chunk_list:
-                yield from self._extract_one(client, chunk)
+                yield from self._extract_one(client, chunk, resolver)
         finally:
             self._lease.release()
 
-    def _extract_one(self, client: Any, chunk: ChunkRecord) -> Iterator[EntityMention]:
+    def _extract_one(
+        self, client: Any, chunk: ChunkRecord, resolver: PageIndexResolver
+    ) -> Iterator[EntityMention]:
         raw = self._call_model(client, chunk.content)
         # Deterministic ordering: by chunk-local start, then label.
         raw.sort(key=lambda e: (int(e.get("start", 0)), str(e.get("label", ""))))
@@ -178,7 +193,6 @@ class EndpointEntityExtractor:
         # lower bound — ADR-0031); a pre-v11 chunk with no map degrades to that shift.
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
         emitted = 0
         for ent in raw:
             resolved = self._valid_span(ent, chunk.content)
@@ -194,7 +208,7 @@ class EndpointEntityExtractor:
                 chunk.provenance,
                 doc_char_start=doc_char_start,
                 doc_char_end=doc_char_end,
-                page_index=page_index,
+                pages=resolver.pages_for_span(chunk, doc_char_start, doc_char_end),
             )
             yield EntityMention(
                 record_id=f"{chunk.record_id}#entity-{emitted}",
@@ -284,19 +298,19 @@ class EndpointEntityExtractor:
         chunk_prov: Provenance,
         doc_char_start: int,
         doc_char_end: int,
-        page_index: PageOffsetIndex | None,
+        pages: tuple[int, int] | None,
     ) -> Provenance:
         """Provenance for a mention: chunk lineage + the mention's own span AND page.
 
         Identical to the CPU learned Provider: the char span is narrowed to the mention's own
-        ``[start, end)`` in the parent document's assembled markdown; the page span is re-resolved
-        from that offset through the parent's page map (so a mention on a later page cites its own
-        page), degrading to the chunk's inherited page range when no page map is present.
+        ``[start, end)`` in the parent document's assembled markdown; ``pages`` is what the
+        :class:`~latence_core.page_index.PageIndexResolver` resolved for that span (so a mention on
+        a later page cites its own page), degrading to the chunk's inherited page range when no page
+        map is available for the document.
         """
         update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-        if page_index is not None:
-            update["page_start"] = page_index.page_for_offset(doc_char_start)
-            update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+        if pages is not None:
+            update["page_start"], update["page_end"] = pages
         return chunk_prov.model_copy(update=update)
 
 
