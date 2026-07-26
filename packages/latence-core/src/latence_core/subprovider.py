@@ -63,6 +63,7 @@ from latence_core.capability import (
     FdeConverter,
     GraphFeatureComputer,
     MultiVectorEmbedder,
+    Parser,
     SparseEmbedder,
     Tokenizer,
     protocol_members,
@@ -148,6 +149,10 @@ class SubProviderRef:
 # envspec walker and the GPU placement probe all read it, so a new slot is declared once instead
 # of being added to six hard-coded tuples (and forgotten in four of them).
 _SLOTS: dict[CapabilityKind, tuple[SubProviderSlot, ...]] = {
+    # W5-universal-parser: ``parser.render`` rasterises any file to page images and delegates the
+    # page OCR to a nested Parser (``stacks/universal-parse.yaml`` wires ``parser.lighton`` there).
+    # It is the GPU-gated node of that stack and, before this declaration, no static tool saw it.
+    CapabilityKind.PARSE: (SubProviderSlot("ocr", Parser),),
     # ADR-0017 (dense embedder) + ADR-0049/0050 (the index-time retrieval signals) + #164 (BM25).
     CapabilityKind.EXPORT: (
         SubProviderSlot("embedder", Embedder),
@@ -176,6 +181,7 @@ _FLAG_REQUIRES: dict[CapabilityKind, dict[str, tuple[str, ...]]] = {
 # The human label that prefixes a slot's error messages, per Capability. Kept beside the slot
 # declaration so the message an operator sees names the Stage kind they wrote, not this module.
 _OWNER_LABEL: dict[CapabilityKind, str] = {
+    CapabilityKind.PARSE: "Parse config",
     CapabilityKind.EXPORT: "Export config",
     CapabilityKind.GRAPH_ASSEMBLY: "Graph Assembly config",
     CapabilityKind.TYPE_CONSOLIDATION: "Type Consolidation config",
