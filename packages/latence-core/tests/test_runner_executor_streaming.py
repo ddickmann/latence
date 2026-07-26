@@ -14,6 +14,8 @@ These tests pin the invariants the streamed executor must keep; each would fail 
 
 * the doc-level Stages' outputs are ABSENT from the retained dict by the time an accumulator
   runs — the release actually happens (``test_doc_level_outputs_released_before_accumulators``);
+  since C6 the default executor never retains a Stage's output at ALL (the Provider's records
+  stream straight into the checkpoint), so this is now the strongest form of the invariant;
 * an accumulator's input is read back from its parents' checkpoints, not the retained dict — the
   wired path is taken (``test_accumulator_input_read_from_checkpoint``);
 * the peak count of simultaneously-retained doc-level records is bounded well below the corpus
@@ -173,7 +175,7 @@ class _SpyRunner(LocalRunner):
         run_id: str,
         incoming: list[StageOutput],
         outputs: dict[str, list[StageOutput]],
-    ) -> list[StageOutput]:
+    ) -> Iterator[StageOutput]:
         if not self._doc_level_names:
             self._doc_level_names = {
                 s.name for s in pipeline.stages if s.capability not in _ACCUMULATOR_KINDS
@@ -272,13 +274,20 @@ def test_retained_doc_level_records_bounded_below_retain_all(tmp_path: Path) -> 
 
     peak_released = released.peak_retained_doc_records
     peak_retained_all = retained.peak_retained_doc_records
-    assert peak_released > 0  # the run does retain the live fan-in transiently
-    # Retaining every Stage's output must peak strictly higher than release (which drops dead +
-    # sink outputs). A comfortable margin so it is not a knife-edge, while still failing hard if
-    # release stops dropping anything.
+    # The retain-all path must actually retain something, otherwise the comparison is vacuous.
+    assert peak_retained_all > 0
+    # Retaining every Stage's output must peak strictly higher than the default path. A
+    # comfortable margin so it is not a knife-edge, while still failing hard if the default path
+    # stops dropping anything.
+    #
+    # Since C6 this is exact rather than merely lower: the default executor streams each Stage's
+    # records from the Provider straight into its checkpoint, so NOTHING is retained and
+    # ``peak_released`` is 0. (Before C6 it was the live DAG fan-in — a transient the earlier
+    # version of this test asserted was ``> 0``. That assertion pinned the implementation, not the
+    # behaviour; dropping to zero is the strictly better outcome it was guarding towards.)
     assert peak_released < peak_retained_all * 0.75, (
-        f"release did not reduce peak retained doc-level records "
-        f"(released={peak_released}, retain-all={peak_retained_all}): the #69 release regressed."
+        f"the default executor did not reduce peak retained doc-level records "
+        f"(default={peak_released}, retain-all={peak_retained_all}): the #69/C6 bound regressed."
     )
 
 
