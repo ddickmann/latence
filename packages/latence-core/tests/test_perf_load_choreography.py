@@ -22,6 +22,7 @@ kwargs a load actually received) — never on a flag saying an effect was reques
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from typing import TYPE_CHECKING, Any
@@ -151,6 +152,28 @@ def fake_torch(monkeypatch: pytest.MonkeyPatch, log: list[str]) -> Iterator[type
     yield torch
 
 
+@pytest.fixture()
+def cores(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Pin the host core count so a ``threads=N`` assertion is about N, not about this machine.
+
+    ``resolve_intra_op_threads`` clamps the requested cap to ``os.cpu_count()``, so an unpinned
+    ``assert "threads=8" in log`` is only true on a host with at least 8 cores: green on the
+    10-core dev box, RED on the 2-4 vCPU ``ubuntu-latest`` runner CI runs the whole suite on. None
+    of the choreography tests are about the machine's core count — they are about the cap value and
+    where in the sequence it lands. Pinning the count high holds the clamp inert so they assert
+    exactly that; :func:`test_the_intra_op_cap_never_exceeds_the_host_core_count` pins it low and
+    puts the clamp itself under test.
+    """
+
+    def _pin(n: int) -> None:
+        monkeypatch.setattr(os, "cpu_count", lambda: n)
+
+    return _pin
+
+
+_MANY_CORES = 64  # the clamp is inert above the cap, so the cap alone is observable
+
+
 def _factory(log: list[str], model: _FakeModel, *, family: str = "gliner") -> Any:
     """A backbone-import factory that records the JIT state AT THE MOMENT OF IMPORT.
 
@@ -184,13 +207,14 @@ _SKIPPED = DeviceDecision(device=None, skipped=True, reason="no CUDA device is a
 
 
 def test_gliner_load_runs_the_whole_sequence_in_order(
-    fake_torch: types.ModuleType, log: list[str]
+    fake_torch: types.ModuleType, log: list[str], cores: Any
 ) -> None:
     """REGRESSION (C4): one call performs all seven steps, in the one order that is correct.
 
     The ordering the deleted AST linter existed to assert, now asserted on OBSERVED EFFECTS. Note
     what a caller supplied: a factory, an id, a config, a decision. Nothing about order.
     """
+    cores(_MANY_CORES)  # the step is "the cap landed here", not "this box has >= 8 cores"
     model = _FakeModel(log)
     out = load_gliner_model(
         _factory(log, model),
@@ -395,7 +419,7 @@ def test_gliner2_on_cuda_resolves_the_native_knobs_and_places(
 
 
 def test_gliner2_caps_intra_op_threads_before_importing_the_backbone(
-    fake_torch: types.ModuleType, log: list[str]
+    fake_torch: types.ModuleType, log: list[str], cores: Any
 ) -> None:
     """REGRESSION (b): the many-core oversubscription guard applies to the gliner2 family too.
 
@@ -404,6 +428,7 @@ def test_gliner2_caps_intra_op_threads_before_importing_the_backbone(
     process-wide torch thread pool: protecting one of the two protects neither. The cap must also
     land BEFORE the backbone import, because capping threads is what first imports torch.
     """
+    cores(_MANY_CORES)  # the many-core host this guard exists FOR — and it makes the 8 mean 8
     model = _FakeModel(log)
     load_gliner2_model(
         _factory(log, model, family="gliner2"),
@@ -416,10 +441,32 @@ def test_gliner2_caps_intra_op_threads_before_importing_the_backbone(
     assert log.index("threads=8") < log.index("import:gliner2:jit_live=False")
 
 
+def test_the_intra_op_cap_never_exceeds_the_host_core_count(
+    fake_torch: types.ModuleType, log: list[str], cores: Any
+) -> None:
+    """The other half of the contract, and the reason the two tests above pin the count.
+
+    Asking torch for 8 intra-op threads on a 4-vCPU box would itself be the oversubscription this
+    guard exists to prevent, so the clamp is behaviour worth observing through the seam — not a
+    detail to be worked around by restating ``min(8, os.cpu_count())`` back at the implementation.
+    """
+    cores(4)  # a small host — the GitHub ``ubuntu-latest`` runner shape
+    load_gliner2_model(
+        _factory(log, _FakeModel(log), family="gliner2"),
+        "acme/gliner2",
+        {},
+        _CPU,
+        provider_name="test.gliner2",
+    )
+    assert "threads=4" in log
+    assert "threads=8" not in log
+
+
 def test_intra_op_thread_cap_is_configurable_and_can_be_opted_out(
-    fake_torch: types.ModuleType, log: list[str]
+    fake_torch: types.ModuleType, log: list[str], cores: Any
 ) -> None:
     """``intra_op_threads`` still belongs to the Provider's config — only the SEQUENCING moved."""
+    cores(_MANY_CORES)
     load_gliner2_model(
         _factory(log, _FakeModel(log), family="gliner2"),
         "acme/gliner2",
