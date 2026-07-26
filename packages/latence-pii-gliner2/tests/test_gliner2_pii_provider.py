@@ -53,12 +53,14 @@ def _chunk(
     document_record_id: str = "doc1",
     index: int = 0,
     induced_labels: InducedLabels | None = None,
+    char_start: int = 0,
 ) -> ChunkRecord:
     """A ChunkRecord — Redaction scans this chunk's ``content`` (W16, ADR-0042).
 
-    Spans are chunk-local (offsets into ``content``); an identity ``offset_map`` + optional
-    ``page_map`` let a span still resolve to its source page (the shared chunk page-resolution seam).
-    ``induced_labels`` carries the corpus-induced pii_types the W12 effective-label union reads.
+    Spans are chunk-local (offsets into ``content``); an ``offset_map`` anchored at ``char_start``
+    + optional ``page_map`` let a span still resolve to its source page (the shared chunk
+    page-resolution seam). ``induced_labels`` carries the corpus-induced pii_types the W12
+    effective-label union reads.
     """
     prov = Provenance(
         source_uri="file:///c/a.txt",
@@ -66,8 +68,8 @@ def _chunk(
         file_type="txt",
         file_size=1000,
         document_id="sha256:doc1",
-        char_start=0,
-        char_end=len(text),
+        char_start=char_start,
+        char_end=char_start + len(text),
         page_start=1,
         page_end=1,
     )
@@ -81,7 +83,9 @@ def _chunk(
         token_count=max(len(text.split()), 0),
         page_map=page_map,
         induced_labels=induced_labels,
-        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text))
+        offset_map=OffsetMap(
+            segments=[OffsetSegment(local_start=0, doc_start=char_start)], length=len(text)
+        )
         if text
         else None,
     )
@@ -415,6 +419,39 @@ def test_span_page_resolves_through_page_map(fake_gliner2: type[_FakeGLiNER2]) -
         iter(Gliner2PIIRedactor(_config()).redact([_chunk(text, page_map=assembly.page_map)]))
     )
     assert rec.pii_spans[0].page_start == 2
+
+
+def test_span_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+    fake_gliner2: type[_FakeGLiNER2],
+) -> None:
+    """REGRESSION (audit R1): the ONE resolver must span the whole ``redact`` call.
+
+    Schema v18 stamps a document's ``page_map`` on its **first** chunk only, so a Provider that
+    lets :func:`plan_chunk_redaction` mint a throwaway ``PageIndexResolver`` per chunk has no map
+    for chunk 1..N and every PIISpan there is emitted with ``page_start=None`` — provenance lost
+    for ~every chunk of every real document (ADR-0021/0031). One resolver per call absorbs the map
+    from chunk 0 and resolves the rest.
+    """
+    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@acme.com."])
+    text = assembly.text
+    boundary = assembly.page_map.pages[1].char_start  # doc offset where page 2 starts
+    head, tail = text[:boundary], text[boundary:]
+    e_local = tail.index("alice@acme.com")
+    fake_gliner2.per_text = {
+        head: [],
+        tail: [{"start": e_local, "end": e_local + 14, "label": "email", "confidence": 0.9}],
+    }
+    chunks = [
+        # v18 carriage: the map rides chunk 0 ONLY.
+        _chunk(head, page_map=assembly.page_map, record_id="doc1#chunk:0", index=0),
+        _chunk(tail, record_id="doc1#chunk:1", index=1, char_start=boundary),
+    ]
+    recs = list(Gliner2PIIRedactor(_config()).redact(chunks))
+    span = recs[1].pii_spans[0]
+    assert (span.page_start, span.page_end) == (2, 2), (
+        "a PII span on a non-first v18 chunk must resolve its OWN source page through the "
+        "document-scoped resolver, not degrade to None"
+    )
 
 
 def test_deterministic_span_order(fake_gliner2: type[_FakeGLiNER2]) -> None:

@@ -52,6 +52,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
@@ -305,27 +306,38 @@ class PresidioRedactor(AdapterBase):
         ``batch=True``) so the corpus is consumed one bounded batch at a time (memory O(batch_size),
         never the whole corpus) and emitted in first-seen order. The analyzer is loaded once on the
         first chunk that needs it (a batch of only clean/skipped chunks never loads spaCy). A
-        chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map +
-        page_map (ADR-0031/0042).
+        chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map + the
+        document-scoped :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042).
+
+        ONE resolver covers the whole call — across batches: since schema v18 a document's
+        ``page_map`` rides its FIRST chunk only, so a per-chunk resolver would resolve pages for
+        that chunk and emit ``page_start=None`` on every later one.
         """
         analyzer_state: dict[str, Any] = {"engine": None}
+        resolver = PageIndexResolver()
 
         def run_batch(batch: list[ChunkRecord]) -> list[ChunkRecord]:
-            return [self._redact_chunk(chunk, analyzer_state) for chunk in batch]
+            return [self._redact_chunk(chunk, analyzer_state, resolver) for chunk in batch]
 
         yield from self.batched(chunks, run_batch)
 
     def _redact_chunk(
-        self, chunk: ChunkRecord, analyzer_state: dict[str, Any]
+        self,
+        chunk: ChunkRecord,
+        analyzer_state: dict[str, Any],
+        resolver: PageIndexResolver,
     ) -> ChunkRecord:
         # The shared plan owns policy resolution + the §4 no-op floor (the Provider's own
-        # _detector_types + _sensitive_set feed it) + the chunk offset/page maps.
+        # _detector_types + _sensitive_set feed it) + the chunk offset map. ``resolver`` is the
+        # call-scoped page resolver: planning runs for EVERY chunk, so it absorbs the document's
+        # map from its first chunk and every later chunk resolves its own source page.
         plan = plan_chunk_redaction(
             chunk,
             self._policy,
             detector_types=self._detector_types,
             sensitive_set=self._sensitive_set,
             min_chars=self._min_chars,
+            resolver=resolver,
         )
         accepted: list[tuple[int, int, str, str, str, float]] = []
         if plan.needs_detection:

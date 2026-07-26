@@ -25,6 +25,7 @@ from latence_core.contracts import (
     Provenance,
     RedactionAction,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.redaction_policy import (
     FINANCIAL_FLOOR_PATTERNS,
     RedactionPolicy,
@@ -71,7 +72,12 @@ def _plan(chunk: ChunkRecord, policy: RedactionPolicy) -> object:
     # detector_types EMPTY + sensitive_set EMPTY models the pre-W18 gliner-family call: a backend
     # whose configured coverage is nothing. needs_detection stays True (not skipped, not near-empty).
     return plan_chunk_redaction(
-        chunk, policy, detector_types=set(), sensitive_set=set(), min_chars=1
+        chunk,
+        policy,
+        detector_types=set(),
+        sensitive_set=set(),
+        min_chars=1,
+        resolver=PageIndexResolver(),
     )
 
 
@@ -121,7 +127,12 @@ def test_floor_respects_explicit_skip() -> None:
     chunk = _chunk(_TEXT, sensitivity="confidential")
     policy = RedactionPolicy({"confidential": {"skip": True}}, RedactionAction.MASK)
     plan = plan_chunk_redaction(
-        chunk, policy, detector_types=set(), sensitive_set=set(), min_chars=1
+        chunk,
+        policy,
+        detector_types=set(),
+        sensitive_set=set(),
+        min_chars=1,
+        resolver=PageIndexResolver(),
     )
     rec = finalize_redacted_chunk(chunk, plan, accepted=[], salt="s")
     assert rec.pii_spans == []

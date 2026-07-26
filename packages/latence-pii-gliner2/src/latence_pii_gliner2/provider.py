@@ -63,6 +63,7 @@ from latence_core.induced import (
     LabelSlot,
     effective_labels,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.perf import (
     empty_cuda_cache,
@@ -653,8 +654,14 @@ class Gliner2PIIRedactor(AdapterBase):
         Each chunk's ``content`` (≤ the model window) is scanned in full — no truncation — and the
         chunk is re-emitted with ``masked_content`` + ``pii_spans`` set (``content`` UNCHANGED).
         Chunks are threaded 1:1 in first-seen order; a chunk-local span resolves to its ORIGINAL
-        source page through the chunk's offset_map + page_map (ADR-0031/0042).
+        source page through the chunk's offset_map + the document-scoped
+        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042).
+
+        ONE resolver covers the whole call: since schema v18 a document's ``page_map`` rides its
+        FIRST chunk only, so a per-chunk resolver would resolve pages for that chunk and emit
+        ``page_start=None`` on every later one.
         """
+        resolver = PageIndexResolver()
         buffer: list[_PendingChunk] = []
 
         def flush() -> Iterator[ChunkRecord]:
@@ -662,18 +669,20 @@ class Gliner2PIIRedactor(AdapterBase):
             buffer.clear()
 
         for chunk in chunks:
-            buffer.append(self._prepare(chunk))
+            buffer.append(self._prepare(chunk, resolver))
             if len(buffer) >= self.batch_size():
                 yield from flush()
         yield from flush()
 
-    def _prepare(self, chunk: ChunkRecord) -> _PendingChunk:
+    def _prepare(self, chunk: ChunkRecord, resolver: PageIndexResolver) -> _PendingChunk:
         """Resolve everything a chunk needs BEFORE the (possibly batched) model call (W7/W16).
 
         The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy resolution, the
-        near-empty/skip decision, the chunk offset/page maps) and the effective label sets are
-        per-chunk and model-independent, so they are computed here up front; the flush then issues
-        one batched model call per label group over the detect-needing chunks.
+        near-empty/skip decision, the chunk offset map) and the effective label sets are per-chunk
+        and model-independent, so they are computed here up front; the flush then issues one
+        batched model call per label group over the detect-needing chunks. ``resolver`` is the
+        call-scoped page resolver — planning runs for EVERY chunk (before the skip decision), so
+        handing it in here is what absorbs the document's map from its first chunk.
 
         The T2 rule, both halves, in one place:
 
@@ -693,6 +702,7 @@ class Gliner2PIIRedactor(AdapterBase):
             detector_types=set(self._labels),
             sensitive_set=set(),
             min_chars=self._min_chars,
+            resolver=resolver,
         )
         # W12 label-source seam (ADR-0038): UNION the config PII floor with any pii_types the
         # OPTIONAL schema_induction Stage induced for this chunk (``induced_labels``), deduped +

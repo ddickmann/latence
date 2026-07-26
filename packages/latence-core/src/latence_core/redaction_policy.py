@@ -222,7 +222,7 @@ def plan_chunk_redaction(
     detector_types: set[str],
     sensitive_set: set[str],
     min_chars: int,
-    resolver: PageIndexResolver | None = None,
+    resolver: PageIndexResolver,
 ) -> ChunkRedactionPlan:
     """Resolve everything a chunk needs BEFORE detection (policy, no-op floor, page/offset maps).
 
@@ -235,15 +235,15 @@ def plan_chunk_redaction(
     ``resolver``, the DOCUMENT-scoped :class:`~latence_core.page_index.PageIndexResolver`, so a
     chunk-content span resolves to its ORIGINAL source page.
 
-    **Pass a resolver that outlives the chunk loop.** A Provider redacting a stream of chunks
-    should build ONE :class:`~latence_core.page_index.PageIndexResolver` per ``redact`` call and
-    hand it to every ``plan_chunk_redaction``: since v18 a document's page map rides its FIRST
-    chunk only, so a per-chunk resolver can only resolve pages for that first chunk. Omitting it
-    creates a throwaway resolver — correct, and byte-identical on a pre-v18 stream where every
-    chunk carried the map, but it forfeits page resolution on later chunks of a v18 stream.
+    **``resolver`` is REQUIRED, and must outlive the chunk loop.** A Redactor builds ONE
+    :class:`~latence_core.page_index.PageIndexResolver` per ``redact`` call and hands it to every
+    ``plan_chunk_redaction``: since v18 a document's page map rides its FIRST chunk only, so a
+    resolver that does not span the whole call resolves pages for that chunk and emits
+    ``page_start=None`` on every later one. It has no default *because* it once had one — all
+    three shipped learned Redactors omitted it, and the resulting provenance loss (ADR-0021/0031)
+    was silent. A missing resolver is now a ``TypeError`` at the call site, not a null page.
     """
     from latence_core.offsetmap import OffsetIndex
-    from latence_core.page_index import PageIndexResolver
 
     sensitivity = chunk.classification.sensitivity
     action, allowed, skip, policy_name = policy.resolve(sensitivity)
@@ -254,10 +254,9 @@ def plan_chunk_redaction(
     disabled_for_sensitive = not would_run_detectors and sensitivity in sensitive_set
     offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
     base_char_start = chunk.provenance.char_start or 0
-    page_resolver = resolver if resolver is not None else PageIndexResolver()
     # Planning happens for EVERY chunk (before detection, before the skip decision), which
     # makes it the one place guaranteed to see the chunk that carries the document's map.
-    page_resolver.observe(chunk)
+    resolver.observe(chunk)
     return ChunkRedactionPlan(
         action=action,
         allowed=allowed,
@@ -265,7 +264,7 @@ def plan_chunk_redaction(
         needs_detection=needs_detection,
         disabled_for_sensitive=disabled_for_sensitive,
         chunk=chunk,
-        resolver=page_resolver,
+        resolver=resolver,
         offset_index=offset_index,
         base_char_start=base_char_start,
     )

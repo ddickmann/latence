@@ -33,6 +33,7 @@ from latence_core.contracts import (
     RedactionAction,
     RedactionRecord,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.pipeline import Pipeline
 from latence_core.quality import QualityReport
 from latence_core.redaction_policy import (
@@ -321,6 +322,7 @@ class _WindowedRedactor:
         ]
 
     def redact(self, chunks: Any) -> Any:
+        resolver = PageIndexResolver()  # ONE per call — the map rides chunk 0 only (v18)
         for chunk in chunks:
             plan = plan_chunk_redaction(
                 chunk,
@@ -328,6 +330,7 @@ class _WindowedRedactor:
                 detector_types={"secret"},
                 sensitive_set=set(),
                 min_chars=1,
+                resolver=resolver,
             )
             accepted = self._accepted(chunk.content) if plan.needs_detection else []
             yield finalize_redacted_chunk(chunk, plan, accepted, "salt")

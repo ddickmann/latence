@@ -81,6 +81,7 @@ from latence_core.goldset import (
     score_entities,
     score_relations,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind
 from latence_core.quality import (
@@ -674,14 +675,28 @@ class _ChunkAggregator:
 class _DriftAggregator:
     """Corpus-level Provenance-integrity drift roll-up across the chunk offsets (S10).
 
-    Audits every :class:`ChunkRecord` that carries its parent document's page map by resolving the
-    chunk's ``[char_start, char_end)`` endpoints through a :class:`PageOffsetIndex` and accumulating
-    the fuzzy recoveries — a finer drift signal than the Parse-only page-boundary audit. Only
-    ChunkRecords are audited: mentions, relations, and redaction spans inherit the chunk offsets the
-    Chunk Stage already validated against the page map, so they carry no independent offset->page
-    drift. Returns ``None`` when there were no page-map-bearing chunk records to audit (a
-    Parse-only or chunk-free run), so a pipeline with nothing to audit reports no drift section
-    rather than a misleading all-zero one.
+    Audits **every** :class:`ChunkRecord` whose parent document has a page map available, by
+    resolving the chunk's ``[char_start, char_end)`` endpoints through the run's
+    :class:`~latence_core.page_index.PageIndexResolver` and accumulating the fuzzy recoveries — a
+    finer drift signal than the Parse-only page-boundary audit. Only ChunkRecords are audited:
+    mentions, relations, and redaction spans inherit the chunk offsets the Chunk Stage already
+    validated against the page map, so they carry no independent offset->page drift. Returns
+    ``None`` when there was no page-map-backed chunk record to audit (a Parse-only or chunk-free
+    run, or a corpus whose documents all failed to parse), so a pipeline with nothing to audit
+    reports no drift section rather than a misleading all-zero one.
+
+    **Why the resolver and not a per-record index.** This audit used to gate on
+    ``record.page_map is not None`` and build a throwaway :class:`PageOffsetIndex` per chunk. That
+    read the map off the record — precisely what C1 (schema v18) stopped guaranteeing: the map now
+    rides a document's FIRST chunk only, so the gate silently narrowed the corpus-integrity audit
+    to one chunk per document (~1/N coverage) while still reporting a confident ``clean``. Drift is
+    most likely at LARGE offsets, i.e. in exactly the later chunks the gate dropped. The resolver
+    is document-keyed and memoised, so every chunk of a document resolves against that document's
+    map whichever record carried it, and its corpus-level
+    :attr:`~latence_core.page_index.PageIndexResolver.diagnostics` roll-up — which exists for this
+    section — replaces the hand-summed per-index tallies. Every chunk is ``observe``d before it is
+    judged interesting, per the resolver's contract: a document's map-bearing first chunk may be
+    the one with no char span.
 
     Subscribes to the same chunk stream as :class:`_ChunkAggregator`; the builder decodes it once
     and hands each record to both.
@@ -691,10 +706,8 @@ class _DriftAggregator:
     kinds: ClassVar[tuple[CapabilityKind, ...]] = (CapabilityKind.CHUNK,)
 
     def __init__(self) -> None:
+        self._resolver = PageIndexResolver()
         self._audited = 0
-        self._resolutions = 0
-        self._recovered = 0
-        self._max_drift = 0
 
     @classmethod
     def for_run(cls, context: QualityRunContext) -> _DriftAggregator | None:
@@ -707,27 +720,28 @@ class _DriftAggregator:
 
     def audit(self, record: Record | StageOutput) -> None:
         """Fold one record into the drift tally (the Stage is irrelevant — see the compat shim)."""
-        if not isinstance(record, ChunkRecord) or record.page_map is None:
+        if not isinstance(record, ChunkRecord):
             return
+        # Teach the resolver first, always: the map rides the document's first chunk, which is
+        # often the least interesting one, and skipping it would degrade every later chunk.
+        self._resolver.observe(record)
         prov = record.provenance
         if prov.char_start is None or prov.char_end is None:
             return
-        index = PageOffsetIndex(record.page_map)
-        index.page_for_offset(prov.char_start)
-        index.page_for_offset(max(prov.char_end - 1, prov.char_start))
-        diag = index.diagnostics
+        if self._resolver.pages_for_span(record, prov.char_start, prov.char_end) is None:
+            # No page map for this chunk's document (an unparsed parent) — nothing to audit it
+            # against. Counted as an unresolved lookup by the resolver, never a silent clean.
+            return
         self._audited += 1
-        self._resolutions += diag.resolutions
-        self._recovered += diag.recovered
-        self._max_drift = max(self._max_drift, diag.max_drift_chars)
 
     def finish(self) -> DriftDiagnostics | None:
         if self._audited == 0:
             return None
+        diag = self._resolver.diagnostics
         return DriftDiagnostics(
-            resolutions=self._resolutions,
-            recovered=self._recovered,
-            max_drift_chars=self._max_drift,
+            resolutions=diag.resolutions,
+            recovered=diag.recovered,
+            max_drift_chars=diag.max_drift_chars,
             records_audited=self._audited,
         )
 

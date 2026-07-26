@@ -44,11 +44,15 @@ def _chunk(
     *,
     sensitivity: str = "public",
     page_map: PageMap | None = None,
+    record_id: str = "doc1#chunk:0",
+    index: int = 0,
+    char_start: int = 0,
 ) -> ChunkRecord:
     """A ChunkRecord — Redaction scans this chunk's ``content`` (W16, ADR-0042).
 
-    Spans are chunk-local (offsets into ``content``); an identity ``offset_map`` + optional
-    ``page_map`` let a span still resolve to its source page (the shared chunk page-resolution seam).
+    Spans are chunk-local (offsets into ``content``); an ``offset_map`` anchored at ``char_start``
+    + optional ``page_map`` let a span still resolve to its source page (the shared chunk
+    page-resolution seam).
     """
     prov = Provenance(
         source_uri="file:///c/a.txt",
@@ -56,21 +60,23 @@ def _chunk(
         file_type="txt",
         file_size=1000,
         document_id="sha256:doc1",
-        char_start=0,
-        char_end=len(content),
+        char_start=char_start,
+        char_end=char_start + len(content),
         page_start=1,
         page_end=1,
     )
     return ChunkRecord(
-        record_id="doc1#chunk:0",
+        record_id=record_id,
         document_record_id="doc1",
-        index=0,
+        index=index,
         provenance=prov,
         classification=Classification(language="en", sensitivity=sensitivity),
         content=content,
         token_count=max(len(content.split()), 0),
         page_map=page_map,
-        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(content))
+        offset_map=OffsetMap(
+            segments=[OffsetSegment(local_start=0, doc_start=char_start)], length=len(content)
+        )
         if content
         else None,
     )
@@ -326,6 +332,40 @@ def test_span_page_resolves_through_page_map(fake_presidio: type[_FakeAnalyzerEn
     ]
     rec = next(iter(PresidioRedactor(_config()).redact([_chunk(text, page_map=assembly.page_map)])))
     assert rec.pii_spans[0].page_start == 2
+
+
+def test_span_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+    fake_presidio: type[_FakeAnalyzerEngine],
+) -> None:
+    """REGRESSION (audit R1): the ONE resolver must span the whole ``redact`` call.
+
+    Schema v18 stamps a document's ``page_map`` on its **first** chunk only, so a Provider that
+    lets :func:`plan_chunk_redaction` mint a throwaway ``PageIndexResolver`` per chunk has no map
+    for chunk 1..N and every PIISpan there is emitted with ``page_start=None`` — provenance lost
+    for ~every chunk of every real document (ADR-0021/0031).
+    """
+    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@example.com."])
+    text = assembly.text
+    boundary = assembly.page_map.pages[1].char_start  # doc offset where page 2 starts
+    head, tail = text[:boundary], text[boundary:]
+    e_local = tail.index(_EMAIL)
+    # The fake drops any span running past the analysed text, so only the tail chunk detects it.
+    fake_presidio.spans = [
+        {"entity_type": "EMAIL_ADDRESS", "start": e_local, "end": e_local + len(_EMAIL),
+         "score": 0.9}
+    ]
+    chunks = [
+        # v18 carriage: the map rides chunk 0 ONLY.
+        _chunk(head, page_map=assembly.page_map, record_id="doc1#chunk:0", index=0),
+        _chunk(tail, record_id="doc1#chunk:1", index=1, char_start=boundary),
+    ]
+    recs = list(PresidioRedactor(_config()).redact(chunks))
+    assert recs[0].pii_spans == []
+    span = recs[1].pii_spans[0]
+    assert (span.page_start, span.page_end) == (2, 2), (
+        "a PII span on a non-first v18 chunk must resolve its OWN source page through the "
+        "document-scoped resolver, not degrade to None"
+    )
 
 
 # -- H-C1 sensitive-doc no-op floor (must not regress on the drop-in) ----------

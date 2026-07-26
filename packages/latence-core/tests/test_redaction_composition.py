@@ -42,6 +42,7 @@ from latence_core.contracts import (
     Provenance,
     RedactionAction,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.pipeline import Pipeline
 from latence_core.redaction_policy import (
     RedactionPolicy,
@@ -224,6 +225,7 @@ def _finalize(
         detector_types={"person", "credit_card"},
         sensitive_set=set(),
         min_chars=1,
+        resolver=PageIndexResolver(),
     )
     return finalize_redacted_chunk(chunk, plan, accepted=accepted, salt="s")
 
