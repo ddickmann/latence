@@ -204,11 +204,14 @@ def test_process_still_runs_a_correctly_wired_stack(tmp_path: Path) -> None:
 def test_a_stage_provider_typo_is_named_with_a_suggestion_and_no_corpus_is_staged(
     tmp_path: Path,
 ) -> None:
-    """A one-letter Stage Provider typo is a class-lookup away; it used to cost a whole run.
+    """A one-letter Stage Provider typo used to make the publish gate report **PASS**.
 
-    ``latence stack validate`` previously staged the bundled corpus and executed the pipeline to
-    discover ``chunk.markdow`` — reporting an opaque ``run raised KeyError``. Now it is reported
-    statically, by name, with the intended Provider, and the corpus is never staged.
+    Measured on the pre-change code: ``chunk.markdow`` is not in the registry, so the device
+    pre-flight read it as "provider not installed on this host", skipped it with-flag, transitively
+    dropped everything downstream, and returned a green ``device_honesty`` result. A typo was
+    indistinguishable from an absent GPU package — a false green in the command that gates
+    CI/publish. The near-miss check tells the two apart: a name one edit away from a registered one
+    is a typo (error, everywhere), a name nothing resembles is an absent package (warning).
     """
     stack = _default_stack_dict()
     _stage_of(stack, "chunk")["provider"] = "chunk.markdow"
