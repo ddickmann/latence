@@ -319,11 +319,29 @@ _TRANSFORMERS_VOCAB = 48
 
 
 class _FakeArr:
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, device: str = "cpu") -> None:
         self._data = data
+        self.device = device
 
     def tolist(self) -> Any:
         return self._data
+
+    def to(self, target: Any) -> _FakeArr:
+        """A real torch tensor moves; the fake tracks where it was moved to (see _FakeEncoding)."""
+        return _FakeArr(self._data, str(target))
+
+
+class _FakeEncoding(dict[str, _FakeArr]):
+    """A ``BatchEncoding`` stand-in.
+
+    Faithful in the way the adapter now depends on: ``AutoTokenizer(..., return_tensors="pt")``
+    returns a ``BatchEncoding``, which is a mapping (so ``**encoding`` spreads) AND carries a
+    ``.to(device)`` that moves its tensors. The encoding always comes back on CPU no matter where
+    the model was placed — which is exactly why the adapter has to move it.
+    """
+
+    def to(self, target: Any) -> _FakeEncoding:
+        return _FakeEncoding({key: value.to(target) for key, value in self.items()})
 
 
 def _fake_tok_ids(text: str) -> list[int]:
@@ -350,7 +368,7 @@ class _FakeTokenizer:
         width = max((len(s) for s in seqs), default=0)
         padded = [s + [0] * (width - len(s)) for s in seqs]
         mask = [[1] * len(s) + [0] * (width - len(s)) for s in seqs]
-        return {"input_ids": _FakeArr(padded), "attention_mask": _FakeArr(mask)}
+        return _FakeEncoding({"input_ids": _FakeArr(padded), "attention_mask": _FakeArr(mask)})
 
 
 class _FakeConfig:

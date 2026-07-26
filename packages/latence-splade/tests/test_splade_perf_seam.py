@@ -20,6 +20,7 @@ which torch context manager the forward actually entered.
 
 from __future__ import annotations
 
+import math
 import sys
 import types
 from typing import Any
@@ -163,3 +164,98 @@ def test_no_device_decision_keeps_the_pre_existing_no_placement_behaviour(
     model = TransformersSpladeModel("acme/splade")
     model._load()  # noqa: SLF001
     assert model._model.device == "cpu"  # noqa: SLF001
+
+
+# --- The other half of placement: the ENCODING has to follow the model -----------------------
+#
+# ``_FakeMaskedLM`` above ignores the device of what it is called with, so it can prove the model
+# MOVED but never that the forward is *runnable* afterwards. Torch's real contract is that a
+# forward mixing a cuda module with cpu inputs raises ``RuntimeError: Expected all tensors to be on
+# the same device``. The doubles below encode exactly that contract: a tensor carries a device and
+# a ``.to``; the encoding is a ``BatchEncoding``-shaped mapping that moves its tensors; and the
+# model REFUSES a forward whose inputs are not resident where it is.
+
+
+class _DeviceArr(_Arr):
+    """A tensor double that knows where it lives — ``.to`` returns a moved copy, like torch."""
+
+    def __init__(self, rows: Any, device: str = "cpu") -> None:
+        super().__init__(rows)
+        self.device = device
+
+    def to(self, target: Any) -> _DeviceArr:
+        return _DeviceArr(self._rows, str(target))
+
+
+class _Encoding(dict[str, Any]):
+    """A ``BatchEncoding`` double: a mapping (so ``**encoding`` works) that can move its tensors."""
+
+    def to(self, target: Any) -> _Encoding:
+        return _Encoding({key: value.to(target) for key, value in self.items()})
+
+
+class _DeviceStrictMaskedLM(_FakeMaskedLM):
+    """Torch's device contract: a forward over inputs resident elsewhere is a ``RuntimeError``."""
+
+    def __call__(self, **kwargs: Any) -> _Output:
+        for name, tensor in kwargs.items():
+            resident = getattr(tensor, "device", "cpu")
+            if str(resident).split(":", 1)[0] != str(self.device).split(":", 1)[0]:
+                msg = (
+                    f"Expected all tensors to be on the same device, but got {name} is on "
+                    f"{resident}, different from other tensors on {self.device}"
+                )
+                raise RuntimeError(msg)
+        return _Output(_Arr([[[math.e - 1.0] * 16]]))
+
+
+class _DeviceStrictTokenizer(_FakeTokenizer):
+    """A real tokenizer returns CPU tensors regardless of where the model was placed."""
+
+    def __call__(self, texts: Any, **kwargs: Any) -> Any:
+        if kwargs.get("return_tensors") != "pt":
+            return {"input_ids": [1]}
+        return _Encoding(
+            {"input_ids": _DeviceArr([[1]]), "attention_mask": _DeviceArr([[1]])}
+        )
+
+
+@pytest.fixture()
+def device_strict_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = types.ModuleType("transformers")
+    module.AutoTokenizer = _DeviceStrictTokenizer  # type: ignore[attr-defined]
+    module.AutoModelForMaskedLM = _DeviceStrictMaskedLM  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", module)
+
+
+def test_splade_moves_the_encoding_onto_the_device_it_placed_the_model_on(
+    device_strict_transformers: None,
+) -> None:
+    """REGRESSION: placing the model without moving the encoding breaks every CUDA host.
+
+    The tokenizer hands back CPU tensors no matter where the model was placed. With the model on
+    ``cuda`` and the encoding left on ``cpu``, torch raises ``RuntimeError: Expected all tensors to
+    be on the same device`` — which this adapter maps to a ``ProviderError`` and the Export's
+    sparse-embedding stage fails outright. Before device placement existed the model stayed on CPU
+    and the forward succeeded, so this is a *new* break of a provider that used to work (slowly).
+    """
+    model = TransformersSpladeModel("acme/splade", device=_CUDA)
+
+    weights = model.term_weights(["hello"])
+
+    assert model._model.device == "cuda"  # noqa: SLF001 - the model really was placed
+    assert weights == [dict.fromkeys(range(16), 1.0)], (
+        "the SPLADE forward must run with the encoding resident on the same device as the model"
+    )
+
+
+def test_splade_encoding_stays_on_cpu_when_no_device_was_resolved(
+    device_strict_transformers: None,
+) -> None:
+    """The no-placement path is unchanged: nothing moves, and the forward still runs."""
+    model = TransformersSpladeModel("acme/splade")
+
+    weights = model.term_weights(["hello"])
+
+    assert model._model.device == "cpu"  # noqa: SLF001
+    assert weights == [dict.fromkeys(range(16), 1.0)]

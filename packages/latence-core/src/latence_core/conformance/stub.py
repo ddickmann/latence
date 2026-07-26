@@ -531,13 +531,31 @@ def _splade_token_ids(text: str) -> list[int]:
 
 
 class _StubArray:
-    """A minimal stand-in for a torch tensor: the only surface the adapter uses is ``.tolist()``."""
+    """A minimal stand-in for a torch tensor: ``.tolist()``, plus a device it can be moved to."""
 
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, device: str = "cpu") -> None:
         self._data = data
+        self.device = device
 
     def tolist(self) -> Any:
         return self._data
+
+    def to(self, target: Any) -> _StubArray:
+        return _StubArray(self._data, str(target))
+
+
+class _StubBatchEncoding(dict[str, _StubArray]):
+    """A ``BatchEncoding`` stand-in: a mapping (``**encoding`` spreads) that can move its tensors.
+
+    ``AutoTokenizer(..., return_tensors="pt")`` returns a ``BatchEncoding``, which always comes back
+    on **cpu** regardless of where the model was placed and carries a ``.to(device)`` for exactly
+    that reason. A stub that is a bare ``dict`` is *less capable* than the dependency it stands in
+    for, which would make the adapter's encoding placement fail against the stub rather than
+    against a real defect.
+    """
+
+    def to(self, target: Any) -> _StubBatchEncoding:
+        return _StubBatchEncoding({key: value.to(target) for key, value in self.items()})
 
 
 class _StubSpladeTokenizer:
@@ -563,7 +581,9 @@ class _StubSpladeTokenizer:
         width = max((len(s) for s in seqs), default=0)
         padded = [s + [0] * (width - len(s)) for s in seqs]
         mask = [[1] * len(s) + [0] * (width - len(s)) for s in seqs]
-        return {"input_ids": _StubArray(padded), "attention_mask": _StubArray(mask)}
+        return _StubBatchEncoding(
+            {"input_ids": _StubArray(padded), "attention_mask": _StubArray(mask)}
+        )
 
 
 class _StubSpladeConfig:

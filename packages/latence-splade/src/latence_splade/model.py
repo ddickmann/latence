@@ -239,6 +239,14 @@ class TransformersSpladeModel:
                 max_length=self._max_length,
                 return_tensors="pt",
             )
+            # Placement has TWO halves. ``_load`` moved the model; the tokenizer does not know
+            # about that and always returns CPU tensors, so the encoding has to follow it or the
+            # forward mixes a cuda module with cpu inputs and torch raises. Same two lines as the
+            # sibling transformers adapters (``parser.lighton``/``parser.glm``), keyed off the same
+            # resolved device the load placed on; ``None`` (no device resolved) moves nothing.
+            device = self._device.device
+            if device is not None:
+                encoding = encoding.to(device)
             output = self._forward(encoding)
             logits = output.logits.tolist()
             attention_mask = encoding["attention_mask"].tolist()
