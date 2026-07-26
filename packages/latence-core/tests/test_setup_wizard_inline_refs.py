@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from _setup_stack import try_stage
+from _setup_stack import stage, try_stage
 from latence_core.contracts import ChunkRecord, Classification, Provenance
 from latence_core.setup import SetupAnswers, build_stack_config, detect_inline_family
 from latence_core.setup.wizard import PROFILE_LITE, PROFILE_SOTA
@@ -141,8 +141,8 @@ def test_sota_pipeline_omits_inline_refs_when_no_family(tmp_path: Path) -> None:
         _answers(_plain_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, inline_refs=None)
     )
     assert try_stage(text, "inline_refs") is None
-    assert try_stage(text, "consolidate_types").depends_on == ["extract"]
-    assert try_stage(text, "disambiguate").depends_on == ["consolidate_types"]
+    assert stage(text, "consolidate_types").depends_on == ["extract"]
+    assert stage(text, "disambiguate").depends_on == ["consolidate_types"]
 
 
 def test_lite_profile_never_wires_inline_refs(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_emitted_config_recovers_inline_body_citations(tmp_path: Path) -> None:
     text = build_stack_config(
         _answers(_rfc_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, inline_refs=config)
     )
-    emitted = try_stage(text, "inline_refs").config
+    emitted = stage(text, "inline_refs").config
 
     provider = InlineReferenceExtractor(dict(emitted))
     chunks = [

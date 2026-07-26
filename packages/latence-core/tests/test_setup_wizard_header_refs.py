@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from _setup_stack import try_stage
+from _setup_stack import stage, try_stage
 from latence_core.contracts import ChunkRecord, Classification, Provenance
 from latence_core.setup import SetupAnswers, build_stack_config, detect_header_family
 from latence_core.setup.wizard import PROFILE_LITE, PROFILE_SOTA
@@ -147,8 +147,8 @@ def test_sota_pipeline_omits_header_refs_when_no_family(tmp_path: Path) -> None:
     off-by-default, byte-identical-wiring invariant)."""
     text = build_stack_config(_answers(_plain_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, header_refs=None))
     assert try_stage(text, "header_refs") is None
-    assert try_stage(text, "consolidate_types").depends_on == ["extract"]
-    assert try_stage(text, "disambiguate").depends_on == ["consolidate_types"]
+    assert stage(text, "consolidate_types").depends_on == ["extract"]
+    assert stage(text, "disambiguate").depends_on == ["consolidate_types"]
 
 
 def test_lite_profile_never_wires_header_refs(tmp_path: Path) -> None:
@@ -192,7 +192,7 @@ def test_emitted_config_recovers_real_rfc_edges(tmp_path: Path) -> None:
     config = detect_header_family(f"file://{_rfc_corpus(tmp_path)}")
     assert config is not None
     text = build_stack_config(_answers(_rfc_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, header_refs=config))
-    emitted = try_stage(text, "header_refs").config
+    emitted = stage(text, "header_refs").config
 
     provider = HeaderReferenceExtractor(dict(emitted))
     fused = provider.extract_fused([_chunk(_RFC_FRONT_MATTER)])
