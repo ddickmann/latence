@@ -51,7 +51,7 @@ and pages are resolved EXACTLY like the learned providers and like header_refs: 
 offset is lifted to a true original-markdown offset through the chunk's stripped-``content`` ->
 original ``offset_map`` via :class:`~latence_core.offsetmap.OffsetIndex` (a pre-v11 chunk degrades
 to the ``char_start + local`` shift), and each span's source page is resolved through the parent's
-page map via :class:`~latence_core.pagemap.PageOffsetIndex` (degrading to the chunk's inherited page
+page map via :class:`~latence_core.page_index.PageIndexResolver` (degrading to the chunk's inherited page
 range when no map is present). A document whose self id resolves from neither the front matter nor
 the file name yields nothing (never an error, never a dangling edge).
 """
@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_core.stages.header_refs import _span_provenance
 
@@ -280,8 +280,12 @@ class InlineReferenceExtractor:
         """
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
+        # ONE resolver for the whole call. It replaces the hand-rolled per-chunk page-index
+        # cache this Provider used to keep — the only one of the five core call sites that
+        # cached at all, and even it re-derived an index per CHUNK rather than per document.
+        resolver = PageIndexResolver()
         for doc_chunks in self._group_by_document(chunks):
-            doc_mentions, doc_relations = self._extract_document(doc_chunks)
+            doc_mentions, doc_relations = self._extract_document(doc_chunks, resolver)
             mentions.extend(doc_mentions)
             relations.extend(doc_relations)
         return FusedExtraction(mentions=mentions, relations=relations)
@@ -342,7 +346,7 @@ class InlineReferenceExtractor:
         return excluded
 
     def _extract_document(
-        self, doc_chunks: list[ChunkRecord]
+        self, doc_chunks: list[ChunkRecord], resolver: PageIndexResolver
     ) -> tuple[list[EntityMention], list[RelationMention]]:
         resolved = self._resolve_self(doc_chunks)
         if resolved is None:
@@ -353,20 +357,18 @@ class InlineReferenceExtractor:
 
         mentions: list[EntityMention] = []
         by_text: dict[str, EntityMention] = {}
-        index_cache: dict[str, tuple[OffsetIndex | None, PageOffsetIndex | None, int]] = {}
+        # The OFFSET map is genuinely chunk-scoped (it indexes this chunk's stripped
+        # content), so its index stays cached per chunk here. The PAGE map is not — that
+        # now lives behind ``resolver``, memoised per document.
+        index_cache: dict[str, tuple[OffsetIndex | None, int]] = {}
 
-        def indices(
-            chunk: ChunkRecord,
-        ) -> tuple[OffsetIndex | None, PageOffsetIndex | None, int]:
+        def indices(chunk: ChunkRecord) -> tuple[OffsetIndex | None, int]:
             cached = index_cache.get(chunk.record_id)
             if cached is None:
                 offset_index = (
                     OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
                 )
-                page_index = (
-                    PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
-                )
-                cached = (offset_index, page_index, chunk.provenance.char_start or 0)
+                cached = (offset_index, chunk.provenance.char_start or 0)
                 index_cache[chunk.record_id] = cached
             return cached
 
@@ -376,7 +378,7 @@ class InlineReferenceExtractor:
             existing = by_text.get(text)
             if existing is not None:
                 return existing
-            offset_index, page_index, chunk_char_start = indices(chunk)
+            offset_index, chunk_char_start = indices(chunk)
             if offset_index is not None:
                 doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
             else:
@@ -392,7 +394,10 @@ class InlineReferenceExtractor:
                 text=text,
                 confidence=1.0,
                 provenance=_span_provenance(
-                    chunk.provenance, doc_start, doc_end, page_index, chunk.page_map
+                    chunk.provenance,
+                    doc_start,
+                    doc_end,
+                    resolver.pages_for_span(chunk, doc_start, doc_end),
                 ),
                 classification=chunk.classification,
             )
@@ -426,7 +431,7 @@ class InlineReferenceExtractor:
                 if tail.record_id == head.record_id:
                     continue
                 relations.append(
-                    self._relation(chunk, len(relations), head, tail, indices(chunk)[1])
+                    self._relation(chunk, len(relations), head, tail, resolver)
                 )
         return mentions, relations
 
@@ -436,7 +441,7 @@ class InlineReferenceExtractor:
         index: int,
         head: EntityMention,
         tail: EntityMention,
-        page_index: PageOffsetIndex | None,
+        resolver: PageIndexResolver,
     ) -> RelationMention:
         span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
         span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
@@ -451,7 +456,10 @@ class InlineReferenceExtractor:
             tail_text=tail.text,
             confidence=min(max(self._default_confidence, 0.0), 1.0),
             provenance=_span_provenance(
-                head.provenance, span_start, span_end, page_index, chunk.page_map
+                head.provenance,
+                span_start,
+                span_end,
+                resolver.pages_for_span(chunk, span_start, span_end),
             ),
             classification=chunk.classification,
         )

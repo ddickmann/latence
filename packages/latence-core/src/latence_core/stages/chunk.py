@@ -15,6 +15,10 @@ CONTEXT definition of Chunk):
 * each chunk's Provenance ``page_start``/``page_end`` is resolved from the parent's
   page map via the core :class:`~latence_core.pagemap.PageOffsetIndex`, so a chunk
   spanning a page boundary records the real source pages;
+* the parent's page map itself rides the stream **once per document** — on the
+  document's first chunk (schema v18) — and downstream Stages resolve sub-chunk
+  offsets through :class:`~latence_core.page_index.PageIndexResolver`, which memoises
+  one index per ``document_record_id``;
 * Classification is inherited from the parent document unchanged;
 * the parent document's Provenance identity (source_uri, file_name, document_id, …)
   is carried onto every chunk.
@@ -169,9 +173,9 @@ def _emit_chunk_records(doc: DocumentRecord, chunks: list[Chunk]) -> Iterator[Ch
     """Turn a document's engine :class:`Chunk`s into contract :class:`ChunkRecord`s.
 
     Shared by both reference Chunker Providers so the contract-stamping — page resolution
-    through the parent :class:`PageOffsetIndex`, carried page map + stripped→original offset
-    map, inherited Provenance/Classification — is identical regardless of which segmentation
-    strategy produced the chunks.
+    through the parent :class:`PageOffsetIndex`, the once-per-document page map + the
+    per-chunk stripped→original offset map, inherited Provenance/Classification — is
+    identical regardless of which segmentation strategy produced the chunks.
     """
     # Resolve page alignment through the parent's page map (present after a successful
     # Parse). Absent (shouldn't happen for a PARSED doc), fall back to page 1 so a chunk
@@ -201,10 +205,19 @@ def _emit_chunk_records(doc: DocumentRecord, chunks: list[Chunk]) -> Iterator[Ch
             content=ch.text,
             media_type="text/markdown",
             token_count=ch.token_count,
-            # Carry the parent's page map forward so a downstream Stage that finds a
-            # sub-chunk offset (an entity mention) can resolve *that* offset's own source
-            # page, not just inherit the chunk's range.
-            page_map=doc.page_map,
+            # Carry the parent's page map forward ONCE per document — on its first chunk
+            # (schema v18). The page map is DOCUMENT-scoped state, invariant across every
+            # chunk of the document, so a copy on all N chunks was pure duplication: for a
+            # 519-page document chunked at 640 tokens it was ~30 KB of JSON on each of ~399
+            # records, i.e. ~92% of every chunk checkpoint line, paid again on every
+            # checkpoint write, streaming read-back and decode.
+            #
+            # Downstream Stages resolve a sub-chunk offset's own source page through
+            # :class:`~latence_core.page_index.PageIndexResolver`, which memoises one
+            # PageOffsetIndex per ``document_record_id`` — it adopts the map from the first
+            # chunk it sees for a document (this one) and every later chunk of that document
+            # resolves from the memoised index, so page accuracy is unchanged.
+            page_map=doc.page_map if i == 0 else None,
             # Carry the stripped→original offset map so that same sub-chunk offset resolves
             # to its TRUE original offset (content is markup-stripped, so char_start + local
             # is only a lower bound once markup precedes it).

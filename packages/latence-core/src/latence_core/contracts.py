@@ -195,7 +195,29 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # corpus's canonical type vocabulary rather than recomputing it. Additive and defaulted 0, and the
 # vocabulary itself is Corpus-Version state (an additive file), so no number bump — the same rule
 # ADR-0043's own additive ``documents_reused`` / ``documents_extracted`` fields followed.
-SCHEMA_VERSION = 17
+# v18 (C1 — the document page map stops riding every chunk): :class:`PageMap` is
+# DOCUMENT-scoped state — contiguous spans over the whole assembled markdown, invariant
+# across every chunk of that document — yet :class:`ChunkRecord` carried it BY VALUE on all
+# N chunks so a Stage could read it off the record. Measured on a 519-page document chunked
+# at 640 tokens: ~30 KB of JSON on each of ~399 chunk records, i.e. ~92% of every chunk
+# checkpoint line (~12 MB redundant per document, ~12 GB across a 1,000-document corpus),
+# paid again on every checkpoint write, every streaming read-back and every decode.
+# ``ChunkRecord.page_map`` is now stamped on a document's FIRST chunk only, and downstream
+# resolution goes through :class:`latence_core.page_index.PageIndexResolver` — a narrow,
+# document-keyed seam that memoises ONE :class:`latence_core.pagemap.PageOffsetIndex` per
+# ``document_record_id`` (and can equally be seeded from the parsed DocumentRecords, the
+# authoritative on-disk copy, ADR-0017). The FIELD is unchanged and still optional, so a
+# v17 record — which carried the map on every chunk — still validates and still resolves
+# identically (the resolver adopts whichever record carries the map first). Provenance is
+# byte-identical: offsets and pages are unchanged (ADR-0021/0031). This is a payload
+# change, not a shape change; the number bumps because the *meaning* of a populated
+# ``page_map`` narrows from "every chunk" to "the document's first chunk".
+#
+# NOTE for ADR-0033 (streaming, memory-bounded runner): that ADR bounds the runner's
+# in-flight record COUNT but never named per-record PAYLOAD as a memory axis — a stream of
+# bounded length whose every record embeds document-scoped state is still O(documents ×
+# chunks × page_map). Worth an amendment; see the C1 report.
+SCHEMA_VERSION = 18
 
 
 class Provenance(BaseModel):
@@ -821,12 +843,20 @@ class ChunkRecord(Record):
 
     ``page_map`` carries the parent document's page-boundary map forward so a
     *downstream* Stage that finds a sub-chunk offset (an entity mention) can
-    resolve **that offset's own** source page through
-    :class:`~latence_core.pagemap.PageOffsetIndex` — not merely inherit the
-    chunk's whole ``[page_start, page_end]`` range. Without it, a mention on a
-    later page of a multi-page chunk would cite the chunk's first page. Optional
-    (a chunk produced before S4, or from a document with no page map, has ``None``
-    and downstream falls back to the inherited chunk page range).
+    resolve **that offset's own** source page — not merely inherit the chunk's
+    whole ``[page_start, page_end]`` range. Without it, a mention on a later page
+    of a multi-page chunk would cite the chunk's first page.
+
+    Since v18 the map is DOCUMENT-scoped carriage: the Chunk Stage stamps it on a
+    document's **first** chunk only, and every Stage resolves through
+    :class:`~latence_core.page_index.PageIndexResolver`, which memoises one
+    :class:`~latence_core.pagemap.PageOffsetIndex` per ``document_record_id``
+    (adopting the map from the first record of that document it sees, or seeded
+    directly from the parsed DocumentRecords). Callers MUST NOT read this field
+    directly to resolve a page — a ``None`` here means "ask the resolver", not
+    "no page map exists". Reading it directly is what made every chunk pay for a
+    document-scoped copy. Still optional and still populated on every chunk by a
+    pre-v18 producer, so an older stream resolves identically.
 
     ``offset_map`` carries the stripped-``content``→original-markdown offset map
     (:class:`OffsetMap`) so a downstream Stage can recover a sub-chunk offset's TRUE
@@ -843,7 +873,11 @@ class ChunkRecord(Record):
     token_count: int = Field(..., ge=0, description="Budgeted token count for the chunk text.")
     page_map: PageMap | None = Field(
         default=None,
-        description="Parent document's page map, so a sub-chunk offset resolves to its own page.",
+        description=(
+            "Parent document's page map, carried ONCE per document (on its first chunk, v18) "
+            "so a sub-chunk offset resolves to its own page. Read it through "
+            "latence_core.page_index.PageIndexResolver, never directly."
+        ),
     )
     offset_map: OffsetMap | None = Field(
         default=None,
