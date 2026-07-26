@@ -129,7 +129,7 @@ def test_records_are_streamed_not_materialised(tmp_path: Path) -> None:
             provider_holder.append(self)
 
     class _SpyRunner(LocalRunner):
-        def _stream_batches(  # type: ignore[override]
+        def _stream_batches(
             self,
             storage: Storage,
             tmp: str,

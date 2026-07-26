@@ -202,7 +202,10 @@ class StageOutcome:
         Raises :class:`RuntimeError` if called on a successful execution whose record stream was
         never consumed: the counters would all read zero and the row would be a quiet lie.
         """
-        duration = self._elapsed if self._elapsed is not None else 0.0
+        # A REPLAYED Stage reports 0.0, not the time it took to re-read its checkpoint: the run
+        # did not spend that time doing the Stage's work, and the Quality Report's
+        # ``total_duration_seconds`` sums these. Matches the pre-C3 resume row exactly.
+        duration = 0.0 if self._from_checkpoint else (self._elapsed or 0.0)
         if error is not None:
             return StageMetrics(
                 name=self._stage.name,

@@ -38,7 +38,7 @@ from latence_runner_airflow import AirflowRunner
 _RUNNER_SPECIFIC = frozenset({"runner", "duration_seconds", "from_checkpoint"})
 
 
-class _ProfiledGazetteer(GazetteerEntityExtractor):  # type: ignore[misc]
+class _ProfiledGazetteer(GazetteerEntityExtractor):
     """The stock gazetteer extractor, with a declared ProviderProfile bolted on.
 
     Deliberately profile-declaring: ``compute``/``model_id``/``license`` plus the routed
