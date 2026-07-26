@@ -28,6 +28,12 @@ from latence_core.stacks.capability_guard import (
     capability_protocol,
     check_stack_capabilities,
 )
+from latence_core.stacks.check import (
+    Finding,
+    Severity,
+    StackCheck,
+    check_stack,
+)
 from latence_core.stacks.corpus import (
     ValidationCorpusManifest,
     build_validation_corpus_bytes,
@@ -41,11 +47,15 @@ from latence_core.stacks.validate import (
 
 __all__ = [
     "CheckResult",
+    "Finding",
     "SatisfactionFinding",
+    "Severity",
+    "StackCheck",
     "StackValidationResult",
     "ValidationCorpusManifest",
     "build_validation_corpus_bytes",
     "capability_protocol",
+    "check_stack",
     "check_stack_capabilities",
     "stage_validation_corpus",
     "validate_stack",

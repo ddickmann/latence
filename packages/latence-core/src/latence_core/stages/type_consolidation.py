@@ -48,6 +48,7 @@ from pydantic import ValidationError
 from latence_core.capability import TypeConsolidation
 from latence_core.contracts import EntityMention, RelationMention, TypeKind, TypeVocabulary
 from latence_core.errors import ConfigError
+from latence_core.pipeline import CapabilityKind
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_core.type_consolidation import TypeCanonicalizer
 
@@ -229,11 +230,21 @@ class CascadeTypeConsolidator:
     def _resolve_embedder(self) -> Embedder:
         """Resolve (once) the semantic rung's Embedder from ``config['embedder']``.
 
-        ``spec`` is ``None`` (⇒ the in-core deterministic ``embedding.hashing``) or a
-        ``{"provider", "config"}`` mapping naming any Embedder Provider. A mis-named or
-        non-Embedder Provider fails LOUDLY at wiring time with a typed
-        :class:`~latence_core.errors.ConfigError` — never a silent fallback to a different
-        vocabulary than the operator asked for (ADR-0034: no silent errors).
+        The nested block is parsed and capability-checked by the one module that owns it
+        (:mod:`latence_core.subprovider`): ``spec`` is ``None`` (⇒ this Provider's own default, the
+        in-core deterministic ``embedding.hashing``) or a ``{"provider", "config"}`` mapping naming
+        any Embedder Provider. A malformed shape is a :class:`~latence_core.errors.ConfigError` and
+        a non-Embedder Provider a :class:`~latence_core.errors.ContractError` — both LOUD at wiring
+        time, never a silent fallback to a different vocabulary than the operator asked for
+        (ADR-0034: no silent errors).
+
+        Two behaviours changed with the move, deliberately. The capability mismatch now raises
+        ``ContractError`` (as the Export and Graph-Assembly slots already did) instead of
+        ``ConfigError``: one mistake, one type. And the check is
+        :func:`~latence_core.capability.satisfies_capability` rather than ``isinstance``, which on
+        a ``runtime_checkable`` Protocol invokes ``Embedder.dimension`` via ``hasattr`` — loading a
+        served Embedder's backend during config validation, exactly the ADR-0016 violation audit R6
+        removed from the Export.
         """
         if self._embedder is not None:
             return self._embedder
@@ -241,37 +252,26 @@ class CascadeTypeConsolidator:
         # cost a stack that never enables the semantic rung should not pay.
         from latence_core.capability import Embedder as EmbedderProtocol
         from latence_core.capability import ProviderRegistry
+        from latence_core.subprovider import (
+            SubProviderRef,
+            SubProviderSlot,
+            build_sub_provider,
+            sub_provider_ref,
+        )
 
-        spec = self._embedder_spec
-        if spec is None:
-            name, embedder_config = _DEFAULT_EMBEDDER, {}
-        elif isinstance(spec, dict):
-            raw_name = spec.get("provider")
-            if not isinstance(raw_name, str) or not raw_name:
-                msg = (
-                    f"{self.provider_name}: config 'embedder' requires a non-empty string "
-                    f"'provider' entry-point name."
-                )
-                raise ConfigError(msg)
-            raw_config = spec.get("config", {})
-            if not isinstance(raw_config, dict):
-                msg = f"{self.provider_name}: 'embedder.config' must be a mapping if present."
-                raise ConfigError(msg)
-            name, embedder_config = raw_name, dict(raw_config)
-        else:
-            msg = (
-                f"{self.provider_name}: config 'embedder' must be a mapping "
-                f"{{'provider': <name>, 'config': {{...}}}} or absent; "
-                f"got {type(spec).__name__}."
-            )
-            raise ConfigError(msg)
-        candidate = ProviderRegistry().load(name)(embedder_config)
-        if not isinstance(candidate, EmbedderProtocol):
-            msg = (
-                f"{self.provider_name}: config 'embedder' names {name!r}, which does not "
-                f"satisfy the Embedder capability."
-            )
-            raise ConfigError(msg)
+        owner = f"{self.provider_name}: config"
+        ref = sub_provider_ref(
+            self._embedder_spec,
+            capability=CapabilityKind.TYPE_CONSOLIDATION,
+            key="embedder",
+            owner=owner,
+        ) or SubProviderRef(
+            slot=SubProviderSlot("embedder", EmbedderProtocol),
+            provider=_DEFAULT_EMBEDDER,
+        )
+        candidate: Embedder = build_sub_provider(
+            ref, registry=ProviderRegistry(), owner=owner
+        )
         self._embedder = candidate
         return candidate
 

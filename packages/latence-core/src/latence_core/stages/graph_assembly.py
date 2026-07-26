@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any
 from latence_core.capability import (
     GraphFeatureComputer,
     ProviderRegistry,
-    satisfies_capability,
 )
 from latence_core.contracts import (
     DisambiguationRecord,
@@ -40,14 +39,19 @@ from latence_core.contracts import (
     GraphRecord,
     GraphScope,
 )
-from latence_core.errors import ConfigError, ContractError
+from latence_core.errors import ContractError
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
+from latence_core.pipeline import CapabilityKind
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.subprovider import owner_label, resolve_sub_provider
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from latence_core.contracts import CanonicalEntity, NormalizedRelation
+
+# The message prefix this Stage's nested-block errors carry, from the one slot declaration.
+_OWNER = owner_label(CapabilityKind.GRAPH_ASSEMBLY)
 
 
 def _resolve_feature_computer(
@@ -55,45 +59,28 @@ def _resolve_feature_computer(
 ) -> GraphFeatureComputer | None:
     """Resolve the OPTIONAL ``graph_features`` computer from a ``{"provider", "config"}`` block.
 
-    The same composition Export uses for its Embedder (ADR-0017): ``spec`` is ``None`` (enrichment
-    off — the graph is emitted byte-identically to today, ADR-0051) or a ``{"provider", "config"}``
-    map naming a :class:`~latence_core.capability.GraphFeatureComputer` Provider (the in-core
+    The same nested sub-Provider block the Export uses for its Embedder (ADR-0017), resolved
+    through the one module that owns that block (:mod:`latence_core.subprovider`): ``spec`` is
+    ``None`` (enrichment off — the graph is emitted byte-identically to today, ADR-0051) or a
+    ``{"provider", "config"}`` map naming a
+    :class:`~latence_core.capability.GraphFeatureComputer` Provider (the in-core
     ``graph_features.degree`` / ``graph_features.pagerank`` references, or a pluggable
-    Louvain/Leiden package). A mis-named Provider fails **loudly at wiring time** — a
-    :class:`~latence_core.errors.ContractError` — rather than silently emitting no features; a
-    malformed ``spec`` shape is a :class:`~latence_core.errors.ConfigError`.
+    Louvain/Leiden package).
+
+    Failure modes are unchanged — a mis-named Provider is a loud wiring-time
+    :class:`~latence_core.errors.ContractError`, a malformed shape a
+    :class:`~latence_core.errors.ConfigError` — but the *declaration* that ``GRAPH_ASSEMBLY``
+    owns a ``graph_features`` slot demanding ``GraphFeatureComputer`` now lives in one place, so
+    the offline ``latence stack check`` verifies this block instead of it reaching run time
+    unexamined (the blessed SOTA stack wires it, and nothing static used to look at it).
     """
-    if spec is None:
-        return None
-    if not isinstance(spec, dict):
-        msg = (
-            "Graph Assembly config 'graph_features' must be a mapping "
-            "{'provider': <name>, 'config': {...}} or absent; "
-            f"got {type(spec).__name__}."
-        )
-        raise ConfigError(msg)
-    provider_name = spec.get("provider")
-    if not isinstance(provider_name, str) or not provider_name:
-        msg = (
-            "Graph Assembly config 'graph_features' requires a non-empty string 'provider' "
-            "entry-point name."
-        )
-        raise ConfigError(msg)
-    provider_config = spec.get("config", {})
-    if not isinstance(provider_config, dict):
-        msg = "Graph Assembly config 'graph_features.config' must be a mapping if present."
-        raise ConfigError(msg)
-    provider_cls = registry.load(provider_name)
-    provider = provider_cls(provider_config)
-    # satisfies_capability, not isinstance: a runtime_checkable isinstance INVOKES a Protocol
-    # property via hasattr, which would run Provider work at wiring time (audit R6).
-    if not satisfies_capability(provider, GraphFeatureComputer):
-        msg = (
-            f"Provider {provider_name!r} named in Graph Assembly config 'graph_features' does not "
-            "satisfy the GraphFeatureComputer capability."
-        )
-        raise ContractError(msg)
-    return provider
+    return resolve_sub_provider(
+        spec,
+        capability=CapabilityKind.GRAPH_ASSEMBLY,
+        key="graph_features",
+        registry=registry,
+        owner=_OWNER,
+    )
 
 
 def _stamp_features(

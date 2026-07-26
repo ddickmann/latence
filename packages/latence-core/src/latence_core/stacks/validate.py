@@ -47,13 +47,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from latence_core.capability import ProviderRegistry
+from latence_core.errors import ConfigError
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers.device import select_device
 from latence_core.quality import QualityReport
+from latence_core.stacks.check import check_stack
 from latence_core.storage import Storage
+from latence_core.subprovider import stage_sub_providers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from latence_core.stacks.check import StackCheck
 
 # The two run ids the harness uses. ``_RUN_PRIMARY`` is run twice (the resume check re-runs the
 # same id); ``_RUN_DETERMINISM`` is a second, independent run under a fresh id whose export must
@@ -213,51 +218,53 @@ def _skip_reason_for_stage(stage: Stage, registry: ProviderRegistry) -> str | No
     decision = select_device(requested, profile)
     if decision.skipped:
         return decision.reason
-    # An Export stage may opt into a *nested* Embedder Provider (ADR-0017 opt-in augmentation) that
-    # is itself GPU/endpoint-gated (e.g. embedding.sentence_transformers pinned device: cuda, or an
-    # endpoint embedder whose package is absent). The embedder is not a top-level DAG node, so the
-    # check above never sees it; inspect it through the SAME select_device seam so the embed
+    # A Stage may opt into *nested* sub-Provider blocks (the Export's embedder / retrieval signals
+    # / BM25 tokenizer, the Graph Assembly's graph_features, the resolvers' semantic embedder) that
+    # are themselves GPU/endpoint-gated (e.g. embedding.sentence_transformers pinned device: cuda,
+    # or an endpoint embedder whose package is absent). None is a top-level DAG node, so the check
+    # above never sees them; inspect each through the SAME select_device seam so the embed
     # bake-off's ST candidate is honestly skipped-with-flag on a CPU host rather than run-and-fail
-    # (W1-embed — the same device-honesty posture applied to the nested embedder).
-    return _embedder_skip_reason(stage, registry)
+    # (W1-embed — the device-honesty posture applied to every nested Provider, not just embedder).
+    return _sub_provider_skip_reason(stage, registry)
 
 
-def _embedder_skip_reason(stage: Stage, registry: ProviderRegistry) -> str | None:
-    """Why this Export stage's nested ``config['embedder']`` Provider is not runnable here, or None.
+def _sub_provider_skip_reason(stage: Stage, registry: ProviderRegistry) -> str | None:
+    """Why a nested ``{provider, config}`` Provider of this stage is not runnable here, or None.
 
-    The Embedder is an opt-in Export sub-config (``{"provider": ..., "config": {...}}``), not a DAG
-    Stage, so :func:`_skip_reason_for_stage`'s top-level check never inspects it. This applies the
-    identical honest skip conditions to the nested embedder Provider: **not installed** (its heavy
-    package is absent) OR **GPU-only, no CUDA** (its declared profile + the embedder config's
-    requested ``device`` resolve to a skip through the SAME :func:`select_device` seam). A CPU/auto
-    embedder whose package fails to load is a REAL breakage (return None ⇒ run + FAIL loudly), never
-    silently skipped. A stage with no embedder returns None.
+    A nested Provider is an opt-in sub-config, not a DAG Stage, so
+    :func:`_skip_reason_for_stage`'s top-level check never inspects it. This applies the identical
+    honest skip conditions to every slot the Stage's Capability declares
+    (:func:`~latence_core.subprovider.stage_sub_providers` — one declaration, so a newly added slot
+    is device-checked without editing this function): **not installed** (its heavy package is
+    absent) OR **GPU-only, no CUDA** (its declared profile + the block's requested ``device``
+    resolve to a skip through the SAME :func:`select_device` seam). A CPU/auto sub-Provider whose
+    package fails to load is a REAL breakage (return None ⇒ run + FAIL loudly), never silently
+    skipped. A stage with no nested block returns None; the first skipping slot wins, in
+    declaration order, so the reason is deterministic.
+
+    A malformed block returns None rather than a skip: its shape is
+    :func:`~latence_core.stacks.check.check_stack`'s verdict to give, and swallowing it here as a
+    device skip would turn a config error into a silent omission.
     """
-    spec = stage.config.get("embedder")
-    if not isinstance(spec, dict):
-        return None
-    provider = spec.get("provider")
-    if not isinstance(provider, str) or not provider:
-        return None
-    if provider not in registry.names():
-        return (
-            f"embedder {provider!r} not installed on this host (needs its GPU/endpoint package)"
-        )
-    embedder_config = spec.get("config", {})
-    requested = (
-        str(embedder_config.get("device", "auto"))
-        if isinstance(embedder_config, dict)
-        else "auto"
-    )
     try:
-        profile = registry.profile(provider)
-    except Exception:  # noqa: BLE001 - triage a nested-embedder load error by its requested device
-        if requested in ("cuda", "gpu"):
-            return f"embedder {provider!r} failed to load on this host (missing GPU dep)"
+        refs = stage_sub_providers(stage)
+    except ConfigError:
         return None
-    decision = select_device(requested, profile)
-    if decision.skipped:
-        return f"embedder {provider!r}: {decision.reason}"
+    for ref in refs:
+        if ref.provider not in registry.names():
+            return (
+                f"{ref.key} {ref.provider!r} not installed on this host "
+                f"(needs its GPU/endpoint package)"
+            )
+        try:
+            profile = registry.profile(ref.provider)
+        except Exception:  # noqa: BLE001 - triage a nested load error by its requested device
+            if ref.device in ("cuda", "gpu"):
+                return f"{ref.key} {ref.provider!r} failed to load on this host (missing GPU dep)"
+            continue
+        decision = select_device(ref.device, profile)
+        if decision.skipped:
+            return f"{ref.key} {ref.provider!r}: {decision.reason}"
     return None
 
 
@@ -536,6 +543,74 @@ def _check_graceful_failure(report: QualityReport) -> CheckResult:
     return CheckResult(name="graceful_failure", passed=passed, detail=detail)
 
 
+def _static_check_result(static: StackCheck) -> CheckResult:
+    """Fold the offline :func:`~latence_core.stacks.check.check_stack` into one harness check.
+
+    The E2E harness reports pass/fail per named check, so the whole static pre-flight — structure,
+    DAG, capability wiring, Provider resolution, every nested sub-Provider block, the config-key
+    rules — arrives as a single ``static_check`` row whose detail is the findings themselves. A
+    stack whose only findings are WARNINGs (an uninstalled GPU Provider on a CPU box) PASSes: that
+    is the device-honesty posture, decided in one place rather than re-derived here.
+    """
+    if not static.ok:
+        return CheckResult(
+            name="static_check",
+            passed=False,
+            detail="; ".join(f.describe() for f in static.errors),
+        )
+    if static.warnings:
+        return CheckResult(
+            name="static_check",
+            passed=True,
+            detail=(
+                f"no errors; {len(static.warnings)} warning(s) (Providers not installed here): "
+                + "; ".join(f.describe() for f in static.warnings)
+            ),
+        )
+    return CheckResult(
+        name="static_check",
+        passed=True,
+        detail="structure, DAG, capability wiring, sub-Providers and config keys all check out",
+    )
+
+
+def _early_result(
+    stack_path: Path,
+    storage: Storage,
+    root: str,
+    *,
+    checks: list[CheckResult],
+    ok: bool,
+    document_count: int = 0,
+    skipped_stages: list[str] | None = None,
+) -> StackValidationResult:
+    """Persist the signed-style summary and return the result — the shared early-exit tail.
+
+    Three exits leave before the full check battery (static-check failure, an all-skipped stack, a
+    run that raised) and each used to re-implement "build a result, render it, write it to Storage,
+    rebuild the result with the summary URI". One place now, so an exit path cannot silently stop
+    persisting its summary.
+    """
+    stack_name = Path(stack_path).name
+    result = StackValidationResult(
+        stack_name=stack_name,
+        ok=ok,
+        checks=checks,
+        document_count=document_count,
+        skipped_stages=skipped_stages or [],
+    )
+    summary_uri = f"{root}/_latence/stack-validation/{stack_name}.md"
+    storage.write_atomic(summary_uri, result.render().encode("utf-8"))
+    return StackValidationResult(
+        stack_name=stack_name,
+        ok=ok,
+        checks=checks,
+        document_count=document_count,
+        skipped_stages=skipped_stages or [],
+        summary_uri=summary_uri,
+    )
+
+
 def _check_phase_boundary(pipeline: Pipeline) -> CheckResult:
     """Phase boundary: no corpus-level Stage is scheduled before the chunk-level front half (T1).
 
@@ -648,17 +723,39 @@ def validate_stack(
     root = storage_root.rstrip("/")
     corpus_dir = corpus_dir or f"{root}/_validation-corpus"
 
-    # Stage the bundled corpus (deterministic bytes) so the stack's Source reads it like a real
-    # adopter folder.
-    from latence_core.stacks.corpus import stage_validation_corpus
-
-    stage_validation_corpus(storage, corpus_dir)
-
     declared = load_stack(stack_path, storage_uri=root, corpus_dir=corpus_dir)
 
     # One registry shared by the pre-flight AND the runner, so the "installed / CPU-runnable"
     # decision the harness makes is the exact roster the Runner would load against.
     registry = ProviderRegistry()
+
+    # -- Static pre-flight (C8) -----------------------------------------------
+    # ``check_stack`` is the offline composition point: structure + DAG, the phase boundary, the
+    # capability guard, Provider resolution, and every nested {provider, config} sub-Provider block.
+    # It runs FIRST and, on an error, short-circuits: staging a corpus and running a stack twice to
+    # rediscover a mis-wired Provider wastes minutes to reach a verdict a class inspection already
+    # has. It is also the reason the guard finally bites here — ADR-0036 §3 introduced it precisely
+    # because a CPU host device-skips the GPU Stages the Runner would have isinstance-checked, and
+    # this harness (the thing meant to catch that class of bug on CPU) never called it.
+    #
+    # The T1 phase-boundary invariant is a STATIC property of the DECLARED stack, so it is computed
+    # once here (before the device reduction, which would hide a violation whose corpus-level stage
+    # happens to be GPU-only) and reported on EVERY exit path — including the static-fail,
+    # all-skipped and run-failed ones, where it is the only thing this host can still tell the
+    # operator.
+    phase_check = _check_phase_boundary(declared)
+    static = check_stack(declared, registry=registry)
+    static_check = _static_check_result(static)
+    if not static.ok:
+        return _early_result(
+            stack_path, storage, root, checks=[phase_check, static_check], ok=False
+        )
+
+    # Stage the bundled corpus (deterministic bytes) so the stack's Source reads it like a real
+    # adopter folder.
+    from latence_core.stacks.corpus import stage_validation_corpus
+
+    stage_validation_corpus(storage, corpus_dir)
 
     # -- Device-honesty pre-flight (P3-F1 posture) ----------------------------
     # Reduce the stack to the sub-Pipeline whose Providers are installed + CPU-runnable on THIS
@@ -668,40 +765,27 @@ def validate_stack(
     pipeline, dropped = _cpu_reachable_subpipeline(declared, registry)
     skipped_stages = sorted(dropped)
 
-    # The T1 phase-boundary invariant is a STATIC property of the DECLARED stack, so it is computed
-    # once here (before the device reduction, which would hide a violation whose corpus-level stage
-    # happens to be GPU-only) and reported on EVERY exit path — including the all-skipped and
-    # run-failed ones, where it is the only thing this host can still tell the operator.
-    phase_check = _check_phase_boundary(declared)
-
     if all(s.name in dropped for s in declared.stages):
         # Nothing CPU-reachable (a fully-GPU stack on a CPU host). Not a failure: report every
         # Stage skipped-with-flag + a clean device-honesty pass, no run attempted (no fake numbers).
-        checks = [
-            phase_check,
-            CheckResult(
-                name="device_honesty",
-                passed=True,
-                skipped=True,
-                detail=f"all stages skipped-with-flag on this host: {', '.join(skipped_stages)}",
-            ),
-        ]
-        result = StackValidationResult(
-            stack_name=Path(stack_path).name,
+        return _early_result(
+            stack_path,
+            storage,
+            root,
+            checks=[
+                phase_check,
+                static_check,
+                CheckResult(
+                    name="device_honesty",
+                    passed=True,
+                    skipped=True,
+                    detail=(
+                        f"all stages skipped-with-flag on this host: {', '.join(skipped_stages)}"
+                    ),
+                ),
+            ],
             ok=phase_check.passed,
-            checks=checks,
-            document_count=0,
             skipped_stages=skipped_stages,
-        )
-        summary_uri = f"{root}/_latence/stack-validation/{result.stack_name}.md"
-        storage.write_atomic(summary_uri, result.render().encode("utf-8"))
-        return StackValidationResult(
-            stack_name=result.stack_name,
-            ok=phase_check.passed,
-            checks=checks,
-            document_count=0,
-            skipped_stages=skipped_stages,
-            summary_uri=summary_uri,
         )
 
     runner = LocalRunner(registry)
@@ -728,30 +812,21 @@ def validate_stack(
         determinism_run_dir = runner.run_dir(pipeline, _RUN_DETERMINISM)
         determinism_export = _export_artifacts(storage, determinism_run_dir)
     except Exception as exc:  # noqa: BLE001 - a broken stack must FAIL the harness, not crash it
-        checks = [
-            phase_check,
-            CheckResult(
-                name="run",
-                passed=False,
-                detail=f"stack run raised {type(exc).__name__}: {exc}",
-            ),
-        ]
-        result = StackValidationResult(
-            stack_name=Path(stack_path).name,
+        return _early_result(
+            stack_path,
+            storage,
+            root,
+            checks=[
+                phase_check,
+                static_check,
+                CheckResult(
+                    name="run",
+                    passed=False,
+                    detail=f"stack run raised {type(exc).__name__}: {exc}",
+                ),
+            ],
             ok=False,
-            checks=checks,
-            document_count=0,
             skipped_stages=skipped_stages,
-        )
-        summary_uri = f"{root}/_latence/stack-validation/{result.stack_name}.md"
-        storage.write_atomic(summary_uri, result.render().encode("utf-8"))
-        return StackValidationResult(
-            stack_name=result.stack_name,
-            ok=False,
-            checks=checks,
-            document_count=0,
-            skipped_stages=skipped_stages,
-            summary_uri=summary_uri,
         )
 
     # A stage the RUNNER itself skipped-with-flag (an installed GPU Provider on a CPU host) adds to
@@ -761,6 +836,7 @@ def validate_stack(
 
     checks = [
         phase_check,
+        static_check,
         _check_contracts(persisted_report),
         _check_kg(pipeline, persisted_report, storage, primary_run_dir),
         _check_rag(pipeline, storage, primary_run_dir),
