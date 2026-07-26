@@ -181,6 +181,64 @@ def test_quality_slice_end_to_end(tmp_path: Path) -> None:
     assert report.goldset.documents_matched == gs.documents_matched
 
 
+def test_drift_audit_covers_every_chunk_the_real_chunker_emitted(tmp_path: Path) -> None:
+    """Every chunk the REAL Chunk Stage emitted is audited — through the REAL Runner.
+
+    The C1 v18 producer/consumer contract lives across two modules: ``stages/chunk.py`` stamps
+    the page map on a document's FIRST chunk only, and ``_DriftAggregator`` must resolve every
+    later chunk through the memoised :class:`PageIndexResolver` rather than off the record. The
+    aggregator's own unit tests hand-build that stream (``page_map if i == 0 else None``), so
+    they encode the producer's half as an ASSUMPTION instead of testing it — if the producer
+    and the consumer ever disagree again, those tests still pass. This one runs the actual
+    chunker and asserts the report audited what the chunker actually produced.
+
+    It also closes the coverage gap the C5 byte-identity fixture cannot: that fixture's corpus
+    is one chunk per document, where "audit the first chunk" and "audit every chunk" are
+    indistinguishable. Here the document is deliberately chunked into many.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # Long enough that the chunker emits many chunks for this ONE document.
+    (docs / "long.txt").write_text("Alice works at Acme Corporation in Berlin. " * 60, "utf-8")
+    store = f"file://{tmp_path}/store"
+    pipeline = Pipeline.from_yaml_text(
+        f"""
+name: drift-coverage
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config:
+      max_tokens: 32
+      overlap_tokens: 0
+      min_tokens: 4
+"""
+    )
+    report = LocalRunner().run(pipeline, run_id="driftcov")
+
+    assert report.chunk is not None
+    assert report.drift is not None
+    # Non-vacuity: the point of the fixture is that this document is NOT single-chunk.
+    assert report.chunk.chunks_total > 1
+    # The invariant: coverage is every chunk, not one per document. Pre-fix this was 1.
+    assert report.drift.records_audited == report.chunk.chunks_total
+    # Two endpoint lookups per audited chunk, all resolved against the document's own map.
+    assert report.drift.resolutions == 2 * report.chunk.chunks_total
+
+
 def test_quality_slice_without_goldset_reports_no_evaluation(tmp_path: Path) -> None:
     # A pipeline with no gold_set_uri still emits the report; the gold-set section is absent.
     docs = _docs(tmp_path)
