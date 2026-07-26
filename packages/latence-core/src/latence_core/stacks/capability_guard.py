@@ -13,8 +13,13 @@ This module makes the wiring statically checkable **without a GPU and without in
 Provider** (instantiation would load torch). It reads the Provider *class* from the registry
 (module import is dependency-free for the heavy Providers — the heavy import is deferred to first
 use, ADR-0016) and structurally checks it against the Protocol its Stage's :class:`CapabilityKind`
-declares — the SAME capability→Protocol mapping the Runner's ``_dispatch_stage`` enforces, kept in
-ONE place so the two cannot drift.
+declares.
+
+That mapping used to be a copy kept here, under a comment claiming it was "kept in ONE place so the
+two cannot drift" — while the Runner held its own inline copy and three other modules held adjacent
+facts about the same Capabilities. It now comes from the Capability's own
+:class:`~latence_core.capability_descriptor.CapabilityDescriptor`, which is the one place, and which
+refuses at import to describe a :class:`CapabilityKind` that has not declared its Protocol.
 
 A ``runtime_checkable`` Protocol whose members are all methods supports ``issubclass``; the
 :class:`~latence_core.capability.Embedder` Protocol has a ``dimension`` **property** (a non-method
@@ -28,67 +33,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from latence_core.capability import (
-    Chunker,
-    ContentScreener,
-    ContextEnricher,
-    Disambiguator,
-    Embedder,
-    EntityExtractor,
-    Export,
-    FusedEntityRelationExtractor,
-    GraphAssembler,
-    GraphCompleter,
-    IntakeScreener,
-    LabelInducer,
-    Parser,
-    PIIDetector,
-    Profiler,
-    ProviderRegistry,
-    RelationExtractor,
-    Source,
-    TypeConsolidator,
-)
-from latence_core.pipeline import CapabilityKind
+from latence_core.capability import Embedder, ProviderRegistry
+from latence_core.capability_descriptor import dag_protocol_for, descriptor_for
 
 if TYPE_CHECKING:
-    from latence_core.pipeline import Pipeline, Stage
-
-# The capability→Protocol mapping the Runner's ``_dispatch_stage`` enforces at run time, declared
-# ONCE here so a stack's wiring is statically checkable on a CPU host (the GPU Stage the Runner
-# would have isinstance-checked is device-skipped in CI, so this pre-flight is the only CPU-visible
-# bite). A DAG-node CapabilityKind maps to the Protocol its Provider must satisfy. ``EMBEDDING`` is
-# NOT a top-level DAG node (it is a nested Export sub-config — see :func:`embedder_provider_of`), so
-# it is absent here and checked separately against :class:`Embedder`.
-_CAPABILITY_PROTOCOL: dict[CapabilityKind, type] = {
-    CapabilityKind.SOURCE: Source,
-    CapabilityKind.INTAKE_SCREENING: IntakeScreener,
-    CapabilityKind.PARSE: Parser,
-    CapabilityKind.CHUNK: Chunker,
-    CapabilityKind.CONTENT_SCREENING: ContentScreener,
-    CapabilityKind.SCHEMA_INDUCTION: LabelInducer,
-    CapabilityKind.ENTITY_EXTRACTION: EntityExtractor,
-    CapabilityKind.RELATION_EXTRACTION: RelationExtractor,
-    CapabilityKind.FUSED_ENTITY_RELATION: FusedEntityRelationExtractor,
-    CapabilityKind.REDACTION: PIIDetector,
-    CapabilityKind.PROFILING: Profiler,
-    CapabilityKind.TYPE_CONSOLIDATION: TypeConsolidator,
-    CapabilityKind.DISAMBIGUATION: Disambiguator,
-    CapabilityKind.GRAPH_ASSEMBLY: GraphAssembler,
-    CapabilityKind.GRAPH_COMPLETION: GraphCompleter,
-    CapabilityKind.CONTEXT_ENRICHMENT: ContextEnricher,
-    CapabilityKind.EXPORT: Export,
-}
+    from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 
 
 def capability_protocol(kind: CapabilityKind) -> type:
     """Return the Capability Protocol a DAG Stage of ``kind`` requires its Provider to satisfy.
 
+    A thin read of the Capability's own descriptor — the same declaration the Runner's dispatch
+    enforces at run time, so this CPU pre-flight and that run-time check cannot answer differently.
+
     Raises ``KeyError`` for a kind that is not a top-level DAG node (``EMBEDDING`` — a nested Export
     sub-config, not a Stage), so a caller that mis-treats it as a Stage fails loudly rather than
     silently skipping the check.
     """
-    return _CAPABILITY_PROTOCOL[kind]
+    return dag_protocol_for(kind)
+
+
+def _stage_protocol(kind: CapabilityKind) -> type | None:
+    """The Protocol to check a Stage's Provider against, ``None`` when the kind is not a Stage."""
+    descriptor = descriptor_for(kind)
+    return descriptor.protocol if descriptor.dag_node else None
 
 
 def _class_satisfies(provider_cls: type, protocol: type) -> bool:
@@ -172,7 +140,7 @@ def check_stack_capabilities(
     findings: list[SatisfactionFinding] = []
 
     for stage in pipeline.stages:
-        protocol = _CAPABILITY_PROTOCOL.get(stage.capability)
+        protocol = _stage_protocol(stage.capability)
         if protocol is not None and stage.provider in installed:
             try:
                 provider_cls = registry.load(stage.provider)

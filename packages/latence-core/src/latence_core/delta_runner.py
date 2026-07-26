@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from latence_core.capability import DeltaProcessor, DocumentEnumerator, ProviderRegistry
+from latence_core.capability_descriptor import CORPUS_LEVEL_KINDS
 from latence_core.contracts import (
     ChunkRecord,
     DeletionMode,
@@ -101,19 +102,19 @@ _CORPUS_LEVEL = (DisambiguationRecord, GraphRecord)
 # so an unchanged document's records are reused across a delta instead of re-extracted.
 _DOC_LEVEL = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
 
-# The Stage kinds whose checkpoint the reuse store must NOT read (T4). Every one of them is either
-# a sink that re-emits its input verbatim (Export) or a CORPUS-LEVEL accumulator — and a
-# corpus-level accumulator can ride a doc-level carrier: Type Consolidation re-emits the whole
-# run's mentions/relations relabelled, so its checkpoint spans the REUSED documents too. See
-# :meth:`DeltaRunner._doc_level_records` for why that distinction has to be drawn by Stage kind
-# rather than by carrier type.
-_CORPUS_LEVEL_KINDS = (
-    CapabilityKind.PROFILING,
-    CapabilityKind.TYPE_CONSOLIDATION,
-    CapabilityKind.DISAMBIGUATION,
-    CapabilityKind.GRAPH_ASSEMBLY,
-    CapabilityKind.GRAPH_COMPLETION,
-    CapabilityKind.EXPORT,
+# The Stage kinds whose checkpoint the reuse store must NOT read (T4): every CORPUS-LEVEL kind.
+# A corpus-level Stage can ride a doc-level carrier — Type Consolidation re-emits the whole run's
+# mentions/relations relabelled, Context Enrichment re-emits the whole chunk stream with a header
+# summarizing the assembled graph, and an Export sink re-emits its input verbatim — so the
+# distinction has to be drawn by Stage KIND, not by carrier type (see
+# :meth:`DeltaRunner._doc_level_records`).
+#
+# Derived from the Capability descriptors rather than hand-listed: this tuple and the
+# phase-boundary check are the SAME fact ("does this Stage aggregate across documents?"), and when
+# they were two hand-written lists they disagreed — ``TYPE_CONSOLIDATION`` was here but missing
+# there. Sorted by CapabilityKind declaration order so the tuple is deterministic.
+_CORPUS_LEVEL_KINDS: tuple[CapabilityKind, ...] = tuple(
+    kind for kind in CapabilityKind if kind in CORPUS_LEVEL_KINDS
 )
 
 
