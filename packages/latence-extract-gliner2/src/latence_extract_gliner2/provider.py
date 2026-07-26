@@ -90,18 +90,15 @@ from latence_core.induced import LabelFloor, LabelSlot, effective_labels, resolv
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
-from latence_core.providers.device import cuda_available
+from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import (
-    cap_intra_op_threads,
     empty_cuda_cache,
-    ensure_gliner2_on_cuda,
     inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
     iter_label_buckets,
     iter_token_budget_microbatches,
-    load_gliner2_optimized,
-    neutralize_torch_jit,
+    load_gliner2_model,
     resolve_gliner2_knob,
     resolve_intra_op_threads,
     resolve_max_len,
@@ -467,9 +464,17 @@ class Gliner2FusedExtractor:
         # invalid value is an operator ConfigError up front, not a native fault buried in the lazy
         # load. device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places), matching where the
         # model will actually land.
+        # (a): resolve the device ONCE, through the ADR-0036 seam, like every other learned
+        # Provider. This Provider used to probe ``cuda_available()`` directly and never look at
+        # ``config["device"]`` at all — so ``device: cuda`` in the blessed pod stack was a no-op
+        # and, worse, ``device: cpu`` on a GPU box was silently overridden: it still resolved
+        # ``quantize=True`` and still moved the model to cuda. That is #191's failure class, in the
+        # Provider carrying the heaviest Stage. Resolving at construction also turns an invalid
+        # ``device`` string into an operator ConfigError before any weights are downloaded.
+        self._device = self._resolve_device(config.get("device", "auto"))
         try:
-            resolve_gliner2_knob("quantize", None, load_config)
-            resolve_gliner2_knob("compile", None, load_config)
+            resolve_gliner2_knob("quantize", self._device.device, load_config)
+            resolve_gliner2_knob("compile", self._device.device, load_config)
             self._intra_op_threads = resolve_intra_op_threads(load_config)
             # T7: the token-budget micro-batch bounds for the bucketed forward — the safety net that
             # keeps ONE padded activation bounded (max_texts × max_len) for any bucket size.
@@ -491,15 +496,18 @@ class Gliner2FusedExtractor:
     # -- lazy model load ----------------------------------------------------
 
     def _gliner2_cls(self) -> Any:
-        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner2 import — that
-        # import transitively pulls in transformers' deberta_v2 modeling module, whose
-        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
-        # (inside load_gliner2_optimized, which is entered only AFTER this class is resolved) cannot
-        # un-script them: the env switch is read by torch only at ITS import, and
-        # jit._state.disable() only affects FUTURE script() calls — so the scripted helpers would
-        # still die in nvrtc (libnvrtc-builtins.so.13.0) on the first forward on a Blackwell/CUDA-13
-        # box. Throughput-only, byte-identical output.
-        neutralize_torch_jit(provider_name="fused_entity_relation.gliner2")
+        """The backbone-import factory the perf seam calls at the one correct instant (#190).
+
+        It no longer neutralizes the JIT itself: it is HANDED to
+        :func:`~latence_core.providers.perf.load_gliner2_model`, which kills the TorchScript JIT and
+        caps the intra-op threads and only then calls this. That import transitively pulls in
+        transformers' ``deberta_v2`` module, whose relative-position helpers are compiled by
+        ``@torch.jit.script`` AT IMPORT and cannot be un-scripted afterwards (the Blackwell/CUDA-13
+        ``libnvrtc-builtins.so.13.0`` crash). The ordering used to be a rule this Provider had to
+        re-state in a comment and an AST linter had to police; now it is a straight line of code
+        inside the seam that no caller can reorder. The native dependency and its install hint stay
+        here, where the package that owns them is (ADR-0036 §2).
+        """
         try:
             from gliner2 import GLiNER2
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
@@ -510,41 +518,36 @@ class Gliner2FusedExtractor:
             raise ImportError(msg) from exc
         return GLiNER2
 
+    @classmethod
+    def _resolve_device(cls, requested: object) -> DeviceDecision:
+        """Route the ``device`` config value (``auto|cpu|cuda``) through the ADR-0036 device seam.
+
+        ``compute="either"`` (see :meth:`profile`), so ``cpu`` pins CPU, ``auto`` follows
+        availability, and ``cuda`` resolves to CUDA when a GPU is present — else the seam returns a
+        **skip** decision, which the load choreography turns into a loud ConfigError rather than a
+        silent CPU fallback (#191). A malformed device string is a ConfigError, not a TypeError.
+        """
+        try:
+            return select_device(str(requested), cls.profile())
+        except ValueError as exc:
+            msg = f"fused_entity_relation.gliner2: invalid device config: {exc}"
+            raise ConfigError(msg) from exc
+
     def _load_model(self) -> Any:
+        """Load the checkpoint on first use (cached) via the shared load choreography (C4).
+
+        One call. :func:`~latence_core.providers.perf.load_gliner2_model` owns the ordered sequence
+        — skip-decision → JIT kill → intra-op thread cap → backbone import → native quantize/compile
+        load (guarded, degrades to plain) → cuda placement keyed off the RESOLVED device. What this
+        Provider still owns is what is genuinely its own: the batched-API check below.
+        """
         if self._model is not None:
             return self._model
-        # W9-jit (#190, audit R1): FIRST, before anything imports torch — ``cap_intra_op_threads``
-        # below does — so the JIT env switch is already off in the environment torch reads at
-        # ITS import, not only after. Idempotent with the call in ``_gliner2_cls`` (which
-        # guarantees the ordering
-        # against the gliner2/deberta_v2 import for both load sites).
-        neutralize_torch_jit(provider_name="fused_entity_relation.gliner2")
-        # W9-scaling: cap torch intra-op threads BEFORE the load/first forward so gliner2's
-        # internal batching cannot oversubscribe a many-core host (the ~cpu_count-thread CPU spin
-        # with the GPU idle). Guarded → a torch-free/failed cap is a logged no-op.
-        cap_intra_op_threads(
-            self._intra_op_threads, provider_name="fused_entity_relation.gliner2"
-        )
-        # W9 perf seam: the gliner2 framework exposes NATIVE quantize (fp16) + compile
-        # (torch.compile + fused GPU kernels) kwargs on from_pretrained — pod-measured 1.74×
-        # combined NER+RE at byte-identical output. quantize defaults True on cuda / False on cpu;
-        # compile rides the cuda default since T7 (bucketing removed the recompile-thrash
-        # precondition). GUARDED so a quantize/compile fault degrades to a plain load (throughput
-        # only, never a crash). device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places).
-        self._model = load_gliner2_optimized(
-            self._gliner2_cls().from_pretrained,
+        self._model = load_gliner2_model(
+            self._gliner2_cls,
             self._model_id,
-            None,
             self._config,
-            provider_name="fused_entity_relation.gliner2",
-        )
-        # W9-scaling: when a GPU is present, ensure the (fp16) model is actually on cuda and LOG its
-        # device — the defence against the fp16-eager GPU-idle hang (a fp16-converted model that
-        # silently stayed on CPU → a CPU-bound spin). Best-effort + guarded (never crashes); a model
-        # from_pretrained already placed correctly makes the move a harmless no-op.
-        ensure_gliner2_on_cuda(
-            self._model,
-            cuda=cuda_available(),
+            self._device,
             provider_name="fused_entity_relation.gliner2",
         )
         # T7: the loaded object must expose the BATCHED entry points this Provider now drives.
@@ -572,17 +575,13 @@ class Gliner2FusedExtractor:
             "fused_entity_relation.gliner2: torch.compile failed at inference; re-loading the "
             "uncompiled model (quantize kept) — throughput only, never a crash"
         )
-        self._model = load_gliner2_optimized(
-            self._gliner2_cls().from_pretrained,
+        # The SAME choreography as the first load — placement included, which is the point: skipping
+        # it here would leave the model that serves the REST of the run unplaced.
+        self._model = load_gliner2_model(
+            self._gliner2_cls,
             self._model_id,
-            None,
             cfg,
-            provider_name="fused_entity_relation.gliner2",
-        )
-        # Keep the uncompiled reload on cuda too (W9-scaling) — the placement/logging is idempotent.
-        ensure_gliner2_on_cuda(
-            self._model,
-            cuda=cuda_available(),
+            self._device,
             provider_name="fused_entity_relation.gliner2",
         )
         return self._model
