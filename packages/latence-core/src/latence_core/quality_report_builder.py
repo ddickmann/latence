@@ -25,6 +25,27 @@ whole executor:
 interface. This is a **pure structural refactor: the Quality Report is byte-identical** to the
 pre-extraction output; the report-building logic below moved verbatim, only its collaborators are
 now injected instead of ``self``.
+
+**C5 — the consumer now matches the producer.** The extraction above kept the shape it inherited:
+:meth:`StageRecordReader.stage_records` is an ``Iterator`` precisely so a Runner can release a
+doc-level Stage's retained output and stream it back from its checkpoint (#69, ADR-0033), and the
+builder immediately did ``list.extend(...)`` on it. ``build()`` held fourteen whole-corpus lists
+live at once — ``parsed``, ``chunked``, ``post_content``, ``flagged_source``, ``mentions``,
+``relations``, ``redactions``, ``features``, ``disambiguations``, ``graph_records``,
+``inferred_records``, ``context_records``, ``consolidated``, ``disambig_mentions_in`` — of which
+two were byte-identical calls, so the entity-mention stream (59,450 records for 200 documents per
+PERF-RESULTS, the largest in any corpus) was decoded and retained TWICE. That quietly moved
+ADR-0033's memory peak from mid-run to report time rather than removing it.
+
+The gather is now a FOLD. Each section is a :class:`QualityAggregator` that declares the
+Capabilities it subscribes to and consumes records one at a time; ``build()`` makes ONE pass over
+the DAG, opens each subscribed Stage's stream once, fans each record out to that Stage's
+subscribers, and drops it. Peak memory is ``O(aggregators x bounded state)`` instead of
+``O(corpus x sections)``; the duplicate decode is gone; and adding a Stage's metric is one class
+plus one entry in :data:`QUALITY_AGGREGATORS` rather than an edit to ``build()``. The report
+remains **byte-identical** — ADR-0008's H-F1 amendment makes its bytes the contract, and the fold
+preserves the gather's record order, which is what keeps the order-sensitive accumulations (float
+averages, last-wins alias maps) bit-for-bit the same.
 """
 
 from __future__ import annotations
