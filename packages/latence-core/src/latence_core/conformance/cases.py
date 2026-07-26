@@ -27,6 +27,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
+from latence_core.capability_descriptor import (
+    ENTRY_POINT_PREFIX_HEADS,
+    descriptor_for,
+    kind_for_entry_point,
+)
 from latence_core.conformance import fixtures
 from latence_core.conformance import stub as stubs
 from latence_core.contracts import (
@@ -75,40 +80,21 @@ class Capability(StrEnum):
     DELTA = "delta"
 
 
-# Map a Provider entry-point **name prefix** to its Capability. The prefix is the substring
-# before the first ``.`` (``entity.gliner`` → ``entity``), EXCEPT where two Screening
-# Capabilities share the ``screening`` prefix (``screening.intake_*`` vs ``screening.content_*``)
-# and where ``parser.*`` and ``parse.*`` both name the Parse Capability. Those are handled by
-# :func:`capability_of`, which reads the second segment for Screening.
-_PREFIX_TO_CAPABILITY: dict[str, Capability] = {
-    "source": Capability.SOURCE,
-    "parse": Capability.PARSE,
-    "parser": Capability.PARSE,
-    "chunk": Capability.CHUNK,
-    "label_inducer": Capability.SCHEMA_INDUCTION,
-    "entity": Capability.ENTITY,
-    "relation": Capability.RELATION,
-    # A FUSED Entity+Relation provider (extract_fused) is checked against the RELATION case (the
-    # fused branch drives extract_fused). ``relation.gliner_relex`` uses the ``relation`` prefix for
-    # back-compat; ``fused_entity_relation.gliner2`` (W9) names the fused Capability explicitly.
-    "fused_entity_relation": Capability.RELATION,
-    "redaction": Capability.REDACTION,
-    "profiling": Capability.PROFILING,
-    "type_consolidation": Capability.TYPE_CONSOLIDATION,
-    "disambiguation": Capability.DISAMBIGUATION,
-    "graph": Capability.GRAPH,
-    "graph_completion": Capability.GRAPH_COMPLETION,
-    "graph_features": Capability.GRAPH_FEATURES,
-    "context": Capability.CONTEXT_ENRICHMENT,
-    "export": Capability.EXPORT,
-    "embedding": Capability.EMBEDDING,
+# The entry-point prefixes of the seams that are NOT pipeline Stages, so they have no
+# :class:`~latence_core.pipeline.CapabilityKind` and no CapabilityDescriptor to read the prefix
+# from. Every prefix that DOES name a Stage Capability lives on that Capability's descriptor
+# (``CapabilityDescriptor.entry_point_prefixes``) alongside the rest of its facts — including the
+# ``screening.intake_*`` / ``screening.content_*`` split, which used to be an if-chain here.
+_NON_STAGE_PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     # Index-time retrieval-signal generators (ADR-0049/0050): siblings of the dense Embedder under
-    # the same latence.providers seam.
+    # the same latence.providers seam, but never DAG Stages.
     "sparse": Capability.SPARSE_EMBEDDING,
     "multivector": Capability.MULTIVECTOR_EMBEDDING,
     "fde": Capability.FDE,
     # #164: the Tokenizer seam of the BM25 term-statistics exporter (ADR-0048/0049).
     "tokenizer": Capability.TOKENIZER,
+    # The corpus-graph feature computer and the delta processor: engine seams, not Stages.
+    "graph_features": Capability.GRAPH_FEATURES,
     "delta": Capability.DELTA,
 }
 
@@ -121,24 +107,28 @@ def capability_of(provider_name: str) -> Capability:
     (both share the ``screening`` prefix), and ``export.knowledge_graph``/``export.demo_site``/
     ``export.jsonl_parquet`` all → Export. A name whose prefix names no known Capability raises
     ``KeyError`` — a Provider the suite cannot classify is a loud failure, not a silent skip.
+
+    For a Stage Capability the prefix is read from its
+    :class:`~latence_core.capability_descriptor.CapabilityDescriptor`, so a new Capability is
+    auto-classified the moment it declares its facts — and cannot be declared without a prefix.
+    Only the non-Stage seams (sparse/multivector/fde/tokenizer/graph_features/delta) still carry
+    their prefix here, because they have no CapabilityKind to hang it on.
     """
-    prefix, _, rest = provider_name.partition(".")
-    if prefix == "screening":
-        if rest.startswith("intake"):
-            return Capability.INTAKE_SCREENING
-        if rest.startswith("content"):
-            return Capability.CONTENT_SCREENING
-        msg = f"Screening Provider {provider_name!r} is neither intake_* nor content_*."
-        raise KeyError(msg)
-    try:
-        return _PREFIX_TO_CAPABILITY[prefix]
-    except KeyError as exc:
-        msg = (
-            f"Provider {provider_name!r} has an unknown Capability prefix {prefix!r}; "
-            "add it to _PREFIX_TO_CAPABILITY (or write a ConformanceCase) — a Provider the "
-            "conformance suite cannot classify is a loud failure, never a silent skip."
-        )
-        raise KeyError(msg) from exc
+    prefix, _, _rest = provider_name.partition(".")
+    non_stage = _NON_STAGE_PREFIX_TO_CAPABILITY.get(prefix)
+    if non_stage is not None:
+        return non_stage
+    if prefix in ENTRY_POINT_PREFIX_HEADS:
+        # Raises KeyError naming the expected second segments when a dotted prefix (``screening``)
+        # matches no discriminator — the same loud failure, one level down.
+        return Capability(descriptor_for(kind_for_entry_point(provider_name)).conformance_case)
+    msg = (
+        f"Provider {provider_name!r} has an unknown Capability prefix {prefix!r}; "
+        "declare it on the Capability's CapabilityDescriptor (or, for a non-Stage seam, in "
+        "_NON_STAGE_PREFIX_TO_CAPABILITY) — a Provider the conformance suite cannot classify "
+        "is a loud failure, never a silent skip."
+    )
+    raise KeyError(msg)
 
 
 # The invoke signature: given a constructed Provider instance, run it and return the records it
