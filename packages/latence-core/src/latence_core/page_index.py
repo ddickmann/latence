@@ -45,6 +45,12 @@ Report — lives here, once.
    inherited page range. (A lookup also absorbs, as a backstop, so a forgotten
    ``observe`` costs completeness rather than correctness on the chunks it did see.)
 
+   Route 2 also puts an invariant on the chunk **stream**: the map-carrying chunk must
+   SURVIVE to the consumer. A Stage that removes chunks — Content Screening quarantines
+   them — can drop exactly that one record and take the whole document's page resolution
+   with it. :func:`rehome_page_maps` is where that invariant is kept, applied by the
+   Runner at the point chunks leave the stream so every Screening Provider inherits it.
+
 Route 2 is why the map no longer has to ride on all N chunks. For a 519-page document
 chunked at 640 tokens that is ~30 KB of JSON on 1 record instead of ~399 — ~92% of every
 chunk checkpoint line was the duplicated map, and every checkpoint write, streaming
@@ -53,9 +59,13 @@ read-back and decode paid for it.
 **Never raises, never guesses silently.** Resolution degrades exactly as the ported
 ``PageOffsetIndex`` does (Provenance resolution must not be the thing that fails a run),
 and a degradation is *counted* rather than swallowed: :attr:`PageIndexResolver.unresolved`
-is the number of lookups that found no map, so a Quality Report can surface the gap
-instead of the caller silently emitting an inherited page range (ADR-0034: no silent
-errors — failures are observable).
+is the number of lookups that found no map, instead of the caller silently emitting an
+inherited page range (ADR-0034: no silent errors — failures are observable). The count has
+a consumer: the Quality Report's drift audit
+(``quality_report_builder._DriftAggregator``) reads it and warns, counts-only, when chunks
+went unaudited — a section that merely shrank would otherwise read as a confident
+``clean``. The *preventable* half of the degradation is prevented rather than reported —
+see :func:`rehome_page_maps`.
 """
 
 from __future__ import annotations
@@ -65,9 +75,55 @@ from typing import TYPE_CHECKING
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
     from latence_core.contracts import ChunkRecord, DocumentRecord, PageMap
+
+
+def rehome_page_maps(
+    kept: Sequence[ChunkRecord], *, dropped_from: Iterable[ChunkRecord]
+) -> list[ChunkRecord]:
+    """Re-stamp each document's page map onto the first chunk of it that SURVIVED.
+
+    Route 2 (above) rests on an invariant that is about the chunk **stream**, not about any
+    one record: a document's map rides its first chunk, so that chunk must reach the
+    consumer. Any Stage that REMOVES chunks can break it — Content Screening quarantines a
+    chunk carrying a prompt-injection marker, and a document's opening chunk (title page,
+    header block, a pasted instruction) is a likely place for one. Dropping it destroyed
+    page resolution for the *whole* document: every later chunk resolved to ``None`` and
+    every mention/relation/PII span in it degraded to its chunk's inherited page range.
+    Before C1 the map rode all N chunks, so filtering could not do that — the invariant is
+    what C1 introduced, and this is where it is kept.
+
+    Call it at the point chunks leave the stream, with ``kept`` the survivors and
+    ``dropped_from`` the stream they were selected out of (the Runner does this for every
+    Content-Screening Provider, so a third-party screener inherits the guarantee). A
+    document whose map-carrier survived, or which never had a map, is returned untouched —
+    identical objects, so an unfiltered stream is byte-identical to its input.
+
+    O(len(kept)) time and one map reference per document (the maps already exist in
+    ``dropped_from``); it materialises nothing the caller was not already holding.
+    """
+    carried: dict[str, PageMap] = {}
+    for chunk in dropped_from:
+        if chunk.page_map is not None:
+            carried.setdefault(chunk.document_record_id, chunk.page_map)
+    if not carried:
+        return list(kept)
+    seen: set[str] = set()
+    restamped: list[ChunkRecord] = []
+    for chunk in kept:
+        document_record_id = chunk.document_record_id
+        if document_record_id in seen or chunk.page_map is not None:
+            seen.add(document_record_id)
+            restamped.append(chunk)
+            continue
+        seen.add(document_record_id)
+        page_map = carried.get(document_record_id)
+        restamped.append(
+            chunk if page_map is None else chunk.model_copy(update={"page_map": page_map})
+        )
+    return restamped
 
 
 class PageIndexResolver:

@@ -71,6 +71,7 @@ from latence_core.observability import (
     RunLineage,
     dataset_for_uri,
 )
+from latence_core.page_index import rehome_page_maps
 from latence_core.pipeline import CapabilityKind, ExtractOn, Pipeline, Stage
 from latence_core.quality import (
     DriftDiagnostics,
@@ -1240,7 +1241,18 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, content_outcome)
             # Passed chunks (some now carrying propagated RiskMarkers) proceed to
             # Export; quarantined chunks are removed and persisted for audit.
-            return iter(content_outcome.passed)
+            #
+            # Removing a chunk must not remove its DOCUMENT's page map. Since C1 (schema
+            # v18) the map rides a document's first chunk only, so quarantining that one
+            # chunk — a document's opening chunk is a likely place for an injection marker
+            # — would leave every later chunk of that document with no map at all, and
+            # every mention/relation/PII span downstream would silently inherit its
+            # chunk's page range instead of resolving its own source page (ADR-0021/0031).
+            # Re-stamping it onto the first surviving chunk keeps the stream invariant the
+            # PageIndexResolver's absorb-from-the-stream route depends on, for EVERY
+            # ContentScreener Provider rather than only the ones that remember. A stream
+            # nothing was dropped from comes back untouched.
+            return iter(rehome_page_maps(content_outcome.passed, dropped_from=chunk_records))
 
         if stage.capability is CapabilityKind.SCHEMA_INDUCTION:
             label_inducer = self._capability_provider(stage, provider, LabelInducer)

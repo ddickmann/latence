@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Protocol
@@ -113,6 +114,11 @@ if TYPE_CHECKING:
     from latence_core.pipeline import Pipeline, Stage
     from latence_core.runner import StageOutput
     from latence_core.storage import Storage
+
+
+# Counts-only, never content (ADR-0034): the one degradation the report's own fields cannot
+# express — chunks the drift audit could not resolve at all — is surfaced here.
+logger = logging.getLogger("latence.quality")
 
 
 # -- co-occurrence fingerprint (relocated from runner.py, re-exported there) ----------------
@@ -735,6 +741,20 @@ class _DriftAggregator:
         self._audited += 1
 
     def finish(self) -> DriftDiagnostics | None:
+        # ADR-0034, the other half of "counted rather than swallowed": a chunk whose document
+        # has no page map is not audited, so it is invisible in ``records_audited`` — and a
+        # report section that simply shrank would read as a confident ``clean``. This is the
+        # resolver's ``unresolved`` count's consumer: an operator sees the gap. Counts only
+        # (no record id, no document id, no content) — the report's own no-PII discipline.
+        unresolved = self._resolver.unresolved
+        if unresolved:
+            logger.warning(
+                "provenance drift audit: %d chunk offset lookup(s) found no page map for "
+                "their document and were not audited (%d chunk(s) audited); those chunks' "
+                "page provenance is inherited, not resolved",
+                unresolved,
+                self._audited,
+            )
         if self._audited == 0:
             return None
         diag = self._resolver.diagnostics
