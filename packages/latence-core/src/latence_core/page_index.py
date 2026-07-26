@@ -133,15 +133,6 @@ class PageIndexResolver:
             index.page_for_offset(max(end - 1, start)),
         )
 
-    def resolves(self, chunk: ChunkRecord) -> bool:
-        """Whether this chunk's document has a page map (no lookup, no drift recorded).
-
-        For the callers whose fallback is not "inherit a page range" but a genuinely
-        different code path (a redaction plan that must decide *before* detection whether
-        page resolution is available at all).
-        """
-        return self._index_for(chunk) is not None
-
     # -- diagnostics --------------------------------------------------------
 
     @property

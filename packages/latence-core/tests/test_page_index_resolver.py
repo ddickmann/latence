@@ -240,7 +240,6 @@ def test_resolver_degrades_and_counts_when_no_map_is_available() -> None:
 
     assert resolver.page_for(stripped[0], 0) is None
     assert resolver.pages_for_span(stripped[0], 0, 10) is None
-    assert resolver.resolves(stripped[0]) is False
     assert resolver.unresolved == 2
     assert resolver.documents == 0
 
