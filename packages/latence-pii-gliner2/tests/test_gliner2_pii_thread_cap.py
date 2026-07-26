@@ -18,6 +18,7 @@ configured value) — never on a config flag.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from typing import Any
@@ -62,15 +63,33 @@ def recording_torch(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return calls
 
 
+@pytest.fixture()
+def cores(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Pin the host core count so a cap assertion is about the CAP, not about this machine.
+
+    ``resolve_intra_op_threads`` clamps the requested cap to ``os.cpu_count()``. A test that asserts
+    a bare literal is therefore only true on a host with at least that many cores: it is green on a
+    10-core dev box and RED on the 2-4 vCPU ``ubuntu-latest`` runner CI runs the suite on. Pinning
+    the count makes every assertion below host-independent — high to hold the clamp inert while the
+    cap itself is under test, low in the one test that puts the clamp under test.
+    """
+
+    def _pin(n: int) -> None:
+        monkeypatch.setattr(os, "cpu_count", lambda: n)
+
+    return _pin
+
+
 def _config(**extra: Any) -> dict[str, Any]:
     return {"pii_labels": ["person"], "device": "cpu", **extra}
 
 
 def test_redaction_gliner2_caps_intra_op_threads_at_load(
-    fake_gliner2: None, recording_torch: list[int], monkeypatch: pytest.MonkeyPatch
+    fake_gliner2: None, recording_torch: list[int], cores: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The default cap (8) is applied — the twin had this, this Provider did not."""
     monkeypatch.setenv("LATENCE_CUDA", "0")
+    cores(64)  # a many-core host: the clamp is inert, so this asserts the cap and nothing else
     Gliner2PIIRedactor(_config())._load_model()
     assert recording_torch == [8], (
         "redaction.gliner2 must cap torch's intra-op threads at load; without it a many-core host "
@@ -78,10 +97,26 @@ def test_redaction_gliner2_caps_intra_op_threads_at_load(
     )
 
 
+def test_the_cap_never_exceeds_the_host_core_count(
+    fake_gliner2: None, recording_torch: list[int], cores: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the contract: on a small host the cap clamps down to the cores present.
+
+    Asking torch for 8 intra-op threads on a 4-vCPU CI runner would itself be the oversubscription
+    this guard exists to prevent, so the clamp is behaviour worth pinning — and pinning it here is
+    what lets the test above assert a literal instead of restating ``min(...)`` back at the code.
+    """
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    cores(4)
+    Gliner2PIIRedactor(_config())._load_model()
+    assert recording_torch == [4]
+
+
 def test_the_cap_is_configurable(
-    fake_gliner2: None, recording_torch: list[int], monkeypatch: pytest.MonkeyPatch
+    fake_gliner2: None, recording_torch: list[int], cores: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("LATENCE_CUDA", "0")
+    cores(64)
     Gliner2PIIRedactor(_config(intra_op_threads=2))._load_model()
     assert recording_torch == [2]
 

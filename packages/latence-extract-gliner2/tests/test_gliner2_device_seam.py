@@ -21,6 +21,7 @@ These tests assert BEHAVIOUR through the Provider's own load path: what kwargs t
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from typing import Any
@@ -132,12 +133,34 @@ def test_an_invalid_device_string_is_a_config_error_at_construction(
 def test_intra_op_threads_are_capped_at_load(
     fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The many-core oversubscription guard still applies after the choreography moved inward."""
+    """The many-core oversubscription guard still applies after the choreography moved inward.
+
+    ``os.cpu_count`` is pinned high on purpose: ``resolve_intra_op_threads`` clamps the requested
+    cap to the core count, so an unpinned ``assert calls == [5]`` would be an assertion about the
+    machine the suite runs on (green on a 10-core dev box, red on the 2-4 vCPU ``ubuntu-latest``
+    runner). Pinned, this asserts the configured cap; the clamp is pinned separately below.
+    """
     calls: list[int] = []
     torch = types.ModuleType("torch")
     torch.set_num_threads = calls.append  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setenv("LATENCE_CUDA", "0")
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
 
     Gliner2FusedExtractor(_config(device="cpu", intra_op_threads=5))._load_model()
     assert calls == [5]
+
+
+def test_the_intra_op_cap_never_exceeds_the_host_core_count(
+    fake_gliner2: type[_FakeGLiNER2], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cap larger than the box clamps down — asking for more threads than cores IS the bug."""
+    calls: list[int] = []
+    torch = types.ModuleType("torch")
+    torch.set_num_threads = calls.append  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setenv("LATENCE_CUDA", "0")
+    monkeypatch.setattr(os, "cpu_count", lambda: 4)
+
+    Gliner2FusedExtractor(_config(device="cpu", intra_op_threads=5))._load_model()
+    assert calls == [4]
