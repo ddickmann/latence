@@ -78,6 +78,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, PIISpan, RedactionRecord
+from latence_core.page_index import PageIndexResolver
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_core.redaction_policy import (
@@ -485,12 +486,14 @@ class HybridPIIRedactor:
         W16 (ADR-0042): the chunk-level Redactor. Each chunk's ``content`` (≤ the model window) is
         scanned in full — no truncation — so PII anywhere in the chunk is masked. The clean
         ``content`` is UNCHANGED; ``masked_content`` is the PII-safe variant and ``pii_spans`` the
-        chunk-local, counts-only spans (source pages resolved through the chunk's offset_map +
-        page_map). The shared :func:`plan_chunk_redaction` / :func:`finalize_redacted_chunk`
-        machinery
-        owns policy + no-op-floor + masking; this Provider owns only detection. Chunks are threaded
-        1:1 in first-seen order for determinism.
+        chunk-local, counts-only spans (source pages resolved through the chunk's offset_map + the
+        document-scoped page index). The shared :func:`plan_chunk_redaction` /
+        :func:`finalize_redacted_chunk` machinery owns policy + no-op-floor + masking; this
+        Provider owns only detection. Chunks are threaded 1:1 in first-seen order for determinism.
         """
+        # ONE resolver for the whole call — the document's page map rides its first chunk
+        # (v18), so a per-chunk resolver would only resolve pages for that chunk.
+        resolver = PageIndexResolver()
         for chunk in chunks:
             plan = plan_chunk_redaction(
                 chunk,
@@ -498,6 +501,7 @@ class HybridPIIRedactor:
                 detector_types=self._detector_types,
                 sensitive_set=self._sensitive_set,
                 min_chars=self._min_chars,
+                resolver=resolver,
             )
             accepted: list[tuple[int, int, str, str, str, float]] = []
             if plan.needs_detection:

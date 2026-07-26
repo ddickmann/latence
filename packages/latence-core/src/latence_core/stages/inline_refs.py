@@ -50,10 +50,10 @@ occurrence — so identical input + config yields byte-identical output (the Bas
 and pages are resolved EXACTLY like the learned providers and like header_refs: a chunk-local model
 offset is lifted to a true original-markdown offset through the chunk's stripped-``content`` ->
 original ``offset_map`` via :class:`~latence_core.offsetmap.OffsetIndex` (a pre-v11 chunk degrades
-to the ``char_start + local`` shift), and each span's source page is resolved through the parent's
-page map via :class:`~latence_core.page_index.PageIndexResolver` (degrading to the chunk's inherited page
-range when no map is present). A document whose self id resolves from neither the front matter nor
-the file name yields nothing (never an error, never a dangling edge).
+to the ``char_start + local`` shift), and each span's source page is resolved through the
+document-scoped :class:`~latence_core.page_index.PageIndexResolver` (degrading to the chunk's
+inherited page range when no map is available). A document whose self id resolves from neither the
+front matter nor the file name yields nothing (never an error, never a dangling edge).
 """
 
 from __future__ import annotations

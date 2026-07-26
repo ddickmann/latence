@@ -37,7 +37,8 @@ original-markdown offsets through the chunk's stripped-``content``->original ``o
 :class:`~latence_core.offsetmap.OffsetIndex` (a pre-v11 chunk degrades to the ``char_start + local``
 shift), and each span's source page is resolved through the document-scoped
 :class:`~latence_core.page_index.PageIndexResolver` (degrading to the chunk's inherited page range
-when no page map is available for the document). The self id and a relation's header line are matched **within one chunk** — for
+when no page map is available for the document). The self id and a relation's header line are
+matched **within one chunk** — for
 front-matter metadata headers (RFC, e-mail, memo) the self declaration and the header lines are
 co-located in the same leading chunk, so this is exact; a chunk carrying header lines but no self
 declaration yields nothing (never an error, never a dangling edge).
