@@ -16,6 +16,18 @@ the produced records carry real, resolvable offsets — a genuine contract check
 
 The harness flags every stub-scoped Provider ``conformance-verified against stub; live numbers
 need a rig`` in its result, so a reader never mistakes a stub-pass for a live quality number.
+
+**Known ADR-0016 violation, tracked.** Every fake in this module stands in for a dependency
+``latence-core`` does not declare (``openai``, ``gliner``, ``gliner2``, ``sentence_transformers``,
+``transformers``, ``presidio``, ``pypdfium2``/``PIL``), so shipping a Provider package still
+requires editing the core. The right shape is already proven in-tree —
+``latence_source_sharepoint.testing`` ships its Graph fake in its own ``src``, and
+``cases._LAZY_PROVIDER_CASES`` builds a case only when the owning package is installed — and the
+generalisation is a second entry-point group, ``latence.conformance_cases``, with core keeping only
+``harness`` (the C1–C6 checks) and ``fixtures``. See
+``issues/backlog-post-v1/conformance-cases-per-package.md``. The roster half of the same problem is
+already fixed: the expected Provider set is derived from the workspace manifests
+(``packages/latence-core/tests/_workspace_providers.py``), not restated in a test.
 """
 
 from __future__ import annotations

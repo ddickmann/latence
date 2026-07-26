@@ -12,14 +12,21 @@ against a deterministic stub (their real numbers need a rig, #64 — flagged, ne
 The suite also proves the checks **bite** (not merely assert): a deliberately-broken throwaway
 Provider FAILs C2 (untyped crash) and C4 (declared-deterministic-but-not), and a synthetic
 GPU-only Provider is skipped-with-flag by C5 — so a bad Provider would actually be caught.
+
+The roster this parametrizes over is **derived from the workspace's package manifests**
+(``_workspace_providers``), not restated here: every Provider already declares itself once, in its
+own ``[project.entry-points."latence.providers"]`` block, so shipping one is a single edit and the
+gate can no longer drift away from what the workspace actually contains.
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
+from _workspace_providers import declared_providers, providers_declared_in
 from latence_core.capability import ProviderRegistry
 from latence_core.conformance import (
     build_conformance_report,
@@ -88,104 +95,14 @@ def _model_profile(
         batch=batch,
     )
 
-# The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 50 Providers across 21 Capabilities (P3 landscape + the three index-time retrieval-signal
-# reference generators sparse.hashing / multivector.hashing / fde.reference #160 + the first real
-# Wave-1 adapter H-A1 + the
-# learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii + the real
-# GPU LightOn-OCR Parser W1-lighton + its served-vLLM twin parser.lighton_vllm W10 + its MIT twin
-# the GPU GLM-OCR Parser W1-glm + the OPTIONAL reference GraphCompleter W2-linkpred Slice 1 + the
-# learned ULTRA/PyKEEN GraphCompleter W2-linkpred Slice 2 + the fastino GLiNER2 Redactor
-# W3-pii-gliner2 + the OPTIONAL LLM schema-induction LabelInducer W4-schema-induction + the universal
-# license-clean parser.render W5-universal-parser + the unified fused Entity+Relation gliner2
-# extractor W9-gliner2-unified, the relex drop-in + the OPTIONAL reference ContextEnricher
-# context.kg_header W13-context-enrichment + the enterprise GLinker Disambiguator
-# disambiguation.glinker ADR-0046 — the neural L2→L3→L4→L0 linking + audited resolver, GPU + the two
-# OPTIONAL reference GraphFeatureComputers graph_features.degree / graph_features.pagerank — degree/
-# connected-components + PageRank/label-propagation centrality+community, ADR-0051 #161).
-# If a Provider is added/removed, this list is updated deliberately, so the count check catches an
-# accidental un-covered Provider.
-_EXPECTED_PROVIDERS = frozenset(
-    {
-        "source.local_folder",
-        # The SharePoint/OneDrive source-SYSTEM connector (#182, latence-source-sharepoint).
-        "source.sharepoint",
-        "parser.plaintext",
-        "parser.document",
-        "parser.pdfplumber",
-        "parser.lighton",
-        "parser.lighton_vllm",
-        "parser.glm",
-        "parser.render",
-        "parser.endpoint",
-        "chunk.markdown",
-        "chunk.sentence_window",
-        "screening.intake_signature",
-        "screening.content_keyword",
-        "screening.content_fuzzy",
-        "label_inducer.llm",
-        # T5: the non-frontier per-chunk inducer behind the SAME schema-induction seam — a
-        # deterministic, CPU-only, zero-network tagger over an operator-declared candidate type
-        # space (no model, no weights, no call), so it runs for REAL in the conformance suite.
-        "label_inducer.lexicon",
-        "entity.gazetteer",
-        "entity.gliner",
-        "entity.endpoint",
-        "relation.pattern",
-        "relation.llm",
-        "relation.gliner_relex",
-        "fused_entity_relation.gliner2",
-        # The in-core deterministic structured-header cross-reference extractor (dogfood-3-inspect):
-        # recovers self-anchored, bare-identifier metadata-header relations (RFC Obsoletes:/Updates:)
-        # that entity-anchored RE cannot. Pure-Python, zero-dep, fulfils the fused seam.
-        "fused_entity_relation.header_refs",
-        # The in-core deterministic INLINE-CITATION cross-reference extractor (the dogfood measured
-        # gap): recovers a document's INLINE body "RFC <n>" citations — the majority of a corpus's
-        # gold cross-references — that the header-only header_refs sibling structurally cannot see.
-        # Pure-Python, zero-dep, fulfils the fused seam.
-        "fused_entity_relation.inline_refs",
-        "redaction.hybrid_rule",
-        "redaction.gliner_pii",
-        "redaction.gliner2",
-        "redaction.presidio",
-        "profiling.statistical",
-        "profiling.lightweight",
-        "disambiguation.cascade",
-        "disambiguation.exact_surface",
-        # T3 (ADR-0054): the corpus-level TYPE-vocabulary canonicalizer + its exact-surface
-        # second reference — the resolution phase's type-side twin of the disambiguators.
-        "type_consolidation.cascade",
-        "type_consolidation.exact_surface",
-        "disambiguation.embedding",
-        "disambiguation.glinker",
-        "graph.canonical",
-        "graph.weighted",
-        "graph_completion.reference",
-        "graph_completion.ultra",
-        "graph_features.degree",
-        "graph_features.pagerank",
-        "context.kg_header",
-        "export.jsonl_parquet",
-        "export.knowledge_graph",
-        "export.demo_site",
-        "embedding.hashing",
-        "embedding.endpoint",
-        "embedding.sentence_transformers",
-        "sparse.hashing",
-        "sparse.splade",
-        "multivector.hashing",
-        "fde.reference",
-        # The real, canonical MUVERA FDE (latence-muvera, #163) — pure-Python, training-free,
-        # numpy-free, installed in the CPU-first dev env so it RUNS the default _fde_case() for
-        # real, alongside the in-core fde.reference (ADR-0050).
-        "fde.muvera",
-        # The two in-core reference Tokenizers (#164) — the varying seam of the optional BM25
-        # term-statistics artifact exporter (ADR-0048/0049). Pure-Python, deterministic, zero-dep.
-        "tokenizer.regex",
-        "tokenizer.whitespace",
-        "delta.affected_set",
-    }
-)
+# The roster the registry must discover, DERIVED from the workspace's package manifests rather
+# than restated here (see ``_workspace_providers``). Every Provider is already declared exactly
+# once, in its own package's ``[project.entry-points."latence.providers"]`` block; a second,
+# hand-maintained copy of that list bought nothing but drift — its own comment claimed "50
+# Providers" while the set held 59 — and made shipping a Provider a two-package edit. Adding a
+# Provider is now ONE edit: its own pyproject.toml.
+_DECLARING_PACKAGE: dict[str, str] = declared_providers()
+_EXPECTED_PROVIDERS = frozenset(_DECLARING_PACKAGE)
 
 
 @pytest.fixture(autouse=True)
@@ -207,13 +124,69 @@ def _all_provider_names() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 59 Providers — real coverage, not a subset."""
+def test_registry_discovers_every_provider_the_workspace_declares() -> None:
+    """The environment under test holds exactly the Providers the workspace ships — no subset.
+
+    ``missing`` means a package declares a Provider that the environment never installed (it would
+    otherwise go entirely unconformed — the silent gap a hand-maintained roster could not see,
+    because a forgotten Provider is absent from both sides of it). ``extra`` means something
+    outside this workspace registered under our entry-point group.
+    """
     names = set(_all_provider_names())
+    missing = {name: _DECLARING_PACKAGE[name] for name in sorted(_EXPECTED_PROVIDERS - names)}
+    extra = sorted(names - _EXPECTED_PROVIDERS)
     assert names == set(_EXPECTED_PROVIDERS), (
-        f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
+        f"roster mismatch; declared-but-not-installed={missing}, installed-but-undeclared={extra}"
     )
-    assert len(names) == 59
+
+
+def test_the_roster_is_derived_from_the_manifests_not_restated() -> None:
+    """The expectation comes from the packages themselves, and spans more than one of them.
+
+    A derivation bug that only ever saw ``latence-core`` would silently shrink the gate to the
+    in-core reference Providers, so the roster is asserted to reach across packages and to include
+    a Provider that lives outside core (ADR-0016: heavy Providers ship in their own packages).
+    """
+    assert len(set(_DECLARING_PACKAGE.values())) > 1
+    assert _DECLARING_PACKAGE["export.jsonl_parquet"] == "latence-core"
+    assert _DECLARING_PACKAGE["redaction.presidio"] == "latence-pii-presidio"
+
+
+def test_the_derivation_bites_on_a_provider_no_package_declares(tmp_path: Path) -> None:
+    """The derived roster reflects the manifests exactly — it cannot invent or drop a name."""
+    workspace = tmp_path / "ws"
+    (workspace / "packages" / "latence-thing").mkdir(parents=True)
+    (workspace / "packages" / "latence-thing" / "pyproject.toml").write_text(
+        '[project]\nname = "latence-thing"\n'
+        '[project.entry-points."latence.providers"]\n'
+        '"chunk.thing" = "latence_thing:Thing"\n',
+        encoding="utf-8",
+    )
+    assert providers_declared_in(workspace) == {"chunk.thing": "latence-thing"}
+
+    # A workspace that declares nothing is an ERROR, never an empty (vacuously passing) roster.
+    empty = tmp_path / "empty"
+    (empty / "packages" / "latence-nothing").mkdir(parents=True)
+    (empty / "packages" / "latence-nothing" / "pyproject.toml").write_text(
+        '[project]\nname = "latence-nothing"\n', encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="refusing to report an empty roster"):
+        providers_declared_in(empty)
+
+
+def test_the_derivation_bites_on_a_duplicated_provider_name(tmp_path: Path) -> None:
+    """Two packages claiming one entry-point name is a FAILURE, not a silently-shadowed Provider."""
+    workspace = tmp_path / "ws"
+    for package in ("latence-a", "latence-b"):
+        (workspace / "packages" / package).mkdir(parents=True)
+        (workspace / "packages" / package / "pyproject.toml").write_text(
+            f'[project]\nname = "{package}"\n'
+            '[project.entry-points."latence.providers"]\n'
+            '"chunk.thing" = "latence_thing:Thing"\n',
+            encoding="utf-8",
+        )
+    with pytest.raises(RuntimeError, match="declared twice"):
+        providers_declared_in(workspace)
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -251,7 +224,7 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     """The rolled-up report: all pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 59
+    assert report.providers_total == len(_EXPECTED_PROVIDERS)
     assert report.providers_failed == 0
     assert report.all_passed
     # The endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
