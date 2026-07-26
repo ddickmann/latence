@@ -26,12 +26,12 @@ These tests hold that line, and each one asserts an observable behaviour rather 
 
 from __future__ import annotations
 
-import json
 import tracemalloc
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+from _c5_broad_stack import FIXTURE, run_broad, timing_free
 from latence_core.contracts import (
     Classification,
     EntityMention,
@@ -47,205 +47,12 @@ from latence_core.quality_report_builder import (
     QualityRunContext,
     StageRecordReader,
 )
-from latence_core.runner import LocalRunner, StageOutput, topological_order
+from latence_core.runner import StageOutput, topological_order
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
-_FIXTURE = Path(__file__).parent / "data" / "quality_report_c5_fixture.json"
-
-
-# ---------------------------------------------------------------------------
-# A broad run whose report exercises (nearly) every section.
-# ---------------------------------------------------------------------------
-
-
-def _docs(tmp_path: Path) -> Path:
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    (docs / "memo.txt").write_text(
-        "Alice works at Acme. Contact alice@acme.example for details.\n",
-        encoding="utf-8",
-    )
-    (docs / "note.txt").write_text(
-        "Bob joined International Business Machines. IBM partnered with Acme.\n",
-        encoding="utf-8",
-    )
-    (docs / "brief.txt").write_text(
-        "Globex partnered with Acme. Carol works at Globex.\n",
-        encoding="utf-8",
-    )
-    return docs
-
-
-def _gold_set(tmp_path: Path) -> Path:
-    """Gold annotations over ``memo.txt`` so the gold-set section is populated too."""
-    gold = {
-        "match_min_overlap": 0.0,
-        "documents": [
-            {
-                "file_name": "memo.txt",
-                "entities": [
-                    {"label": "person", "char_start": 0, "char_end": 5, "text": "Alice"},
-                    {"label": "org", "char_start": 15, "char_end": 19, "text": "Acme"},
-                ],
-                "relations": [
-                    {
-                        "label": "works_for",
-                        "head": {"label": "person", "char_start": 0, "char_end": 5},
-                        "tail": {"label": "org", "char_start": 15, "char_end": 19},
-                    }
-                ],
-            }
-        ],
-    }
-    path = tmp_path / "gold.json"
-    path.write_text(json.dumps(gold), encoding="utf-8")
-    return path
-
-
-def _broad_pipeline(store: str, docs_dir: Path, gold_uri: str) -> Pipeline:
-    """A single stack wiring every in-core Capability that contributes a report section.
-
-    source -> intake_screen -> parse -> chunk -> content_screen -> {entities, relations} ->
-    consolidate -> disambiguate -> graph -> complete -> enrich -> exports, plus redaction and
-    profiling branches and a gold set. Deliberately broad: the byte-identity fixture is only
-    meaningful if it covers the sections the fold has to reproduce.
-    """
-    return Pipeline.from_yaml_text(
-        f"""
-name: c5-aggregators
-storage_uri: {store}
-gold_set_uri: {gold_uri}
-stages:
-  - name: source
-    capability: source
-    provider: source.local_folder
-    config:
-      path: 'file://{docs_dir}'
-      sensitivity: internal
-      extensions: [txt]
-  - name: intake_screen
-    capability: intake_screening
-    provider: screening.intake_signature
-    depends_on: [source]
-    config:
-      max_bytes: 2097152
-      max_zip_ratio: 50.0
-  - name: parse
-    capability: parse
-    provider: parser.plaintext
-    depends_on: [intake_screen]
-  - name: chunk
-    capability: chunk
-    provider: chunk.markdown
-    depends_on: [parse]
-  - name: content_screen
-    capability: content_screening
-    provider: screening.content_keyword
-    depends_on: [chunk]
-  - name: entities
-    capability: entity_extraction
-    provider: entity.gazetteer
-    depends_on: [content_screen]
-    config:
-      labels:
-        org:
-          terms: [Acme, Globex]
-        organization:
-          terms: [International Business Machines, IBM]
-        person:
-          terms: [Alice, Bob, Carol]
-  - name: relations
-    capability: relation_extraction
-    provider: relation.pattern
-    depends_on: [content_screen, entities]
-    config:
-      window_chars: 200
-      relations:
-        works_for:
-          head: person
-          tail: org
-          triggers: [works at, joined]
-        partner_of:
-          head: org
-          tail: org
-          triggers: [partnered with]
-  - name: consolidate
-    capability: type_consolidation
-    provider: type_consolidation.cascade
-    depends_on: [entities, relations]
-    config:
-      aliases:
-        organization: org
-  - name: redact
-    capability: redaction
-    provider: redaction.hybrid_rule
-    depends_on: [content_screen]
-    config:
-      salt: c5-secret-salt
-  - name: profiling
-    capability: profiling
-    provider: profiling.statistical
-    depends_on: [parse, entities]
-  - name: disambiguate
-    capability: disambiguation
-    provider: disambiguation.cascade
-    depends_on: [consolidate]
-  - name: graph
-    capability: graph_assembly
-    provider: graph.canonical
-    depends_on: [disambiguate]
-    config:
-      corpus_id: c5
-  - name: complete
-    capability: graph_completion
-    provider: graph_completion.reference
-    depends_on: [graph]
-    config:
-      corpus_id: c5
-      transitive_labels: [partner_of]
-      symmetric_labels: []
-  - name: enrich
-    capability: context_enrichment
-    provider: context.kg_header
-    depends_on: [redact, graph]
-    config:
-      max_neighbors_per_entity: 1
-      max_triples: 6
-      min_entity_confidence: 0.0
-      min_edge_confidence: 0.0
-  - name: export_corpus
-    capability: export
-    provider: export.jsonl_parquet
-    depends_on: [enrich]
-    config:
-      basename: corpus
-"""
-    )
-
-
-def _timing_free(report: QualityReport) -> str:
-    """The report's JSON with wall-clock durations zeroed — everything else byte-for-byte.
-
-    Durations are the only fields a re-run legitimately changes, so they are canonicalised
-    (never dropped: a missing key would hide a shape change) and the remaining bytes are
-    compared exactly.
-    """
-    canonical = report.model_copy(deep=True)
-    canonical.total_duration_seconds = 0.0
-    for stage in canonical.stages:
-        stage.duration_seconds = 0.0
-    return canonical.to_json()
-
-
-def _run_broad(tmp_path: Path) -> QualityReport:
-    docs = _docs(tmp_path)
-    gold = _gold_set(tmp_path)
-    store = f"file://{tmp_path}/store"
-    pipeline = _broad_pipeline(store, docs, f"file://{gold}")
-    return LocalRunner().run(pipeline, run_id="c5")
 
 
 def test_folded_report_is_byte_identical_to_the_pre_c5_gather_fixture(tmp_path: Path) -> None:
@@ -256,9 +63,9 @@ def test_folded_report_is_byte_identical_to_the_pre_c5_gather_fixture(tmp_path: 
     pipeline against the pre-C5 builder; every field except the wall-clock durations is compared
     exactly.
     """
-    report = _run_broad(tmp_path)
-    expected = _FIXTURE.read_text(encoding="utf-8")
-    assert _timing_free(report) == expected
+    report = run_broad(tmp_path)
+    expected = FIXTURE.read_text(encoding="utf-8")
+    assert timing_free(report) == expected
 
     # Not vacuous: the fixture has to actually contain the sections the fold reproduces.
     populated = [
@@ -290,7 +97,7 @@ def test_rendered_report_is_byte_identical_to_the_pre_c5_render(tmp_path: Path) 
     tuple; it is now derived from the report model's own section-marked fields. The order and the
     display names must not move.
     """
-    report = _run_broad(tmp_path)
+    report = run_broad(tmp_path)
     rendered = report.render()
     assert (
         "## Stage metrics present: Parse, Chunk, Screening, Entities, Relations, Redaction, "
