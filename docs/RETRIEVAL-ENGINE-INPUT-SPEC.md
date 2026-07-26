@@ -367,7 +367,7 @@ Nothing in the output is engine-specific: Parquet/JSONL for the corpus, Parquet 
 3. **Deterministic / reproducible.** Content-addressed ids (chunk ids, `node_id` = sha256(corpus+entity), `edge_id` = sha256(corpus+relation)); sorted-key JSON; capped/sorted collections; streamed Parquet byte-identical to the buffered path. A seeded run over the same corpus + config is byte-identical.
 4. **Evidence-linked edges.** Every `GraphEdge` carries `Evidence` naming the source mentions/documents; the Quality Report's `graph.evidence_coverage` reports the fraction of edges so justified (1.0 = all).
 5. **Additive / versioned schemas.** `schema_version` on every record; new fields default to `None`/empty so older readers keep validating.
-6. **Atomic publish.** Both corpus files and the report are written to temp paths and atomically renamed (`Storage.finalize_atomic` / `write_atomic`), so a reader never sees a torn file.
+6. **Atomic publish.** Both corpus files and the report are written to temp paths and atomically renamed (`Storage.atomic_writers` for the streamed corpus file *set*, `Storage.write_atomic` for the buffered report), so a reader never sees a torn file — and a failed run sweeps its own temp paths rather than leaving them on the store. On an object store "atomically renamed" means the destination object is written in one atomic, read-after-write-consistent PUT; the underlying copy-then-delete is two operations, so a crash mid-publish can still leave a temp object behind (see `Storage.atomic_writer`).
 
 ---
 

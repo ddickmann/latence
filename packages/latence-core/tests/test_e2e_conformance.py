@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _workspace_providers import declared_providers
 from latence_core.capability import ProviderRegistry
 from latence_core.conformance import build_conformance_report
 from latence_core.pipeline import Pipeline
@@ -98,7 +99,9 @@ def test_run_report_carries_conformance_rollup(tmp_path: Path) -> None:
     conformance = build_conformance_report(ProviderRegistry())
     report.conformance = conformance
     assert report.conformance is not None
-    assert report.conformance.providers_total == 59
+    # Derived from the workspace manifests, not restated: adding a Provider is one edit, in its
+    # own pyproject.toml (see ``_workspace_providers``).
+    assert report.conformance.providers_total == len(declared_providers())
     assert report.conformance.all_passed
     assert report.conformance.providers_failed == 0
 
@@ -106,7 +109,7 @@ def test_run_report_carries_conformance_rollup(tmp_path: Path) -> None:
     # machine-readable artifact stays valid with the new section (counts only, no PII).
     round_tripped = QualityReport.model_validate_json(report.to_json())
     assert round_tripped.conformance is not None
-    assert round_tripped.conformance.providers_total == 59
+    assert round_tripped.conformance.providers_total == len(declared_providers())
     assert round_tripped.conformance.all_passed
     # The human-readable render still works (the conformance section is machine-only).
     assert "Quality Report" in round_tripped.render()
