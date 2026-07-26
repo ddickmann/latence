@@ -183,7 +183,14 @@ from latence_core.quality import (
     StageMetrics,
     StageScore,
 )
-from latence_core.quality_report_builder import QualityReportBuilder, StageRecordReader
+from latence_core.quality_report_builder import (
+    QUALITY_AGGREGATORS,
+    QualityAggregator,
+    QualityAggregatorFactory,
+    QualityReportBuilder,
+    QualityRunContext,
+    StageRecordReader,
+)
 from latence_core.runner import LocalRunner, topological_order
 from latence_core.state import (
     AffectedSet,
@@ -343,7 +350,11 @@ __all__ = [
     "ProviderProfile",
     "ProviderRegistry",
     "QualityReport",
+    "QUALITY_AGGREGATORS",
+    "QualityAggregator",
+    "QualityAggregatorFactory",
     "QualityReportBuilder",
+    "QualityRunContext",
     "QuarantineRecord",
     "Record",
     "RedactionAction",

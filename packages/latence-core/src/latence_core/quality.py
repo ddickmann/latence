@@ -8,6 +8,8 @@ per-Stage quality metrics, KG statistics, and gold-set precision/recall.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from latence_core.conformance.report import ConformanceReport
@@ -779,6 +781,36 @@ def _render_induction_cost(stages: list[StageMetrics]) -> list[str]:
     return lines
 
 
+#: Marker for an optional PER-STAGE quality section on :class:`QualityReport`.
+#:
+#: ``render()`` used to list the present sections from a hand-maintained ``section_map`` tuple that
+#: had to be edited in lockstep with the model — one of the five edit sites adding a Stage's metric
+#: required (C5). The marker moves that knowledge onto the field itself: a section field declares
+#: ``Field(default=None, json_schema_extra=SECTION)`` and ``render()`` discovers it, in declaration
+#: order, with its display name derived from the field name. Adding a counts-only section is then a
+#: model field plus its aggregator, and nothing else.
+#:
+#: It rides ``json_schema_extra`` because that is pydantic's supported per-field metadata channel;
+#: it is inert for ``model_dump``/``model_dump_json``, so no report byte moves.
+# Typed ``dict[str, Any]`` because that is pydantic's ``JsonDict``; the value is a bool.
+SECTION: dict[str, Any] = {"quality_section": True}
+
+
+def _section_fields() -> list[tuple[str, str]]:
+    """The marked section fields as ``(display name, field name)``, in declaration order.
+
+    The display name is the field name in CamelCase (``type_consolidation`` ->
+    ``TypeConsolidation``), which reproduces the hand-written names the ``section_map`` tuple
+    carried — verified byte-for-byte by the rendered-report regression test.
+    """
+    return [
+        ("".join(part.capitalize() for part in name.split("_")), name)
+        for name, info in QualityReport.model_fields.items()
+        if isinstance(info.json_schema_extra, dict)
+        and info.json_schema_extra.get("quality_section") is True
+    ]
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -792,30 +824,36 @@ class QualityReport(BaseModel):
     stages: list[StageMetrics] = Field(default_factory=list)
     completeness: CompletenessCheck = Field(default_factory=CompletenessCheck)
     contracts_complete: bool = True
+    # The optional per-Stage sections, each marked with ``SECTION`` so ``render()`` discovers it
+    # instead of a hand-maintained list. Declaration order IS the rendered order.
     # Present when the run had a Parse Stage; ``None`` for a Parse-free pipeline.
-    parse: ParseQuality | None = None
+    parse: ParseQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had a Chunk Stage / a Screening Stage respectively.
-    chunk: ChunkQuality | None = None
-    screening: ScreeningQuality | None = None
+    chunk: ChunkQuality | None = Field(default=None, json_schema_extra=SECTION)
+    screening: ScreeningQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had an Entity-Extraction Stage.
-    entities: EntityQuality | None = None
+    entities: EntityQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had a Relation-Extraction (or fused) Stage.
-    relations: RelationQuality | None = None
+    relations: RelationQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had a Redaction Stage.
-    redaction: RedactionQuality | None = None
+    redaction: RedactionQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had a Profiling Stage.
-    profiling: ProfilingQuality | None = None
+    profiling: ProfilingQuality | None = Field(default=None, json_schema_extra=SECTION)
     # T3 (ADR-0054): present when the run had a Type-Consolidation Stage — how much TYPE drift
     # per-chunk induction produced and how much of it the resolution phase collapsed, with the
     # alias->canonical map an operator reviews and corrects. None otherwise.
-    type_consolidation: TypeConsolidationQuality | None = None
+    type_consolidation: TypeConsolidationQuality | None = Field(
+        default=None, json_schema_extra=SECTION
+    )
     # Present when the run had a Disambiguation Stage.
-    disambiguation: DisambiguationQuality | None = None
+    disambiguation: DisambiguationQuality | None = Field(default=None, json_schema_extra=SECTION)
     # Present when the run had a Graph Assembly Stage.
-    graph: GraphQuality | None = None
+    graph: GraphQuality | None = Field(default=None, json_schema_extra=SECTION)
     # W13 (ADR-0039): present when the run had a context_enrichment Stage — how much KG coherence it
     # projected onto chunks (chunks enriched, avg neighbors, hub entities capped). None otherwise.
-    context_enrichment: ContextEnrichmentQuality | None = None
+    context_enrichment: ContextEnrichmentQuality | None = Field(
+        default=None, json_schema_extra=SECTION
+    )
     # S10: corpus-level Provenance-integrity drift roll-up (present when the run parsed
     # documents with page maps), and the gold-set harness result (present only when a
     # gold set was supplied — an adopter dropped in annotated documents).
@@ -875,20 +913,11 @@ class QualityReport(BaseModel):
                 f"{m.records_in} in -> {m.records_out} out, "
                 f"{m.duration_seconds:.3f}s{resumed}{errored}"
             )
-        section_map = (
-            ("Parse", self.parse),
-            ("Chunk", self.chunk),
-            ("Screening", self.screening),
-            ("Entities", self.entities),
-            ("Relations", self.relations),
-            ("Redaction", self.redaction),
-            ("Profiling", self.profiling),
-            ("TypeConsolidation", self.type_consolidation),
-            ("Disambiguation", self.disambiguation),
-            ("Graph", self.graph),
-            ("ContextEnrichment", self.context_enrichment),
-        )
-        present = [name for name, section in section_map if section is not None]
+        # Derived from the model's own SECTION-marked fields (declaration order), so a new section
+        # appears here without editing render() — see :data:`SECTION`.
+        present = [
+            display for display, name in _section_fields() if getattr(self, name) is not None
+        ]
         if present:
             lines.append("")
             lines.append(f"## Stage metrics present: {', '.join(present)}")
