@@ -475,7 +475,11 @@ class Gliner2FusedExtractor:
         try:
             resolve_gliner2_knob("quantize", self._device.device, load_config)
             resolve_gliner2_knob("compile", self._device.device, load_config)
-            self._intra_op_threads = resolve_intra_op_threads(load_config)
+            # Validation only: the cap itself is APPLIED by the load choreography (which must own
+            # it, because it has to land before the backbone import — capping threads is what first
+            # imports torch). Resolving it here keeps a bad value an operator ConfigError at
+            # construction rather than a native fault buried in the lazy load.
+            resolve_intra_op_threads(load_config)
             # T7: the token-budget micro-batch bounds for the bucketed forward — the safety net that
             # keeps ONE padded activation bounded (max_texts × max_len) for any bucket size.
             self._microbatch_max_texts, self._microbatch_token_budget = resolve_microbatch_bounds(
