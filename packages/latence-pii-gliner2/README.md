@@ -88,4 +88,34 @@ command — never a raw native `AttributeError`.
       policies:
         public: { action: mask }
         internal: { action: tag }          # detect-only for internal docs
+      # guardrails: true                   # also screen for learned guardrail categories (T2)
+      # guard_labels: [malware instructions]   # extra categories over the universal guard floor
 ```
+
+## Safety floors are UNIVERSAL; only induced types are per-chunk (T2)
+
+The sibling extractor scopes its config labels **per chunk** (relevance labels). This Redactor does
+the opposite with its config labels, deliberately:
+
+* **Induced `pii_types` are per chunk** — a chunk is screened for what its own induction found.
+* **The configured `pii_labels` are NOT** — they are a *safety* floor applied to **every** chunk. A
+  leaked card in a chunk whose induced types are all about shipping logistics must still be masked.
+  Attempting to scope them (`label_floor: per_chunk`) is a `ConfigError`, not a silent no-op.
+* The deterministic **ADR-0044 financial floor** (`ssn` / `credit_card` / `iban`) is the second,
+  model-independent layer of the same guarantee, enforced for every Redaction Provider at the shared
+  `finalize_redacted_chunk` seam — so a model that misses one still cannot leak it.
+
+### Learned guardrails (`guardrails: true`, off by default)
+
+The default checkpoint is a **guardrails**+PII model, so with `guardrails: true` each chunk is also
+screened for guardrail categories under the same rule: the universal guard floor
+(`prompt injection`, `harmful content`) plus any `guard_labels`, plus the categories induced for
+**that** chunk (`induced_labels.guard_types`). The floor is never subsetted per chunk.
+
+A guardrail hit is **flagged, never masked**: it produces a `RiskMarker` on the chunk (categories
+`prompt_injection` / `harmful` — the same vocabulary `screening.content_keyword` emits, so a RAG
+consumer filters one set) whose `reason` names the category and hit count and never echoes the
+matched text. Masking would silently corrupt the corpus text; the marker survives into it.
+
+This is orthogonal to the deterministic keyword `content_screen` Stage, which is a separate,
+earlier pre-filter and is untouched. Off by default ⇒ no extra labels, no markers, byte-identical.

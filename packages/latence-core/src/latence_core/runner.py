@@ -40,6 +40,7 @@ from latence_core.capability import (
     RelationExtractor,
     ScreeningOutcome,
     Source,
+    TypeConsolidator,
 )
 from latence_core.contracts import (
     ChunkRecord,
@@ -54,6 +55,7 @@ from latence_core.contracts import (
     RedactionRecord,
     RelationMention,
     ScreeningFinding,
+    TypeVocabulary,
 )
 from latence_core.errors import ConfigError, ContractError, error_category
 from latence_core.observability import (
@@ -148,6 +150,10 @@ _CHECKPOINT_READ_BATCH_RECORDS = 1024
 # doc-level records simultaneously.
 _ACCUMULATOR_KINDS = (
     CapabilityKind.PROFILING,
+    # T3 (ADR-0054): Type Consolidation is corpus-level by construction — a canonical type
+    # vocabulary cannot be elected from a prefix of the labels, only from all of them. Its own
+    # output is bounded by the mention set it re-emits (1:1, relabelled), not by corpus text.
+    CapabilityKind.TYPE_CONSOLIDATION,
     CapabilityKind.DISAMBIGUATION,
     CapabilityKind.GRAPH_ASSEMBLY,
     # W2-linkpred: Graph Completion consumes the whole assembled graph (NODE + EDGE GraphRecords),
@@ -291,9 +297,12 @@ class LocalRunner:
         # StageMetrics. A LabelInducer Provider exposes ``induction_fallbacks`` /
         # ``induction_documents`` int attributes (how many documents fell back to config labels out
         # of how many attempted); the Runner reads them after the Stage runs and resets. A
-        # non-induction Provider → (0, 0, 0). The third element is the loud empty-after-sanitization
-        # subset (documents that induced NOTHING usable even after the recovery re-prompt).
-        self._last_stage_induction = (0, 0, 0)
+        # non-induction Provider → an empty map. Carries the loud empty-after-sanitization subset
+        # (documents that induced NOTHING usable even after the recovery re-prompt) AND the T5
+        # induction COST columns (calls / dedup cache hits / endpoint-reported tokens / whether the
+        # call budget bound the run). A dict rather than a tuple because it is a growing set of
+        # optional columns fed straight into StageMetrics by name.
+        self._last_stage_induction: dict[str, int | bool] = {}
         # Per-Stage relation fan-out-guard tally, keyed by Stage name: (output-capped docs,
         # relations dropped [ADR-0033 / #63], input-capped docs, mentions dropped [#68]). A
         # RelationExtractor Provider exposes ``fanout_capped_documents``/
@@ -351,14 +360,16 @@ class LocalRunner:
         self._last_stage_retries = 0
         return count
 
-    def _drain_induction_tally(self) -> tuple[int, int, int]:
-        """Read + reset the schema-induction fail-open tally the just-run Stage reported (W4).
+    def _drain_induction_tally(self) -> dict[str, int | bool]:
+        """Read + reset the schema-induction columns the just-run Stage reported (W4 + T5).
 
-        Returns ``(fallbacks, documents, empty_after_sanitization)`` — the last being the loud
-        subset that induced nothing usable even after the recovery re-prompt.
+        Returns the ``StageMetrics`` field map: the W4 fail-open tally (``induction_fallbacks`` /
+        ``induction_documents`` / the loud ``induction_empty_after_sanitization``) plus the T5 cost
+        columns (``induction_calls`` / ``induction_cache_hits`` / the endpoint-reported token
+        counts / ``induction_budget_exhausted``). Empty for every non-induction Stage.
         """
         tally = self._last_stage_induction
-        self._last_stage_induction = (0, 0, 0)
+        self._last_stage_induction = {}
         return tally
 
     @staticmethod
@@ -398,27 +409,44 @@ class LocalRunner:
         return value if isinstance(value, int) else 0
 
     @staticmethod
-    def _provider_induction_tally(provider: object) -> tuple[int, int, int]:
-        """The schema-induction fail-open tally a LabelInducer Provider exposes (W4, ADR-0038).
+    def _provider_induction_tally(provider: object) -> dict[str, int | bool]:
+        """The schema-induction columns a LabelInducer Provider exposes (W4 ADR-0038, T5 cost).
 
-        Returns ``(fallbacks, documents, empty_after_sanitization)``: how many documents fell back
-        to config labels (a safety net bit — malformed/truncated/schema-invalid/empty output, or an
-        unreachable endpoint) out of how many the Stage attempted, and the LOUD subset that induced
-        NOTHING usable even after the empty-recovery re-prompt (the quality-cliff signal). Any
-        without the attributes (every non-induction Provider) contributes ``(0, 0, 0)`` — read
-        defensively so the seam names no base class (ADR-0004), the same discipline as
-        ``_provider_retry_count`` / ``_provider_fanout``.
+        Two families, read off the SAME optional-attribute seam:
+
+        * **fail-open** (W4): how many documents fell back to config labels (a safety-net bit —
+          malformed/truncated/schema-invalid/empty output, or an unreachable endpoint) out of how
+          many the Stage attempted, and the LOUD subset that induced NOTHING usable even after the
+          empty-recovery re-prompt (the quality-cliff signal).
+        * **cost** (T5): the requests actually issued, the items the chunk-text dedup cache
+          answered for free, the endpoint's own reported token usage, and whether a configured
+          call budget bound the run. Per-chunk induction is one call per distinct chunk text, so
+          this is what makes its cost readable instead of feared.
+
+        A Provider exposing none of them (every non-induction Provider) contributes an EMPTY map —
+        read defensively so the seam names no base class (ADR-0004), the same discipline as
+        ``_provider_retry_count`` / ``_provider_fanout``. Absent columns simply keep their
+        ``StageMetrics`` defaults rather than being written as zeros.
         """
-
-        def _int_attr(name: str) -> int:
-            value = getattr(provider, name, 0)
-            return value if isinstance(value, int) else 0
-
-        return (
-            _int_attr("induction_fallbacks"),
-            _int_attr("induction_documents"),
-            _int_attr("induction_empty_after_sanitization"),
+        counters = (
+            "induction_fallbacks",
+            "induction_documents",
+            "induction_empty_after_sanitization",
+            "induction_calls",
+            "induction_cache_hits",
+            "induction_prompt_tokens",
+            "induction_completion_tokens",
         )
+        tally: dict[str, int | bool] = {}
+        for name in counters:
+            value = getattr(provider, name, None)
+            # bool is an int subclass — exclude it so a mis-typed flag never lands in a count.
+            if isinstance(value, int) and not isinstance(value, bool):
+                tally[name] = value
+        exhausted = getattr(provider, "induction_budget_exhausted", None)
+        if isinstance(exhausted, bool):
+            tally["induction_budget_exhausted"] = exhausted
+        return tally
 
     # -- device routing (P3-F1, ADR-0036 §2) -------------------------------
 
@@ -582,7 +610,13 @@ class LocalRunner:
             # Graph Assembly, marked properties.inferred=True), so its checkpoint reads back as
             # GraphRecord and its predicted edges flow to Export alongside the asserted graph.
             return GraphRecord
-        if stage.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+        if stage.capability in (
+            CapabilityKind.FUSED_ENTITY_RELATION,
+            # T3: Type Consolidation is a mention→mention transform that re-emits BOTH carriers
+            # (mentions and relations, relabelled), so it checkpoints the same MIXED carrier a
+            # fused extractor does.
+            CapabilityKind.TYPE_CONSOLIDATION,
+        ):
             # A fused Stage checkpoints a MIXED carrier (EntityMention +
             # RelationMention). Signalled by Record; read via _read_mixed_checkpoint.
             return Record
@@ -697,7 +731,12 @@ class LocalRunner:
             parent = by_name.get(name)
             if parent is None:  # pragma: no cover - validated DAG
                 continue
-            if parent.capability is CapabilityKind.FUSED_ENTITY_RELATION:
+            if parent.capability in (
+                CapabilityKind.FUSED_ENTITY_RELATION,
+                # T3: same MIXED carrier — a Stage downstream of Type Consolidation reads back
+                # both relabelled mentions and relabelled relations from one checkpoint.
+                CapabilityKind.TYPE_CONSOLIDATION,
+            ):
                 return Record
             if parent.capability is CapabilityKind.PROFILING:
                 return FeatureRecord
@@ -1324,11 +1363,6 @@ class LocalRunner:
                     emit_start=False,
                 )
 
-            (
-                induction_fallbacks,
-                induction_documents,
-                induction_empty_after_sanitization,
-            ) = self._drain_induction_tally()
             stage_metrics.append(
                 StageMetrics(
                     name=stage.name,
@@ -1339,9 +1373,7 @@ class LocalRunner:
                     duration_seconds=round(duration, 6),
                     runner=runner_name,
                     endpoint_retries=self._drain_retry_count(),
-                    induction_fallbacks=induction_fallbacks,
-                    induction_documents=induction_documents,
-                    induction_empty_after_sanitization=induction_empty_after_sanitization,
+                    **self._drain_induction_tally(),  # type: ignore[arg-type]
                     **profile_fields,  # type: ignore[arg-type]
                 )
             )
@@ -1583,6 +1615,45 @@ class LocalRunner:
             )
             return list(provider.profile(profile_docs, profile_mentions))
 
+        if stage.capability is CapabilityKind.TYPE_CONSOLIDATION:
+            if not isinstance(provider, TypeConsolidator):
+                msg = (
+                    f"Provider {stage.provider!r} does not satisfy "
+                    f"the TypeConsolidator capability."
+                )
+                raise ContractError(msg)
+            # T3 (ADR-0054): Type Consolidation is the corpus-level TYPE-vocabulary resolver,
+            # the type-side twin of Disambiguation. It is corpus-level and multi-input like
+            # Disambiguation: an Entity-Extraction (or fused) parent supplies the EntityMentions
+            # whose labels it canonicalizes (REQUIRED — the labels ARE the vocabulary), and an
+            # optional Relation-Extraction (or fused) parent supplies the RelationMentions whose
+            # labels it canonicalizes alongside them. It re-emits BOTH carriers, relabelled, so a
+            # Disambiguation Stage wired to it reads canonical types — which matters because the
+            # entity resolver votes a cluster's type from its members' labels and gates its
+            # low-precision rungs on type compatibility.
+            #
+            # NOT streamed (unlike Profiling/Disambiguation): the Stage's contract is to return the
+            # SAME records relabelled, so it holds them regardless; a lazy input would only move
+            # the materialisation inside the Provider. The retained set is the mention set, which
+            # the extraction Stages' own checkpoints already bound.
+            self._require_type_consolidation_inputs_streamed(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            tc_mentions = self._stream_inputs_of_type(
+                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            tc_relations = self._stream_inputs_of_type(
+                stage, outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            consolidated = provider.consolidate(tc_mentions, tc_relations)
+            # The vocabulary is not a Record and never enters the DAG — it describes the corpus's
+            # SCHEMA, not a span of a document. It is persisted beside the run's checkpoints as a
+            # sidecar (ADR-0017: files are the source of truth), which is what makes it survive
+            # the run and lets an incremental delta run seed from it (T4).
+            self._persist_type_vocabulary(storage, pipeline, run_id, stage, consolidated.vocabulary)
+            typed: list[StageOutput] = [*consolidated.mentions, *consolidated.relations]
+            return typed
+
         if stage.capability is CapabilityKind.DISAMBIGUATION:
             if not isinstance(provider, Disambiguator):
                 msg = (
@@ -1776,6 +1847,46 @@ class LocalRunner:
         # An unknown capability is a malformed-Pipeline config error (#73), formerly a ValueError.
         raise ConfigError(msg)
 
+    # -- Type-vocabulary sidecar (T3, off the DAG) --------------------------
+
+    def _type_vocabulary_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
+        return f"{self._run_dir(pipeline, run_id)}/type-vocabulary/{stage_name}.json"
+
+    def _persist_type_vocabulary(
+        self,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+        stage: Stage,
+        vocabulary: TypeVocabulary | None,
+    ) -> None:
+        """Persist a Type-Consolidation Stage's canonical vocabulary for audit + delta reuse (T3).
+
+        Written even when the run consolidated nothing (an empty vocabulary is the honest answer
+        to "what did this Stage decide", not a missing file), so a reader never has to
+        distinguish "no file" from "no consolidation".
+        """
+        payload = (vocabulary if vocabulary is not None else TypeVocabulary()).model_dump_json(
+            indent=2
+        )
+        storage.write_atomic(
+            self._type_vocabulary_uri(pipeline, run_id, stage.name), payload.encode("utf-8")
+        )
+
+    def read_type_vocabulary(
+        self, storage: Storage, pipeline: Pipeline, run_id: str, stage_name: str
+    ) -> TypeVocabulary | None:
+        """Read back a run's persisted canonical type vocabulary; ``None`` when none was written.
+
+        The seam an incremental delta run (T4) reads its predecessor's vocabulary through before
+        seeding the next consolidation — so a delta aliases a new type INTO an existing canonical
+        cluster instead of re-electing (and thereby renaming) one.
+        """
+        uri = self._type_vocabulary_uri(pipeline, run_id, stage_name)
+        if not storage.exists(uri):
+            return None
+        return TypeVocabulary.model_validate_json(storage.read_text(uri))
+
     # -- Screening sidecars (quarantine + findings, off the DAG) ------------
 
     def _persist_screening_sidecar(
@@ -1901,6 +2012,30 @@ class LocalRunner:
         """
         return self._reuse_overlay_by_type.get(expected, [])  # type: ignore[return-value]
 
+    @staticmethod
+    def _parent_reemits_overlay(stage: Stage, pipeline: Pipeline, expected: type[_T]) -> bool:
+        """True when a parent Stage has ALREADY folded the reuse overlay into this carrier (T4).
+
+        The overlay must reach each corpus-level accumulator exactly once. Almost every
+        corpus-level Stage transforms its input into a DIFFERENT carrier (Disambiguation emits
+        DisambiguationRecords, Graph Assembly GraphRecords), so appending the reused mentions to
+        its stream is the only way it sees them. **Type Consolidation is the exception**: it is a
+        corpus-level accumulator whose output carrier IS its input carrier — it consumes
+        ``fresh ∪ overlay`` and re-emits all of it, relabelled. A downstream Stage that then
+        appended the overlay AGAIN would see every reused mention twice, which surfaces as a
+        ``CanonicalEntity`` whose ``member_mention_ids`` are duplicated (the resolver's
+        no-double-counting contract) — a delta that crashes rather than silently mis-counts, but a
+        crash all the same. So the overlay is suppressed for a carrier a parent already re-emitted.
+        """
+        if expected not in (EntityMention, RelationMention):
+            return False
+        by_name = {s.name: s for s in pipeline.stages}
+        return any(
+            (parent := by_name.get(name)) is not None
+            and parent.capability is CapabilityKind.TYPE_CONSOLIDATION
+            for name in stage.depends_on
+        )
+
     def _stream_inputs_of_type(
         self,
         stage: Stage,
@@ -1930,8 +2065,10 @@ class LocalRunner:
                 if isinstance(record, expected):
                     yield record
         # W17: append the reused doc-level records of this carrier so the accumulator folds in the
-        # unchanged documents' Stage outputs alongside the freshly-extracted ones (fresh ∪ reused).
-        yield from self._overlay_of_type(expected)
+        # unchanged documents' Stage outputs alongside the freshly-extracted ones (fresh ∪ reused)
+        # — unless a parent already re-emitted them (:meth:`_parent_reemits_overlay`, T4).
+        if not self._parent_reemits_overlay(stage, pipeline, expected):
+            yield from self._overlay_of_type(expected)
 
     def _stream_all_records_of_type(
         self,
@@ -2325,6 +2462,38 @@ class LocalRunner:
                 f"(got: {', '.join(got)}). A Disambiguation Stage must depend on an "
                 f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
                 f"the Pipeline's depends_on wiring."
+            )
+            raise ContractError(msg)
+
+    def _require_type_consolidation_inputs_streamed(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> None:
+        """A Type-Consolidation Stage must be wired to an Entity-Extraction parent (T3).
+
+        The mentions' labels ARE the vocabulary it canonicalizes, so the mention side is REQUIRED
+        (the relation side is optional — an entity-only stack is valid). A non-empty input that
+        carries no EntityMention means the Pipeline wired the Stage to the wrong parent; that is a
+        typed wiring error, never a silent pass-through that would leave the KG's types drifted
+        while the report claimed consolidation ran (ADR-0034). An empty run is legitimately empty.
+        """
+        present, names = self._scan_input_carriers(
+            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        )
+        if not present:
+            return
+        if EntityMention not in present:
+            got = sorted(names)
+            msg = (
+                f"Stage {stage.name!r} (type_consolidation) received no EntityMentions "
+                f"(got: {', '.join(got)}). A Type-Consolidation Stage must depend on an "
+                f"Entity-Extraction (or fused) Stage (the mentions whose types it "
+                f"canonicalizes). Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)
 

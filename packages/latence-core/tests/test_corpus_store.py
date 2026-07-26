@@ -78,6 +78,33 @@ def test_commit_produces_incrementing_versions(tmp_path: Path) -> None:
     assert store.head_version() == 1
 
 
+def test_the_canonical_type_vocabulary_round_trips_per_version(tmp_path: Path) -> None:
+    """T4: the vocabulary a delta EXTENDS is Corpus-Version state, versioned like the records.
+
+    A Version that committed none reads back ``None`` (the pre-T4 / no-consolidation path stays
+    byte-identical), and a prior Version keeps the vocabulary IT committed — so an audit of v0 sees
+    v0's type space, not the head's.
+    """
+    from latence_core.contracts import CanonicalType, TypeKind, TypeVocabulary
+
+    store = _store(tmp_path)
+    store.commit(
+        parent_version=None, records=[_record("acme", 1)], delta_json=_delta(["doc-a"]),
+        document_count=1, reconciled=True,
+    )
+    assert store.head_type_vocabulary() is None
+
+    vocabulary = TypeVocabulary(
+        types=[CanonicalType(kind=TypeKind.ENTITY, canonical="organization", aliases=["org"])]
+    )
+    store.commit(
+        parent_version=0, records=[_record("acme", 2)], delta_json=_delta(["doc-b"]),
+        document_count=2, reconciled=False, type_vocabulary=vocabulary,
+    )
+    assert store.head_type_vocabulary() == vocabulary
+    assert store.read_type_vocabulary(0) is None, "a prior Version keeps its own type space"
+
+
 def test_idempotent_recommit_same_fingerprint_is_noop(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.commit(

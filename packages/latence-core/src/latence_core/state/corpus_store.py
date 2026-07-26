@@ -17,6 +17,10 @@ Layout under ``<storage_uri>/_latence/corpus/``:
 * ``wal/v<N>/MANIFEST.json`` — the WAL commit manifest (the linearisation point);
 * ``wal/v<N>/records.jsonl`` — the committed derived record set for Version N;
 * ``wal/v<N>/version.json`` — the :class:`~latence_core.contracts.CorpusVersion` contract;
+* ``wal/v<N>/doclevel.jsonl`` — the cross-run doc-level reuse store (W17, ADR-0043);
+* ``wal/v<N>/schema.json`` — the frozen induced CORPUS schema, if any (W17, ADR-0043 §1);
+* ``wal/v<N>/type-vocabulary.json`` — the canonical TYPE vocabulary a delta extends (T4,
+  ADR-0043 §1b / ADR-0054);
 * ``wal/HEAD`` — a pointer to the highest committed version (a fast-path read; the WAL scan
   is authoritative and used to rebuild HEAD on recovery).
 
@@ -42,6 +46,7 @@ from latence_core.contracts import (
     InducedLabels,
     Record,
     RelationMention,
+    TypeVocabulary,
 )
 from latence_core.errors import StorageError
 from latence_core.state.write_ahead_log import WriteAheadLog
@@ -62,6 +67,13 @@ _HEAD_NAME = "HEAD"
 # stay stable across a delta (the coupling ADR-0043 breaks); absent ⇒ no induction / no freeze.
 _DOCLEVEL_NAME = "doclevel.jsonl"
 _SCHEMA_NAME = "schema.json"
+# T4 (ADR-0043 amended by ADR-0054): the corpus's canonical TYPE vocabulary, staged under the same
+# WAL transaction. Per-chunk induction (T1) produces no single corpus schema to freeze, so the
+# durable cross-run artifact is this vocabulary: a delta SEEDS its Type-Consolidation Stage with
+# it, the Stage merges the new chunks' induced types INTO it (append-don't-churn), and the extended
+# vocabulary commits with Version N+1. Absent/empty ⇒ no type consolidation ran (or the Version
+# predates T4) and the next delta canonicalizes from scratch.
+_TYPEVOCAB_NAME = "type-vocabulary.json"
 
 # The record kinds a Corpus Version persists. Discriminated on read by a ``_kind`` tag so the
 # polymorphic derived set round-trips. Doc-level carriers (chunks/mentions/relations/redactions)
@@ -179,6 +191,30 @@ class CorpusStore:
             return None
         return self.read_schema(head)
 
+    def read_type_vocabulary(self, version: int) -> TypeVocabulary | None:
+        """Read a committed Version's canonical TYPE vocabulary, or ``None`` if it holds none (T4).
+
+        The durable half of the "persist + extend" model that replaces the frozen single schema
+        for per-chunk induction: a delta reads this back, seeds its Type-Consolidation Stage with
+        it, and commits the EXTENDED vocabulary — so an existing canonical type's id/label never
+        churns and the KG's type space grows monotonically. ``None`` when the Version ran no type
+        consolidation (or predates T4), in which case the next delta canonicalizes from scratch.
+        """
+        uri = self._wal.staged_uri(version, _TYPEVOCAB_NAME)
+        if not self._wal.is_committed(version) or not self._storage.exists(uri):
+            return None
+        text = self._storage.read_text(uri).strip()
+        if not text:
+            return None
+        return TypeVocabulary.model_validate_json(text)
+
+    def head_type_vocabulary(self) -> TypeVocabulary | None:
+        """The head Version's canonical type vocabulary (``None`` before the first commit)."""
+        head = self.head_version()
+        if head is None:
+            return None
+        return self.read_type_vocabulary(head)
+
     # -- transaction --------------------------------------------------------
 
     def commit(
@@ -191,6 +227,7 @@ class CorpusStore:
         reconciled: bool,
         doclevel_records: list[Record] | None = None,
         induced_schema: InducedLabels | None = None,
+        type_vocabulary: TypeVocabulary | None = None,
     ) -> CorpusVersion:
         """Commit the next Corpus Version transactionally (read-N → write-N+1).
 
@@ -207,6 +244,10 @@ class CorpusStore:
         are optional (``None`` ⇒ an empty doclevel / no frozen schema) so a caller that does not
         yet persist them is unaffected. On the idempotent no-op re-run below the head is returned
         as-is (its reuse store already stands), so nothing is re-staged.
+
+        T4: ``type_vocabulary`` (the corpus's canonical TYPE vocabulary, ADR-0054) rides the same
+        transaction for the same reason — it is the cross-run state a delta EXTENDS, so it must
+        become live exactly when the records it describes do. ``None`` ⇒ no vocabulary committed.
         """
         head = self.head_version()
         version = 0 if head is None else head + 1
@@ -251,6 +292,11 @@ class CorpusStore:
             _SCHEMA_NAME,
             "" if induced_schema is None else induced_schema.model_dump_json(),
         )
+        typevocab_uri = self._wal.stage_text(
+            version,
+            _TYPEVOCAB_NAME,
+            "" if type_vocabulary is None else type_vocabulary.model_dump_json(),
+        )
         self._wal.commit(
             version,
             files={
@@ -258,6 +304,7 @@ class CorpusStore:
                 "version": version_uri,
                 "doclevel": doclevel_uri,
                 "schema": schema_uri,
+                "type_vocabulary": typevocab_uri,
             },
             metadata={
                 "parent": "none" if parent_version is None else str(parent_version),

@@ -181,6 +181,16 @@ def test_induced_labels_reach_the_extractor(fake_gliner: None, tmp_path: Path) -
     assert induce_metrics.capability == "schema_induction"
     assert induce_metrics.induction_fallbacks == 0
     assert induce_metrics.induction_documents == 1
+    # T5: and it records what that induction COST — end to end, Provider → Runner → report.
+    assert induce_metrics.induction_calls == 1
+    assert induce_metrics.induction_cache_hits == 0
+    assert induce_metrics.induction_prompt_tokens > 0  # the endpoint's own usage, summed
+    assert induce_metrics.induction_completion_tokens > 0
+    assert induce_metrics.induction_budget_exhausted is False
+    # A non-induction Stage never fabricates induction columns.
+    chunk_metrics = next(m for m in report.stages if m.name == "chunk")
+    assert chunk_metrics.induction_calls == 0
+    assert chunk_metrics.induction_budget_exhausted is False
 
 
 def test_without_induction_stage_is_byte_identical_labels(fake_gliner: None, tmp_path: Path) -> None:

@@ -19,7 +19,12 @@ from latence_core.contracts import ChunkRecord, Classification, Provenance
 from latence_schema_inducer.provider import LLMLabelInducer
 
 
-def _chunk(doc_id: str, content: str = "Alice works for Acme Corp.") -> ChunkRecord:
+def _chunk(doc_id: str, content: str | None = None) -> ChunkRecord:
+    # DISTINCT text per document by default: since T5 the Provider induces once per DISTINCT job
+    # text, so identical fixture text would collapse N documents into ONE call and quietly gut the
+    # concurrency assertions below (they measure the fan-out over N real calls).
+    if content is None:
+        content = f"Alice works for Acme Corp; memo {doc_id}."
     prov = Provenance(
         source_uri="mem://t/doc.txt",
         file_name="doc.txt",

@@ -2199,7 +2199,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "gliner2", extras = ["local"], specifier = ">=1.0,<2" },
+    { name = "gliner2", extras = ["local"], specifier = ">=1.3,<2" },
     { name = "latence-core", editable = "packages/latence-core" },
     { name = "peft", specifier = ">=0.10" },
 ]

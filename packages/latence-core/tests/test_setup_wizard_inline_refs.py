@@ -120,10 +120,17 @@ def test_sota_pipeline_wires_inline_refs_stage(tmp_path: Path) -> None:
     assert stage.provider == "fused_entity_relation.inline_refs"
     assert stage.depends_on == ["induce"]
 
+    # Both extractors feed the resolution phase. Since ADR-0054 they feed it through the
+    # type-consolidation Stage, which canonicalizes the drifted induced TYPE vocabulary before
+    # entity resolution reads it — so that Stage gathers the extractors and `disambiguate` reads it.
+    consolidate = _stage(text, "consolidate_types")
+    assert consolidate is not None
+    assert "extract" in consolidate.depends_on
+    assert "inline_refs" in consolidate.depends_on
+
     disambiguate = _stage(text, "disambiguate")
     assert disambiguate is not None
-    assert "extract" in disambiguate.depends_on
-    assert "inline_refs" in disambiguate.depends_on
+    assert disambiguate.depends_on == ["consolidate_types"]
 
 
 def test_sota_pipeline_omits_inline_refs_when_no_family(tmp_path: Path) -> None:
@@ -133,7 +140,8 @@ def test_sota_pipeline_omits_inline_refs_when_no_family(tmp_path: Path) -> None:
         _answers(_plain_corpus(tmp_path), tmp_path, profile=PROFILE_SOTA, inline_refs=None)
     )
     assert _stage(text, "inline_refs") is None
-    assert _stage(text, "disambiguate").depends_on == ["extract"]
+    assert _stage(text, "consolidate_types").depends_on == ["extract"]
+    assert _stage(text, "disambiguate").depends_on == ["consolidate_types"]
 
 
 def test_lite_profile_never_wires_inline_refs(tmp_path: Path) -> None:

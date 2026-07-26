@@ -47,6 +47,7 @@ from latence_core.capability import (
     ProviderRegistry,
     RelationExtractor,
     Source,
+    TypeConsolidator,
 )
 from latence_core.pipeline import CapabilityKind
 
@@ -71,6 +72,7 @@ _CAPABILITY_PROTOCOL: dict[CapabilityKind, type] = {
     CapabilityKind.FUSED_ENTITY_RELATION: FusedEntityRelationExtractor,
     CapabilityKind.REDACTION: PIIDetector,
     CapabilityKind.PROFILING: Profiler,
+    CapabilityKind.TYPE_CONSOLIDATION: TypeConsolidator,
     CapabilityKind.DISAMBIGUATION: Disambiguator,
     CapabilityKind.GRAPH_ASSEMBLY: GraphAssembler,
     CapabilityKind.GRAPH_COMPLETION: GraphCompleter,

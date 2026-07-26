@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         Record,
         RelationMention,
         ScreeningFinding,
+        TypeVocabulary,
     )
     from latence_core.storage import Storage
 
@@ -361,6 +362,61 @@ class Profiler(Protocol):
         self, documents: Iterable[DocumentRecord], mentions: Iterable[EntityMention]
     ) -> Iterator[FeatureRecord]:
         """Consume the run's documents + mentions; yield per-document + corpus FeatureRecords."""
+        ...
+
+
+@dataclass(frozen=True)
+class TypeConsolidation:
+    """The output of a :class:`TypeConsolidator` — remapped records + the vocabulary that did it.
+
+    Three things travel together because they are one decision: the ``mentions`` and
+    ``relations`` with their ``label`` rewritten to canonical form (and their raw induced label
+    preserved on ``raw_label``), and the :class:`~latence_core.contracts.TypeVocabulary` that
+    defines the mapping. The Runner threads the records downstream and persists the vocabulary
+    beside the Stage's checkpoint — so the consolidation is inspectable as data, and an
+    incremental run can merge into it (ADR-0017: files are the source of truth).
+    """
+
+    mentions: list[EntityMention] = field(default_factory=list)
+    relations: list[RelationMention] = field(default_factory=list)
+    vocabulary: TypeVocabulary | None = None
+
+
+@runtime_checkable
+class TypeConsolidator(Protocol):
+    """Canonicalizes the corpus's TYPE vocabulary (CONTEXT ``Resolution``; T3).
+
+    The counterpart to :class:`Disambiguator` in the resolution phase: where a Disambiguator
+    resolves entity **mentions** to canonical entities, a TypeConsolidator resolves the
+    **type vocabulary** those mentions are labelled with. Both are corpus-level, and both exist
+    because the front half of the pipeline now runs per chunk: each chunk induces its own
+    labels, which is what gives it a small, relevant, uncapped label set — and what makes chunk
+    A say ``org`` where chunk B says ``organization``. Consistency is earned HERE, downstream,
+    instead of being imposed upstream by freezing and salience-capping one corpus schema before
+    extraction (which silently dropped rare-but-critical labels).
+
+    It is a **corpus-level mention→mention transform**: it consumes the whole run's
+    :class:`~latence_core.contracts.EntityMention`s (required — the labels it canonicalizes) and,
+    optionally, its :class:`~latence_core.contracts.RelationMention`s, and returns the SAME
+    records with each ``label`` rewritten to its canonical form and the raw induced label kept on
+    ``raw_label`` for audit — plus the :class:`~latence_core.contracts.TypeVocabulary` it built.
+
+    It runs BEFORE Disambiguation, not after: the entity resolver votes a cluster's type from its
+    members' labels and gates its low-precision rungs on type compatibility, so feeding it a
+    drifted vocabulary would both split clusters that belong together and mistype the ones that
+    survive. Canonical types in, consistent entities and consistent graph out.
+
+    Determinism is part of the contract: identical inputs must yield an identical vocabulary and
+    identical records (stable clustering, stable canonical election), so a seeded run is
+    byte-identical (Baseline bar).
+    """
+
+    def consolidate(
+        self,
+        mentions: Iterable[EntityMention],
+        relations: Iterable[RelationMention] = (),
+    ) -> TypeConsolidation:
+        """Consume the run's mentions (+ optional relations); return them remapped + the vocab."""
         ...
 
 

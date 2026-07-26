@@ -24,7 +24,31 @@ default extraction engine** (ADR-0036, W9), consolidating extraction onto GLiNER
     # compile defaults OFF (opt-in) — W9-scaling recompile-thrash guard, see below
     # intra_op_threads: 8   # W9-scaling many-core oversubscription cap (<=0 disables)
     # batch_size: 16        # progress cadence, clamped to 64
+    # label_floor: per_chunk  # default; `universal` restores the config ∪ induced union
 ```
+
+## Labels are a PER-CHUNK floor (T2)
+
+When an optional `schema_induction` Stage runs, each chunk carries the types induced **for that
+chunk**. This Provider then scores the chunk against **its own** induced types — the `labels` /
+`relation_labels` above are the fallback for a chunk induction said nothing about, not a set
+stamped onto every chunk:
+
+| `label_floor` | effective labels for a chunk that induced types | for a chunk that induced none |
+| --- | --- | --- |
+| `per_chunk` (default) | the chunk's own induced types | the config lists |
+| `universal` | config ∪ induced | the config lists |
+
+`per_chunk` is the default because zero-shot precision **and** the span-scoring activation both
+degrade with label count: prompting a chunk with ~40 corpus-wide types means ~35 irrelevant labels
+competing for its spans, and a label dimension large enough to turn a routine forward into a
+multi-GiB allocation. The trade is explicit — `universal` is recall insurance (a chunk whose
+induction under-called is still scored for the config types); `per_chunk` trades that insurance for
+label-count purity, which is sound precisely because induction is per chunk and the type vocabulary
+is reconciled downstream rather than imposed upstream.
+
+Without induction — including "predefined-only" mode, where the `induce` Stage is skipped entirely
+— every chunk is scored against exactly the config lists under either value, byte-identically.
 
 ## Performance (W9) + scaling hardening (W9-scaling)
 

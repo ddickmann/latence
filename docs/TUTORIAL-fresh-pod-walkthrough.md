@@ -156,11 +156,16 @@ Model default is `openai/gpt-4.1-mini` reached via `base_url: https://openrouter
 base URL to `http://<vllm-host>:8000/v1` for an on-prem vLLM (any placeholder key), or leave it
 `null` for direct OpenAI with `$OPENAI_API_KEY`.
 
-> **Warning — GLiNER2 `compile` defaults OFF on GPU, and keep it off at scale.** The provider's
-> `torch.compile` knob is **off by default** (opt-in). gliner2 compiles with `dynamic=True`, which
-> **recompile-thrashes on varied-length production chunks** (pod-measured: the worker pinned ~290%
-> CPU, GPU 0%, no progress). Leave `compile: false` (the default) for a real mixed corpus; enable it
-> ONLY for a homogeneous / uniform-length workload.
+> **GLiNER2 `compile` is ON by default on GPU again (T7), and it is now safe.** It was forced OFF
+> because gliner2 compiles with `torch.compile(dynamic=True)` and, while each forward was one
+> varied-length chunk scored against a corpus-wide ~40-label schema, a fresh (label-count, batch)
+> shape family per chunk **recompile-thrashed** (pod-measured: worker pinned ~290% CPU, GPU 0%, no
+> progress). The extraction redesign removes both varying dimensions: chunks are **bucketed by label
+> set** (constant label dimension within a bucket) and each bucket is **micro-batched** (capped batch
+> dimension), so dynamo sees one shape family per bucket. Two guards remain, so a backend that cannot
+> compile costs throughput only: a compile fault at load degrades to a plain load, and a lazy
+> `BackendCompilerFailed` on the first forward re-loads the uncompiled model once. Pin
+> `compile: false` if you want it off.
 
 ### 1.4 Verify the install
 
@@ -276,7 +281,7 @@ capability wiring — the SAME machinery `latence stack validate` builds on, no 
 ```text
 source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
   → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
-  → profiling → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
+  → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
   → enrich(context) → export_kg + export_corpus[Granite r2, context_columns, bm25]
 ```
 
@@ -297,10 +302,12 @@ latence process --config ./latence.stack.yaml --run-id run-0001
 >
 > - **parse → `parser.lighton_vllm`** — the served-vLLM LightOn OCR endpoint (§2). The wizard writes
 >   your `base_url` + `model`, with `api_key: EMPTY` and `max_concurrency: 8`.
-> - **induce → `label_inducer.llm`** at **corpus** granularity (`max_labels 40`, `temperature 0`) —
->   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above).
+> - **induce → `label_inducer.llm`** at **chunk** granularity (`dedup: true`, `temperature 0`) —
+>   the schema-induction quality lever (its `base_url`/`model`/key are the LLM prompts above). Each
+>   chunk keeps only its OWN small, relevant label set; `dedup` induces once per DISTINCT chunk
+>   text, so a corpus's boilerplate costs one call, not one per occurrence.
 > - **extract → `fused_entity_relation.gliner2`** (`threshold 0.3`, labels floor
->   `[person, organization]`, `compile` off by default) and **redact → `redaction.gliner2`**
+>   `[person, organization]`, `compile` on by default on GPU — T7) and **redact → `redaction.gliner2`**
 >   (#197, ADR-0041 §7a — the SAME GLiNER2 engine `extract` runs, so redaction adds no second
 >   model library; chunk-level, financial-PII floor — the W16 `redact → enrich → export_corpus`
 >   dataflow).
@@ -347,8 +354,11 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 > **Why this config matters more than the model.** With generic English labels, a low threshold, and
 > no schema induction, the output is noisy — pronouns/laws/products get mistyped as entities and the
 > relations are garbage. Turn schema induction **on** (the LLM discovers the domain's real labels per
-> corpus), use **`granularity: corpus`** (one shared canonical schema, so entity types stay
-> consistent across the whole KG), give redaction real **financial-PII** labels, cap chunks at
+> corpus), use **`granularity: chunk`** (each chunk keeps only its own relevant types — a
+> corpus-wide merged schema has to be salience-capped, which drops the rare-but-critical type from
+> the one chunk that needed it and scores every other chunk against types that are not in it; type
+> consistency is earned downstream in the resolution phase), give redaction real **financial-PII**
+> labels, cap chunks at
 > **`max_tokens: 640`**, and let the GLinker disambiguator's precision defaults ride. Then entities
 > are correctly typed and the relations are meaningful.
 >
@@ -362,7 +372,7 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 # stacks/my-corpus.yaml — the enterprise-SOTA stack:
 #   source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
 #     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
-#     → profiling → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
+#     → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
 #     → enrich(context) → export_kg + export_corpus[Granite r2 + bm25]
 #
 # {CORPUS_DIR} / {STORAGE_URI} are placeholders — fill them in §4.1 before `latence run`.
@@ -410,9 +420,11 @@ stages:
     provider: screening.content_keyword
     depends_on: [chunk]
 
-  # 6) Schema induction (the quality lever): a small LLM discovers the corpus's own
-  #    {entity, relation, pii} types. granularity: corpus → ONE shared, canonical, deduped schema
-  #    stamped on every chunk (no per-chunk/per-doc type drift across the KG).
+  # 6) Schema induction (the quality lever): a small LLM discovers each CHUNK's own
+  #    {entity, relation, pii} types. granularity: chunk → every chunk carries only the types that
+  #    are actually in it (best recall AND best zero-shot precision; the small label set is also
+  #    what keeps the GLiNER2 span-scoring tensor small). Corpus-wide type consistency is earned
+  #    downstream in the resolution phase, not bought here with a salience cap.
   - name: induce
     capability: schema_induction
     provider: label_inducer.llm
@@ -421,14 +433,16 @@ stages:
       model: openai/gpt-4.1-mini             # OpenRouter model id (openai/ prefix). Direct OpenAI: gpt-4.1-mini
       base_url: https://openrouter.ai/api/v1 # null ⇒ OpenAI; http://<vllm-host>:8000/v1 ⇒ on-prem vLLM
       # api_key comes from $OPENROUTER_API_KEY (falls back to $OPENAI_API_KEY). NEVER inline it here.
-      granularity: corpus                    # one shared canonical schema for the whole corpus
+      granularity: chunk                     # per-chunk induction: each chunk keeps its own types
+      dedup: true                            # induce once per DISTINCT chunk text (the cost lever)
       max_tokens: 2048                        # truncated reply retries at double, then fails open
       max_labels: 40
       temperature: 0.0                        # deterministic
 
   # 7) Fused NER+RE in ONE pass (GLiNER2). config labels are a FLOOR; the induced entity/relation
   #    types are UNIONed on per corpus (config ∪ induced). threshold 0.3 = the SOTA recall floor.
-  #    `compile` is left OFF (the provider default — it recompile-thrashes on varied chunks; §1.3).
+  #    `compile` is left to the provider default (T7: ON on cuda — the forward is bucketed by label
+  #    set, so it no longer recompile-thrashes; §1.3).
   - name: extract
     capability: fused_entity_relation
     provider: fused_entity_relation.gliner2
@@ -447,6 +461,13 @@ stages:
   #    sets each chunk's masked_content (each chunk ≤ the model window, so no PII is truncated). It
   #    depends_on induce so the induced pii_types UNION onto this floor; enrich then reads THIS
   #    redacted chunk stream, so export_corpus is masked AND enriched.
+  #    T2: the `pii_labels` floor is UNIVERSAL — applied to every chunk, never subsetted by what a
+  #    chunk induced (a leaked card in an "irrelevant" chunk must still be masked); only the induced
+  #    pii_types are per chunk. `guardrails: true` turns on the GUARDRAILS half of the same
+  #    checkpoint under the same rule: every chunk carries the universal guard floor (prompt
+  #    injection / harmful content) unioned with its own induced guard_types, and a hit is FLAGGED
+  #    as a RiskMarker in the corpus, never masked. The deterministic keyword content_screen Stage
+  #    above is a separate, earlier pre-filter and is untouched.
   - name: redact
     capability: redaction
     provider: redaction.gliner2
@@ -454,6 +475,7 @@ stages:
     config:
       device: cuda
       pii_labels: [person, email, phone number, address, iban, credit card number, tax id, bank account number, social security number]
+      guardrails: true
       max_len: 768
       threshold: 0.5
 
@@ -462,6 +484,26 @@ stages:
     capability: profiling
     provider: profiling.statistical
     depends_on: [parse, extract]
+
+  # 9b) Type consolidation: canonicalize the corpus's TYPE vocabulary (T3, ADR-0054). Labels are
+  #     induced PER CHUNK above, which is what keeps each chunk's label set small, relevant and
+  #     uncapped — and what makes one chunk say `org` where another says `organization` or
+  #     `company`. This Stage folds that drift into ONE canonical vocabulary and rewrites every
+  #     mention's + relation's label onto it BEFORE the resolver runs (the resolver votes a
+  #     cluster's type from its members' labels and gates its low-precision rungs on type
+  #     compatibility, so drifted types in = split clusters and mistyped entities out). The
+  #     semantic rung rides the SAME Granite embedder over a few dozen type STRINGS — no second
+  #     model. The raw induced label stays on each record and the alias map lands on the Quality
+  #     Report, so every fold is visible and correctable via `aliases`.
+  - name: consolidate_types
+    capability: type_consolidation
+    provider: type_consolidation.cascade
+    depends_on: [extract]
+    config:
+      use_embedding_merge: true
+      embedder:
+        provider: embedding.sentence_transformers
+        config: {model: ibm-granite/granite-embedding-311m-multilingual-r2, dimension: 768, device: cuda, attn_implementation: flash_attention_2}
 
   # 10) Disambiguation: the enterprise GLinker entity-linker + audited resolver (ADR-0046).
   #     Neural L2→L3→L4→L0 linking (gliner-linker biencoder + reranker + FlashDeBERTa) LINKS each
@@ -473,7 +515,7 @@ stages:
   - name: disambiguate
     capability: disambiguation
     provider: disambiguation.glinker
-    depends_on: [extract]
+    depends_on: [consolidate_types]
     config:
       device: cuda
       context_window: 200          # ±chars of chunk context for the neural linker input
@@ -702,7 +744,8 @@ PY
 
 ### 5.5 `induce` → `induce.jsonl` (chunks stamped with the DISCOVERED schema)
 This is the payoff of schema induction — the domain labels the LLM found for **your** corpus. In
-`granularity: corpus` every chunk carries the **same** merged `induced_labels`:
+`granularity: chunk` each chunk carries its OWN `induced_labels`, so you should see MANY distinct
+schemas (one per distinct chunk text); a single distinct schema would mean corpus mode:
 ```bash
 python - <<PY
 import json
@@ -710,7 +753,7 @@ seen=set()
 for l in open("$CK/induce.jsonl"):
     il=json.loads(l).get("induced_labels")
     if il: seen.add(json.dumps({k:il[k] for k in ("entity_types","relation_types","pii_types")}, sort_keys=True))
-print("distinct induced schemas:", len(seen))          # corpus mode → 1
+print("distinct induced schemas:", len(seen))          # chunk mode → many; corpus mode → 1
 for s in list(seen)[:1]: print(json.dumps(json.loads(s), indent=2))
 PY
 # look for: sensible domain types (e.g. bank, law, payment_product / owns, regulated_by / iban, tax_id),
@@ -983,15 +1026,24 @@ do **not** write a Python script. Three CLI commands drive the corpus forward, e
 next **Corpus Version** (immutable, inspectable, rollback-able). They take the **same stack YAML**
 `latence run` takes.
 
-> **Extraction is now incremental too (W17, ADR-0043).** Since W17 a delta's **extraction compute**
-> is O(changed), not O(corpus): the induced corpus schema is frozen in the Corpus Version, each
-> **unchanged** document (matched by content-addressed `document_id`) **skips its doc-level Stages**
-> (parse/chunk/extract/redact) and **reuses its committed records**, and only new/changed documents
-> are extracted. The corpus-level Stages (disambiguate/graph/…) then run over the UNION of reused +
-> freshly-extracted records. The churn's `extraction: N extracted, M reused` line is the witness.
-> The one escape hatch is `--reinduce`, which re-runs induction over the full current corpus and
-> re-extracts every document — the correct-by-construction O(corpus) fallback when you want the
-> induced vocabulary to move with the corpus.
+> **Extraction is incremental too (W17, ADR-0043).** A delta's **extraction compute** is
+> O(changed), not O(corpus): each **unchanged** document (matched by content-addressed
+> `document_id`) **skips its doc-level Stages** (parse/chunk/extract/redact) and **reuses its
+> committed records**, and only new/changed documents are extracted — so only their chunks are
+> **induced**, too. The corpus-level Stages (disambiguate/graph/…) then run over the UNION of
+> reused + freshly-extracted records. The churn's `extraction: N extracted, M reused` line is the
+> witness.
+>
+> **How a delta stays consistent with the base run (T4).** Labels are induced *per chunk*, so there
+> is no single corpus schema to freeze. What the corpus carries forward instead is its **canonical
+> type vocabulary**: the delta's freshly-induced types are canonicalized *against* the committed
+> one, so a drifted surface (`org` where the corpus says `organization`) **aliases into the existing
+> type** and a genuinely new type **appends** a new one. Existing canonical type names never change,
+> so nothing already in your knowledge graph is retyped, and the churn's
+> `canonical types: +N new, +M aliased into existing` line shows you exactly what grew.
+> The one escape hatch is `--reinduce`: the **full rebuild** — re-induce every chunk and
+> re-canonicalize the type vocabulary from scratch, re-extracting every document. It is the only
+> path that may re-elect a canonical type label, which is why it is not the default.
 
 ### 8.1 `latence delta` — add / update (the source folder changed)
 
@@ -1003,7 +1055,8 @@ Drop new or edited files into the source folder, then:
 latence delta stacks/my-corpus.yaml
 # or, explicit:
 latence delta stacks/my-corpus.yaml --run-id delta-2026-07-13
-# force the full O(corpus) re-induce + re-extract (move the induced vocabulary with the corpus):
+# full rebuild: re-induce every chunk AND re-canonicalize the type vocabulary from scratch
+# (lets the vocabulary move with the corpus — canonical type names may be re-elected):
 latence delta stacks/my-corpus.yaml --reinduce
 ```
 
@@ -1090,7 +1143,7 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 | `FlashInfer requires sm75+` when starting vLLM on Blackwell | FlashInfer's capability check misparses `sm_120` as `12` and rejects a capable device | `export VLLM_USE_FLASHINFER_SAMPLER=0` before the serve — disables only the *sampler*, cudagraphs stay ON (§2). **Not** `--enforce-eager`: it clears the abort by killing cudagraphs and flooring throughput. |
 | Model downloads hang / error on `hf_xet` (Blackwell pod) | the Hugging Face XET transfer backend is flaky on some SM 12.x pods | `export HF_HUB_DISABLE_XET=1` before downloading (§1.3). |
 | `nvrtc: failed to open libnvrtc-builtins.so.13.0` (GLiNER2/DeBERTa crash) | torch JIT on SM 12.x / cu13x | `export PYTORCH_JIT=0` before running (§1.3). |
-| Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompile-thrashes on varied-length chunks | leave `compile` at its **default OFF**; enable only for a homogeneous / uniform-length workload (§1.3). |
+| Extraction worker pinned ~290% CPU, GPU idle, no progress | `compile: true` on GLiNER2 — `dynamic=True` recompiles per distinct (label-count, batch) shape | T7 removed the cause (label-set bucketing + micro-batching pin both dimensions), so compile is on by default again; if you still see it, pin `compile: false` and report the chunk-length/label-set spread (§1.3). |
 | `error: externally-managed-environment` on `pip install` | RunPod PEP-668 system Python | add `--break-system-packages` (§1.2), or use a venv. |
 | `ModuleNotFoundError: peft` / `glinker` / `flashdeberta` / `gliner` at run time | a `--no-deps` editable install skipped a hidden dep | reinstall the package **without** `--no-deps` and `pip install ...` the runtime deps (§1.2). |
 | `disambiguation.glinker` prints `MISSING` at verify (§1.4) | the separate `latence-disambig-glinker` heavy package wasn't installed | `pip install -e packages/latence-disambig-glinker` + `pip install glinker flashdeberta` (ADR-0016). |

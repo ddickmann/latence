@@ -178,14 +178,8 @@ class _MdebertaGLiNER2:
         """The encoder forward — it consults the relative-position helper, like mdeberta."""
         self._rel_pos(len(text), 0)
 
-    def extract_entities(
-        self,
-        text: str,
-        entity_types: list[str],
-        threshold: float = 0.5,
-        include_spans: bool = False,  # noqa: ARG002 - API parity; the fake always spans
-        include_confidence: bool = False,  # noqa: ARG002 - API parity
-        max_len: int = 768,  # noqa: ARG002 - API parity
+    def _entities_for(
+        self, text: str, entity_types: list[str], threshold: float
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
         self._forward(text)
         by_label: dict[str, list[dict[str, Any]]] = {}
@@ -202,14 +196,8 @@ class _MdebertaGLiNER2:
             )
         return {"entities": by_label}
 
-    def extract_relations(
-        self,
-        text: str,
-        relation_types: list[str],
-        threshold: float = 0.5,  # noqa: ARG002 - API parity
-        include_spans: bool = False,  # noqa: ARG002 - API parity
-        include_confidence: bool = False,  # noqa: ARG002 - API parity
-        max_len: int = 768,  # noqa: ARG002 - API parity
+    def _relations_for(
+        self, text: str, relation_types: list[str]
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
         self._forward(text)
         by_rel: dict[str, list[dict[str, Any]]] = {}
@@ -220,6 +208,77 @@ class _MdebertaGLiNER2:
                 {"head": dict(r["head"]), "tail": dict(r["tail"])}
             )
         return {"relation_extraction": by_rel}
+
+    # The BATCHED entry points the Provider drives since T7 — same real gliner2 signature (one
+    # schema for the whole call, one per-text result dict in input order). The scripted
+    # relative-position helper runs per text, so the nvrtc failure mode still reproduces end to end.
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,  # noqa: ARG002 - API parity
+        threshold: float = 0.5,
+        format_results: bool = True,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        include_spans: bool = False,  # noqa: ARG002 - API parity; the fake always spans
+        max_len: int | None = None,  # noqa: ARG002 - API parity
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        return [self._entities_for(text, entity_types, threshold) for text in texts]
+
+    def batch_extract_relations(
+        self,
+        texts: list[str],
+        relation_types: list[str],
+        batch_size: int = 8,  # noqa: ARG002 - API parity
+        threshold: float = 0.5,  # noqa: ARG002 - API parity
+        format_results: bool = True,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        include_spans: bool = False,  # noqa: ARG002 - API parity
+        max_len: int | None = None,  # noqa: ARG002 - API parity
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        return [self._relations_for(text, relation_types) for text in texts]
+
+    def extract_entities(
+        self,
+        text: str,
+        entity_types: list[str],
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return self.batch_extract_entities(
+            [text],
+            entity_types,
+            1,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )[0]
+
+    def extract_relations(
+        self,
+        text: str,
+        relation_types: list[str],
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return self.batch_extract_relations(
+            [text],
+            relation_types,
+            1,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )[0]
 
 
 @pytest.fixture()
@@ -320,8 +379,8 @@ def test_a_genuine_native_fault_still_surfaces_typed(
         raise RuntimeError(msg)
 
     monkey = _MdebertaGLiNER2(build_relative_position)
-    monkey.extract_entities = boom  # type: ignore[method-assign, assignment]
+    monkey.batch_extract_entities = boom  # type: ignore[method-assign, assignment]
     extractor._model = monkey  # noqa: SLF001 - inject the loaded model directly
-    with pytest.raises(ProviderError, match="extract_entities"):
+    with pytest.raises(ProviderError, match="batch_extract_entities"):
         extractor.extract_fused([_chunk()])
     assert fake_torch is not None

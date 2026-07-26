@@ -164,7 +164,38 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # mirroring the risk_markers/induced_labels/context_header annotation precedent. The document-level
 # :class:`RedactionRecord` contract is RETAINED but DEPRECATED (the superseded doc-level path). See
 # ADR-0042.
-SCHEMA_VERSION = 16
+#
+# v17 (the extraction redesign) carries TWO additive, defaulted contract additions that ship in the
+# SAME revision — they land together, so no record ever exists with one and not the other:
+#
+# v17a (T2 per-chunk extraction): :class:`InducedLabels` gains a fourth slot, ``guard_types`` — the
+# GUARDRAIL categories induced for a chunk, the learned-guardrail twin of ``pii_types``. The
+# blessed Redaction checkpoint (``fastino/GLiNER2-Guardrails-PII-Multi``) is a guardrails+PII
+# model, so its guard categories follow the SAME per-chunk rule the redesign applies to every
+# LEARNED label set: induced per chunk, UNIONed onto a small UNIVERSAL guard safety floor that is
+# never subsetted (a security invariant, not a relevance label — see
+# :data:`latence_core.redaction_policy.GUARD_SAFETY_FLOOR`). Additive and defaulted to ``[]``, so a
+# record produced without guard induction carries an empty slot and every extractor behaves exactly
+# as before; the deterministic keyword ``screening.content_keyword`` pre-filter is a SEPARATE stage
+# and is untouched.
+#
+# v17b (T3 type canonicalization): per-chunk induction makes the corpus's TYPE vocabulary drift
+# (chunk A induces ``org``, chunk B ``organization``, chunk C ``company``), so a corpus-level
+# Type-Consolidation Stage canonicalizes the vocabulary DOWNSTREAM — consistency is earned in the
+# resolution phase, never imposed on induction by capping. :class:`EntityMention` and
+# :class:`RelationMention` each gain an additive, defaulted ``raw_label: str | None``: when the
+# Stage rewrites ``label`` to its canonical form it keeps the extractor's raw induced type here, so
+# every remap is auditable on the record itself. ``None`` ⇒ never remapped (a stack with no
+# Type-Consolidation Stage never populates it). The canonical vocabulary itself is a
+# :class:`TypeVocabulary` — persistable (the Runner writes it beside the checkpoint) and MERGEABLE
+# (an incremental delta run extends it without churning existing canonical entries).
+#
+# v17c (T4 incremental delta reconciliation): :class:`DeltaChurn` gains ``canonical_types_added`` /
+# ``type_aliases_added`` / ``canonical_types_total`` — the witness that a delta EXTENDED the
+# corpus's canonical type vocabulary rather than recomputing it. Additive and defaulted 0, and the
+# vocabulary itself is Corpus-Version state (an additive file), so no number bump — the same rule
+# ADR-0043's own additive ``documents_reused`` / ``documents_extracted`` fields followed.
+SCHEMA_VERSION = 17
 
 
 class Provenance(BaseModel):
@@ -484,6 +515,13 @@ class InducedLabels(BaseModel):
     it (audit); ``confidences`` maps a label to the model's 0..1 score for it (auditable, optional
     — a label with no score is simply absent from the map). A slot the model evidenced no types for
     is an empty list, not a fabricated one.
+
+    v17 adds the fourth slot ``guard_types`` (guardrail categories), so every LEARNED label set a
+    downstream Provider prompts with — entity, relation, PII, guardrail — has a per-record slot.
+    Whether a slot's config labels are a droppable RELEVANCE floor or a non-subsettable UNIVERSAL
+    SAFETY floor is the consumer's decision, expressed at the
+    :func:`latence_core.induced.effective_labels` seam via
+    :class:`~latence_core.induced.LabelFloor`.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -497,6 +535,16 @@ class InducedLabels(BaseModel):
     )
     pii_types: list[str] = Field(
         default_factory=list, description="Sanitized PII types induced for the document."
+    )
+    guard_types: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Sanitized GUARDRAIL categories induced for the record (v17) — the learned-guardrail "
+            "twin of ``pii_types``, consumed by a guardrails-capable Redaction Provider. Like "
+            "every other slot these are RELEVANCE labels scoped to the record; the UNIVERSAL guard "
+            "safety floor (latence_core.redaction_policy.GUARD_SAFETY_FLOOR) is unioned on top and "
+            "is never subsetted. Empty (default) ⇒ no guard induction ran."
+        ),
     )
     model_id: str = Field(
         ..., min_length=1, description="The LLM that induced these labels (audit)."
@@ -902,6 +950,18 @@ class EntityMention(Record):
     label: str = Field(..., min_length=1, description="Zero-shot entity type (per-Pipeline label).")
     text: str = Field(..., min_length=1, description="The mention's exact surface string.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+    # T3 (type canonicalization): the label the EXTRACTOR produced, kept verbatim when a
+    # corpus-level Type-Consolidation Stage rewrites ``label`` to its canonical form. The audit
+    # trail for the remap — an operator reading a mention can always see which raw induced type it
+    # came from, so a consolidation decision is inspectable and correctable, never silent.
+    # ``None`` means "never remapped" (``label`` IS the raw label), so a stack with no
+    # Type-Consolidation Stage is byte-identical to before the field existed apart from the
+    # explicit ``null``.
+    raw_label: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The pre-canonicalization induced type, when a Type-Consolidation Stage ran.",
+    )
 
     @model_validator(mode="after")
     def _span_present(self) -> EntityMention:
@@ -969,6 +1029,13 @@ class RelationMention(Record):
     head_text: str = Field(..., min_length=1, description="Head mention surface string.")
     tail_text: str = Field(..., min_length=1, description="Tail mention surface string.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+    # T3: the raw induced relation type, kept for audit when a Type-Consolidation Stage rewrote
+    # ``label`` to its canonical form (the EntityMention.raw_label rationale, relation side).
+    raw_label: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The pre-canonicalization induced type, when a Type-Consolidation Stage ran.",
+    )
 
     @model_validator(mode="after")
     def _relation_valid(self) -> RelationMention:
@@ -992,6 +1059,228 @@ class RelationMention(Record):
             msg = "A RelationMention's Provenance must carry a page_start and page_end."
             raise ValueError(msg)
         return self
+
+
+# -- T3: corpus-wide TYPE canonicalization -----------------------------------
+
+
+class TypeKind(StrEnum):
+    """Which label vocabulary a :class:`CanonicalType` belongs to.
+
+    Entity types and relation types are canonicalized in the SAME pass but never mixed: an
+    entity type ``organization`` and a relation type ``organization of`` are different
+    vocabularies, and folding one into the other would corrupt the graph. Every lookup is
+    therefore keyed by ``(kind, label)``.
+    """
+
+    ENTITY = "entity"
+    RELATION = "relation"
+
+
+class CanonicalType(BaseModel):
+    """One canonical type and every raw induced label folded into it (T3).
+
+    Per-chunk induction produces type drift — ``org`` here, ``organization`` there,
+    ``company`` in a third chunk — because each chunk induces its own labels. The
+    Type-Consolidation Stage clusters those synonymous surfaces and elects ONE canonical
+    label per cluster; this record is the cluster.
+
+    ``aliases`` holds every OTHER raw label in the cluster (sorted, canonical excluded), so the
+    alias→canonical map an operator reads on the Quality Report is exactly
+    ``{alias: canonical for alias in aliases}``. ``strategies`` names the clustering rungs that
+    produced the folds (``normalized``/``alias``/``acronym``/``prefix``/``head_noun``/
+    ``embedding``), so a suspicious merge is traceable to the rule that made it — the audit the
+    entity resolver's ``merge_decisions`` provides on the entity side. ``mention_count`` is how
+    many mentions/relations carried a member label, the salience signal an operator sorts by.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    kind: TypeKind
+    canonical: str = Field(..., min_length=1, description="The elected human-facing type label.")
+    aliases: list[str] = Field(
+        default_factory=list, description="Every other raw label folded here (sorted)."
+    )
+    mention_count: int = Field(
+        default=0, ge=0, description="Mentions/relations that carried a member label."
+    )
+    strategies: list[str] = Field(
+        default_factory=list, description="Clustering rungs that produced the folds (sorted)."
+    )
+
+    @model_validator(mode="after")
+    def _canonical_not_aliased(self) -> CanonicalType:
+        if self.canonical in self.aliases:
+            msg = (
+                f"CanonicalType {self.canonical!r} lists itself as an alias — the alias set is "
+                "the OTHER labels folded into the canonical one."
+            )
+            raise ValueError(msg)
+        if len(set(self.aliases)) != len(self.aliases):
+            msg = f"CanonicalType {self.canonical!r} has duplicate aliases."
+            raise ValueError(msg)
+        return self
+
+    @property
+    def labels(self) -> list[str]:
+        """Every raw label this cluster covers — the canonical one plus its aliases."""
+        return [self.canonical, *self.aliases]
+
+
+class TypeVocabulary(BaseModel):
+    """The corpus's canonical type vocabulary + its alias map (T3) — persistable and mergeable.
+
+    The artifact the Type-Consolidation Stage emits: the ``M`` canonical types the run's ``N``
+    raw induced types collapsed to, each with the aliases folded into it. It is a plain
+    serializable model (not a :class:`Record`) because it describes the corpus's SCHEMA, not a
+    span of a document — it has no Provenance to carry. The Runner persists it beside the
+    Stage's checkpoint, which is what makes it survive the run (ADR-0017: files are the source
+    of truth).
+
+    **Mergeability is a first-class property** (designed for the T4 incremental-delta lane): a
+    later run merges its freshly-induced vocabulary INTO the persisted one with
+    :meth:`merge`, which is deliberately *append-don't-churn* — an existing canonical label is
+    NEVER renamed by a later run (that would rewrite the type of every node already in the KG);
+    new aliases attach to the existing cluster and genuinely new types are appended.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    types: list[CanonicalType] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _one_cluster_per_label(self) -> TypeVocabulary:
+        """A raw label may belong to exactly ONE cluster per kind (the map must be a function)."""
+        seen: set[tuple[TypeKind, str]] = set()
+        for entry in self.types:
+            for label in entry.labels:
+                key = (entry.kind, label)
+                if key in seen:
+                    msg = (
+                        f"Type label {label!r} ({entry.kind.value}) appears in more than one "
+                        "cluster — the alias→canonical map would be ambiguous."
+                    )
+                    raise ValueError(msg)
+                seen.add(key)
+        return self
+
+    def of_kind(self, kind: TypeKind) -> list[CanonicalType]:
+        """The clusters of one kind, in emission order (canonical-label order)."""
+        return [entry for entry in self.types if entry.kind is kind]
+
+    def alias_map(self, kind: TypeKind) -> dict[str, str]:
+        """``{raw label: canonical label}`` for one kind — the operator-facing consolidation map.
+
+        Only genuine ALIASES appear (a type that was already canonical maps to itself and is
+        omitted), so the map an operator reads on the Quality Report is exactly the set of
+        rewrites the run performed — an empty map means nothing was consolidated.
+        """
+        return {
+            alias: entry.canonical
+            for entry in self.types
+            if entry.kind is kind
+            for alias in entry.aliases
+        }
+
+    def canonical_for(self, kind: TypeKind, label: str) -> str:
+        """The canonical label for a raw ``label``; the label itself when it is unknown.
+
+        Unknown-is-identity keeps the remap TOTAL: a label the vocabulary never saw (a delta
+        run's brand-new type, a hand-written relation label) passes through unchanged rather
+        than being dropped or mapped to a wrong cluster.
+        """
+        for entry in self.types:
+            if entry.kind is kind and (label == entry.canonical or label in entry.aliases):
+                return entry.canonical
+        return label
+
+    def merge(self, other: TypeVocabulary) -> TypeVocabulary:
+        """Fold ``other`` into this vocabulary — append-don't-churn (the T4 delta contract).
+
+        For every cluster in ``other``: if any of its labels already belongs to a cluster of the
+        same kind here, that EXISTING cluster absorbs it — the existing canonical label is kept
+        (renaming it would silently retype every node already in the KG), its aliases are unioned
+        and strategies unioned. Otherwise the cluster is appended verbatim. When a cluster in
+        ``other`` bridges two existing clusters, the first match (in this vocabulary's order) wins
+        and the bridged labels join it — deterministic, and it never splits an existing cluster.
+
+        **``mention_count`` is the LATEST observation, not a running sum** (T4). ``self`` is the
+        vocabulary persisted by an earlier run and ``other`` the one a later run built over the
+        whole CURRENT corpus, so the two count the same mentions: summing them would report a
+        multiple of the true corpus salience on the Quality Report, and would grow without bound
+        as deltas accumulate — the count would also differ between two applications of the same
+        delta, breaking idempotency. So a cluster ``other`` observed takes ``other``'s count
+        (several ``other`` clusters folding into ONE existing cluster do sum, because those are
+        disjoint observations *within* one run), and a cluster ``other`` never observed keeps the
+        count it was persisted with.
+
+        The result is ordered by ``(kind, canonical)`` and every alias list sorted, so merging
+        is associative in outcome and byte-stable: the same pair of vocabularies always merges
+        to the identical document.
+        """
+        merged: list[dict[str, Any]] = [
+            {
+                "kind": e.kind,
+                "canonical": e.canonical,
+                "aliases": set(e.aliases),
+                "mention_count": e.mention_count,
+                "strategies": set(e.strategies),
+            }
+            for e in self.types
+        ]
+        # Which slots ``other`` has already contributed a count to in THIS merge — the first
+        # contribution REPLACES the persisted count (same corpus, re-counted), later ones add to
+        # it (two of ``other``'s clusters folding into one existing cluster are disjoint counts).
+        recounted: set[int] = set()
+        for entry in other.types:
+            labels = set(entry.labels)
+            target = next(
+                (
+                    (index, slot)
+                    for index, slot in enumerate(merged)
+                    if slot["kind"] is entry.kind
+                    and (labels & ({str(slot["canonical"])} | set(slot["aliases"])))
+                ),
+                None,
+            )
+            if target is None:
+                recounted.add(len(merged))
+                merged.append(
+                    {
+                        "kind": entry.kind,
+                        "canonical": entry.canonical,
+                        "aliases": set(entry.aliases),
+                        "mention_count": entry.mention_count,
+                        "strategies": set(entry.strategies),
+                    }
+                )
+                continue
+            index, slot = target
+            canonical = str(slot["canonical"])
+            slot["aliases"] = (set(slot["aliases"]) | labels) - {canonical}
+            slot["mention_count"] = (
+                int(slot["mention_count"]) + entry.mention_count
+                if index in recounted
+                else entry.mention_count
+            )
+            recounted.add(index)
+            slot["strategies"] = set(slot["strategies"]) | set(entry.strategies)
+        return TypeVocabulary(
+            types=[
+                CanonicalType(
+                    kind=slot["kind"],
+                    canonical=str(slot["canonical"]),
+                    aliases=sorted(set(slot["aliases"])),
+                    mention_count=int(slot["mention_count"]),
+                    strategies=sorted(set(slot["strategies"])),
+                )
+                for slot in sorted(
+                    merged, key=lambda s: (str(TypeKind(s["kind"]).value), str(s["canonical"]))
+                )
+            ]
+        )
 
 
 # -- S6: Redaction (PII) -----------------------------------------------------
@@ -1957,6 +2246,9 @@ class DeltaChurn(BaseModel):
     canonical entities (a bridging doc that MERGES two clusters, a deleted doc that SPLITS
     one); ``edges_added`` / ``edges_retracted`` the graph patch. ``records_retracted`` /
     ``records_purged`` count the soft-tombstoned vs physically-erased derived records.
+    ``canonical_types_added`` / ``type_aliases_added`` / ``canonical_types_total`` are the T4
+    type-vocabulary churn: how the delta EXTENDED the persisted canonical type vocabulary (new
+    canonical entries vs raw labels that aliased into an existing one).
     ``drift`` is the metric and ``reconciliation_triggered`` whether it forced a full recompute,
     with ``deletion_mode`` recording how deletes were handled. ``from_version`` / ``to_version``
     bracket the transaction.
@@ -1988,6 +2280,17 @@ class DeltaChurn(BaseModel):
     # ``documents_reused == 0`` and every document is extracted.
     documents_reused: int = 0
     documents_extracted: int = 0
+    # T4 (ADR-0043 amended): the canonical TYPE-vocabulary churn. Per-chunk induction produces no
+    # single corpus schema to freeze, so what a delta carries across runs is the canonical type
+    # vocabulary (ADR-0054), PERSISTED in the Corpus Version and EXTENDED — never recomputed —
+    # by each delta. ``canonical_types_added`` counts the genuinely new canonical entries this
+    # delta appended; ``type_aliases_added`` the raw labels that folded INTO an existing canonical
+    # cluster (the no-churn half: they aliased instead of renaming anything);
+    # ``canonical_types_total`` the size of the committed vocabulary afterwards. All three are
+    # zero for a pipeline with no Type-Consolidation Stage.
+    canonical_types_added: int = Field(default=0, ge=0)
+    type_aliases_added: int = Field(default=0, ge=0)
+    canonical_types_total: int = Field(default=0, ge=0)
     entities_created: int = 0
     entities_merged: int = 0
     entities_split: int = 0

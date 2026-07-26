@@ -94,7 +94,31 @@ from latence_core.contracts import DeltaChurn, ScreeningFinding
 # a :class:`ContextEnrichmentQuality` roll-up (``chunks_enriched`` / ``avg_neighbors_per_chunk`` /
 # ``hub_entities_capped``), counts-only (no content), present only when the run had a
 # ``context_enrichment`` Stage. Additive and defaulted None, so a v18 report still validates.
-QUALITY_SCHEMA_VERSION = 19
+# v20 (the extraction redesign) carries TWO additive report changes that ship in the SAME revision —
+# they land together, so no report ever exists with one and not the other:
+# v20a (T5, per-chunk induction cost): :class:`StageMetrics` gains the induction COST columns —
+# ``induction_calls`` / ``induction_cache_hits`` / ``induction_prompt_tokens`` /
+# ``induction_completion_tokens`` / ``induction_budget_exhausted``. Per-chunk induction is one LLM
+# call per distinct chunk text, so a run's induction cost has to be readable in the report rather
+# than inferred; the dedup cache-hit count is what shows the saving. Additive and defaulted
+# 0/False, so a v19 report still validates.
+# v20b (T3 type canonicalization, ADR-0054): the report gains an optional ``type_consolidation`` —
+# a :class:`TypeConsolidationQuality` roll-up ("N raw induced types -> M canonical types" plus the
+# alias->canonical map actually applied, for entities and relations), present only when the run had
+# a ``type_consolidation`` Stage. It is the operator's window onto the downstream canonicalization
+# that makes per-chunk induction safe: every fold is visible and correctable through the Stage's
+# ``aliases`` config. Type labels + counts only (never document text), safe to persist. Additive
+# and defaulted None, so a v19 report still validates.
+# v20c (T4, incremental delta reconciliation): :class:`~latence_core.contracts.DeltaChurn` gains
+# ``canonical_types_added`` / ``type_aliases_added`` / ``canonical_types_total`` — how the delta
+# EXTENDED the corpus's canonical type vocabulary (a genuinely new type vs a drifted surface that
+# aliased into an existing one). It replaces the frozen-schema story for per-chunk induction, so
+# the operator can see the KG's type space growing monotonically. Counts only. Additive and
+# defaulted 0, and the rendered churn line is emitted only when the corpus HAS a vocabulary, so a
+# report from a pipeline without a Type-Consolidation Stage is byte-identical. No number bump: the
+# extraction-redesign report changes ship in one revision (same rule as ADR-0043's own additive
+# DeltaChurn fields, which also did not bump).
+QUALITY_SCHEMA_VERSION = 20
 
 
 class StageMetrics(BaseModel):
@@ -151,6 +175,31 @@ class StageMetrics(BaseModel):
     # directly rather than inferring it from a generic fallback count. 0 when every induction
     # produced labels (or when a fallback was a different safety-net miss). A count only — no PII.
     induction_empty_after_sanitization: int = Field(default=0)
+    # T5 (per-chunk induction cost): what the induce Stage actually COST, so "induce every chunk"
+    # is a number an operator can read rather than a number they have to fear. Per-chunk induction
+    # is one LLM call per DISTINCT chunk text, so the honest report needs the calls actually made,
+    # how many items the dedup cache answered for free, and the endpoint's own token accounting:
+    #   ``induction_calls``            — chat-completion requests issued (a repair / truncation /
+    #                                    empty-recovery re-prompt is its own request; transport
+    #                                    retries are counted on ``endpoint_retries`` instead, so the
+    #                                    two never double-count).
+    #   ``induction_cache_hits``       — items served from the chunk-text dedup cache with NO call.
+    #                                    The cache-hit RATE is ``cache_hits / induction_documents``
+    #                                    (items answered for free / items attempted).
+    #   ``induction_prompt_tokens`` /
+    #   ``induction_completion_tokens``— summed from each response's ``usage`` block. 0 means the
+    #                                    endpoint reported no usage (some on-prem vLLM configs) —
+    #                                    an honest unknown, NEVER an estimated token count.
+    #   ``induction_budget_exhausted`` — True iff the configured per-run call budget bound the run
+    #                                    (jobs beyond it fell back to the config-label floor). The
+    #                                    LOUD bit: a bounded run must never look like a full one.
+    # All counts only, no content — the no-PII discipline the whole report keeps. 0/False for every
+    # non-induction Stage.
+    induction_calls: int = Field(default=0)
+    induction_cache_hits: int = Field(default=0)
+    induction_prompt_tokens: int = Field(default=0)
+    induction_completion_tokens: int = Field(default=0)
+    induction_budget_exhausted: bool = Field(default=False)
     # P3-F1 (ADR-0036 §2): the provider-profile + device-routing columns for this Stage,
     # read from the Provider's declared ProviderProfile and the device seam's decision.
     # A Provider that declares no profile leaves ``compute``/``model_id``/``license`` None
@@ -463,6 +512,39 @@ class ProfilingQuality(BaseModel):
     top_co_occurrences: dict[str, int] = Field(default_factory=dict)
 
 
+class TypeConsolidationQuality(BaseModel):
+    """Type-Consolidation quality: how much TYPE drift the run collapsed (T3, ADR-0054).
+
+    Emitted when a run had a Type-Consolidation Stage. This is the operator-facing half of the
+    T3 contract: per-chunk induction is only safe if a human can SEE what the downstream
+    canonicalization did and correct it, so the report carries both the headline (``N`` raw
+    induced types → ``M`` canonical types) and the full ``alias → canonical`` map that produced
+    it. An operator who disagrees with a fold sets the Stage's ``aliases`` config and the next run
+    is different — deterministically, and without touching a model.
+
+    Every number here is DERIVED FROM THE EMITTED RECORDS (each mention's ``raw_label`` next to
+    its canonical ``label``), not from the Stage's self-report, so the report cannot claim a
+    consolidation the records do not show.
+
+    ``raw_entity_types`` / ``canonical_entity_types`` are the distinct entity-type counts before
+    and after (equal ⇒ nothing was folded); the relation pair is the same for relation types.
+    ``entity_alias_map`` / ``relation_alias_map`` are the rewrites actually applied, sorted.
+    ``mentions_remapped`` / ``relations_remapped`` count the records whose label changed.
+    Counts + type labels only (never document text), so it is safe to persist.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw_entity_types: int = 0
+    canonical_entity_types: int = 0
+    raw_relation_types: int = 0
+    canonical_relation_types: int = 0
+    mentions_remapped: int = 0
+    relations_remapped: int = 0
+    entity_alias_map: dict[str, str] = Field(default_factory=dict)
+    relation_alias_map: dict[str, str] = Field(default_factory=dict)
+
+
 class DisambiguationQuality(BaseModel):
     """Disambiguation-Stage quality: merge + link + normalisation statistics (S8).
 
@@ -660,6 +742,43 @@ class GoldSetEvaluation(BaseModel):
     stages: list[StageScore] = Field(default_factory=list)
 
 
+def _render_induction_cost(stages: list[StageMetrics]) -> list[str]:
+    """The human-readable induction-cost section (T5); empty when the run induced nothing.
+
+    Per-chunk induction is one call per DISTINCT chunk text, so "what did induction cost?" is the
+    first question an enterprise evaluator asks about the redesign — and the honest answer has to be
+    in the report an operator already reads, not derivable from JSON they have to go find. Rendered
+    only for Stages that actually attempted an induction, so a stack without a ``schema_induction``
+    Stage renders byte-identically to before.
+
+    The cache-hit RATE is ``cache_hits / documents`` — the fraction of items answered for free by
+    the chunk-text dedup, i.e. the size of the saving. A ``0 tokens`` reading next to a non-zero
+    call count is an endpoint that reports no usage (an honest unknown), NOT a free run; a ``0
+    calls`` reading next to a non-zero document count is a Provider that makes none (the
+    deterministic tagger). The budget line is printed only when a budget actually BOUND the run,
+    because that is the one state an operator must not miss.
+    """
+    active = [m for m in stages if m.induction_documents or m.induction_calls]
+    if not active:
+        return []
+    lines = ["", "## Induction cost"]
+    for m in active:
+        rate = (m.induction_cache_hits / m.induction_documents) if m.induction_documents else 0.0
+        lines.append(
+            f"- {m.name}: {m.induction_calls} call(s) for {m.induction_documents} item(s); "
+            f"cache hits {m.induction_cache_hits} ({rate:.1%}); "
+            f"tokens {m.induction_prompt_tokens} prompt + {m.induction_completion_tokens} "
+            f"completion (as reported by the endpoint); "
+            f"fell back {m.induction_fallbacks}"
+        )
+        if m.induction_budget_exhausted:
+            lines.append(
+                f"  - BUDGET BOUND this run: item(s) beyond `max_induction_calls` made no call "
+                f"and fell back to the config-label floor (see {m.name}.induction_fallbacks)"
+            )
+    return lines
+
+
 class QualityReport(BaseModel):
     """The per-run report emitted alongside the data."""
 
@@ -686,6 +805,10 @@ class QualityReport(BaseModel):
     redaction: RedactionQuality | None = None
     # Present when the run had a Profiling Stage.
     profiling: ProfilingQuality | None = None
+    # T3 (ADR-0054): present when the run had a Type-Consolidation Stage — how much TYPE drift
+    # per-chunk induction produced and how much of it the resolution phase collapsed, with the
+    # alias->canonical map an operator reviews and corrects. None otherwise.
+    type_consolidation: TypeConsolidationQuality | None = None
     # Present when the run had a Disambiguation Stage.
     disambiguation: DisambiguationQuality | None = None
     # Present when the run had a Graph Assembly Stage.
@@ -760,6 +883,7 @@ class QualityReport(BaseModel):
             ("Relations", self.relations),
             ("Redaction", self.redaction),
             ("Profiling", self.profiling),
+            ("TypeConsolidation", self.type_consolidation),
             ("Disambiguation", self.disambiguation),
             ("Graph", self.graph),
             ("ContextEnrichment", self.context_enrichment),
@@ -768,6 +892,32 @@ class QualityReport(BaseModel):
         if present:
             lines.append("")
             lines.append(f"## Stage metrics present: {', '.join(present)}")
+        lines.extend(_render_induction_cost(self.stages))
+        if self.type_consolidation is not None:
+            # The T3 operator-facing section: the headline collapse, then the full alias map so a
+            # human SEES every rewrite and can correct it in config. Rendered before the alias
+            # lines so a large map never buries the number that matters.
+            tc = self.type_consolidation
+            lines.append("")
+            lines.append("## Type consolidation")
+            lines.append(
+                f"- entity types: {tc.raw_entity_types} raw -> "
+                f"{tc.canonical_entity_types} canonical "
+                f"({tc.mentions_remapped} mentions remapped)"
+            )
+            lines.append(
+                f"- relation types: {tc.raw_relation_types} raw -> "
+                f"{tc.canonical_relation_types} canonical "
+                f"({tc.relations_remapped} relations remapped)"
+            )
+            for title, amap in (
+                ("entity aliases", tc.entity_alias_map),
+                ("relation aliases", tc.relation_alias_map),
+            ):
+                if not amap:
+                    continue
+                lines.append(f"- {title}:")
+                lines.extend(f"  - {alias} -> {canonical}" for alias, canonical in amap.items())
         if self.context_enrichment is not None:
             ce = self.context_enrichment
             lines.append("")
@@ -823,5 +973,13 @@ class QualityReport(BaseModel):
                 f"- extraction: {dc.documents_extracted} extracted, "
                 f"{dc.documents_reused} reused (doc-level Stages skipped)"
             )
+            # T4: the canonical type vocabulary the delta EXTENDED. Rendered only when the corpus
+            # has one, so a pipeline without a Type-Consolidation Stage reads exactly as before.
+            if dc.canonical_types_total:
+                lines.append(
+                    f"- canonical types: +{dc.canonical_types_added} new, "
+                    f"+{dc.type_aliases_added} aliased into existing "
+                    f"({dc.canonical_types_total} total)"
+                )
             lines.append(f"- drift: {dc.drift:.3f}")
         return "\n".join(lines) + "\n"

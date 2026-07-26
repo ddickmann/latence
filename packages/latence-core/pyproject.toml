@@ -123,6 +123,16 @@ latence = "latence_core.cli:app"
 # Second reference Profiler (#77): a scale-oriented lightweight profiler — same feature
 # contract, streaming, but skips the O(n²) co-occurrence pairing for huge corpora.
 "profiling.lightweight" = "latence_core.stages.profiling:LightweightProfiler"
+# T3 built-ins (ADR-0054): the corpus-level TYPE-vocabulary canonicalizer of the resolution
+# phase. Per-chunk label induction gives each chunk a small, relevant, uncapped label set and
+# therefore produces type drift (org / organization / company); these fold the drifted labels into
+# one canonical vocabulary and remap every mention + relation onto it BEFORE entity resolution,
+# keeping the raw induced label on the record for audit. Two real strategies behind one seam
+# (ADR-0035): the full audited cascade, and the exact-surface + alias high-precision baseline.
+# Pure Python, deterministic, no extra deps (ADR-0007/0016) — the optional semantic rung borrows
+# whatever Embedder Provider the stack already wires.
+"type_consolidation.cascade" = "latence_core.stages.type_consolidation:CascadeTypeConsolidator"
+"type_consolidation.exact_surface" = "latence_core.stages.type_consolidation:ExactSurfaceTypeConsolidator"
 # S8 built-in: deterministic CPU-viable cascade disambiguator (5-strategy entity
 # resolver + Union-Find + audited merge log; GLinker-style KB linking with graceful
 # fallback; relation normalizer with inverse detection). Pure Python, no extra deps —

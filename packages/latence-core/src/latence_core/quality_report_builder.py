@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from latence_core.contracts import (
@@ -77,6 +78,7 @@ from latence_core.quality import (
     ScreeningQuality,
     StageMetrics,
     StageScore,
+    TypeConsolidationQuality,
 )
 
 if TYPE_CHECKING:
@@ -356,6 +358,18 @@ class QualityReportBuilder:
             storage=storage,
             run_id=run_id,
         )
+        # T3 (ADR-0054): the Type-Consolidation Stage's own output — the SAME mentions and
+        # relations, relabelled, each carrying its ``raw_label``. The rollup is derived from these
+        # records rather than from the Stage's self-report, so the report can only claim a
+        # consolidation the records actually show.
+        consolidated = self._records_of_kind(
+            pipeline,
+            ordered,
+            outputs,
+            CapabilityKind.TYPE_CONSOLIDATION,
+            storage=storage,
+            run_id=run_id,
+        )
         # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
         # the Stage consumed — the count it resolved from.
         disambig_mentions_in = self._records_of_kinds(
@@ -381,6 +395,7 @@ class QualityReportBuilder:
             relations=self._relation_quality(pipeline, relations, self._fanout_total(ordered)),
             redaction=self._redaction_quality(pipeline, redactions),
             profiling=self._profiling_quality(pipeline, features),
+            type_consolidation=self._type_consolidation_quality(pipeline, consolidated),
             disambiguation=self._disambiguation_quality(
                 pipeline, disambiguations, disambig_mentions_in
             ),
@@ -1025,6 +1040,39 @@ class QualityReportBuilder:
         return quality
 
     @staticmethod
+    def _type_consolidation_quality(
+        pipeline: Pipeline, records: list[StageOutput]
+    ) -> TypeConsolidationQuality | None:
+        """Aggregate the TYPE-drift collapse for the report (T3, ADR-0054).
+
+        Only computed when the Pipeline has a Type-Consolidation Stage. ``records`` is that
+        Stage's mixed output — the run's :class:`~latence_core.contracts.EntityMention`s and
+        :class:`~latence_core.contracts.RelationMention`s after the remap, each carrying its
+        pre-canonicalization type on ``raw_label`` when (and only when) it was rewritten.
+
+        Everything is read off those records: the raw vocabulary is ``{raw_label or label}``, the
+        canonical vocabulary is ``{label}``, and the alias map is the set of ``raw_label -> label``
+        pairs observed. That makes the section a MEASUREMENT of what happened to the data rather
+        than a restatement of what the Provider intended — a Stage that silently failed to remap
+        would report ``N raw -> N canonical`` and an empty alias map, which is exactly the honest
+        answer.
+        """
+        if not any(s.capability is CapabilityKind.TYPE_CONSOLIDATION for s in pipeline.stages):
+            return None
+        entities = _type_drift(records, EntityMention)
+        relations = _type_drift(records, RelationMention)
+        return TypeConsolidationQuality(
+            raw_entity_types=entities.raw_types,
+            canonical_entity_types=entities.canonical_types,
+            mentions_remapped=entities.remapped,
+            entity_alias_map=entities.alias_map,
+            raw_relation_types=relations.raw_types,
+            canonical_relation_types=relations.canonical_types,
+            relations_remapped=relations.remapped,
+            relation_alias_map=relations.alias_map,
+        )
+
+    @staticmethod
     def _disambiguation_quality(
         pipeline: Pipeline,
         records: list[StageOutput],
@@ -1270,3 +1318,43 @@ class QualityReportBuilder:
             quality.page_drift_recovered += diag.recovered
             quality.page_drift_max_chars = max(quality.page_drift_max_chars, diag.max_drift_chars)
         return quality
+
+
+@dataclass(frozen=True)
+class _TypeDrift:
+    """How one label vocabulary changed across a Type-Consolidation Stage (T3)."""
+
+    raw_types: int
+    canonical_types: int
+    remapped: int
+    alias_map: dict[str, str]
+
+
+def _type_drift(
+    records: Iterable[StageOutput], carrier: type[EntityMention] | type[RelationMention]
+) -> _TypeDrift:
+    """Measure one carrier's type drift from the remapped records themselves (T3, ADR-0054).
+
+    ``raw_label`` is set if and ONLY if the Stage rewrote that record's label, so the raw
+    vocabulary is ``{raw_label or label}``, the canonical vocabulary is ``{label}``, and the alias
+    map is exactly the rewrites applied. A run that consolidated nothing therefore reports equal
+    counts and an empty map — the honest reading of "nothing happened", never a fabricated fold.
+    """
+    raw: set[str] = set()
+    canonical: set[str] = set()
+    aliases: dict[str, str] = {}
+    remapped = 0
+    for record in records:
+        if not isinstance(record, carrier):
+            continue
+        canonical.add(record.label)
+        raw.add(record.raw_label or record.label)
+        if record.raw_label is not None:
+            aliases[record.raw_label] = record.label
+            remapped += 1
+    return _TypeDrift(
+        raw_types=len(raw),
+        canonical_types=len(canonical),
+        remapped=remapped,
+        alias_map=dict(sorted(aliases.items())),
+    )

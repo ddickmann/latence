@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "latence-schema-inducer"
 version = "0.1.0"
-description = "Unsupervised schema-induction (LabelInducer) Provider — a small OpenAI-compatible LLM induces a document's own entity/relation/PII label schema — for the Latence framework."
+description = "Schema-induction (LabelInducer) Providers for the Latence framework: a small OpenAI-compatible LLM induces each chunk's own entity/relation/PII label schema, plus a deterministic zero-network tagger over an operator-declared candidate type space."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -49,6 +49,11 @@ Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.
 # (ADR-0004/0038). Off by default: a stack with no schema_induction Stage is byte-identical.
 [project.entry-points."latence.providers"]
 "label_inducer.llm" = "latence_schema_inducer.provider:LLMLabelInducer"
+# The non-frontier per-chunk option (T5): a deterministic, CPU-only, zero-network zero-shot tagger
+# over an operator-declared candidate type space. Same Capability, same InducedLabels contract, same
+# Quality-Report columns — so an operator swaps `induce.provider` and nothing else moves. Adds no
+# dependency (pure stdlib) and bundles no weights.
+"label_inducer.lexicon" = "latence_schema_inducer.lexicon:LexiconLabelInducer"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_schema_inducer"]

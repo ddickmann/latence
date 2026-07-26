@@ -60,6 +60,7 @@ class Capability(StrEnum):
     RELATION = "relation"
     REDACTION = "redaction"
     PROFILING = "profiling"
+    TYPE_CONSOLIDATION = "type_consolidation"
     DISAMBIGUATION = "disambiguation"
     GRAPH = "graph"
     GRAPH_COMPLETION = "graph_completion"
@@ -93,6 +94,7 @@ _PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     "fused_entity_relation": Capability.RELATION,
     "redaction": Capability.REDACTION,
     "profiling": Capability.PROFILING,
+    "type_consolidation": Capability.TYPE_CONSOLIDATION,
     "disambiguation": Capability.DISAMBIGUATION,
     "graph": Capability.GRAPH,
     "graph_completion": Capability.GRAPH_COMPLETION,
@@ -887,6 +889,62 @@ def _schema_induction_case() -> ConformanceCase:
     )
 
 
+def _lexicon_induction_case() -> ConformanceCase:
+    """Schema Induction, non-frontier path (T5): the deterministic zero-network candidate tagger.
+
+    ``label_inducer.lexicon`` is pure-Python, CPU-only and makes NO call, so — unlike its LLM
+    sibling — it runs for REAL here (never stub-scoped): the invoke drives it over the canonical
+    corpus with a candidate space whose cues are actually present in the fixture text, and the
+    validity predicate asserts the chunk came back annotated. It also needs its own config: the
+    Provider refuses to construct with an empty candidate space (a config mistake worth failing
+    loudly on), which the LLM sibling's ``base_url``-only config would trigger.
+
+    The adversarial input is a chunk that evidences NO candidate: the Provider must fail OPEN
+    (return the chunk unchanged, ``induced_labels`` still ``None``) exactly like the LLM path —
+    never crash, never invent a type.
+    """
+    config: dict[str, Any] = {
+        "granularity": "chunk",
+        "candidates": {
+            "entity_types": {"organization": ["Acme"], "person": ["Alice"]},
+            "relation_types": ["works for"],
+            "pii_types": {"email address": ["Contact"]},
+        },
+    }
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        return list(provider.induce(fixtures.canonical_corpus().chunks))
+
+    def valid_output(records: Sequence[object]) -> bool:
+        if not _records_contract_valid(records, empty_ok=False):
+            return False
+        from latence_core.contracts import InducedLabels
+
+        chunks = [r for r in records if isinstance(r, ChunkRecord)]
+        if not chunks:
+            return False
+        return all(
+            isinstance(c.induced_labels, InducedLabels)
+            and bool(c.induced_labels.entity_types)
+            and bool(c.induced_labels.model_id)
+            for c in chunks
+        )
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # A chunk that matches no declared cue: fail-open, unchanged, no crash (the W4 posture the
+        # LLM sibling reaches via a schema-invalid reply — reached here with no network at all).
+        return _capture_raise(lambda: list(provider.induce([_pii_chunk()])))
+
+    return ConformanceCase(
+        capability=Capability.SCHEMA_INDUCTION,
+        config=config,
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+        empty_ok=True,
+    )
+
+
 def _entity_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
     """Entity Extraction: tag mentions in chunks; an empty chunk yields none (graceful empty)."""
     labels_dict = {
@@ -1256,6 +1314,43 @@ def _profiling_case() -> ConformanceCase:
 
     return ConformanceCase(
         capability=Capability.PROFILING,
+        config={},
+        invoke=invoke,
+        valid_output=valid_output,
+        adversarial=adversarial,
+    )
+
+
+def _type_consolidation_case() -> ConformanceCase:
+    """Type Consolidation: the run's mentions + relations back, relabelled onto one vocabulary.
+
+    The output carrier is the INPUT carrier (a mention→mention transform), so C1 audits the same
+    contract-valid mentions/relations the extractors emit — which is exactly the point: a
+    consolidator that corrupted a record on the way through would fail C1 here rather than in the
+    graph. An empty corpus yields an empty consolidation and an empty vocabulary, never a crash.
+    """
+
+    def invoke(provider: Any) -> Sequence[Record]:
+        c = fixtures.canonical_corpus()
+        result = provider.consolidate(c.mentions, c.relations)
+        out: list[Record] = [*result.mentions, *result.relations]
+        return out
+
+    def valid_output(records: Sequence[object]) -> bool:
+        return _records_contract_valid(records, empty_ok=False)
+
+    def adversarial(provider: Any) -> AdversarialOutcome:
+        # Flattened to the records the empty corpus produced (none), the shape the graceful-path
+        # classifier reads — an empty corpus is a defined empty, never a crash.
+        def _empty() -> list[Record]:
+            result = provider.consolidate([], [])
+            out: list[Record] = [*result.mentions, *result.relations]
+            return out
+
+        return _capture_raise(_empty)
+
+    return ConformanceCase(
+        capability=Capability.TYPE_CONSOLIDATION,
         config={},
         invoke=invoke,
         valid_output=valid_output,
@@ -1862,6 +1957,7 @@ CONFORMANCE_CASES: dict[Capability, ConformanceCase] = {
     Capability.RELATION: _relation_case(stub_scoped=False, gliner=False),
     Capability.REDACTION: _redaction_case(stub_scoped=False),
     Capability.PROFILING: _profiling_case(),
+    Capability.TYPE_CONSOLIDATION: _type_consolidation_case(),
     Capability.DISAMBIGUATION: _disambiguation_case(),
     Capability.GRAPH: _graph_case(),
     Capability.GRAPH_COMPLETION: _graph_completion_case(),
@@ -1888,6 +1984,9 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     # stub-scoped (async AsyncOpenAI stub for the served endpoint) but its REAL shared rasteriser
     # runs offline (fake pypdfium2/PIL) — the served OCR is the only stubbed thing.
     "parser.lighton_vllm": _lighton_vllm_case(),
+    # The T5 non-frontier inducer: same Capability, but zero-network and deterministic, so it runs
+    # for REAL against its own candidate-space case instead of the LLM sibling's openai stub.
+    "label_inducer.lexicon": _lexicon_induction_case(),
     "entity.endpoint": _entity_case(stub_scoped=True, gliner=False),
     "entity.gliner": _entity_case(stub_scoped=True, gliner=True),
     "relation.llm": _relation_case(stub_scoped=True, gliner=False),

@@ -28,6 +28,8 @@ from latence_core.capability import (
     RelationExtractor,
     ScreeningOutcome,
     Source,
+    TypeConsolidation,
+    TypeConsolidator,
 )
 from latence_core.chunking import (
     Chunk,
@@ -46,6 +48,7 @@ from latence_core.conformance.report import (
 from latence_core.contracts import (
     SCHEMA_VERSION,
     CanonicalEntity,
+    CanonicalType,
     ChunkRecord,
     Classification,
     ContextHeader,
@@ -91,6 +94,8 @@ from latence_core.contracts import (
     ScreeningCheckpoint,
     ScreeningFinding,
     ScreeningVerdict,
+    TypeKind,
+    TypeVocabulary,
 )
 from latence_core.delta_runner import DeltaRunner
 from latence_core.embedding import HashingEmbedder
@@ -231,6 +236,7 @@ __all__ = [
     "ConfusionCounts",
     "ContentScreener",
     "ContextEnrichmentQuality",
+    "CanonicalType",
     "ContextHeader",
     "ContractError",
     "CorpusFeatures",
@@ -355,6 +361,10 @@ __all__ = [
     "ScreeningQuarantineError",
     "ScreeningVerdict",
     "Source",
+    "TypeConsolidation",
+    "TypeConsolidator",
+    "TypeKind",
+    "TypeVocabulary",
     "Span",
     "SpanSink",
     "Stage",

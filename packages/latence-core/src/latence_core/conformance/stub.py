@@ -260,14 +260,8 @@ class _StubGLiNER2:
     def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubGLiNER2:  # noqa: ARG003 - id/quantize/compile unused offline
         return cls()
 
-    def extract_entities(
-        self,
-        text: str,
-        entity_types: list[str],
-        threshold: float = 0.5,
-        include_spans: bool = False,  # noqa: ARG002 - accepted for API parity
-        include_confidence: bool = False,  # noqa: ARG002 - accepted for API parity
-        max_len: int = 768,  # noqa: ARG002 - W12 model-window bound; accepted for API parity
+    def _entities_for(
+        self, text: str, entity_types: list[str], threshold: float
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
         by_label: dict[str, list[dict[str, Any]]] = {}
         for e in type(self).entities:
@@ -284,37 +278,8 @@ class _StubGLiNER2:
             )
         return {"entities": by_label}
 
-    def batch_extract_entities(
-        self,
-        texts: list[str],
-        entity_types: list[str],
-        threshold: float = 0.5,
-        include_spans: bool = False,
-        include_confidence: bool = False,
-        max_len: int = 768,  # W12 model-window bound; accepted for API parity
-    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
-        # The REAL batched GLiNER2 API (W7): one forward pass over all texts; result[i] is the
-        # per-label dict for texts[i] — the exact single-text ``extract_entities`` shape per input.
-        return [
-            self.extract_entities(
-                text,
-                entity_types,
-                threshold=threshold,
-                include_spans=include_spans,
-                include_confidence=include_confidence,
-                max_len=max_len,
-            )
-            for text in texts
-        ]
-
-    def extract_relations(
-        self,
-        text: str,
-        relation_types: list[str],
-        threshold: float = 0.5,  # noqa: ARG002 - the seeded rows are already above threshold
-        include_spans: bool = False,  # noqa: ARG002 - API parity
-        include_confidence: bool = False,  # noqa: ARG002 - API parity
-        max_len: int = 768,  # noqa: ARG002 - W12 model-window bound; accepted for API parity
+    def _relations_for(
+        self, text: str, relation_types: list[str]
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
         # The REAL fused-extraction relation shape (W9): a per-relation-type dict of head/tail
         # sub-dict rows, NOT a flat list or a tuple — ``{"relation_extraction": {rel: [{"head":
@@ -328,6 +293,82 @@ class _StubGLiNER2:
                 {"head": dict(r["head"]), "tail": dict(r["tail"])}
             )
         return {"relation_extraction": by_rel}
+
+    # The REAL batched GLiNER2 entry points (signature mirrored from gliner2 1.3.2's
+    # ``Extractor.batch_extract_entities`` / ``…_relations``: ONE schema for the whole call,
+    # ``batch_size`` third positional, ``max_len`` keyword-last, one per-text result dict IN ORDER).
+    # These are what both gliner2 Providers drive — the redactor since W7, the fused extractor since
+    # T7 (one native forward per label bucket).
+    def batch_extract_entities(
+        self,
+        texts: list[str],
+        entity_types: list[str],
+        batch_size: int = 8,  # noqa: ARG002 - gliner2's internal sub-batch knob; API parity
+        threshold: float = 0.5,
+        format_results: bool = True,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        include_spans: bool = False,  # noqa: ARG002 - API parity
+        max_len: int | None = None,  # noqa: ARG002 - W12 model-window bound; API parity
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        return [self._entities_for(text, entity_types, threshold) for text in texts]
+
+    def batch_extract_relations(
+        self,
+        texts: list[str],
+        relation_types: list[str],
+        batch_size: int = 8,  # noqa: ARG002 - API parity
+        threshold: float = 0.5,  # noqa: ARG002 - the seeded rows are already above threshold
+        format_results: bool = True,  # noqa: ARG002 - API parity
+        include_confidence: bool = False,  # noqa: ARG002 - API parity
+        include_spans: bool = False,  # noqa: ARG002 - API parity
+        max_len: int | None = None,  # noqa: ARG002 - API parity
+    ) -> list[dict[str, dict[str, list[dict[str, Any]]]]]:
+        return [self._relations_for(text, relation_types) for text in texts]
+
+    # In gliner2 itself the single-text calls are thin wrappers over the batched ones
+    # (``extract`` → ``batch_extract([text], …)[0]``); mirrored so the stub cannot make the batched
+    # path look like the only path when it is not.
+    def extract_entities(
+        self,
+        text: str,
+        entity_types: list[str],
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return self.batch_extract_entities(
+            [text],
+            entity_types,
+            1,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )[0]
+
+    def extract_relations(
+        self,
+        text: str,
+        relation_types: list[str],
+        threshold: float = 0.5,
+        format_results: bool = True,
+        include_confidence: bool = False,
+        include_spans: bool = False,
+        max_len: int | None = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return self.batch_extract_relations(
+            [text],
+            relation_types,
+            1,
+            threshold,
+            format_results,
+            include_confidence,
+            include_spans,
+            max_len,
+        )[0]
 
 
 @contextlib.contextmanager

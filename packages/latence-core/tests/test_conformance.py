@@ -124,6 +124,10 @@ _EXPECTED_PROVIDERS = frozenset(
         "screening.content_keyword",
         "screening.content_fuzzy",
         "label_inducer.llm",
+        # T5: the non-frontier per-chunk inducer behind the SAME schema-induction seam — a
+        # deterministic, CPU-only, zero-network tagger over an operator-declared candidate type
+        # space (no model, no weights, no call), so it runs for REAL in the conformance suite.
+        "label_inducer.lexicon",
         "entity.gazetteer",
         "entity.gliner",
         "entity.endpoint",
@@ -148,6 +152,10 @@ _EXPECTED_PROVIDERS = frozenset(
         "profiling.lightweight",
         "disambiguation.cascade",
         "disambiguation.exact_surface",
+        # T3 (ADR-0054): the corpus-level TYPE-vocabulary canonicalizer + its exact-surface
+        # second reference — the resolution phase's type-side twin of the disambiguators.
+        "type_consolidation.cascade",
+        "type_consolidation.exact_surface",
         "disambiguation.embedding",
         "disambiguation.glinker",
         "graph.canonical",
@@ -200,12 +208,12 @@ def _all_provider_names() -> list[str]:
 
 
 def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 56 Providers — real coverage, not a subset."""
+    """The registry discovers exactly the expected 59 Providers — real coverage, not a subset."""
     names = set(_all_provider_names())
     assert names == set(_EXPECTED_PROVIDERS), (
         f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
     )
-    assert len(names) == 56
+    assert len(names) == 59
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -243,7 +251,7 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     """The rolled-up report: all pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 56
+    assert report.providers_total == 59
     assert report.providers_failed == 0
     assert report.all_passed
     # The endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.

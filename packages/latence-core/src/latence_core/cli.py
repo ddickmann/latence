@@ -608,6 +608,16 @@ def setup(
             "induction (it rides `induce.config.domain`) and is recorded as a header note.",
         ),
     ] = None,
+    predefined_labels: Annotated[
+        Path | None,
+        typer.Option(
+            "--predefined-labels",
+            help="PREDEFINED-ONLY mode: a JSON/YAML file with your FIXED label schema "
+            "({entity_types, relation_types, pii_types}). Emits NO `induce` stage at all — zero "
+            "induction LLM calls — and extracts every chunk against exactly these labels. For a "
+            "corpus with a known taxonomy. The ADR-0044 financial-PII floor still applies.",
+        ),
+    ] = None,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Where to save the generated stack config.")
     ] = Path("latence.stack.yaml"),
@@ -636,6 +646,7 @@ def setup(
         detect_header_family,
         detect_inline_family,
         llm_key_env_var,
+        parse_predefined_labels,
         recommend_parser,
         recommend_sota_parser,
         scan_source,
@@ -880,6 +891,34 @@ def setup(
             err=True,
         )
 
+    # T1 predefined-only: an operator with a KNOWN schema (a compliance taxonomy, a fixed entity
+    # set) supplies it as a file, and the generator emits NO `induce` stage at all — no Provider,
+    # no client, no LLM call. Loaded + validated here (I/O is the CLI's job; the generator stays
+    # pure) and failing LOUDLY, because a typo'd slot that silently fell back to the profile's
+    # default labels is the worst outcome for exactly the corpora that opt in.
+    fixed_labels: dict[str, list[str]] | None = None
+    if predefined_labels is not None:
+        if not predefined_labels.is_file():
+            typer.echo(f"Predefined-labels file not found: {predefined_labels}", err=True)
+            raise typer.Exit(code=2)
+        import yaml  # YAML is a superset of JSON, so ONE loader reads either file format.
+
+        try:
+            fixed_labels = parse_predefined_labels(
+                yaml.safe_load(predefined_labels.read_text(encoding="utf-8"))
+            )
+        except SetupConfigError as exc:
+            typer.echo(f"Invalid --predefined-labels file: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        except yaml.YAMLError as exc:
+            typer.echo(f"--predefined-labels file is not valid JSON/YAML: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        typer.echo(
+            "Predefined-only mode: schema induction is OFF (no `induce` stage, zero LLM calls); "
+            "extraction runs every chunk against your fixed labels.",
+            err=True,
+        )
+
     answers = SetupAnswers(
         source=src,
         storage=store,
@@ -897,11 +936,14 @@ def setup(
         extensions=extensions,
         header_refs=header_refs_family,
         inline_refs=inline_refs_family,
+        predefined_labels=fixed_labels,
     )
 
     # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.
+    # Predefined-only makes NO induction call, so warning about a key it will never read would be
+    # noise that teaches operators to ignore the warning.
     key_var = llm_key_env_var(base_url)
-    if not os.environ.get(key_var):
+    if fixed_labels is None and not os.environ.get(key_var):
         typer.echo(
             f"WARNING: ${key_var} is not set. Schema induction needs it at run time "
             f"(`latence process`). Export it before running, e.g. `export {key_var}=...`.",
@@ -1013,9 +1055,10 @@ def delta(
         typer.Option(
             "--reinduce",
             help=(
-                "Re-run schema induction over the full current corpus and re-extract EVERY "
-                "document (the O(corpus) escape hatch). Default reuses the frozen induced schema "
-                "+ unchanged documents' records, so only new/changed documents are extracted."
+                "Full rebuild: re-induce EVERY chunk and re-canonicalize the type vocabulary "
+                "from scratch, re-extracting every document (the O(corpus) escape hatch, and the "
+                "one path that may re-elect canonical type labels). Default induces only the "
+                "new/changed chunks and EXTENDS the corpus's canonical type vocabulary."
             ),
         ),
     ] = False,
@@ -1025,10 +1068,13 @@ def delta(
 
     The user added, changed, or removed files in the source folder; this detects them by
     content-hash against the last committed Corpus Version and commits Version N+1 with the
-    affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: the induced schema
-    is frozen in the Corpus Version and each UNCHANGED document's doc-level records are reused, so
-    only NEW/CHANGED documents run parse/chunk/extract/redact — the compute is O(changed documents),
-    not O(corpus). ``--reinduce`` re-inducts over the whole corpus and re-extracts everything.
+    affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: each UNCHANGED
+    document's doc-level records are reused, so only NEW/CHANGED documents run
+    parse/chunk/extract/redact (and only their chunks are induced) — the compute is O(changed
+    documents), not O(corpus). Consistency with the base run comes from the corpus's canonical
+    TYPE vocabulary, which the delta EXTENDS rather than recomputes (T4/ADR-0054): a new type
+    aliases into an existing canonical entry or appends a new one, and existing canonical types
+    never churn. ``--reinduce`` is the full rebuild — re-induce and re-canonicalize from scratch.
     """
     _configure_logging(verbose)
     pipeline = _load_pipeline(pipeline_path)

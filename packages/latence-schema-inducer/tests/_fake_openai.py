@@ -56,6 +56,10 @@ class _Script:
     #: is genuinely concurrent). Without this an unbounded run would still pass the timing test.
     in_flight: int = 0
     max_in_flight: int = 0
+    #: Whether the response carries a ``usage`` block. OpenAI and OpenRouter ALWAYS report one; an
+    #: on-prem vLLM can be configured not to, so a test can turn it off to exercise the Provider's
+    #: "the endpoint told us nothing about tokens" path (which must report 0, never an estimate).
+    report_usage: bool = True
     #: Guards ``steps``/``calls`` mutation across concurrently-awaited ``create`` coroutines. asyncio
     #: is single-threaded so this is belt-and-suspenders, but it keeps the pop/append atomic.
     _lock: threading.Lock = threading.Lock()
@@ -67,6 +71,7 @@ class _Script:
         cls.delay = 0.0
         cls.in_flight = 0
         cls.max_in_flight = 0
+        cls.report_usage = True
 
     @classmethod
     def next_step(cls) -> tuple[str, Any, Any]:
@@ -109,9 +114,30 @@ class _FakeCompletions:
                 raise a
             message = types.SimpleNamespace(content=a)
             choice = types.SimpleNamespace(message=message, finish_reason=b)
-            return types.SimpleNamespace(choices=[choice])
+            if not _Script.report_usage:
+                # A served endpoint configured without usage accounting: the field is ABSENT, the
+                # shape the Provider must tolerate without inventing a token count.
+                return types.SimpleNamespace(choices=[choice])
+            return types.SimpleNamespace(choices=[choice], usage=_usage(kwargs, a))
         finally:
             _Script.in_flight -= 1
+
+
+def _usage(kwargs: dict[str, Any], content: str) -> Any:
+    """The response ``usage`` block, in the real client's shape, from a deterministic word count.
+
+    The real API returns ``usage.prompt_tokens`` / ``completion_tokens`` / ``total_tokens``. This
+    fake cannot know the vendor's tokenizer, so it reports a WORD count — deterministic and
+    dependent on the same inputs a real count is (the sent messages + the returned content), which
+    is what the Provider's accounting must be exercised against. A test asserts the Provider's tally
+    equals the sum of what the fake reported, never an absolute token number.
+    """
+    messages = kwargs.get("messages") or []
+    prompt = sum(len(str(m.get("content", "")).split()) for m in messages)
+    completion = len(content.split())
+    return types.SimpleNamespace(
+        prompt_tokens=prompt, completion_tokens=completion, total_tokens=prompt + completion
+    )
 
 
 class _FakeChat:
@@ -147,7 +173,7 @@ def raises(exc: Exception) -> tuple[str, Exception, None]:
 
 @contextlib.contextmanager
 def install(
-    steps: list[tuple[str, Any, Any]], *, delay: float = 0.0
+    steps: list[tuple[str, Any, Any]], *, delay: float = 0.0, report_usage: bool = True
 ) -> Iterator[type[_Script]]:
     """Install the fake ``openai`` module driven by ``steps``; yields the ``_Script`` for asserts.
 
@@ -159,6 +185,7 @@ def install(
     _Script.reset()
     _Script.steps = list(steps)
     _Script.delay = delay
+    _Script.report_usage = report_usage
     module = types.ModuleType("openai")
     module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
     saved = sys.modules.get("openai")

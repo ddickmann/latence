@@ -11,19 +11,35 @@ fused_entity_relation.gliner2`` with no other change. Consolidating extraction o
 the separate ``relation.gliner_relex`` architecture (kept-but-superseded in the roster): one
 backbone for NER + RE + PII, native ``quantize``/``compile``, more throughput, less handling.
 
-Pod-validated gliner2 1.3.2 API (REAL — mirrored exactly in the offline fake):
+Pod-validated gliner2 1.3.2 API (REAL — mirrored exactly in the offline fake). The Provider drives
+the **batched** entry points; the single-text ``extract_entities``/``extract_relations`` are, in
+gliner2 itself, thin wrappers that call the batched ones with a one-element list:
 
 .. code-block:: python
 
     from gliner2 import GLiNER2
     model = GLiNER2.from_pretrained("fastino/gliner2-multi-v1", quantize=True, compile=True)
-    ents = model.extract_entities(text, entity_types, threshold=0.5,
-                                  include_spans=True, include_confidence=True)
-    # -> {"entities": {label: [{"text", "confidence", "start", "end"}, ...], ...}}
-    rels = model.extract_relations(text, relation_types, threshold=0.5,
-                                   include_spans=True, include_confidence=True)
-    # -> {"relation_extraction": {rel_type: [{"head": {"text","confidence","start","end"},
-    #                                         "tail": {...}}, ...], ...}}
+    ents = model.batch_extract_entities(texts, entity_types, threshold=0.5,
+                                        include_spans=True, include_confidence=True, max_len=768)
+    # -> [{"entities": {label: [{"text", "confidence", "start", "end"}, ...], ...}}, ...]
+    rels = model.batch_extract_relations(texts, relation_types, threshold=0.5,
+                                         include_spans=True, include_confidence=True, max_len=768)
+    # -> [{"relation_extraction": {rel_type: [{"head": {"text","confidence","start","end"},
+    #                                          "tail": {...}}, ...], ...}}, ...]
+
+**T7 — efficient per-chunk extraction.** Per-chunk induction (T1/T2) gives every chunk its own
+small label set, but a batched forward takes ONE schema per call. The Provider therefore BUCKETS
+each streaming batch by label set (:func:`~latence_core.providers.perf.iter_label_buckets`) and
+runs ONE native batched forward per bucket at that bucket's own small label count — never the
+corpus union, never one call per chunk. gliner2's own batched span-rep path documents itself as
+"bit-identical to calling compute_span_rep per sample", and the Provider re-orders nothing, so the
+emitted records are bucket- and batch-INVARIANT (asserted against a per-chunk reference).
+
+**No server, and we do not pretend otherwise.** gliner2 ships no self-hostable inference server —
+its only server surface is ``GLiNER2.from_api``, a CLIENT for fastino's *cloud* API (data egress +
+an external key), which is disqualifying for an on-prem data framework. All the throughput here is
+gliner2's NATIVE BATCHED FORWARD + ``compile`` + ``quantize``, running IN-PROCESS on the operator's
+own hardware.
 
 The entity ``start``/``end`` are chunk-local **char** offsets (half-open); the relation ``head``/
 ``tail`` sub-dicts carry the SAME chunk-local ``start``/``end`` char offsets, so a relation is
@@ -50,9 +66,8 @@ Licensing (ADR-0012 / research-diligence, verified 2026-07-10 — weights AND co
 The ``gliner2`` import is deferred to first use (ADR-0016) so importing this module (for Provider
 discovery) never requires torch; a missing optional dep raises a clear error only when the Provider
 is run. W9 perf seam: the native ``quantize`` (fp16) load knob defaults True on cuda / False on cpu,
-guarded so a fault degrades to a plain load (never a crash). W9-scaling hardening (Blackwell): the
-native ``compile`` knob defaults **OFF** (opt-in) because gliner2's ``dynamic=True`` compile
-recompile-thrashes on varied-length production chunks; torch intra-op threads are capped at load
+guarded so a fault degrades to a plain load (never a crash). W9-scaling hardening (Blackwell):
+torch intra-op threads are capped at load
 (default 8) to stop a many-core host oversubscribing to a CPU spin with the GPU idle; the fp16 model
 is explicitly moved to cuda and its device logged (the fp16-on-CPU defence); and extraction streams
 in bounded batches with per-batch progress logging so a large corpus never *appears* hung.
@@ -65,33 +80,39 @@ CUDA-13 box on the FIRST forward. Throughput-only; the emitted records are byte-
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError, ProviderError
-from latence_core.induced import LabelSlot, effective_labels
+from latence_core.induced import LabelFloor, LabelSlot, effective_labels, resolve_label_floor
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
     cap_intra_op_threads,
+    empty_cuda_cache,
     ensure_gliner2_on_cuda,
     inference_context,
     is_compile_backend_failure,
+    is_cuda_oom,
+    iter_label_buckets,
+    iter_token_budget_microbatches,
     load_gliner2_optimized,
     neutralize_torch_jit,
     resolve_gliner2_knob,
     resolve_intra_op_threads,
     resolve_max_len,
+    resolve_microbatch_bounds,
 )
 from latence_core.providers.profile import ProviderProfile
 
 _log = logging.getLogger("latence.provider.gliner2_fused")
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
 
     from latence_core.contracts import ChunkRecord, Provenance
 
@@ -99,12 +120,14 @@ if TYPE_CHECKING:
 # over an mdeberta-v3 encoder via the fastino GLiNER2 framework.
 _DEFAULT_MODEL = "fastino/gliner2-multi-v1"
 
-# The default streaming batch size: the number of chunks processed between progress checkpoints
-# (each chunk is still ONE bounded ≤ max_len forward — this provider does not pack multiple chunks
-# into a single native call, so batch_size shapes the PROGRESS cadence, not a padded batch tensor).
-# Bounded by _MAX_BATCH_SIZE so a large configured value can never make the stage run silently for
-# minutes with no visible progress (the "appears hung" failure). The emitted mentions/relations are
-# record-for-record identical for any positive batch size (input-order, per-chunk — ADR-0033).
+# The default streaming batch size: the BUCKETING WINDOW — how many chunks are buffered before
+# they are partitioned by label set and each bucket run through one native batched forward (T7).
+# It is NOT the model-forward tensor size: every bucket is further split into token-budget
+# micro-batches, so the padded activation is bounded by (microbatch_max_texts × max_len) for ANY
+# configured batch_size. A wider window packs buckets better (more chunks share a label set) at a
+# coarser progress cadence, so 16 is the balance point; _MAX_BATCH_SIZE bounds the cadence so a
+# large corpus can never run silently for minutes (the "appears hung" failure). The emitted
+# mentions/relations are record-for-record identical for any positive batch size (ADR-0033).
 _DEFAULT_BATCH_SIZE = 16
 
 # The hard cap on the streaming batch (progress cadence). A configured batch_size above this is
@@ -112,15 +135,121 @@ _DEFAULT_BATCH_SIZE = 16
 # the "a large single batch must never wedge / silently stall the stage" guarantee (W9-scaling).
 _MAX_BATCH_SIZE = 64
 
-# W9-scaling: torch.compile defaults OFF for this provider (opt-in only). gliner2 compiles with
-# ``dynamic=True``, which RECOMPILES per distinct chunk-shape; on a real varied-length corpus that
-# thrashes torch._dynamo past its recompile_limit (measured: worker pinned ~290% CPU, GPU 0%, no
-# progress after ~50 min). The pod-measured 2.83×/1.74× was on UNIFORM batch shapes, not production
-# corpora. Compile stays available as a config knob (``compile: true``) for a homogeneous workload,
-# with the docstring warning. NOTE: the W9 inference-time reload-uncompiled latch only catches
-# compile *crashes* (BackendCompilerFailed), NOT this silent recompile *thrash* — so the safe
-# default is the real fix, not the latch.
-_COMPILE_DEFAULT = False
+# T2 (per-chunk extraction): entity + relation labels are RELEVANCE labels, so this Provider's
+# config labels are a PER-CHUNK floor, not a universal one — a chunk that induced its own types is
+# scored against THOSE ALONE, and the config floor is the recall net for a chunk induction said
+# nothing about. This is the SOTA choice for a zero-shot span-scoring model and it is not close:
+#
+#   * PRECISION. GLiNER2 scores every candidate span against every label; recall/precision degrade
+#     as the label count grows because irrelevant types compete for the same spans. Unioning a
+#     corpus-wide floor onto a chunk that already induced its own 5 types buys nothing on that
+#     chunk and taxes every span decision on it.
+#   * MEMORY. The span-scoring activation is (batch × positions × LABELS); the label dimension is
+#     what turned a routine forward into a multi-GiB allocation. Small per-chunk label sets are the
+#     ROOT fix for that, not the reactive micro-batch backoff.
+#   * The trade, stated honestly: a UNIVERSAL floor is recall insurance — a chunk whose induction
+#     under-called (missed ``person``) would still be scored for it. PER_CHUNK forfeits that
+#     insurance in exchange for label-count purity, and the redesign accepts it BECAUSE the front
+#     half now induces per chunk (the induced set is derived from the chunk's own text) and the
+#     type vocabulary is reconciled downstream, not imposed upstream. An operator who wants the
+#     insurance back sets ``label_floor: universal`` — one knob, no code change.
+#
+# A chunk with NO induced labels falls back to the config floor under either policy, so every stack
+# without a ``schema_induction`` Stage (and predefined-only mode, where induction is skipped
+# entirely) is byte-identical: exactly its config labels, per chunk.
+_DEFAULT_LABEL_FLOOR = LabelFloor.PER_CHUNK
+
+
+@dataclass(frozen=True)
+class _PendingChunk:
+    """A chunk with its two resolved label sets — the bucket keys for the batched forward (T7).
+
+    Resolving the effective (entity, relation) label sets is model-independent, so it happens for
+    the whole streaming window BEFORE any forward; the sets are then the keys the window is
+    partitioned by. Tuples, not lists: they must be hashable to bucket, and label ORDER is part of
+    the question asked of the model, so two chunks share a bucket only when they would have been
+    asked the identical question.
+    """
+
+    chunk: ChunkRecord
+    entity_labels: tuple[str, ...]
+    relation_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Slot:
+    """One of the two extraction slots — the ONE place the entity/relation asymmetry lives (T7).
+
+    The bucketing, micro-batching, compile-latch, OOM-backoff and scatter-back logic is identical
+    for entities and relations; only three things differ: which native batched method to call,
+    which top-level key wraps each per-text result, and which of a chunk's two label sets is the
+    bucket key. Naming that difference once — instead of duplicating the whole batched path per
+    slot, or branching on a string inside it — is what keeps the batched forward a single deep
+    method rather than two near-copies that can drift.
+    """
+
+    #: the native gliner2 batched entry point (``batch_extract_entities`` / ``…_relations``).
+    method: str
+    #: the top-level key wrapping each per-text result (``entities`` / ``relation_extraction``).
+    envelope: str
+    #: whether this slot reads a chunk's ENTITY label set (else its RELATION set).
+    entity: bool
+
+    def labels_of(self, item: _PendingChunk) -> tuple[str, ...]:
+        """This slot's label set for ``item`` — the bucket key."""
+        return item.entity_labels if self.entity else item.relation_labels
+
+
+_ENTITY_SLOT = _Slot(method="batch_extract_entities", envelope="entities", entity=True)
+_RELATION_SLOT = _Slot(
+    method="batch_extract_relations", envelope="relation_extraction", entity=False
+)
+
+
+def _unwrap(slot: _Slot, raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """One per-text result → its per-label / per-relation-type dict of rows (faithful shape check).
+
+    The REAL gliner2 shapes are nested dicts — ``{"entities": {label: [rows]}}`` and
+    ``{"relation_extraction": {rel_type: [rows]}}`` — NOT the ``gliner`` library's flat list. A
+    provider that mis-parses either as a flat list recovers ZERO spans silently, which is exactly
+    the false green the offline fake and its anchor test exist to close. Anything that is not the
+    pinned shape is a typed :class:`ProviderError` (ADR-0034), never a quiet empty result.
+    """
+    payload: Any = raw.get(slot.envelope) if isinstance(raw, dict) else raw
+    if not isinstance(payload, dict):
+        got = type(payload).__name__
+        msg = (
+            f"fused_entity_relation.gliner2: unexpected {slot.method} output shape "
+            f"(expected {{{slot.envelope!r}: {{label: [rows]}}}}, got {got})"
+        )
+        raise ProviderError(msg)
+    return cast("dict[str, list[dict[str, Any]]]", payload)
+
+
+def _require_batched_api(model: Any) -> None:
+    """Typed :class:`ProviderError` if the loaded model lacks the batched entry points (T7).
+
+    The backstop for anything the package pin cannot see (a hand-installed older ``gliner2``, a
+    fork, a vendored wrapper, or a ``GLiNER2.from_api`` CLOUD client rather than a local model):
+    the missing method surfaces as a typed, actionable framework error at LOAD rather than the raw
+    ``AttributeError`` an operator got in the field on the twin redactor (#192).
+    """
+    missing = [
+        slot.method
+        for slot in (_ENTITY_SLOT, _RELATION_SLOT)
+        if not callable(getattr(model, slot.method, None))
+    ]
+    if not missing:
+        return
+    msg = (
+        f"fused_entity_relation.gliner2 batches via {' + '.join(missing)}(texts, types, "
+        "threshold=…, include_spans=True, include_confidence=True, max_len=…), but the loaded "
+        f"GLiNER2 object exposes no callable {missing!r}. Those reached their current signature in "
+        "gliner2 1.2.6 and this Provider supports gliner2 >=1.3,<2. Install a supported version "
+        "(pip install 'gliner2[local]>=1.3,<2') or point 'model' at a checkpoint the GLiNER2 "
+        "framework can load locally."
+    )
+    raise ProviderError(msg)
 
 
 class Gliner2FusedExtractor:
@@ -137,30 +266,43 @@ class Gliner2FusedExtractor:
             ``["organization", "person"]``). GLiNER2 works best with lower/title case.
         relation_labels: list[str]  — REQUIRED. The zero-shot relation types to extract between
             the entities (e.g. ``["works for", "located in"]``).
+        label_floor: str  — ``per_chunk`` (default) or ``universal``: what the config ``labels`` /
+            ``relation_labels`` MEAN for a chunk that carries induced types (T2). ``per_chunk``
+            treats them as a RELEVANCE floor — a chunk that induced its own types is scored against
+            THOSE ALONE, and the config lists are the recall net for a chunk induction said nothing
+            about. ``universal`` restores the historical union (config ∪ induced) on every chunk.
+            Default ``per_chunk``: zero-shot precision AND the span-scoring activation both degrade
+            with label count, so stamping a global floor onto a chunk that already induced its own
+            types is a pure tax (see :data:`_DEFAULT_LABEL_FLOOR` for the full trade). A chunk with
+            no induced labels uses exactly the config lists under either value.
         model: str  — the checkpoint id (default ``fastino/gliner2-multi-v1``, Apache-2.0).
         threshold: float  — score threshold; entities/relations below it are dropped (default 0.5).
         min_chars: int  — a chunk whose stripped length is below this is skipped without invoking
             the model (default 1).
         max_len: int  — the mdeberta-v3 model token window (default 768), threaded as the native
-            ``max_len`` of ``extract_entities`` / ``extract_relations`` (W12). A chunk that
-            tokenizes past it is SILENTLY truncated by the model (tail entities/relations lost,
+            ``max_len`` of ``batch_extract_entities`` / ``batch_extract_relations`` (W12). A chunk
+            that tokenizes past it is SILENTLY truncated by the model (tail entities/relations lost,
             offsets unreliable); this bounds the window explicitly. CAVEAT: the chunker
             (``chunk.markdown`` ``max_tokens``) counts in a DIFFERENT tokenizer, ~1.2× fewer tokens
             than mdeberta — keep the chunk cap ≤ ~640 for this 768 window; the guard is the backstop
-        batch_size: int  — the streaming **progress cadence**: how many chunks are processed
-            between incremental progress checkpoints (default 16; clamped to 64). Each chunk is
-            still ONE bounded ≤ ``max_len`` forward — this provider does NOT pack multiple chunks
-            into one native call — so batch_size shapes the progress/GC granularity, not a padded
-            batch tensor; the emitted mentions AND relations (offsets/labels/endpoints/order) are
-            record-for-record identical for any positive batch size. Must be ``>= 1``. The clamp
-            guarantees a large corpus always logs progress often enough to never *appear* hung.
-            (dogfood-2b-process: because the forward is single-chunk BY CONSTRUCTION, this extractor
-            has no padded multi-text activation to bound — so it needs no micro-batching. Its twin
-            ``redaction.gliner2`` DOES pack multiple docs into one ``batch_extract_entities`` call,
-            so it reaches the SAME bounded-forward guarantee the other way: by splitting each
-            forward into token-budget micro-batches via
-            :func:`~latence_core.providers.perf.iter_token_budget_microbatches`. Both keep
-            ``batch_size`` a genuine progress/flush knob, decoupled from the forward.)
+        batch_size: int  — the **bucketing window** and progress cadence: how many chunks are
+            buffered before they are partitioned by label set and each bucket run through one native
+            batched forward (default 16; clamped to 64; must be ``>= 1``). It is NOT the model
+            forward tensor — each bucket is split into token-budget micro-batches below — so a wider
+            window only packs buckets better and coarsens the progress trail. The emitted mentions
+            AND relations (offsets/labels/endpoints/order) are record-for-record identical for any
+            positive batch size and any bucketing (the T7 invariance test drives a per-chunk
+            reference); the clamp guarantees a large corpus always logs progress often enough to
+            never *appear* hung.
+        microbatch_max_texts: int  — the hard cap on texts packed into ONE native batched forward
+            (default 4, the pod-safe count). gliner2 pads a micro-batch to its longest sequence, so
+            this bounds the padded forward to ``max_texts × max_len`` positions regardless of
+            ``batch_size`` or bucket size. With per-chunk label sets the label dimension has already
+            collapsed (T7: the ~17 GiB OOM tensor was ``batch × ~768 tokens × ~40 labels``), so this
+            is now the rarely-biting safety net rather than the cure.
+        microbatch_token_budget: int  — the token budget (summed per-text token lengths, each capped
+            at ``max_len``) for ONE forward (default 3072 = 4 × 768). The SECONDARY bound, tighter
+            than ``max_texts`` when ``max_len`` is raised.
         intra_op_threads: int  — cap on torch **intra-op** threads applied at load (W9-scaling,
             default 8; ``<= 0`` disables the cap). On a many-core host gliner2's internal batching
             oversubscribes torch's default ``os.cpu_count()`` intra-op pool to ~cpu_count threads —
@@ -172,23 +314,48 @@ class Gliner2FusedExtractor:
             model is explicitly moved to cuda after load and its device is logged (W9-scaling), so a
             fp16-converted model that silently stayed on CPU is caught, not a silent CPU spin. Set
             ``quantize: false`` if a run is CPU-bound with the GPU idle despite placement.
-        compile: bool | 'auto'  — gliner2 native ``compile`` (torch.compile + fused GPU kernels)
-            load knob. **Default OFF** (opt-in) for this provider (W9-scaling): gliner2 compiles
-            with ``dynamic=True`` and RECOMPILES per distinct chunk-shape, which thrashes
-            torch._dynamo past its recompile_limit on a real varied-length corpus (CPU-pinned, GPU
-            idle, no progress). Enable ``compile: true`` ONLY for a homogeneous / uniform-length
-            workload. Guarded like ``quantize``; the inference-time reload-uncompiled latch catches
-            compile *crashes*, but NOT the recompile *thrash* — hence the off default.
+        compile: bool | 'auto'  — gliner2 native ``compile`` (``torch.compile`` + fused GPU kernels)
+            load knob. ``auto`` (the default) resolves **True on cuda / False on cpu** — T7
+            UNLOCKED it. It was forced OFF while extraction ran one varied-length chunk against a
+            corpus-wide ~40-label schema per forward: gliner2 compiles with
+            ``torch.compile(..., dynamic=True)``, and a fresh (label-count, batch) shape family per
+            chunk thrashed torch._dynamo past its recompile_limit (pod-measured: worker pinned
+            ~290% CPU, GPU 0%, no progress). Bucketing removes BOTH varying dimensions: within a
+            bucket the label dimension is constant by construction, and the micro-batch caps the
+            batch dimension at ``microbatch_max_texts`` — so dynamo sees one shape family per bucket
+            instead of one per chunk, which is the regime the pod-measured 1.74×/2.83× came from.
+            Guarded twice: a compile fault at LOAD degrades to a plain load, and the lazy
+            ``BackendCompilerFailed`` on the first forward trips the inference-time
+            reload-uncompiled latch (:meth:`_reload_uncompiled`) — so a backend that cannot compile
+            (Blackwell / CUDA-13 nvrtc, ADR-0036) costs throughput, never correctness or a crash.
+            Set ``compile: false`` to pin it off.
 
     Fulfils BOTH the EntityExtractor and the FusedEntityRelationExtractor seam: it also exposes
     ``extract`` so it can stand in for a plain Entity-Extraction Stage when a Pipeline wants only
     its NER half. The model is loaded lazily and cached on first use, so constructing the Provider
     never downloads weights.
 
-    Labels (W4 seam, ADR-0038): the entity + relation label sets are the config floors UNIONed with
-    any types the OPTIONAL ``schema_induction`` Stage induced for a chunk's document (induced ∪
-    config, deduped + order-stable, per slot) — exactly like relex. Absent (the default, every
-    existing stack) these are exactly the config labels.
+    Labels (W4 seam, ADR-0038; T2 floor policy): the per-chunk entity + relation label sets come
+    from the shared :func:`~latence_core.induced.effective_labels` seam. Under the default
+    ``label_floor: per_chunk`` a chunk that carries induced types is scored against ITS OWN types;
+    under ``label_floor: universal`` the config floor is unioned onto every chunk (the historical
+    behaviour, kept as a knob). Either way a chunk with no induced labels — every stack without a
+    ``schema_induction`` Stage, and predefined-only mode where induction is skipped entirely — is
+    scored against exactly the config labels.
+
+    Batching (T7): each streaming ``batch_size`` window is BUCKETED by label set — separately for
+    the entity slot and the relation slot, since a chunk can share one and not the other — and each
+    bucket runs through ONE native ``batch_extract_entities`` / ``batch_extract_relations`` forward
+    per token-budget micro-batch, at that bucket's own small label count. Per-text results are
+    scattered back by index, so emission stays in input-chunk order and the output is
+    bucket-invariant (record-for-record identical to a per-chunk reference). Absent induction every
+    chunk shares the config label set → ONE bucket → the whole window is one forward.
+
+    Why this is the ROOT fix for the CUDA-OOM (dogfood-2b-process): the span-scoring activation is
+    ``batch × positions × LABELS``, and the measured ~17 GiB spike was ``batch × ~768 tokens × ~40``
+    corpus-wide ``labels``. Per-chunk induction collapses the label dimension to a handful, so the
+    tensor never forms; the reactive micro-batch/OOM-halving backoff stays as the last-resort net
+    and should now fire zero times.
     """
 
     @classmethod
@@ -229,8 +396,13 @@ class Gliner2FusedExtractor:
             perf_note=(
                 "gliner2 native quantize (fp16) on cuda (W9; pod-measured 1.74× combined NER+RE at "
                 "byte-identical output; guarded → plain load on any fault; model moved to cuda + "
-                "device logged post-load). compile defaults OFF (W9-scaling: dynamic=True "
-                "recompile-thrashes on varied-length corpora; opt-in for uniform workloads). "
+                "device logged post-load). compile now rides the cuda default (T7): chunks are "
+                "bucketed by label set and each bucket runs one native batched forward, so the "
+                "label + batch dimensions are constant within a bucket and gliner2's "
+                "torch.compile(dynamic=True) no longer recompile-thrashes; guarded at load AND by "
+                "the inference-time reload-uncompiled latch. No inference server is involved: "
+                "gliner2 ships none (from_api is a cloud client), so this is the native batched "
+                "forward in-process. "
                 "Intra-op threads capped (default 8) against many-core oversubscription; "
                 "extraction streams in bounded batches with per-batch progress logging. "
                 "TorchScript JIT neutralized at the shared load seam (#190: mdeberta's scripted "
@@ -264,6 +436,15 @@ class Gliner2FusedExtractor:
         # extract_entities/extract_relations take a native ``max_len``; past it the model silently
         # truncates (tail entities/relations lost, offsets unreliable). Explicit + configurable.
         self._max_len = resolve_max_len(config)
+        # T2: is the config label list a PER-CHUNK relevance floor (default — see
+        # _DEFAULT_LABEL_FLOOR) or a UNIVERSAL one stamped onto every chunk? Validated eagerly, so a
+        # typo'd value is an operator ConfigError at construction rather than a silently ignored key
+        # that leaves the run on the other policy.
+        try:
+            self._label_floor = resolve_label_floor(config, default=_DEFAULT_LABEL_FLOOR)
+        except ValueError as exc:
+            msg = f"fused_entity_relation.gliner2: {exc}"
+            raise ConfigError(msg) from exc
         # Streaming progress cadence, clamped to _MAX_BATCH_SIZE so a large configured value can
         # never let the stage run for minutes with no visible progress (W9-scaling): a corpus always
         # checkpoints/logs at least every _MAX_BATCH_SIZE chunks.
@@ -272,14 +453,15 @@ class Gliner2FusedExtractor:
             provider_name="fused_entity_relation.gliner2",
         )
         self._batch_size = min(requested_batch, _MAX_BATCH_SIZE)
-        # W9-scaling: default torch.compile OFF for this provider (opt-in only) — gliner2's
-        # dynamic=True compile recompile-thrashes on varied-length production chunks. An operator
-        # who sets compile explicitly still gets it; absent, it is forced off. The perf-seam load
-        # (load_gliner2_optimized) reads compile from self._config, so injecting the default here is
-        # the single source of truth for both the eager validation below and the lazy load.
+        # T7: ``compile`` no longer carries a forced-OFF provider default — it rides the shared
+        # ``auto`` resolution (True on cuda, False on cpu). The forced-off default existed because
+        # a per-chunk forward against a corpus-wide ~40-label schema handed gliner2's
+        # torch.compile(dynamic=True) a fresh (label-count, batch) shape family per chunk and
+        # thrashed dynamo. Bucketing by label set pins the label dimension within a bucket and the
+        # micro-batch pins the batch dimension, so the thrash precondition is gone; the load-time
+        # guard and the inference-time reload-uncompiled latch still make a non-compiling backend a
+        # throughput-only degradation.
         load_config: dict[str, Any] = dict(config)
-        if "compile" not in load_config:
-            load_config["compile"] = _COMPILE_DEFAULT
         # The perf-seam config knobs (quantize / compile) + the intra-op thread cap, read at load
         # (W9 / W9-scaling). Validate them eagerly (fail-fast at construction, like batch_size): an
         # invalid value is an operator ConfigError up front, not a native fault buried in the lazy
@@ -289,6 +471,11 @@ class Gliner2FusedExtractor:
             resolve_gliner2_knob("quantize", None, load_config)
             resolve_gliner2_knob("compile", None, load_config)
             self._intra_op_threads = resolve_intra_op_threads(load_config)
+            # T7: the token-budget micro-batch bounds for the bucketed forward — the safety net that
+            # keeps ONE padded activation bounded (max_texts × max_len) for any bucket size.
+            self._microbatch_max_texts, self._microbatch_token_budget = resolve_microbatch_bounds(
+                load_config
+            )
         except ValueError as exc:
             msg = f"fused_entity_relation.gliner2: {exc}"
             raise ConfigError(msg) from exc
@@ -341,9 +528,9 @@ class Gliner2FusedExtractor:
         # W9 perf seam: the gliner2 framework exposes NATIVE quantize (fp16) + compile
         # (torch.compile + fused GPU kernels) kwargs on from_pretrained — pod-measured 1.74×
         # combined NER+RE at byte-identical output. quantize defaults True on cuda / False on cpu;
-        # compile is defaulted OFF here (W9-scaling recompile-thrash guard) unless the operator opts
-        # in. GUARDED so a quantize/compile fault degrades to a plain load (throughput only, never a
-        # crash). device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places on cuda).
+        # compile rides the cuda default since T7 (bucketing removed the recompile-thrash
+        # precondition). GUARDED so a quantize/compile fault degrades to a plain load (throughput
+        # only, never a crash). device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places).
         self._model = load_gliner2_optimized(
             self._gliner2_cls().from_pretrained,
             self._model_id,
@@ -360,6 +547,12 @@ class Gliner2FusedExtractor:
             cuda=cuda_available(),
             provider_name="fused_entity_relation.gliner2",
         )
+        # T7: the loaded object must expose the BATCHED entry points this Provider now drives.
+        # Checked at LOAD (not at the first forward) so a gliner2 too old to have them — or an
+        # api-client object rather than a local model — is a typed, actionable ProviderError up
+        # front (ADR-0034), never the raw native AttributeError an operator cannot act on (the #192
+        # field failure on the twin redactor).
+        _require_batched_api(self._model)
         return self._model
 
     def _reload_uncompiled(self) -> Any:
@@ -399,21 +592,26 @@ class Gliner2FusedExtractor:
     def extract_fused(self, chunks: Iterable[ChunkRecord]) -> FusedExtraction:
         """Extract entities + relations per chunk; yield mentions + relations together (S4/S5).
 
-        Chunks below ``min_chars`` are skipped without a model call. For each remaining chunk the
-        effective (entity, relation) label set is the config floor UNIONed with any induced types
-        (the W4 seam), and the model is called ONCE for entities and once for relations — the two
-        native gliner2 calls (``extract_entities`` + ``extract_relations``, both
-        ``include_spans=True``). The per-chunk record building (offset/page resolution, relation→
-        mention span resolution) is UNCHANGED from the relex path; emission is in input (chunk)
-        order. The in-flight *model* state is bounded per chunk (each forward is one ≤ ``max_len``
-        call, never the whole corpus, ADR-0033).
+        Chunks below ``min_chars`` are skipped without a model call. Every remaining chunk resolves
+        its OWN effective (entity, relation) label sets through the W4 seam under the T2 floor
+        policy — with the default ``per_chunk`` floor a chunk that induced its own types is scored
+        against THOSE ALONE, and a chunk that induced nothing (every predefined-only /
+        no-induction stack) falls back to exactly the config lists.
 
-        **W9-scaling — incremental, batch-granular progress:** chunks are processed in bounded
-        batches of ``batch_size`` (clamped to :data:`_MAX_BATCH_SIZE`); after each batch the
-        provider logs cumulative progress (chunks / mentions / relations). On a large corpus (the
-        diagnosed 2,802-chunk run) this means the stage emits a steady progress trail instead of
-        running silently for tens of minutes — so a slow run is visible, never "appears hung", and
-        the log doubles as a coarse resume-forensics trail alongside the Runner's checkpoint writes.
+        **T7 — bucket, then batch.** Within each ``batch_size`` window the chunks are partitioned by
+        label set (:func:`~latence_core.providers.perf.iter_label_buckets`), separately per slot
+        because a chunk can share the entity set and not the relation set, and each bucket is run
+        through ONE native ``batch_extract_entities`` / ``batch_extract_relations`` forward per
+        token-budget micro-batch, with the bucket's own SMALL schema. Per-text results scatter back
+        by index, so the per-chunk record building (offset/page resolution, relation→mention span
+        resolution) and the emission order are UNCHANGED — the output is bucket-invariant,
+        record-for-record identical to calling the model once per chunk.
+
+        **W9-scaling — incremental, batch-granular progress:** after each window the provider logs
+        cumulative progress (chunks / mentions / relations). On a large corpus (the diagnosed
+        2,802-chunk run) the stage emits a steady progress trail instead of running silently for
+        tens of minutes — so a slow run is visible, never "appears hung", and the log doubles as a
+        coarse resume-forensics trail alongside the Runner's checkpoint writes.
         """
         loaded = False
         mentions: list[EntityMention] = []
@@ -429,22 +627,11 @@ class Gliner2FusedExtractor:
             if not loaded:
                 self._load_model()
                 loaded = True
-            for chunk in batch:
-                # W4 label-source seam (ADR-0038): UNION the config labels with the chunk's induced
-                # entity/relation types, deduped + order-stable, per slot. Absent ⇒ config labels.
-                entity_labels = effective_labels(
-                    self._labels, chunk.induced_labels, LabelSlot.ENTITY
-                )
-                relation_labels = effective_labels(
-                    self._relation_labels, chunk.induced_labels, LabelSlot.RELATION
-                )
-                # The forward reads self._model (so an inference-time compile fallback that re-loads
-                # the uncompiled model is picked up transparently on the next call, W9).
-                raw_entities = self._extract_entities(chunk.content, entity_labels)
-                raw_relations = self._extract_relations(chunk.content, relation_labels)
-                chunk_mentions, chunk_relations = self._build_records(
-                    chunk, raw_entities, raw_relations
-                )
+            pending = [self._prepare(chunk) for chunk in batch]
+            raw_entities = self._bucketed_forward(pending, _ENTITY_SLOT)
+            raw_relations = self._bucketed_forward(pending, _RELATION_SLOT)
+            for item, ents, rels in zip(pending, raw_entities, raw_relations, strict=True):
+                chunk_mentions, chunk_relations = self._build_records(item.chunk, ents, rels)
                 mentions.extend(chunk_mentions)
                 relations.extend(chunk_relations)
                 processed += 1
@@ -459,112 +646,148 @@ class Gliner2FusedExtractor:
             )
         return FusedExtraction(mentions=mentions, relations=relations)
 
-    def _forward(self, op: str, invoke: Callable[[Any], Any]) -> Any:
-        """Run one native forward (``invoke(model)``), with the W9 inference-time compile guard.
+    def _prepare(self, chunk: ChunkRecord) -> _PendingChunk:
+        """Resolve a chunk's two effective label sets BEFORE any model call (the bucket keys, T7).
 
-        ``torch.compile`` compiles lazily on the first forward, so a backend that cannot compile the
-        model raises a ``BackendCompilerFailed`` (dynamo/inductor) INSIDE ``invoke`` — which the
-        load-time guard cannot catch. This wrapper catches exactly that class of fault
-        (:func:`~latence_core.providers.perf.is_compile_backend_failure`) ONCE, re-loads the model
-        with ``compile`` forced off (:meth:`_reload_uncompiled`; ``quantize`` kept), and retries the
-        forward against the uncompiled model — so a bad compile costs only throughput, never a
-        crash. The fallback runs at most once (``_compile_disabled``). Any OTHER native fault (a
-        genuine model/runtime error) is mapped to a typed :class:`ProviderError` carrying NO input
-        text / PII (only the op + native type name — C2/C6), exactly as before.
+        W4 label-source seam (ADR-0038) under the T2 per-chunk floor policy: with the default
+        PER_CHUNK floor a chunk that induced its own entity/relation types is scored against THOSE
+        ALONE (no global floor re-inflating the label count); a chunk that induced nothing — and
+        every predefined-only / no-induction stack — falls back to exactly the config labels.
+        ``label_floor: universal`` restores the historical union.
 
-        Every forward (both the first attempt and the uncompiled retry) runs INSIDE
+        The two sets are kept as TUPLES because they double as the bucket keys: label ORDER is
+        significant (it is the order handed to the model, and gliner2's per-label output dict is
+        keyed by it), so two chunks bucket together only when they would have been asked the
+        identical question.
+        """
+        return _PendingChunk(
+            chunk=chunk,
+            entity_labels=tuple(
+                effective_labels(
+                    self._labels, chunk.induced_labels, LabelSlot.ENTITY, floor=self._label_floor
+                )
+            ),
+            relation_labels=tuple(
+                effective_labels(
+                    self._relation_labels,
+                    chunk.induced_labels,
+                    LabelSlot.RELATION,
+                    floor=self._label_floor,
+                )
+            ),
+        )
+
+    def _bucketed_forward(
+        self, pending: list[_PendingChunk], slot: _Slot
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        """Run one slot (entities or relations) over ``pending`` as ONE forward per label bucket.
+
+        The T7 core. ``pending`` is a whole ``batch_size`` window; its chunks are partitioned by
+        this slot's label set, and each bucket is handed to the slot's native BATCHED entry point
+        with that bucket's own small schema. A bucket is further split by the token-budget
+        micro-batch bound, so ONE padded activation stays bounded at
+        ``microbatch_max_texts × max_len`` positions no matter how large the bucket is.
+
+        Returns the per-chunk raw output ALIGNED with ``pending`` (index i ↔ pending[i]) — results
+        are scattered back by index, never by output order, so bucketing can never permute a
+        chunk's result onto another chunk. That, plus gliner2's own batched span-rep path being
+        documented as "bit-identical to calling compute_span_rep per sample", is why the emitted
+        records are bucket-invariant.
+        """
+        keys = [slot.labels_of(item) for item in pending]
+        results: list[dict[str, list[dict[str, Any]]] | None] = [None] * len(pending)
+        for labels, indices in iter_label_buckets(keys):
+            texts = [pending[i].chunk.content for i in indices]
+            for start, end in iter_token_budget_microbatches(
+                texts,
+                max_len=self._max_len,
+                max_texts=self._microbatch_max_texts,
+                token_budget=self._microbatch_token_budget,
+            ):
+                raw = self._batch_forward(slot, texts[start:end], list(labels))
+                if len(raw) != end - start:
+                    msg = (
+                        f"fused_entity_relation.gliner2: {slot.method} returned {len(raw)} "
+                        f"results for a micro-batch of {end - start} texts."
+                    )
+                    raise ProviderError(msg)
+                for offset, item in enumerate(raw):
+                    results[indices[start + offset]] = _unwrap(slot, item)
+        # Every index belongs to exactly one bucket and every bucket is tiled by micro-batches, so
+        # no slot can stay unfilled; the assertion-free narrowing keeps mypy --strict honest.
+        return [{} if item is None else item for item in results]
+
+    def _batch_forward(
+        self, slot: _Slot, texts: list[str], labels: list[str]
+    ) -> list[Any]:
+        """One native batched forward, with the compile latch AND the CUDA-OOM halving backoff.
+
+        Two inference-time faults are recovered here so ``latence process`` never dies mid-run:
+
+        * **compile fault** — ``torch.compile`` compiles LAZILY on the first forward, so a backend
+          that cannot compile raises a ``BackendCompilerFailed`` (dynamo/inductor) HERE, not at load
+          (:func:`~latence_core.providers.perf.is_compile_backend_failure`). The provider re-loads
+          the uncompiled model ONCE (:meth:`_reload_uncompiled`; quantize kept) and retries — the
+          graceful degradation that keeps the T7 compile default safe on a Blackwell/CUDA-13 box.
+
+        * **CUDA OOM** — the last-resort net (T7 makes it near-dead code: with per-chunk label sets
+          the span-scoring tensor's label dimension has collapsed, and that dimension is what made
+          it ~17 GiB). Because the output is batch-invariant, the micro-batch is split in half and
+          each half retried after a best-effort cache release; a batch of ONE that still OOMs is
+          genuinely unrecoverable and surfaces as a typed error — no dropped chunk, no fake green.
+
+        Any other native fault is already a typed :class:`~latence_core.errors.ProviderError`
+        carrying only the op + native type name (no chunk text / PII — C2/C6).
+        """
+        try:
+            return self._native_batch(self._model, slot, texts, labels)
+        except Exception as exc:  # noqa: BLE001 - intercept recoverable faults before surfacing
+            # ``_native_batch`` wraps the native fault as ProviderError; both predicates walk the
+            # cause chain to the original BackendCompilerFailed / OutOfMemoryError underneath.
+            if not self._compile_disabled and is_compile_backend_failure(exc):
+                return self._native_batch(self._reload_uncompiled(), slot, texts, labels)
+            if is_cuda_oom(exc) and len(texts) > 1:
+                empty_cuda_cache(provider_name="fused_entity_relation.gliner2")
+                mid = len(texts) // 2
+                # Re-enter through _batch_forward so a compile-reload inside one half is picked up
+                # by the next (self._model is the source of truth after _reload_uncompiled).
+                left = self._batch_forward(slot, texts[:mid], labels)
+                right = self._batch_forward(slot, texts[mid:], labels)
+                return left + right
+            raise
+
+    def _native_batch(
+        self, model: Any, slot: _Slot, texts: list[str], labels: list[str]
+    ) -> list[Any]:
+        """The single native call, under ``inference_mode``, typed on any fault.
+
+        ``include_spans=True`` is REQUIRED — without it gliner2 returns entity *strings* / relation
+        head/tail *text* only, which the framework contract cannot ground; the Provider always
+        passes it. The forward runs INSIDE
         :func:`~latence_core.providers.perf.inference_context` (``torch.inference_mode()``): this is
         an extraction-only encoder that never backpropagates, so building an autograd graph and
         pinning its activations alive would only ACCUMULATE VRAM run-over-run to a CUDA OOM
-        (dogfood-2b-process). Under inference mode no graph is built and each forward's activations
-        free immediately — same entities/relations, bounded memory (torch-free-safe offline).
+        (dogfood-2b-process). Any native fault becomes a typed :class:`ProviderError` naming the op
+        and the native exception type ONLY — never the chunk text (C2/C6).
         """
         try:
             with inference_context():
-                return invoke(self._model)
-        except Exception as exc:  # noqa: BLE001 - map native → typed / compile → uncompiled retry
-            if not self._compile_disabled and is_compile_backend_failure(exc):
-                model = self._reload_uncompiled()
-                # Retry once on the uncompiled model. A fault here is a genuine error (surfaced).
-                try:
-                    with inference_context():
-                        return invoke(model)
-                except Exception as exc2:  # noqa: BLE001 - typed, carrying NO input text/PII
-                    msg = (
-                        f"fused_entity_relation.gliner2: provider failure in {op!r} "
-                        f"(native {type(exc2).__name__})"
+                return list(
+                    getattr(model, slot.method)(
+                        texts,
+                        labels,
+                        threshold=self._threshold,
+                        include_spans=True,
+                        include_confidence=True,
+                        max_len=self._max_len,
                     )
-                    raise ProviderError(msg) from exc2
+                )
+        except Exception as exc:  # noqa: BLE001 - map native → typed, carrying NO input text/PII
             msg = (
-                f"fused_entity_relation.gliner2: provider failure in {op!r} "
+                f"fused_entity_relation.gliner2: provider failure in {slot.method!r} "
                 f"(native {type(exc).__name__})"
             )
             raise ProviderError(msg) from exc
-
-    def _extract_entities(
-        self, text: str, entity_labels: list[str]
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Call the native ``extract_entities`` and return its per-label dict of rows.
-
-        The REAL gliner2 shape (pod-validated, mirrored in the offline fake):
-        ``{"entities": {label: [{"text", "confidence", "start", "end"}, ...]}}`` — a per-label
-        dict, NOT the ``gliner`` library's flat list. ``include_spans=True`` is REQUIRED for the
-        ``start``/``end`` char offsets the framework grounds on. The forward runs through
-        :meth:`_forward` (the W9 compile guard + typed-error mapping, no PII leak).
-        """
-        out: Any = self._forward(
-            "extract_entities",
-            lambda model: model.extract_entities(
-                text,
-                entity_labels,
-                threshold=self._threshold,
-                include_spans=True,
-                include_confidence=True,
-                max_len=self._max_len,
-            ),
-        )
-        by_label: Any = out["entities"] if isinstance(out, dict) else out
-        if not isinstance(by_label, dict):
-            got = type(by_label).__name__
-            msg = (
-                "fused_entity_relation.gliner2: unexpected extract_entities output shape "
-                f"(expected {{'entities': {{label: [rows]}}}}, got {got})"
-            )
-            raise ProviderError(msg)
-        return by_label
-
-    def _extract_relations(
-        self, text: str, relation_labels: list[str]
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Call the native ``extract_relations`` and return its per-relation dict of head/tail rows.
-
-        The REAL gliner2 shape (pod-validated, mirrored in the offline fake):
-        ``{"relation_extraction": {rel_type: [{"head": {"text","confidence","start","end"},
-        "tail": {...}}, ...]}}`` — a per-relation-type dict of head/tail sub-dict rows, NOT a flat
-        list. ``include_spans=True`` is REQUIRED so head/tail carry the ``start``/``end`` char
-        offsets a relation is resolved to its mentions by. The forward runs through :meth:`_forward`
-        (the W9 compile guard + typed-error mapping, no PII leak).
-        """
-        out: Any = self._forward(
-            "extract_relations",
-            lambda model: model.extract_relations(
-                text,
-                relation_labels,
-                threshold=self._threshold,
-                include_spans=True,
-                include_confidence=True,
-                max_len=self._max_len,
-            ),
-        )
-        by_rel: Any = out["relation_extraction"] if isinstance(out, dict) else out
-        if not isinstance(by_rel, dict):
-            got = type(by_rel).__name__
-            msg = (
-                "fused_entity_relation.gliner2: unexpected extract_relations output shape "
-                f"(expected {{'relation_extraction': {{rel: [rows]}}}}, got {got})"
-            )
-            raise ProviderError(msg)
-        return by_rel
 
     # -- plain Entity-Extraction half (so it also fits the EntityExtractor seam) --
 

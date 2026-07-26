@@ -11,6 +11,9 @@ Given a stack config (a full-spine Pipeline YAML) it:
 2. runs the stack end-to-end on the local :class:`~latence_core.runner.LocalRunner`;
 3. asserts the G1-style checks in one place, each a pass/fail :class:`CheckResult`:
 
+   * **phase-boundary** — the front half is chunk/document-level: no corpus-aggregating Stage is
+     scheduled before redaction (T1; see :mod:`latence_core.stacks.phase_boundary`). A STATIC check
+     over the declared stack, so it holds on a CPU-only host and even when the run itself failed;
    * **contracts** — every record carries Provenance + Classification and offsets align
      (reuses the ``QualityReportBuilder`` completeness check + the ADR-0031 zero-drift roll-up
      the run already computed — NOT a reinvented completeness/offset audit);
@@ -533,6 +536,35 @@ def _check_graceful_failure(report: QualityReport) -> CheckResult:
     return CheckResult(name="graceful_failure", passed=passed, detail=detail)
 
 
+def _check_phase_boundary(pipeline: Pipeline) -> CheckResult:
+    """Phase boundary: no corpus-level Stage is scheduled before the chunk-level front half (T1).
+
+    A STATIC check over the DECLARED stack — no run, no providers — so it holds even for a stack
+    whose learned Stages are skipped-with-flag on this host. It is checked on the declared pipeline
+    rather than the device-reduced one precisely because the reduction drops GPU stages: reducing
+    first could hide a violation on a CPU box and green a stack that is wrong on the pod.
+
+    See :mod:`latence_core.stacks.phase_boundary` for why this is an invariant: a corpus-level stage
+    in the front half must collapse the corpus into one capped, broadcast artifact, which silently
+    costs recall on every chunk that needed a rare type and precision on every chunk scored against
+    types that are not in it.
+    """
+    from latence_core.stacks.phase_boundary import check_phase_boundary
+
+    violations = check_phase_boundary(pipeline)
+    if violations:
+        return CheckResult(
+            name="phase_boundary",
+            passed=False,
+            detail="; ".join(v.describe() for v in violations),
+        )
+    return CheckResult(
+        name="phase_boundary",
+        passed=True,
+        detail="front half is chunk/document-level (no corpus-level stage before redaction)",
+    )
+
+
 def _check_determinism(
     pipeline: Pipeline, primary: dict[str, bytes], second: dict[str, bytes]
 ) -> CheckResult:
@@ -636,20 +668,27 @@ def validate_stack(
     pipeline, dropped = _cpu_reachable_subpipeline(declared, registry)
     skipped_stages = sorted(dropped)
 
+    # The T1 phase-boundary invariant is a STATIC property of the DECLARED stack, so it is computed
+    # once here (before the device reduction, which would hide a violation whose corpus-level stage
+    # happens to be GPU-only) and reported on EVERY exit path — including the all-skipped and
+    # run-failed ones, where it is the only thing this host can still tell the operator.
+    phase_check = _check_phase_boundary(declared)
+
     if all(s.name in dropped for s in declared.stages):
         # Nothing CPU-reachable (a fully-GPU stack on a CPU host). Not a failure: report every
         # Stage skipped-with-flag + a clean device-honesty pass, no run attempted (no fake numbers).
         checks = [
+            phase_check,
             CheckResult(
                 name="device_honesty",
                 passed=True,
                 skipped=True,
                 detail=f"all stages skipped-with-flag on this host: {', '.join(skipped_stages)}",
-            )
+            ),
         ]
         result = StackValidationResult(
             stack_name=Path(stack_path).name,
-            ok=True,
+            ok=phase_check.passed,
             checks=checks,
             document_count=0,
             skipped_stages=skipped_stages,
@@ -658,7 +697,7 @@ def validate_stack(
         storage.write_atomic(summary_uri, result.render().encode("utf-8"))
         return StackValidationResult(
             stack_name=result.stack_name,
-            ok=True,
+            ok=phase_check.passed,
             checks=checks,
             document_count=0,
             skipped_stages=skipped_stages,
@@ -690,11 +729,12 @@ def validate_stack(
         determinism_export = _export_artifacts(storage, determinism_run_dir)
     except Exception as exc:  # noqa: BLE001 - a broken stack must FAIL the harness, not crash it
         checks = [
+            phase_check,
             CheckResult(
                 name="run",
                 passed=False,
                 detail=f"stack run raised {type(exc).__name__}: {exc}",
-            )
+            ),
         ]
         result = StackValidationResult(
             stack_name=Path(stack_path).name,
@@ -720,6 +760,7 @@ def validate_stack(
     skipped_stages = sorted(set(skipped_stages) | set(runner_skipped))
 
     checks = [
+        phase_check,
         _check_contracts(persisted_report),
         _check_kg(pipeline, persisted_report, storage, primary_run_dir),
         _check_rag(pipeline, storage, primary_run_dir),
