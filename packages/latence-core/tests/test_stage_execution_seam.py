@@ -14,6 +14,7 @@ not a detail; it is the whole reason a Runner cannot get streaming wrong by acci
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Iterator
 from importlib import metadata
 from pathlib import Path
@@ -198,6 +199,86 @@ def test_record_stream_is_one_shot(tmp_path: Path) -> None:
     assert len(list(outcome.records)) == 2
     with pytest.raises(RuntimeError, match="already taken"):
         _ = outcome.records
+
+
+def test_a_consumer_side_failure_still_reports_the_time_and_retries_it_burned(
+    tmp_path: Path,
+) -> None:
+    """The FAILED row is honest even when the exception came from the CONSUMER, not the Provider.
+
+    The producing generator is *suspended at a yield* when the checkpoint/WAL/storage write raises,
+    so its ``finally`` — the one that stops the clock, drains the Provider tallies and releases the
+    model — has not run when the Runner's ``except`` branch calls ``metrics(error=...)``. Reading
+    the counters there without finalizing the stream reports ``duration_seconds=0.0`` and
+    ``endpoint_retries=0`` for a Stage that burned real time and real retries, and leaks the
+    Provider (no ``del`` / no CUDA-cache release). The outcome owns the Provider's whole lifetime,
+    so finalizing is its job, not a fourth name a Runner adapter has to learn.
+    """
+    torn_down: list[bool] = []
+
+    class _RetryingParser:
+        def __init__(self, config: dict[str, Any] | None = None) -> None:
+            self._config = config or {}
+            self.endpoint_retries = 0
+
+        def parse(self, inputs: Iterable[ParserInput]) -> Iterator[Any]:
+            from latence_parser_plaintext.provider import PlaintextParser
+
+            inner = PlaintextParser(self._config)
+            try:
+                for record in inner.parse(inputs):
+                    self.endpoint_retries += 1
+                    time.sleep(0.005)  # real, measurable work behind each record
+                    yield record
+            finally:
+                torn_down.append(True)
+
+    class _FullDiskRunner(LocalRunner):
+        """The consumer fails: the checkpoint writer dies on the 4th record."""
+
+        def _stream_batches(
+            self,
+            fh: IO[bytes],
+            storage: Storage,
+            records: Iterable[Any],
+            **kwargs: Any,
+        ) -> tuple[int, int]:
+            if kwargs.get("stage_name") != "parse":
+                return super()._stream_batches(fh, storage, records, **kwargs)
+            seen = 0
+            for _record in records:
+                seen += 1
+                if seen == 4:
+                    raise OSError("[Errno 28] No space left on device")
+            return seen, 0  # pragma: no cover - the writer always fails here
+
+    docs = _docs(tmp_path, n=6)
+    store = f"file://{tmp_path}/store"
+    runner = _FullDiskRunner(registry=_registry("parser.retrying", _RetryingParser))
+
+    with pytest.raises(OSError, match="No space left on device"):
+        runner.run(_pipeline(store, docs, parser="parser.retrying"), run_id="r")
+
+    import json
+
+    storage = Storage.for_uri(store)
+    report_uri = f"{store}/_latence/runs/r/quality-report.json"
+    stages = {s["name"]: s for s in json.loads(storage.read_text(report_uri))["stages"]}
+    parse = stages["parse"]
+    assert parse["error_count"] == 1
+    assert parse["endpoint_retries"] == 4, (
+        "the FAILED row reported the retries as "
+        f"{parse['endpoint_retries']} — the Provider burned 4. The producing generator was "
+        "suspended at its yield and its tally drain never ran."
+    )
+    assert parse["duration_seconds"] > 0.0, (
+        "the FAILED row reported duration_seconds=0.0 for a Stage that did ~20ms of real work: "
+        "the clock is stopped in a finally that a consumer-side failure never reaches."
+    )
+    assert torn_down == [True], (
+        "the Provider's stream was never closed, so the seam's teardown (del provider + "
+        "empty_cuda_cache) never ran — on a GPU stack the model stays resident."
+    )
 
 
 def test_stage_failures_surface_from_the_stream_with_populated_failure_metrics(

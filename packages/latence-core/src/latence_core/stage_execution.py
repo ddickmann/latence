@@ -47,6 +47,7 @@ deliberately not bundled with this behavioural change).
 
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
@@ -59,7 +60,7 @@ from latence_core.providers.profile import ProviderProfile, profile_of
 from latence_core.quality import StageMetrics
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Generator, Iterable, Iterator
 
     from latence_core.capability import ProviderRegistry
     from latence_core.pipeline import Pipeline, Stage
@@ -150,6 +151,7 @@ class StageOutcome:
         self._elapsed: float | None = None
         self._taken = False
         self._drained = False
+        self._stream: Generator[StageOutput, None, None] | None = None
 
     @property
     def skipped(self) -> bool:
@@ -167,7 +169,9 @@ class StageOutcome:
 
         Consuming this is what actually runs the Provider. The Provider's teardown (tally drain,
         strong-reference drop, CUDA cache release) fires when the stream is exhausted or abandoned,
-        never before it has produced anything.
+        never before it has produced anything. The outcome keeps a handle on the stream so it can
+        close an ABANDONED one itself (see :meth:`_finalize_stream`) — a Runner that fails while
+        consuming does not have to know that the teardown is still pending.
         """
         if self._taken:
             msg = (
@@ -177,18 +181,62 @@ class StageOutcome:
             )
             raise RuntimeError(msg)
         self._taken = True
-        return self._counted()
+        self._stream = self._counted()
+        return self._stream
 
-    def _counted(self) -> Iterator[StageOutput]:
+    def _counted(self) -> Generator[StageOutput, None, None]:
         try:
             for record in self._produce(self._tallies):
                 self._records_out += 1
                 yield record
         finally:
             # Stops the clock on BOTH the success and the failure path, so a failed Stage's
-            # metrics report the time it actually burned rather than zero.
+            # metrics report the time it actually burned rather than zero. On the failure path
+            # this runs either because the Provider raised THROUGH it, or because
+            # ``_finalize_stream`` closed the stream the failing consumer left suspended.
             self._elapsed = time.perf_counter() - self._started_at
             self._drained = True
+
+    def _finalize_stream(self, error: BaseException) -> None:
+        """Close a record stream a failing consumer abandoned, so the pending teardown runs.
+
+        A Stage can fail on either side of the ``yield``. When the *Provider* raises, the
+        exception travels out through both ``finally`` blocks and everything is already measured
+        by the time the Runner reaches its ``except``. When the **consumer** raises — the
+        checkpoint/WAL/storage write the Runner drives the stream into — the producing generator
+        is still SUSPENDED at its ``yield``, kept alive by the traceback, and neither ``finally``
+        has run: the clock is unstopped, the Provider's tallies are undrained and the model is
+        still referenced. A FAILED row built at that moment reports ``duration_seconds=0.0`` and
+        ``endpoint_retries=0`` for a Stage that burned real time and real retries, and on a GPU
+        stack leaks the model until the garbage collector happens to reach the frame.
+
+        Closing the generator here throws ``GeneratorExit`` into it at that ``yield``, which runs
+        both ``finally`` blocks — delegated through ``yield from`` into the Provider's own stream
+        first, so the Provider tears down before the seam drains it. This lives on the outcome
+        rather than in the Runner's ``except`` on purpose: the outcome owns the Provider's whole
+        lifetime, and the seam's promise is that a Runner adapter learns three names, not four.
+        """
+        stream = self._stream
+        self._stream = None
+        if stream is None or self._drained:
+            return
+        if inspect.getgeneratorstate(stream) == inspect.GEN_RUNNING:
+            # metrics() called from *inside* the stream (a Provider's own except). Closing a
+            # running generator is a RuntimeError; the pending finally will run when the frame
+            # it is already unwinding finishes.
+            return  # pragma: no cover - pathological caller
+        try:
+            stream.close()
+        except BaseException as teardown:  # noqa: BLE001 - never mask the real Stage failure
+            # The teardown of an ALREADY-failing Stage failed too. Letting it out would replace
+            # the Stage's real exception (and skip the Runner's FAIL report), so it is attached to
+            # that exception instead of raised or dropped — visible, never silent (ADR-0034), and
+            # a stable typed CATEGORY + type name only, never a message that could quote a record.
+            error.add_note(
+                f"latence: tearing down stage {self._stage.name!r} after the failure above "
+                f"additionally raised {type(teardown).__name__} "
+                f"(category={error_category(teardown)}); the failure above is the primary error."
+            )
 
     def metrics(
         self, *, records_in: int, error: BaseException | None = None
@@ -197,11 +245,15 @@ class StageOutcome:
 
         ``error`` builds the FAILED row instead: ``records_out=0``, ``error_count=1`` and the
         stable typed *category* (ADR-0034) — counts and a category only, never the exception
-        message, which can quote a record.
+        message, which can quote a record. The failed row's duration and retry columns are as real
+        as a successful row's: a stream the failing consumer left suspended is finalized first
+        (:meth:`_finalize_stream`), which is what stops the clock and drains the Provider.
 
         Raises :class:`RuntimeError` if called on a successful execution whose record stream was
         never consumed: the counters would all read zero and the row would be a quiet lie.
         """
+        if error is not None:
+            self._finalize_stream(error)
         # A REPLAYED Stage reports 0.0, not the time it took to re-read its checkpoint: the run
         # did not spend that time doing the Stage's work, and the Quality Report's
         # ``total_duration_seconds`` sums these. Matches the pre-C3 resume row exactly.
@@ -354,7 +406,10 @@ class StageExecution:
                 # THE ordering that makes lazy Stage output sound. Every counter below is written
                 # by the Provider *while* it generates; reading them before the stream is drained
                 # (the shape the old eager ``finally`` had) reports zeros for all of them. Runs on
-                # the failure path too, so a failed Stage still reports the retries it burned.
+                # the failure path too, so a failed Stage still reports the retries it burned —
+                # including when the CONSUMER is what failed, because ``metrics(error=...)``
+                # closes the suspended stream first (``StageOutcome._finalize_stream``) and the
+                # ``GeneratorExit`` that raises here reaches this block.
                 t.endpoint_retries = _provider_retry_count(provider)
                 t.induction = _provider_induction_tally(provider)
                 if stage.capability in (
