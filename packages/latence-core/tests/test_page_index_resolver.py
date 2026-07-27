@@ -27,7 +27,7 @@ from latence_core.contracts import (
     Provenance,
 )
 from latence_core.page_index import (
-    DEFAULT_MAX_LIVE_DOCUMENTS,
+    DEFAULT_MAX_LIVE_PAGES,
     PageIndexResolver,
     rehome_page_maps,
 )
@@ -63,7 +63,11 @@ _CONFIG = {
 
 
 def _document(record_id: str = "doc-1") -> DocumentRecord:
-    assembly = PageMap.from_page_texts([p.strip() for p in _PAGES])
+    return _document_with_pages(record_id, [p.strip() for p in _PAGES])
+
+
+def _document_with_pages(record_id: str, pages: list[str]) -> DocumentRecord:
+    assembly = PageMap.from_page_texts(pages)
     prov = Provenance(
         source_uri="file:///report.pdf",
         file_name="report.pdf",
@@ -82,6 +86,20 @@ def _document(record_id: str = "doc-1") -> DocumentRecord:
         content=assembly.text,
         page_map=assembly.page_map,
         disposition=Disposition.PARSED,
+    )
+
+
+def _single_chunk(doc: DocumentRecord) -> ChunkRecord:
+    """One chunk covering the whole document and carrying its map (the v18 carrier)."""
+    return ChunkRecord(
+        record_id=f"{doc.record_id}#chunk-0",
+        document_record_id=doc.record_id,
+        index=0,
+        provenance=doc.provenance,
+        classification=doc.classification,
+        content=doc.content,
+        token_count=len(doc.content.split()),
+        page_map=doc.page_map,
     )
 
 
@@ -599,7 +617,10 @@ def test_resolver_does_not_retain_every_documents_page_map_for_the_whole_run() -
                     (truth.page_for_offset(start), truth.page_for_offset(max(end - 1, start))),
                 )
 
-    resolver = PageIndexResolver()
+    # A budget of 8 documents' worth of pages, so the bound is exercised on a 128-document
+    # corpus without the test having to build 50,000 spans of them.
+    budget = len(_PAGES) * 8
+    resolver = PageIndexResolver(max_live_pages=budget)
     chunk = None
     for chunk, expected in stream():
         resolver.observe(chunk)
@@ -620,25 +641,70 @@ def test_resolver_does_not_retain_every_documents_page_map_for_the_whole_run() -
         "linear in the corpus, not in the batch"
     )
     assert alive["doc-0"]() is None, "the first document's page map is still reachable"
-    assert len(retained) <= DEFAULT_MAX_LIVE_DOCUMENTS
-    assert resolver.live_documents <= DEFAULT_MAX_LIVE_DOCUMENTS
+    assert resolver.live_pages <= budget
+    assert len(retained) <= budget // len(_PAGES)
     assert resolver.evicted_reentries == 0, "a grouped stream never re-enters an evicted doc"
 
 
 def test_retention_window_is_the_documented_bound_and_is_configurable() -> None:
     """The window is a stated number, not an accident, and a caller can widen it."""
     docs = [_document(f"doc-{i}") for i in range(4)]
-    resolver = PageIndexResolver(max_live_documents=2)
+    resolver = PageIndexResolver(max_live_pages=len(_PAGES) * 2)
     for doc in docs:
         chunk = _chunks(doc)[0]
         assert resolver.pages_for_span(chunk, 0, 1) is not None
     assert resolver.live_documents == 2
+    assert resolver.live_pages == len(_PAGES) * 2
     assert resolver.documents == 4
     assert PageIndexResolver().live_documents == 0
-    assert DEFAULT_MAX_LIVE_DOCUMENTS >= 16, "must exceed every shipped Provider batch"
+    assert PageIndexResolver().live_pages == 0
 
-    with pytest.raises(ValueError, match="max_live_documents"):
-        PageIndexResolver(max_live_documents=0)
+    with pytest.raises(ValueError, match="max_live_pages"):
+        PageIndexResolver(max_live_pages=0)
+
+
+def test_the_default_budget_still_bounds_a_corpus_of_large_page_maps() -> None:
+    """The default is a real ceiling, not "never evicts": big maps still get released.
+
+    The R4 fix widened the window enormously for the SHORT documents that dominate a real
+    stream — but it must not have turned the bound off. Measured on maps big enough to fill
+    it: retention stops at the budget instead of growing with the corpus (ADR-0033).
+    """
+    pages_each = DEFAULT_MAX_LIVE_PAGES // 8
+    big = [
+        _document_with_pages(f"big-{i}", ["Page body text." for _ in range(pages_each)])
+        for i in range(12)
+    ]
+    resolver = PageIndexResolver()
+    for doc in big:
+        assert doc.page_map is not None
+        chunk = _single_chunk(doc)
+        assert resolver.pages_for_span(chunk, 0, 1) is not None
+
+    assert resolver.documents == 12
+    assert resolver.live_pages <= DEFAULT_MAX_LIVE_PAGES
+    assert resolver.live_documents == 8, "retention is the budget, not the corpus"
+
+
+def test_a_document_bigger_than_the_whole_budget_still_resolves() -> None:
+    """Never evict the last index: the bound must not create a worse bug than it fixes.
+
+    An index is inserted before the window is trimmed, so a document whose map alone exceeds
+    ``max_live_pages`` would be evicted the instant it was absorbed — and then EVERY lookup
+    against it would degrade to an inherited page range, which is exactly the wrong-page
+    failure the window exists inside, made unconditional.
+    """
+    doc = _document_with_pages("huge", ["Page body text." for _ in range(50)])
+    assert doc.page_map is not None
+    chunk = _single_chunk(doc)
+
+    resolver = PageIndexResolver(max_live_pages=1)
+    assert resolver.pages_for_span(chunk, 0, 1) == (1, 1)
+    assert resolver.live_documents == 1
+    assert resolver.live_pages == 50
+    last_offset = doc.page_map.total_chars - 1
+    assert resolver.page_for(chunk, last_offset) == 50
+    assert resolver.unresolved == 0
 
 
 def test_drift_from_an_evicted_document_still_reaches_the_corpus_roll_up() -> None:
@@ -658,8 +724,8 @@ def test_drift_from_an_evicted_document_still_reaches_the_corpus_roll_up() -> No
             resolver.page_for(chunk, doc.page_map.total_chars + 500)  # fuzzy recovery
         return resolver.diagnostics
 
-    windowed = resolve(PageIndexResolver(max_live_documents=1))
-    unbounded = resolve(PageIndexResolver(max_live_documents=len(docs)))
+    windowed = resolve(PageIndexResolver(max_live_pages=len(_PAGES)))
+    unbounded = resolve(PageIndexResolver(max_live_pages=len(_PAGES) * len(docs)))
 
     assert windowed == unbounded
     assert windowed.resolutions == 6
@@ -677,7 +743,7 @@ def test_a_lookup_for_an_evicted_document_is_counted_and_announced(
     assert a_chunks[0].page_map is not None
     assert a_chunks[1].page_map is None  # v18: only the first chunk carries the map
 
-    resolver = PageIndexResolver(max_live_documents=1)
+    resolver = PageIndexResolver(max_live_pages=len(_PAGES))
     with caplog.at_level(logging.WARNING, logger="latence.provenance"):
         assert resolver.pages_for_span(a_chunks[0], 0, 10) is not None
         resolver.observe(_chunks(doc_b)[0])  # evicts doc-a
@@ -688,7 +754,7 @@ def test_a_lookup_for_an_evicted_document_is_counted_and_announced(
     warnings = [r for r in caplog.records if r.name == "latence.provenance"]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
-    assert "max_live_documents" in message
+    assert "max_live_pages" in message
     assert doc_a.record_id not in message  # counts only
     assert doc_a.content[:40] not in message
 

@@ -78,6 +78,18 @@ class PageOffsetIndex:
         """The running drift diagnostics (a snapshot copy — safe to serialize)."""
         return self._diag.model_copy()
 
+    @property
+    def page_count(self) -> int:
+        """How many page spans this index covers — the document's page count.
+
+        This is what an index *weighs*: the retained ``PageMap`` is one
+        :class:`~latence_core.contracts.PageSpan` per page (~550 bytes measured on a
+        519-page document, ~279 KB in total), so a caller that has to bound how much page
+        state it keeps live bounds THIS, not the number of documents — a 1-page note and a
+        519-page contract differ by ~500× (:data:`latence_core.page_index.DEFAULT_MAX_LIVE_PAGES`).
+        """
+        return len(self._starts)
+
     def page_for_offset(self, offset: int) -> int:
         """Return the 1-based source page for a character ``offset`` in the text.
 

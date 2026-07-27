@@ -62,13 +62,16 @@ R3, "retain every document's page map for the length of the run": ~284 KB per 51
 (279 KB of :class:`~latence_core.contracts.PageMap` objects, 5 KB of index), i.e. ~284 MB at 1k
 documents and ~2.8 GB at 10k — inside a Stage ADR-0033's *Honest memory boundary* declares
 ``O(checkpoint batch)`` on both sides. Absorbed maps are therefore held in a **bounded LRU
-window** (:data:`DEFAULT_MAX_LIVE_DOCUMENTS`, overridable per resolver): chunks arrive grouped by
-document, so only the documents a Provider holds *in flight* — at most its batch, 16 for every
-shipped batching Provider — can need an index at once. Nothing is traded for the bound on a
-document-grouped stream: eviction folds the evicted index's drift into the corpus roll-up, and a
-chunk arriving for an already-evicted document is COUNTED and warned
-(:attr:`PageIndexResolver.evicted_reentries`), never silently mis-paged (ADR-0034). Seeded maps
-(route 1) are the caller's own materialised state and are pinned, not windowed.
+window**, and the budget is measured in the unit those bytes are actually made of: PAGE SPANS
+(:data:`DEFAULT_MAX_LIVE_PAGES`, overridable per resolver). R3 budgeted DOCUMENTS instead, which
+priced a 1-page note and a 519-page contract the same and therefore bounded neither the memory
+nor the caller's in-flight set — audit R4 measured a corpus of short documents evicting, mid
+batch, the long document a Provider was still resolving, whose later chunks then inherited a
+plausible-looking WRONG page range. Eviction folds the evicted index's drift into the corpus
+roll-up, the most recently used index is never evicted (a document whose map alone exceeds the
+budget still resolves), and a chunk arriving for an already-evicted document is COUNTED and
+warned (:attr:`PageIndexResolver.evicted_reentries`), never silently mis-paged (ADR-0034).
+Seeded maps (route 1) are the caller's own materialised state and are pinned, not windowed.
 
 **Never raises, never guesses silently.** Resolution degrades exactly as the ported
 ``PageOffsetIndex`` does (Provenance resolution must not be the thing that fails a run),
@@ -97,17 +100,39 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("latence.provenance")
 
-#: How many documents' page indices one resolver keeps live at once (ADR-0033).
+#: How many PAGE SPANS one resolver keeps live at once (ADR-0033).
 #:
-#: The stream a Stage is handed is grouped by document — the Chunk Stage emits a document's
-#: chunks together and checkpoint order is preserved — so a resolver only needs an index for
-#: the documents its caller holds IN FLIGHT. That is bounded by the Provider's batch: every
-#: shipped batching Provider uses ``batch_size`` 16, and the widest shape (a whole batch
-#: observed before any of it is resolved, as ``latence_extract_gliner2`` does) needs one index
-#: per distinct document in that batch. 64 is 4× that, so no shipped stack can evict a document
-#: it is still working on; a Provider that deliberately holds more must say so by constructing
-#: the resolver with a larger ``max_live_documents``, and is TOLD to when it does not.
-DEFAULT_MAX_LIVE_DOCUMENTS = 64
+#: The window exists to bound one thing: the bytes of :class:`~latence_core.contracts.PageMap`
+#: a Stage holds while it streams. Those bytes are pages — ~550 per
+#: :class:`~latence_core.contracts.PageSpan`, ~279 KB for the measured 519-page document — so
+#: pages are the unit the budget is stated in. 50,000 spans is a ~27 MB ceiling that does not
+#: move with the corpus, and it holds ~96 documents of 519 pages **or** 50,000 single-page ones.
+#:
+#: It used to be a count of DOCUMENTS (64), justified by "every shipped batching Provider uses
+#: ``batch_size`` 16, so 64 is 4× the widest in-flight set". Audit R4 measured both halves false
+#: and the wrong-page regression they permit (``issues/audit-arch/R4-memory_claims_real-0.md``):
+#:
+#: * ``batch_size`` does not bound the DISTINCT DOCUMENTS a Provider observes before it resolves.
+#:   A Provider must ``observe`` every chunk — including the ones its ``min_chars`` floor drops
+#:   (see below) — so a corpus of short documents streams hundreds of them through the window
+#:   while one batch of long-document chunks accumulates. Those short documents each consumed a
+#:   whole window slot and evicted the documents the batch was still working on, whose later
+#:   chunks then carried no map of their own (schema v18) and inherited a WRONG page range.
+#: * ``latence_extract_gliner2`` clamps ``batch_size`` to 64 and the PII Providers clamp it not at
+#:   all, so an in-range operator config already presented a window-sized or wider in-flight set.
+#:
+#: Counting pages removes the pathology at its root: a slot is now priced at what it weighs, so
+#: the short documents that dominate a real stream cost ~1/500th of what a long one does and can
+#: no longer evict it. The bound stays honest for the shape it was written for — a corpus of
+#: genuinely huge maps still evicts, is counted, and is warned (:attr:`PageIndexResolver
+#: .evicted_reentries`), and a caller that deliberately holds more says so with
+#: ``max_live_pages``.
+DEFAULT_MAX_LIVE_PAGES = 50_000
+
+#: How many evicted document ids are remembered, purely to TELL a re-entry (window too small)
+#: apart from a document that never carried a map. Diagnostics only — ids, not maps — so it is
+#: sized for coverage of a plausible over-run rather than tied to the page budget.
+_EVICTED_RING = 1024
 
 
 def rehome_page_maps(
@@ -165,13 +190,13 @@ class PageIndexResolver:
     so a 400-chunk document builds the ``bisect`` array once, not 400 times.
 
     **Memoised, not accumulated.** The indices it absorbs from the stream live in an LRU
-    window of ``max_live_documents`` documents; the ``PageMap`` an absorbed index was built
-    from is reachable only from that index, so evicting the index frees the map with it. That
-    is what keeps a doc-level Stage's page-map retention proportional to the documents its
-    Provider holds in flight rather than to the corpus (ADR-0033) — see
-    :data:`DEFAULT_MAX_LIVE_DOCUMENTS` for why the default cannot bite a shipped stack, and
-    :attr:`evicted_reentries` for what happens, loudly, if it ever does. Maps handed in at
-    construction (route 1) are the caller's own state and are pinned outside the window.
+    window of ``max_live_pages`` page spans; the ``PageMap`` an absorbed index was built from
+    is reachable only from that index, so evicting the index frees the map with it. That is
+    what keeps a doc-level Stage's page-map retention a fixed ceiling rather than linear in the
+    corpus (ADR-0033) — see :data:`DEFAULT_MAX_LIVE_PAGES` for why the budget is stated in
+    pages and not in documents, and :attr:`evicted_reentries` for what happens, loudly, when a
+    caller does hold more than the budget. Maps handed in at construction (route 1) are the
+    caller's own state and are pinned outside the window.
 
     Not a Pydantic model: like the indices it owns, this is live state with mutable
     diagnostics, distinct from the serialized :class:`~latence_core.contracts.PageMap`
@@ -183,7 +208,8 @@ class PageIndexResolver:
         "_evicted",
         "_evicted_reentries",
         "_indices",
-        "_max_live",
+        "_live_pages",
+        "_max_live_pages",
         "_pinned",
         "_seen",
         "_unresolved",
@@ -194,19 +220,21 @@ class PageIndexResolver:
         self,
         page_maps: Mapping[str, PageMap] | None = None,
         *,
-        max_live_documents: int = DEFAULT_MAX_LIVE_DOCUMENTS,
+        max_live_pages: int = DEFAULT_MAX_LIVE_PAGES,
     ) -> None:
         """Seed the resolver with ``document_record_id -> PageMap`` (optional).
 
         An empty resolver is perfectly usable: it absorbs each document's map from the
         first record it sees that carries one.
 
-        ``max_live_documents`` bounds how many ABSORBED document indices are kept live at
-        once (LRU). Raise it only for a Provider that resolves against more distinct
-        documents than it has observed most recently — a batch wider than the default.
+        ``max_live_pages`` bounds how many ABSORBED page spans are kept live at once (LRU by
+        document). Raise it only for a caller that resolves against more page state than the
+        default ceiling — the failure it prevents is measured, counted and warned, never
+        guessed at. The most recently used index is always retained, so a single document
+        larger than the whole budget still resolves.
         """
-        if max_live_documents < 1:
-            msg = f"max_live_documents must be >= 1, got {max_live_documents}"
+        if max_live_pages < 1:
+            msg = f"max_live_pages must be >= 1, got {max_live_pages}"
             raise ValueError(msg)
         # Seeded maps are PINNED: the caller already materialised them (they came off
         # DocumentRecords it holds), route 1 promises resolution in any order, and dropping
@@ -216,7 +244,9 @@ class PageIndexResolver:
         # eviction releases the map (the ~279 KB of a 519-page document) and not just the
         # ~5 KB bisect array.
         self._indices: OrderedDict[str, PageOffsetIndex] = OrderedDict()
-        self._max_live = max_live_documents
+        self._max_live_pages = max_live_pages
+        # The window's occupancy, in the unit the budget is stated in.
+        self._live_pages = 0
         # Drift for documents whose index has been discarded is folded in here as it is
         # produced, so the aggregate survives even if an index is never queried again.
         self._diag = PageDriftDiagnostics()
@@ -315,25 +345,34 @@ class PageIndexResolver:
         """How many distinct documents this resolver has learned a page map for.
 
         Cumulative, not live: evicting a document's index (see
-        :data:`DEFAULT_MAX_LIVE_DOCUMENTS`) does not un-learn it. :attr:`live_documents` is
+        :data:`DEFAULT_MAX_LIVE_PAGES`) does not un-learn it. :attr:`live_documents` is
         the retained window.
         """
         return self._seen
 
     @property
     def live_documents(self) -> int:
-        """How many document indices are retained right now (``<= max_live_documents``)."""
+        """How many document indices are retained right now."""
         return len(self._indices)
+
+    @property
+    def live_pages(self) -> int:
+        """How many page spans are retained right now — the window's occupancy.
+
+        ``<= max_live_pages`` except when a SINGLE document's map is bigger than the whole
+        budget, which is retained rather than evicted (see :meth:`_evict_beyond_window`).
+        """
+        return self._live_pages
 
     @property
     def evicted_reentries(self) -> int:
         """Lookups for a document whose index had been evicted and that carried no map.
 
-        Non-zero means the caller resolves against more distinct documents than it keeps in
-        flight most recently — i.e. ``max_live_documents`` is smaller than the caller's
-        window — and those lookups degraded to the inherited page range. They are also
-        counted in :attr:`unresolved`; this is the half that names the CAUSE, so the
-        degradation is never silent (ADR-0034). The fix is the constructor argument.
+        Non-zero means the caller resolves against more page state than the budget retains —
+        i.e. ``max_live_pages`` is smaller than the caller's live set — and those lookups
+        degraded to the inherited page range. They are also counted in :attr:`unresolved`;
+        this is the half that names the CAUSE, so the degradation is never silent
+        (ADR-0034). The fix is the constructor argument.
         """
         return self._evicted_reentries
 
@@ -368,13 +407,21 @@ class PageIndexResolver:
             self._evicted.pop(document_record_id, None)
         index = PageOffsetIndex(page_map)
         self._indices[document_record_id] = index
+        self._live_pages += index.page_count
         self._evict_beyond_window()
         return index
 
     def _evict_beyond_window(self) -> None:
-        """Drop least-recently-used document indices until the window fits."""
-        while len(self._indices) > self._max_live:
+        """Drop least-recently-used document indices until the page budget fits.
+
+        Never drops the last one: an index is inserted before this runs, so a document whose
+        map alone exceeds the whole budget would otherwise be evicted the instant it was
+        absorbed and EVERY lookup against it would degrade — trading the bug this bound
+        exists to prevent for a worse one.
+        """
+        while self._live_pages > self._max_live_pages and len(self._indices) > 1:
             document_record_id, evicted = self._indices.popitem(last=False)
+            self._live_pages -= evicted.page_count
             diag = evicted.diagnostics
             # Fold the evicted index's drift into the running aggregate BEFORE it dies, so
             # the corpus-level roll-up the Quality Report's drift section reads (ADR-0008)
@@ -387,7 +434,7 @@ class PageIndexResolver:
                 }
             )
             self._evicted[document_record_id] = None
-            while len(self._evicted) > self._max_live:
+            while len(self._evicted) > _EVICTED_RING:
                 self._evicted.popitem(last=False)
 
     def _note_reentry(self) -> None:
@@ -399,10 +446,9 @@ class PageIndexResolver:
         # Counts only: no record id, no document id, no content (ADR-0034).
         logger.warning(
             "page index: a chunk arrived for a document whose page index had already been "
-            "evicted from the %d-document live window and carried no page map of its own; "
-            "its page provenance is inherited, not resolved. Construct the "
-            "PageIndexResolver with max_live_documents >= the number of documents this "
-            "caller holds in flight. Further occurrences are counted in "
-            "PageIndexResolver.evicted_reentries.",
-            self._max_live,
+            "evicted from the %d-page live window and carried no page map of its own; its "
+            "page provenance is inherited, not resolved. Construct the PageIndexResolver "
+            "with max_live_pages >= the page state this caller holds in flight. Further "
+            "occurrences are counted in PageIndexResolver.evicted_reentries.",
+            self._max_live_pages,
         )

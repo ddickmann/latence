@@ -104,13 +104,28 @@ per-transient** boundary, not the aspirational end state.
     corpus — memoised a `PageMap` + `PageOffsetIndex` per `document_record_id` and evicted
     neither, so a doc-level Stage retained ~284 KB per 519-page document for its whole execution
     (~284 MB at 1k documents, ~2.8 GB at 10k) inside the bound this section states. It is now an
-    LRU window of `DEFAULT_MAX_LIVE_DOCUMENTS` (64) documents, which is ≥ the widest in-flight
-    batch any shipped Provider presents (16), so retention is bounded by the batch and no shipped
-    stack can evict a document it is still resolving. An absorbed map is reachable only from its
-    index, so eviction frees the map; the evicted index's drift is folded into the corpus roll-up
-    first (the drift section's numbers are unchanged, ADR-0008); and a lookup for an
-    already-evicted document is counted and warned, counts-only, rather than degrading silently
-    (`PageIndexResolver.evicted_reentries`, ADR-0034).
+    LRU window with a budget of `DEFAULT_MAX_LIVE_PAGES` (50,000) **page spans** — a ~27 MB
+    ceiling that does not move with the corpus. An absorbed map is reachable only from its
+    index, so eviction frees the map; the most recently used index is never evicted (a document
+    whose map alone exceeds the budget still resolves); the evicted index's drift is folded into
+    the corpus roll-up first (the drift section's numbers are unchanged, ADR-0008); and a lookup
+    for an already-evicted document is counted and warned, counts-only, rather than degrading
+    silently (`PageIndexResolver.evicted_reentries`, ADR-0034).
+  * **Why the budget is pages and not documents (audit R4).** R3 first stated the window as 64
+    DOCUMENTS, justified by "every shipped batching Provider uses `batch_size` 16, so 64 is 4×
+    the widest in-flight set". Both halves were false — `latence_extract_gliner2` clamps
+    `batch_size` to 64 and the PII Providers clamp it not at all, and `batch_size` does not bound
+    the DISTINCT DOCUMENTS observed before a batch resolves, because a Provider must `observe()`
+    every chunk including the ones its `min_chars` floor drops. A corpus of one-page memos
+    therefore streamed hundreds of documents through the window while one batch of long-document
+    chunks accumulated and evicted the long document that batch was still resolving; its later
+    chunks carry no map of their own (schema v18), so their mentions inherited the chunk's page
+    range — a plausible-looking WRONG page, i.e. exactly the ADR-0021/0031 resolution regression
+    the C1 seam exists to prevent, at an in-range operator config. A page span is what the
+    retained state is made of (~550 bytes), so pricing a slot by pages makes the bound a real
+    memory bound instead of a proxy, and makes the short documents that dominate a real stream
+    cost ~1/500th of what a long one does. Measured on the shipped wiring in
+    `packages/latence-extract-gliner2/tests/test_gliner2_page_window.py`.
   * **The one property traded for the bound.** Those branches' carrier check is now per-record,
     so a mis-wired Pipeline raises the same typed `ContractError` at the first record of the
     wrong carrier instead of before the Provider is called. Same accept/reject set (`_as_type`
