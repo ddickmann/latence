@@ -167,6 +167,39 @@ _ACCUMULATOR_KINDS: tuple[CapabilityKind, ...] = tuple(
     kind for kind in CapabilityKind if kind in ACCUMULATOR_KINDS
 )
 
+# The doc-level Capabilities whose INPUT the Runner streams (ADR-0033, audit R2).
+#
+# C6 streamed the output side — the Provider's iterator goes straight into the checkpoint, so a
+# Stage's records never exist as a list. Its INPUT was still materialised whole-corpus:
+# ``_gather_inputs`` concatenated every parent's records into one list held for the Stage's whole
+# execution, and ``_as_type`` built a second list of the same size (a third under
+# ``extract_on: masked``). For the Capabilities below the Protocol is ``Iterable``-in and the
+# Provider consumes it exactly once, so the Runner hands it a lazy stream read record-by-record
+# from the parents' checkpoints (:meth:`LocalRunner._stream_doc_inputs`) — the input transient
+# becomes O(1) records rather than O(corpus-slice).
+#
+# The doc-level Capabilities NOT listed here are excluded because their Protocol makes the
+# materialisation the PROVIDER's, not a Runner-side buffer — streaming the input would move no
+# memory and only cost a second pass:
+#   * INTAKE_SCREENING / CONTENT_SCREENING return a ``ScreeningOutcome`` holding passed +
+#     quarantined lists, and Content Screening's page-map re-homing needs the input set to know
+#     what was dropped;
+#   * RELATION_EXTRACTION and CONTEXT_ENRICHMENT partition ONE input stream into two carriers
+#     (chunks + mentions / chunks + graph), so one side must be buffered whatever the Runner does;
+#   * EXPORT writes a file and holds what it materialises (streamed internally in row groups).
+# Their transients are the two inherent exceptions ADR-0033 already names, plus the two-carrier
+# partition — see the ADR's **Honest memory boundary**.
+_STREAMED_INPUT_KINDS: frozenset[CapabilityKind] = frozenset(
+    {
+        CapabilityKind.PARSE,
+        CapabilityKind.CHUNK,
+        CapabilityKind.SCHEMA_INDUCTION,
+        CapabilityKind.ENTITY_EXTRACTION,
+        CapabilityKind.FUSED_ENTITY_RELATION,
+        CapabilityKind.REDACTION,
+    }
+)
+
 # Secret-handling (issue #30): the run manifest persists the whole Pipeline
 # (including every Stage's operator ``config``) verbatim. A Provider such as the S5
 # relation.llm reads its ``api_key`` from ``$OPENAI_API_KEY`` (env fallback, no key
@@ -376,7 +409,7 @@ class LocalRunner:
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: list[StageOutput],
+        incoming: Iterable[StageOutput],
         outputs: dict[str, list[StageOutput]],
     ) -> Iterator[StageOutput]:
         """The :class:`~latence_core.stage_execution.StageDispatch` half this engine supplies.
@@ -949,9 +982,23 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # (:meth:`_gathered_count`), never a retained list. Every other Stage is per-document
             # and small enough to gather eagerly (its own output is then released once dead).
             is_accumulator = stage.capability in _ACCUMULATOR_KINDS
+            incoming: Iterable[StageOutput]
             if is_accumulator:
-                incoming: list[StageOutput] = []
+                incoming = []
                 records_in = self._gathered_count(
+                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+            elif stage.capability in _STREAMED_INPUT_KINDS:
+                # Audit R2: the doc-level INPUT side of the same bound. The Stage's Provider
+                # consumes an ``Iterable`` exactly once, so it is handed a lazy stream over the
+                # parents' checkpoints instead of a gathered list — nothing corpus-sized is ever
+                # built (:data:`_STREAMED_INPUT_KINDS`). ``records_in`` is counted without
+                # decoding a single record (:meth:`_streamed_input_count`), so the span/lineage
+                # column stays exact and the count costs no memory and no validation pass.
+                incoming = self._stream_doc_inputs(
+                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+                records_in = self._streamed_input_count(
                     stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
                 )
             else:
@@ -1194,30 +1241,50 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: list[StageOutput],
+        incoming: Iterable[StageOutput],
         outputs: dict[str, list[StageOutput]],
     ) -> Iterator[StageOutput]:
         """Narrow a Stage's input to its capability's carrier and return the Provider's STREAM.
 
         C6: every Capability Protocol is already ``Iterable``-in/``Iterator``-out, so the
         Provider's iterator is handed back **uncollapsed** — the Runner writes it record-by-record
-        into the checkpoint and the Stage's output never exists as a list. The capability checks,
-        input narrowing and wiring validation above each ``return`` still run EAGERLY (a mis-wired
-        Pipeline raises its typed ContractError before a single record is produced); only the
-        record production is lazy.
+        into the checkpoint and the Stage's output never exists as a list.
 
-        The two exceptions are inherent, not oversights: Export must hold the records it
-        materialises (it writes a file), and the fused/consolidating Stages return two carriers
-        from one call. Both are bounded by what the Provider itself already held.
+        Audit R2 completes the other half: for the Capabilities in :data:`_STREAMED_INPUT_KINDS`
+        the ``incoming`` this receives is itself a lazy stream over the parents' checkpoints, and
+        the narrowing is lazy too (:meth:`_as_type_stream`), so the Stage's INPUT is never a list
+        either. Those branches trade an eager wiring check for the bound: the same typed
+        ``ContractError`` is raised at the first record of the wrong carrier instead of before the
+        Provider is called (same accept/reject set — see :meth:`_as_type_stream`). Every other
+        branch still receives a gathered list and validates eagerly.
+
+        The remaining materialisations are inherent, not oversights: Export must hold the records
+        it materialises (it writes a file); the screening Capabilities return an outcome object
+        holding passed + quarantined; a two-carrier branch (Relation, Context Enrichment) must
+        buffer one side of the partition; and the fused/consolidating Stages return two carriers
+        from one call. All are bounded by what the Provider itself already held.
         """
         if stage.capability is CapabilityKind.SOURCE:
             source = self._capability_provider(stage, provider, Source)
             # A Source is a root: it reads Storage, not upstream records.
             return iter(source.produce(storage))
 
+        # The eager branches partition their input more than once (or hand it to a Provider that
+        # returns an outcome object), so they need it as a list — and they always receive one:
+        # only :data:`_STREAMED_INPUT_KINDS` are handed a lazy stream. Binding it here once makes
+        # which branch reads which shape explicit, and keeps a future streamed Capability from
+        # silently double-reading a one-shot generator.
+        gathered: list[StageOutput] = (
+            []
+            if stage.capability in _STREAMED_INPUT_KINDS
+            else incoming
+            if isinstance(incoming, list)
+            else list(incoming)
+        )
+
         if stage.capability is CapabilityKind.INTAKE_SCREENING:
             intake_screener = self._capability_provider(stage, provider, IntakeScreener)
-            raw_inputs = self._as_type(stage, incoming, ParserInput)
+            raw_inputs = self._as_type(stage, gathered, ParserInput)
             intake_outcome = intake_screener.screen_intake(raw_inputs)
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, intake_outcome)
             # Only the passed raw inputs proceed to Parse; the quarantined ones are
@@ -1226,17 +1293,17 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         if stage.capability is CapabilityKind.PARSE:
             parser = self._capability_provider(stage, provider, Parser)
-            parser_inputs = self._as_type(stage, incoming, ParserInput)
+            parser_inputs = self._as_type_stream(stage, incoming, ParserInput)
             return iter(parser.parse(parser_inputs))
 
         if stage.capability is CapabilityKind.CHUNK:
             chunker = self._capability_provider(stage, provider, Chunker)
-            doc_records = self._as_type(stage, incoming, DocumentRecord)
+            doc_records = self._as_type_stream(stage, incoming, DocumentRecord)
             return iter(chunker.chunk(doc_records))
 
         if stage.capability is CapabilityKind.CONTENT_SCREENING:
             content_screener = self._capability_provider(stage, provider, ContentScreener)
-            chunk_records = self._as_type(stage, incoming, ChunkRecord)
+            chunk_records = self._as_type(stage, gathered, ChunkRecord)
             content_outcome = content_screener.screen_content(chunk_records)
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, content_outcome)
             # Passed chunks (some now carrying propagated RiskMarkers) proceed to
@@ -1265,15 +1332,18 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # the chunk directly. Redaction reads a per-document DocumentRecord, so when a stack
             # also wires this chunk stream into ``redact`` the Runner projects each document's
             # induced labels onto its DocumentRecord (the bridge in the REDACTION dispatch below).
-            induce_chunks = self._as_type(stage, incoming, ChunkRecord)
+            induce_chunks = self._as_type_stream(stage, incoming, ChunkRecord)
             return iter(label_inducer.induce(induce_chunks))
 
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             entity_extractor = self._capability_provider(stage, provider, EntityExtractor)
-            chunk_records = self._extract_input_chunks(
-                pipeline, self._as_type(stage, incoming, ChunkRecord)
+            # Audit R2: chunks in, one at a time — the corpus-sized transient this branch used to
+            # hold (the gathered list + its narrowed copy + the masked ``model_copy`` of it) is
+            # what made an Entity Stage over a large corpus OOM despite C6.
+            entity_chunks = self._extract_input_chunks_streamed(
+                pipeline, self._as_type_stream(stage, incoming, ChunkRecord)
             )
-            return iter(entity_extractor.extract(chunk_records))
+            return iter(entity_extractor.extract(entity_chunks))
 
         if stage.capability is CapabilityKind.RELATION_EXTRACTION:
             relation_extractor = self._capability_provider(stage, provider, RelationExtractor)
@@ -1281,9 +1351,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # Content-Screening) parent for text/page-map context AND an
             # Entity-Extraction parent for the mentions it relates. Partition the
             # gathered inputs by carrier; a missing side is a wiring error.
-            rel_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
-            rel_mentions = [r for r in incoming if isinstance(r, EntityMention)]
-            self._require_relation_inputs(stage, incoming, rel_chunks, rel_mentions)
+            rel_chunks = [r for r in gathered if isinstance(r, ChunkRecord)]
+            rel_mentions = [r for r in gathered if isinstance(r, EntityMention)]
+            self._require_relation_inputs(stage, gathered, rel_chunks, rel_mentions)
             rel_chunks = self._extract_input_chunks(pipeline, rel_chunks)
             return iter(relation_extractor.relate(rel_chunks, rel_mentions))
 
@@ -1294,8 +1364,8 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # One pass over the chunks yields BOTH mentions and relations; the fused
             # Stage threads them together downstream (no separate Entity-Extraction
             # Stage — the S5 no-double-extract routing).
-            fused_chunks = self._extract_input_chunks(
-                pipeline, self._as_type(stage, incoming, ChunkRecord)
+            fused_chunks = self._extract_input_chunks_streamed(
+                pipeline, self._as_type_stream(stage, incoming, ChunkRecord)
             )
             fused = fused_extractor.extract_fused(fused_chunks)
             return chain(fused.mentions, fused.relations)
@@ -1315,8 +1385,23 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # ``induced_labels`` — no document bridge needed (chunks already carry it when a
             # schema_induction Stage is upstream), so a Provider UNIONs the induced pii_types onto
             # its config floor per chunk.
-            redaction_chunks = self._as_type(stage, incoming, ChunkRecord)
-            self._require_redaction_inputs(stage, incoming, redaction_chunks)
+            #
+            # The W16 wiring guidance is the streamed narrowing's own message here, rather than a
+            # second check after it: ``_as_type``/``_as_type_stream`` already rejects the first
+            # non-chunk record, so the separate ``no ChunkRecords`` guard could never fire and its
+            # (better) advice never reached an operator.
+            redaction_chunks = self._as_type_stream(
+                stage,
+                incoming,
+                ChunkRecord,
+                message=lambda got: (
+                    f"Stage {stage.name!r} (redaction) received no ChunkRecords "
+                    f"(got: {got}). Since W16 (ADR-0042) Redaction is a chunk→chunk "
+                    f"transform and must depend on the Chunk (or Content Screening / Schema "
+                    f"Induction) Stage — the chunks it redacts, not Parse. Check the "
+                    f"Pipeline's depends_on wiring."
+                ),
+            )
             return iter(pii_detector.redact(redaction_chunks))
 
         if stage.capability is CapabilityKind.PROFILING:
@@ -1476,8 +1561,8 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # every chunk's ``context_header`` stays None (byte-identical to no-stage). The enriched
             # chunk stream threads downstream to the corpus Export, which prepends the header to the
             # EMBEDDING input only (the stored content stays byte-unchanged — ADR-0039).
-            enrich_chunks = [r for r in incoming if isinstance(r, ChunkRecord)]
-            enrich_graph = [r for r in incoming if isinstance(r, GraphRecord)]
+            enrich_chunks = [r for r in gathered if isinstance(r, ChunkRecord)]
+            enrich_graph = [r for r in gathered if isinstance(r, GraphRecord)]
             # W17 boundary: Context Enrichment is NOT a per-document transform — a chunk's
             # ``context_header`` summarizes the mutable assembled graph, so a reused document's
             # header can go stale when a delta changes the graph, AND its enriched chunks would
@@ -1487,7 +1572,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # overlay is always empty here and enrichment sees the full freshly-extracted corpus —
             # correct by construction. Combining reuse with enrichment is deferred to a later wave.
             self._require_context_enrichment_inputs(
-                stage, incoming, enrich_chunks, enrich_graph
+                stage, gathered, enrich_chunks, enrich_graph
             )
             enrich_mentions = self._stream_all_records_of_type(
                 outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
@@ -1499,7 +1584,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # Export materializes any inter-Stage Record: DocumentRecords (S1/S2
             # spine) or ChunkRecords (S3, when a Chunk Stage sits upstream). Only a
             # raw ParserInput (not a Record) is an invalid Export input.
-            exportable = self._as_records(stage, incoming)
+            exportable = self._as_records(stage, gathered)
             # W17: a DOC-LEVEL Export (its carrier is a per-document record — e.g. a chunk/redact
             # RAG corpus) materializes the reused documents' records too, so the exported corpus
             # is the whole corpus (fresh ∪ reused), not only the changed documents. A corpus-level
@@ -1860,6 +1945,105 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             )
         return gathered
 
+    def _stream_doc_inputs(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> Iterator[StageOutput]:
+        """The lazy form of :meth:`_gather_inputs` for a doc-level Stage (audit R2, ADR-0033).
+
+        Same records, same order — parents read in declared ``depends_on`` order, each from the
+        live dict if still retained and otherwise streamed back from its checkpoint
+        (:meth:`_stage_records`) — but nothing is concatenated into a list. The Stage's Provider
+        pulls one record at a time, so the whole input side of a doc-level Stage costs O(1)
+        records instead of O(corpus-slice). Deterministic and byte-identical to the gathered form:
+        the two differ only in what memory is held while the Stage runs.
+
+        Overlay-blind, exactly like :meth:`_gather_inputs`: the W17 reuse overlay is folded in for
+        the corpus-level accumulators only (:meth:`_stream_inputs_of_type`), never here.
+        """
+        for parent in stage.depends_on:
+            yield from self._stage_records(
+                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+
+    def _streamed_input_count(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> int:
+        """``records_in`` for a streamed doc-level Stage — counted, never materialised (audit R2).
+
+        The metric the span, the lineage START event and the ``StageMetrics`` row all report is
+        needed BEFORE the Stage executes, so it cannot be a tally taken while the stream flows.
+        Counting a retained parent is a ``len``; counting a released one counts the checkpoint's
+        non-blank LINES (:meth:`_stage_record_count`) — one record per line by construction of
+        :meth:`_write_checkpoint`, so the count is exact without decoding (and therefore without
+        re-validating) a single record. O(1) memory, and no second Pydantic pass over the corpus.
+        """
+        return sum(
+            self._stage_record_count(
+                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            for parent in stage.depends_on
+        )
+
+    def _stage_record_count(
+        self,
+        stage_name: str,
+        outputs: Mapping[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> int:
+        """How many records one Stage produced — from the live dict, else its checkpoint's lines.
+
+        The counting companion to :meth:`_stage_records`. A checkpoint is newline-delimited
+        ``model_dump_json`` (one record per non-blank line, blank lines skipped on read), so
+        counting lines equals counting decoded records — including a fused Stage's mixed-carrier
+        checkpoint, where each line is still exactly one record. A Stage with no checkpoint (not
+        run, or genuinely empty) counts 0.
+        """
+        if stage_name in outputs:
+            return len(outputs[stage_name])
+        ckpt_uri = self._checkpoint_uri(pipeline, run_id, stage_name)
+        if not storage.exists(ckpt_uri):
+            return 0
+        total = 0
+        with storage.open(ckpt_uri, "rb") as fh:
+            for raw_line in fh:
+                if raw_line.strip():
+                    total += 1
+        return total
+
+    @staticmethod
+    def _extract_input_chunks_streamed(
+        pipeline: Pipeline, chunks: Iterable[ChunkRecord]
+    ) -> Iterator[ChunkRecord]:
+        """The lazy form of :meth:`_extract_input_chunks` (audit R2, W18/ADR-0044).
+
+        Same records, one at a time. This is the transient the audit found doubling (and, in
+        ``masked`` mode, tripling with fresh ``model_copy`` objects) the already corpus-sized
+        input list: an Entity Stage held the gathered list, its narrowed copy AND the masked copy
+        simultaneously. Yielding keeps at most one masked copy alive at a time, and the masking
+        rule is byte-for-byte the eager one.
+        """
+        masked = pipeline.extract_on is ExtractOn.MASKED
+        for chunk in chunks:
+            if masked and chunk.masked_content is not None:
+                yield chunk.model_copy(update={"content": chunk.masked_content})
+            else:
+                yield chunk
+
     @staticmethod
     def _extract_input_chunks(
         pipeline: Pipeline, chunks: list[ChunkRecord]
@@ -1903,6 +2087,48 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             )
             raise ContractError(msg)
         return [r for r in records if isinstance(r, expected)]
+
+    @staticmethod
+    def _wrong_carrier_error(stage: Stage, expected: type[_T], got: Iterable[str]) -> ContractError:
+        """THE mis-wired-carrier message, shared by the gathered and the streamed narrowing."""
+        return ContractError(
+            f"Stage {stage.name!r} ({stage.capability.value}) requires "
+            f"{expected.__name__} inputs but received: {', '.join(sorted(set(got)))}. "
+            f"Check the Pipeline's depends_on wiring."
+        )
+
+    @classmethod
+    def _as_type_stream(
+        cls,
+        stage: Stage,
+        records: Iterable[StageOutput],
+        expected: type[_T],
+        *,
+        message: Callable[[str], str] | None = None,
+    ) -> Iterator[_T]:
+        """The lazy form of :meth:`_as_type` — narrow a streamed input, one record at a time.
+
+        Identical contract: every record must be the carrier the Stage's capability requires, and
+        the first one that is not raises the SAME typed :class:`ContractError` naming the wrong
+        carrier. Identical outcome too — :meth:`_as_type` raises when *any* record is wrong, so
+        for every reachable input (all-right, all-wrong, or mixed) both forms accept or reject the
+        same streams. What differs is *when*: the typed error surfaces at the first offending
+        record rather than before the Provider is called. That is still strictly before the
+        Stage's checkpoint is published (it is written temp→rename after the stream is drained),
+        so a mis-wired Pipeline still fails loudly with no torn commit (ADR-0034) — it just does
+        not pay an O(corpus) buffer for the privilege of failing a few microseconds earlier.
+
+        ``message`` overrides the generic wiring text for a Capability that has more specific
+        advice to give (Redaction's W16 chunk→chunk rule); it receives the offending carrier's
+        type name.
+        """
+        for record in records:
+            if not isinstance(record, expected):
+                got = type(record).__name__
+                if message is not None:
+                    raise ContractError(message(got))
+                raise cls._wrong_carrier_error(stage, expected, [got])
+            yield record
 
     @staticmethod
     def _require_relation_inputs(
@@ -1975,30 +2201,6 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
                 f"(got: {', '.join(got)}). A Context-Enrichment Stage must also depend on the "
                 f"Graph Assembly Stage — the assembled KG it projects onto each chunk. "
                 f"Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    @staticmethod
-    def _require_redaction_inputs(
-        stage: Stage, incoming: list[StageOutput], chunks: list[ChunkRecord]
-    ) -> None:
-        """A Redaction Stage must be wired to a Chunk parent (the chunks it redacts) — W16/ADR-0042.
-
-        Redaction is a chunk→chunk transform: it depends on a Chunk (or Content Screening / Schema
-        Induction) parent for the ChunkRecords it PII-scans + masks. A non-empty input that carries
-        NO ChunkRecord means the Pipeline wired Redaction to the wrong parent (e.g. the old
-        ``depends_on: [parse]`` doc-level wiring) — surface it as a clear typed error. An empty run
-        is legitimately empty.
-        """
-        if not incoming:
-            return
-        if not chunks:
-            got = sorted({type(r).__name__ for r in incoming})
-            msg = (
-                f"Stage {stage.name!r} (redaction) received no ChunkRecords "
-                f"(got: {', '.join(got)}). Since W16 (ADR-0042) Redaction is a chunk→chunk "
-                f"transform and must depend on the Chunk (or Content Screening / Schema Induction) "
-                f"Stage — the chunks it redacts, not Parse. Check the Pipeline's depends_on wiring."
             )
             raise ContractError(msg)
 

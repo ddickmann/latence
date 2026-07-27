@@ -1,8 +1,27 @@
 # #110 — `batch_docs` doc-level streaming loop (the real memory bound the ADR-0033 doc-level claim promised)
 
-**Status: backlog / deferred.** Filed by H-E1 Part 4 (audit THEME E) when ADR-0033's "built"
-doc-level bounded-batching claim was corrected to honest. This is the **real work** the corrected
-ADR now defers.
+**Status: backlog / deferred — RESCOPED (audit R2).** Filed by H-E1 Part 4 (audit THEME E) when
+ADR-0033's "built" doc-level bounded-batching claim was corrected to honest. This is the **real
+work** the corrected ADR still defers.
+
+> **Rescope (audit R2).** Two later changes removed part of the reason this issue existed, and one
+> intervening ADR-0033 rewrite wrongly retired it altogether ("no longer needed for memory") while
+> the input side was still whole-corpus. The honest position:
+>
+> * **C6** streams a doc-level Stage's **output** (the Provider's iterator goes straight into the
+>   checkpoint; nothing is retained in `outputs`).
+> * **Audit R2** streams a doc-level Stage's **input** for the six Capabilities whose Provider
+>   consumes an `Iterable` exactly once — `runner._STREAMED_INPUT_KINDS`: Parse, Chunk, Schema
+>   Induction, Entity Extraction, Fused, Redaction.
+> * **This issue is still open for the other four**: Intake/Content **Screening** (the Protocol
+>   returns a `ScreeningOutcome` holding passed + quarantined, and page-map re-homing needs the
+>   input set), **Relation Extraction** and **Context Enrichment** (one stream partitioned into two
+>   carriers), and **Export** (it writes a file). Their input is still a gathered `O(corpus-slice)`
+>   list, and no dispatch-level change can bound it — only limiting how many documents enter the
+>   chain at once (this issue), or changing those Providers' Protocols, can.
+>
+> So the DoD below narrows to those Capabilities; the six streamed ones need no `batch_docs` for
+> memory.
 
 ## Why this exists
 ADR-0033 ("Streaming, memory-bounded local Runner") decided the doc-level Stages (Source,
@@ -38,18 +57,21 @@ exactly the code THEME-F reshapes, so writing `batch_docs` first would write it 
 is deliberately parked until THEME-F is done.
 
 ## Definition of Done (Hardening bar)
-- [ ] `batch_docs` config threads through the Pipeline/Runner; a doc-level Stage's peak retained
-      output is `O(batch)`, not `O(corpus-slice)` — proven by a `tracemalloc` scaling test that
-      feeds a large corpus as a generator and asserts sub-linear peak growth of the **doc-level
-      chain** (not just Export, which `test_export_memory_scaling.py` already covers).
+- [ ] `batch_docs` config threads through the Pipeline/Runner; the peak transient of a
+      **Screening / Relation / Context-Enrichment / Export** Stage (the four whose input is still
+      gathered whole-corpus after C6 + R2) is `O(batch)`, not `O(corpus-slice)` — proven by a
+      `tracemalloc` scaling test that feeds a large corpus as a generator and asserts sub-linear
+      peak growth of the **doc-level chain** (not just Export, which
+      `test_export_memory_scaling.py` already covers).
 - [ ] Determinism preserved: identical input+config ⇒ identical Corpus Version fingerprint
       (batches flow in stable input order; accumulators still sort before emit).
 - [ ] Resume stays exact at batch granularity: a crash-mid-batch resume produces a **byte-identical**
       export + checkpoints (the H-E1 Part 1 resume-equality discipline, extended to mid-batch).
 - [ ] No regression to Provenance / Classification / Evidence / offset guarantees or the
       delta/Purge checkpoint-read path.
-- [ ] ADR-0033 flipped from "doc-level batching DEFERRED (#110)" back to "built", with the "Honest
-      memory boundary" section updated to the new real bound.
+- [ ] ADR-0033's "Honest memory boundary" updated to the new real bound — and only to the bound
+      the merged code actually holds, per-Capability (the R2 lesson: an ADR status flip is not a
+      memory fix).
 - [ ] The off-heap-RSS caveat: pair the Python-alloc `tracemalloc` assertion with the perf rig's
       RSS number (#63) if #63 has landed, or restate the caveat if not.
 

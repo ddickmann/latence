@@ -1,20 +1,28 @@
-# Streaming, memory-bounded local Runner (accepted — doc-level materialisation removed by C6)
+# Streaming, memory-bounded local Runner (partially accepted — doc-level stream both ways, EXCEPT the Capabilities whose Provider materialises)
 
-**Status: accepted.** The **IO-transient** half landed first (G1-RESULTS Lane 6 / issue #63,
-completed by #69, input-side relation transient bounded by #68). The **doc-level materialisation**
-— the `return list(provider…)` in every `_dispatch_stage` branch that this ADR flagged as the
-remaining unbounded transient — was removed by **C6**, which lands on top of the **C3**
-Stage-execution seam: `_dispatch_stage` now returns the Provider's `Iterator` uncollapsed and the
-Runner writes it record-by-record into the checkpoint, so a doc-level Stage's records never exist
-as a list. `outputs` retains nothing at all by default; the finalized checkpoint is the source of
-truth (ADR-0017) and every reader streams it back. See **Honest memory boundary** below for the
-per-transient status. The `batch_docs` *scheduling* loop (issue #110) remains proposed — but the
-memory reason for wanting it is gone; see **Rejected**.
+**Status: partially accepted.** The **IO-transient** half landed first (G1-RESULTS Lane 6 / issue
+#63, completed by #69, input-side relation transient bounded by #68). The **doc-level output
+materialisation** — the `return list(provider…)` in every `_dispatch_stage` branch that this ADR
+flagged as the remaining unbounded transient — was removed by **C6**, which lands on top of the
+**C3** Stage-execution seam: `_dispatch_stage` returns the Provider's `Iterator` uncollapsed and
+the Runner writes it record-by-record into the checkpoint, so a doc-level Stage's records never
+exist as a list. `outputs` retains nothing at all by default; the finalized checkpoint is the
+source of truth (ADR-0017) and every reader streams it back. The matching **doc-level input**
+materialisation — `_gather_inputs` concatenating every parent's records into the list a Stage held
+for its whole execution — was removed by **audit R2** for the Capabilities whose Protocol allows
+it (`_STREAMED_INPUT_KINDS`: Parse, Chunk, Schema Induction, Entity Extraction, Fused, Redaction).
+It is **still whole-corpus for the rest** — Screening, Relation Extraction, Context Enrichment,
+Export — because their Provider materialises the input anyway. See **Honest memory boundary**
+below for the per-transient status; that residue is why this ADR is *partially*, not fully,
+accepted, and why the `batch_docs` scheduling loop (issue #110) is still the mechanism that would
+close it.
 
-> **C6 update.** The H-E1 Part 4 correction below is preserved for the record. It is now
-> HISTORICAL: the `O(corpus-slice)` per-doc-level-stage materialisation it honestly flagged was
-> removed by C6 (streaming dispatch through the C3 seam). What remains true from it is the
-> discipline — do not claim a bound the code does not hold.
+> **C6 + R2 update.** The H-E1 Part 4 correction below is preserved for the record. Its
+> `O(corpus-slice)` per-doc-level-stage finding was *half* addressed by C6 (the output side) and,
+> for six of the ten doc-level Capabilities, the other half by audit R2 (the input side). What
+> remains true from it, and what an intervening rewrite of this section violated, is the
+> discipline — **do not claim a bound the code does not hold**, and do not retire the issue that
+> tracks the missing bound on the strength of the claim.
 >
 > **H-E1 Part 4 correction (audit THEME E).** This ADR previously read "built" with a
 > `batch_docs`-default-256 doc-level batching loop as a landed mechanism. That was an overclaim:
@@ -30,7 +38,7 @@ The local Runner is a whole-corpus-in-memory DAG executor: `runner.py` holds `ou
 ## Decision (two stage classes + incremental IO)
 The DAG splits into two kinds of stage, routed by CapabilityKind:
 
-1. **Streaming transforms** (doc-level: Source, Screening, Parse, Chunk, Entity, Relation, Redaction). These are per-document and independent, so the Runner *should* push the corpus through them in **bounded batches** (configurable `batch_docs`, default e.g. 256) instead of whole lists: a batch flows the full doc-level chain, its outputs are appended to checkpoints, then it is released before the next batch. Provider signatures are already `Iterable`-in/`Iterable`-out, so provider code barely changes — the change is in the Runner's execution loop. **STATUS: DEFERRED, not built (issue #110).** `batch_docs` is not implemented; each doc-level Stage today does `return list(provider…)` and materialises its whole output for the corpus slice. What *is* built is the *release* of a doc-level Stage's retained output once its consumers have run (#69), which bounds the *simultaneously-retained* set by the DAG fan-in — but not the per-stage `O(corpus-slice)` materialisation itself. The `batch_docs` loop lands after the THEME-F Runner refactor (so it isn't written against a Runner that is about to change).
+1. **Streaming transforms** (doc-level: Source, Screening, Parse, Chunk, Entity, Relation, Redaction). These are per-document and independent, so the Runner *should* push the corpus through them in **bounded batches** (configurable `batch_docs`, default e.g. 256) instead of whole lists: a batch flows the full doc-level chain, its outputs are appended to checkpoints, then it is released before the next batch. Provider signatures are already `Iterable`-in/`Iterable`-out, so provider code barely changes — the change is in the Runner's execution loop. **STATUS: the `batch_docs` *scheduling* loop is still DEFERRED (issue #110); the per-Stage materialisation it was wanted for is gone for six of the ten doc-level Capabilities.** What is built: the *release* of a doc-level Stage's retained output once its consumers have run (#69), the streamed **output** dispatch (C6) and the streamed **input** for `_STREAMED_INPUT_KINDS` (audit R2) — so those Stages are `O(checkpoint batch)` on both sides without any scheduling change. Screening / Relation / Context Enrichment / Export still materialise their input by Provider Protocol, and only `batch_docs` bounds those.
 2. **Accumulators** (corpus-level: Profiling, Disambiguation, Graph Assembly). These inherently need the whole corpus, but their **output is bounded by the knowledge-graph size, not the corpus size** — canonical entities, KG nodes/edges, corpus features — which is `O(entities + edges) << O(all mentions)`. The design formalizes the contract that an accumulator consumes a stream and holds only bounded aggregate/canonical state (Profiling already spills features; Disambiguation/Graph already emit canonical records, not raw mentions). They receive the doc-level output as a stream (read back from checkpoints batch-by-batch), not a materialized list.
 
 **Incremental Export.** Replace `from_pylist(whole)` with a `pq.ParquetWriter` writing **row-group batches** + JSONL append. This kills the single biggest transient (peak RSS currently coincides with Export).
@@ -59,13 +67,13 @@ per-transient** boundary, not the aspirational end state.
 * **Relation fan-out (#63/#68).** Per-document output and input candidate transients are capped,
   bounding the `~0.084·n²` low-cardinality blow-up.
 
-* **The doc-level stage materialisation itself (C6).** `_dispatch_stage` returns
+* **The doc-level stage OUTPUT materialisation (C6).** `_dispatch_stage` returns
   `Iterator[StageOutput]` — the Provider's own iterator, uncollapsed — and `_run` feeds it
   straight into `_write_checkpoint`. A doc-level Stage's records are therefore serialized in
   `_CHECKPOINT_BATCH_RECORDS` batches as the Provider produces them and are never a list. Nothing
   is retained in the executor's `outputs` dict either (the `_release_doc_level_outputs` knob
   flips back to the pre-#69 retain-everything path for a byte-for-byte differential check). The
-  per-doc-level-stage transient is `O(checkpoint batch)` + whatever the Provider itself holds.
+  per-doc-level-stage OUTPUT transient is `O(checkpoint batch)` + whatever the Provider holds.
   * **The two exceptions, and why they are inherent.** An **Export** must hold the records it
     materialises (it writes a file, and streams it internally in `_EXPORT_BATCH_ROWS` row groups).
     A **fused** or **Type-Consolidation** Stage returns two carriers from one Provider call, which
@@ -77,7 +85,35 @@ per-transient** boundary, not the aspirational end state.
     producing generator's own `finally`, inside `StageExecution` (C3), which owns the Provider's
     whole lifetime. This is the load-bearing detail of C6: streaming without it is silently wrong.
 
+* **The doc-level stage INPUT materialisation — for six of the ten Capabilities (audit R2).**
+  C6 bounded only the output side; the input side was still `_gather_inputs` concatenating every
+  parent's records into one list that lived in `ctx.incoming` for the Stage's entire execution,
+  with `_as_type` building a second list of the same size and (under `extract_on: masked`)
+  `_extract_input_chunks` a third of fresh `model_copy` objects. Measured on the shipped code:
+  an Entity Stage's `ctx.incoming` held 48 records at 4 documents and 192 at 16 — exactly linear.
+  For the Capabilities in `runner._STREAMED_INPUT_KINDS` — **Parse, Chunk, Schema Induction,
+  Entity Extraction, Fused, Redaction** — the Runner now hands the Stage a lazy stream over the
+  parents' checkpoints (`_stream_doc_inputs` + `_as_type_stream` +
+  `_extract_input_chunks_streamed`); pulling the *k*-th input record has read exactly *k* records
+  back. Both sides of those Stages are `O(checkpoint batch)`. `records_in` stays exact without a
+  buffer: `_streamed_input_count` counts the checkpoint's lines (one record per line by
+  construction of `_write_checkpoint`) rather than decoding the corpus a second time.
+  * **The one property traded for the bound.** Those branches' carrier check is now per-record,
+    so a mis-wired Pipeline raises the same typed `ContractError` at the first record of the
+    wrong carrier instead of before the Provider is called. Same accept/reject set (`_as_type`
+    already rejected an input if *any* record was wrong), and still strictly before the Stage's
+    checkpoint is published — no torn commit, no silent acceptance (ADR-0034).
+
 **NOT bounded today:**
+* **The doc-level INPUT of the remaining four Capabilities.** **Intake/Content Screening**
+  (`screen_*` returns a `ScreeningOutcome` holding passed + quarantined lists, and Content
+  Screening's page-map re-homing needs the input set to know what was dropped), **Relation
+  Extraction** and **Context Enrichment** (one input stream partitioned into two carriers — one
+  side must be buffered whatever the Runner does) and **Export** (it writes a file) still receive
+  a gathered `O(corpus-slice)` list. Streaming the Runner's half would move no memory, because the
+  Provider materialises the same records anyway — so this is a **Provider-Protocol** bound to win,
+  or a scheduling one (#110), not a dispatch one. A corpus that OOMs a Content-Screening or a
+  Relation Stage still OOMs.
 * **Peak RSS at 100k / 1M documents.** Still needs a dedicated perf rig (#63); every bound above is
   validated at reduced scale in-suite.
 
@@ -103,16 +139,23 @@ Both facts are now pinned by `test_accumulator_memory_bound.py` rather than asse
 the doc and the code cannot drift apart again. For truly massive corpora the mention set (and the
 KG) would need sharding / external accumulator state — a separate effort, out of this ADR.
 
-**Net:** IO transients (Export + checkpoint write), the retained live set, and the per-doc-level-
-stage transient are all bounded; corpus-level memory is bounded by the KG for Profiling/Graph and
-by the **mention set** for Disambiguation/Type-Consolidation. The real 100k/1M peak-RSS +
-no-OOM-at-ceiling numbers still need a dedicated perf rig (#63).
+**Net:** IO transients (Export + checkpoint write) and the retained live set are bounded; a
+doc-level Stage's transient is bounded on **both** sides for the six Capabilities in
+`_STREAMED_INPUT_KINDS` and on the **output side only** for Screening / Relation / Context
+Enrichment / Export, whose input is still `O(corpus-slice)` because their Provider materialises it;
+corpus-level memory is bounded by the KG for Profiling/Graph and by the **mention set** for
+Disambiguation/Type-Consolidation. The real 100k/1M peak-RSS + no-OOM-at-ceiling numbers still need
+a dedicated perf rig (#63).
 
 **Scope of the in-suite memory test.** `test_export_memory_scaling.py` bounds **Python-object
 allocations** via `tracemalloc` (the streamed Export's peak stays sub-linear as the corpus grows
 4×). It does **not** measure Arrow/Parquet **off-heap RSS** (pyarrow buffers, OS page cache) — that
-is the perf rig's job (#63). It also validates only the Export transient, not the doc-level-stage
-`O(corpus-slice)` materialisation above (which #110 will bound and test).
+is the perf rig's job (#63). It also validates only the Export transient. The doc-level-stage
+transient is pinned by shape rather than by allocation: `test_runner_executor_streaming.py` for
+the output side (nothing retained) and `test_doc_level_input_streaming.py` for the input side (the
+Stage never receives a materialised list, and pulling the *k*-th input record has read exactly *k*
+records back from the parent's checkpoint). The four Capabilities whose input is still gathered
+have no bound to test — see **NOT bounded today**.
 
 ## Blast radius / risk
 Runner execution loop + checkpoint format (batch-granular) + Export writer change. Providers mostly unchanged (iterable contracts already hold). Risks to guard with tests: checkpoint/resume correctness at batch granularity, determinism (fingerprint stability), no regression to Provenance/Evidence/offset guarantees, and the delta/Purge path (which reads checkpoints) staying correct. Accumulators must be confirmed to hold only bounded state (audit Disambiguation/Graph for any hidden full-corpus list).
@@ -182,23 +225,34 @@ Runner execution loop + checkpoint format (batch-granular) + Export writer chang
   (`test_runner_executor_streaming.py`) pin the release, the checkpoint-streamed accumulator input
   (the wired path), the peak-retained bound vs. retain-all, and report/KG byte-identity.
 
-**Built (C3 + C6, after the Runner refactor):**
+**Built (C3 + C6 + audit R2, after the Runner refactor):**
 * **Streaming dispatch through the Stage-execution seam.** `_dispatch_stage` returns
   `Iterator[StageOutput]`; `_run` is `resolve inputs -> execute -> persist -> release`, with the
   Provider's stream written batch-granularly into the checkpoint. The `O(corpus-slice)` doc-level
-  materialisation this ADR flagged as its last unbounded transient is gone, and the Provider
-  teardown moved after consumption so the tallies and the VRAM lifecycle stay correct under lazy
-  iteration (see **Honest memory boundary**).
+  **output** materialisation is gone, and the Provider teardown moved after consumption so the
+  tallies and the VRAM lifecycle stay correct under lazy iteration (see **Honest memory
+  boundary**).
+* **Streaming the doc-level INPUT (audit R2).** `StageContext.incoming` is an `Iterable`, not a
+  list: for `_STREAMED_INPUT_KINDS` the Runner passes a lazy stream over the parents' checkpoints
+  and the narrowing/masking stay lazy too, so neither side of those Stages is ever corpus-sized.
+  The interface got *smaller* (a consumer may iterate `incoming` at most once) rather than gaining
+  a layer; a Runner adapter on a materialised substrate (Airflow XCom) still passes a list. The
+  now-unreachable `_require_redaction_inputs` guard folded into the streamed narrowing's message,
+  which is the first time its W16 advice can actually reach an operator.
 * **The accumulator audit** the "Blast radius / risk" section required — performed, the ADR's
   over-claim corrected, and both the `O(mentions)` bound and the single-pass contract pinned by
   `test_accumulator_memory_bound.py`.
 
 **Remaining (explicitly out of this issue, still flagged):**
-* **The `batch_docs` doc-level streaming loop (issue #110) — still NOT BUILT, and no longer
-  needed for memory.** Its purpose in this ADR was to bound the per-stage `O(corpus-slice)`
-  transient; C6 bounds that directly, without a scheduling change. #110 survives only as a
-  *latency* idea (a batch reaching Export before the whole corpus is parsed), which is a different
-  argument and needs its own justification.
+* **The `batch_docs` doc-level streaming loop (issue #110) — still NOT BUILT, and still the only
+  mechanism that bounds the residue.** C6 + R2 bound both sides of a doc-level Stage *whose
+  Provider consumes a stream*, without a scheduling change — so #110 is no longer needed for those
+  six Capabilities. It is still needed for the other four: Screening, Relation Extraction, Context
+  Enrichment and Export materialise their input by Protocol, and only limiting how many documents
+  enter the chain at once bounds them. (An earlier revision of this ADR retired #110 outright on
+  the strength of a claim the code did not hold; that was the exact mistake the H-E1 correction
+  above warns against.) #110 additionally carries the *latency* argument (a batch reaching Export
+  before the whole corpus is parsed), which is separate and needs its own justification.
 * The real **100k / 1M peak-RSS + no-OOM-at-ceiling** numbers still need a dedicated perf rig
   (the DoD Hardening "no OOM at the documented ceiling" is validated at reduced scale here; the
   headline numbers stay flagged, per the issue).
@@ -208,7 +262,9 @@ Runner execution loop + checkpoint format (batch-granular) + Export writer chang
   explicitly enough. A Provider still receives an `Iterable` and is free to batch internally (and
   the batching ones do — that is the amortization this bullet protects). What C6 changed is that
   the **Runner** no longer collapses the Provider's returned iterator with `list(...)`; it writes
-  it batch-granularly into the checkpoint. Nothing about the Provider's call shape changed, and
-  the on-disk output is byte-identical. So C6 does **not** reopen this rejection.
+  it batch-granularly into the checkpoint. Audit R2 changed the mirror image: the Runner no longer
+  collapses the Provider's *input* into a list either, for the Capabilities that consume it once.
+  Nothing about the Provider's call shape changed — it still receives one `Iterable` and may batch
+  internally — and the on-disk output is byte-identical. So neither reopens this rejection.
 - A queue/thread backpressure model (the local Runner is single-process; bounded batches ARE the backpressure — a real distributed backpressure story is the Databricks/Airflow adapter's job, ADR-0003).
 - Rewriting accumulators to be incremental-across-runs (that's the delta engine's job, #58/#42) — orthogonal.

@@ -72,17 +72,22 @@ if TYPE_CHECKING:
 class StageContext:
     """Everything a Stage needs from its Runner that is not the Stage itself.
 
-    ``incoming`` is the Stage's gathered input (empty for a corpus-level accumulator, which
-    streams its input instead); ``outputs`` is the per-Stage record map the accumulator streams
-    *from* — a live dict under the local Runner, the XCom store under Airflow. ``runner`` is the
-    name stamped onto the Stage's metrics, which is the only place the two Runners are allowed to
-    differ.
+    ``incoming`` is the Stage's input, and it is only an ``Iterable`` on purpose (ADR-0033): a
+    doc-level Stage whose Provider consumes its input exactly once is handed a **lazy stream** over
+    the parents' checkpoints, so neither side of such a Stage — input or output — is ever a
+    corpus-sized list. It is empty for a corpus-level accumulator (which streams its input per
+    carrier instead) and a plain list for the Capabilities whose Provider materialises the input
+    anyway (screening outcomes, two-carrier partitions, Export). A consumer must therefore iterate
+    it AT MOST ONCE; a Runner adapter on a materialised substrate (Airflow XCom) may of course
+    pass a list. ``outputs`` is the per-Stage record map the accumulator streams *from* — a live
+    dict under the local Runner, the XCom store under Airflow. ``runner`` is the name stamped onto
+    the Stage's metrics, which is the only place the two Runners are allowed to differ.
     """
 
     storage: Storage
     pipeline: Pipeline
     run_id: str
-    incoming: list[StageOutput]
+    incoming: Iterable[StageOutput]
     outputs: dict[str, list[StageOutput]]
     runner: str = "local"
 
@@ -97,7 +102,7 @@ class StageDispatch(Protocol):
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: list[StageOutput],
+        incoming: Iterable[StageOutput],
         outputs: dict[str, list[StageOutput]],
     ) -> Iterator[StageOutput]:
         """Narrow the Stage's input to its capability's carrier and return the Provider's stream."""

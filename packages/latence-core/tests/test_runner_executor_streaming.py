@@ -45,7 +45,7 @@ from latence_core.runner import _ACCUMULATOR_KINDS, LocalRunner, StageOutput
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from latence_core.pipeline import Stage
     from latence_core.quality import QualityReport
@@ -173,7 +173,10 @@ class _SpyRunner(LocalRunner):
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: list[StageOutput],
+        # Audit R2: a doc-level Stage's input is a lazy stream for the Capabilities the Runner
+        # streams (``_STREAMED_INPUT_KINDS``), so the seam's parameter is an ``Iterable``. This
+        # spy only inspects ``outputs``, never ``incoming``, so it must not consume it.
+        incoming: Iterable[StageOutput],
         outputs: dict[str, list[StageOutput]],
     ) -> Iterator[StageOutput]:
         if not self._doc_level_names:
