@@ -98,6 +98,19 @@ per-transient** boundary, not the aspirational end state.
   back. Both sides of those Stages are `O(checkpoint batch)`. `records_in` stays exact without a
   buffer: `_streamed_input_count` counts the checkpoint's lines (one record per line by
   construction of `_write_checkpoint`) rather than decoding the corpus a second time.
+  * **The page-map state those Stages carry across the stream (audit R3).** `O(checkpoint batch)`
+    on both sides is a claim about the RECORDS; it was not true of the state a Stage derives from
+    them. `PageIndexResolver` — one per Stage invocation, and the invocation is handed the whole
+    corpus — memoised a `PageMap` + `PageOffsetIndex` per `document_record_id` and evicted
+    neither, so a doc-level Stage retained ~284 KB per 519-page document for its whole execution
+    (~284 MB at 1k documents, ~2.8 GB at 10k) inside the bound this section states. It is now an
+    LRU window of `DEFAULT_MAX_LIVE_DOCUMENTS` (64) documents, which is ≥ the widest in-flight
+    batch any shipped Provider presents (16), so retention is bounded by the batch and no shipped
+    stack can evict a document it is still resolving. An absorbed map is reachable only from its
+    index, so eviction frees the map; the evicted index's drift is folded into the corpus roll-up
+    first (the drift section's numbers are unchanged, ADR-0008); and a lookup for an
+    already-evicted document is counted and warned, counts-only, rather than degrading silently
+    (`PageIndexResolver.evicted_reentries`, ADR-0034).
   * **The one property traded for the bound.** Those branches' carrier check is now per-record,
     so a mis-wired Pipeline raises the same typed `ContractError` at the first record of the
     wrong carrier instead of before the Provider is called. Same accept/reject set (`_as_type`

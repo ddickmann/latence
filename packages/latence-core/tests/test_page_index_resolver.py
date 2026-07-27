@@ -12,7 +12,9 @@ Two acceptance criteria drive this file:
 
 from __future__ import annotations
 
+import gc
 import logging
+import weakref
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,8 +26,12 @@ from latence_core.contracts import (
     PageMap,
     Provenance,
 )
-from latence_core.page_index import PageIndexResolver, rehome_page_maps
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import (
+    DEFAULT_MAX_LIVE_DOCUMENTS,
+    PageIndexResolver,
+    rehome_page_maps,
+)
+from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import Pipeline
 from latence_core.quality_report_builder import _DriftAggregator
 from latence_core.runner import LocalRunner
@@ -35,6 +41,7 @@ from latence_core.stages.screening import KeywordContentScreener
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 # Five pages. The budget below (300 tokens vs ~110 tokens of page) is deliberately wide
@@ -554,3 +561,137 @@ def test_rehoming_is_a_no_op_when_nothing_was_dropped() -> None:
     same = rehome_page_maps(chunks, dropped_from=chunks)
     assert [c.model_dump_json() for c in same] == [c.model_dump_json() for c in chunks]
     assert all(a is b for a, b in zip(same, chunks, strict=True))
+
+
+# -- the retention bound: live window, not corpus (R3) -------------------------
+
+
+def test_resolver_does_not_retain_every_documents_page_map_for_the_whole_run() -> None:
+    """Page-map retention is bounded by the documents IN FLIGHT, not by the corpus.
+
+    One resolver is built per Stage invocation and the Stage's Provider is handed the whole
+    corpus stream in one call, so a resolver that never releases a document holds one
+    ``PageMap`` + one ``PageOffsetIndex`` per document for the Stage's entire execution —
+    ~284 KB per 519-page document, i.e. ~284 MB at 1k documents inside a single Entity /
+    Redaction / Fused Stage. ADR-0033's "Honest memory boundary" says those Stages are
+    ``O(checkpoint batch)`` on both sides; an operator sizes RAM against that section.
+
+    Measured the only way that cannot be faked: a **weak reference** to each document's
+    ``PageMap``. The stream is a generator, so once a document's chunks have been consumed the
+    only thing that can still be keeping its map alive is the resolver.
+    """
+    total = 128
+    alive: dict[str, weakref.ReferenceType[PageMap]] = {}
+
+    def stream() -> Iterator[tuple[ChunkRecord, tuple[int, int]]]:
+        """Yield ``(chunk, the pages a per-document index gives)`` and drop the document."""
+        for i in range(total):
+            doc = _document(f"doc-{i}")
+            page_map = doc.page_map
+            assert page_map is not None
+            alive[doc.record_id] = weakref.ref(page_map)
+            truth = PageOffsetIndex(page_map)
+            for chunk in _chunks(doc):
+                start = chunk.provenance.char_start or 0
+                end = chunk.provenance.char_end or start
+                yield (
+                    chunk,
+                    (truth.page_for_offset(start), truth.page_for_offset(max(end - 1, start))),
+                )
+
+    resolver = PageIndexResolver()
+    chunk = None
+    for chunk, expected in stream():
+        resolver.observe(chunk)
+        start = chunk.provenance.char_start or 0
+        end = chunk.provenance.char_end or start
+        # Provenance is not traded for the bound (ADR-0021/0031): every chunk of every
+        # document resolves to exactly the pages its own index gives.
+        assert resolver.pages_for_span(chunk, start, end) == expected
+    del chunk
+    gc.collect()
+
+    assert resolver.documents == total, "every document must have been resolved, not skipped"
+    assert resolver.unresolved == 0, "nothing may degrade to an inherited page range"
+
+    retained = sorted(record_id for record_id, ref in alive.items() if ref() is not None)
+    assert len(retained) < total, (
+        f"resolver retains {len(retained)} of {total} document page maps — retention is "
+        "linear in the corpus, not in the batch"
+    )
+    assert alive["doc-0"]() is None, "the first document's page map is still reachable"
+    assert len(retained) <= DEFAULT_MAX_LIVE_DOCUMENTS
+    assert resolver.live_documents <= DEFAULT_MAX_LIVE_DOCUMENTS
+    assert resolver.evicted_reentries == 0, "a grouped stream never re-enters an evicted doc"
+
+
+def test_retention_window_is_the_documented_bound_and_is_configurable() -> None:
+    """The window is a stated number, not an accident, and a caller can widen it."""
+    docs = [_document(f"doc-{i}") for i in range(4)]
+    resolver = PageIndexResolver(max_live_documents=2)
+    for doc in docs:
+        chunk = _chunks(doc)[0]
+        assert resolver.pages_for_span(chunk, 0, 1) is not None
+    assert resolver.live_documents == 2
+    assert resolver.documents == 4
+    assert PageIndexResolver().live_documents == 0
+    assert DEFAULT_MAX_LIVE_DOCUMENTS >= 16, "must exceed every shipped Provider batch"
+
+    with pytest.raises(ValueError, match="max_live_documents"):
+        PageIndexResolver(max_live_documents=0)
+
+
+def test_drift_from_an_evicted_document_still_reaches_the_corpus_roll_up() -> None:
+    """ADR-0008: the drift section's numbers must not change because an index was dropped.
+
+    The Quality Report's drift audit runs ONE resolver over the whole chunk stream, so if a
+    window that evicts also forgets, the corpus roll-up silently shrinks — a report section
+    that got smaller reads as a confident ``clean``.
+    """
+    docs = [_document(f"doc-{i}") for i in range(3)]
+
+    def resolve(resolver: PageIndexResolver) -> PageDriftDiagnostics:
+        for doc in docs:
+            chunk = _chunks(doc)[0]
+            assert doc.page_map is not None
+            resolver.page_for(chunk, 0)
+            resolver.page_for(chunk, doc.page_map.total_chars + 500)  # fuzzy recovery
+        return resolver.diagnostics
+
+    windowed = resolve(PageIndexResolver(max_live_documents=1))
+    unbounded = resolve(PageIndexResolver(max_live_documents=len(docs)))
+
+    assert windowed == unbounded
+    assert windowed.resolutions == 6
+    assert windowed.recovered == 3
+    assert windowed.max_drift_chars > 0
+
+
+def test_a_lookup_for_an_evicted_document_is_counted_and_announced(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ADR-0034: a too-small window degrades LOUDLY — never a plausible-looking wrong page."""
+    doc_a = _document("doc-a")
+    doc_b = _document("doc-b")
+    a_chunks = _chunks(doc_a)
+    assert a_chunks[0].page_map is not None
+    assert a_chunks[1].page_map is None  # v18: only the first chunk carries the map
+
+    resolver = PageIndexResolver(max_live_documents=1)
+    with caplog.at_level(logging.WARNING, logger="latence.provenance"):
+        assert resolver.pages_for_span(a_chunks[0], 0, 10) is not None
+        resolver.observe(_chunks(doc_b)[0])  # evicts doc-a
+        assert resolver.pages_for_span(a_chunks[1], 0, 10) is None
+
+    assert resolver.evicted_reentries == 1
+    assert resolver.unresolved == 1
+    warnings = [r for r in caplog.records if r.name == "latence.provenance"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "max_live_documents" in message
+    assert doc_a.record_id not in message  # counts only
+    assert doc_a.content[:40] not in message
+
+    # A re-entering chunk that DOES carry a map re-seeds rather than degrading.
+    assert resolver.pages_for_span(a_chunks[0], 0, 10) is not None
+    assert resolver.documents == 2  # re-absorption is not a new document

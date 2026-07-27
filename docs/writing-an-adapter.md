@@ -119,6 +119,17 @@ page_start, page_end = self.resolve_pages(chunk, doc_start, doc_end, resolver=re
 A `Runner` that holds the parsed documents can seed the resolver authoritatively instead
 (`PageIndexResolver.from_documents(documents)`, ADR-0017: files are the source of truth).
 
+"One per call" does **not** mean "keeps the corpus": the resolver retains an index for the
+`DEFAULT_MAX_LIVE_DOCUMENTS` (64) most recently used documents and releases the rest with their
+page maps, so a Stage's page state stays proportional to the documents in flight rather than to
+the corpus (ADR-0033). 64 is well above every shipped Provider's batch (16). If yours deliberately
+observes more distinct documents than it resolves against — a very wide batch, or a two-pass shape
+that resolves long after it observed — construct it as
+`PageIndexResolver(max_live_documents=N)`. You will be told if you needed to and did not: a lookup
+for a document whose index was already released is counted
+(`resolver.evicted_reentries`) and warned once, counts-only, instead of quietly inheriting the
+chunk's page range.
+
 ## Malformed-profile: fail loud (P3-F2 §2)
 
 A Provider that declares a **malformed** profile (a `PROFILE`/`profile()` that is not a

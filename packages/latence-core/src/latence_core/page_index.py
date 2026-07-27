@@ -56,6 +56,20 @@ chunked at 640 tokens that is ~30 KB of JSON on 1 record instead of ~399 — ~92
 chunk checkpoint line was the duplicated map, and every checkpoint write, streaming
 read-back and decode paid for it.
 
+**What it keeps alive (ADR-0033).** A resolver is built per Stage invocation and the Stage's
+Provider is handed the WHOLE corpus stream in one call, so "memoise per document" meant, until
+R3, "retain every document's page map for the length of the run": ~284 KB per 519-page document
+(279 KB of :class:`~latence_core.contracts.PageMap` objects, 5 KB of index), i.e. ~284 MB at 1k
+documents and ~2.8 GB at 10k — inside a Stage ADR-0033's *Honest memory boundary* declares
+``O(checkpoint batch)`` on both sides. Absorbed maps are therefore held in a **bounded LRU
+window** (:data:`DEFAULT_MAX_LIVE_DOCUMENTS`, overridable per resolver): chunks arrive grouped by
+document, so only the documents a Provider holds *in flight* — at most its batch, 16 for every
+shipped batching Provider — can need an index at once. Nothing is traded for the bound on a
+document-grouped stream: eviction folds the evicted index's drift into the corpus roll-up, and a
+chunk arriving for an already-evicted document is COUNTED and warned
+(:attr:`PageIndexResolver.evicted_reentries`), never silently mis-paged (ADR-0034). Seeded maps
+(route 1) are the caller's own materialised state and are pinned, not windowed.
+
 **Never raises, never guesses silently.** Resolution degrades exactly as the ported
 ``PageOffsetIndex`` does (Provenance resolution must not be the thing that fails a run),
 and a degradation is *counted* rather than swallowed: :attr:`PageIndexResolver.unresolved`
@@ -70,6 +84,8 @@ see :func:`rehome_page_maps`.
 
 from __future__ import annotations
 
+import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
@@ -78,6 +94,20 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
     from latence_core.contracts import ChunkRecord, DocumentRecord, PageMap
+
+logger = logging.getLogger("latence.provenance")
+
+#: How many documents' page indices one resolver keeps live at once (ADR-0033).
+#:
+#: The stream a Stage is handed is grouped by document — the Chunk Stage emits a document's
+#: chunks together and checkpoint order is preserved — so a resolver only needs an index for
+#: the documents its caller holds IN FLIGHT. That is bounded by the Provider's batch: every
+#: shipped batching Provider uses ``batch_size`` 16, and the widest shape (a whole batch
+#: observed before any of it is resolved, as ``latence_extract_gliner2`` does) needs one index
+#: per distinct document in that batch. 64 is 4× that, so no shipped stack can evict a document
+#: it is still working on; a Provider that deliberately holds more must say so by constructing
+#: the resolver with a larger ``max_live_documents``, and is TOLD to when it does not.
+DEFAULT_MAX_LIVE_DOCUMENTS = 64
 
 
 def rehome_page_maps(
@@ -134,25 +164,69 @@ class PageIndexResolver:
     lazily on first use and reused for every subsequent lookup against that document —
     so a 400-chunk document builds the ``bisect`` array once, not 400 times.
 
+    **Memoised, not accumulated.** The indices it absorbs from the stream live in an LRU
+    window of ``max_live_documents`` documents; the ``PageMap`` an absorbed index was built
+    from is reachable only from that index, so evicting the index frees the map with it. That
+    is what keeps a doc-level Stage's page-map retention proportional to the documents its
+    Provider holds in flight rather than to the corpus (ADR-0033) — see
+    :data:`DEFAULT_MAX_LIVE_DOCUMENTS` for why the default cannot bite a shipped stack, and
+    :attr:`evicted_reentries` for what happens, loudly, if it ever does. Maps handed in at
+    construction (route 1) are the caller's own state and are pinned outside the window.
+
     Not a Pydantic model: like the indices it owns, this is live state with mutable
     diagnostics, distinct from the serialized :class:`~latence_core.contracts.PageMap`
     contracts it is built from.
     """
 
-    __slots__ = ("_diag", "_indices", "_page_maps", "_unresolved")
+    __slots__ = (
+        "_diag",
+        "_evicted",
+        "_evicted_reentries",
+        "_indices",
+        "_max_live",
+        "_pinned",
+        "_seen",
+        "_unresolved",
+        "_warned_reentry",
+    )
 
-    def __init__(self, page_maps: Mapping[str, PageMap] | None = None) -> None:
+    def __init__(
+        self,
+        page_maps: Mapping[str, PageMap] | None = None,
+        *,
+        max_live_documents: int = DEFAULT_MAX_LIVE_DOCUMENTS,
+    ) -> None:
         """Seed the resolver with ``document_record_id -> PageMap`` (optional).
 
         An empty resolver is perfectly usable: it absorbs each document's map from the
         first record it sees that carries one.
+
+        ``max_live_documents`` bounds how many ABSORBED document indices are kept live at
+        once (LRU). Raise it only for a Provider that resolves against more distinct
+        documents than it has observed most recently — a batch wider than the default.
         """
-        self._page_maps: dict[str, PageMap] = dict(page_maps) if page_maps else {}
-        self._indices: dict[str, PageOffsetIndex] = {}
+        if max_live_documents < 1:
+            msg = f"max_live_documents must be >= 1, got {max_live_documents}"
+            raise ValueError(msg)
+        # Seeded maps are PINNED: the caller already materialised them (they came off
+        # DocumentRecords it holds), route 1 promises resolution in any order, and dropping
+        # them would free nothing the caller was not keeping anyway.
+        self._pinned: dict[str, PageMap] = dict(page_maps) if page_maps else {}
+        # LRU by last use. An absorbed PageMap is referenced ONLY by its index here, so
+        # eviction releases the map (the ~279 KB of a 519-page document) and not just the
+        # ~5 KB bisect array.
+        self._indices: OrderedDict[str, PageOffsetIndex] = OrderedDict()
+        self._max_live = max_live_documents
         # Drift for documents whose index has been discarded is folded in here as it is
         # produced, so the aggregate survives even if an index is never queried again.
         self._diag = PageDriftDiagnostics()
         self._unresolved = 0
+        self._seen = len(self._pinned)
+        # A bounded ring of the ids most recently evicted — enough to TELL a re-entry
+        # (window too small) apart from a document that simply never had a map.
+        self._evicted: OrderedDict[str, None] = OrderedDict()
+        self._evicted_reentries = 0
+        self._warned_reentry = False
 
     @classmethod
     def from_documents(cls, documents: Iterable[DocumentRecord]) -> PageIndexResolver:
@@ -238,8 +312,30 @@ class PageIndexResolver:
 
     @property
     def documents(self) -> int:
-        """How many distinct documents this resolver holds a page map for."""
-        return len(self._page_maps)
+        """How many distinct documents this resolver has learned a page map for.
+
+        Cumulative, not live: evicting a document's index (see
+        :data:`DEFAULT_MAX_LIVE_DOCUMENTS`) does not un-learn it. :attr:`live_documents` is
+        the retained window.
+        """
+        return self._seen
+
+    @property
+    def live_documents(self) -> int:
+        """How many document indices are retained right now (``<= max_live_documents``)."""
+        return len(self._indices)
+
+    @property
+    def evicted_reentries(self) -> int:
+        """Lookups for a document whose index had been evicted and that carried no map.
+
+        Non-zero means the caller resolves against more distinct documents than it keeps in
+        flight most recently — i.e. ``max_live_documents`` is smaller than the caller's
+        window — and those lookups degraded to the inherited page range. They are also
+        counted in :attr:`unresolved`; this is the half that names the CAUSE, so the
+        degradation is never silent (ADR-0034). The fix is the constructor argument.
+        """
+        return self._evicted_reentries
 
     # -- internals ----------------------------------------------------------
 
@@ -248,17 +344,65 @@ class PageIndexResolver:
         document_record_id = chunk.document_record_id
         index = self._indices.get(document_record_id)
         if index is not None:
+            self._indices.move_to_end(document_record_id)
             return index
-        page_map = self._page_maps.get(document_record_id)
+        page_map = self._pinned.get(document_record_id)
         if page_map is None:
             # Absorb from the stream: the Chunk Stage stamps the map on a document's
             # first chunk (and a pre-v18 record carries it on every chunk), so the first
             # record of a document teaches the resolver and the rest resolve for free.
             carried = chunk.page_map
             if carried is None:
+                if document_record_id in self._evicted:
+                    self._note_reentry()
                 return None
             page_map = carried
-            self._page_maps[document_record_id] = carried
+            # A re-absorbed document was already counted; the ring is what tells them apart.
+            if document_record_id in self._evicted:
+                del self._evicted[document_record_id]
+            else:
+                self._seen += 1
+        else:
+            # A pinned map can always be rebuilt into an index, so its id leaving the window
+            # is not a re-entry to report when it comes back.
+            self._evicted.pop(document_record_id, None)
         index = PageOffsetIndex(page_map)
         self._indices[document_record_id] = index
+        self._evict_beyond_window()
         return index
+
+    def _evict_beyond_window(self) -> None:
+        """Drop least-recently-used document indices until the window fits."""
+        while len(self._indices) > self._max_live:
+            document_record_id, evicted = self._indices.popitem(last=False)
+            diag = evicted.diagnostics
+            # Fold the evicted index's drift into the running aggregate BEFORE it dies, so
+            # the corpus-level roll-up the Quality Report's drift section reads (ADR-0008)
+            # is exactly what an unbounded resolver would have produced.
+            self._diag = self._diag.model_copy(
+                update={
+                    "resolutions": self._diag.resolutions + diag.resolutions,
+                    "recovered": self._diag.recovered + diag.recovered,
+                    "max_drift_chars": max(self._diag.max_drift_chars, diag.max_drift_chars),
+                }
+            )
+            self._evicted[document_record_id] = None
+            while len(self._evicted) > self._max_live:
+                self._evicted.popitem(last=False)
+
+    def _note_reentry(self) -> None:
+        """Count — and, once, say — that the live window was too small for this caller."""
+        self._evicted_reentries += 1
+        if self._warned_reentry:
+            return
+        self._warned_reentry = True
+        # Counts only: no record id, no document id, no content (ADR-0034).
+        logger.warning(
+            "page index: a chunk arrived for a document whose page index had already been "
+            "evicted from the %d-document live window and carried no page map of its own; "
+            "its page provenance is inherited, not resolved. Construct the "
+            "PageIndexResolver with max_live_documents >= the number of documents this "
+            "caller holds in flight. Further occurrences are counted in "
+            "PageIndexResolver.evicted_reentries.",
+            self._max_live,
+        )
