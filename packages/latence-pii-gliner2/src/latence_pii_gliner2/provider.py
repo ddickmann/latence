@@ -63,19 +63,18 @@ from latence_core.induced import (
     LabelSlot,
     effective_labels,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.device import cuda_available
 from latence_core.providers.perf import (
     empty_cuda_cache,
-    ensure_gliner2_on_cuda,
     inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
     iter_label_buckets,
     iter_token_budget_microbatches,
-    load_gliner2_optimized,
-    neutralize_torch_jit,
+    load_gliner2_model,
     resolve_gliner2_knob,
+    resolve_intra_op_threads,
     resolve_max_len,
     resolve_microbatch_bounds,
 )
@@ -451,17 +450,24 @@ class Gliner2PIIRedactor(AdapterBase):
         return True, [*GUARD_SAFETY_FLOOR, *extra]
 
     def _validate_perf_knobs(self) -> None:
-        """Resolve the W9 ``quantize``/``compile`` knobs eagerly → ConfigError on a bad value.
+        """Resolve the W9 ``quantize``/``compile``/``intra_op_threads`` knobs eagerly → ConfigError.
 
         Resolving them at construction (against the resolved device) turns an invalid
-        ``quantize``/``compile`` config into an operator :class:`ConfigError` up front, rather than
-        a native fault surfaced only at the lazy load — the same fail-fast discipline as
-        ``batch_size``. The resolved values are recomputed at load time (device-stable), so this is
-        purely validation.
+        ``quantize``/``compile``/``intra_op_threads`` config into an operator :class:`ConfigError`
+        up front, rather than a native fault surfaced only at the lazy load — the same fail-fast
+        discipline as ``batch_size``. The resolved values are recomputed at load time
+        (device-stable), so this is purely validation.
+
+        ``intra_op_threads`` is validated here because the load choreography now applies the
+        many-core intra-op thread cap to this Provider too — defect (b). ``extract`` had it and
+        ``redact`` did not, yet the blessed stack runs BOTH mdeberta backbones in the same process
+        on the same many-core host; protecting one of the two protects neither, because the spin is
+        a process-wide torch thread pool.
         """
         try:
             resolve_gliner2_knob("quantize", self.device.device, self._config)
             resolve_gliner2_knob("compile", self.device.device, self._config)
+            resolve_intra_op_threads(self._config)
         except ValueError as exc:
             msg = f"{self.provider_name}: {exc}"
             raise ConfigError(msg) from exc
@@ -476,16 +482,15 @@ class Gliner2PIIRedactor(AdapterBase):
         :class:`~latence_core.errors.ProviderError` naming the supported range, never the native
         ``AttributeError``/``TypeError`` the mismatched API would raise later (ADR-0034).
 
-        W9-jit (#190, audit R1): the TorchScript JIT is neutralized FIRST, before the ``gliner2``
-        import — that import transitively pulls in transformers' deberta_v2 modeling module, whose
-        relative-position helpers are compiled by ``@torch.jit.script`` **AT IMPORT**. Neutralizing
-        later (inside ``load_gliner2_optimized``, entered only once this class is resolved) cannot
-        un-script them: the env switch is read by torch only at ITS import, and
-        ``jit._state.disable()`` affects only FUTURE ``script()`` calls — so the scripted helpers
-        would still die in nvrtc (``libnvrtc-builtins.so.13.0``) on the first forward on a
-        Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
+        W9-jit (#190, audit R1): this method no longer neutralizes the JIT itself — it is HANDED to
+        :func:`~latence_core.providers.perf.load_gliner2_model` as the backbone-import factory, and
+        the seam kills the TorchScript JIT (and caps the intra-op threads, which imports torch) and
+        only then calls it. That import transitively pulls in transformers' deberta_v2 modeling
+        module, whose relative-position helpers are compiled by ``@torch.jit.script`` **AT IMPORT**
+        and can never be un-scripted afterwards, so on a Blackwell/CUDA-13 box they die in nvrtc
+        (``libnvrtc-builtins.so.13.0``) on the first forward. Making the import a factory is what
+        turns that ordering from a rule into a straight line of code the caller cannot reorder.
         """
-        neutralize_torch_jit(provider_name=self.provider_name)
         try:
             import gliner2
             from gliner2 import GLiNER2
@@ -511,9 +516,11 @@ class Gliner2PIIRedactor(AdapterBase):
         # (throughput only, never a crash) — so a host whose torch/CUDA rejects fp16 or a compile
         # warmup fails still loads the identical model. An invalid ``quantize``/``compile`` value is
         # a ConfigError surfaced before the load (never a silent wrong knob).
-        # The import is resolved OUTSIDE the guard so a missing-dep ImportError surfaces as the
-        # clear "pip install latence-pii-gliner2" error, not a wrapped ProviderError.
-        gliner2_cls = self._gliner2_cls()
+        # C4: one call owns the whole ordered sequence (skip-decision → JIT kill → intra-op thread
+        # cap → backbone import → guarded quantize/compile load → cuda placement keyed off the
+        # RESOLVED device), and it types a native load fault itself (ADR-0034) — so there is no
+        # ``self.guard`` here to swallow the missing-dep ImportError, which still surfaces as the
+        # clear "pip install latence-pii-gliner2" message.
         # dogfood-2b-process: the default PII checkpoint's tokenizer_config.json stores
         # ``extra_special_tokens`` as a LIST, which transformers >= 4.57 (pulled transitively via
         # gliner2[local], within this Provider's allowed range) rejects at load with a native
@@ -522,24 +529,13 @@ class Gliner2PIIRedactor(AdapterBase):
         # (guarded, best-effort, byte-identical tokenization). Mirrors the glinker backend's
         # _patch_tokenizer_config precedent; a dict-shaped checkpoint is an idempotent no-op.
         coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
-        with self.guard("load_model"):
-            self._model = load_gliner2_optimized(
-                gliner2_cls.from_pretrained,
-                self._model_id,
-                self.device.device,
-                self._config,
-                provider_name=self.provider_name,
-            )
-        # W9-scaling: ``load_gliner2_optimized`` uses ``device`` ONLY to resolve the quantize/
-        # compile knobs — it performs NO placement. So when a GPU is present, ensure the fp16 model
-        # actually on cuda and LOG its device: the defence against the #191 fp16-eager GPU-idle hang
-        # (a fp16-converted model that silently stayed on CPU → a CPU-bound spin at 0% GPU, correct
-        # output, no warning). Best-effort + guarded (never crashes); a model already placed
-        # correctly makes the move a harmless no-op. Mirrors the twin fused_entity_relation.gliner2.
-        ensure_gliner2_on_cuda(
-            self._model,
-            cuda=cuda_available(),
+        self._model = load_gliner2_model(
+            self._gliner2_cls,
+            self._model_id,
+            self._config,
+            self.device,
             provider_name=self.provider_name,
+            guard=self.guard,
         )
         # #192: the loaded object must expose the batched-entity API this Provider drives. Checked
         # at LOAD (not at the first flush) so an API mismatch is a typed, actionable ProviderError
@@ -564,24 +560,18 @@ class Gliner2PIIRedactor(AdapterBase):
             "redaction.gliner2: torch.compile failed at inference; re-loading the uncompiled "
             "model (quantize kept) — throughput only, never a crash"
         )
-        gliner2_cls = self._gliner2_cls()
         # Idempotent no-op after _load_model already patched the cached config (dogfood-2b); kept
         # for symmetry so this reload path is never coupled to a prior patch having run.
         coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
-        with self.guard("load_model"):
-            self._model = load_gliner2_optimized(
-                gliner2_cls.from_pretrained,
-                self._model_id,
-                self.device.device,
-                cfg,
-                provider_name=self.provider_name,
-            )
-        # Keep the uncompiled reload on cuda too (W9-scaling) — this model serves the REST of the
-        # run, so skipping placement here would leave it fp16-on-CPU. Placement is idempotent.
-        ensure_gliner2_on_cuda(
-            self._model,
-            cuda=cuda_available(),
+        # The SAME choreography as the first load — placement included, which is the point: this
+        # model serves the REST of the run, so skipping placement here would leave it fp16-on-CPU.
+        self._model = load_gliner2_model(
+            self._gliner2_cls,
+            self._model_id,
+            cfg,
+            self.device,
             provider_name=self.provider_name,
+            guard=self.guard,
         )
         return self._model
 
@@ -664,8 +654,16 @@ class Gliner2PIIRedactor(AdapterBase):
         Each chunk's ``content`` (≤ the model window) is scanned in full — no truncation — and the
         chunk is re-emitted with ``masked_content`` + ``pii_spans`` set (``content`` UNCHANGED).
         Chunks are threaded 1:1 in first-seen order; a chunk-local span resolves to its ORIGINAL
-        source page through the chunk's offset_map + page_map (ADR-0031/0042).
+        source page through the chunk's offset_map + the
+        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042), which reads the
+        chunk's own ``page_slice`` (v19) — so resolution is exact whatever order chunks arrive
+        in and whichever of them a Stage dropped.
+
+        ONE resolver covers the whole call so the drift roll-up is per call rather than thrown
+        away per chunk; it holds no document state, so that is a reporting choice, not a
+        correctness one.
         """
+        resolver = PageIndexResolver()
         buffer: list[_PendingChunk] = []
 
         def flush() -> Iterator[ChunkRecord]:
@@ -673,18 +671,20 @@ class Gliner2PIIRedactor(AdapterBase):
             buffer.clear()
 
         for chunk in chunks:
-            buffer.append(self._prepare(chunk))
+            buffer.append(self._prepare(chunk, resolver))
             if len(buffer) >= self.batch_size():
                 yield from flush()
         yield from flush()
 
-    def _prepare(self, chunk: ChunkRecord) -> _PendingChunk:
+    def _prepare(self, chunk: ChunkRecord, resolver: PageIndexResolver) -> _PendingChunk:
         """Resolve everything a chunk needs BEFORE the (possibly batched) model call (W7/W16).
 
         The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy resolution, the
-        near-empty/skip decision, the chunk offset/page maps) and the effective label sets are
-        per-chunk and model-independent, so they are computed here up front; the flush then issues
-        one batched model call per label group over the detect-needing chunks.
+        near-empty/skip decision, the chunk offset map) and the effective label sets are per-chunk
+        and model-independent, so they are computed here up front; the flush then issues one
+        batched model call per label group over the detect-needing chunks. ``resolver`` is the
+        call-scoped page resolver — planning runs for EVERY chunk (before the skip decision), so
+        handing it in here is what absorbs the document's map from its first chunk.
 
         The T2 rule, both halves, in one place:
 
@@ -704,6 +704,7 @@ class Gliner2PIIRedactor(AdapterBase):
             detector_types=set(self._labels),
             sensitive_set=set(),
             min_chars=self._min_chars,
+            resolver=resolver,
         )
         # W12 label-source seam (ADR-0038): UNION the config PII floor with any pii_types the
         # OPTIONAL schema_induction Stage induced for this chunk (``induced_labels``), deduped +

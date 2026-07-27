@@ -711,3 +711,51 @@ def test_the_shipped_gpu_probe_set_is_unchanged_by_the_derivation() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     spec = load_environment(repo_root / "deploy" / "env" / "gpu-learned" / "environment.yaml")
     assert placement_probe_providers(spec, repo_root) == spec.learned_providers
+
+
+# --------------------------------------------------------------------------------------------
+# R3-seams_real_not_hypothetical-0 — the probe iterates `stack_components`, so a nested slot the
+# walker cannot see is a GPU model the gate silently never drives.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_nested_gpu_model_cannot_be_skipped_into_a_green_report(tmp_path: Path) -> None:
+    """The documented universal-parse shape: a Parse Stage whose OCR model is nested under ``ocr:``.
+
+    Pre-fix, ``envspec.stack_components`` walked a hard-coded ``(embedder, sparse_embedder,
+    multivector_embedder)`` tuple, so the ``ocr`` block — the ONLY GPU-gated node of that stack —
+    was invisible here. The loop below ``continue``d past it without appending a finding, and the
+    ``E-PLACEMENT-NONE`` guard did not fire either, because the sibling redaction Stage *was*
+    probed. The report was a genuine ``ok=True`` earned by measuring the wrong set of models: #191
+    with an extra level of nesting.
+
+    Post-fix the nested model is enumerated. It has no driver (``DRIVERS`` knows text-in/vector-out
+    Capabilities, not OCR), so the gate says ``E-PLACEMENT-UNDRIVABLE`` and names it — unexercised
+    is not passed. What must never happen again is silence.
+    """
+    stages = _REDACT_STAGE + (
+        "  - name: parse\n"
+        "    capability: parse\n"
+        "    provider: parser.render\n"
+        "    config:\n"
+        "      device: cuda\n"
+        "      ocr:\n"
+        "        provider: parser.lighton\n"
+        "        config: {device: cuda}\n"
+    )
+    spec = _write_env(
+        tmp_path,
+        stages=stages,
+        learned=("redaction.gliner_pii", "parser.lighton"),
+        providers=("redaction.gliner_pii", "parser.render", "parser.lighton"),
+    )
+
+    result = _probe(spec, FakeCuda(allocate_per_call=8_388_608))
+
+    codes = [f.code for f in result.report.findings]
+    assert not result.ok, (
+        "the nested OCR model was never driven, yet the gate reported success: "
+        f"{result.describe()}"
+    )
+    assert codes == ["E-PLACEMENT-UNDRIVABLE"], codes
+    assert "parser.lighton" in result.report.findings[0].message

@@ -52,8 +52,11 @@ Offsets (the recurring coordinate trap, ADR-0031): the chunk-local model offsets
 TRUE original-markdown offsets through the chunk's stripped→original ``offset_map`` via
 :class:`~latence_core.offsetmap.OffsetIndex` (``char_start + local`` is only a lower bound once
 markdown markup was stripped; a pre-v11 chunk with no map degrades to that shift). Each page span is
-re-resolved through the parent's page map via :class:`~latence_core.pagemap.PageOffsetIndex`. A
-relation's covering span is the min/max of its resolved endpoints, so it inherits the correction.
+re-resolved through :class:`~latence_core.page_index.PageIndexResolver`, which reads the chunk's
+OWN ``page_slice`` (v19) — so every chunk resolves exactly, in any order, whichever siblings a
+Stage dropped. ONE resolver serves the whole ``extract_fused`` call so the drift roll-up is per
+call. A relation's covering span spans two chunks, so it is answered from the endpoints' own
+already-exact pages (:func:`~latence_core.page_index.pages_for_covering_span`), not by a lookup.
 
 Licensing (ADR-0012 / research-diligence, verified 2026-07-10 — weights AND code, separately):
     * ``gliner2`` library (PyPI + github.com/fastino-ai/GLiNER2): **Apache-2.0** (code) — LICENSE
@@ -88,20 +91,17 @@ from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.induced import LabelFloor, LabelSlot, effective_labels, resolve_label_floor
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.providers.adapter import validate_batch_size
-from latence_core.providers.device import cuda_available
+from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import (
-    cap_intra_op_threads,
     empty_cuda_cache,
-    ensure_gliner2_on_cuda,
     inference_context,
     is_compile_backend_failure,
     is_cuda_oom,
     iter_label_buckets,
     iter_token_budget_microbatches,
-    load_gliner2_optimized,
-    neutralize_torch_jit,
+    load_gliner2_model,
     resolve_gliner2_knob,
     resolve_intra_op_threads,
     resolve_max_len,
@@ -467,10 +467,22 @@ class Gliner2FusedExtractor:
         # invalid value is an operator ConfigError up front, not a native fault buried in the lazy
         # load. device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places), matching where the
         # model will actually land.
+        # (a): resolve the device ONCE, through the ADR-0036 seam, like every other learned
+        # Provider. This Provider used to probe ``cuda_available()`` directly and never look at
+        # ``config["device"]`` at all — so ``device: cuda`` in the blessed pod stack was a no-op
+        # and, worse, ``device: cpu`` on a GPU box was silently overridden: it still resolved
+        # ``quantize=True`` and still moved the model to cuda. That is #191's failure class, in the
+        # Provider carrying the heaviest Stage. Resolving at construction also turns an invalid
+        # ``device`` string into an operator ConfigError before any weights are downloaded.
+        self._device = self._resolve_device(config.get("device", "auto"))
         try:
-            resolve_gliner2_knob("quantize", None, load_config)
-            resolve_gliner2_knob("compile", None, load_config)
-            self._intra_op_threads = resolve_intra_op_threads(load_config)
+            resolve_gliner2_knob("quantize", self._device.device, load_config)
+            resolve_gliner2_knob("compile", self._device.device, load_config)
+            # Validation only: the cap itself is APPLIED by the load choreography (which must own
+            # it, because it has to land before the backbone import — capping threads is what first
+            # imports torch). Resolving it here keeps a bad value an operator ConfigError at
+            # construction rather than a native fault buried in the lazy load.
+            resolve_intra_op_threads(load_config)
             # T7: the token-budget micro-batch bounds for the bucketed forward — the safety net that
             # keeps ONE padded activation bounded (max_texts × max_len) for any bucket size.
             self._microbatch_max_texts, self._microbatch_token_budget = resolve_microbatch_bounds(
@@ -491,15 +503,18 @@ class Gliner2FusedExtractor:
     # -- lazy model load ----------------------------------------------------
 
     def _gliner2_cls(self) -> Any:
-        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner2 import — that
-        # import transitively pulls in transformers' deberta_v2 modeling module, whose
-        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
-        # (inside load_gliner2_optimized, which is entered only AFTER this class is resolved) cannot
-        # un-script them: the env switch is read by torch only at ITS import, and
-        # jit._state.disable() only affects FUTURE script() calls — so the scripted helpers would
-        # still die in nvrtc (libnvrtc-builtins.so.13.0) on the first forward on a Blackwell/CUDA-13
-        # box. Throughput-only, byte-identical output.
-        neutralize_torch_jit(provider_name="fused_entity_relation.gliner2")
+        """The backbone-import factory the perf seam calls at the one correct instant (#190).
+
+        It no longer neutralizes the JIT itself: it is HANDED to
+        :func:`~latence_core.providers.perf.load_gliner2_model`, which kills the TorchScript JIT and
+        caps the intra-op threads and only then calls this. That import transitively pulls in
+        transformers' ``deberta_v2`` module, whose relative-position helpers are compiled by
+        ``@torch.jit.script`` AT IMPORT and cannot be un-scripted afterwards (the Blackwell/CUDA-13
+        ``libnvrtc-builtins.so.13.0`` crash). The ordering used to be a rule this Provider had to
+        re-state in a comment and an AST linter had to police; now it is a straight line of code
+        inside the seam that no caller can reorder. The native dependency and its install hint stay
+        here, where the package that owns them is (ADR-0036 §2).
+        """
         try:
             from gliner2 import GLiNER2
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
@@ -510,41 +525,36 @@ class Gliner2FusedExtractor:
             raise ImportError(msg) from exc
         return GLiNER2
 
+    @classmethod
+    def _resolve_device(cls, requested: object) -> DeviceDecision:
+        """Route the ``device`` config value (``auto|cpu|cuda``) through the ADR-0036 device seam.
+
+        ``compute="either"`` (see :meth:`profile`), so ``cpu`` pins CPU, ``auto`` follows
+        availability, and ``cuda`` resolves to CUDA when a GPU is present — else the seam returns a
+        **skip** decision, which the load choreography turns into a loud ConfigError rather than a
+        silent CPU fallback (#191). A malformed device string is a ConfigError, not a TypeError.
+        """
+        try:
+            return select_device(str(requested), cls.profile())
+        except ValueError as exc:
+            msg = f"fused_entity_relation.gliner2: invalid device config: {exc}"
+            raise ConfigError(msg) from exc
+
     def _load_model(self) -> Any:
+        """Load the checkpoint on first use (cached) via the shared load choreography (C4).
+
+        One call. :func:`~latence_core.providers.perf.load_gliner2_model` owns the ordered sequence
+        — skip-decision → JIT kill → intra-op thread cap → backbone import → native quantize/compile
+        load (guarded, degrades to plain) → cuda placement keyed off the RESOLVED device. What this
+        Provider still owns is what is genuinely its own: the batched-API check below.
+        """
         if self._model is not None:
             return self._model
-        # W9-jit (#190, audit R1): FIRST, before anything imports torch — ``cap_intra_op_threads``
-        # below does — so the JIT env switch is already off in the environment torch reads at
-        # ITS import, not only after. Idempotent with the call in ``_gliner2_cls`` (which
-        # guarantees the ordering
-        # against the gliner2/deberta_v2 import for both load sites).
-        neutralize_torch_jit(provider_name="fused_entity_relation.gliner2")
-        # W9-scaling: cap torch intra-op threads BEFORE the load/first forward so gliner2's
-        # internal batching cannot oversubscribe a many-core host (the ~cpu_count-thread CPU spin
-        # with the GPU idle). Guarded → a torch-free/failed cap is a logged no-op.
-        cap_intra_op_threads(
-            self._intra_op_threads, provider_name="fused_entity_relation.gliner2"
-        )
-        # W9 perf seam: the gliner2 framework exposes NATIVE quantize (fp16) + compile
-        # (torch.compile + fused GPU kernels) kwargs on from_pretrained — pod-measured 1.74×
-        # combined NER+RE at byte-identical output. quantize defaults True on cuda / False on cpu;
-        # compile rides the cuda default since T7 (bucketing removed the recompile-thrash
-        # precondition). GUARDED so a quantize/compile fault degrades to a plain load (throughput
-        # only, never a crash). device=None ⇒ the torch-free CUDA probe (GLiNER2 auto-places).
-        self._model = load_gliner2_optimized(
-            self._gliner2_cls().from_pretrained,
+        self._model = load_gliner2_model(
+            self._gliner2_cls,
             self._model_id,
-            None,
             self._config,
-            provider_name="fused_entity_relation.gliner2",
-        )
-        # W9-scaling: when a GPU is present, ensure the (fp16) model is actually on cuda and LOG its
-        # device — the defence against the fp16-eager GPU-idle hang (a fp16-converted model that
-        # silently stayed on CPU → a CPU-bound spin). Best-effort + guarded (never crashes); a model
-        # from_pretrained already placed correctly makes the move a harmless no-op.
-        ensure_gliner2_on_cuda(
-            self._model,
-            cuda=cuda_available(),
+            self._device,
             provider_name="fused_entity_relation.gliner2",
         )
         # T7: the loaded object must expose the BATCHED entry points this Provider now drives.
@@ -572,17 +582,13 @@ class Gliner2FusedExtractor:
             "fused_entity_relation.gliner2: torch.compile failed at inference; re-loading the "
             "uncompiled model (quantize kept) — throughput only, never a crash"
         )
-        self._model = load_gliner2_optimized(
-            self._gliner2_cls().from_pretrained,
+        # The SAME choreography as the first load — placement included, which is the point: skipping
+        # it here would leave the model that serves the REST of the run unplaced.
+        self._model = load_gliner2_model(
+            self._gliner2_cls,
             self._model_id,
-            None,
             cfg,
-            provider_name="fused_entity_relation.gliner2",
-        )
-        # Keep the uncompiled reload on cuda too (W9-scaling) — the placement/logging is idempotent.
-        ensure_gliner2_on_cuda(
-            self._model,
-            cuda=cuda_available(),
+            self._device,
             provider_name="fused_entity_relation.gliner2",
         )
         return self._model
@@ -620,9 +626,13 @@ class Gliner2FusedExtractor:
         #: cumulative (chunks_processed, mentions, relations) recorded per batch — the progress
         #: trail an operator (or a test) reads to confirm the stage streams incrementally.
         self._progress = []
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's index
+        # is built on the first chunk of it we see and reused for every later chunk. It is handed
+        # to _iter_batches so it observes EVERY chunk, including the ones min_chars drops.
+        resolver = PageIndexResolver()
 
         for batch_count, batch in enumerate(
-            _iter_batches(chunks, self._batch_size, self._min_chars), start=1
+            _iter_batches(chunks, self._batch_size, self._min_chars, resolver), start=1
         ):
             if not loaded:
                 self._load_model()
@@ -631,7 +641,9 @@ class Gliner2FusedExtractor:
             raw_entities = self._bucketed_forward(pending, _ENTITY_SLOT)
             raw_relations = self._bucketed_forward(pending, _RELATION_SLOT)
             for item, ents, rels in zip(pending, raw_entities, raw_relations, strict=True):
-                chunk_mentions, chunk_relations = self._build_records(item.chunk, ents, rels)
+                chunk_mentions, chunk_relations = self._build_records(
+                    item.chunk, ents, rels, resolver
+                )
                 mentions.extend(chunk_mentions)
                 relations.extend(chunk_relations)
                 processed += 1
@@ -800,6 +812,7 @@ class Gliner2FusedExtractor:
         chunk: ChunkRecord,
         entities_by_label: dict[str, list[dict[str, Any]]],
         relations_by_type: dict[str, list[dict[str, Any]]],
+        resolver: PageIndexResolver,
     ) -> tuple[list[EntityMention], list[RelationMention]]:
         """Map the REAL gliner2 per-label/per-relation dicts → the framework mention/relation set.
 
@@ -834,7 +847,8 @@ class Gliner2FusedExtractor:
 
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Each record's page span comes from the DOCUMENT-scoped resolver, so a chunk carrying
+        # no page map (every non-first chunk since v18) still resolves its own pages.
 
         mentions: list[EntityMention] = []
         by_span: dict[tuple[int, int], EntityMention] = {}
@@ -857,7 +871,12 @@ class Gliner2FusedExtractor:
                 doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
             else:
                 doc_start, doc_end = chunk_char_start + local_start, chunk_char_start + local_end
-            provenance = _mention_provenance(chunk.provenance, doc_start, doc_end, page_index)
+            provenance = _mention_provenance(
+                chunk.provenance,
+                doc_start,
+                doc_end,
+                resolver.pages_for_span(chunk, doc_start, doc_end),
+            )
             mention = EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
                 document_record_id=chunk.document_record_id,
@@ -904,7 +923,16 @@ class Gliner2FusedExtractor:
                 continue
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
-            rel_prov = _relation_provenance(head, tail, span_start, span_end, page_index)
+            rel_prov = _relation_provenance(
+                head,
+                tail,
+                span_start,
+                span_end,
+                # A covering span runs between two endpoints and is not a sub-chunk offset,
+                # so it is answered from the endpoints' own already-exact pages rather than by
+                # a lookup against any one chunk.
+                pages_for_covering_span(head.provenance, tail.provenance),
+            )
             relations.append(
                 RelationMention(
                     record_id=f"{chunk.record_id}#relation-{emitted}",
@@ -925,7 +953,10 @@ class Gliner2FusedExtractor:
 
 
 def _iter_batches(
-    chunks: Iterable[ChunkRecord], batch_size: int, min_chars: int
+    chunks: Iterable[ChunkRecord],
+    batch_size: int,
+    min_chars: int,
+    resolver: PageIndexResolver,
 ) -> Iterable[list[ChunkRecord]]:
     """Group the (lazy) chunk stream into bounded batches of processable chunks (W9-scaling).
 
@@ -993,12 +1024,13 @@ def _mention_provenance(
     chunk_prov: Provenance,
     doc_char_start: int,
     doc_char_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
+    """``pages`` is what the :class:`~latence_core.page_index.PageIndexResolver` resolved for the
+    mention's own span; ``None`` (no page map available) degrades to the chunk's inherited range."""
     update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(doc_char_start)
-        update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     return chunk_prov.model_copy(update=update)
 
 
@@ -1007,13 +1039,12 @@ def _relation_provenance(
     tail: EntityMention,
     span_start: int,
     span_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
     base = head.provenance
     update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(span_start)
-        update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     else:
         hp, tp = head.provenance, tail.provenance
         starts = [p for p in (hp.page_start, tp.page_start) if p is not None]

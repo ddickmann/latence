@@ -81,6 +81,7 @@ from latence_core.contracts import (
     OffsetSegment,
     PageMap,
     PageMapAssembly,
+    PageSlice,
     PageSpan,
     ParserInput,
     PIISpan,
@@ -112,6 +113,7 @@ from latence_core.errors import (
     ConfigError,
     ContractError,
     LatenceError,
+    PageSliceMissingError,
     ProviderError,
     ScreeningQuarantineError,
     StorageError,
@@ -149,6 +151,7 @@ from latence_core.observability import (
     validate_run_event,
 )
 from latence_core.offsetmap import OffsetIndex
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers import (
@@ -182,7 +185,14 @@ from latence_core.quality import (
     StageMetrics,
     StageScore,
 )
-from latence_core.quality_report_builder import QualityReportBuilder, StageRecordReader
+from latence_core.quality_report_builder import (
+    QUALITY_AGGREGATORS,
+    QualityAggregator,
+    QualityAggregatorFactory,
+    QualityReportBuilder,
+    QualityRunContext,
+    StageRecordReader,
+)
 from latence_core.runner import LocalRunner, topological_order
 from latence_core.state import (
     AffectedSet,
@@ -321,8 +331,11 @@ __all__ = [
     "OffsetMap",
     "OffsetSegment",
     "PageDriftDiagnostics",
+    "PageIndexResolver",
     "PageMap",
     "PageMapAssembly",
+    "PageSlice",
+    "PageSliceMissingError",
     "PageOffsetIndex",
     "PrometheusMetricSink",
     "PIIDetector",
@@ -341,7 +354,11 @@ __all__ = [
     "ProviderProfile",
     "ProviderRegistry",
     "QualityReport",
+    "QUALITY_AGGREGATORS",
+    "QualityAggregator",
+    "QualityAggregatorFactory",
     "QualityReportBuilder",
+    "QualityRunContext",
     "QuarantineRecord",
     "Record",
     "RedactionAction",
@@ -389,6 +406,7 @@ __all__ = [
     "estimate_tokens",
     "make_graph_id",
     "observability_available",
+    "pages_for_covering_span",
     "profile_of",
     "record_quality_report",
     "score_entities",

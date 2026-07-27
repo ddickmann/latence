@@ -31,6 +31,7 @@ from latence_core.contracts import (
     Provenance,
     RelationMention,
 )
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import Pipeline
 from latence_core.quality import QualityReport
@@ -39,14 +40,22 @@ from latence_core.storage import Storage
 
 
 def _shift(
-    chunk: ChunkRecord, doc_start: int, doc_end: int, idx: PageOffsetIndex | None
+    chunk: ChunkRecord, doc_start: int, doc_end: int, resolver: PageIndexResolver
 ) -> Provenance:
-    """Provenance for a span at document offsets, with its page resolved via the map."""
-    update: dict[str, int] = {"char_start": doc_start, "char_end": doc_end}
-    if idx is not None:
-        update["page_start"] = idx.page_for_offset(doc_start)
-        update["page_end"] = idx.page_for_offset(max(doc_end - 1, doc_start))
-    return chunk.provenance.model_copy(update=update)
+    """Provenance for a span at document offsets, with its page resolved through the seam.
+
+    Through :class:`PageIndexResolver`, never off the record: the chunk owns its page spans
+    (v19) and the seam owns the half-open end clamp.
+    """
+    page_start, page_end = resolver.pages_for_span(chunk, doc_start, doc_end)
+    return chunk.provenance.model_copy(
+        update={
+            "char_start": doc_start,
+            "char_end": doc_end,
+            "page_start": page_start,
+            "page_end": page_end,
+        }
+    )
 
 
 _ENTITY_YAML = """
@@ -220,10 +229,11 @@ class _FakeFusedProvider:
     def extract_fused(self, chunks: Any) -> FusedExtraction:
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
+        resolver = PageIndexResolver()
         for chunk in chunks:
             if not isinstance(chunk, ChunkRecord) or not chunk.content.strip():
                 continue
-            out = self._extract_one(chunk)
+            out = self._extract_one(chunk, resolver)
             if out is None:
                 continue
             head, tail, relation = out
@@ -233,7 +243,7 @@ class _FakeFusedProvider:
 
     @staticmethod
     def _extract_one(
-        chunk: ChunkRecord,
+        chunk: ChunkRecord, resolver: PageIndexResolver
     ) -> tuple[EntityMention, EntityMention, RelationMention] | None:
         text = chunk.content
         a = text.find("Alice")
@@ -241,7 +251,6 @@ class _FakeFusedProvider:
         if a < 0 or o < 0:
             return None
         base = chunk.provenance.char_start or 0
-        idx = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
         head = EntityMention(
             record_id=f"{chunk.record_id}#entity-0",
             document_record_id=chunk.document_record_id,
@@ -250,7 +259,7 @@ class _FakeFusedProvider:
             label="PERSON",
             text="Alice",
             confidence=0.9,
-            provenance=_shift(chunk, base + a, base + a + len("Alice"), idx),
+            provenance=_shift(chunk, base + a, base + a + len("Alice"), resolver),
             classification=chunk.classification,
         )
         tail = EntityMention(
@@ -261,11 +270,15 @@ class _FakeFusedProvider:
             label="ORG",
             text="Acme Corp",
             confidence=0.9,
-            provenance=_shift(chunk, base + o, base + o + len("Acme Corp"), idx),
+            provenance=_shift(chunk, base + o, base + o + len("Acme Corp"), resolver),
             classification=chunk.classification,
         )
         span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
         span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
+        # A covering span is not a sub-chunk offset — its endpoints may sit in different
+        # chunks — so its pages are the union of the endpoints' own exact pages, not a lookup.
+        covering_pages = pages_for_covering_span(head.provenance, tail.provenance)
+        assert covering_pages is not None
         relation = RelationMention(
             record_id=f"{chunk.document_record_id}#relation-0",
             document_record_id=chunk.document_record_id,
@@ -276,7 +289,14 @@ class _FakeFusedProvider:
             head_text=head.text,
             tail_text=tail.text,
             confidence=0.88,
-            provenance=_shift(chunk, span_start, span_end, idx),
+            provenance=head.provenance.model_copy(
+                update={
+                    "char_start": span_start,
+                    "char_end": span_end,
+                    "page_start": covering_pages[0],
+                    "page_end": covering_pages[1],
+                }
+            ),
             classification=chunk.classification,
         )
         return head, tail, relation

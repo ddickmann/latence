@@ -55,7 +55,7 @@ from latence_core.contracts import (
     ChunkRecord,
     Classification,
     EntityMention,
-    PageMap,
+    PageSlice,
     PageSpan,
     Provenance,
 )
@@ -171,7 +171,8 @@ def _probe_chunk() -> ChunkRecord:
         index=0,
         content=_PROBE_TEXT,
         token_count=len(_PROBE_TEXT.split()),
-        page_map=PageMap(
+        # One chunk on one page, so the chunk's slice is that page.
+        page_slice=PageSlice(
             pages=[PageSpan(page_number=1, char_start=0, char_end=len(_PROBE_TEXT))],
             total_chars=len(_PROBE_TEXT),
         ),

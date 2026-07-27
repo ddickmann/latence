@@ -41,13 +41,36 @@ from latence_core.stages.graph_assembly import CanonicalGraphAssembler
 from latence_core.stages.profiling import StatisticalProfiler
 from latence_core.stages.relation import PatternRelationExtractor
 
-# The single canonical document. Small, deterministic, and PII-bearing (the email). The
-# trigger phrase "works for" sits between the "Alice" and "Acme Corp" mentions so the pattern
-# RelationExtractor emits a real relation — the fixtures exercise the whole doc-level spine.
-CANONICAL_TEXT = (
-    "Alice works for Acme Corp in Berlin. "
-    "Contact alice@example.com about Acme Corp."
+# The single canonical document, **as its source pages**. Small, deterministic, and PII-bearing
+# (the email). The trigger phrase "works for" sits between the "Alice" and "Acme Corp" mentions so
+# the pattern RelationExtractor emits a real relation — the fixtures exercise the whole doc-level
+# spine.
+#
+# It is MULTI-PAGE, and the second sentence deliberately STRADDLES the page 2 / page 3 boundary,
+# because a one-page document cannot observe the invariant rule 3 of docs/CONFORMANCE.md states:
+# every Provider must resolve a sub-chunk offset's OWN page through a ``PageIndexResolver`` rather
+# than stamp the parent chunk's inherited range on it. On a single page every such degradation is
+# *coincidentally* correct, so the suite reported a silently mis-paging Provider as
+# conformance-verified (``issues/audit-arch/R4-invariants_and_adrs-2.md``). Paginated, chunk 1
+# spans pages 2–3 and its mentions land on page 2 or page 3, so an inherited range is a WRONG
+# range and the suite sees it.
+CANONICAL_PAGES: tuple[str, ...] = (
+    "Alice works for Acme Corp in Berlin.",
+    "Contact alice@example.com about",
+    "Acme Corp.",
 )
+#: The inter-page separator the canonical document is assembled with. A single space, so the
+#: assembled text is byte-identical to the pre-pagination fixture — pagination changed where the
+#: page boundaries are, not one character of the document.
+CANONICAL_PAGE_SEPARATOR = " "
+CANONICAL_TEXT = CANONICAL_PAGE_SEPARATOR.join(CANONICAL_PAGES)
+
+# The Chunker config the canonical corpus is built with. Deliberately a small token budget: the
+# canonical document is tiny and at the 512-token default it produces exactly ONE chunk, whose
+# single page makes every page claim coincidentally right. Packing one sentence per chunk gives
+# the corpus a second chunk that STRADDLES two pages — the shape rule 3 is actually about, and the
+# case a per-chunk ``page_slice`` has to carry both spans for.
+_CANONICAL_CHUNKER_CONFIG = {"max_tokens": 16, "overlap_tokens": 0, "min_tokens": 4}
 
 # A PII value that appears verbatim in the canonical text; the C6 no-leak check asserts this
 # exact string never surfaces in a non-Redactor Provider's output records.
@@ -127,7 +150,14 @@ def _build_document() -> DocumentRecord:
     )
     from latence_core.contracts import Disposition, PageMap
 
-    assembly = PageMap.from_page_texts([text])
+    # Assemble from the SOURCE PAGES, not from the flat text: the page map is what makes the
+    # ADR-0021/0031 round-trip (offset -> original page) checkable, and a one-span map makes every
+    # page answer 1 — including a wrong one. ``from_page_texts`` builds the text and the boundaries
+    # together, so the assembled result is exactly ``CANONICAL_TEXT``.
+    assembly = PageMap.from_page_texts(list(CANONICAL_PAGES), CANONICAL_PAGE_SEPARATOR)
+    if assembly.text != text:  # pragma: no cover - guarded by test_conformance
+        msg = "CANONICAL_PAGES must assemble to CANONICAL_TEXT byte-for-byte"
+        raise AssertionError(msg)
     prov = raw.provenance.model_copy(update={"char_start": 0, "char_end": len(text)})
     return DocumentRecord(
         record_id=f"{raw.provenance.document_id}:doc",
@@ -148,7 +178,7 @@ def canonical_corpus() -> CanonicalCorpus:
     Provenance + Classification and validated offsets by construction of the Providers.
     """
     documents = [_build_document()]
-    chunks = list(MarkdownChunker({}).chunk(documents))
+    chunks = list(MarkdownChunker(_CANONICAL_CHUNKER_CONFIG).chunk(documents))
     mentions = list(
         GazetteerEntityExtractor({"labels": _ENTITY_LABELS}).extract(chunks)
     )

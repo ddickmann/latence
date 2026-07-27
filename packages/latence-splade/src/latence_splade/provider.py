@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import SparseVector
 from latence_core.errors import ConfigError
+from latence_core.providers.device import select_device
 from latence_core.providers.profile import UNVERIFIED_LICENSE, ProviderProfile
 
 from latence_splade.composition import EntityTerm, SpladeInput, compose
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from latence_core.capability import SparseSignals
+    from latence_core.providers.device import DeviceDecision
 
 _DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 _DEFAULT_ENTITY_BOOST = 1.0
@@ -174,13 +176,34 @@ class SpladeCompositionEmbedder:
         self._model: SpladeModel | None = model
         self._config_model_id = str(cfg.get("model", "") or "")
         self._max_length = int(cfg.get("max_length", 512))
+        # (c): ``sparse.splade`` is a registered LEARNED Provider running real transformer forwards,
+        # and it had no device routing and no perf seam at all — the fp32 regression guard's curated
+        # list simply never named it. Resolve the device ONCE here, through the ADR-0036 seam, like
+        # every other learned Provider; the adapter then loads through the shared choreography.
+        # ``compute="either"`` (see :meth:`profile`), so a CPU-only host resolves to cpu rather than
+        # skipping. An invalid ``device`` string is an operator ConfigError at construction.
+        self._device = self._resolve_device(cfg.get("device", "auto"))
+        self._perf_config: dict[str, Any] = dict(cfg)
+
+    @classmethod
+    def _resolve_device(cls, requested: object) -> DeviceDecision:
+        """Route the ``device`` config value (``auto|cpu|cuda``) through the device seam."""
+        try:
+            return select_device(str(requested), cls.profile())
+        except ValueError as exc:
+            msg = f"sparse.splade: invalid device config: {exc}"
+            raise ConfigError(msg) from exc
 
     def _resolve_model(self) -> SpladeModel:
         if self._model is None:
             # Constructs (does not load) the transformers adapter; a missing 'model' is rejected
-            # there.
+            # there. The resolved device + perf config travel with it so the eventual load runs the
+            # shared choreography rather than a bare fp32 ``from_pretrained``.
             self._model = TransformersSpladeModel(
-                self._config_model_id, max_length=self._max_length
+                self._config_model_id,
+                max_length=self._max_length,
+                device=self._device,
+                config=self._perf_config,
             )
         return self._model
 

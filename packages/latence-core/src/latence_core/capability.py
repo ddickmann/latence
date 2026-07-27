@@ -303,7 +303,7 @@ class PIIDetector(Protocol):
     The chunk's ``content`` stays UNMASKED (so a later re-read / audit sees the full entities); the
     additive ``masked_content`` is the PII-safe variant the Export materializes for the RAG corpus,
     and ``pii_spans`` are the chunk-local, counts-only detected spans (offsets into the chunk
-    ``content``, source pages resolved through the chunk's offset_map+page_map — never the raw
+    ``content``, source pages resolved through the chunk's offset_map+page_slice — never the raw
     value, S6 AC). Redaction is metadata-aware: the Provider keys its policy off each chunk's
     ``Classification.sensitivity`` (S6 AC). The PII type set is Provider/config-supplied — the
     Capability names no PII types. A chunk with no detected PII yields a chunk whose
@@ -313,8 +313,12 @@ class PIIDetector(Protocol):
     :mod:`latence_core.redaction_policy` (``plan_chunk_redaction`` + ``finalize_redacted_chunk``),
     so a Provider owns ONLY detection. Because Redaction reads the chunk's markup-stripped
     ``content``, a span's chunk-local offset resolves to its ORIGINAL source page through the
-    chunk's offset_map + page_map — the coordinate-correctness ADR-0031/0042 guarantee. Redaction
-    therefore depends on the Chunk Stage (not Parse).
+    chunk's offset_map + the
+    :class:`~latence_core.page_index.PageIndexResolver` — the coordinate-correctness ADR-0031/0042
+    guarantee. The resolver reads the chunk's OWN ``page_slice`` (v19), so resolution is exact in
+    any order and with any sibling chunk missing. A Provider builds ONE resolver per ``redact``
+    call and hands it to every ``plan_chunk_redaction`` (it is a required argument, so the page
+    seam cannot be forgotten). Redaction therefore depends on the Chunk Stage (not Parse).
 
     The document-level :meth:`redact` shape (``Iterable[DocumentRecord] ->
     Iterator[RedactionRecord]``) is DEPRECATED; a Provider MAY retain it as a secondary

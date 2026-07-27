@@ -39,9 +39,12 @@ import yaml
 from latence_core.contracts import (
     ChunkRecord,
     Classification,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.pipeline import Pipeline
 from latence_core.redaction_policy import (
     RedactionPolicy,
@@ -224,6 +227,7 @@ def _finalize(
         detector_types={"person", "credit_card"},
         sensitive_set=set(),
         min_chars=1,
+        resolver=PageIndexResolver(),
     )
     return finalize_redacted_chunk(chunk, plan, accepted=accepted, salt="s")
 
@@ -247,6 +251,11 @@ def _chunk(text: str) -> ChunkRecord:
         classification=Classification(language="en", sensitivity="internal"),
         content=text,
         token_count=len(text.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
     )
 
 

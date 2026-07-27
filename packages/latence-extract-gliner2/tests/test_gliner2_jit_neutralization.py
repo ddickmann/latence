@@ -36,7 +36,13 @@ import types
 from typing import Any
 
 import pytest
-from latence_core.contracts import ChunkRecord, Classification, Provenance
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    PageSlice,
+    PageSpan,
+    Provenance,
+)
 from latence_core.errors import ProviderError
 from latence_extract_gliner2 import Gliner2FusedExtractor
 
@@ -76,6 +82,11 @@ def _chunk() -> ChunkRecord:
         classification=Classification(language="en", sensitivity="internal"),
         content=TEXT,
         token_count=len(TEXT.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=2, char_start=100, char_end=100 + len(TEXT))],
+            total_chars=100 + len(TEXT),
+        ),
     )
 
 

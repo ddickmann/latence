@@ -68,7 +68,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 | `content` | string | no (default `""`) | Markup-stripped, PII-redacted retrieval text. **Byte-unchanged by W13.** |
 | `media_type` | string | no (default `text/markdown`) | How to interpret `content`. |
 | `token_count` | int | no | Budgeted token count for the chunk text. |
-| `page_map` | object\|null | yes | Parent doc page-boundary map (`PageMap`), so a sub-chunk offset resolves to its own page. |
+| `page_slice` | object\|null | yes | THIS chunk's own page spans (`PageSlice`) — exactly the parent document's `PageSpan`s overlapping `[char_start, char_end)`, in document coordinates — so a sub-chunk offset resolves to its own page. **Renamed from `page_map` in schema v19**, which carried the parent document's WHOLE map (on every chunk, then on the document's first chunk only). |
 | `offset_map` | object\|null | yes | `OffsetMap`: run-length map stripped-`content`→original-markdown offsets (v11). |
 | `risk_markers` | array<RiskMarker> | no (default `[]`) | Content-Screening flags that survive into the corpus (filterable — exclude flagged chunks). |
 | `induced_labels` | object\|null | yes | `InducedLabels` the `schema_induction` Stage attached (v14). |
@@ -78,7 +78,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 **Example line** (abridged, chunk with a context header, no embedding):
 
 ```json
-{"classification":{"category":"contract","language":"en","schema_version":15,"sensitivity":"confidential"},"content":"Acme Corporation entered into a master services agreement with Beta LLC on 3 March 2024.","context_header":{"entities":["Acme Corporation","Beta LLC"],"entity_types":["Organization","Organization"],"kg_node_ids":["b1c2...","d3e4..."],"neighbor_node_ids":["f5a6..."],"neighbor_triples":["Acme Corporation —acquired→ Gamma Inc"],"situating_sentence":null,"model_id":null,"schema_version":15},"document_record_id":"sha256:9a…","index":4,"media_type":"text/markdown","offset_map":{"length":88,"segments":[{"doc_start":512,"local_start":0}],"schema_version":15},"page_map":null,"provenance":{"char_end":600,"char_start":512,"document_id":"sha256:9a…","file_name":"msa.pdf","file_size":48210,"file_type":"pdf","page_end":2,"page_start":2,"schema_version":15,"source_system":null,"source_uri":"file:///corpus/msa.pdf"},"record_id":"sha256:1f…","risk_markers":[],"induced_labels":null,"schema_version":15,"token_count":21}
+{"classification":{"category":"contract","language":"en","schema_version":15,"sensitivity":"confidential"},"content":"Acme Corporation entered into a master services agreement with Beta LLC on 3 March 2024.","context_header":{"entities":["Acme Corporation","Beta LLC"],"entity_types":["Organization","Organization"],"kg_node_ids":["b1c2...","d3e4..."],"neighbor_node_ids":["f5a6..."],"neighbor_triples":["Acme Corporation —acquired→ Gamma Inc"],"situating_sentence":null,"model_id":null,"schema_version":15},"document_record_id":"sha256:9a…","index":4,"media_type":"text/markdown","offset_map":{"length":88,"segments":[{"doc_start":512,"local_start":0}],"schema_version":15},"page_slice":{"pages":[{"char_end":640,"char_start":420,"page_number":2,"schema_version":15}],"schema_version":15,"total_chars":1180},"provenance":{"char_end":600,"char_start":512,"document_id":"sha256:9a…","file_name":"msa.pdf","file_size":48210,"file_type":"pdf","page_end":2,"page_start":2,"schema_version":15,"source_system":null,"source_uri":"file:///corpus/msa.pdf"},"record_id":"sha256:1f…","risk_markers":[],"induced_labels":null,"schema_version":15,"token_count":21}
 ```
 
 ### 2.2 `records.parquet` — RAG corpus (Parquet / Arrow)
@@ -99,7 +99,7 @@ Writer: `JsonlParquetExport._parquet_schema` / `_record_batch` (`export.py:309-3
 
 **Genuinely-optional guarantee:** without `embedder` and without `context_columns`, the Parquet schema is the first six columns and is **byte-identical** to a pre-W13 run (`export.py:310-333`). An all-empty corpus still writes the schema-only Parquet so a reader always gets the column set (`export.py:279-282`).
 
-> The flat Parquet projection deliberately drops `document_record_id`, `token_count`, `risk_markers`, `offset_map`, `page_map`, `induced_labels` — those live fully in `records.jsonl`. A retrieval engine that needs them either reads the JSONL or projects `provenance` (which carries `document_id`). **Flag:** if the engine needs `document_record_id`/`risk_markers` as first-class Parquet columns, that is a small additive change to `_parquet_schema` — the seam exists but is not wired today.
+> The flat Parquet projection deliberately drops `document_record_id`, `token_count`, `risk_markers`, `offset_map`, `page_slice`, `induced_labels` — those live fully in `records.jsonl`. A retrieval engine that needs them either reads the JSONL or projects `provenance` (which carries `document_id`). **Flag:** if the engine needs `document_record_id`/`risk_markers` as first-class Parquet columns, that is a small additive change to `_parquet_schema` — the seam exists but is not wired today.
 
 ### 2.3 The `embedding` column (opt-in dense vector)
 
@@ -362,12 +362,12 @@ Nothing in the output is engine-specific: Parquet/JSONL for the corpus, Parquet 
 
 ## 7. Guarantees the retrieval engine can rely on
 
-1. **Exact offset round-trip to source.** Every record's `Provenance` carries `char_start/char_end` (+ `page_start/page_end`) in the parent document's assembled-markdown coordinates; `page_map` + `offset_map` on the chunk let a sub-chunk offset resolve to its **true** original offset and page (`OffsetMap`, `PageOffsetIndex`), not a lower bound.
+1. **Exact offset round-trip to source.** Every record's `Provenance` carries `char_start/char_end` (+ `page_start/page_end`) in the parent document's assembled-markdown coordinates; `page_slice` + `offset_map` on the chunk let a sub-chunk offset resolve to its **true** original offset and page (`OffsetMap`, `PageOffsetIndex`), not a lower bound.
 2. **Redaction applied before export.** The corpus text is the PII-handled variant — the Embedder embeds `masked_content` when present, and `PIISpan` never stores the raw value (`contracts.py:929-945`). `redaction_disabled_for_sensitive` is a loud flag that an empty `pii_spans` on a sensitive doc means "control OFF", not "clean" (H-C1 §4).
 3. **Deterministic / reproducible.** Content-addressed ids (chunk ids, `node_id` = sha256(corpus+entity), `edge_id` = sha256(corpus+relation)); sorted-key JSON; capped/sorted collections; streamed Parquet byte-identical to the buffered path. A seeded run over the same corpus + config is byte-identical.
 4. **Evidence-linked edges.** Every `GraphEdge` carries `Evidence` naming the source mentions/documents; the Quality Report's `graph.evidence_coverage` reports the fraction of edges so justified (1.0 = all).
 5. **Additive / versioned schemas.** `schema_version` on every record; new fields default to `None`/empty so older readers keep validating.
-6. **Atomic publish.** Both corpus files and the report are written to temp paths and atomically renamed (`Storage.finalize_atomic` / `write_atomic`), so a reader never sees a torn file.
+6. **Atomic publish.** Both corpus files and the report are written to temp paths and atomically renamed (`Storage.atomic_writers` for the streamed corpus file *set*, `Storage.write_atomic` for the buffered report), so a reader never sees a torn file — and a failed run sweeps its own temp paths rather than leaving them on the store. On an object store "atomically renamed" means the destination object is written in one atomic, read-after-write-consistent PUT; the underlying copy-then-delete is two operations, so a crash mid-publish can still leave a temp object behind (see `Storage.atomic_writer`).
 
 ---
 

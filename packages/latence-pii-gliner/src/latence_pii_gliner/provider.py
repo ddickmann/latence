@@ -39,16 +39,10 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
-from latence_core.providers.perf import (
-    apply_gliner_max_len,
-    load_then_cast,
-    maybe_compile,
-    neutralize_torch_jit,
-    place_on_device,
-    resolve_max_len,
-)
+from latence_core.providers.perf import load_gliner_model, resolve_max_len
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
     ChunkRedactionPlan,
@@ -90,6 +84,28 @@ _DEFAULT_MODEL = "urchade/gliner_multi_pii-v1"
 # PIISpans/masking are record-for-record identical to a per-document loop for any positive batch
 # size (ADR-0033: the in-flight tensor is bounded to ``batch_size``, never the whole corpus).
 _DEFAULT_BATCH_SIZE = 16
+
+
+def _import_gliner() -> Any:
+    """Return the ``GLiNER`` class — the backbone-import factory the perf seam calls (#190).
+
+    Handed to :func:`~latence_core.providers.perf.load_gliner_model` rather than called here, so the
+    TorchScript JIT is provably dead **before** this import evaluates: it transitively pulls in
+    transformers' ``deberta_v2`` module, whose relative-position helpers are compiled by
+    ``@torch.jit.script`` AT IMPORT and can never be un-scripted afterwards (the Blackwell/CUDA-13
+    ``libnvrtc-builtins.so.13.0`` crash, #190). Passing the import as a factory is what makes that
+    ordering un-gettable-wrong: this package still owns the native dependency and its install hint
+    (ADR-0036 §2) — only the INSTANT the import runs moved into the seam.
+    """
+    try:
+        from gliner import GLiNER
+    except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        msg = (
+            "The 'gliner' package is required to run GlinerPIIRedactor. "
+            "Install it with: pip install latence-pii-gliner"
+        )
+        raise ImportError(msg) from exc
+    return GLiNER
 
 
 class GlinerPIIRedactor:
@@ -230,43 +246,24 @@ class GlinerPIIRedactor:
     # -- lazy model load ----------------------------------------------------
 
     def _load_model(self) -> Any:
-        if self._model is not None:
-            return self._model
-        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner import — that
-        # import transitively pulls in transformers' deberta_v2 modeling module, whose
-        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
-        # (inside load_then_cast) cannot un-script them: the env switch is read by torch only at
-        # ITS import, and jit._state.disable() only affects FUTURE script() calls — so the
-        # scripted helpers would still die in nvrtc (libnvrtc-builtins.so.13.0) on the first
-        # forward on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
-        neutralize_torch_jit(provider_name="redaction.gliner_pii")
-        try:
-            from gliner import GLiNER
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
-            msg = (
-                "The 'gliner' package is required to run GlinerPIIRedactor. "
-                "Install it with: pip install latence-pii-gliner"
+        """Load the checkpoint on first use (cached) via the shared load choreography (C4).
+
+        One call. :func:`~latence_core.providers.perf.load_gliner_model` owns the whole ordered
+        sequence — skip-decision → JIT kill → intra-op thread cap → backbone import → plain load +
+        bf16 cast → placement on the resolved device WITH read-back verification → mdeberta window
+        bound → guarded compile — so none of those five "before" constraints is this Provider's to
+        remember. They used to be: this body was copy-paste identical across the three plain-gliner
+        Providers modulo one string, and #190 (JIT after the import) and #191 (placement wired to
+        one Provider of three) are what a hand-copied sequence costs.
+        """
+        if self._model is None:
+            self._model = load_gliner_model(
+                _import_gliner,
+                self._model_id,
+                self._config,
+                self._device,
+                provider_name="redaction.gliner_pii",
             )
-            raise ImportError(msg) from exc
-        if self._device.skipped or self._device.device is None:
-            # #191: ``device: cuda`` on a host with no CUDA used to fall through to a CPU load and a
-            # ~11.5 s/chunk run with the GPU idle and NO warning. The seam's skip decision is now
-            # surfaced as an operator error — honour the resolved device or fail loudly (ADR-0036).
-            msg = f"redaction.gliner_pii: {self._device.reason}"
-            raise ConfigError(msg)
-        device = self._device.device
-        # W8 perf seam (pod-corrected): plain ``gliner`` 0.2.27 REJECTS torch_dtype/attn_impl in
-        # in from_pretrained and its encoder has no FA2/FlashDeBERTa — so load PLAIN, then .to(bf16)
-        # on cuda (measured 1.36× faster, byte-identical); the cast is a no-op on CPU / fp32. The
-        # dtype now keys off the RESOLVED device, not a bare availability probe.
-        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, device)
-        # #191: plain ``gliner`` does NOT auto-place — ``from_pretrained`` loads on CPU. Place the
-        # model on the resolved device HERE, at load, and verify it landed (a mismatch raises).
-        place_on_device(model, device, provider_name="redaction.gliner_pii")
-        # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
-        # guard) so gliner never silently truncates a long document past config.max_len.
-        apply_gliner_max_len(model, self._max_len)
-        self._model = maybe_compile(model, self._config, provider_name="redaction.gliner_pii")
         return self._model
 
     # -- redaction ----------------------------------------------------------
@@ -277,8 +274,16 @@ class GlinerPIIRedactor:
         Each chunk's ``content`` (≤ the model window) is scanned in full — no truncation — and the
         chunk is re-emitted with ``masked_content`` + ``pii_spans`` set (``content`` UNCHANGED).
         Chunks are threaded 1:1 in first-seen order; a chunk-local span resolves to its ORIGINAL
-        source page through the chunk's offset_map + page_map (ADR-0031/0042).
+        source page through the chunk's offset_map + the
+        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042), which reads the
+        chunk's own ``page_slice`` (v19) — so resolution is exact whatever order chunks arrive
+        in and whichever of them a Stage dropped.
+
+        ONE resolver covers the whole call so the drift roll-up is per call rather than thrown
+        away per chunk; it holds no document state, so that is a reporting choice, not a
+        correctness one.
         """
+        resolver = PageIndexResolver()
         buffer: list[_PendingChunk] = []
 
         def flush() -> Iterator[ChunkRecord]:
@@ -286,19 +291,21 @@ class GlinerPIIRedactor:
             buffer.clear()
 
         for chunk in chunks:
-            buffer.append(self._prepare(chunk))
+            buffer.append(self._prepare(chunk, resolver))
             if len(buffer) >= self._batch_size:
                 yield from flush()
         yield from flush()
 
-    def _prepare(self, chunk: ChunkRecord) -> _PendingChunk:
+    def _prepare(self, chunk: ChunkRecord, resolver: PageIndexResolver) -> _PendingChunk:
         """Resolve everything a chunk needs BEFORE the (possibly batched) model call.
 
         The :class:`~latence_core.redaction_policy.ChunkRedactionPlan` (policy resolution, the
-        near-empty/skip decision, the chunk offset/page maps) and the effective PII label set
+        near-empty/skip decision, the chunk offset map) and the effective PII label set
         (config ∪ induced, read off the chunk's ``induced_labels``) are per-chunk and
         model-independent, so they are computed here up front; the flush then issues at most one
-        model call per same-label group.
+        model call per same-label group. ``resolver`` is the call-scoped page resolver — planning
+        runs for EVERY chunk (before the skip decision), so handing it in here is what absorbs the
+        document's map from its first chunk.
         """
         plan = plan_chunk_redaction(
             chunk,
@@ -306,6 +313,7 @@ class GlinerPIIRedactor:
             detector_types=set(self._labels),
             sensitive_set=set(),
             min_chars=self._min_chars,
+            resolver=resolver,
         )
         # W4 label-source seam (ADR-0038): UNION the config PII types with any pii_types the
         # OPTIONAL schema_induction Stage induced for this chunk (``induced_labels``), deduped +

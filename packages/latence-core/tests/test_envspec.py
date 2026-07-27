@@ -729,3 +729,67 @@ def test_every_learned_provider_in_the_gpu_stack_is_pinned_to_cuda() -> None:
     for component in stack_components(spec.stack_path):
         if component.provider in spec.learned_providers:
             assert component.config.get("device") == "cuda", component.provider
+
+
+# --------------------------------------------------------------------------------------------
+# R3-seams_real_not_hypothetical-0 — the two walkers in this module must not disagree.
+# --------------------------------------------------------------------------------------------
+
+_COMMITTED_STACKS = sorted((_REPO_ROOT / "stacks").glob("*.yaml")) + sorted(
+    _ENV_ROOT.glob("*/stack.yaml")
+)
+
+
+@pytest.mark.parametrize(
+    "stack_path",
+    _COMMITTED_STACKS,
+    ids=[str(p.relative_to(_REPO_ROOT)) for p in _COMMITTED_STACKS],
+)
+def test_the_two_stack_walkers_agree_on_every_committed_stack(stack_path: Path) -> None:
+    """``stack_components`` must find every Provider the structural ``stack_providers`` walk finds.
+
+    They answer the same question about the same file — one returns names, the other returns names
+    WITH the capability and config the placement probe needs to drive them — so a Provider visible
+    to one and invisible to the other is a hole in whichever gate reads the poorer walker.
+
+    It was a real hole: ``stack_components`` used a hard-coded 3-key tuple
+    (``embedder``/``sparse_embedder``/``multivector_embedder``) while the framework declares SEVEN
+    nested slots, so ``parser.lighton`` (the GPU-gated OCR of ``universal-parse``),
+    ``fde.reference`` and ``graph_features.degree`` were invisible to the #191 placement gate and
+    to the env-stack constructibility gate.
+    """
+    from latence_core.envspec import stack_components
+
+    components = {c.provider for c in stack_components(stack_path)}
+    structural = stack_providers(stack_path)
+    assert components == structural, (
+        f"{stack_path.relative_to(_REPO_ROOT)}: the walkers disagree — "
+        f"stack_components misses {sorted(structural - components)}, "
+        f"invents {sorted(components - structural)}"
+    )
+
+
+def test_stack_components_finds_the_nested_ocr_sub_provider() -> None:
+    """The universal-parse stack's OCR model is nested under ``parse.config.ocr``.
+
+    ``subprovider.py`` calls it "the GPU-gated node of that stack"; before this fix no static
+    consumer saw it, so ``latence env placement`` could report ok=True for a stack shaped like this
+    without ever driving a forward pass through the one model on the GPU.
+    """
+    from latence_core.envspec import stack_components
+
+    stack = _REPO_ROOT / "stacks" / "universal-parse.yaml"
+    by_provider = {c.provider: c for c in stack_components(stack)}
+    ocr = by_provider["parser.lighton"]
+    assert ocr.capability == "ocr"  # the nesting key doubles as the driver-selection capability
+    assert ocr.config["device"] == "cuda"
+
+
+def test_stack_component_order_is_deterministic() -> None:
+    """The walk reads a ``frozenset`` of keys; order must come from the FILE, not from hashing."""
+    from latence_core.envspec import stack_components
+
+    stack = _REPO_ROOT / "stacks" / "retrieval-signals.yaml"
+    first = [(c.capability, c.provider) for c in stack_components(stack)]
+    for _ in range(5):
+        assert [(c.capability, c.provider) for c in stack_components(stack)] == first

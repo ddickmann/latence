@@ -12,6 +12,7 @@ from latence_core.contracts import (
     Classification,
     EntityMention,
     PageMap,
+    PageSlice,
     PageSpan,
     Provenance,
 )
@@ -110,7 +111,8 @@ def _chunk_with_page_map(
         document_record_id="doc",
         index=0,
         token_count=1,
-        page_map=page_map,
+        # v19: the chunk carries the spans it overlaps, cut from the document's map.
+        page_slice=PageSlice.for_span(page_map, char_start, char_end),
     )
 
 
@@ -184,6 +186,120 @@ def test_drift_diagnostics_none_when_no_chunk_records() -> None:
         confidence=1.0,
     )
     assert LocalRunner._drift_diagnostics([mention]) is None
+
+
+def _paged_chunk_stream(
+    *, pages: int, page_chars: int, chunks: int, overrun: int
+) -> list[ChunkRecord]:
+    """A v19 chunk stream: every chunk carries the page spans it overlaps.
+
+    ``pages`` contiguous pages of ``page_chars`` characters each, split into ``chunks``
+    equal chunks. The LAST chunk's end is pushed ``overrun`` characters past the map's
+    ``total_chars`` so its resolution needs the fuzzy fallback — i.e. the drift lives at a
+    large offset, in a chunk that is not the first.
+    """
+    total_chars = pages * page_chars
+    page_map = PageMap(
+        pages=[
+            PageSpan(
+                page_number=n + 1,
+                char_start=n * page_chars,
+                char_end=(n + 1) * page_chars,
+            )
+            for n in range(pages)
+        ],
+        total_chars=total_chars,
+    )
+    width = total_chars // chunks
+    stream: list[ChunkRecord] = []
+    for i in range(chunks):
+        char_start = i * width
+        char_end = total_chars + overrun if i == chunks - 1 else char_start + width
+        stream.append(
+            ChunkRecord(
+                record_id=f"c{i}",
+                provenance=Provenance(
+                    source_uri="file:///c/doc.txt",
+                    file_name="doc.txt",
+                    file_type="txt",
+                    file_size=total_chars,
+                    document_id="sha256:doc",
+                    page_start=1,
+                    page_end=pages,
+                    char_start=char_start,
+                    char_end=char_end,
+                ),
+                classification=Classification(language="en", sensitivity="internal"),
+                document_record_id="doc",
+                index=i,
+                token_count=1,
+                page_slice=PageSlice.for_span(page_map, char_start, char_end),
+            )
+        )
+    return stream
+
+
+def test_drift_audit_covers_every_chunk_of_a_document_not_just_the_first() -> None:
+    # Regression for the C1 blast radius on the S10 drift audit: the aggregator used to gate
+    # on ``record.page_map is None``, which under v18 (map on the first chunk only) collapsed
+    # the corpus-integrity audit from N chunks to 1 per document -- ~1/N coverage, silently.
+    # Drift is most likely at LARGE offsets, i.e. exactly in the later chunks the gate skipped,
+    # so a first-chunk-only audit reports ``clean`` for a corpus that is not. Under v19 the
+    # gate cannot narrow: every chunk describes its own pages.
+    stream = _paged_chunk_stream(pages=7, page_chars=100, chunks=7, overrun=40)
+
+    diag = LocalRunner._drift_diagnostics([*stream])
+
+    assert diag is not None
+    # Every chunk of the document is audited.
+    assert diag.records_audited == 7
+    assert diag.resolutions == 14  # two endpoint lookups per chunk
+    # The overrun on the LAST chunk is caught: a first-chunk-only audit reports it clean.
+    assert diag.recovered >= 1
+    assert diag.max_drift_chars == 40
+    assert diag.clean is False
+
+
+def test_drift_audit_resolves_each_document_against_its_own_pages() -> None:
+    # Two documents interleaved in one stream: each chunk resolves against ITS OWN spans, so
+    # document B's chunks cannot resolve through document A's map (one shared index would be
+    # a provenance lie, ADR-0021/0031). B's map is clean, A's last chunk overruns.
+    doc_a = _paged_chunk_stream(pages=2, page_chars=50, chunks=2, overrun=10)
+    doc_b = [
+        chunk.model_copy(update={"record_id": f"b{chunk.index}", "document_record_id": "doc-b"})
+        for chunk in _paged_chunk_stream(pages=2, page_chars=50, chunks=2, overrun=0)
+    ]
+
+    diag = LocalRunner._drift_diagnostics([*doc_a, *doc_b])
+
+    assert diag is not None
+    assert diag.records_audited == 4  # both chunks of both documents
+    assert diag.resolutions == 8
+    assert diag.recovered == 1  # only doc A's overrun
+    assert diag.max_drift_chars == 10
+
+
+def test_drift_audit_skips_chunks_that_carry_no_page_spans() -> None:
+    # A chunk stamped with no page spans at all (a Chunker whose parent document never
+    # parsed a map) has nothing to resolve against: those chunks are not audited and must
+    # not be counted as clean resolutions. Only the mapped document contributes.
+    mapped = _paged_chunk_stream(pages=2, page_chars=50, chunks=2, overrun=0)
+    unmapped = [
+        chunk.model_copy(
+            update={
+                "record_id": f"u{chunk.index}",
+                "document_record_id": "doc-unmapped",
+                "page_slice": None,
+            }
+        )
+        for chunk in _paged_chunk_stream(pages=2, page_chars=50, chunks=2, overrun=0)
+    ]
+
+    diag = LocalRunner._drift_diagnostics([*mapped, *unmapped])
+
+    assert diag is not None
+    assert diag.records_audited == 2
+    assert diag.resolutions == 4
 
 
 def test_stage_score_totals() -> None:

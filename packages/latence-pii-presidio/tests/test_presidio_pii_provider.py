@@ -31,6 +31,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
@@ -44,11 +46,15 @@ def _chunk(
     *,
     sensitivity: str = "public",
     page_map: PageMap | None = None,
+    record_id: str = "doc1#chunk:0",
+    index: int = 0,
+    char_start: int = 0,
 ) -> ChunkRecord:
     """A ChunkRecord — Redaction scans this chunk's ``content`` (W16, ADR-0042).
 
-    Spans are chunk-local (offsets into ``content``); an identity ``offset_map`` + optional
-    ``page_map`` let a span still resolve to its source page (the shared chunk page-resolution seam).
+    Spans are chunk-local (offsets into ``content``); an ``offset_map`` anchored at ``char_start``
+    + optional ``page_map`` let a span still resolve to its source page (the shared chunk
+    page-resolution seam).
     """
     prov = Provenance(
         source_uri="file:///c/a.txt",
@@ -56,21 +62,33 @@ def _chunk(
         file_type="txt",
         file_size=1000,
         document_id="sha256:doc1",
-        char_start=0,
-        char_end=len(content),
+        char_start=char_start,
+        char_end=char_start + len(content),
         page_start=1,
         page_end=1,
     )
     return ChunkRecord(
-        record_id="doc1#chunk:0",
+        record_id=record_id,
         document_record_id="doc1",
-        index=0,
+        index=index,
         provenance=prov,
         classification=Classification(language="en", sensitivity=sensitivity),
         content=content,
         token_count=max(len(content.split()), 0),
-        page_map=page_map,
-        offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(content))
+        # v19: the chunk carries its OWN page spans. Cut them from ``page_map`` when the
+        # test supplies a real multi-page document; otherwise the fixture is a one-page
+        # document and the chunk's slice is that single page.
+        page_slice=(
+            PageSlice.for_span(page_map, char_start, char_start + len(content))
+            if page_map is not None
+            else PageSlice(
+                pages=[PageSpan(page_number=1, char_start=0, char_end=char_start + len(content))],
+                total_chars=char_start + len(content),
+            )
+        ),
+        offset_map=OffsetMap(
+            segments=[OffsetSegment(local_start=0, doc_start=char_start)], length=len(content)
+        )
         if content
         else None,
     )
@@ -326,6 +344,49 @@ def test_span_page_resolves_through_page_map(fake_presidio: type[_FakeAnalyzerEn
     ]
     rec = next(iter(PresidioRedactor(_config()).redact([_chunk(text, page_map=assembly.page_map)])))
     assert rec.pii_spans[0].page_start == 2
+
+
+def test_span_page_resolves_on_a_later_chunk_handed_over_first(
+    fake_presidio: type[_FakeAnalyzerEngine],
+) -> None:
+    """REGRESSION (audit R1/R4): a later chunk's PII span cites its OWN source page.
+
+    Chunk 1 sits wholly on page 2 of a two-page document. The failure this stands against is
+    a span emitted with ``page_start=None`` or with the parent chunk's inherited page —
+    provenance lost for ~every chunk of every real document (ADR-0021/0031). Under v18 the
+    map rode chunk 0 only, so the property held only if one resolver spanned the whole
+    ``redact`` call AND chunk 0 arrived first. Since v19 the chunk carries its own page
+    spans, so the later chunk is handed over FIRST here and the answer is still exact.
+    """
+    assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@example.com."])
+    text = assembly.text
+    boundary = assembly.page_map.pages[1].char_start  # doc offset where page 2 starts
+    head, tail = text[:boundary], text[boundary:]
+    e_local = tail.index(_EMAIL)
+    # The fake drops any span running past the analysed text, so only the tail chunk detects it.
+    fake_presidio.spans = [
+        {"entity_type": "EMAIL_ADDRESS", "start": e_local, "end": e_local + len(_EMAIL),
+         "score": 0.9}
+    ]
+    chunks = [
+        # v19 carriage: every chunk carries its own slice, so stream order is irrelevant —
+        # the later chunk is fed FIRST, which under v18 lost its page entirely.
+        _chunk(
+            tail,
+            page_map=assembly.page_map,
+            record_id="doc1#chunk:1",
+            index=1,
+            char_start=boundary,
+        ),
+        _chunk(head, page_map=assembly.page_map, record_id="doc1#chunk:0", index=0),
+    ]
+    recs = list(PresidioRedactor(_config()).redact(chunks))
+    assert recs[1].pii_spans == []  # the HEAD chunk, fed second
+    span = recs[0].pii_spans[0]  # the TAIL chunk, fed first
+    assert (span.page_start, span.page_end) == (2, 2), (
+        "a PII span on a later chunk must resolve its OWN source page from that chunk's own "
+        "page spans, whatever order the chunks arrive in"
+    )
 
 
 # -- H-C1 sensitive-doc no-op floor (must not regress on the drop-in) ----------

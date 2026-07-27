@@ -129,7 +129,7 @@ satisfy the Capability structurally without it. It gives you four composable pie
 | `self.device` | Resolves `config.device` (`auto`/`cpu`/`cuda`) against your profile via `select_device` — a `compute="gpu"` adapter on a CPU-only host sees the **skip** decision, never a fabricated device. |
 | `AdapterBase.batched(...)` | Groups an input iterable into `config.batch_size` chunks and calls your `_run_batch`, degrading to one-item calls when the profile is not batch-capable — **deterministic input-order output**, no whole-corpus buffering (streaming-friendly, [ADR-0033](../adr/0033-streaming-memory-bounded-runner.md)). |
 | `AdapterBase.guard("<op>")` | A context manager that catches a native exception and re-raises it as the right typed `LatenceError` (`ProviderError` / `ConfigError`), tagged with provider + op, carrying no content/PII. |
-| `carry_provenance` / `rebase_offsets` | Map a native library's output back onto the input's Provenance/Classification and character offsets, reusing the `OffsetIndex` / `PageOffsetIndex` seam — never a weaker mapper. |
+| `carry_provenance` / `rebase_offsets` / `resolve_pages` | Map a native library's output back onto the input's Provenance/Classification and character offsets, reusing the `OffsetIndex` seam and the `PageIndexResolver` seam — never a weaker mapper, never a hand-rolled page index ([one resolver per call, and the chunk answers for itself](../writing-an-adapter.md#the-page-resolver-one-per-call-and-the-chunk-answers-for-itself)). |
 
 The real, shipping template is
 [`parser.pdfplumber`](../reference/example-provider.md) — the first Wave-1 adapter built

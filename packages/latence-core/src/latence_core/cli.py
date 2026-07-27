@@ -1,6 +1,10 @@
 """``latence`` CLI (typer).
 
 * ``latence run <pipeline.yaml>`` — execute a Pipeline on the local Runner (S1).
+* ``latence stack check <stack.yaml>`` — check a stack OFFLINE (no corpus, no models, no run):
+  structure + DAG, the phase-boundary invariant, capability wiring, Provider resolution, every
+  nested ``{provider, config}`` sub-Provider block, and config keys that go nowhere. Sub-second,
+  so a fleet of committed stack configs is finally lint-gatable in CI (C8).
 * ``latence stack validate <stack.yaml>`` — run a named stack end-to-end on the bundled
   corpus and assert the G1-style checks (contracts/KG/RAG/report + determinism + resume +
   graceful-failure + device-honesty), write a signed-style summary, and exit non-zero on
@@ -329,6 +333,41 @@ def _maybe_export_metrics(report: QualityReport) -> None:
         logger.warning(
             "metrics export failed (LATENCE_METRICS=%s); continuing", kind, exc_info=True
         )
+
+
+@stack_app.command("check")
+def stack_check(
+    stack_path: Annotated[
+        Path, typer.Argument(help="Path to the stack YAML (e.g. ./latence.stack.yaml).")
+    ],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+) -> None:
+    """Check a stack config OFFLINE — no corpus, no models, no run. Fast enough to gate CI.
+
+    The cheap counterpart to ``latence stack validate``: it reads the file and inspects Provider
+    *classes*, so it needs no GPU, no network, no corpus and no model weights, and finishes in
+    well under a second. It reports the structure/DAG errors, the phase-boundary invariant, the
+    capability wiring of every Stage Provider, every nested ``{provider, config}`` sub-Provider
+    block, and config keys that go nowhere.
+
+    This is what makes a fleet of committed ``latence.stack.yaml`` files lint-gatable: before it,
+    the only way to check a hand-edited stack was a full local run, even though the mistake was a
+    typo a class inspection catches. Exits 0 when there are no errors (Providers that are simply
+    not installed on this host are WARNINGs, so the same file passes on a CPU CI box and a GPU
+    pod), 1 on any error, 2 when the file does not exist.
+    """
+    _configure_logging(verbose)
+    if not stack_path.exists():
+        typer.echo(f"Stack file not found: {stack_path}", err=True)
+        raise typer.Exit(code=2)
+
+    # Lazy import: a bare ``latence run`` should not pull the stacks package.
+    from latence_core.stacks.check import check_stack
+
+    result = check_stack(stack_path)
+    typer.echo(result.render())
+    if not result.ok:
+        raise typer.Exit(code=1)
 
 
 @stack_app.command("validate")
@@ -1029,6 +1068,23 @@ def process(
             f"Config not found: {config}. Run `latence setup` first (or pass --config).", err=True
         )
         raise typer.Exit(code=2)
+
+    # Static guard (C8): the emitted config's own header invites hand-editing, so run the offline
+    # check before spending a pipeline on a typo. Sub-second, offline, and strictly earlier than the
+    # failure it prevents — a mis-named nested Provider used to surface only when the run reached
+    # that Stage, after the corpus had already been parsed and chunked. A Provider that is merely
+    # not installed here is a WARNING, so this never blocks a stack whose GPU packages live on the
+    # run host. Identical to what ``latence stack check`` reports.
+    from latence_core.stacks.check import check_stack
+
+    checked = check_stack(config)
+    if not checked.ok:
+        typer.echo(f"Stack config has errors — not running {config}:", err=True)
+        for finding in checked.errors:
+            typer.echo(f"  - {finding.describe()}", err=True)
+        typer.echo("Fix them (or run `latence stack check` for the full report).", err=True)
+        raise typer.Exit(code=2)
+
     _execute_pipeline_file(config, run_id=run_id)
 
 

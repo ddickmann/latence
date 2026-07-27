@@ -16,6 +16,18 @@ the produced records carry real, resolvable offsets — a genuine contract check
 
 The harness flags every stub-scoped Provider ``conformance-verified against stub; live numbers
 need a rig`` in its result, so a reader never mistakes a stub-pass for a live quality number.
+
+**Known ADR-0016 violation, tracked.** Every fake in this module stands in for a dependency
+``latence-core`` does not declare (``openai``, ``gliner``, ``gliner2``, ``sentence_transformers``,
+``transformers``, ``presidio``, ``pypdfium2``/``PIL``), so shipping a Provider package still
+requires editing the core. The right shape is already proven in-tree —
+``latence_source_sharepoint.testing`` ships its Graph fake in its own ``src``, and
+``cases._LAZY_PROVIDER_CASES`` builds a case only when the owning package is installed — and the
+generalisation is a second entry-point group, ``latence.conformance_cases``, with core keeping only
+``harness`` (the C1–C6 checks) and ``fixtures``. See
+``issues/backlog-post-v1/conformance-cases-per-package.md``. The roster half of the same problem is
+already fixed: the expected Provider set is derived from the workspace manifests
+(``packages/latence-core/tests/_workspace_providers.py``), not restated in a test.
 """
 
 from __future__ import annotations
@@ -519,13 +531,31 @@ def _splade_token_ids(text: str) -> list[int]:
 
 
 class _StubArray:
-    """A minimal stand-in for a torch tensor: the only surface the adapter uses is ``.tolist()``."""
+    """A minimal stand-in for a torch tensor: ``.tolist()``, plus a device it can be moved to."""
 
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, device: str = "cpu") -> None:
         self._data = data
+        self.device = device
 
     def tolist(self) -> Any:
         return self._data
+
+    def to(self, target: Any) -> _StubArray:
+        return _StubArray(self._data, str(target))
+
+
+class _StubBatchEncoding(dict[str, _StubArray]):
+    """A ``BatchEncoding`` stand-in: a mapping (``**encoding`` spreads) that can move its tensors.
+
+    ``AutoTokenizer(..., return_tensors="pt")`` returns a ``BatchEncoding``, which always comes back
+    on **cpu** regardless of where the model was placed and carries a ``.to(device)`` for exactly
+    that reason. A stub that is a bare ``dict`` is *less capable* than the dependency it stands in
+    for, which would make the adapter's encoding placement fail against the stub rather than
+    against a real defect.
+    """
+
+    def to(self, target: Any) -> _StubBatchEncoding:
+        return _StubBatchEncoding({key: value.to(target) for key, value in self.items()})
 
 
 class _StubSpladeTokenizer:
@@ -551,7 +581,9 @@ class _StubSpladeTokenizer:
         width = max((len(s) for s in seqs), default=0)
         padded = [s + [0] * (width - len(s)) for s in seqs]
         mask = [[1] * len(s) + [0] * (width - len(s)) for s in seqs]
-        return {"input_ids": _StubArray(padded), "attention_mask": _StubArray(mask)}
+        return _StubBatchEncoding(
+            {"input_ids": _StubArray(padded), "attention_mask": _StubArray(mask)}
+        )
 
 
 class _StubSpladeConfig:
@@ -569,14 +601,26 @@ class _StubSpladeMaskedLM:
     Emits a positive logit at each token's own vocab id (zero elsewhere), so the adapter's real
     SPLADE pooling (``max_t log(1+relu)``) yields a genuine non-empty term-weight map keyed by the
     tokens present — a faithful shape, not a passthrough that lies.
+
+    Faithful about placement too, since ``sparse.splade`` joined the shared load choreography: a
+    real ``nn.Module`` is resident on **cpu** after ``from_pretrained`` and is moved by ``.to()``,
+    reporting the result via ``.device``. A stub without those is *less capable* than the dependency
+    it stands in for, which makes the seam's "prove it landed or raise" step fail against the stub
+    rather than against a real defect.
     """
 
     def __init__(self) -> None:
         self.config = _StubSpladeConfig()
+        self.device = "cpu"
 
     @classmethod
     def from_pretrained(cls, _model_id: str, **_kwargs: Any) -> _StubSpladeMaskedLM:
         return cls()
+
+    def to(self, target: Any) -> _StubSpladeMaskedLM:
+        if isinstance(target, str):
+            self.device = target
+        return self
 
     def eval(self) -> _StubSpladeMaskedLM:
         return self

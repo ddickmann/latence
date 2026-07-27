@@ -25,15 +25,42 @@ whole executor:
 interface. This is a **pure structural refactor: the Quality Report is byte-identical** to the
 pre-extraction output; the report-building logic below moved verbatim, only its collaborators are
 now injected instead of ``self``.
+
+**C5 — the consumer now matches the producer.** The extraction above kept the shape it inherited:
+:meth:`StageRecordReader.stage_records` is an ``Iterator`` precisely so a Runner can release a
+doc-level Stage's retained output and stream it back from its checkpoint (#69, ADR-0033), and the
+builder immediately did ``list.extend(...)`` on it. ``build()`` held fourteen whole-corpus lists
+live at once — ``parsed``, ``chunked``, ``post_content``, ``flagged_source``, ``mentions``,
+``relations``, ``redactions``, ``features``, ``disambiguations``, ``graph_records``,
+``inferred_records``, ``context_records``, ``consolidated``, ``disambig_mentions_in`` — of which
+two were byte-identical calls, so the entity-mention stream (59,450 records for 200 documents per
+PERF-RESULTS, the largest in any corpus) was decoded and retained TWICE. That quietly moved
+ADR-0033's memory peak from mid-run to report time rather than removing it.
+
+The gather is now a FOLD. Each section is a :class:`QualityAggregator` that declares the
+Capabilities it subscribes to and consumes records one at a time; ``build()`` makes ONE pass over
+the DAG, opens each subscribed Stage's stream once, fans each record out to that Stage's
+subscribers, and drops it. Peak memory is ``O(aggregators x bounded state)`` instead of
+``O(corpus x sections)`` — including the SINK stream ``build()`` folds into the completeness check,
+which :meth:`QualityReportBuilder.final_records` used to hand over as one whole-corpus list (audit
+R4: the fold's win was real but the sink list it did not remove was ~99.6% of report-time peak, so
+the bound did not ship). The duplicate decode is gone; and adding a Stage's metric is one class
+plus one entry in :data:`QUALITY_AGGREGATORS` rather than an edit to ``build()``. The report
+remains **byte-identical** — ADR-0008's H-F1 amendment makes its bytes the contract, and the fold
+preserves the gather's record order, which is what keeps the order-sensitive accumulations (float
+averages, last-wins alias maps) bit-for-bit the same.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
+from latence_core.capability_descriptor import descriptors
 from latence_core.contracts import (
     ChunkRecord,
     DisambiguationRecord,
@@ -51,13 +78,14 @@ from latence_core.contracts import (
     ScreeningCheckpoint,
     ScreeningFinding,
 )
-from latence_core.errors import ConfigError
+from latence_core.errors import ConfigError, ContractError, PageSliceMissingError
 from latence_core.goldset import (
     ConfusionCounts,
     GoldSet,
     score_entities,
     score_relations,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import CapabilityKind
 from latence_core.quality import (
@@ -82,11 +110,18 @@ from latence_core.quality import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
+
+    from pydantic import BaseModel
 
     from latence_core.pipeline import Pipeline, Stage
     from latence_core.runner import StageOutput
     from latence_core.storage import Storage
+
+
+# Counts-only, never content (ADR-0034): the one degradation the report's own fields cannot
+# express — chunks the drift audit could not resolve at all — is surfaced here.
+logger = logging.getLogger("latence.quality")
 
 
 # -- co-occurrence fingerprint (relocated from runner.py, re-exported there) ----------------
@@ -181,6 +216,92 @@ class StageRecordReader(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class QualityRunContext:
+    """Everything an aggregator may need to decide whether it applies, and to configure itself.
+
+    Handed to each registered factory exactly once per report. It carries the *run*, never the
+    records: an aggregator that needs a Stage's config (the Context-Enrichment caps), the Redaction
+    supersession topology, the run's fan-out tally, or the Storage-backed screening sidecars reads
+    them from here at construction, and everything else arrives one record at a time through
+    :meth:`QualityAggregator.observe`.
+    """
+
+    pipeline: Pipeline
+    ordered: list[Stage]
+    run_id: str
+    storage: Storage
+    reader: StageRecordReader
+    fanout: tuple[int, int, int, int]
+
+
+class QualityAggregator(Protocol):
+    """One Quality-Report section, computed as a FOLD over a record stream (C5).
+
+    The :class:`StageRecordReader` seam is lazy by construction — ``stage_records`` yields one
+    :class:`~latence_core.runner.StageOutput` at a time precisely so a Runner can release a
+    doc-level Stage's retained output and stream it back from its checkpoint (#69, ADR-0033). The
+    report builder used to defeat that: each per-kind gather did ``result.extend(...)`` and
+    ``build()`` held fourteen whole-corpus lists live at once (the entity-mention stream — the
+    largest in any corpus — twice). This Protocol is the consumer that matches the producer.
+
+    An implementation declares:
+
+    * ``section_field`` — the :class:`~latence_core.quality.QualityReport` field it fills. One
+      aggregator owns one field; the report keeps its typed, named sections (a discriminated list
+      would be worse for every consumer of the artifact).
+    * ``kinds`` — the :class:`~latence_core.pipeline.CapabilityKind`\\ s whose Stage output it
+      wants. The builder streams each subscribed Stage's records ONCE and fans them out to every
+      subscriber, so two sections reading the same stream cost one decode, not two.
+
+    and implements:
+
+    * :meth:`observe` — fold one record into bounded state. The ``stage`` is passed because a fold
+      legitimately depends on WHICH Stage produced the record: a section that subscribes to two
+      kinds (asserted vs inferred graph edges), or one that must ignore a superseded Redaction
+      Stage, decides here rather than in ``build()``.
+    * :meth:`finish` — return the section, or ``None`` when the run has nothing to report (the
+      honest "no such Stage ran" answer, never an all-zero section).
+
+    **Invariants an implementation must hold.**
+
+    * *Bounded state.* ``observe`` must not accumulate per-record objects. Counters, sums, sets of
+      ids, and small sorted maps are the vocabulary. (:class:`_GoldSetAggregator` is the one
+      documented exception — the scorer indexes both whole sets by construction — and it is opt-in,
+      constructed only when the Pipeline declares a ``gold_set_uri``.)
+    * *Order-stability.* Records arrive in the DAG's topological Stage order, and within a Stage in
+      the reader's yield order — the same order the old per-kind gather concatenated. Any
+      accumulation that is order-sensitive (float sums, last-write-wins alias maps) therefore
+      reproduces the pre-C5 bytes exactly; any map that reaches the report is sorted before it is
+      returned. ADR-0008's H-F1 amendment makes the report's BYTES the contract.
+    * *No side effects.* ``finish`` returns a value; it never writes.
+
+    Adding a Stage's quality metric is one module implementing this Protocol plus one entry in
+    :data:`QUALITY_AGGREGATORS` — ``build()`` is not edited. What relates that entry to the
+    Capability it reports on is :func:`check_aggregator_coverage`, which holds this registry
+    against the ``quality_section`` every
+    :class:`~latence_core.capability_descriptor.CapabilityDescriptor` declares.
+    """
+
+    section_field: ClassVar[str]
+    kinds: ClassVar[tuple[CapabilityKind, ...]]
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        """Fold one record of one subscribed Stage into this section's bounded state."""
+        ...
+
+    def finish(self) -> BaseModel | None:
+        """The finished section, or ``None`` when the run has nothing to report."""
+        ...
+
+
+#: What the builder needs to obtain an aggregator for a run: a callable that inspects the run and
+#: either returns its aggregator or declines (``None``) because the Pipeline has no such Stage. The
+#: decline is load-bearing — a declined aggregator never subscribes, so its Capability's records are
+#: never decoded at all.
+QualityAggregatorFactory = Callable[[QualityRunContext], "QualityAggregator | None"]
+
+
 class QualityReportBuilder:
     """Assembles a run's :class:`~latence_core.quality.QualityReport` from its Stage outputs.
 
@@ -201,10 +322,18 @@ class QualityReportBuilder:
         reader: StageRecordReader,
         *,
         fanout_by_stage: Mapping[str, tuple[int, int, int, int]] | None = None,
+        aggregators: tuple[QualityAggregatorFactory, ...] | None = None,
     ) -> None:
         self._reader = reader
         self._fanout_by_stage: Mapping[str, tuple[int, int, int, int]] = (
             fanout_by_stage if fanout_by_stage is not None else {}
+        )
+        # The registry is a DEPENDENCY, not a hard-wired table (C5): the default is the built-in
+        # section set, and a caller with its own sections supplies them here. Every caller that
+        # does not care passes nothing and learns nothing. (See QUALITY_AGGREGATORS for why this
+        # is NOT sourced from a per-Capability factory on the CapabilityDescriptor.)
+        self._aggregators: tuple[QualityAggregatorFactory, ...] = (
+            aggregators if aggregators is not None else QUALITY_AGGREGATORS
         )
 
     # -- public surface ----------------------------------------------------
@@ -217,24 +346,32 @@ class QualityReportBuilder:
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-    ) -> list[StageOutput]:
-        """Records for the Quality Report: the outputs of the DAG's sink Stages.
+    ) -> Iterator[StageOutput]:
+        """Stream the records for the Quality Report: the outputs of the DAG's sink Stages.
 
         A sink is a Stage nothing depends on. Reporting on sinks (rather than a
         single threaded ``current``) keeps the report correct for a fan-out or
         converging DAG, where the last topological Stage is not the whole story.
         A sink whose retained output was released (#69) is streamed back from its checkpoint.
+
+        **Lazy, like the reader it wraps (C5).** This used to ``list.extend`` each sink Stage's
+        stream and hand back the list — the same defeat of the lazy
+        :class:`StageRecordReader` seam that C5 removed from the per-kind gathers, and the one place
+        it survived. Both Runners call this at their report call site, so report-time peak stayed
+        ``O(corpus)`` (measured: ~4.8 KB per sink record, ~99.6% of the report phase's peak) after
+        every Stage had already been streamed and released — C5's ``O(aggregators x bounded state)``
+        bound did not reach the shipped path. :meth:`build` consumes this exactly once, in
+        :func:`_fold_final_records`, and nothing else reads it, so yielding is sufficient and the
+        report phase is now ``O(1)`` in the corpus (ADR-0033). Order is unchanged — sink Stages in
+        topological order, reader order within a Stage — so the report stays byte-identical
+        (ADR-0008).
         """
         depended_on = {p for s in ordered for p in s.depends_on}
         sinks = [s.name for s in ordered if s.name not in depended_on]
-        final: list[StageOutput] = []
         for name in sinks:
-            final.extend(
-                self._reader.stage_records(
-                    name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
+            yield from self._reader.stage_records(
+                name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
             )
-        return final
 
     def build(
         self,
@@ -246,222 +383,75 @@ class QualityReportBuilder:
         outputs: Mapping[str, list[StageOutput]],
         final_records: Iterable[Record | StageOutput],
     ) -> QualityReport:
-        records = list(final_records)
-        completeness = self._completeness_check(records)
-        # Document count = distinct source documents seen across the run. Chunks
-        # fan out from a document (many chunks share one document_id), so counting
-        # distinct Provenance document ids is correct whether the sinks are
-        # DocumentRecords or ChunkRecords. A Profiling Stage's CORPUS-scope
-        # FeatureRecord carries a synthetic corpus-scope document_id (it is not a source
-        # document), so it is excluded from the source-document count.
-        doc_ids = {
-            r.provenance.document_id
-            for r in records
-            if not (isinstance(r, FeatureRecord) and r.scope is FeatureScope.CORPUS)
-        }
-        # Parse/Chunk quality scan the Stage that produced those records (not just
-        # the sinks), so a Source→Parse→Chunk→Export pipeline (whose sinks are
-        # ChunkRecords) still reports Parse metrics from the Parse Stage's output.
-        parsed = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.PARSE, storage=storage, run_id=run_id
-        )
-        chunked = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.CHUNK, storage=storage, run_id=run_id
-        )
-        # Content Screening attaches the risk markers, so the flagged count is read
-        # from the FINAL corpus records (post-screening), not the raw Chunk output
-        # (which has no markers yet). Falls back to the chunk output when there is
-        # no Content-Screening Stage.
-        post_content = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.CONTENT_SCREENING,
-            storage=storage,
+        """Assemble the run's report by FOLDING each Stage's records through its aggregators (C5).
+
+        One pass over the DAG. For every Stage that at least one aggregator subscribed to, the
+        reader's stream is opened ONCE and each record is fanned out to that Stage's subscribers,
+        then dropped — so peak memory is ``O(aggregators x bounded state)`` rather than
+        ``O(corpus x sections)``, and the entity-mention stream (previously decoded twice, once as
+        ``mentions`` and once as the byte-identical ``disambig_mentions_in``) is decoded once.
+
+        ``final_records`` is consumed lazily too: the sink records are folded into the completeness
+        check and the distinct-source-document count in a single pass, never copied into a list. A
+        caller that hands over an iterator therefore never materialises the sinks either.
+
+        The report is byte-identical to the pre-C5 gather. Records reach each aggregator in the same
+        order the per-kind gather concatenated them (topological Stage order, reader order within a
+        Stage), which is what makes the order-sensitive accumulations — float averages, last-wins
+        alias maps — reproduce exactly (ADR-0008 H-F1).
+        """
+        context = QualityRunContext(
+            pipeline=pipeline,
+            ordered=ordered,
             run_id=run_id,
-        )
-        flagged_source = post_content if post_content else chunked
-        # Mentions come from an Entity-Extraction Stage OR a fused Stage (which emits
-        # mentions + relations together); relations from a Relation-Extraction Stage
-        # OR that same fused Stage. The quality builders isinstance-filter each list to
-        # its own carrier, so a fused Stage's mixed output is passed to both.
-        mentions = self._records_of_kinds(
-            pipeline,
-            ordered,
-            outputs,
-            (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
             storage=storage,
-            run_id=run_id,
+            reader=self._reader,
+            fanout=self._fanout_total(ordered),
         )
-        relations = self._records_of_kinds(
-            pipeline,
-            ordered,
-            outputs,
-            (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
-            storage=storage,
-            run_id=run_id,
-        )
-        # A Redaction Stage that another Redaction Stage depends on (transitively) is SUPERSEDED:
-        # its chunks are re-emitted downstream with its spans composed in, and only that
-        # downstream version reaches the Export. Gathering the superseded Stage's output too
-        # would tally every upstream span twice. Dropping it at the STAGE level (rather than
-        # de-duplicating records by ``record_id``) is what keeps the rollup honest for a corpus
-        # containing byte-identical documents, whose content-addressed ``record_id``s legitimately
-        # repeat — see :meth:`_redaction_quality`.
-        redactions = self._records_of_kind(
-            pipeline,
-            [s for s in ordered if s.name in self._terminal_redaction_stages(pipeline)],
-            outputs,
-            CapabilityKind.REDACTION,
-            storage=storage,
-            run_id=run_id,
-        )
-        features = self._records_of_kind(
-            pipeline, ordered, outputs, CapabilityKind.PROFILING, storage=storage, run_id=run_id
-        )
-        disambiguations = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.DISAMBIGUATION,
-            storage=storage,
-            run_id=run_id,
-        )
-        graph_records = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.GRAPH_ASSEMBLY,
-            storage=storage,
-            run_id=run_id,
-        )
-        # W2-linkpred: the OPTIONAL Graph Completion Stage's predicted edges, gathered SEPARATELY
-        # from the asserted graph so an inferred edge can never inflate the asserted-edge count
-        # (they are a distinct capability's output, not part of graph_assembly). Empty when the
-        # stack declares no Graph Completion Stage (byte-identical to today).
-        inferred_records = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.GRAPH_COMPLETION,
-            storage=storage,
-            run_id=run_id,
-        )
-        # W13: the OPTIONAL Context Enrichment Stage's enriched ChunkRecords (each carrying a
-        # ContextHeader), for the counts-only enrichment roll-up. Empty when the stack declares no
-        # context_enrichment Stage (the section is then None — byte-identical to today).
-        context_records = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.CONTEXT_ENRICHMENT,
-            storage=storage,
-            run_id=run_id,
-        )
-        # T3 (ADR-0054): the Type-Consolidation Stage's own output — the SAME mentions and
-        # relations, relabelled, each carrying its ``raw_label``. The rollup is derived from these
-        # records rather than from the Stage's self-report, so the report can only claim a
-        # consolidation the records actually show.
-        consolidated = self._records_of_kind(
-            pipeline,
-            ordered,
-            outputs,
-            CapabilityKind.TYPE_CONSOLIDATION,
-            storage=storage,
-            run_id=run_id,
-        )
-        # Mentions-in for the disambiguation rollup: the Entity-Extraction (or fused) output
-        # the Stage consumed — the count it resolved from.
-        disambig_mentions_in = self._records_of_kinds(
-            pipeline,
-            ordered,
-            outputs,
-            (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION),
-            storage=storage,
-            run_id=run_id,
-        )
+        aggregators: list[QualityAggregator] = []
+        for factory in self._aggregators:
+            aggregator = factory(context)
+            if aggregator is not None:
+                aggregators.append(aggregator)
+
+        # Subscription plan: which aggregators want each Capability's records. An aggregator that
+        # declined (no such Stage in the Pipeline) subscribes to nothing, so its Capability's
+        # records are never decoded — the cheapest possible answer for a narrow stack.
+        subscribers: dict[CapabilityKind, list[QualityAggregator]] = {}
+        for aggregator in aggregators:
+            # ``dict.fromkeys`` de-duplicates while preserving the declared order: an aggregator
+            # that repeats a Capability in ``kinds`` must still observe each record exactly once,
+            # or its counts silently double.
+            for kind in dict.fromkeys(aggregator.kinds):
+                subscribers.setdefault(kind, []).append(aggregator)
+
+        for stage in ordered:
+            listeners = subscribers.get(stage.capability)
+            if not listeners:
+                continue
+            for record in self._reader.stage_records(
+                stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            ):
+                for aggregator in listeners:
+                    aggregator.observe(stage, record)
+
+        sections: dict[str, BaseModel] = {}
+        for aggregator in aggregators:
+            section = aggregator.finish()
+            if section is not None:
+                sections[aggregator.section_field] = section
+
+        completeness, document_count = _fold_final_records(final_records)
         return QualityReport(
             pipeline_name=pipeline.name,
             run_id=run_id,
-            document_count=len(doc_ids),
+            document_count=document_count,
             total_duration_seconds=round(sum(m.duration_seconds for m in stage_metrics), 6),
             stages=stage_metrics,
             completeness=completeness,
             contracts_complete=completeness.passed,
-            parse=self._parse_quality(pipeline, parsed),
-            chunk=self._chunk_quality(pipeline, chunked, flagged_source),
-            screening=self._screening_quality(pipeline, run_id, storage, ordered),
-            entities=self._entity_quality(pipeline, mentions),
-            relations=self._relation_quality(pipeline, relations, self._fanout_total(ordered)),
-            redaction=self._redaction_quality(pipeline, redactions),
-            profiling=self._profiling_quality(pipeline, features),
-            type_consolidation=self._type_consolidation_quality(pipeline, consolidated),
-            disambiguation=self._disambiguation_quality(
-                pipeline, disambiguations, disambig_mentions_in
-            ),
-            graph=self._graph_quality(pipeline, graph_records, inferred_records),
-            context_enrichment=self._context_enrichment_quality(
-                pipeline, context_records, graph_records
-            ),
-            drift=self._drift_diagnostics(chunked),
-            goldset=self._goldset_evaluation(pipeline, storage, mentions, relations),
+            **sections,  # type: ignore[arg-type]
         )
-
-    # -- per-kind rollups (read records back through the reader seam) -------
-
-    def _records_of_kind(
-        self,
-        pipeline: Pipeline,
-        ordered: list[Stage],
-        outputs: Mapping[str, list[StageOutput]],
-        kind: CapabilityKind,
-        *,
-        storage: Storage,
-        run_id: str,
-    ) -> list[StageOutput]:
-        """Flatten the outputs of every Stage fulfilling ``kind`` (order-stable).
-
-        A Stage whose retained output was released (#69) is streamed back from its checkpoint,
-        so the Quality Report's per-kind rollups are read one kind at a time rather than the
-        whole doc-level output being held across the run.
-        """
-        result: list[StageOutput] = []
-        for stage in ordered:
-            if stage.capability is kind:
-                result.extend(
-                    self._reader.stage_records(
-                        stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                    )
-                )
-        return result
-
-    def _records_of_kinds(
-        self,
-        pipeline: Pipeline,
-        ordered: list[Stage],
-        outputs: Mapping[str, list[StageOutput]],
-        kinds: tuple[CapabilityKind, ...],
-        *,
-        storage: Storage,
-        run_id: str,
-    ) -> list[StageOutput]:
-        """Flatten the outputs of every Stage fulfilling any of ``kinds`` (order-stable).
-
-        Used where a record kind can be produced by more than one capability — a
-        mention comes from an Entity-Extraction OR a fused Stage; a relation from a
-        Relation-Extraction OR that same fused Stage — and the caller then filters the
-        gathered output by carrier type. A released Stage's output is streamed from its
-        checkpoint (#69).
-        """
-        result: list[StageOutput] = []
-        for stage in ordered:
-            if stage.capability in kinds:
-                result.extend(
-                    self._reader.stage_records(
-                        stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                    )
-                )
-        return result
 
     def _fanout_total(self, ordered: list[Stage]) -> tuple[int, int, int, int]:
         """Sum the per-Stage relation fan-out-guard tallies across the run (ADR-0033 / #63, #68).
@@ -485,109 +475,1059 @@ class QualityReportBuilder:
             dropped_men += dm
         return out_capped, dropped_rel, in_capped, dropped_men
 
-    # -- completeness / drift / gold-set ----------------------------------
 
-    @staticmethod
-    def _completeness_check(records: list[Record | StageOutput]) -> CompletenessCheck:
-        """Contract-completeness over the exported records (Provenance/Classification + offsets).
-
-        Every record must carry Provenance and Classification (contract-guaranteed, audited
-        here). The S10 promotion also audits offset *alignment*: a record that carries a char
-        span must carry a **well-ordered** one, and if it also carries page coordinates those
-        must be well-ordered too — the "offsets aligned" half of the completeness AC. A record
-        with no char span at all is vacuously aligned and not counted. Page *presence* is not
-        re-required here: the sub-document carriers whose contracts require a page span
-        (EntityMention/RelationMention) already guarantee it at construction, while a
-        whole-document carrier (DocumentRecord/RedactionRecord/FeatureRecord) legitimately
-        holds a ``[0, len)`` char span with no page span.
-        """
-        check = CompletenessCheck(
-            records_checked=len(records),
-            records_with_provenance=sum(1 for r in records if r.provenance is not None),
-            records_with_classification=sum(1 for r in records if r.classification is not None),
-        )
-        for record in records:
-            prov = record.provenance
-            if prov.char_start is None and prov.char_end is None:
-                # No char span to audit — vacuously aligned.
-                continue
-            check.offset_bearing_records += 1
-            span_ok = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            pages_ok = (
-                prov.page_start is None or prov.page_end is None or prov.page_end >= prov.page_start
-            )
-            if span_ok and pages_ok:
-                check.records_with_aligned_offsets += 1
-        return check
+    # -- backwards-compatible shim ----------------------------------------
 
     @staticmethod
     def _drift_diagnostics(chunked: list[StageOutput]) -> DriftDiagnostics | None:
-        """Provenance-integrity drift roll-up across the chunk offsets (S10).
+        """Fold a materialised chunk list through the drift aggregator (compat shim).
 
-        Audits every :class:`ChunkRecord` that carries its parent document's page map by
-        resolving the chunk's ``[char_start, char_end)`` endpoints through a
-        :class:`PageOffsetIndex` and accumulating the fuzzy recoveries — a finer drift
-        signal than the Parse-only page-boundary audit. Only ChunkRecords are audited:
-        mentions, relations, and redaction spans inherit the chunk offsets the Chunk Stage
-        already validated against the page map, so they carry no independent offset→page
-        drift. Returns ``None`` when there were no page-map-bearing chunk records to audit (a
-        Parse-only or chunk-free run), so a pipeline with nothing to audit reports no drift
-        section rather than a misleading all-zero one.
+        The drift roll-up itself is now :class:`_DriftAggregator`, folded from the streamed chunk
+        records like every other section. This staticmethod survives because
+        :meth:`~latence_core.runner.LocalRunner._drift_diagnostics` forwards to it and the existing
+        unit tests exercise it directly with a hand-built list; it is a thin re-entry into the same
+        fold, so the two can never disagree.
         """
-        audited = 0
-        resolutions = 0
-        recovered = 0
-        max_drift = 0
+        aggregator = _DriftAggregator()
         for record in chunked:
-            if not isinstance(record, ChunkRecord) or record.page_map is None:
-                continue
-            prov = record.provenance
-            if prov.char_start is None or prov.char_end is None:
-                continue
-            index = PageOffsetIndex(record.page_map)
-            index.page_for_offset(prov.char_start)
-            index.page_for_offset(max(prov.char_end - 1, prov.char_start))
-            diag = index.diagnostics
-            audited += 1
-            resolutions += diag.resolutions
-            recovered += diag.recovered
-            max_drift = max(max_drift, diag.max_drift_chars)
-        if audited == 0:
+            aggregator.audit(record)
+        return aggregator.finish()
+
+
+def _fold_final_records(
+    final_records: Iterable[Record | StageOutput],
+) -> tuple[CompletenessCheck, int]:
+    """One lazy pass over the sink records: contract-completeness + distinct source documents.
+
+    Both answers used to be read off ``records = list(final_records)`` — a whole-corpus copy on top
+    of the thirteen per-kind lists. They are folds, so they are computed together in a single pass
+    and the sink stream is never materialised here. A caller that passes an iterator therefore pays
+    ``O(1)``; a caller that passes a list keeps only its own list.
+
+    **Completeness** (S10): every record must carry Provenance and Classification
+    (contract-guaranteed, audited here), and the offsets must be *aligned* — a record that carries a
+    char span must carry a **well-ordered** one, and if it also carries page coordinates those must
+    be well-ordered too. A record with no char span at all is vacuously aligned and not counted.
+    Page *presence* is not re-required: the sub-document carriers whose contracts require a page
+    span (EntityMention/RelationMention) already guarantee it at construction, while a
+    whole-document carrier (DocumentRecord/RedactionRecord/FeatureRecord) legitimately holds a
+    ``[0, len)`` char span with no page span.
+
+    **Document count**: distinct source documents seen across the run. Chunks fan out from a
+    document (many chunks share one ``document_id``), so counting distinct Provenance document ids
+    is correct whether the sinks are DocumentRecords or ChunkRecords. A Profiling Stage's
+    CORPUS-scope FeatureRecord carries a synthetic corpus-scope ``document_id`` (it is not a source
+    document), so it is excluded.
+    """
+    check = CompletenessCheck()
+    doc_ids: set[str] = set()
+    for record in final_records:
+        check.records_checked += 1
+        if record.provenance is not None:
+            check.records_with_provenance += 1
+        if record.classification is not None:
+            check.records_with_classification += 1
+        prov = record.provenance
+        if not (isinstance(record, FeatureRecord) and record.scope is FeatureScope.CORPUS):
+            doc_ids.add(prov.document_id)
+        if prov.char_start is None and prov.char_end is None:
+            # No char span to audit — vacuously aligned.
+            continue
+        check.offset_bearing_records += 1
+        span_ok = (
+            prov.char_start is not None
+            and prov.char_end is not None
+            and prov.char_end >= prov.char_start
+        )
+        pages_ok = (
+            prov.page_start is None or prov.page_end is None or prov.page_end >= prov.page_start
+        )
+        if span_ok and pages_ok:
+            check.records_with_aligned_offsets += 1
+    return check, len(doc_ids)
+
+
+# ==========================================================================================
+# The built-in aggregators. One module-private class per Quality-Report section; each declares
+# the Capabilities whose records it folds and the report field it fills, and NONE of them is
+# named in :meth:`QualityReportBuilder.build` — they reach the report through
+# :data:`QUALITY_AGGREGATORS` alone.
+# ==========================================================================================
+
+
+_MENTION_KINDS = (CapabilityKind.ENTITY_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION)
+_RELATION_KINDS = (CapabilityKind.RELATION_EXTRACTION, CapabilityKind.FUSED_ENTITY_RELATION)
+_SCREENING_KINDS = (CapabilityKind.INTAKE_SCREENING, CapabilityKind.CONTENT_SCREENING)
+
+
+def _has_kind(pipeline: Pipeline, kinds: tuple[CapabilityKind, ...]) -> bool:
+    """True when the Pipeline declares at least one Stage fulfilling any of ``kinds``."""
+    return any(s.capability in kinds for s in pipeline.stages)
+
+
+class _ParseAggregator:
+    """Parse-Stage quality: page-map drift + parse-error counts (S2).
+
+    Constructed only when the Pipeline actually has a Parse Stage, so a Source->Export pipeline
+    reports ``parse=None`` rather than a misleading all-zero section. For each parsed
+    :class:`DocumentRecord` that carries a page map, a :class:`PageOffsetIndex` is built and audited
+    — resolving each page's boundary offsets — so the drift diagnostics the ported asset produces
+    surface in the Quality Report (S2: "drift diagnostics in the Quality Report"). A clean parse
+    resolves every offset exactly (``page_maps_clean``). Each parsed record's assembled-markdown
+    byte size is summed into ``bytes_after_parse`` — the observable rollup of the Provenance
+    'size-after-parse'. The page index is built and discarded per record, so the fold's state is the
+    :class:`~latence_core.quality.ParseQuality` counters and nothing else.
+    """
+
+    section_field: ClassVar[str] = "parse"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (CapabilityKind.PARSE,)
+
+    def __init__(self) -> None:
+        self._quality = ParseQuality()
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _ParseAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
             return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if not isinstance(record, DocumentRecord):
+            return
+        quality = self._quality
+        if record.disposition is Disposition.PARSE_ERROR:
+            quality.parse_errors += 1
+            return
+        quality.documents_parsed += 1
+        # Provenance 'size-after-parse', aggregated: the assembled-markdown byte size of each
+        # parsed record (mirrors the parser's per-record ``size_after_parse`` helper).
+        quality.bytes_after_parse += len(record.content.encode("utf-8"))
+        page_map = record.page_map
+        if page_map is None:
+            return
+        quality.page_map_present += 1
+        quality.pages_total += len(page_map.pages)
+        index = PageOffsetIndex(page_map)
+        # Audit: resolve each page's start and last-char offset. With exact boundaries every lookup
+        # is exact; any drift the map carries is detected here and accumulated.
+        for span in page_map.pages:
+            index.page_for_offset(span.char_start)
+            index.page_for_offset(max(span.char_end - 1, span.char_start))
+        diag = index.diagnostics
+        quality.page_drift_resolutions += diag.resolutions
+        quality.page_drift_recovered += diag.recovered
+        quality.page_drift_max_chars = max(quality.page_drift_max_chars, diag.max_drift_chars)
+
+    def finish(self) -> ParseQuality | None:
+        return self._quality
+
+
+class _ChunkAggregator:
+    """Chunk-Stage quality: chunk counts, tokens, offset integrity (S3).
+
+    Constructed only when the Pipeline has a Chunk Stage. The Chunk Stage's own output is the
+    canonical chunk set from which counts, tokens, and the offset-preservation invariant are
+    measured: every :class:`ChunkRecord`'s Provenance ``char_start``/``char_end`` must be a valid
+    span and its ``page_start``/``page_end`` populated — the S3 round-trip invariant, so
+    ``offset_preserving`` is True only if every chunk carried a resolvable span.
+
+    ``chunks_flagged`` reads the POST-Content-Screening corpus, because Content Screening is what
+    attaches the risk markers (the raw Chunk output has none yet), falling back to the chunk output
+    when the stack declares no Content-Screening Stage. The gather expressed that as
+    ``post_content if post_content else chunked`` over two materialised lists; the fold keeps both
+    tallies plus the "did any screened record arrive at all" bit, which is exactly the same
+    predicate — non-empty ``post_content`` — decided without holding either list.
+    """
+
+    section_field: ClassVar[str] = "chunk"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (
+        CapabilityKind.CHUNK,
+        CapabilityKind.CONTENT_SCREENING,
+    )
+
+    def __init__(self) -> None:
+        self._quality = ChunkQuality()
+        self._flagged_in_chunks = 0
+        self._flagged_after_screening = 0
+        self._saw_screened_record = False
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _ChunkAggregator | None:
+        if not _has_kind(context.pipeline, (CapabilityKind.CHUNK,)):
+            return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if stage.capability is CapabilityKind.CONTENT_SCREENING:
+            self._saw_screened_record = True
+            if isinstance(record, ChunkRecord) and record.flagged:
+                self._flagged_after_screening += 1
+            return
+        if not isinstance(record, ChunkRecord):
+            return
+        quality = self._quality
+        quality.chunks_total += 1
+        quality.tokens_total += record.token_count
+        prov = record.provenance
+        has_span = (
+            prov.char_start is not None
+            and prov.char_end is not None
+            and prov.char_end >= prov.char_start
+        )
+        has_pages = prov.page_start is not None and prov.page_end is not None
+        if has_span and has_pages:
+            quality.chunks_offset_preserving += 1
+        if record.flagged:
+            self._flagged_in_chunks += 1
+
+    def finish(self) -> ChunkQuality | None:
+        self._quality.chunks_flagged = (
+            self._flagged_after_screening
+            if self._saw_screened_record
+            else self._flagged_in_chunks
+        )
+        return self._quality
+
+
+class _DriftAggregator:
+    """Corpus-level Provenance-integrity drift roll-up across the chunk offsets (S10).
+
+    Audits **every** :class:`ChunkRecord` whose parent document has a page map available, by
+    resolving the chunk's ``[char_start, char_end)`` endpoints through the run's
+    :class:`~latence_core.page_index.PageIndexResolver` and accumulating the fuzzy recoveries — a
+    finer drift signal than the Parse-only page-boundary audit. Only ChunkRecords are audited:
+    mentions, relations, and redaction spans inherit the chunk offsets the Chunk Stage already
+    validated against the page map, so they carry no independent offset->page drift. Returns
+    ``None`` when there was no page-map-backed chunk record to audit (a Parse-only or chunk-free
+    run, or a corpus whose documents all failed to parse), so a pipeline with nothing to audit
+    reports no drift section rather than a misleading all-zero one.
+
+    **Why the resolver and not a per-record index.** This audit used to build a throwaway
+    :class:`PageOffsetIndex` per chunk and discard its diagnostics. The resolver's corpus-level
+    :attr:`~latence_core.page_index.PageIndexResolver.diagnostics` roll-up — which exists for this
+    section — replaces the hand-summed per-index tallies. Since v19 every chunk carries its own
+    page spans, so coverage is every chunk in the stream, in any order: the v18 shape (map on the
+    document's first chunk, adopted from the stream) meant an audit that ran before that record
+    arrived, or after a filtering Stage dropped it, silently fell to ~1/N coverage while still
+    reporting a confident ``clean`` — and drift is likeliest at LARGE offsets, i.e. in exactly the
+    later chunks that lost their map.
+
+    Subscribes to the same chunk stream as :class:`_ChunkAggregator`; the builder decodes it once
+    and hands each record to both.
+    """
+
+    section_field: ClassVar[str] = "drift"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (CapabilityKind.CHUNK,)
+
+    def __init__(self) -> None:
+        self._resolver = PageIndexResolver()
+        self._audited = 0
+        self._unresolved = 0
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _DriftAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
+            return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        self.audit(record)
+
+    def audit(self, record: Record | StageOutput) -> None:
+        """Fold one record into the drift tally (the Stage is irrelevant — see the compat shim)."""
+        if not isinstance(record, ChunkRecord):
+            return
+        prov = record.provenance
+        if prov.char_start is None or prov.char_end is None:
+            return
+        try:
+            self._resolver.pages_for_span(record, prov.char_start, prov.char_end)
+        except PageSliceMissingError:
+            # A chunk whose producing Chunker stamped no page spans — nothing to audit it
+            # against. The REPORT is a reporter: it counts the gap and says so in
+            # :meth:`finish` rather than failing a run that has already produced its records.
+            # Every other caller lets the error propagate, which is what keeps a missing slice
+            # from being absorbed anywhere it could become a wrong page.
+            self._unresolved += 1
+            return
+        self._audited += 1
+
+    def finish(self) -> DriftDiagnostics | None:
+        # ADR-0034, the other half of "counted rather than swallowed": a chunk that carried no
+        # page spans is not audited, so it is invisible in ``records_audited`` — and a report
+        # section that simply shrank would read as a confident ``clean``. Counts only (no
+        # record id, no document id, no content) — the report's own no-PII discipline.
+        if self._unresolved:
+            logger.warning(
+                "provenance drift audit: %d chunk(s) carried no page_slice and were not "
+                "audited (%d chunk(s) audited); the Chunk Provider that produced them stamps "
+                "no page spans, so their page provenance is inherited, not resolved",
+                self._unresolved,
+                self._audited,
+            )
+        if self._audited == 0:
+            return None
+        diag = self._resolver.diagnostics
         return DriftDiagnostics(
-            resolutions=resolutions,
-            recovered=recovered,
-            max_drift_chars=max_drift,
-            records_audited=audited,
+            resolutions=diag.resolutions,
+            recovered=diag.recovered,
+            max_drift_chars=diag.max_drift_chars,
+            records_audited=self._audited,
         )
 
-    def _goldset_evaluation(
-        self,
-        pipeline: Pipeline,
-        storage: Storage,
-        mentions: list[StageOutput],
-        relations: list[StageOutput],
-    ) -> GoldSetEvaluation | None:
-        """Score the run against the adopter's gold set, when one is supplied (S10 harness).
 
-        Returns ``None`` unless the Pipeline declares a ``gold_set_uri`` — the harness is
-        opt-in (an adopter drops in 20–50 annotated documents). When present, the gold set is
-        loaded from Storage (JSON or YAML), the extracted mentions/relations are mapped to
-        their source file names, and per-Stage precision/recall/F1 are computed
-        deterministically against the annotations. The mention side is required for both
-        Stages (a relation's endpoints resolve through the mention spans), so a relations-only
-        gold set with no Entity-Extraction Stage simply yields no relation matches — never an
-        error.
-        """
-        if not pipeline.gold_set_uri:
+class _ScreeningAggregator:
+    """Screening findings across both checkpoints (S3) — the one section that reads a SIDECAR.
+
+    Screening's report input is not a record stream: each Screening Stage's findings + quarantine
+    dispositions are persisted to a sidecar beside its checkpoint (so the numbers are identical on
+    fresh and resumed runs) and read back through
+    :meth:`StageRecordReader.read_findings`. It therefore subscribes to no
+    :class:`~latence_core.pipeline.CapabilityKind` at all and does all its work in :meth:`finish`.
+
+    Keeping it in the same registry as the record-stream sections is deliberate: "how do I add a
+    Quality-Report section?" has exactly one answer, and the odd one out is odd inside its own
+    module rather than as a special case in ``build()``. Every Quarantine disposition and reason and
+    every propagated flag is auditable in the report (S3 AC).
+    """
+
+    section_field: ClassVar[str] = "screening"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = ()
+
+    def __init__(self, context: QualityRunContext) -> None:
+        self._context = context
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _ScreeningAggregator | None:
+        if not _has_kind(context.pipeline, _SCREENING_KINDS):
             return None
-        gold = self._load_gold_set(pipeline.gold_set_uri, storage)
-        typed_mentions = [m for m in mentions if isinstance(m, EntityMention)]
-        typed_relations = [r for r in relations if isinstance(r, RelationMention)]
+        return cls(context)
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:  # pragma: no cover - no kinds
+        """Never called: this section subscribes to no record stream."""
+
+    def finish(self) -> ScreeningQuality | None:
+        ctx = self._context
+        quality = ScreeningQuality()
+        for stage in ctx.ordered:
+            if stage.capability not in _SCREENING_KINDS:
+                continue
+            findings = ctx.reader.read_findings(
+                ctx.storage, ctx.pipeline, ctx.run_id, stage.name
+            )
+            quality.findings.extend(findings)
+            for finding in findings:
+                if finding.checkpoint is ScreeningCheckpoint.INTAKE:
+                    quality.intake_screened += 1
+                else:
+                    quality.content_screened += 1
+                if finding.verdict.value == "quarantine":
+                    quality.quarantined += 1
+                elif finding.verdict.value == "flag":
+                    quality.flagged += 1
+                else:
+                    quality.passed += 1
+        return quality
+
+
+class _EntityAggregator:
+    """Entity-Extraction quality: per-type counts + confidence distribution (S4).
+
+    Constructed only when the Pipeline has an Entity-Extraction (or fused) Stage. Folds the mention
+    set into per-label counts, the confidence histogram, and the offset-resolution invariant: every
+    :class:`~latence_core.contracts.EntityMention`'s Provenance must carry a valid char span AND a
+    page span — the S4 round-trip (mention -> offset -> original page) — so ``offset_resolving`` is
+    True only when every mention carried a resolvable span. The confidence distribution + per-type
+    counts are the S4 acceptance criterion.
+
+    A fused Entity+Relation Stage emits mentions and relations together, so this aggregator and
+    :class:`_RelationAggregator` both subscribe to ``FUSED_ENTITY_RELATION`` and each isinstance-
+    filters the mixed stream to its own carrier — one decode, two sections.
+
+    Bounded state: counters, a ten-bin histogram, a per-label map, and the set of chunk ids that
+    produced a mention (``chunks_with_mentions``) — bounded by the corpus's chunk count, not its
+    mention count, and the same set the gather built.
+    """
+
+    section_field: ClassVar[str] = "entities"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = _MENTION_KINDS
+
+    def __init__(self) -> None:
+        self._quality = EntityQuality()
+        self._chunk_ids_with_mentions: set[str] = set()
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _EntityAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
+            return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if not isinstance(record, EntityMention):
+            return
+        quality = self._quality
+        quality.mentions_total += 1
+        quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
+        quality.confidence.add(record.confidence)
+        self._chunk_ids_with_mentions.add(record.chunk_record_id)
+        prov = record.provenance
+        has_span = (
+            prov.char_start is not None
+            and prov.char_end is not None
+            and prov.char_end >= prov.char_start
+        )
+        has_pages = prov.page_start is not None and prov.page_end is not None
+        if has_span and has_pages:
+            quality.mentions_offset_resolving += 1
+
+    def finish(self) -> EntityQuality | None:
+        quality = self._quality
+        quality.chunks_with_mentions = len(self._chunk_ids_with_mentions)
+        # Sort per_type for a stable, deterministic report.
+        quality.per_type = dict(sorted(quality.per_type.items()))
+        return quality
+
+
+class _RelationAggregator:
+    """Relation-Extraction quality: per-type counts + confidence distribution (S5).
+
+    Constructed only when the Pipeline has a Relation-Extraction (or fused) Stage. Folds the
+    relation set into per-label counts, the confidence histogram, and the offset-resolution
+    invariant: every :class:`~latence_core.contracts.RelationMention`'s Provenance must carry a
+    valid char span AND a page span — the S5 round-trip — so ``offset_resolving`` is True only when
+    every relation carried a resolvable span.
+
+    The run's ``(output-capped-docs, dropped-relations, input-capped-docs, dropped-mentions)``
+    fan-out-guard tally (ADR-0033 / #63 output cap; #68 input mention cap) is read from the
+    :class:`QualityRunContext` at construction and surfaced as the audited "capped" marker, so a
+    bounded pathological corpus is never silently truncated.
+    """
+
+    section_field: ClassVar[str] = "relations"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = _RELATION_KINDS
+
+    def __init__(self, fanout: tuple[int, int, int, int]) -> None:
+        self._quality = RelationQuality()
+        (
+            self._quality.fanout_capped_documents,
+            self._quality.fanout_dropped_relations,
+            self._quality.mention_capped_documents,
+            self._quality.mention_dropped_mentions,
+        ) = fanout
+        self._docs_with_relations: set[str] = set()
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _RelationAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
+            return None
+        return cls(context.fanout)
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if not isinstance(record, RelationMention):
+            return
+        quality = self._quality
+        quality.relations_total += 1
+        quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
+        quality.confidence.add(record.confidence)
+        self._docs_with_relations.add(record.document_record_id)
+        prov = record.provenance
+        has_span = (
+            prov.char_start is not None
+            and prov.char_end is not None
+            and prov.char_end >= prov.char_start
+        )
+        has_pages = prov.page_start is not None and prov.page_end is not None
+        if has_span and has_pages:
+            quality.relations_offset_resolving += 1
+
+    def finish(self) -> RelationQuality | None:
+        quality = self._quality
+        quality.documents_with_relations = len(self._docs_with_relations)
+        quality.per_type = dict(sorted(quality.per_type.items()))
+        return quality
+
+
+def _terminal_redaction_stages(pipeline: Pipeline) -> set[str]:
+    """Names of the Redaction Stages whose output actually reaches the rest of the Pipeline.
+
+    A Redaction Stage is SUPERSEDED when some other Redaction Stage depends on it, directly or
+    transitively: since W16 Redaction is a chunk->chunk transform and
+    :func:`~latence_core.redaction_policy._compose_prior_spans` folds the upstream spans into the
+    downstream Stage's own, the downstream Stage re-emits the same chunks carrying every mask the
+    chain applied. Only that downstream version flows on to the Export, so only it may be tallied.
+    Parallel Redaction branches supersede nothing and are all terminal.
+    """
+    by_name = {s.name: s for s in pipeline.stages}
+    redaction_stages = {s.name for s in pipeline.stages if s.capability is CapabilityKind.REDACTION}
+    superseded: set[str] = set()
+    for name in redaction_stages:
+        seen: set[str] = set()
+        frontier = list(by_name[name].depends_on)
+        while frontier:
+            dep = frontier.pop()
+            if dep in seen or dep not in by_name:
+                continue
+            seen.add(dep)
+            if dep in redaction_stages:
+                superseded.add(dep)
+            frontier.extend(by_name[dep].depends_on)
+    return redaction_stages - superseded
+
+
+class _RedactionAggregator:
+    """Redaction quality: per-PII-type + per-action detection counts (S6/W16).
+
+    Constructed only when the Pipeline has a Redaction Stage. Since W16 (ADR-0042) Redaction is a
+    chunk->chunk transform, so the stream is the set of redacted
+    :class:`~latence_core.contracts.ChunkRecord`s (each carrying ``masked_content`` +
+    ``pii_spans``). Per-type/per-action span counts are summed across chunks; documents-redacted and
+    documents-with-PII are rolled up to the DOCUMENT level (distinct ``document_record_id``s) so the
+    report reads the same as the old one-record-per-document shape — the S6 acceptance criterion.
+    Only counts and type/action names cross into the report; **no raw PII value** ever does (a
+    PIISpan never stores the surface string, so this rollup cannot leak one). The deprecated
+    doc-level :class:`~latence_core.contracts.RedactionRecord` path is still tallied for backward
+    compatibility.
+
+    Only the TERMINAL Redaction Stages are folded, and every one of their records is summed with
+    FULL MULTIPLICITY. Both halves matter, and they used to be got wrong in opposite directions:
+
+    * Folding EVERY Redaction Stage's output double-counts a CHAINED topology — exactly what the
+      shipped ``gpu-learned`` / ``full-stack`` stacks declare since audit R5-12
+      (``redact_financial.depends_on: [redact_pii]``). The same chunk appears twice: once as the
+      upstream Stage emitted it, once as the downstream Stage re-emitted it after
+      :func:`~latence_core.redaction_policy._compose_prior_spans` folded the upstream spans in. That
+      inflates every upstream span and can name a ``pii_type`` that exists nowhere in the exported
+      corpus. Dropping the superseded Stages at the source fixes this: the terminal Stage's chunks
+      already carry every mask the chain applied, because composition is coverage-preserving.
+    * De-duplicating by ``record_id`` instead (audit R6) fixes the chain but UNDER-counts the plain
+      single-Redactor path, because ``record_id``s are content-addressed: two byte-identical
+      documents share one ``document_id`` and hence one chunk ``record_id``, yet both are separately
+      exported and both carry real PII. Halving that corpus's tally is a silent regression (audit
+      R7), so no de-duplication by ``record_id`` happens here.
+
+    The gather expressed the terminal-stage rule by handing ``_records_of_kind`` a pre-filtered
+    Stage list; the fold decides per record from the ``stage`` it was produced by — the same rule,
+    now owned by the section that depends on it. The report is the operator's redaction audit trail
+    (ADR-0034 counts-only observability), so it must describe the EXPORTED CORPUS.
+    """
+
+    section_field: ClassVar[str] = "redaction"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (CapabilityKind.REDACTION,)
+
+    def __init__(self, terminal: set[str]) -> None:
+        self._terminal = terminal
+        self._quality = RedactionQuality()
+        self._redacted_docs: set[str] = set()
+        self._docs_with_pii: set[str] = set()
+        self._disabled_docs: set[str] = set()
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _RedactionAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
+            return None
+        return cls(_terminal_redaction_stages(context.pipeline))
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if stage.name not in self._terminal:
+            return
+        if isinstance(record, ChunkRecord):
+            # Chunk-level (W16): masked_content is set on every chunk the Redaction Stage produced.
+            if record.masked_content is None:
+                return
+            doc_id = record.document_record_id
+            self._redacted_docs.add(doc_id)
+            if record.pii_spans:
+                self._docs_with_pii.add(doc_id)
+            if record.redaction_disabled_for_sensitive:
+                self._disabled_docs.add(doc_id)
+            spans = record.pii_spans
+        elif isinstance(record, RedactionRecord):
+            # Deprecated doc-level path: one record per document.
+            self._redacted_docs.add(record.document_record_id)
+            if record.pii_spans:
+                self._docs_with_pii.add(record.document_record_id)
+            if record.redaction_disabled_for_sensitive:
+                self._disabled_docs.add(record.document_record_id)
+            spans = record.pii_spans
+        else:
+            return
+        quality = self._quality
+        for span in spans:
+            quality.pii_total += 1
+            quality.per_type[span.pii_type] = quality.per_type.get(span.pii_type, 0) + 1
+            action = span.action.value
+            quality.per_action[action] = quality.per_action.get(action, 0) + 1
+
+    def finish(self) -> RedactionQuality | None:
+        quality = self._quality
+        quality.documents_redacted = len(self._redacted_docs)
+        quality.documents_with_pii = len(self._docs_with_pii)
+        # H-C1 no-op floor: a sensitive doc whose control ran no detectors. LOUD, first-class —
+        # while this is > 0, documents_with_pii:0 is NOT a clean bill.
+        quality.redaction_disabled_for_sensitive = len(self._disabled_docs)
+        quality.per_type = dict(sorted(quality.per_type.items()))
+        quality.per_action = dict(sorted(quality.per_action.items()))
+        return quality
+
+
+class _ProfilingAggregator:
+    """Profiling quality: per-document feature averages + corpus aggregates (S7).
+
+    Constructed only when the Pipeline has a Profiling Stage. The stream is the mix of
+    DOCUMENT-scope and the single CORPUS-scope
+    :class:`~latence_core.contracts.FeatureRecord`s. The document-scope records are averaged into a
+    compact readability/density/diversity summary, and the corpus-scope record's aggregates
+    (word/vocabulary counts, corpus Zipf alpha, source coverage, entity-type frequency, top
+    co-occurrences) are surfaced verbatim — the S7 acceptance criterion. Counts and averages only
+    (no raw document text).
+
+    The gather materialised the document-scope records so it could take ``len`` once and five
+    ``sum``s over the same list; the fold keeps a count and five running totals instead. The
+    accumulation order is the stream order, which is the order the gather's list was in, so the
+    float sums are bit-identical — the byte-identity constraint bites hardest here.
+
+    The co-occurrence list is rendered as ``pair-fingerprint`` -> document-count: the raw entity
+    surfaces (possible PII from a ``confidential`` source that would otherwise land in an
+    ``internal``-stamped report) are replaced by a deterministic, **salted** sha256 fingerprint of
+    the ``left|right`` pair (the same salted-digest construction S6 uses; salt from the Redaction
+    Stage config). The fingerprint keeps the raw surface out of the report and defeats rainbow-table
+    recovery, but it is not irreversible — a reader who can enumerate candidate entity names and
+    knows the salt could still recover a pair by dictionary attack, so the report is *not* safe to
+    publish to an untrusted audience. The raw surfaces remain only in the exported,
+    sensitivity-stamped ``CorpusFeatures`` data artifact.
+    """
+
+    section_field: ClassVar[str] = "profiling"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (CapabilityKind.PROFILING,)
+
+    def __init__(self, salt: str) -> None:
+        self._salt = salt
+        self._documents = 0
+        self._readability = 0.0
+        self._density = 0.0
+        self._type_token_ratio = 0.0
+        self._zipf_alpha = 0.0
+        self._compression_ratio = 0.0
+        self._corpus: FeatureRecord | None = None
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _ProfilingAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
+            return None
+        return cls(_fingerprint_salt(context.pipeline))
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if not isinstance(record, FeatureRecord):
+            return
+        if record.scope is FeatureScope.DOCUMENT and record.document is not None:
+            doc = record.document
+            self._documents += 1
+            self._readability += doc.readability
+            self._density += doc.density
+            self._type_token_ratio += doc.type_token_ratio
+            self._zipf_alpha += doc.zipf_alpha
+            self._compression_ratio += doc.compression_ratio
+        elif (
+            record.scope is FeatureScope.CORPUS
+            and record.corpus is not None
+            and self._corpus is None
+        ):
+            # The FIRST corpus-scope record wins, exactly as the gather's ``next(...)`` did. This is
+            # the one whole record the fold retains, and there is at most one per run.
+            self._corpus = record
+
+    def finish(self) -> ProfilingQuality | None:
+        quality = ProfilingQuality()
+        n = self._documents
+        quality.documents_profiled = n
+        if n:
+            quality.avg_readability = round(self._readability / n, 6)
+            quality.avg_density = round(self._density / n, 6)
+            quality.avg_type_token_ratio = round(self._type_token_ratio / n, 6)
+            quality.avg_zipf_alpha = round(self._zipf_alpha / n, 6)
+            quality.avg_compression_ratio = round(self._compression_ratio / n, 6)
+        corpus = self._corpus
+        if corpus is not None and corpus.corpus is not None:
+            cf = corpus.corpus
+            quality.corpus_total_words = cf.total_words
+            quality.corpus_unique_words = cf.total_unique_words
+            quality.corpus_zipf_alpha = cf.corpus_zipf_alpha
+            quality.language_coverage = dict(cf.language_coverage)
+            quality.category_coverage = dict(cf.category_coverage)
+            quality.sensitivity_coverage = dict(cf.sensitivity_coverage)
+            quality.distinct_entities = len(cf.entity_frequency)
+            quality.entity_type_frequency = dict(cf.entity_type_frequency)
+            quality.top_co_occurrences = {
+                _co_occurrence_fingerprint(co.left, co.right, self._salt): co.document_count
+                for co in cf.co_occurrences
+            }
+        return quality
+
+
+@dataclass
+class _TypeDriftFold:
+    """How one carrier's label vocabulary changed across a Type-Consolidation Stage (T3).
+
+    ``raw_label`` is set if and ONLY if the Stage rewrote that record's label, so the raw vocabulary
+    is ``{raw_label or label}``, the canonical vocabulary is ``{label}``, and the alias map is
+    exactly the rewrites applied. A run that consolidated nothing therefore reports equal counts and
+    an empty map — the honest reading of "nothing happened", never a fabricated fold. State is
+    bounded by the TYPE vocabulary (tens of labels), not by the mention count.
+    """
+
+    raw: set[str] = field(default_factory=set)
+    canonical: set[str] = field(default_factory=set)
+    aliases: dict[str, str] = field(default_factory=dict)
+    remapped: int = 0
+
+    def add(self, record: EntityMention | RelationMention) -> None:
+        self.canonical.add(record.label)
+        self.raw.add(record.raw_label or record.label)
+        if record.raw_label is not None:
+            self.aliases[record.raw_label] = record.label
+            self.remapped += 1
+
+    def alias_map(self) -> dict[str, str]:
+        return dict(sorted(self.aliases.items()))
+
+
+class _TypeConsolidationAggregator:
+    """The TYPE-drift collapse the run achieved (T3, ADR-0054).
+
+    Constructed only when the Pipeline has a Type-Consolidation Stage. The stream is that Stage's
+    mixed output — the run's :class:`~latence_core.contracts.EntityMention`s and
+    :class:`~latence_core.contracts.RelationMention`s after the remap, each carrying its
+    pre-canonicalization type on ``raw_label`` when (and only when) it was rewritten.
+
+    Everything is read off those records, so the section is a MEASUREMENT of what happened to the
+    data rather than a restatement of what the Provider intended — a Stage that silently failed to
+    remap would report ``N raw -> N canonical`` and an empty alias map, which is exactly the honest
+    answer.
+    """
+
+    section_field: ClassVar[str] = "type_consolidation"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (CapabilityKind.TYPE_CONSOLIDATION,)
+
+    def __init__(self) -> None:
+        self._entities = _TypeDriftFold()
+        self._relations = _TypeDriftFold()
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _TypeConsolidationAggregator | None:
+        if not _has_kind(context.pipeline, cls.kinds):
+            return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if isinstance(record, EntityMention):
+            self._entities.add(record)
+        elif isinstance(record, RelationMention):
+            self._relations.add(record)
+
+    def finish(self) -> TypeConsolidationQuality | None:
+        return TypeConsolidationQuality(
+            raw_entity_types=len(self._entities.raw),
+            canonical_entity_types=len(self._entities.canonical),
+            mentions_remapped=self._entities.remapped,
+            entity_alias_map=self._entities.alias_map(),
+            raw_relation_types=len(self._relations.raw),
+            canonical_relation_types=len(self._relations.canonical),
+            relations_remapped=self._relations.remapped,
+            relation_alias_map=self._relations.alias_map(),
+        )
+
+
+class _DisambiguationAggregator:
+    """Disambiguation merge/link/normalisation statistics (S8).
+
+    Constructed only when the Pipeline has a Disambiguation Stage. It folds TWO streams: the
+    Disambiguation Stage's own mix of ENTITY-scope (canonical entities) and RELATION-scope
+    (normalized relations) :class:`~latence_core.contracts.DisambiguationRecord`s, and the
+    Entity-Extraction (or fused) output the Stage consumed — of which it needs only a COUNT
+    (``mentions_in``, the number it resolved from).
+
+    That second subscription is the duplicate the gather paid for twice: ``mentions`` and
+    ``disambig_mentions_in`` were byte-identical ``_records_of_kinds`` calls over the same
+    Capabilities, so the largest stream in any corpus (59,450 records for 200 documents per
+    PERF-RESULTS) was decoded and retained twice. Sharing the stream with
+    :class:`_EntityAggregator` makes it one decode and no retention.
+
+    Rolls up: mentions in vs canonical entities out; the created/merged/singleton breakdown; applied
+    vs below-policy merges (the no-silent-over-merge audit) broken down by strategy; KB-linked vs
+    unlinked entities; and relations normalized (with the inverted count). Counts only (no raw
+    text) — the S8 acceptance criterion, safe to persist.
+    """
+
+    section_field: ClassVar[str] = "disambiguation"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (
+        CapabilityKind.DISAMBIGUATION,
+        *_MENTION_KINDS,
+    )
+
+    def __init__(self) -> None:
+        self._quality = DisambiguationQuality()
+        self._entities = 0
+        self._confidence_sum = 0.0
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _DisambiguationAggregator | None:
+        if not _has_kind(context.pipeline, (CapabilityKind.DISAMBIGUATION,)):
+            return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        quality = self._quality
+        if stage.capability in _MENTION_KINDS:
+            if isinstance(record, EntityMention):
+                quality.mentions_in += 1
+            return
+        if not isinstance(record, DisambiguationRecord):
+            return
+        if record.scope is DisambiguationScope.ENTITY and record.entity is not None:
+            entity = record.entity
+            self._entities += 1
+            if entity.mention_count > 1:
+                quality.entities_merged += 1
+            else:
+                quality.entities_singleton += 1
+            if entity.linked:
+                quality.entities_linked += 1
+            else:
+                quality.entities_unlinked += 1
+            self._confidence_sum += entity.evidence.confidence
+            for decision in entity.merge_decisions:
+                if decision.applied:
+                    quality.merges_applied += 1
+                    key = decision.strategy.value
+                    quality.merges_by_strategy[key] = quality.merges_by_strategy.get(key, 0) + 1
+                else:
+                    quality.merges_below_policy += 1
+        elif record.scope is DisambiguationScope.RELATION and record.relation is not None:
+            quality.relations_normalized += 1
+            if record.relation.inverted:
+                quality.relations_inverted += 1
+
+    def finish(self) -> DisambiguationQuality | None:
+        quality = self._quality
+        quality.entities_out = self._entities
+        if self._entities:
+            quality.avg_entity_confidence = round(self._confidence_sum / self._entities, 6)
+        quality.merges_by_strategy = dict(sorted(quality.merges_by_strategy.items()))
+        return quality
+
+
+class _GraphAggregator:
+    """Graph-Assembly KG statistics (S9) + the separately-counted inferred edges (W2-linkpred).
+
+    Constructed only when the Pipeline has a Graph Assembly Stage. The ASSERTED stream is that
+    Stage's mix of NODE-scope and EDGE-scope :class:`~latence_core.contracts.GraphRecord`s:
+    node/edge counts; nodes by entity type and edges by relation label; KB-linked node count; and
+    — the S9
+    acceptance criterion — evidence coverage, the fraction of edges whose Evidence names at least
+    one source mention (1.0 = every edge is justified).
+
+    The OPTIONAL Graph Completion Stage's PREDICTED EDGE-scope records (ADR-0037) are a SECOND
+    subscription, counted into ``inferred_edge_count`` / ``inferred_edges_by_scorer`` and NEVER
+    folded into ``edges_total`` / ``edges_by_label`` / ``evidence_coverage``. An inferred edge must
+    never inflate the asserted-edge statistics — the enterprise-honesty crux — which is exactly why
+    the two streams stay distinguishable in the fold: the ``stage`` says which one a record came
+    from. A run with no Graph Completion Stage has ``inferred_edge_count == 0``. Only edges that
+    actually carry ``properties["inferred"] is True`` are tallied (a defensive guard so nothing but
+    a genuinely-inferred edge is counted). Counts only (no raw text); all maps sorted.
+    """
+
+    section_field: ClassVar[str] = "graph"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (
+        CapabilityKind.GRAPH_ASSEMBLY,
+        CapabilityKind.GRAPH_COMPLETION,
+    )
+
+    def __init__(self) -> None:
+        self._quality = GraphQuality()
+        self._nodes = 0
+        self._edges = 0
+        self._node_confidence = 0.0
+        self._edge_confidence = 0.0
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _GraphAggregator | None:
+        if not _has_kind(context.pipeline, (CapabilityKind.GRAPH_ASSEMBLY,)):
+            return None
+        return cls()
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if not isinstance(record, GraphRecord):
+            return
+        quality = self._quality
+        if stage.capability is CapabilityKind.GRAPH_COMPLETION:
+            if record.scope is not GraphScope.EDGE or record.edge is None:
+                return
+            if record.edge.properties.get("inferred") is not True:
+                return
+            quality.inferred_edge_count += 1
+            scorer = str(record.edge.properties.get("scorer", "unknown"))
+            quality.inferred_edges_by_scorer[scorer] = (
+                quality.inferred_edges_by_scorer.get(scorer, 0) + 1
+            )
+            return
+        if record.scope is GraphScope.NODE and record.node is not None:
+            node = record.node
+            self._nodes += 1
+            quality.nodes_by_type[node.label] = quality.nodes_by_type.get(node.label, 0) + 1
+            if node.linked:
+                quality.nodes_linked += 1
+            self._node_confidence += node.confidence
+        elif record.scope is GraphScope.EDGE and record.edge is not None:
+            edge = record.edge
+            self._edges += 1
+            quality.edges_by_label[edge.label] = quality.edges_by_label.get(edge.label, 0) + 1
+            if edge.evidence.mention_ids:
+                quality.edges_with_evidence += 1
+            self._edge_confidence += edge.confidence
+
+    def finish(self) -> GraphQuality | None:
+        quality = self._quality
+        quality.nodes_total = self._nodes
+        quality.edges_total = self._edges
+        if self._nodes:
+            quality.avg_node_confidence = round(self._node_confidence / self._nodes, 6)
+        if self._edges:
+            quality.avg_edge_confidence = round(self._edge_confidence / self._edges, 6)
+            quality.evidence_coverage = round(quality.edges_with_evidence / self._edges, 6)
+        quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
+        quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
+        quality.inferred_edges_by_scorer = dict(sorted(quality.inferred_edges_by_scorer.items()))
+        return quality
+
+
+class _ContextEnrichmentAggregator:
+    """The OPTIONAL Context Enrichment Stage's coherence roll-up (W13, ADR-0039).
+
+    Constructed only when the Pipeline has a ``context_enrichment`` Stage (else the section is
+    ``None`` — byte-identical to a stack without it). Counts-only (no content).
+    ``chunks_enriched`` + ``avg_neighbors_per_chunk`` are read off the enriched
+    :class:`~latence_core.contracts.ChunkRecord`s directly (a chunk with a non-empty
+    :class:`~latence_core.contracts.ContextHeader` counts; its ``neighbor_node_ids`` are the
+    query-time KG-expansion keys averaged).
+
+    ``hub_entities_capped`` is the anti-bloat witness: the number of KG entities whose gated
+    neighbor DEGREE exceeds the Stage's ``max_neighbors_per_entity`` cap — those entities contribute
+    only their TOP-k relations wherever they appear (the hub-entity guard). It is computed from the
+    assembled graph (the second subscription, shared with :class:`_GraphAggregator` at no extra
+    decode) plus the Stage's config, so it is honest and reproducible. The degree map is bounded by
+    the node count, not the edge count.
+    """
+
+    section_field: ClassVar[str] = "context_enrichment"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (
+        CapabilityKind.CONTEXT_ENRICHMENT,
+        CapabilityKind.GRAPH_ASSEMBLY,
+    )
+
+    def __init__(self, max_neighbors: int, min_edge_confidence: float) -> None:
+        self._max_neighbors = max_neighbors
+        self._min_edge_confidence = min_edge_confidence
+        self._headers = 0
+        self._neighbors = 0
+        self._degree: dict[str, int] = {}
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _ContextEnrichmentAggregator | None:
+        stage = next(
+            (
+                s
+                for s in context.pipeline.stages
+                if s.capability is CapabilityKind.CONTEXT_ENRICHMENT
+            ),
+            None,
+        )
+        if stage is None:
+            return None
+        return cls(
+            int(stage.config.get("max_neighbors_per_entity", 4)),
+            float(stage.config.get("min_edge_confidence", 0.0)),
+        )
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if stage.capability is CapabilityKind.GRAPH_ASSEMBLY:
+            # Degree = distinct gated edges touching the node (each edge is a neighbor from both
+            # endpoints). Mirrors the Provider's edge-confidence gate.
+            if self._max_neighbors <= 0:
+                return
+            if not isinstance(record, GraphRecord) or record.scope is not GraphScope.EDGE:
+                return
+            edge = record.edge
+            if edge is None or edge.confidence < self._min_edge_confidence:
+                return
+            self._degree[edge.source_node_id] = self._degree.get(edge.source_node_id, 0) + 1
+            self._degree[edge.target_node_id] = self._degree.get(edge.target_node_id, 0) + 1
+            return
+        if isinstance(record, ChunkRecord) and record.context_header is not None:
+            self._headers += 1
+            self._neighbors += len(record.context_header.neighbor_node_ids)
+
+    def finish(self) -> ContextEnrichmentQuality | None:
+        quality = ContextEnrichmentQuality()
+        quality.chunks_enriched = self._headers
+        if self._headers:
+            quality.avg_neighbors_per_chunk = round(self._neighbors / self._headers, 6)
+        if self._max_neighbors > 0:
+            quality.hub_entities_capped = sum(
+                1 for d in self._degree.values() if d > self._max_neighbors
+            )
+        return quality
+
+
+class _GoldSetAggregator:
+    """The gold-set harness result (S10) — the one aggregator that legitimately retains records.
+
+    Constructed ONLY when the Pipeline declares a ``gold_set_uri``: the harness is opt-in (an
+    adopter drops in 20-50 annotated documents), so a normal run constructs nothing here and pays
+    nothing. When it is present, :func:`~latence_core.goldset.score_entities` /
+    :func:`~latence_core.goldset.score_relations` index BOTH whole sets against the annotations —
+    that is the algorithm, not a consumer defect — so this fold keeps the typed mentions and typed
+    relations. It is the documented exception to the bounded-state rule, and it is bounded by an
+    operator decision (a gold set is a few dozen documents' worth of extractions, not the corpus).
+
+    Which stream a record came from matters and is decided from the ``stage``: mentions are the
+    Entity-Extraction (or fused) output and relations the Relation-Extraction (or fused) output,
+    exactly as the two gathers scoped them, so a relation Stage that also emitted mentions does not
+    silently contribute them to the entity score.
+
+    The mention side is required for both Stages (a relation's endpoints resolve through the mention
+    spans), so a relations-only gold set with no Entity-Extraction Stage simply yields no relation
+    matches — never an error.
+    """
+
+    section_field: ClassVar[str] = "goldset"
+    kinds: ClassVar[tuple[CapabilityKind, ...]] = (
+        CapabilityKind.ENTITY_EXTRACTION,
+        CapabilityKind.RELATION_EXTRACTION,
+        CapabilityKind.FUSED_ENTITY_RELATION,
+    )
+
+    def __init__(self, gold_set_uri: str, storage: Storage) -> None:
+        self._gold_set_uri = gold_set_uri
+        self._storage = storage
+        self._mentions: list[EntityMention] = []
+        self._relations: list[RelationMention] = []
+
+    @classmethod
+    def for_run(cls, context: QualityRunContext) -> _GoldSetAggregator | None:
+        if not context.pipeline.gold_set_uri:
+            return None
+        return cls(context.pipeline.gold_set_uri, context.storage)
+
+    def observe(self, stage: Stage, record: StageOutput) -> None:
+        if stage.capability in _MENTION_KINDS and isinstance(record, EntityMention):
+            self._mentions.append(record)
+        if stage.capability in _RELATION_KINDS and isinstance(record, RelationMention):
+            self._relations.append(record)
+
+    def finish(self) -> GoldSetEvaluation | None:
+        gold = _load_gold_set(self._gold_set_uri, self._storage)
+        typed_mentions = self._mentions
+        typed_relations = self._relations
         # Map each mention/relation's parent document to its source file name so the gold
         # annotations (keyed by file name) bind to the run's records.
         file_name_of: dict[str, str] = {}
@@ -606,755 +1546,140 @@ class QualityReportBuilder:
             match_min_overlap=gold.match_min_overlap,
         )
         entity_overall, entity_labels = score_entities(typed_mentions, gold, file_name_of)
-        evaluation.stages.append(self._stage_score("entities", entity_overall, entity_labels))
+        evaluation.stages.append(_stage_score("entities", entity_overall, entity_labels))
         if gold.total_relations > 0:
             relation_overall, relation_labels = score_relations(
                 typed_relations, typed_mentions, gold, file_name_of
             )
-            evaluation.stages.append(
-                self._stage_score("relations", relation_overall, relation_labels)
-            )
+            evaluation.stages.append(_stage_score("relations", relation_overall, relation_labels))
         return evaluation
 
-    @staticmethod
-    def _load_gold_set(uri: str, storage: Storage) -> GoldSet:
-        """Load + validate a gold set from Storage (JSON or YAML), by file extension."""
-        text = storage.read_text(uri)
-        if uri.endswith((".yaml", ".yml")):
-            import yaml
 
-            data = yaml.safe_load(text)
-        else:
-            data = json.loads(text)
-        if not isinstance(data, dict):
-            msg = f"Gold set at {uri!r} must be a JSON/YAML mapping at the top level."
-            # A malformed operator-supplied gold set is a config error (#73); ConfigError is a
-            # ValueError subclass, so pre-taxonomy ``except ValueError`` callers keep catching it.
-            raise ConfigError(msg)
-        return GoldSet.from_mapping(data)
+def _load_gold_set(uri: str, storage: Storage) -> GoldSet:
+    """Load + validate a gold set from Storage (JSON or YAML), by file extension."""
+    text = storage.read_text(uri)
+    if uri.endswith((".yaml", ".yml")):
+        import yaml
 
-    @staticmethod
-    def _stage_score(
-        stage: str,
-        overall: ConfusionCounts,
-        per_label: dict[str, ConfusionCounts],
-    ) -> StageScore:
-        """Assemble a :class:`StageScore` from the confusion counts (overall + per label)."""
-        return StageScore(
-            stage=stage,
-            true_positives=overall.true_positives,
-            false_positives=overall.false_positives,
-            false_negatives=overall.false_negatives,
-            precision=overall.precision,
-            recall=overall.recall,
-            f1=overall.f1,
-            per_label={
-                label: LabelScore(
-                    true_positives=c.true_positives,
-                    false_positives=c.false_positives,
-                    false_negatives=c.false_negatives,
-                    precision=c.precision,
-                    recall=c.recall,
-                    f1=c.f1,
-                )
-                for label, c in per_label.items()
-            },
-        )
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    if not isinstance(data, dict):
+        msg = f"Gold set at {uri!r} must be a JSON/YAML mapping at the top level."
+        # A malformed operator-supplied gold set is a config error (#73); ConfigError is a
+        # ValueError subclass, so pre-taxonomy ``except ValueError`` callers keep catching it.
+        raise ConfigError(msg)
+    return GoldSet.from_mapping(data)
 
-    # -- per-Stage quality rollups ----------------------------------------
 
-    def _screening_quality(
-        self, pipeline: Pipeline, run_id: str, storage: Storage, ordered: list[Stage]
-    ) -> ScreeningQuality | None:
-        """Aggregate Screening findings across both checkpoints for the report.
-
-        Reads each Screening Stage's persisted findings + quarantine sidecars (so
-        the numbers are identical on fresh and resumed runs) and rolls them into
-        the Quality Report: every Quarantine disposition and reason, and every
-        propagated flag, are auditable there (S3 AC). Returns ``None`` when the
-        Pipeline has no Screening Stage.
-        """
-        screen_kinds = (CapabilityKind.INTAKE_SCREENING, CapabilityKind.CONTENT_SCREENING)
-        if not any(s.capability in screen_kinds for s in pipeline.stages):
-            return None
-        quality = ScreeningQuality()
-        for stage in ordered:
-            if stage.capability not in screen_kinds:
-                continue
-            findings = self._reader.read_findings(storage, pipeline, run_id, stage.name)
-            quality.findings.extend(findings)
-            for finding in findings:
-                if finding.checkpoint is ScreeningCheckpoint.INTAKE:
-                    quality.intake_screened += 1
-                else:
-                    quality.content_screened += 1
-                if finding.verdict.value == "quarantine":
-                    quality.quarantined += 1
-                elif finding.verdict.value == "flag":
-                    quality.flagged += 1
-                else:
-                    quality.passed += 1
-        return quality
-
-    @staticmethod
-    def _chunk_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        flagged_source: list[StageOutput],
-    ) -> ChunkQuality | None:
-        """Aggregate Chunk-Stage quality: chunk counts, tokens, offset integrity.
-
-        Only computed when the Pipeline has a Chunk Stage. ``records`` is the Chunk
-        Stage's output (the canonical chunk set) from which counts, tokens, and the
-        offset-preservation invariant are measured: every :class:`ChunkRecord`'s
-        Provenance ``char_start``/``char_end`` must be a valid span and its
-        ``page_start``/``page_end`` populated — the S3 round-trip invariant, so
-        ``offset_preserving`` is True only if every chunk carried a resolvable span.
-        ``flagged_source`` is the POST-Content-Screening corpus (markers are
-        attached there, not at Chunk), so ``chunks_flagged`` reflects the corpus.
-        """
-        if not any(s.capability is CapabilityKind.CHUNK for s in pipeline.stages):
-            return None
-        quality = ChunkQuality()
-        for record in records:
-            if not isinstance(record, ChunkRecord):
-                continue
-            quality.chunks_total += 1
-            quality.tokens_total += record.token_count
-            prov = record.provenance
-            has_span = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
+def _stage_score(
+    stage: str,
+    overall: ConfusionCounts,
+    per_label: dict[str, ConfusionCounts],
+) -> StageScore:
+    """Assemble a :class:`StageScore` from the confusion counts (overall + per label)."""
+    return StageScore(
+        stage=stage,
+        true_positives=overall.true_positives,
+        false_positives=overall.false_positives,
+        false_negatives=overall.false_negatives,
+        precision=overall.precision,
+        recall=overall.recall,
+        f1=overall.f1,
+        per_label={
+            label: LabelScore(
+                true_positives=c.true_positives,
+                false_positives=c.false_positives,
+                false_negatives=c.false_negatives,
+                precision=c.precision,
+                recall=c.recall,
+                f1=c.f1,
             )
-            has_pages = prov.page_start is not None and prov.page_end is not None
-            if has_span and has_pages:
-                quality.chunks_offset_preserving += 1
-        quality.chunks_flagged = sum(
-            1 for r in flagged_source if isinstance(r, ChunkRecord) and r.flagged
-        )
-        return quality
-
-    @staticmethod
-    def _entity_quality(pipeline: Pipeline, records: list[StageOutput]) -> EntityQuality | None:
-        """Aggregate Entity-Extraction quality: per-type counts + confidence dist.
-
-        Only computed when the Pipeline has an Entity-Extraction Stage. ``records``
-        is that Stage's output (the mention set) from which per-label counts, the
-        confidence histogram, and the offset-resolution invariant are measured:
-        every :class:`~latence_core.contracts.EntityMention`'s Provenance must carry
-        a valid char span AND a page span — the S4 round-trip (mention → offset →
-        original page) — so ``offset_resolving`` is True only when every mention
-        carried a resolvable span. The confidence distribution + per-type counts are
-        the S4 acceptance criterion (they "land in the Quality Report").
-        """
-        entity_kinds = (
-            CapabilityKind.ENTITY_EXTRACTION,
-            CapabilityKind.FUSED_ENTITY_RELATION,
-        )
-        if not any(s.capability in entity_kinds for s in pipeline.stages):
-            return None
-        quality = EntityQuality()
-        chunk_ids_with_mentions: set[str] = set()
-        for record in records:
-            if not isinstance(record, EntityMention):
-                continue
-            quality.mentions_total += 1
-            quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
-            quality.confidence.add(record.confidence)
-            chunk_ids_with_mentions.add(record.chunk_record_id)
-            prov = record.provenance
-            has_span = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            has_pages = prov.page_start is not None and prov.page_end is not None
-            if has_span and has_pages:
-                quality.mentions_offset_resolving += 1
-        quality.chunks_with_mentions = len(chunk_ids_with_mentions)
-        # Sort per_type for a stable, deterministic report.
-        quality.per_type = dict(sorted(quality.per_type.items()))
-        return quality
-
-    @staticmethod
-    def _relation_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        fanout: tuple[int, int, int, int] = (0, 0, 0, 0),
-    ) -> RelationQuality | None:
-        """Aggregate Relation-Extraction quality: per-type counts + confidence dist (S5).
-
-        Only computed when the Pipeline has a Relation-Extraction (or fused) Stage.
-        ``records`` is the relation set from which per-label counts, the confidence
-        histogram, and the offset-resolution invariant are measured: every
-        :class:`~latence_core.contracts.RelationMention`'s Provenance must carry a
-        valid char span AND a page span — the S5 round-trip (relation → offset →
-        original page) — so ``offset_resolving`` is True only when every relation
-        carried a resolvable span. The per-type counts + confidence distribution are
-        the S5 acceptance criterion ("relation counts + confidence land in the
-        Quality Report"). ``fanout`` is the run's ``(output-capped-docs, dropped-relations,
-        input-capped-docs, dropped-mentions)`` fan-out-guard tally (ADR-0033 / #63 output cap;
-        #68 input mention cap), surfaced as the audited "capped" marker so a bounded
-        pathological corpus is never silently truncated.
-        """
-        relation_kinds = (
-            CapabilityKind.RELATION_EXTRACTION,
-            CapabilityKind.FUSED_ENTITY_RELATION,
-        )
-        if not any(s.capability in relation_kinds for s in pipeline.stages):
-            return None
-        quality = RelationQuality()
-        (
-            quality.fanout_capped_documents,
-            quality.fanout_dropped_relations,
-            quality.mention_capped_documents,
-            quality.mention_dropped_mentions,
-        ) = fanout
-        docs_with_relations: set[str] = set()
-        for record in records:
-            if not isinstance(record, RelationMention):
-                continue
-            quality.relations_total += 1
-            quality.per_type[record.label] = quality.per_type.get(record.label, 0) + 1
-            quality.confidence.add(record.confidence)
-            docs_with_relations.add(record.document_record_id)
-            prov = record.provenance
-            has_span = (
-                prov.char_start is not None
-                and prov.char_end is not None
-                and prov.char_end >= prov.char_start
-            )
-            has_pages = prov.page_start is not None and prov.page_end is not None
-            if has_span and has_pages:
-                quality.relations_offset_resolving += 1
-        quality.documents_with_relations = len(docs_with_relations)
-        quality.per_type = dict(sorted(quality.per_type.items()))
-        return quality
-
-    @staticmethod
-    def _terminal_redaction_stages(pipeline: Pipeline) -> set[str]:
-        """Names of the Redaction Stages whose output actually reaches the rest of the Pipeline.
-
-        A Redaction Stage is SUPERSEDED when some other Redaction Stage depends on it, directly or
-        transitively: since W16 Redaction is a chunk→chunk transform and
-        :func:`~latence_core.redaction_policy._compose_prior_spans` folds the upstream spans into
-        the downstream Stage's own, the downstream Stage re-emits the same chunks carrying every
-        mask the chain applied. Only that downstream version flows on to the Export, so only it may
-        be tallied. Parallel Redaction branches supersede nothing and are all terminal.
-        """
-        by_name = {s.name: s for s in pipeline.stages}
-        redaction_stages = {
-            s.name for s in pipeline.stages if s.capability is CapabilityKind.REDACTION
-        }
-        superseded: set[str] = set()
-        for name in redaction_stages:
-            seen: set[str] = set()
-            frontier = list(by_name[name].depends_on)
-            while frontier:
-                dep = frontier.pop()
-                if dep in seen or dep not in by_name:
-                    continue
-                seen.add(dep)
-                if dep in redaction_stages:
-                    superseded.add(dep)
-                frontier.extend(by_name[dep].depends_on)
-        return redaction_stages - superseded
-
-    @staticmethod
-    def _redaction_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> RedactionQuality | None:
-        """Aggregate Redaction quality: per-PII-type + per-action detection counts (S6/W16).
-
-        Only computed when the Pipeline has a Redaction Stage. Since W16 (ADR-0042) Redaction is a
-        chunk→chunk transform, so ``records`` is the set of redacted
-        :class:`~latence_core.contracts.ChunkRecord`s (each carrying ``masked_content`` +
-        ``pii_spans``). The per-type/per-action span counts are summed across chunks; the
-        documents-redacted and documents-with-PII counts are rolled up to the DOCUMENT level
-        (distinct
-        ``document_record_id``s) so the report reads the same as the old one-record-per-document
-        shape — the S6 acceptance criterion ("PII detection counts by type land in the Quality
-        Report"). Only counts and type/action names cross into the report; **no raw PII value** ever
-        does (a PIISpan never stores the surface string, so this rollup cannot leak one). The
-        deprecated doc-level :class:`~latence_core.contracts.RedactionRecord` path is still tallied
-        for backward compatibility.
-
-        ``records`` carries the output of the TERMINAL Redaction Stages only
-        (:meth:`_terminal_redaction_stages`), and every one of those records is summed with FULL
-        MULTIPLICITY. Both halves matter, and they used to be got wrong in opposite directions:
-
-        * Folding EVERY Redaction Stage's output (the flat concatenation ``_records_of_kind``
-          builds) double-counts a CHAINED topology — exactly what the shipped ``gpu-learned`` /
-          ``full-stack`` stacks declare since audit R5-12
-          (``redact_financial.depends_on: [redact_pii]``). The same chunk appears twice: once as
-          the upstream Stage emitted it, once as the downstream Stage re-emitted it after
-          :func:`~latence_core.redaction_policy._compose_prior_spans` folded the upstream spans in.
-          That inflates every upstream span and can name a ``pii_type`` that exists nowhere in the
-          exported corpus (an upstream span replaced by an identical-extent downstream span of a
-          DIFFERENT type would still be tallied under its old label). Dropping the superseded
-          Stages at the source fixes this: the terminal Stage's chunks already carry every mask the
-          chain applied, because composition is coverage-preserving.
-        * De-duplicating the flat list by ``record_id`` instead (audit R6) fixes the chain but
-          UNDER-counts the plain single-Redactor path, because ``record_id``s are
-          content-addressed: two byte-identical documents share one ``document_id`` and hence one
-          chunk ``record_id``, yet both are separately exported and both carry real PII. Halving
-          that corpus's tally is a silent regression (audit R7), so no de-duplication by
-          ``record_id`` happens here.
-
-        The report is the operator's redaction audit trail (ADR-0034 counts-only observability), so
-        it must describe the EXPORTED CORPUS — not the chain length, and not the number of
-        distinct content hashes in it.
-        """
-        if not any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages):
-            return None
-        quality = RedactionQuality()
-        redacted_docs: set[str] = set()
-        docs_with_pii: set[str] = set()
-        disabled_docs: set[str] = set()
-        for record in records:
-            if isinstance(record, ChunkRecord):
-                # Chunk-level (W16): masked_content is set on every chunk the Redaction Stage
-                # produced. Roll spans up per type/action; document-level counts dedupe by parent.
-                if record.masked_content is None:
-                    continue
-                doc_id = record.document_record_id
-                redacted_docs.add(doc_id)
-                if record.pii_spans:
-                    docs_with_pii.add(doc_id)
-                if record.redaction_disabled_for_sensitive:
-                    disabled_docs.add(doc_id)
-                spans = record.pii_spans
-            elif isinstance(record, RedactionRecord):
-                # Deprecated doc-level path: one record per document.
-                redacted_docs.add(record.document_record_id)
-                if record.pii_spans:
-                    docs_with_pii.add(record.document_record_id)
-                if record.redaction_disabled_for_sensitive:
-                    disabled_docs.add(record.document_record_id)
-                spans = record.pii_spans
-            else:
-                continue
-            for span in spans:
-                quality.pii_total += 1
-                quality.per_type[span.pii_type] = quality.per_type.get(span.pii_type, 0) + 1
-                action = span.action.value
-                quality.per_action[action] = quality.per_action.get(action, 0) + 1
-        quality.documents_redacted = len(redacted_docs)
-        quality.documents_with_pii = len(docs_with_pii)
-        # §4 no-op floor: a sensitive doc whose control ran no detectors. LOUD, first-class —
-        # while this is > 0, documents_with_pii:0 is NOT a clean bill.
-        quality.redaction_disabled_for_sensitive = len(disabled_docs)
-        quality.per_type = dict(sorted(quality.per_type.items()))
-        quality.per_action = dict(sorted(quality.per_action.items()))
-        return quality
-
-    @staticmethod
-    def _profiling_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> ProfilingQuality | None:
-        """Aggregate Profiling quality: per-document feature averages + corpus aggregates (S7).
-
-        Only computed when the Pipeline has a Profiling Stage. ``records`` is the mix of
-        DOCUMENT-scope and the single CORPUS-scope
-        :class:`~latence_core.contracts.FeatureRecord`s. The document-scope records are
-        averaged into a compact readability/density/diversity summary, and the
-        corpus-scope record's aggregates (word/vocabulary counts, corpus Zipf α, source
-        coverage, entity-type frequency, top co-occurrences) are surfaced verbatim —
-        the S7 acceptance criterion ("feature summary lands in the Quality Report").
-        Counts and averages only (no raw document text). All maps are already
-        engine-sorted; the co-occurrence list is rendered as ``pair-fingerprint`` →
-        document-count — the raw entity surfaces (possible PII from a ``confidential``
-        source that would otherwise land in an ``internal``-stamped report) are replaced
-        by a deterministic, **salted** sha256 fingerprint of the ``left|right`` pair (the
-        same salted-digest construction S6 uses; salt from the Redaction Stage config).
-        The fingerprint keeps the raw surface out of the report and defeats rainbow-table
-        recovery, but it is not irreversible — a reader who can enumerate candidate
-        entity names and knows the salt could still recover a pair by dictionary attack,
-        so the report is *not* safe to publish to an untrusted audience. The raw surfaces
-        remain only in the exported, sensitivity-stamped ``CorpusFeatures`` data artifact.
-        """
-        if not any(s.capability is CapabilityKind.PROFILING for s in pipeline.stages):
-            return None
-        quality = ProfilingQuality()
-        doc_features = [
-            r
-            for r in records
-            if isinstance(r, FeatureRecord)
-            and r.scope is FeatureScope.DOCUMENT
-            and r.document is not None
-        ]
-        n = len(doc_features)
-        quality.documents_profiled = n
-        if n:
-            quality.avg_readability = round(
-                sum(r.document.readability for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_density = round(
-                sum(r.document.density for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_type_token_ratio = round(
-                sum(r.document.type_token_ratio for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_zipf_alpha = round(
-                sum(r.document.zipf_alpha for r in doc_features if r.document) / n, 6
-            )
-            quality.avg_compression_ratio = round(
-                sum(r.document.compression_ratio for r in doc_features if r.document) / n, 6
-            )
-        corpus = next(
-            (
-                r
-                for r in records
-                if isinstance(r, FeatureRecord)
-                and r.scope is FeatureScope.CORPUS
-                and r.corpus is not None
-            ),
-            None,
-        )
-        if corpus is not None and corpus.corpus is not None:
-            cf = corpus.corpus
-            quality.corpus_total_words = cf.total_words
-            quality.corpus_unique_words = cf.total_unique_words
-            quality.corpus_zipf_alpha = cf.corpus_zipf_alpha
-            quality.language_coverage = dict(cf.language_coverage)
-            quality.category_coverage = dict(cf.category_coverage)
-            quality.sensitivity_coverage = dict(cf.sensitivity_coverage)
-            quality.distinct_entities = len(cf.entity_frequency)
-            quality.entity_type_frequency = dict(cf.entity_type_frequency)
-            # Fingerprint each pair rather than emit the raw entity surfaces: a co-occurring
-            # pair drawn from a ``confidential`` source must not have its (possibly PII)
-            # surface rendered into the ``internal``-stamped Quality Report. The salted
-            # sha256 fingerprint (same construction as S6's placeholder_for; salt resolved
-            # from the Redaction Stage config) is deterministic, so equal pairs map to equal
-            # keys (the recurrence signal is preserved) without printing the surface. It is a
-            # fingerprint, not encryption — low-entropy surfaces remain dictionary-recoverable
-            # by a reader who knows the salt, so this removes the surface from the report but
-            # does not make the report publishable to an untrusted audience. The raw pair
-            # remains only in the exported, sensitivity-stamped CorpusFeatures data artifact.
-            salt = _fingerprint_salt(pipeline)
-            quality.top_co_occurrences = {
-                _co_occurrence_fingerprint(co.left, co.right, salt): co.document_count
-                for co in cf.co_occurrences
-            }
-        return quality
-
-    @staticmethod
-    def _type_consolidation_quality(
-        pipeline: Pipeline, records: list[StageOutput]
-    ) -> TypeConsolidationQuality | None:
-        """Aggregate the TYPE-drift collapse for the report (T3, ADR-0054).
-
-        Only computed when the Pipeline has a Type-Consolidation Stage. ``records`` is that
-        Stage's mixed output — the run's :class:`~latence_core.contracts.EntityMention`s and
-        :class:`~latence_core.contracts.RelationMention`s after the remap, each carrying its
-        pre-canonicalization type on ``raw_label`` when (and only when) it was rewritten.
-
-        Everything is read off those records: the raw vocabulary is ``{raw_label or label}``, the
-        canonical vocabulary is ``{label}``, and the alias map is the set of ``raw_label -> label``
-        pairs observed. That makes the section a MEASUREMENT of what happened to the data rather
-        than a restatement of what the Provider intended — a Stage that silently failed to remap
-        would report ``N raw -> N canonical`` and an empty alias map, which is exactly the honest
-        answer.
-        """
-        if not any(s.capability is CapabilityKind.TYPE_CONSOLIDATION for s in pipeline.stages):
-            return None
-        entities = _type_drift(records, EntityMention)
-        relations = _type_drift(records, RelationMention)
-        return TypeConsolidationQuality(
-            raw_entity_types=entities.raw_types,
-            canonical_entity_types=entities.canonical_types,
-            mentions_remapped=entities.remapped,
-            entity_alias_map=entities.alias_map,
-            raw_relation_types=relations.raw_types,
-            canonical_relation_types=relations.canonical_types,
-            relations_remapped=relations.remapped,
-            relation_alias_map=relations.alias_map,
-        )
-
-    @staticmethod
-    def _disambiguation_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        mentions_in: list[StageOutput],
-    ) -> DisambiguationQuality | None:
-        """Aggregate Disambiguation merge/link/normalisation statistics for the report (S8).
-
-        Only computed when the Pipeline has a Disambiguation Stage. ``records`` is the mix of
-        ENTITY-scope (canonical entities) and RELATION-scope (normalized relations)
-        :class:`~latence_core.contracts.DisambiguationRecord`s; ``mentions_in`` the
-        Entity-Extraction output the Stage consumed. Rolls up: mentions in vs canonical
-        entities out; the created/merged/singleton breakdown; applied vs below-policy merges
-        (the no-silent-over-merge audit) broken down by strategy; KB-linked vs unlinked
-        entities; and relations normalized (with the inverted count). Counts only (no raw
-        text) — the S8 acceptance criterion, safe to persist.
-        """
-        if not any(s.capability is CapabilityKind.DISAMBIGUATION for s in pipeline.stages):
-            return None
-        quality = DisambiguationQuality()
-        quality.mentions_in = sum(1 for r in mentions_in if isinstance(r, EntityMention))
-        entities = [
-            r
-            for r in records
-            if isinstance(r, DisambiguationRecord)
-            and r.scope is DisambiguationScope.ENTITY
-            and r.entity is not None
-        ]
-        quality.entities_out = len(entities)
-        confidence_sum = 0.0
-        for record in entities:
-            entity = record.entity
-            if entity is None:  # pragma: no cover - filtered above
-                continue
-            if entity.mention_count > 1:
-                quality.entities_merged += 1
-            else:
-                quality.entities_singleton += 1
-            if entity.linked:
-                quality.entities_linked += 1
-            else:
-                quality.entities_unlinked += 1
-            confidence_sum += entity.evidence.confidence
-            for decision in entity.merge_decisions:
-                if decision.applied:
-                    quality.merges_applied += 1
-                    key = decision.strategy.value
-                    quality.merges_by_strategy[key] = quality.merges_by_strategy.get(key, 0) + 1
-                else:
-                    quality.merges_below_policy += 1
-        if entities:
-            quality.avg_entity_confidence = round(confidence_sum / len(entities), 6)
-        quality.merges_by_strategy = dict(sorted(quality.merges_by_strategy.items()))
-        relations = [
-            r
-            for r in records
-            if isinstance(r, DisambiguationRecord)
-            and r.scope is DisambiguationScope.RELATION
-            and r.relation is not None
-        ]
-        quality.relations_normalized = len(relations)
-        quality.relations_inverted = sum(
-            1 for r in relations if r.relation is not None and r.relation.inverted
-        )
-        return quality
-
-    @staticmethod
-    def _graph_quality(
-        pipeline: Pipeline,
-        records: list[StageOutput],
-        inferred_records: list[StageOutput] | None = None,
-    ) -> GraphQuality | None:
-        """Aggregate Graph-Assembly KG statistics for the report (S9; + W2 inferred edges).
-
-        Only computed when the Pipeline has a Graph Assembly Stage. ``records`` is the mix of
-        NODE-scope (graph nodes) and EDGE-scope (graph edges)
-        :class:`~latence_core.contracts.GraphRecord`s from the ASSERTED graph (the Graph Assembly
-        Stage). Rolls up: node/edge counts; nodes by entity type and edges by relation label;
-        KB-linked node count; and — the S9 acceptance criterion — evidence coverage, the fraction of
-        edges whose Evidence names at least one source mention (1.0 = every edge is justified).
-
-        ``inferred_records`` (W2-linkpred, ADR-0037) is the OPTIONAL Graph Completion Stage's
-        PREDICTED EDGE-scope GraphRecords, counted SEPARATELY into ``inferred_edge_count`` /
-        ``inferred_edges_by_scorer`` — NEVER folded into ``edges_total`` / ``edges_by_label`` /
-        ``evidence_coverage``. An inferred edge must never inflate the asserted-edge statistics (the
-        enterprise-honesty crux). A run with no Graph Completion Stage has ``inferred_edge_count ==
-        0``. Counts only (no raw text), safe to persist. All maps are sorted for a deterministic
-        report.
-        """
-        if not any(s.capability is CapabilityKind.GRAPH_ASSEMBLY for s in pipeline.stages):
-            return None
-        quality = GraphQuality()
-        nodes = [
-            r.node
-            for r in records
-            if isinstance(r, GraphRecord) and r.scope is GraphScope.NODE and r.node is not None
-        ]
-        edges = [
-            r.edge
-            for r in records
-            if isinstance(r, GraphRecord) and r.scope is GraphScope.EDGE and r.edge is not None
-        ]
-        quality.nodes_total = len(nodes)
-        quality.edges_total = len(edges)
-        node_conf = 0.0
-        for node in nodes:
-            quality.nodes_by_type[node.label] = quality.nodes_by_type.get(node.label, 0) + 1
-            if node.linked:
-                quality.nodes_linked += 1
-            node_conf += node.confidence
-        edge_conf = 0.0
-        for edge in edges:
-            quality.edges_by_label[edge.label] = quality.edges_by_label.get(edge.label, 0) + 1
-            if edge.evidence.mention_ids:
-                quality.edges_with_evidence += 1
-            edge_conf += edge.confidence
-        if nodes:
-            quality.avg_node_confidence = round(node_conf / len(nodes), 6)
-        if edges:
-            quality.avg_edge_confidence = round(edge_conf / len(edges), 6)
-            quality.evidence_coverage = round(quality.edges_with_evidence / len(edges), 6)
-        quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
-        quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
-        # W2-linkpred: count the OPTIONAL Graph Completion Stage's predicted edges SEPARATELY. They
-        # are marked properties["inferred"]=True; we count only edges that carry that marker (a
-        # defensive guard so nothing but a genuinely-inferred edge is ever tallied here).
-        for r in inferred_records or []:
-            if not isinstance(r, GraphRecord) or r.scope is not GraphScope.EDGE or r.edge is None:
-                continue
-            if r.edge.properties.get("inferred") is not True:
-                continue
-            quality.inferred_edge_count += 1
-            scorer = str(r.edge.properties.get("scorer", "unknown"))
-            quality.inferred_edges_by_scorer[scorer] = (
-                quality.inferred_edges_by_scorer.get(scorer, 0) + 1
-            )
-        quality.inferred_edges_by_scorer = dict(sorted(quality.inferred_edges_by_scorer.items()))
-        return quality
-
-    @staticmethod
-    def _context_enrichment_quality(
-        pipeline: Pipeline,
-        context_records: list[StageOutput],
-        graph_records: list[StageOutput],
-    ) -> ContextEnrichmentQuality | None:
-        """Aggregate the OPTIONAL Context Enrichment Stage's coherence roll-up (W13, ADR-0039).
-
-        Only computed when the Pipeline has a ``context_enrichment`` Stage (else None —
-        byte-identical
-        to today). Counts-only (no content). ``chunks_enriched`` + ``avg_neighbors_per_chunk`` are
-        read off the enriched :class:`~latence_core.contracts.ChunkRecord`s directly (a chunk with a
-        non-empty :class:`~latence_core.contracts.ContextHeader` counts; its ``neighbor_node_ids``
-        are
-        the query-time KG-expansion keys averaged). ``hub_entities_capped`` is the anti-bloat
-        witness:
-        the number of KG entities whose gated neighbor DEGREE exceeds the Stage's
-        ``max_neighbors_per_entity`` cap — those entities contribute only their TOP-k relations
-        wherever they appear (the hub-entity guard), computed from the assembled graph + the Stage's
-        config so it is honest and reproducible.
-        """
-        stage = next(
-            (s for s in pipeline.stages if s.capability is CapabilityKind.CONTEXT_ENRICHMENT),
-            None,
-        )
-        if stage is None:
-            return None
-        quality = ContextEnrichmentQuality()
-        headers = [
-            r.context_header
-            for r in context_records
-            if isinstance(r, ChunkRecord) and r.context_header is not None
-        ]
-        quality.chunks_enriched = len(headers)
-        if headers:
-            total_neighbors = sum(len(h.neighbor_node_ids) for h in headers)
-            quality.avg_neighbors_per_chunk = round(total_neighbors / len(headers), 6)
-
-        # Hub-entity guard witness: a node whose gated neighbor degree exceeds the per-entity cap is
-        # capped wherever it appears. Degree = distinct gated edges touching the node (each edge is
-        # a neighbor from both endpoints). Mirror the Provider's edge-confidence gate + cap.
-        max_neighbors = int(stage.config.get("max_neighbors_per_entity", 4))
-        min_edge_confidence = float(stage.config.get("min_edge_confidence", 0.0))
-        if max_neighbors > 0:
-            degree: dict[str, int] = {}
-            for r in graph_records:
-                if (
-                    not isinstance(r, GraphRecord)
-                    or r.scope is not GraphScope.EDGE
-                    or r.edge is None
-                ):
-                    continue
-                edge = r.edge
-                if edge.confidence < min_edge_confidence:
-                    continue
-                degree[edge.source_node_id] = degree.get(edge.source_node_id, 0) + 1
-                degree[edge.target_node_id] = degree.get(edge.target_node_id, 0) + 1
-            quality.hub_entities_capped = sum(1 for d in degree.values() if d > max_neighbors)
-        return quality
-
-    @staticmethod
-    def _parse_quality(pipeline: Pipeline, records: list[StageOutput]) -> ParseQuality | None:
-        """Aggregate Parse-Stage quality: page-map drift + parse-error counts.
-
-        Only computed when the Pipeline actually has a Parse Stage, so a
-        Source→Export pipeline reports ``parse=None`` rather than a misleading
-        all-zero section. For each parsed :class:`DocumentRecord` that carries a
-        page map, the Runner builds a :class:`PageOffsetIndex` and audits it —
-        resolving each page's boundary offsets — so the drift diagnostics the
-        ported asset produces surface in the Quality Report (S2: "drift
-        diagnostics in the Quality Report"). A clean parse resolves every offset
-        exactly (``page_maps_clean``). Each parsed record's assembled-markdown
-        byte size is summed into ``bytes_after_parse`` — the observable rollup of
-        the Provenance 'size-after-parse'.
-        """
-        if not any(s.capability is CapabilityKind.PARSE for s in pipeline.stages):
-            return None
-
-        quality = ParseQuality()
-        for record in records:
-            if not isinstance(record, DocumentRecord):
-                continue
-            if record.disposition is Disposition.PARSE_ERROR:
-                quality.parse_errors += 1
-                continue
-            quality.documents_parsed += 1
-            # Provenance 'size-after-parse', aggregated: the assembled-markdown
-            # byte size of each parsed record (mirrors the parser's per-record
-            # ``size_after_parse`` helper, summed here into the observable report).
-            quality.bytes_after_parse += len(record.content.encode("utf-8"))
-            page_map = record.page_map
-            if page_map is None:
-                continue
-            quality.page_map_present += 1
-            quality.pages_total += len(page_map.pages)
-            index = PageOffsetIndex(page_map)
-            # Audit: resolve each page's start and last-char offset. With exact
-            # boundaries every lookup is exact; any drift the map carries is
-            # detected here and accumulated into the diagnostics.
-            for span in page_map.pages:
-                index.page_for_offset(span.char_start)
-                index.page_for_offset(max(span.char_end - 1, span.char_start))
-            diag = index.diagnostics
-            quality.page_drift_resolutions += diag.resolutions
-            quality.page_drift_recovered += diag.recovered
-            quality.page_drift_max_chars = max(quality.page_drift_max_chars, diag.max_drift_chars)
-        return quality
-
-
-@dataclass(frozen=True)
-class _TypeDrift:
-    """How one label vocabulary changed across a Type-Consolidation Stage (T3)."""
-
-    raw_types: int
-    canonical_types: int
-    remapped: int
-    alias_map: dict[str, str]
-
-
-def _type_drift(
-    records: Iterable[StageOutput], carrier: type[EntityMention] | type[RelationMention]
-) -> _TypeDrift:
-    """Measure one carrier's type drift from the remapped records themselves (T3, ADR-0054).
-
-    ``raw_label`` is set if and ONLY if the Stage rewrote that record's label, so the raw
-    vocabulary is ``{raw_label or label}``, the canonical vocabulary is ``{label}``, and the alias
-    map is exactly the rewrites applied. A run that consolidated nothing therefore reports equal
-    counts and an empty map — the honest reading of "nothing happened", never a fabricated fold.
-    """
-    raw: set[str] = set()
-    canonical: set[str] = set()
-    aliases: dict[str, str] = {}
-    remapped = 0
-    for record in records:
-        if not isinstance(record, carrier):
-            continue
-        canonical.add(record.label)
-        raw.add(record.raw_label or record.label)
-        if record.raw_label is not None:
-            aliases[record.raw_label] = record.label
-            remapped += 1
-    return _TypeDrift(
-        raw_types=len(raw),
-        canonical_types=len(canonical),
-        remapped=remapped,
-        alias_map=dict(sorted(aliases.items())),
+            for label, c in per_label.items()
+        },
     )
+
+
+#: The built-in Quality-Report sections, in the order they are constructed and finished.
+#:
+#: This tuple is the ONLY place ``build()`` learns which sections exist. Adding a Stage's quality
+#: metric is: one class implementing :class:`QualityAggregator`, one entry here. It used to be five
+#: edits — a new model, a new optional field on :class:`~latence_core.quality.QualityReport`, an
+#: entry in ``render()``'s section map, a bespoke render block, and a ``_x_quality`` method plus a
+#: gather and a kwarg inside ``build()``. Two of those five are gone entirely (the render section
+#: list is now derived from the report model's own section-marked fields) and the ``build()`` edits
+#: collapsed into this line.
+#:
+#: Order is fixed rather than incidental: it decides the order records are fanned out to
+#: subscribers, which is irrelevant to every section's arithmetic but is one less thing that can
+#: drift between runs.
+#:
+#: This registry is deliberately NOT a per-Capability factory field on L2's
+#: :class:`~latence_core.capability_descriptor.CapabilityDescriptor`, which is what C5 anticipated
+#: before C2 landed. The shipped relation is many-to-many in both directions and a factory per
+#: Capability would be wrong, not merely redundant: :class:`_ScreeningAggregator` subscribes to NO
+#: kind at all (it folds the quarantine sidecars, not DAG records), :class:`_ChunkAggregator` and
+#: :class:`_DriftAggregator` both subscribe to ``CHUNK`` while filling different sections,
+#: :class:`_GraphAggregator` folds ``GRAPH_ASSEMBLY`` and ``GRAPH_COMPLETION`` into ONE section
+#: (constructing it once per Capability would double-count), and ``goldset`` belongs to no
+#: Capability. What the descriptor does own is the *section a Capability claims*
+#: (``quality_section``), and :func:`check_aggregator_coverage` below holds those two declarations
+#: against each other at import so neither can go stale.
+QUALITY_AGGREGATORS: tuple[QualityAggregatorFactory, ...] = (
+    _ParseAggregator.for_run,
+    _ChunkAggregator.for_run,
+    _ScreeningAggregator.for_run,
+    _EntityAggregator.for_run,
+    _RelationAggregator.for_run,
+    _RedactionAggregator.for_run,
+    _ProfilingAggregator.for_run,
+    _TypeConsolidationAggregator.for_run,
+    _DisambiguationAggregator.for_run,
+    _GraphAggregator.for_run,
+    _ContextEnrichmentAggregator.for_run,
+    _DriftAggregator.for_run,
+    _GoldSetAggregator.for_run,
+)
+
+
+def check_aggregator_coverage(
+    aggregators: Sequence[QualityAggregatorFactory] = QUALITY_AGGREGATORS,
+) -> None:
+    """Refuse a registry that leaves a Capability's declared Quality section unfilled.
+
+    The cross-lane gate between L2's descriptors and this registry. A Capability declares which
+    report section it contributes to (``CapabilityDescriptor.quality_section``); this module
+    declares which sections are actually folded. Before, those two lists lived in different files
+    with nothing relating them, so adding a Capability with a ``quality_section`` no aggregator
+    fills produced a section that was silently and permanently ``None`` — a Quality Report that
+    under-reports rather than fails.
+
+    Checked at import, like :func:`~latence_core.capability_descriptor.index_descriptors`, and for
+    the same reason: the failure mode being closed is silence, so the check has to run without
+    anyone remembering to call it. It intentionally does NOT require the converse — an aggregator
+    may fill a section no Capability claims (``drift`` and ``goldset`` are cross-cutting folds over
+    Stages that claim other sections), and may subscribe to kinds outside its own section (the
+    chunk-drift fold reads ``CHUNK``).
+
+    Raises :class:`~latence_core.errors.ContractError` — typed, never a bare assert (ADR-0034) —
+    naming every unfilled section at once.
+    """
+    # Each registered factory is a bound ``for_run`` classmethod, so its ``__self__`` is the
+    # aggregator class carrying the ``section_field`` ClassVar. A factory that is a plain function
+    # declares no section and simply contributes nothing to the cover.
+    filled = {
+        getattr(getattr(factory, "__self__", factory), "section_field", None)
+        for factory in aggregators
+    }
+    claimed = {d.quality_section for d in descriptors() if d.quality_section is not None}
+    unfilled = sorted(claimed - filled)
+    if unfilled:
+        msg = (
+            f"no QualityAggregator fills the report section(s) {', '.join(unfilled)} claimed by a "
+            f"CapabilityDescriptor; every Capability that declares a quality_section must have an "
+            f"aggregator registered in latence_core.quality_report_builder.QUALITY_AGGREGATORS"
+        )
+        raise ContractError(msg)
+
+
+check_aggregator_coverage()

@@ -33,6 +33,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
     RelationMention,
 )
@@ -70,7 +72,24 @@ def _chunk(
         classification=Classification(language="en", sensitivity="internal"),
         content=content,
         token_count=len(content.split()),
-        page_map=page_map,
+        # v19: the chunk carries its OWN page spans, cut from the parent document's map.
+        # Absent a map the fixture is a one-page document, so the slice is that page.
+        page_slice=(
+            PageSlice.for_span(
+                page_map, char_start, char_start + len(content) if char_end is None else char_end
+            )
+            if page_map is not None
+            else PageSlice(
+                pages=[
+                    PageSpan(
+                        page_number=2,
+                        char_start=char_start,
+                        char_end=char_start + len(content) if char_end is None else char_end,
+                    )
+                ],
+                total_chars=char_start + len(content) if char_end is None else char_end,
+            )
+        ),
         offset_map=offset_map,
     )
 
@@ -310,6 +329,103 @@ def test_relation_endpoint_offsets_shift_to_document(fake_gliner: type[_FakeGLiN
     # Covering span straddles the page boundary: records both pages.
     assert rel.provenance.page_start == 1
     assert rel.provenance.page_end == 2
+
+
+def _two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
+    """A v19 document stream: each chunk carries the page spans it overlaps.
+
+    Page 1 is ``[0,16)``, page 2 is ``[16,37)``. Chunk 0 lies wholly on page 1; chunk 1
+    STRADDLES the boundary (doc ``[13,37)``, inherited page range ``1..2``) so its own slice
+    holds BOTH spans. In chunk 1, "Bob" is doc ``[16,19)`` and "Globex" is doc ``[30,36)`` —
+    both wholly on page 2, as is the relation's covering span.
+    """
+    assembly = PageMap.from_page_texts(["Alice is here.", "Bob works for Globex."])
+
+    def _mk(
+        *, index: int, char_start: int, char_end: int, pages: tuple[int, int]
+    ) -> ChunkRecord:
+        return ChunkRecord(
+            record_id=f"doc1#chunk-{index}",
+            document_record_id="doc1",
+            index=index,
+            provenance=Provenance(
+                source_uri="file:///c/a.txt",
+                file_name="a.txt",
+                file_type="txt",
+                file_size=1000,
+                document_id="sha256:doc1",
+                char_start=char_start,
+                char_end=char_end,
+                page_start=pages[0],
+                page_end=pages[1],
+            ),
+            classification=Classification(language="en", sensitivity="internal"),
+            content=assembly.text[char_start:char_end],
+            token_count=4,
+            page_slice=PageSlice.for_span(assembly.page_map, char_start, char_end),
+            offset_map=None,
+        )
+
+    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1))
+    second = _mk(index=1, char_start=13, char_end=37, pages=(1, 2))
+    return first, second
+
+
+def test_page_resolves_on_a_page_straddling_later_chunk(
+    fake_gliner: type[_FakeGLiNER],
+) -> None:
+    """A later, page-straddling chunk must resolve its OWN pages (mentions AND relations).
+
+    Inheriting the chunk's page range degrades everything on it to ``(1, 2)`` — an
+    ADR-0021/0031 provenance regression, and a plausible-looking wrong page.
+    """
+    first, second = _two_chunk_document()
+    fake_gliner.per_text_entities = {
+        first.content: [],
+        second.content: [
+            {"start": 3, "end": 6, "label": "person", "score": 0.9},
+            {"start": 17, "end": 23, "label": "organization", "score": 0.9},
+        ],
+    }
+    fake_gliner.per_text_relations = {
+        first.content: [],
+        second.content: [
+            {
+                "head": {"start": 3, "end": 6},
+                "tail": {"start": 17, "end": 23},
+                "relation": "works_for",
+                "score": 0.8,
+            }
+        ],
+    }
+    result = GlinerRelexExtractor(_config()).extract_fused([first, second])
+    by_text = {m.text: m for m in result.mentions}
+    assert set(by_text) == {"Bob", "Globex"}
+    # The whole point: page 2 for both, NOT the chunk's inherited (1, 2).
+    assert (by_text["Bob"].provenance.page_start, by_text["Bob"].provenance.page_end) == (2, 2)
+    rel = result.relations[0]
+    assert (rel.provenance.page_start, rel.provenance.page_end) == (2, 2)
+
+
+def test_pages_still_resolve_when_the_first_chunk_is_below_min_chars(
+    fake_gliner: type[_FakeGLiNER],
+) -> None:
+    """A chunk the ``min_chars`` filter skips must not cost any OTHER chunk its page.
+
+    Under v18 it did — the map rode the document's first chunk, which is often the one this
+    filter drops. Since v19 the property is the record's; this pins the outcome either way.
+    """
+    first, second = _two_chunk_document()
+    assert len(first.content.strip()) == 14  # below the min_chars floor set below
+    fake_gliner.per_text_entities = {
+        second.content: [{"start": 3, "end": 6, "label": "person", "score": 0.9}],
+    }
+    fake_gliner.per_text_relations = {second.content: []}
+    cfg = {**_config(), "min_chars": 15}
+    result = GlinerRelexExtractor(cfg).extract_fused([first, second])
+    assert [m.text for m in result.mentions] == ["Bob"]
+    prov = result.mentions[0].provenance
+    assert (prov.page_start, prov.page_end) == (2, 2)
 
 
 def test_offsets_resolve_through_offset_map_past_stripped_markup(
@@ -578,6 +694,11 @@ def _distinct_chunks(n: int) -> list[ChunkRecord]:
                 classification=Classification(language="en", sensitivity="internal"),
                 content=content,
                 token_count=3,
+                # v19: a one-page fixture — the chunk's own page spans are that single page.
+                page_slice=PageSlice(
+                    pages=[PageSpan(page_number=1, char_start=0, char_end=len(content))],
+                    total_chars=len(content),
+                ),
             )
         )
     return chunks

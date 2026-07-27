@@ -12,14 +12,21 @@ against a deterministic stub (their real numbers need a rig, #64 — flagged, ne
 The suite also proves the checks **bite** (not merely assert): a deliberately-broken throwaway
 Provider FAILs C2 (untyped crash) and C4 (declared-deterministic-but-not), and a synthetic
 GPU-only Provider is skipped-with-flag by C5 — so a bad Provider would actually be caught.
+
+The roster this parametrizes over is **derived from the workspace's package manifests**
+(``_workspace_providers``), not restated here: every Provider already declares itself once, in its
+own ``[project.entry-points."latence.providers"]`` block, so shipping one is a single edit and the
+gate can no longer drift away from what the workspace actually contains.
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
+from _workspace_providers import declared_providers, providers_declared_in
 from latence_core.capability import ProviderRegistry
 from latence_core.conformance import (
     build_conformance_report,
@@ -37,6 +44,7 @@ from latence_core.conformance.harness import (
 )
 from latence_core.conformance.report import CheckStatus
 from latence_core.providers.profile import ProviderProfile
+from latence_core.stages.entity import GazetteerEntityExtractor
 
 # Evidence-bearing verified profiles (H-B1) built in-test. A pure-code profile cites the repo
 # LICENSE (weights None); a model-bearing profile records the weights SPDX + a model-card
@@ -88,104 +96,14 @@ def _model_profile(
         batch=batch,
     )
 
-# The exact roster the registry must discover — asserting real coverage, not a moving target.
-# 50 Providers across 21 Capabilities (P3 landscape + the three index-time retrieval-signal
-# reference generators sparse.hashing / multivector.hashing / fde.reference #160 + the first real
-# Wave-1 adapter H-A1 + the
-# learned sentence-transformers Embedder W1-embed + the real Presidio Redactor W1-pii + the real
-# GPU LightOn-OCR Parser W1-lighton + its served-vLLM twin parser.lighton_vllm W10 + its MIT twin
-# the GPU GLM-OCR Parser W1-glm + the OPTIONAL reference GraphCompleter W2-linkpred Slice 1 + the
-# learned ULTRA/PyKEEN GraphCompleter W2-linkpred Slice 2 + the fastino GLiNER2 Redactor
-# W3-pii-gliner2 + the OPTIONAL LLM schema-induction LabelInducer W4-schema-induction + the universal
-# license-clean parser.render W5-universal-parser + the unified fused Entity+Relation gliner2
-# extractor W9-gliner2-unified, the relex drop-in + the OPTIONAL reference ContextEnricher
-# context.kg_header W13-context-enrichment + the enterprise GLinker Disambiguator
-# disambiguation.glinker ADR-0046 — the neural L2→L3→L4→L0 linking + audited resolver, GPU + the two
-# OPTIONAL reference GraphFeatureComputers graph_features.degree / graph_features.pagerank — degree/
-# connected-components + PageRank/label-propagation centrality+community, ADR-0051 #161).
-# If a Provider is added/removed, this list is updated deliberately, so the count check catches an
-# accidental un-covered Provider.
-_EXPECTED_PROVIDERS = frozenset(
-    {
-        "source.local_folder",
-        # The SharePoint/OneDrive source-SYSTEM connector (#182, latence-source-sharepoint).
-        "source.sharepoint",
-        "parser.plaintext",
-        "parser.document",
-        "parser.pdfplumber",
-        "parser.lighton",
-        "parser.lighton_vllm",
-        "parser.glm",
-        "parser.render",
-        "parser.endpoint",
-        "chunk.markdown",
-        "chunk.sentence_window",
-        "screening.intake_signature",
-        "screening.content_keyword",
-        "screening.content_fuzzy",
-        "label_inducer.llm",
-        # T5: the non-frontier per-chunk inducer behind the SAME schema-induction seam — a
-        # deterministic, CPU-only, zero-network tagger over an operator-declared candidate type
-        # space (no model, no weights, no call), so it runs for REAL in the conformance suite.
-        "label_inducer.lexicon",
-        "entity.gazetteer",
-        "entity.gliner",
-        "entity.endpoint",
-        "relation.pattern",
-        "relation.llm",
-        "relation.gliner_relex",
-        "fused_entity_relation.gliner2",
-        # The in-core deterministic structured-header cross-reference extractor (dogfood-3-inspect):
-        # recovers self-anchored, bare-identifier metadata-header relations (RFC Obsoletes:/Updates:)
-        # that entity-anchored RE cannot. Pure-Python, zero-dep, fulfils the fused seam.
-        "fused_entity_relation.header_refs",
-        # The in-core deterministic INLINE-CITATION cross-reference extractor (the dogfood measured
-        # gap): recovers a document's INLINE body "RFC <n>" citations — the majority of a corpus's
-        # gold cross-references — that the header-only header_refs sibling structurally cannot see.
-        # Pure-Python, zero-dep, fulfils the fused seam.
-        "fused_entity_relation.inline_refs",
-        "redaction.hybrid_rule",
-        "redaction.gliner_pii",
-        "redaction.gliner2",
-        "redaction.presidio",
-        "profiling.statistical",
-        "profiling.lightweight",
-        "disambiguation.cascade",
-        "disambiguation.exact_surface",
-        # T3 (ADR-0054): the corpus-level TYPE-vocabulary canonicalizer + its exact-surface
-        # second reference — the resolution phase's type-side twin of the disambiguators.
-        "type_consolidation.cascade",
-        "type_consolidation.exact_surface",
-        "disambiguation.embedding",
-        "disambiguation.glinker",
-        "graph.canonical",
-        "graph.weighted",
-        "graph_completion.reference",
-        "graph_completion.ultra",
-        "graph_features.degree",
-        "graph_features.pagerank",
-        "context.kg_header",
-        "export.jsonl_parquet",
-        "export.knowledge_graph",
-        "export.demo_site",
-        "embedding.hashing",
-        "embedding.endpoint",
-        "embedding.sentence_transformers",
-        "sparse.hashing",
-        "sparse.splade",
-        "multivector.hashing",
-        "fde.reference",
-        # The real, canonical MUVERA FDE (latence-muvera, #163) — pure-Python, training-free,
-        # numpy-free, installed in the CPU-first dev env so it RUNS the default _fde_case() for
-        # real, alongside the in-core fde.reference (ADR-0050).
-        "fde.muvera",
-        # The two in-core reference Tokenizers (#164) — the varying seam of the optional BM25
-        # term-statistics artifact exporter (ADR-0048/0049). Pure-Python, deterministic, zero-dep.
-        "tokenizer.regex",
-        "tokenizer.whitespace",
-        "delta.affected_set",
-    }
-)
+# The roster the registry must discover, DERIVED from the workspace's package manifests rather
+# than restated here (see ``_workspace_providers``). Every Provider is already declared exactly
+# once, in its own package's ``[project.entry-points."latence.providers"]`` block; a second,
+# hand-maintained copy of that list bought nothing but drift — its own comment claimed "50
+# Providers" while the set held 59 — and made shipping a Provider a two-package edit. Adding a
+# Provider is now ONE edit: its own pyproject.toml.
+_DECLARING_PACKAGE: dict[str, str] = declared_providers()
+_EXPECTED_PROVIDERS = frozenset(_DECLARING_PACKAGE)
 
 
 @pytest.fixture(autouse=True)
@@ -207,13 +125,69 @@ def _all_provider_names() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_discovers_the_expected_provider_roster() -> None:
-    """The registry discovers exactly the expected 59 Providers — real coverage, not a subset."""
+def test_registry_discovers_every_provider_the_workspace_declares() -> None:
+    """The environment under test holds exactly the Providers the workspace ships — no subset.
+
+    ``missing`` means a package declares a Provider that the environment never installed (it would
+    otherwise go entirely unconformed — the silent gap a hand-maintained roster could not see,
+    because a forgotten Provider is absent from both sides of it). ``extra`` means something
+    outside this workspace registered under our entry-point group.
+    """
     names = set(_all_provider_names())
+    missing = {name: _DECLARING_PACKAGE[name] for name in sorted(_EXPECTED_PROVIDERS - names)}
+    extra = sorted(names - _EXPECTED_PROVIDERS)
     assert names == set(_EXPECTED_PROVIDERS), (
-        f"unexpected roster; missing={_EXPECTED_PROVIDERS - names}, extra={names - _EXPECTED_PROVIDERS}"
+        f"roster mismatch; declared-but-not-installed={missing}, installed-but-undeclared={extra}"
     )
-    assert len(names) == 59
+
+
+def test_the_roster_is_derived_from_the_manifests_not_restated() -> None:
+    """The expectation comes from the packages themselves, and spans more than one of them.
+
+    A derivation bug that only ever saw ``latence-core`` would silently shrink the gate to the
+    in-core reference Providers, so the roster is asserted to reach across packages and to include
+    a Provider that lives outside core (ADR-0016: heavy Providers ship in their own packages).
+    """
+    assert len(set(_DECLARING_PACKAGE.values())) > 1
+    assert _DECLARING_PACKAGE["export.jsonl_parquet"] == "latence-core"
+    assert _DECLARING_PACKAGE["redaction.presidio"] == "latence-pii-presidio"
+
+
+def test_the_derivation_bites_on_a_provider_no_package_declares(tmp_path: Path) -> None:
+    """The derived roster reflects the manifests exactly — it cannot invent or drop a name."""
+    workspace = tmp_path / "ws"
+    (workspace / "packages" / "latence-thing").mkdir(parents=True)
+    (workspace / "packages" / "latence-thing" / "pyproject.toml").write_text(
+        '[project]\nname = "latence-thing"\n'
+        '[project.entry-points."latence.providers"]\n'
+        '"chunk.thing" = "latence_thing:Thing"\n',
+        encoding="utf-8",
+    )
+    assert providers_declared_in(workspace) == {"chunk.thing": "latence-thing"}
+
+    # A workspace that declares nothing is an ERROR, never an empty (vacuously passing) roster.
+    empty = tmp_path / "empty"
+    (empty / "packages" / "latence-nothing").mkdir(parents=True)
+    (empty / "packages" / "latence-nothing" / "pyproject.toml").write_text(
+        '[project]\nname = "latence-nothing"\n', encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="refusing to report an empty roster"):
+        providers_declared_in(empty)
+
+
+def test_the_derivation_bites_on_a_duplicated_provider_name(tmp_path: Path) -> None:
+    """Two packages claiming one entry-point name is a FAILURE, not a silently-shadowed Provider."""
+    workspace = tmp_path / "ws"
+    for package in ("latence-a", "latence-b"):
+        (workspace / "packages" / package).mkdir(parents=True)
+        (workspace / "packages" / package / "pyproject.toml").write_text(
+            f'[project]\nname = "{package}"\n'
+            '[project.entry-points."latence.providers"]\n'
+            '"chunk.thing" = "latence_thing:Thing"\n',
+            encoding="utf-8",
+        )
+    with pytest.raises(RuntimeError, match="declared twice"):
+        providers_declared_in(workspace)
 
 
 def test_every_provider_maps_to_a_capability_with_a_case() -> None:
@@ -251,7 +225,7 @@ def test_provider_passes_conformance(provider_name: str) -> None:
 def test_full_report_all_pass_and_flags_stub_scoped() -> None:
     """The rolled-up report: all pass, endpoint/GPU stub-flagged, the GPU OCR Parsers skipped."""
     report = build_conformance_report(_registry())
-    assert report.providers_total == 59
+    assert report.providers_total == len(_EXPECTED_PROVIDERS)
     assert report.providers_failed == 0
     assert report.all_passed
     # The endpoint/model Providers are flagged stub-scoped ("needs a rig"), never fabricated.
@@ -674,6 +648,133 @@ def test_c1_bites_an_out_of_range_mention_offset() -> None:
     # And a faithful in-range mention still passes both.
     assert conf_cases._offsets_in_range([good_mention]) is True
     assert conf_cases._page_offsets_resolve([good_mention]) is True
+
+
+class _InheritingEntityExtractor(GazetteerEntityExtractor):
+    """The reference extractor with EXACTLY one flaw: it INHERITS the parent chunk's page range.
+
+    This is the degradation rule 3 of docs/CONFORMANCE.md forbids, and the one every historical
+    route to mis-paging ended in: a Provider that never resolves a sub-chunk offset just stamps
+    ``chunk.provenance.page_start``/``page_end`` on every mention it emits. R1 found it in four
+    shipped ecosystem Providers and three PII Providers, reached by the pre-v18 pattern
+    ``PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else <inherit>`` — which
+    schema v18 turned from correct into silently wrong for every chunk after a document's first.
+    v19 removed that route (the chunk carries its own spans), but the DEGRADATION itself is still
+    expressible by any Provider that simply does not look, which is what this probe is.
+
+    Everything else here — matching, offset-map resolution, ordering, provenance stamping — is the
+    reference implementation, so a conformance FAIL can only come from the page claim.
+    """
+
+    def extract(self, chunks: Any) -> Any:  # noqa: ANN401 - mirrors the Capability signature
+        for chunk in chunks:
+            inherited = (chunk.provenance.page_start, chunk.provenance.page_end)
+            yield from self._extract_one_inheriting(chunk, inherited)
+
+    def _extract_one_inheriting(self, chunk: Any, inherited: Any) -> Any:  # noqa: ANN401
+        from latence_core.contracts import EntityMention
+        from latence_core.offsetmap import OffsetIndex
+
+        text = chunk.content
+        if len(text.strip()) < self._min_chars:
+            return
+        offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
+        chunk_char_start = chunk.provenance.char_start or 0
+        for i, (label, surface, local_start, local_end, confidence) in enumerate(
+            self._find_matches(text)
+        ):
+            if offset_index is not None:
+                doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
+            else:  # pragma: no cover - canonical chunks always carry an offset map
+                doc_start, doc_end = chunk_char_start + local_start, chunk_char_start + local_end
+            pages = inherited
+            yield EntityMention(
+                record_id=f"{chunk.record_id}#entity-{i}",
+                document_record_id=chunk.document_record_id,
+                chunk_record_id=chunk.record_id,
+                index=i,
+                label=label,
+                text=surface,
+                confidence=confidence,
+                provenance=self._mention_provenance(
+                    chunk.provenance,
+                    doc_char_start=doc_start,
+                    doc_char_end=doc_end,
+                    pages=pages,
+                ),
+                classification=chunk.classification,
+            )
+
+
+def test_the_canonical_corpus_has_the_shape_the_page_audit_is_defined_over() -> None:
+    """The fixture corpus must be MULTI-page and MULTI-chunk, with a page-STRADDLING chunk.
+
+    Regression guard for ``issues/audit-arch/R4-invariants_and_adrs-2.md``. The canonical corpus
+    used to be one page and one chunk, so every page fallback was *coincidentally* correct and the
+    C1 page audit could not distinguish a compliant Provider from a silently mis-paging one,
+    whatever it asserted. This pins the three properties that make the audit capable of observing
+    the failure at all; if the fixture ever collapses back to one page or one chunk, this fails
+    before the (now vacuously green) provider checks do.
+    """
+    from latence_core.conformance import fixtures as conf_fixtures
+
+    corpus = conf_fixtures.canonical_corpus()
+    page_map = corpus.documents[0].page_map
+    assert page_map is not None
+    # 1. more than one PAGE, so a wrong page number is expressible at all.
+    assert len(page_map.pages) > 1
+    # 2. more than one CHUNK, and every chunk is self-describing (v19 carriage) — a chunk that
+    #    carried no spans would make the audit unable to run rather than able to fail.
+    assert len(corpus.chunks) > 1
+    assert all(c.page_slice is not None for c in corpus.chunks)
+    # 3. at least one chunk STRADDLES a page break — its slice holds two spans — so inheriting
+    #    its whole range is a WRONG range for any mention in it: the discriminating shape.
+    straddling = [
+        c for c in corpus.chunks if c.page_slice is not None and len(c.page_slice.pages) > 1
+    ]
+    assert straddling, "the corpus must contain a chunk spanning a page break"
+    assert any(c.provenance.page_end != c.provenance.page_start for c in straddling)
+    # and the pagination did not change one byte of the document.
+    assert corpus.documents[0].content == conf_fixtures.CANONICAL_TEXT
+
+
+def test_c1_bites_a_provider_that_inherits_the_chunk_page_instead_of_resolving() -> None:
+    """C1 FAILs a Provider that inherits the chunk's page range; the compliant one still PASSes.
+
+    THE regression guard for ``issues/audit-arch/R4-invariants_and_adrs-2.md``. Rule 3 of
+    docs/CONFORMANCE.md forbids the degradation, but the suite that actually gates Providers ran a
+    one-page/one-chunk corpus and threw the resolved page numbers away, so ``entity.inherits``
+    (below) passed all six checks green while mis-paging 54 of 62 mentions on a 24-page document.
+    The audit now compares each record's CITED page against the page its offset resolves to
+    through the parent document's map.
+    """
+    verdict = _run_conformance_checks_for(
+        provider_name="entity.inherits",
+        capability=Capability.ENTITY,
+        provider_cls=_InheritingEntityExtractor,
+    )
+    assert verdict.passed is False
+    c1 = next(c for c in verdict.checks if c.check == "C1_valid_records")
+    assert c1.status is CheckStatus.FAIL
+    # It is the PAGE claim that fails, not a crash or an out-of-range offset: the same records
+    # pass the bounded in-range half of C1.
+    from latence_core.conformance import cases as conf_cases
+
+    produced = list(
+        _InheritingEntityExtractor({"labels": {"person": {"terms": ["Alice"]}, "org": {"terms": ["Acme Corp"]}}})
+        .extract(_valid_chunks())
+    )
+    assert produced, "the probe must actually emit mentions (a vacuous pass proves nothing)"
+    assert conf_cases._offsets_in_range(produced) is True
+    assert conf_cases._page_offsets_resolve(produced) is False
+
+    # The compliant reference Provider — same corpus, same labels — still PASSes both.
+    compliant = _run_conformance_checks_for(
+        provider_name="entity.gazetteer",
+        capability=Capability.ENTITY,
+        provider_cls=GazetteerEntityExtractor,
+    )
+    assert compliant.passed is True
 
 
 def test_report_is_deterministic() -> None:

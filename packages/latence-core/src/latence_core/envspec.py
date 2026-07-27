@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from latence_core.errors import ConfigError
+from latence_core.subprovider import declared_slot_keys
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from packaging.requirements import Requirement
@@ -1235,11 +1236,13 @@ def probe_providers(spec: EnvironmentSpec) -> EnvironmentReport:
 class StackComponent:
     """One ``provider`` + its ``config`` as a stack YAML declares it (issue #198).
 
-    Covers Stage-level components AND the nested signal components (``embedder`` /
-    ``sparse_embedder`` / ``multivector_embedder``): both are real, separately-loaded models, and
-    the GPU-placement probe must exercise the nested Granite embedder exactly as it exercises the
-    Stage-level extractor. ``capability`` is the Stage's declared capability, or the nesting key
-    for a nested component — either way it is what selects the driver that runs the model.
+    Covers Stage-level components AND the nested sub-Provider components (the ``embedder`` /
+    ``sparse_embedder`` / ``multivector_embedder`` / ``fde_converter`` / ``bm25`` signal slots, the
+    Assembler's ``graph_features``, the universal Parser's ``ocr``): both are real,
+    separately-loaded models, and the GPU-placement probe must exercise the nested Granite embedder
+    exactly as it exercises the Stage-level extractor. ``capability`` is the Stage's declared
+    capability, or the nesting key for a nested component — either way it is what selects the
+    driver that runs the model.
     """
 
     capability: str
@@ -1247,13 +1250,22 @@ class StackComponent:
     config: dict[str, Any]
 
 
-# The nesting keys under which a stack declares a *signal* component (a separately-loaded model
-# inside a Stage's config). The key doubles as the capability name for driver selection.
-_NESTED_COMPONENT_KEYS = ("embedder", "sparse_embedder", "multivector_embedder")
-
-
 def stack_components(stack_path: Path) -> tuple[StackComponent, ...]:
-    """Every provider a stack YAML instantiates, with its capability and config, in file order."""
+    """Every provider a stack YAML instantiates, with its capability and config, in file order.
+
+    The nesting keys come from :func:`~latence_core.subprovider.declared_slot_keys` — the one
+    declaration of what a nested ``{provider, config}`` block may sit under — read HERE, at walk
+    time, rather than copied into a tuple in this module. That copy existed
+    (``_NESTED_COMPONENT_KEYS``) and listed three of the seven declared slots, so this walker was
+    blind to every ``ocr`` / ``fde_converter`` / ``bm25`` / ``graph_features`` sub-Provider while
+    the structural :func:`stack_providers` in this same module saw them: the GPU-placement probe
+    (which iterates THIS function) reported ok=True over a stack whose only GPU model was a nested
+    OCR it never drove (R3-seams_real_not_hypothetical-0).
+
+    The nesting key doubles as the component's capability, which is what selects the probe's
+    driver. Order is the FILE's, so the result is byte-identical run to run.
+    """
+    nested_keys = declared_slot_keys()
     raw = yaml.safe_load(stack_path.read_text(encoding="utf-8"))
     found: list[StackComponent] = []
 
@@ -1277,9 +1289,9 @@ def stack_components(stack_path: Path) -> tuple[StackComponent, ...]:
             )
         for key, value in node.items():
             if key == "config" and isinstance(value, dict):
-                for nested_key in _NESTED_COMPONENT_KEYS:
-                    if nested_key in value:
-                        walk(value[nested_key], nested_key)
+                for nested_key, nested in value.items():
+                    if nested_key in nested_keys:
+                        walk(nested, nested_key)
             elif key not in {"provider", "capability"}:
                 walk(value, own_capability or capability)
 

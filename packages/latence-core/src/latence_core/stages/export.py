@@ -38,12 +38,18 @@ from latence_core.capability import (
     SparseEmbedder,
     SparseSignals,
     Tokenizer,
-    satisfies_capability,
 )
 from latence_core.contracts import SCHEMA_VERSION
-from latence_core.errors import ConfigError, ContractError
+from latence_core.errors import ConfigError
 from latence_core.iceberg import build_iceberg_output
+from latence_core.pipeline import CapabilityKind
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.subprovider import (
+    build_sub_provider,
+    owner_label,
+    resolve_sub_provider,
+    sub_provider_ref,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -61,6 +67,10 @@ if TYPE_CHECKING:
 # (same per-row dumps, same sorted-key JSONL, same flat Parquet schema + values) — only the
 # transient footprint changes.
 _EXPORT_BATCH_ROWS = 1024
+
+# The message prefix this Stage's nested-block errors carry ("Export config 'embedder' …"), read
+# from the one slot declaration so it cannot drift from what the offline checker reports.
+_OWNER = owner_label(CapabilityKind.EXPORT)
 
 
 def _context_header_text(header: dict[str, Any]) -> str:
@@ -495,36 +505,31 @@ class JsonlParquetExport:
         # One shared registry for every opt-in signal generator this Export resolves, so the same
         # roster (and cache) backs the embedder + the retrieval-signal generators.
         registry = registry or ProviderRegistry()
-        self._embedder = self._resolve_signal(
-            config.get("embedder"), registry, Embedder, "embedder"
-        )
+        self._embedder: Embedder | None = self._resolve("embedder", config, registry)
         # W13 (ADR-0039): opt-in Parquet projection of the ContextHeader (byte-identical schema when
         # absent — the genuinely-optional guarantee).
         self._context_columns = bool(config.get("context_columns", False))
         # ADR-0049/0050: the three opt-in index-time retrieval-signal generators. Each is additive —
         # absent ⇒ no column/sidecar, and the export is byte-identical to today.
-        self._sparse = self._resolve_signal(
-            config.get("sparse_embedder"), registry, SparseEmbedder, "sparse_embedder"
+        self._sparse: SparseEmbedder | None = self._resolve("sparse_embedder", config, registry)
+        self._multivector: MultiVectorEmbedder | None = self._resolve(
+            "multivector_embedder", config, registry
         )
-        self._multivector = self._resolve_signal(
-            config.get("multivector_embedder"),
-            registry,
-            MultiVectorEmbedder,
-            "multivector_embedder",
-        )
-        self._fde = self._resolve_signal(
-            config.get("fde_converter"), registry, FdeConverter, "fde_converter"
-        )
+        self._fde: FdeConverter | None = self._resolve("fde_converter", config, registry)
         self._keep_multivectors = bool(config.get("keep_multivectors", False))
         # #164 (ADR-0048/0049): the opt-in BM25 term-statistics exporter. Its varying seam is a
         # Tokenizer; the presence of the ``bm25`` block turns it on (additive — absent ⇒ no files,
         # byte-identical export). The tokenizer's provider NAME is stamped into the artifact so it
         # is self-describing (a store must analyse queries the same way).
-        bm25_spec = config.get("bm25")
-        self._bm25 = self._resolve_signal(bm25_spec, registry, Tokenizer, "bm25")
-        self._bm25_tokenizer_name = (
-            str(bm25_spec["provider"]) if isinstance(bm25_spec, dict) else ""
+        bm25_ref = sub_provider_ref(
+            config.get("bm25"), capability=CapabilityKind.EXPORT, key="bm25"
         )
+        self._bm25: Tokenizer | None = (
+            None
+            if bm25_ref is None
+            else build_sub_provider(bm25_ref, registry=registry, owner=_OWNER)
+        )
+        self._bm25_tokenizer_name = "" if bm25_ref is None else bm25_ref.provider
         # #184 (ADR-0017): the OPTIONAL Iceberg-table output. ``None`` unless an ``iceberg``
         # block is configured — off by default, so the default Export never touches pyiceberg
         # and its files stay byte-identical. Parsed HERE (at wiring time) so a malformed catalog
@@ -548,56 +553,25 @@ class JsonlParquetExport:
             raise ConfigError(msg)
 
     @staticmethod
-    def _resolve_signal(
-        spec: Any,
-        registry: ProviderRegistry,
-        protocol: type,
-        key: str,
-    ) -> Any | None:
-        """Resolve one opt-in signal generator from a ``{"provider", "config"}`` config block.
+    def _resolve(key: str, config: dict[str, Any], registry: ProviderRegistry) -> Any | None:  # noqa: ANN401 - the concrete type is the slot's declared Protocol
+        """Resolve one opt-in signal generator from its nested ``{"provider", "config"}`` block.
 
-        The single resolver shared by the dense Embedder and the three retrieval-signal generators
-        (ADR-0049): ``spec`` is ``None`` (the signal is off) or a ``{"provider", "config"}`` map.
-        The named Provider is loaded from the ``latence.providers`` registry and built, then checked
-        against ``protocol`` (:class:`Embedder` / :class:`SparseEmbedder` /
-        :class:`MultiVectorEmbedder` / :class:`FdeConverter`) so a mis-named Provider fails **loudly
-        at wiring time** — a :class:`~latence_core.errors.ContractError` (a ``TypeError``) — rather
-        than silently emitting no signal. A malformed ``spec`` shape is a
-        :class:`~latence_core.errors.ConfigError`.
-
-        The capability check is :func:`~latence_core.capability.satisfies_capability`, NOT plain
-        ``isinstance`` (audit R6): several of these Protocols declare a property, and a
-        ``runtime_checkable`` ``isinstance`` calls ``hasattr`` — which would *invoke* it and pull a
-        Provider's heavy backend (``sparse.splade`` loads a Hugging Face checkpoint from
-        ``vocab_size``) at **wiring** time, breaking ADR-0016's defer-to-first-use contract and
-        making config validation reach the network.
+        The block's shape, its Provider resolution and its capability check all live in
+        :mod:`latence_core.subprovider`, which is also what the offline ``latence stack check``,
+        the device-skip pre-flight and the envspec walker read — so the Protocol each slot demands
+        is declared ONCE (``EXPORT`` → ``embedder``/``sparse_embedder``/``multivector_embedder``/
+        ``fde_converter``/``bm25``) instead of being re-stated at every call site. Failure modes
+        are unchanged: a malformed shape is a :class:`~latence_core.errors.ConfigError`, a Provider
+        that does not satisfy the slot's Protocol a :class:`~latence_core.errors.ContractError`,
+        both at wiring time and never a silently-absent signal (ADR-0034).
         """
-        if spec is None:
-            return None
-        if not isinstance(spec, dict):
-            msg = (
-                f"Export config {key!r} must be a mapping "
-                "{'provider': <name>, 'config': {...}} or absent; "
-                f"got {type(spec).__name__}."
-            )
-            raise ConfigError(msg)
-        provider_name = spec.get("provider")
-        if not isinstance(provider_name, str) or not provider_name:
-            msg = f"Export config {key!r} requires a non-empty string 'provider' entry-point name."
-            raise ConfigError(msg)
-        provider_config = spec.get("config", {})
-        if not isinstance(provider_config, dict):
-            msg = f"Export config '{key}.config' must be a mapping if present."
-            raise ConfigError(msg)
-        provider_cls = registry.load(provider_name)
-        provider = provider_cls(provider_config)
-        if not satisfies_capability(provider, protocol):
-            msg = (
-                f"Provider {provider_name!r} named in Export config {key!r} does not satisfy the "
-                f"{protocol.__name__} capability."
-            )
-            raise ContractError(msg)
-        return provider
+        return resolve_sub_provider(
+            config.get(key),
+            capability=CapabilityKind.EXPORT,
+            key=key,
+            registry=registry,
+            owner=_OWNER,
+        )
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         """Materialize records to ``<basename>.jsonl`` + ``<basename>.parquet``, streaming.
@@ -605,12 +579,15 @@ class JsonlParquetExport:
         Incremental (ADR-0033 / #63): the input is consumed in bounded batches of
         ``_EXPORT_BATCH_ROWS``; each batch is dumped, (optionally) embedded, JSONL-appended,
         and written as one Parquet row group — so the Export's peak memory is O(batch), not the
-        old O(corpus) ``from_pylist(whole)`` transient (peak RSS coincided with it). Both files
-        are written to sibling temp paths and atomically published (:meth:`Storage.temp_uri` +
-        :meth:`Storage.finalize_atomic`), so a crash mid-Export leaves the previous file or the
-        complete new one, never a torn write — the same WAL guarantee as the buffered path. The
-        bytes are identical to the buffered path: same per-row Pydantic JSON dumps, same
-        sorted-key JSONL line order + trailing-newline rule, same flat Parquet schema + values.
+        old O(corpus) ``from_pylist(whole)`` transient (peak RSS coincided with it). Every file of
+        the deliverable rides ONE :meth:`Storage.atomic_writers` block, so a crash mid-Export
+        leaves the previous files or the complete new set, never a torn write and never a
+        half-published set — and, unlike the two-call ``temp_uri``/``finalize_atomic`` protocol it
+        replaces, never a fleet of orphaned ``.tmp`` siblings either: an exception between opening
+        the (up to four) streams and publishing them used to close the handles and abandon every
+        temp file, once per failed attempt. The bytes are identical to the buffered path: same
+        per-row Pydantic JSON dumps, same sorted-key JSONL line order + trailing-newline rule,
+        same flat Parquet schema + values.
         """
         embed = self._embedder is not None
         sparse = self._sparse is not None
@@ -619,18 +596,12 @@ class JsonlParquetExport:
         schema = self._parquet_schema(embed, self._context_columns, sparse=sparse, fde=fde)
 
         out_dir = out_dir.rstrip("/")
-        # Streaming opens bypass write_bytes' implicit parent-makedirs, so ensure the export
-        # directory exists before opening the temp files (a fresh run has no export/ yet).
-        storage.makedirs(out_dir)
         jsonl_uri = f"{out_dir}/{self._basename}.jsonl"
         parquet_uri = f"{out_dir}/{self._basename}.parquet"
-        jsonl_tmp = storage.temp_uri(jsonl_uri)
-        parquet_tmp = storage.temp_uri(parquet_uri)
         # ADR-0050: raw multi-vectors ride a SIDECAR (heavy, different access pattern), never
         # ``records.parquet``. Written only when ``keep_multivectors`` is set.
         sidecar_uri = f"{out_dir}/multivectors.parquet"
         sidecar_schema = self._sidecar_schema() if sidecar else None
-        sidecar_tmp = storage.temp_uri(sidecar_uri) if sidecar else None
         # #164: the BM25 forward postings stream into a sidecar parquet (one row group per batch, so
         # the per-document postings stay O(batch)); the corpus df/avgdl fold into the accumulator
         # (O(vocab)) and become ``bm25-stats.json`` at finalize. Both only when ``bm25`` is wired.
@@ -643,35 +614,45 @@ class JsonlParquetExport:
         postings_uri = f"{out_dir}/bm25-postings.parquet"
         stats_uri = f"{out_dir}/bm25-stats.json"
         postings_schema = self._bm25_postings_schema() if bm25 else None
-        postings_tmp = storage.temp_uri(postings_uri) if bm25 else None
+        # The deliverable is ONE file set, so it rides ONE atomic publication: Storage opens each
+        # stream on its own temp sibling (creating ``out_dir`` on the way — a fresh run has no
+        # export/ yet), publishes nothing until every stream has closed cleanly, and sweeps every
+        # temp file if anything raises in between. The export owns none of that.
+        stream_uris = [jsonl_uri, parquet_uri]
+        if sidecar:
+            stream_uris.append(sidecar_uri)
+        if bm25:
+            stream_uris.append(postings_uri)
 
         wrote_any = False
         # #184: the record schema_versions this run actually carried — stamped onto the optional
         # Iceberg table so it never claims a contract version its own rows do not have. Folded from
         # the rows already in hand (O(distinct versions), normally one), never a second pass.
         record_versions: set[int] = set()
-        # Streamed writers, all to temp paths, atomically published on success. The JSONL is
-        # byte-stable: one sorted-key object per line, and the trailing newline is written per line
-        # (an N-line file ends in exactly one "\n"; an empty file is empty). The Parquet + sidecar
-        # writers are handed the temp file handle directly (pyarrow streams row groups into any
-        # binary file-like), so they go through the same Storage seam. An ExitStack registers each
-        # writer's close BEFORE its file handle closes (LIFO), so the pyarrow footer is flushed
-        # before the handle shuts — the same ordering the old ``finally: writer.close()`` gave.
-        with contextlib.ExitStack() as stack:
-            jsonl_fh = stack.enter_context(storage.open(jsonl_tmp, "wb"))
-            parquet_fh = stack.enter_context(storage.open(parquet_tmp, "wb"))
+        # Streamed writers over the one atomic publication. The JSONL is byte-stable: one
+        # sorted-key object per line, and the trailing newline is written per line (an N-line file
+        # ends in exactly one "\n"; an empty file is empty). The Parquet + sidecar writers are
+        # handed their Storage handle directly (pyarrow streams row groups into any binary
+        # file-like), so they go through the same Storage seam. The inner ExitStack holds only the
+        # pyarrow writer closes and unwinds FIRST (rightmost context exits first), so every footer
+        # is flushed before ``atomic_writers`` closes the handles and publishes.
+        with (
+            storage.atomic_writers(stream_uris) as streams,
+            contextlib.ExitStack() as stack,
+        ):
+            jsonl_fh = streams[0]
             # pyarrow ships no type stubs; the writer calls are dynamically typed.
-            writer = pq.ParquetWriter(parquet_fh, schema)  # type: ignore[no-untyped-call]
+            writer = pq.ParquetWriter(streams[1], schema)  # type: ignore[no-untyped-call]
             stack.callback(writer.close)
+            next_stream = 2
             sidecar_writer = None
-            if sidecar and sidecar_schema is not None and sidecar_tmp is not None:
-                sidecar_fh = stack.enter_context(storage.open(sidecar_tmp, "wb"))
-                sidecar_writer = pq.ParquetWriter(sidecar_fh, sidecar_schema)  # type: ignore[no-untyped-call]
+            if sidecar and sidecar_schema is not None:
+                sidecar_writer = pq.ParquetWriter(streams[next_stream], sidecar_schema)  # type: ignore[no-untyped-call]
                 stack.callback(sidecar_writer.close)
+                next_stream += 1
             postings_writer = None
-            if bm25 and postings_schema is not None and postings_tmp is not None:
-                postings_fh = stack.enter_context(storage.open(postings_tmp, "wb"))
-                postings_writer = pq.ParquetWriter(postings_fh, postings_schema)  # type: ignore[no-untyped-call]
+            if bm25 and postings_schema is not None:
+                postings_writer = pq.ParquetWriter(streams[next_stream], postings_schema)  # type: ignore[no-untyped-call]
                 stack.callback(postings_writer.close)
 
             for batch_rows in self._batched(records, _EXPORT_BATCH_ROWS):
@@ -711,22 +692,19 @@ class JsonlParquetExport:
                 if postings_writer is not None and postings_schema is not None:
                     postings_writer.write_table(postings_schema.empty_table())  # type: ignore[no-untyped-call]
 
-        storage.finalize_atomic(jsonl_tmp, jsonl_uri)
-        storage.finalize_atomic(parquet_tmp, parquet_uri)
+        # Past the block above every stream is published (or none of them is, and this line was
+        # never reached).
         out_uris = [jsonl_uri, parquet_uri]
-        if sidecar and sidecar_tmp is not None:
-            storage.finalize_atomic(sidecar_tmp, sidecar_uri)
+        if sidecar:
             out_uris.append(sidecar_uri)
-        if bm25 and bm25_acc is not None and postings_tmp is not None:
-            # The postings parquet is flushed (its writer closed with the ExitStack above); now
-            # publish it, then write the corpus stats JSON from the completed fold. Both atomically.
-            storage.finalize_atomic(postings_tmp, postings_uri)
-            stats_tmp = storage.temp_uri(stats_uri)
+        if bm25 and bm25_acc is not None:
+            # The postings parquet was published with the rest of the set; the corpus stats JSON is
+            # a small buffered artifact derived from the completed fold, so it is written after —
+            # atomically, and only once the postings it describes actually exist.
             stats_json = json.dumps(
                 bm25_acc.stats().to_artifact(), sort_keys=True, ensure_ascii=False
             )
-            storage.write_text(stats_tmp, stats_json)
-            storage.finalize_atomic(stats_tmp, stats_uri)
+            storage.write_atomic(stats_uri, stats_json.encode("utf-8"))
             out_uris.extend([postings_uri, stats_uri])
         if self._iceberg is not None:
             # #184: LAST, and only after the Parquet deliverable is atomically published — the

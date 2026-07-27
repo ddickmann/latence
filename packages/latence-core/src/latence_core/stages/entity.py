@@ -28,11 +28,12 @@ Each emitted :class:`~latence_core.contracts.EntityMention` carries:
   naive ``char_start + local`` shift is only a lower bound — ADR-0022 corrected,
   ADR-0031.) A chunk without an offset map (pre-v11) degrades to that shift;
 * Provenance ``page_start``/``page_end`` — the source page(s) that span falls on,
-  resolved from the mention's *own* document offset through the parent's page map
-  (carried on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` — the
-  S4 round-trip (mention → offset → original page). A mention on a later page of a
-  multi-page chunk resolves to that page, not the chunk's first page. When the
-  chunk carries no page map, it degrades to the chunk's inherited page range;
+  resolved from the mention's *own* document offset through the document-scoped
+  :class:`~latence_core.page_index.PageIndexResolver` — the S4 round-trip (mention →
+  offset → original page). A mention on a later page of a multi-page chunk resolves to
+  that page, not the chunk's first page. One resolver serves the whole ``extract`` call,
+  so a document's page index is built once, not once per chunk. When no page map is
+  available for the document it degrades to the chunk's inherited page range;
 * the parent chunk's Classification, inherited unchanged.
 
 An empty or near-empty chunk yields no mentions (never an error) — the S4
@@ -47,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import EntityMention
 from latence_core.errors import ConfigError
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
@@ -484,10 +485,16 @@ class GazetteerEntityExtractor:
     # -- extraction ---------------------------------------------------------
 
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
+        # ONE resolver for the whole call, purely so the drift roll-up is per-call. It is
+        # stateless (v19): each chunk carries its own page spans, so a chunk skipped by the
+        # min_chars filter teaches it nothing and costs nothing.
+        resolver = PageIndexResolver()
         for chunk in chunks:
-            yield from self._extract_one(chunk)
+            yield from self._extract_one(chunk, resolver)
 
-    def _extract_one(self, chunk: ChunkRecord) -> Iterator[EntityMention]:
+    def _extract_one(
+        self, chunk: ChunkRecord, resolver: PageIndexResolver
+    ) -> Iterator[EntityMention]:
         text = chunk.content
         # Empty / near-empty chunk: no mentions, no error (S4 AC).
         if len(text.strip()) < self._min_chars:
@@ -501,11 +508,10 @@ class GazetteerEntityExtractor:
         # defensively so a mention always has an offset.
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        # Resolve each mention's OWN page from the parent's page map (carried on the
-        # chunk), not the chunk's whole page range: a mention on a later page of a
-        # multi-page chunk must cite that page (S4 "correct source page"). Built once
-        # per chunk. Absent (pre-S4 chunk / no page map) → inherit the chunk range.
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Resolve each mention's OWN page, not the chunk's whole page range: a mention on
+        # a later page of a multi-page chunk must cite that page (S4 "correct source page").
+        # The resolver reads the chunk's own page spans, so this is exact whatever order
+        # chunks arrive in and whichever of them are missing.
         for i, (label, surface, local_start, local_end, confidence) in enumerate(matches):
             if offset_index is not None:
                 doc_char_start, doc_char_end = offset_index.resolve_span(local_start, local_end)
@@ -516,7 +522,7 @@ class GazetteerEntityExtractor:
                 chunk.provenance,
                 doc_char_start=doc_char_start,
                 doc_char_end=doc_char_end,
-                page_index=page_index,
+                pages=resolver.pages_for_span(chunk, doc_char_start, doc_char_end),
             )
             yield EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
@@ -563,23 +569,20 @@ class GazetteerEntityExtractor:
         chunk_prov: Provenance,
         doc_char_start: int,
         doc_char_end: int,
-        page_index: PageOffsetIndex | None,
+        pages: tuple[int, int],
     ) -> Provenance:
         """Provenance for a mention: chunk lineage + the mention's own span AND page.
 
         The char span is narrowed to the mention's own ``[doc_char_start,
-        doc_char_end)`` in the parent document. The page span is re-resolved from
-        that offset through the parent's page map (``page_index``) so a mention on a
-        later page of a multi-page chunk cites *its own* page — the ``page_end`` uses
-        the last included character (``doc_char_end - 1``) so a mention straddling a
-        page boundary records both pages. When no page map is available the mention
-        degrades to inheriting the chunk's page range.
+        doc_char_end)`` in the parent document. ``pages`` is what the
+        :class:`~latence_core.page_index.PageIndexResolver` resolved for that span — so a
+        mention on a later page of a multi-page chunk cites *its own* page, and one
+        straddling a page boundary records both. There is no "unresolved" case to degrade
+        on: the chunk carries its own page spans or resolution raises (v19).
         """
         update: dict[str, int] = {
             "char_start": doc_char_start,
             "char_end": doc_char_end,
         }
-        if page_index is not None:
-            update["page_start"] = page_index.page_for_offset(doc_char_start)
-            update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+        update["page_start"], update["page_end"] = pages
         return chunk_prov.model_copy(update=update)

@@ -32,6 +32,7 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
     Provenance,
     RelationMention,
 )
@@ -79,7 +80,10 @@ def _chunk(rid: str, doc: str, content: str) -> ChunkRecord:
         token_count=20,
         provenance=_prov(doc, 0, len(content)),
         classification=_CLS,
-        page_map=PageMap.from_page_texts([content]).page_map,
+        # v19: the chunk carries its own spans; a one-page fixture, so exactly that page.
+        page_slice=PageSlice.for_span(
+            PageMap.from_page_texts([content]).page_map, 0, len(content)
+        ),
     )
 
 
@@ -142,7 +146,9 @@ def _markup_chunk(rid: str, doc: str, markdown: str) -> tuple[ChunkRecord, str]:
         # The chunk covers the whole document markdown: char_start 0, char_end len(markdown).
         provenance=_prov(doc, 0, len(markdown)),
         classification=_CLS,
-        page_map=PageMap.from_page_texts([markdown]).page_map,
+        page_slice=PageSlice.for_span(
+            PageMap.from_page_texts([markdown]).page_map, 0, len(markdown)
+        ),
         offset_map=offset_map,
     )
     return chunk, content

@@ -22,9 +22,12 @@ from latence_core.contracts import (
     Classification,
     OffsetMap,
     OffsetSegment,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
+from latence_core.page_index import PageIndexResolver
 from latence_core.redaction_policy import (
     FINANCIAL_FLOOR_PATTERNS,
     RedactionPolicy,
@@ -61,6 +64,11 @@ def _chunk(text: str, *, sensitivity: str = "public") -> ChunkRecord:
         classification=Classification(language="en", sensitivity=sensitivity),
         content=text,
         token_count=len(text.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
         offset_map=OffsetMap(
             segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)
         ),
@@ -71,7 +79,12 @@ def _plan(chunk: ChunkRecord, policy: RedactionPolicy) -> object:
     # detector_types EMPTY + sensitive_set EMPTY models the pre-W18 gliner-family call: a backend
     # whose configured coverage is nothing. needs_detection stays True (not skipped, not near-empty).
     return plan_chunk_redaction(
-        chunk, policy, detector_types=set(), sensitive_set=set(), min_chars=1
+        chunk,
+        policy,
+        detector_types=set(),
+        sensitive_set=set(),
+        min_chars=1,
+        resolver=PageIndexResolver(),
     )
 
 
@@ -121,7 +134,12 @@ def test_floor_respects_explicit_skip() -> None:
     chunk = _chunk(_TEXT, sensitivity="confidential")
     policy = RedactionPolicy({"confidential": {"skip": True}}, RedactionAction.MASK)
     plan = plan_chunk_redaction(
-        chunk, policy, detector_types=set(), sensitive_set=set(), min_chars=1
+        chunk,
+        policy,
+        detector_types=set(),
+        sensitive_set=set(),
+        min_chars=1,
+        resolver=PageIndexResolver(),
     )
     rec = finalize_redacted_chunk(chunk, plan, accepted=[], salt="s")
     assert rec.pii_spans == []

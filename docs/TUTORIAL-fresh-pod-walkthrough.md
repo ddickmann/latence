@@ -969,7 +969,7 @@ Field-by-field (source: `contracts.py` `ChunkRecord`/`Record`; full table in
   over `rendered_context_header + "\n" + content`, so the vector carries the KG coherence — and,
   under W16, over the **PII-safe (masked)** corpus text, consistent with the stored `content`.
 - **`record_id`** (primary key), `document_record_id` (join key), `index`, `token_count`,
-  `page_map`/`offset_map`, `risk_markers`.
+  `page_slice`/`offset_map`, `risk_markers`.
 
 The **Parquet** is a flat, retrieval-DB-friendly projection (nested fields as JSON strings). With
 `context_columns: true` it has: `record_id, schema_version, provenance, classification, content,

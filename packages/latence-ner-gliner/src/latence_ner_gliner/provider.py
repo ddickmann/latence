@@ -27,11 +27,14 @@ so a mention resolves back to its EXACT source offset even when markdown markup 
 stripped before it within the chunk. (Chunk ``content`` is markup-stripped, so the
 naive ``char_start + local`` shift is only a lower bound — ADR-0022 corrected,
 ADR-0031.) A pre-v11 chunk with no offset map degrades to that shift. From the
-resolved offset the page span is re-resolved through the parent's page map (carried
-on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` to its original
-source page(s) (the S4 round-trip) — a mention on a later page of a multi-page chunk
-cites that page, not the chunk's first page, degrading to the chunk's inherited
-range only when no page map is present. An empty/near-empty chunk yields no mentions
+resolved offset the page span is re-resolved through
+:class:`~latence_core.page_index.PageIndexResolver` to its original source page(s)
+(the S4 round-trip) — a mention on a later page of a multi-page chunk cites that
+page, not the chunk's first page. The resolver reads the chunk's OWN ``page_slice``
+(v19), so every chunk resolves exactly whatever order they arrive in and whichever
+the ``min_chars`` filter drops; a chunk stamped with no spans raises rather than
+inheriting a plausible-looking wrong page. ONE resolver serves the whole ``extract``
+call so the drift roll-up is per call. An empty/near-empty chunk yields no mentions
 (S4 AC).
 
 The ``gliner`` import is deferred to first use so importing this module (for
@@ -47,17 +50,10 @@ from latence_core.contracts import EntityMention
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
-from latence_core.providers.perf import (
-    apply_gliner_max_len,
-    load_then_cast,
-    maybe_compile,
-    neutralize_torch_jit,
-    place_on_device,
-    resolve_max_len,
-)
+from latence_core.providers.perf import load_gliner_model, resolve_max_len
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -73,6 +69,28 @@ _DEFAULT_MODEL = "urchade/gliner_multi-v2.1"
 # outputs are record-for-record identical to a per-chunk loop for any positive batch size
 # (ADR-0033: the in-flight tensor is bounded to ``batch_size``, never the whole corpus).
 _DEFAULT_BATCH_SIZE = 16
+
+
+def _import_gliner() -> Any:
+    """Return the ``GLiNER`` class — the backbone-import factory the perf seam calls (#190).
+
+    Handed to :func:`~latence_core.providers.perf.load_gliner_model` rather than called here, so the
+    TorchScript JIT is provably dead **before** this import evaluates: it transitively pulls in
+    transformers' ``deberta_v2`` module, whose relative-position helpers are compiled by
+    ``@torch.jit.script`` AT IMPORT and can never be un-scripted afterwards (the Blackwell/CUDA-13
+    ``libnvrtc-builtins.so.13.0`` crash, #190). Passing the import as a factory is what makes that
+    ordering un-gettable-wrong: this package still owns the native dependency and its install hint
+    (ADR-0036 §2) — only the INSTANT the import runs moved into the seam.
+    """
+    try:
+        from gliner import GLiNER
+    except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        msg = (
+            "The 'gliner' package is required to run GlinerEntityExtractor. "
+            "Install it with: pip install latence-ner-gliner"
+        )
+        raise ImportError(msg) from exc
+    return GLiNER
 
 
 class GlinerEntityExtractor:
@@ -211,50 +229,24 @@ class GlinerEntityExtractor:
     # -- lazy model load ----------------------------------------------------
 
     def _load_model(self) -> Any:
-        """Import ``gliner`` and load the checkpoint on first use (cached).
+        """Load the checkpoint on first use (cached) via the shared load choreography (C4).
 
-        Deferred so Provider discovery (importing this module) never needs torch,
-        and a missing optional dependency surfaces as a clear install hint only when
-        the Provider is actually run — not at registry enumeration time.
+        One call. :func:`~latence_core.providers.perf.load_gliner_model` owns the whole ordered
+        sequence — skip-decision → JIT kill → intra-op thread cap → backbone import → plain load +
+        bf16 cast → placement on the resolved device WITH read-back verification → mdeberta window
+        bound → guarded compile — so none of those five "before" constraints is this Provider's to
+        remember. They used to be: this body was copy-paste identical across the three plain-gliner
+        Providers modulo one string, and #190 (JIT after the import) and #191 (placement wired to
+        one Provider of three) are what a hand-copied sequence costs.
         """
-        if self._model is not None:
-            return self._model
-        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner import — that
-        # import transitively pulls in transformers' deberta_v2 modeling module, whose
-        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
-        # (inside load_then_cast) cannot un-script them: the env switch is read by torch only at
-        # ITS import, and jit._state.disable() only affects FUTURE script() calls — so the
-        # scripted helpers would still die in nvrtc (libnvrtc-builtins.so.13.0) on the first
-        # forward on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
-        neutralize_torch_jit(provider_name="entity.gliner")
-        try:
-            from gliner import GLiNER
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
-            msg = (
-                "The 'gliner' package is required to run GlinerEntityExtractor. "
-                "Install it with: pip install latence-ner-gliner"
+        if self._model is None:
+            self._model = load_gliner_model(
+                _import_gliner,
+                self._model_id,
+                self._config,
+                self._device,
+                provider_name="entity.gliner",
             )
-            raise ImportError(msg) from exc
-        if self._device.skipped or self._device.device is None:
-            # #191: ``device: cuda`` on a host with no CUDA used to fall through to a CPU load and a
-            # ~11.5 s/chunk run with the GPU idle and NO warning. The seam's skip decision is now
-            # surfaced as an operator error — honour the resolved device or fail loudly (ADR-0036).
-            msg = f"entity.gliner: {self._device.reason}"
-            raise ConfigError(msg)
-        device = self._device.device
-        # W8 perf seam (pod-corrected): the plain ``gliner`` library (0.2.27) REJECTS
-        # ``torch_dtype``/``attn_implementation`` in ``from_pretrained`` and its encoder has no
-        # FA2/FlashDeBERTa — so load PLAIN, then ``.to(bf16)`` on cuda (measured 1.36× faster,
-        # byte-identical entities); the cast is a no-op on CPU / fp32. The dtype keys off the
-        # RESOLVED device, not a bare availability probe.
-        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, device)
-        # #191: plain ``gliner`` does NOT auto-place — ``from_pretrained`` loads on CPU. Place the
-        # model on the resolved device HERE, at load, and verify it landed (a mismatch raises).
-        place_on_device(model, device, provider_name="entity.gliner")
-        # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
-        # guard). gliner silently truncates past config.max_len — set it explicitly + configurably.
-        apply_gliner_max_len(model, self._max_len)
-        self._model = maybe_compile(model, self._config, provider_name="entity.gliner")
         return self._model
 
     # -- extraction ---------------------------------------------------------
@@ -275,6 +267,9 @@ class GlinerEntityExtractor:
         model = None
         batch: list[ChunkRecord] = []
         batch_labels: tuple[str, ...] | None = None
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's
+        # index is built on the first chunk of it we see and reused for every later chunk.
+        resolver = PageIndexResolver()
 
         def flush() -> Iterator[EntityMention]:
             nonlocal model, batch, batch_labels
@@ -289,7 +284,7 @@ class GlinerEntityExtractor:
                 texts, labels, threshold=self._threshold
             )
             for chunk, raw in zip(batch, results, strict=True):
-                yield from self._mentions_for(chunk, list(raw))
+                yield from self._mentions_for(chunk, list(raw), resolver)
             batch = []
             batch_labels = None
 
@@ -312,7 +307,7 @@ class GlinerEntityExtractor:
         yield from flush()
 
     def _mentions_for(
-        self, chunk: ChunkRecord, raw: list[dict[str, Any]]
+        self, chunk: ChunkRecord, raw: list[dict[str, Any]], resolver: PageIndexResolver
     ) -> Iterator[EntityMention]:
         # ``raw`` is this chunk's entity list (chunk-local 'start'/'end', 'label', 'score') — the
         # same shape ``predict_entities`` returned per chunk, now sourced from the batched call and
@@ -324,9 +319,10 @@ class GlinerEntityExtractor:
         # lower bound — ADR-0031); a pre-v11 chunk with no map degrades to that shift.
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        # Re-resolve each mention's OWN page from the parent's page map (carried on
-        # the chunk), not just inherit the chunk's page range. Built once per chunk.
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Re-resolve each mention's OWN page, not just inherit the chunk's page range. The
+        # resolver owns the document→index memoisation, so a chunk that carries no page map
+        # (every non-first chunk since v18) still resolves; ``None`` from it means no map is
+        # available for this document at all → inherit the chunk range.
         for i, ent in enumerate(raw):
             local_start = int(ent["start"])
             local_end = int(ent["end"])
@@ -339,7 +335,7 @@ class GlinerEntityExtractor:
                 chunk.provenance,
                 doc_char_start=doc_char_start,
                 doc_char_end=doc_char_end,
-                page_index=page_index,
+                pages=resolver.pages_for_span(chunk, doc_char_start, doc_char_end),
             )
             yield EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
@@ -358,19 +354,18 @@ class GlinerEntityExtractor:
         chunk_prov: Provenance,
         doc_char_start: int,
         doc_char_end: int,
-        page_index: PageOffsetIndex | None,
+        pages: tuple[int, int] | None,
     ) -> Provenance:
         """Provenance for a mention: chunk lineage + the mention's own span AND page.
 
         The char span is narrowed to the mention's own ``[start, end)`` in the parent
-        document's assembled markdown. The page span is re-resolved from that offset
-        through the parent's page map (``page_index``) so a mention on a later page of
-        a multi-page chunk cites its own page (``page_end`` from the last included
-        character so a boundary-straddling mention records both pages). Absent a page
-        map, the mention degrades to inheriting the chunk's page range.
+        document's assembled markdown. ``pages`` is what the
+        :class:`~latence_core.page_index.PageIndexResolver` resolved for that span — so a
+        mention on a later page of a multi-page chunk cites its own page, and one straddling
+        a page boundary records both. ``None`` (no page map available for the document)
+        degrades to inheriting the chunk's page range.
         """
         update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-        if page_index is not None:
-            update["page_start"] = page_index.page_for_offset(doc_char_start)
-            update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+        if pages is not None:
+            update["page_start"], update["page_end"] = pages
         return chunk_prov.model_copy(update=update)

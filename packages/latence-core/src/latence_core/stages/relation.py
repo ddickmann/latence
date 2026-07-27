@@ -24,10 +24,11 @@ Each emitted :class:`~latence_core.contracts.RelationMention` carries:
   mention's start to the later mention's end), so the relation resolves back to
   source offsets;
 * Provenance ``page_start``/``page_end`` — the source page(s) that covering span
-  falls on, resolved from the parent document's page map (carried on the mentions'
-  chunks) via :class:`~latence_core.pagemap.PageOffsetIndex` — the S5 round-trip
-  (relation → offset → original page); degrading to the endpoints' own recorded
-  pages when no page map is available;
+  falls on, taken from the two endpoint mentions' own exactly-resolved pages via
+  :func:`~latence_core.page_index.pages_for_covering_span` — the S5 round-trip
+  (relation → offset → original page). A covering span is not a sub-chunk offset:
+  its endpoints may sit in different chunks, so it is answered by arithmetic on the
+  endpoints rather than by a page lookup against any one chunk;
 * the parent document's Classification, inherited unchanged.
 
 A document with fewer than two mentions, or no rule-matching pair, yields no
@@ -81,13 +82,13 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import pages_for_covering_span
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
-    from latence_core.contracts import ChunkRecord, EntityMention, PageMap, Provenance
+    from latence_core.contracts import ChunkRecord, EntityMention, Provenance
 
 
 class _Rule:
@@ -327,7 +328,6 @@ class PatternRelationExtractor:
         # trigger phrase be tested against the real between-mention text, and lets a
         # relation's covering span resolve to a page.
         doc_text = self._document_texts(chunk_list)
-        doc_page_map = self._document_page_maps(chunk_list)
 
         mentions_by_doc: dict[str, list[EntityMention]] = {}
         doc_order: list[str] = []
@@ -344,7 +344,6 @@ class PatternRelationExtractor:
                 doc_id,
                 mentions_by_doc[doc_id],
                 doc_text.get(doc_id, ""),
-                doc_page_map.get(doc_id),
             )
 
     def _relate_one_document(
@@ -352,7 +351,6 @@ class PatternRelationExtractor:
         doc_id: str,
         mentions: list[EntityMention],
         text: str,
-        page_map: PageMap | None,
     ) -> Iterator[RelationMention]:
         if len(mentions) < 2:
             # Fewer than two mentions ⇒ no relatable pair (S5 AC: no error).
@@ -385,10 +383,12 @@ class PatternRelationExtractor:
             self.fanout_dropped_relations += len(candidates) - cap
             self.fanout_capped_documents += 1
             candidates = candidates[:cap]
-        page_index = PageOffsetIndex(page_map) if page_map is not None else None
         for i, (rule, head, tail, span_start, span_end) in enumerate(candidates):
             provenance = self._relation_provenance(
-                head, tail, span_start, span_end, page_index
+                head,
+                tail,
+                span_start,
+                span_end,
             )
             yield RelationMention(
                 record_id=f"{doc_id}#relation-{i}",
@@ -512,46 +512,30 @@ class PatternRelationExtractor:
         return texts
 
     @staticmethod
-    def _document_page_maps(chunks: list[ChunkRecord]) -> dict[str, PageMap | None]:
-        """The parent page map per document (carried on chunks since S4), if present."""
-        maps: dict[str, PageMap | None] = {}
-        for chunk in chunks:
-            if chunk.document_record_id not in maps and chunk.page_map is not None:
-                maps[chunk.document_record_id] = chunk.page_map
-        return maps
-
-    @staticmethod
     def _relation_provenance(
         head: EntityMention,
         tail: EntityMention,
         span_start: int,
         span_end: int,
-        page_index: PageOffsetIndex | None,
     ) -> Provenance:
         """Provenance for a relation: shared lineage + the covering span AND its page.
 
-        The char span covers both endpoints (``[span_start, span_end)``). The page
-        span is re-resolved from that covering span through the parent's page map so
-        the relation cites the page(s) its endpoints actually fall on (``page_end``
-        from the last included character so a relation straddling a page boundary
-        records both pages). Absent a page map, it degrades to the union of the two
-        mentions' own recorded pages. Source-document identity is inherited from the
-        head mention (head and tail share a document).
+        The char span covers both endpoints (``[span_start, span_end)``), so the relation
+        cites the page(s) its endpoints actually fall on and one straddling a page boundary
+        records both. Those pages come from the endpoints themselves
+        (:func:`~latence_core.page_index.pages_for_covering_span`) rather than from a lookup:
+        a covering span is not a sub-chunk offset — its endpoints may be in different chunks
+        — and each endpoint already resolved its own page exactly when it was emitted.
+
+        This used to resolve the span against an arbitrary "anchor" chunk of the document,
+        which only worked because that chunk carried the WHOLE document's map, and fell back
+        to the endpoint union whenever it did not. The fallback was the correct answer all
+        along; the lookup was the redundant path. Source-document identity is inherited from
+        the head mention (head and tail share a document).
         """
         base = head.provenance
         update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-        if page_index is not None:
-            update["page_start"] = page_index.page_for_offset(span_start)
-            update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
-        else:
-            head_ps = head.provenance.page_start
-            tail_ps = tail.provenance.page_start
-            head_pe = head.provenance.page_end
-            tail_pe = tail.provenance.page_end
-            starts = [p for p in (head_ps, tail_ps) if p is not None]
-            ends = [p for p in (head_pe, tail_pe) if p is not None]
-            if starts:
-                update["page_start"] = min(starts)
-            if ends:
-                update["page_end"] = max(ends)
+        pages = pages_for_covering_span(head.provenance, tail.provenance)
+        if pages is not None:
+            update["page_start"], update["page_end"] = pages
         return base.model_copy(update=update)

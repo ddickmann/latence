@@ -26,7 +26,7 @@ from latence_core.contracts import (
     TypeKind,
     TypeVocabulary,
 )
-from latence_core.errors import ConfigError
+from latence_core.errors import ConfigError, ContractError
 from latence_core.stages.type_consolidation import (
     CascadeTypeConsolidator,
     ExactSurfaceTypeConsolidator,
@@ -458,10 +458,19 @@ def test_a_misnamed_embedder_provider_fails_loudly() -> None:
 
 
 def test_a_non_embedder_provider_named_as_the_embedder_fails_loudly() -> None:
+    """A Provider that does not satisfy the slot's Protocol is a ``ContractError`` (C8).
+
+    It used to be a ``ConfigError`` here while the identical mistake at the Export's and the Graph
+    Assembly's ``{provider, config}`` slots raised ``ContractError``. All three now resolve through
+    :mod:`latence_core.subprovider`, so one mistake has one type — a shape error is a
+    ``ConfigError`` (still, see the malformed-block cases), a capability mismatch a
+    ``ContractError``. Both remain ``LatenceError`` subclasses, so a caller catching the base is
+    unaffected.
+    """
     provider = CascadeTypeConsolidator(
         {"use_embedding_merge": True, "embedder": {"provider": "chunk.markdown"}}
     )
-    with pytest.raises(ConfigError, match="Embedder capability"):
+    with pytest.raises(ContractError, match="Embedder capability"):
         provider.consolidate([_mention("org", "Acme"), _mention("company", "Globex")])
 
 

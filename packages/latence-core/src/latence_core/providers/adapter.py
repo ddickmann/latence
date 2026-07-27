@@ -38,11 +38,13 @@ The four reusable pieces (compose them; the base does not force a god-class shap
    an operator bad-config → :class:`~latence_core.errors.ConfigError`), tagged with the
    provider name + op and **carrying no record content / PII**. A framework
    :class:`~latence_core.errors.LatenceError` passes through unwrapped.
-4. :meth:`AdapterBase.carry_provenance` + :meth:`AdapterBase.rebase_offsets` — map a native
-   library's output back onto the input's Provenance/Classification and character offsets,
-   reusing the existing :class:`~latence_core.offsetmap.OffsetIndex` /
-   :class:`~latence_core.pagemap.PageOffsetIndex` seam (ADR-0031) — never a weaker hand-rolled
-   offset mapper — so the "offsets/page-provenance intact" invariant is the default.
+4. :meth:`AdapterBase.carry_provenance` + :meth:`AdapterBase.rebase_offsets` +
+   :meth:`AdapterBase.resolve_pages` — map a native library's output back onto the input's
+   Provenance/Classification and character offsets, reusing the existing
+   :class:`~latence_core.offsetmap.OffsetIndex` seam and the document-scoped
+   :class:`~latence_core.page_index.PageIndexResolver` seam (ADR-0031) — never a weaker
+   hand-rolled offset mapper, and never a throwaway per-chunk page index — so the
+   "offsets/page-provenance intact" invariant is the default.
 """
 
 from __future__ import annotations
@@ -52,7 +54,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, cast, runtim
 
 from latence_core.errors import ConfigError, LatenceError, ProviderError
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import load_perf_kwargs as _resolve_perf_kwargs
 from latence_core.providers.perf import maybe_compile as _maybe_compile
@@ -62,11 +63,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
     from latence_core.contracts import (
+        ChunkRecord,
         Classification,
         OffsetMap,
-        PageMap,
         Provenance,
     )
+    from latence_core.page_index import PageIndexResolver
 
 # The default batch size when a batch-capable adapter's config supplies none. Small,
 # sensible, and (like every batching knob) purely memory-shaping — the outputs are
@@ -431,28 +433,36 @@ class AdapterBase:
 
     @staticmethod
     def resolve_pages(
+        chunk: ChunkRecord,
         doc_char_start: int,
         doc_char_end: int,
         *,
-        page_map: PageMap | None,
-        fallback_page_start: int | None,
-        fallback_page_end: int | None,
-    ) -> tuple[int | None, int | None]:
+        resolver: PageIndexResolver,
+    ) -> tuple[int, int]:
         """Resolve a document-offset span to its source page(s) via the page seam (ADR-0031).
 
-        Reuses :class:`~latence_core.pagemap.PageOffsetIndex` — the never-crashes, fuzzy
-        drift-recovering offset→page resolver (the ported ``PageOffsetIndex`` asset) — so a
-        produced sub-record cites **its own** page, not merely the parent chunk's inherited
-        range. The ``page_end`` resolves from the last included character (``doc_char_end - 1``)
-        so a span straddling a page boundary cites the page its last character lands on.
+        Goes through :class:`~latence_core.page_index.PageIndexResolver` — the ONE seam that
+        owns offset→page resolution — so a produced sub-record cites **its own** page, not
+        merely the parent chunk's inherited range. The resolver owns the half-open end clamp
+        and the corpus-wide drift roll-up.
 
-        When the chunk carries no page map, this degrades to the inherited
-        ``fallback_page_start``/``fallback_page_end`` (the parent chunk's page range) — the exact
-        same fallback the in-core gazetteer uses, so the carry helper matches the reference path.
+        ``doc_char_start``/``doc_char_end`` must be offsets **inside ``chunk``**, which is what
+        :meth:`resolve_offsets` produces. Since v19 the chunk carries its own page spans, so
+        resolution needs nothing but the record in hand: any order, any subset of the stream,
+        no ``observe`` and no per-document state::
+
+            resolver = PageIndexResolver()          # one per extract() call, for the roll-up
+            for chunk in chunks:
+                ...
+                pages = self.resolve_pages(chunk, doc_start, doc_end, resolver=resolver)
+
+        A chunk whose producing Chunker stamped no page spans raises
+        :class:`~latence_core.errors.PageSliceMissingError`. It does NOT degrade to the chunk's
+        inherited range: that produced a page that looks resolved and is not, which is the
+        exact provenance regression (audit R2/R4) this seam exists to prevent.
+
+        For a span whose endpoints may lie in DIFFERENT chunks — a relation's covering span —
+        use :func:`~latence_core.page_index.pages_for_covering_span` instead; no single chunk
+        can answer for it.
         """
-        if page_map is None:
-            return fallback_page_start, fallback_page_end
-        index = PageOffsetIndex(page_map)
-        page_start = index.page_for_offset(doc_char_start)
-        page_end = index.page_for_offset(max(doc_char_end - 1, doc_char_start))
-        return page_start, page_end
+        return resolver.pages_for_span(chunk, doc_char_start, doc_char_end)

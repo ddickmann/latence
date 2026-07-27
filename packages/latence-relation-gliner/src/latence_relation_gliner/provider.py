@@ -29,9 +29,12 @@ map carried since v11) via :class:`~latence_core.offsetmap.OffsetIndex` — so a
 offset is EXACT even when markdown markup was stripped before it (``char_start + local``
 is only a lower bound; ADR-0022 corrected, ADR-0031; a pre-v11 chunk degrades to that
 shift). A relation's covering span is the min/max of its resolved endpoints, so it
-inherits the correction. Each page span is re-resolved through the parent's page map
-(carried on the chunk) via :class:`~latence_core.pagemap.PageOffsetIndex` — the S4/S5
-round-trip. Because a fused
+inherits the correction. Each page span is re-resolved through
+:class:`~latence_core.page_index.PageIndexResolver` — the S4/S5 round-trip — which reads the
+chunk's OWN ``page_slice`` (v19), so every chunk resolves exactly in any order. ONE resolver
+serves the whole ``extract_fused`` call so the drift roll-up is per call; a relation's covering
+span spans two chunks and is answered from its endpoints' own pages
+(:func:`~latence_core.page_index.pages_for_covering_span`). Because a fused
 Stage emits both carriers together, the Runner threads mentions AND relations
 downstream from one Stage without running a separate Entity-Extraction Stage (no
 double-extraction).
@@ -50,17 +53,10 @@ from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
-from latence_core.providers.perf import (
-    apply_gliner_max_len,
-    load_then_cast,
-    maybe_compile,
-    neutralize_torch_jit,
-    place_on_device,
-    resolve_max_len,
-)
+from latence_core.providers.perf import load_gliner_model, resolve_max_len
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -75,6 +71,28 @@ _DEFAULT_MODEL = "knowledgator/gliner-relex-multi-v1.0"
 # P8 autotuner overrides per-device); purely memory-shaping — the emitted mentions/relations
 # are record-for-record identical to a per-chunk loop for any positive batch size (ADR-0033).
 _DEFAULT_BATCH_SIZE = 16
+
+
+def _import_gliner() -> Any:
+    """Return the ``GLiNER`` class — the backbone-import factory the perf seam calls (#190).
+
+    Handed to :func:`~latence_core.providers.perf.load_gliner_model` rather than called here, so the
+    TorchScript JIT is provably dead **before** this import evaluates: it transitively pulls in
+    transformers' ``deberta_v2`` module, whose relative-position helpers are compiled by
+    ``@torch.jit.script`` AT IMPORT and can never be un-scripted afterwards (the Blackwell/CUDA-13
+    ``libnvrtc-builtins.so.13.0`` crash, #190). Passing the import as a factory is what makes that
+    ordering un-gettable-wrong: this package still owns the native dependency and its install hint
+    (ADR-0036 §2) — only the INSTANT the import runs moved into the seam.
+    """
+    try:
+        from gliner import GLiNER
+    except ImportError as exc:  # pragma: no cover - exercised only without the dep
+        msg = (
+            "The 'gliner' package is required to run GlinerRelexExtractor. "
+            "Install it with: pip install latence-relation-gliner"
+        )
+        raise ImportError(msg) from exc
+    return GLiNER
 
 
 class GlinerRelexExtractor:
@@ -220,43 +238,24 @@ class GlinerRelexExtractor:
     # -- lazy model load ----------------------------------------------------
 
     def _load_model(self) -> Any:
-        if self._model is not None:
-            return self._model
-        # W9-jit (#190, audit R1): neutralize the TorchScript JIT BEFORE the gliner import — that
-        # import transitively pulls in transformers' deberta_v2 modeling module, whose
-        # relative-position helpers are compiled by @torch.jit.script AT IMPORT. Neutralizing later
-        # (inside load_then_cast) cannot un-script them: the env switch is read by torch only at
-        # ITS import, and jit._state.disable() only affects FUTURE script() calls — so the
-        # scripted helpers would still die in nvrtc (libnvrtc-builtins.so.13.0) on the first
-        # forward on a Blackwell/CUDA-13 box. Throughput-only, byte-identical output.
-        neutralize_torch_jit(provider_name="relation.gliner_relex")
-        try:
-            from gliner import GLiNER
-        except ImportError as exc:  # pragma: no cover - exercised only without the dep
-            msg = (
-                "The 'gliner' package is required to run GlinerRelexExtractor. "
-                "Install it with: pip install latence-relation-gliner"
+        """Load the checkpoint on first use (cached) via the shared load choreography (C4).
+
+        One call. :func:`~latence_core.providers.perf.load_gliner_model` owns the whole ordered
+        sequence — skip-decision → JIT kill → intra-op thread cap → backbone import → plain load +
+        bf16 cast → placement on the resolved device WITH read-back verification → mdeberta window
+        bound → guarded compile — so none of those five "before" constraints is this Provider's to
+        remember. They used to be: this body was copy-paste identical across the three plain-gliner
+        Providers modulo one string, and #190 (JIT after the import) and #191 (placement wired to
+        one Provider of three) are what a hand-copied sequence costs.
+        """
+        if self._model is None:
+            self._model = load_gliner_model(
+                _import_gliner,
+                self._model_id,
+                self._config,
+                self._device,
+                provider_name="relation.gliner_relex",
             )
-            raise ImportError(msg) from exc
-        if self._device.skipped or self._device.device is None:
-            # #191: ``device: cuda`` on a host with no CUDA used to fall through to a CPU load and a
-            # ~11.5 s/chunk run with the GPU idle and NO warning. The seam's skip decision is now
-            # surfaced as an operator error — honour the resolved device or fail loudly (ADR-0036).
-            msg = f"relation.gliner_relex: {self._device.reason}"
-            raise ConfigError(msg)
-        device = self._device.device
-        # W8 perf seam (pod-corrected): plain ``gliner`` 0.2.27 REJECTS torch_dtype/attn_impl in
-        # from_pretrained and its encoder has no FA2/FlashDeBERTa — so load PLAIN, then .to(bf16)
-        # on cuda (measured 1.36× faster, byte-identical); the cast is a no-op on CPU / fp32. The
-        # dtype keys off the RESOLVED device, not a bare availability probe.
-        model = load_then_cast(GLiNER.from_pretrained, self._model_id, self._config, device)
-        # #191: plain ``gliner`` does NOT auto-place — ``from_pretrained`` loads on CPU. Place the
-        # model on the resolved device HERE, at load, and verify it landed (a mismatch raises).
-        place_on_device(model, device, provider_name="relation.gliner_relex")
-        # W12: bound the mdeberta token window BEFORE any compile wrap (the hard model-boundary
-        # guard) so gliner never silently truncates a long chunk past config.max_len.
-        apply_gliner_max_len(model, self._max_len)
-        self._model = maybe_compile(model, self._config, provider_name="relation.gliner_relex")
         return self._model
 
     # -- fused extraction ---------------------------------------------------
@@ -280,6 +279,9 @@ class GlinerRelexExtractor:
         relations: list[RelationMention] = []
         batch: list[ChunkRecord] = []
         batch_labels: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's
+        # index is built on the first chunk of it we see and reused for every later chunk.
+        resolver = PageIndexResolver()
 
         def flush() -> None:
             nonlocal model, batch, batch_labels
@@ -317,7 +319,7 @@ class GlinerRelexExtractor:
                 batch, entities_per_text, relations_per_text, strict=True
             ):
                 chunk_mentions, chunk_relations = self._build_records(
-                    chunk, list(raw_ents), list(raw_rels)
+                    chunk, list(raw_ents), list(raw_rels), resolver
                 )
                 mentions.extend(chunk_mentions)
                 relations.extend(chunk_relations)
@@ -359,6 +361,7 @@ class GlinerRelexExtractor:
         chunk: ChunkRecord,
         raw_entities: list[dict[str, Any]],
         raw_relations: list[dict[str, Any]],
+        resolver: PageIndexResolver,
     ) -> tuple[list[EntityMention], list[RelationMention]]:
         # ``raw_entities`` / ``raw_relations`` are THIS chunk's fused output, mapped back by index
         # from the batched ``inference`` call (W7). Their shape is the REAL gliner-relex contract
@@ -375,7 +378,8 @@ class GlinerRelexExtractor:
         # only a lower bound); a pre-v11 chunk with no map degrades to that shift.
         offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
         chunk_char_start = chunk.provenance.char_start or 0
-        page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+        # Each record's page span comes from the DOCUMENT-scoped resolver, so a chunk carrying
+        # no page map (every non-first chunk since v18) still resolves its own pages.
 
         mentions: list[EntityMention] = []
         # Map the model's chunk-local (start, end) to the stamped mention, so a
@@ -392,7 +396,7 @@ class GlinerRelexExtractor:
                 chunk.provenance,
                 doc_start,
                 doc_end,
-                page_index,
+                resolver.pages_for_span(chunk, doc_start, doc_end),
             )
             mention = EntityMention(
                 record_id=f"{chunk.record_id}#entity-{i}",
@@ -418,7 +422,16 @@ class GlinerRelexExtractor:
                 continue
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
-            rel_prov = _relation_provenance(head, tail, span_start, span_end, page_index)
+            rel_prov = _relation_provenance(
+                head,
+                tail,
+                span_start,
+                span_end,
+                # A covering span runs between two endpoints and is not a sub-chunk offset,
+                # so it is answered from the endpoints' own already-exact pages rather than by
+                # a lookup against any one chunk.
+                pages_for_covering_span(head.provenance, tail.provenance),
+            )
             relations.append(
                 RelationMention(
                     record_id=f"{chunk.record_id}#relation-{emitted}",
@@ -463,12 +476,13 @@ def _mention_provenance(
     chunk_prov: Provenance,
     doc_char_start: int,
     doc_char_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
+    """``pages`` is what the :class:`~latence_core.page_index.PageIndexResolver` resolved for the
+    mention's own span; ``None`` (no page map available) degrades to the chunk's inherited range."""
     update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(doc_char_start)
-        update["page_end"] = page_index.page_for_offset(max(doc_char_end - 1, doc_char_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     return chunk_prov.model_copy(update=update)
 
 
@@ -477,13 +491,12 @@ def _relation_provenance(
     tail: EntityMention,
     span_start: int,
     span_end: int,
-    page_index: PageOffsetIndex | None,
+    pages: tuple[int, int] | None,
 ) -> Provenance:
     base = head.provenance
     update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(span_start)
-        update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     else:
         hp, tp = head.provenance, tail.provenance
         starts = [p for p in (hp.page_start, tp.page_start) if p is not None]

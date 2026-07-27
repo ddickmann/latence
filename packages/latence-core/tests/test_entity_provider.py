@@ -19,6 +19,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
 )
 from latence_core.stages.chunk import MarkdownChunker
@@ -46,8 +48,9 @@ def _chunk(
     ``char_start + k`` when no markup was stripped before it. ``offset_map`` (the
     stripped-content→original map carried since v11) resolves that offset EXACTLY even
     when markup was stripped before the mention; absent it, the extractor degrades to
-    the ``char_start + k`` shift. ``page_map`` lets the extractor re-resolve a
-    mention's *own* page; absent it, a mention inherits the chunk's page range.
+    the ``char_start + k`` shift. ``page_map`` is the PARENT DOCUMENT's map, from which
+    the chunk's own :class:`PageSlice` is cut (v19); absent it the fixture is a one-page
+    document, so the chunk's slice is the single page ``page_start``.
     """
     if char_end is None:
         char_end = char_start + len(content)
@@ -70,7 +73,16 @@ def _chunk(
         classification=Classification(language="en", sensitivity="internal"),
         content=content,
         token_count=len(content.split()),
-        page_map=page_map,
+        page_slice=(
+            PageSlice.for_span(page_map, char_start, char_end)
+            if page_map is not None
+            else PageSlice(
+                pages=[
+                    PageSpan(page_number=page_start, char_start=char_start, char_end=char_end)
+                ],
+                total_chars=char_end,
+            )
+        ),
         offset_map=offset_map,
     )
 
@@ -96,24 +108,52 @@ def test_extracts_typed_mentions_with_confidence() -> None:
     assert by_text["Alice"].confidence == 0.8
 
 
-def test_offsets_resolve_to_document_span_and_inherit_page_without_map() -> None:
-    # No page map on the chunk: the mention degrades to inheriting the chunk's page
-    # range (the documented fallback). Offsets are still exact document offsets.
-    chunk = _chunk("Alice met Bob.", char_start=100, page_start=2, page_end=3)
+def test_offsets_resolve_to_document_span_on_a_single_page_chunk() -> None:
+    # A chunk sitting wholly on page 2 of its document: every mention cites page 2, and
+    # the offsets are exact DOCUMENT offsets (chunk_char_start + local), not chunk-local.
+    chunk = _chunk("Alice met Bob.", char_start=100, page_start=2, page_end=2)
     mentions = list(GazetteerEntityExtractor(_ORG_PERSON_CONFIG).extract([chunk]))
     alice = next(m for m in mentions if m.text == "Alice")
     # Document-level char span = chunk_char_start + local offset. "Alice" is [0,5).
     assert alice.provenance.char_start == 100
     assert alice.provenance.char_end == 105
-    # No page map ⇒ inherit the parent chunk's page range.
     assert alice.provenance.page_start == 2
-    assert alice.provenance.page_end == 3
+    assert alice.provenance.page_end == 2
     # Provenance identity carried through from the chunk.
     assert alice.provenance.document_id == "sha256:doc1"
     # Bob at chunk-local 10 -> document 110.
     bob = next(m for m in mentions if m.text == "Bob")
     assert bob.provenance.char_start == 110
     assert bob.provenance.char_end == 113
+
+
+def test_mention_on_a_page_straddling_chunk_cites_its_own_page_not_the_range() -> None:
+    """ADR-0021/0031: a chunk straddling a page break resolves BOTH pages correctly.
+
+    The chunk's inherited range is ``(2, 3)``, so citing it for either mention is
+    plausible-looking and wrong. Each mention must resolve against the chunk's own two-span
+    slice: "Alice" is before the break (page 2), "Bob" is after it (page 3).
+    """
+    # Pages 1..3 of a document; the chunk is [100, 114), the break at 107.
+    page_map = PageMap(
+        pages=[
+            PageSpan(page_number=1, char_start=0, char_end=60),
+            PageSpan(page_number=2, char_start=60, char_end=107),
+            PageSpan(page_number=3, char_start=107, char_end=200),
+        ],
+        total_chars=200,
+    )
+    chunk = _chunk(
+        "Alice met Bob.", char_start=100, page_start=2, page_end=3, page_map=page_map
+    )
+    # The slice is exactly the two spans the chunk overlaps — not the whole document map.
+    assert chunk.page_slice is not None
+    assert [s.page_number for s in chunk.page_slice.pages] == [2, 3]
+    mentions = list(GazetteerEntityExtractor(_ORG_PERSON_CONFIG).extract([chunk]))
+    alice = next(m for m in mentions if m.text == "Alice")  # doc [100, 105) -> page 2
+    bob = next(m for m in mentions if m.text == "Bob")  # doc [110, 113) -> page 3
+    assert (alice.provenance.page_start, alice.provenance.page_end) == (2, 2)
+    assert (bob.provenance.page_start, bob.provenance.page_end) == (3, 3)
 
 
 def test_mention_page_resolves_to_its_own_page_in_multipage_chunk() -> None:

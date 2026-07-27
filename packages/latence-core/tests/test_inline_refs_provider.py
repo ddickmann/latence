@@ -29,6 +29,8 @@ from latence_core.capability import FusedEntityRelationExtractor
 from latence_core.contracts import (
     ChunkRecord,
     Classification,
+    PageSlice,
+    PageSpan,
     Provenance,
 )
 from latence_core.stages.header_refs import HeaderReferenceExtractor
@@ -106,6 +108,12 @@ def _chunk(text: str, *, index: int, char_start: int, file_name: str = "rfc9110.
         classification=Classification(language="en", sensitivity="internal"),
         content=text,
         token_count=len(text.split()),
+        # v19: the chunk carries its own page spans. This fixture is a one-page document,
+        # so each chunk's slice is that page, covering the chunk's own extent.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=char_start, char_end=char_start + len(text))],
+            total_chars=char_start + len(text),
+        ),
     )
 
 

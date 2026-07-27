@@ -116,6 +116,33 @@ class StorageError(LatenceError, RuntimeError):
     category = "storage"
 
 
+class PageSliceMissingError(ContractError):
+    """A chunk was asked for a page and carries no :class:`~latence_core.contracts.PageSlice`.
+
+    Since v19 every chunk is self-describing: the Chunk Stage stamps the page spans
+    overlapping that chunk onto the chunk itself, so resolution needs nothing but the record
+    in hand. Reaching this error means the record was produced by a Chunker that supplied no
+    page spans at all — a wiring/producer defect, which is why it is a
+    :class:`ContractError`.
+
+    It is an ERROR rather than a ``None`` on purpose. The mechanism this replaced returned
+    ``None`` and let every call site degrade to the chunk's inherited ``[page_start,
+    page_end]`` range, which is a *plausible-looking wrong page* — indistinguishable from a
+    correct one in the output, and counted only in an aggregate nobody reads. ADR-0034: a
+    failure is observable or it is not handled. Carries the chunk's record id (an
+    identifier, never content — the same no-PII discipline as
+    :class:`ScreeningQuarantineError`).
+    """
+
+    def __init__(self, record_id: str) -> None:
+        super().__init__(
+            f"chunk {record_id!r} carries no page_slice, so the source page of an offset "
+            f"inside it cannot be resolved. The Chunk Provider that produced it must stamp "
+            f"PageSlice.for_span(document.page_map, chunk.char_start, chunk.char_end)."
+        )
+        self.record_id = record_id
+
+
 class ScreeningQuarantineError(LatenceError):
     """A Quarantine disposition surfaced as a typed error (an *opt-in* fatal Screening).
 

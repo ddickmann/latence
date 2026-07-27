@@ -20,7 +20,13 @@ from latence_console import browse
 from latence_console.artifacts import RunArtifacts
 from latence_console.render import external_references, render_chunk
 from latence_console.server import ConsoleApp
-from latence_core.contracts import ChunkRecord, Classification, PIISpan, RedactionAction
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    PageSlice,
+    PIISpan,
+    RedactionAction,
+)
 from latence_core.storage import Storage
 from reports import (
     _PAGE_MAP,
@@ -156,7 +162,8 @@ def _chunk_without_offset_map(char_start: int | None) -> ChunkRecord:
         index=1,
         content="Ada Lovelace signs the appendix.",
         token_count=7,
-        page_map=_PAGE_MAP,
+        # v19: the chunk carries the spans it overlaps, cut from the document's map.
+        page_slice=PageSlice.for_span(_PAGE_MAP, char_start or 0, 120),
         offset_map=None,
         masked_content="[PERSON] signs the appendix.",
         pii_spans=[
@@ -252,7 +259,7 @@ def _floor_masked_sensitive_chunk() -> ChunkRecord:
         index=1,
         content=content,
         token_count=14,
-        page_map=_PAGE_MAP,
+        page_slice=PageSlice.for_span(_PAGE_MAP, 0, len(content)),
         masked_content="Please wire the retainer to IBAN [IBAN] before the deadline.",
         pii_spans=[
             PIISpan(

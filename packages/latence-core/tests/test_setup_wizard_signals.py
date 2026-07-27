@@ -29,9 +29,15 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pyarrow.parquet as pq
+from _setup_stack import stage
 from latence_core.conformance import fixtures
-from latence_core.contracts import ChunkRecord, Classification, Provenance
-from latence_core.pipeline import Pipeline
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    PageSlice,
+    PageSpan,
+    Provenance,
+)
 from latence_core.setup import SetupAnswers, build_stack_config
 from latence_core.setup.wizard import PROFILE_LITE, PROFILE_SOTA
 from latence_core.stages.export import JsonlParquetExport
@@ -66,8 +72,7 @@ def _answers(tmp_path: Path, *, profile: str = PROFILE_SOTA) -> SetupAnswers:
 
 def _stage_config(tmp_path: Path, name: str, *, profile: str = PROFILE_SOTA) -> dict[str, Any]:
     text = build_stack_config(_answers(tmp_path, profile=profile))
-    stage = next(s for s in Pipeline.from_yaml_text(text).stages if s.name == name)
-    return dict(stage.config)
+    return dict(stage(text, name).config)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +167,11 @@ def _chunk(record_id: str, text: str, index: int) -> ChunkRecord:
         index=index,
         content=text,
         token_count=max(1, len(text.split())),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
     )
 
 

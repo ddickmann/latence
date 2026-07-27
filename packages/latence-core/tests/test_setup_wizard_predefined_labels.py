@@ -22,8 +22,8 @@ import json
 from pathlib import Path
 
 import pytest
+from _setup_stack import stages_by_name
 from latence_core.cli import app
-from latence_core.pipeline import Pipeline, Stage
 from latence_core.setup import (
     FINANCIAL_PII_LABELS,
     SetupAnswers,
@@ -77,9 +77,8 @@ def _answers(
     )
 
 
-def _stages(text: str) -> dict[str, Stage]:
-    return {s.name: s for s in Pipeline.from_yaml_text(text).stages}
-
+# Stage lookups come from the shared `_setup_stack` helper (C7) — see test_setup_recipe.py for
+# the direct, per-contribution assertions this module's whole-document tests complement.
 
 # -- the induce Stage is absent, and the DAG survives its absence -------------
 
@@ -101,7 +100,7 @@ def test_predefined_only_emits_no_induce_stage_and_still_validates(
         _answers(tmp_path, pii=pii, profile=profile, parser=parser, predefined_labels=_FIXED)
     )
     validate_config_text(text)  # raises on a broken DAG / capability wiring / phase boundary
-    stages = _stages(text)
+    stages = stages_by_name(text)
     assert "induce" not in stages
     assert not any(s.capability == "schema_induction" for s in stages.values())
     assert not any("induce" in s.depends_on for s in stages.values())
@@ -115,7 +114,7 @@ def test_predefined_only_emits_no_induce_stage_and_still_validates(
 
 def test_induction_is_on_by_default_and_off_only_by_choice(tmp_path: Path) -> None:
     """The default is still per-chunk induction — predefined-only is opt-in, never implicit."""
-    default_stages = _stages(build_stack_config(_answers(tmp_path)))
+    default_stages = stages_by_name(build_stack_config(_answers(tmp_path)))
     assert default_stages["induce"].config["granularity"] == "chunk"
 
 
@@ -131,7 +130,7 @@ def test_extraction_runs_against_exactly_the_operator_labels(
     text = build_stack_config(
         _answers(tmp_path, profile=profile, parser=parser, predefined_labels=_FIXED)
     )
-    extract = _stages(text)["extract"]
+    extract = stages_by_name(text)["extract"]
     # The operator's own order, not the profile default and not sorted behind their back.
     assert extract.config["labels"] == ["tariff heading", "commodity"]
     assert extract.config["relation_labels"] == ["classified under"]
@@ -144,7 +143,7 @@ def test_a_partial_schema_keeps_the_profile_default_for_the_unspecified_slot(
     text = build_stack_config(
         _answers(tmp_path, predefined_labels={"entity_types": ["clause"]})
     )
-    extract = _stages(text)["extract"]
+    extract = stages_by_name(text)["extract"]
     assert extract.config["labels"] == ["clause"]
     assert extract.config["relation_labels"] == ["works for", "partner of"]
 
@@ -167,7 +166,7 @@ def test_the_financial_pii_floor_survives_predefined_only(
     text = build_stack_config(
         _answers(tmp_path, profile=profile, parser=parser, predefined_labels=_FIXED)
     )
-    pii_labels = _stages(text)["redact"].config["pii_labels"]
+    pii_labels = stages_by_name(text)["redact"].config["pii_labels"]
     assert set(FINANCIAL_PII_LABELS) <= set(pii_labels)
     assert "customer reference" in pii_labels  # ...and the operator's own PII type rides on top
     # The floor comes FIRST and keeps its canonical order — a stable, diffable config.
@@ -178,7 +177,7 @@ def test_an_operator_pii_type_that_duplicates_the_floor_is_not_repeated(tmp_path
     text = build_stack_config(
         _answers(tmp_path, predefined_labels={"entity_types": ["x"], "pii_types": ["iban"]})
     )
-    pii_labels = _stages(text)["redact"].config["pii_labels"]
+    pii_labels = stages_by_name(text)["redact"].config["pii_labels"]
     assert pii_labels.count("iban") == 1
 
 
@@ -235,7 +234,7 @@ def test_cli_predefined_labels_file_drives_the_generated_stack(tmp_path: Path) -
     assert r1.exit_code == 0, r1.output
     assert r2.exit_code == 0, r2.output
     assert out1.read_bytes() == out2.read_bytes()
-    stages = _stages(out1.read_text(encoding="utf-8"))
+    stages = stages_by_name(out1.read_text(encoding="utf-8"))
     assert "induce" not in stages
     assert stages["extract"].config["labels"] == ["tariff heading", "commodity"]
 

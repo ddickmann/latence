@@ -24,11 +24,12 @@ to derive a deterministic surrogate, and it is never interpolated into an error 
 ``end`` on the text it analysed. Redaction scans the **parsed document** markdown directly
 (``record.content`` at its original-document offsets — capability.py:228), so the analyzed text
 IS the document text and Presidio's spans ARE document offsets. Each span's source page is
-resolved through the AdapterBase :meth:`~latence_core.providers.adapter.AdapterBase.resolve_pages`
-seam over the parent :class:`~latence_core.contracts.PageMap` — the ported ``PageOffsetIndex``
-asset (never a weaker hand-rolled mapper), so a span straddling a page boundary cites its own
-page. Provenance is carried onto the RedactionRecord via
-:meth:`~latence_core.providers.adapter.AdapterBase.carry_provenance` (the source lineage intact,
+resolved through the document-scoped :class:`~latence_core.page_index.PageIndexResolver` seam
+(which owns the memoised ported ``PageOffsetIndex`` asset — never a weaker hand-rolled mapper, and
+never a per-chunk index, which since v18 would see no map on any chunk after a document's first),
+so a span straddling a page boundary cites its own page. Provenance is carried onto the
+RedactionRecord via :meth:`~latence_core.providers.adapter.AdapterBase.carry_provenance`
+(the source lineage intact,
 the offset span narrowed to ``[0, len)``). Spans are made **non-overlapping + stable** (the
 RedactionRecord invariant): earlier start wins, then longer span, then type name.
 
@@ -52,6 +53,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.profile import ProviderProfile
 from latence_core.redaction_policy import (
@@ -128,7 +130,8 @@ class PresidioRedactor(AdapterBase):
     cpu/cuda placement (spaCy is CPU-first, GPU-optional), :meth:`batched` for input-order
     document batching, :meth:`guard` for native-exception → typed
     :class:`~latence_core.errors.ProviderError` mapping (NO raw text / PII in the message), and
-    :meth:`carry_provenance` / :meth:`resolve_pages` for the ADR-0031 offset/page carry.
+    :meth:`carry_provenance` + the :class:`~latence_core.page_index.PageIndexResolver` seam for the
+    ADR-0031 offset/page carry.
 
     Config:
         model: str  — the spaCy model id (default ``en_core_web_sm``, MIT; ``en_core_web_lg``,
@@ -305,27 +308,39 @@ class PresidioRedactor(AdapterBase):
         ``batch=True``) so the corpus is consumed one bounded batch at a time (memory O(batch_size),
         never the whole corpus) and emitted in first-seen order. The analyzer is loaded once on the
         first chunk that needs it (a batch of only clean/skipped chunks never loads spaCy). A
-        chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map +
-        page_map (ADR-0031/0042).
+        chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map + the
+        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042), which reads the
+        chunk's own ``page_slice`` (v19) — so resolution is exact whatever order chunks arrive in
+        and whichever of them a Stage dropped.
+
+        ONE resolver covers the whole call — across batches — so the drift roll-up is per call
+        rather than thrown away per batch; it holds no document state.
         """
         analyzer_state: dict[str, Any] = {"engine": None}
+        resolver = PageIndexResolver()
 
         def run_batch(batch: list[ChunkRecord]) -> list[ChunkRecord]:
-            return [self._redact_chunk(chunk, analyzer_state) for chunk in batch]
+            return [self._redact_chunk(chunk, analyzer_state, resolver) for chunk in batch]
 
         yield from self.batched(chunks, run_batch)
 
     def _redact_chunk(
-        self, chunk: ChunkRecord, analyzer_state: dict[str, Any]
+        self,
+        chunk: ChunkRecord,
+        analyzer_state: dict[str, Any],
+        resolver: PageIndexResolver,
     ) -> ChunkRecord:
         # The shared plan owns policy resolution + the §4 no-op floor (the Provider's own
-        # _detector_types + _sensitive_set feed it) + the chunk offset/page maps.
+        # _detector_types + _sensitive_set feed it) + the chunk offset map. ``resolver`` is the
+        # call-scoped page resolver: planning runs for EVERY chunk, so it absorbs the document's
+        # map from its first chunk and every later chunk resolves its own source page.
         plan = plan_chunk_redaction(
             chunk,
             self._policy,
             detector_types=self._detector_types,
             sensitive_set=self._sensitive_set,
             min_chars=self._min_chars,
+            resolver=resolver,
         )
         accepted: list[tuple[int, int, str, str, str, float]] = []
         if plan.needs_detection:
@@ -353,7 +368,7 @@ class PresidioRedactor(AdapterBase):
         Returns ``(local_start, local_end, pii_type, value, detector, confidence)`` tuples
         (chunk-content offsets); :func:`~latence_core.redaction_policy.finalize_redacted_chunk`
         derives the spans + ORIGINAL-resolved pages + placeholders + masking (the ADR-0031/0042 page
-        seam, via the chunk's offset_map+page_map, never a weaker mapper).
+        seam, via the chunk's offset_map+page_slice, never a weaker mapper).
 
         The whole Presidio call is inside :meth:`guard`, so a native spaCy/Presidio failure becomes
         a typed :class:`~latence_core.errors.ProviderError` carrying **no source text / PII**.

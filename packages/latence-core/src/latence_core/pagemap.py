@@ -34,7 +34,16 @@ import bisect
 
 from pydantic import BaseModel, ConfigDict
 
-from latence_core.contracts import PageMap, PageSpan
+from latence_core.contracts import PageMap, PageSlice, PageSpan
+
+#: What an index can be built over: a whole document's map, or ONE chunk's slice of it.
+#:
+#: The two are structurally identical where the algorithm touches them — an ascending,
+#: contiguous run of :class:`~latence_core.contracts.PageSpan`\\ s plus the document's
+#: ``total_chars`` — so the ported resolution logic is shared verbatim rather than forked. They
+#: differ only in coverage: a :class:`~latence_core.contracts.PageMap` starts at page 1 and
+#: character 0, a :class:`~latence_core.contracts.PageSlice` starts wherever its chunk does.
+PageSpans = PageMap | PageSlice
 
 
 class PageDriftDiagnostics(BaseModel):
@@ -65,7 +74,7 @@ class PageOffsetIndex:
     the serialized :class:`PageMap` contract it is built from.
     """
 
-    def __init__(self, page_map: PageMap) -> None:
+    def __init__(self, page_map: PageSpans) -> None:
         self._page_map = page_map
         # Cumulative starts for bisect. pages are validated contiguous/ordered, so
         # ``_starts[i]`` is page i+1's char_start and the array is sorted ascending.
@@ -78,15 +87,29 @@ class PageOffsetIndex:
         """The running drift diagnostics (a snapshot copy — safe to serialize)."""
         return self._diag.model_copy()
 
+    @property
+    def page_count(self) -> int:
+        """How many page spans this index covers — the document's page count.
+
+        This is what an index *weighs*: the retained ``PageMap`` is one
+        :class:`~latence_core.contracts.PageSpan` per page (~550 bytes measured on a
+        519-page document, ~279 KB in total), so a caller that has to bound how much page
+        state it keeps live bounds THIS, not the number of documents — a 1-page note and a
+        519-page contract differ by ~500× (:data:`latence_core.page_index.DEFAULT_MAX_LIVE_PAGES`).
+        """
+        return len(self._starts)
+
     def page_for_offset(self, offset: int) -> int:
         """Return the 1-based source page for a character ``offset`` in the text.
 
         Exact when ``offset`` falls inside a page's span. Otherwise the fuzzy
         fallback recovers the nearest plausible page and records the drift:
 
-        * a negative offset clamps to page 1 (drift = |offset|);
-        * an offset at/after the assembled end clamps to the last page
+        * a negative offset clamps to the first page covered (drift = |offset|);
+        * an offset at/after the assembled end clamps to the last page covered
           (drift = offset - (total_chars - 1), floored at 0);
+        * over a :class:`~latence_core.contracts.PageSlice`, an offset BEFORE the
+          slice's first page clamps to it (drift = distance);
         * an in-range offset that a ``bisect`` places is exact — the contiguous
           invariant means there are no interior gaps, but the fallback still runs
           if the map is somehow degenerate, so resolution never raises.
@@ -111,17 +134,30 @@ class PageOffsetIndex:
         # bisect_right - 1 gives the page whose char_start is the greatest value
         # <= offset: O(log n). With contiguous spans this is always the exact page.
         idx = bisect.bisect_right(self._starts, offset) - 1
-        if idx < 0:  # pragma: no cover - offset>=0 and _starts[0]==0 make this unreachable
+        if idx < 0:
+            # Before the FIRST span this index covers. Unreachable over a whole document map
+            # (offset >= 0 and _starts[0] == 0), but reachable over a chunk's PageSlice, whose
+            # first span starts where its chunk does: a caller asking about an offset that
+            # precedes the chunk gets the chunk's first page, and the distance is recorded as
+            # drift rather than passed off as an exact resolution.
             self._record_drift(self._starts[0] - offset)
             idx = 0
         return self._page_number(idx)
 
     def page_span(self, page_number: int) -> PageSpan:
-        """The recorded span for a 1-based ``page_number`` (raises if out of range)."""
-        if not 1 <= page_number <= len(self._page_map.pages):
-            msg = f"Page {page_number} out of range 1..{len(self._page_map.pages)}"
+        """The recorded span for a 1-based ``page_number`` (raises if out of range).
+
+        Addressed by the page's own number, not by position, so this reads the same over a
+        whole document map (which starts at page 1) and over a chunk's slice of one (which
+        starts at whatever page its chunk does).
+        """
+        pages = self._page_map.pages
+        first = pages[0].page_number
+        last = first + len(pages) - 1
+        if not first <= page_number <= last:
+            msg = f"Page {page_number} out of range {first}..{last}"
             raise IndexError(msg)
-        return self._page_map.pages[page_number - 1]
+        return pages[page_number - first]
 
     def _page_number(self, index: int) -> int:
         return self._page_map.pages[index].page_number

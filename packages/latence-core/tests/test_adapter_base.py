@@ -6,7 +6,7 @@ Deterministic, seeded, no I/O and no model download. Covers device resolution
 whole-corpus buffering), the native-exception → typed-taxonomy guard (RuntimeError →
 ProviderError, opted-in bad-config → ConfigError, framework LatenceError passthrough,
 **no PII/record content** in the raised message), and the Provenance/offset carry helpers
-(reuse the OffsetIndex/PageOffsetIndex seam, ADR-0031).
+(reuse the OffsetIndex/PageIndexResolver seam, ADR-0031).
 """
 
 from __future__ import annotations
@@ -14,13 +14,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from latence_core import AdapterBase, ProviderProfile
+from latence_core import AdapterBase, PageIndexResolver, ProviderProfile
 from latence_core.contracts import (
     ChunkRecord,
     Classification,
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
     PageSpan,
     Provenance,
 )
@@ -28,6 +29,7 @@ from latence_core.errors import (
     ConfigError,
     ContractError,
     LatenceError,
+    PageSliceMissingError,
     ProviderError,
     error_category,
 )
@@ -277,7 +279,7 @@ def _chunk(*, content: str, char_start: int, offset_map: OffsetMap | None) -> Ch
         index=0,
         content=content,
         token_count=len(content.split()),
-        page_map=page_map,
+        page_slice=PageSlice.for_span(page_map, char_start, char_start + len(content)),
         offset_map=offset_map,
     )
 
@@ -328,28 +330,112 @@ def test_rebase_offsets_uses_offset_index_seam() -> None:
     assert end == 64
 
 
-def test_resolve_pages_uses_page_index_seam() -> None:
-    page_map = PageMap(
+def _two_page_map() -> PageMap:
+    return PageMap(
         pages=[
             PageSpan(page_number=1, char_start=0, char_end=50),
             PageSpan(page_number=2, char_start=50, char_end=120),
         ],
         total_chars=120,
     )
-    # A span at [60, 70) falls on page 2 via PageOffsetIndex (ADR-0031 seam).
-    ps, pe = AdapterBase.resolve_pages(
-        60, 70, page_map=page_map, fallback_page_start=1, fallback_page_end=1
+
+
+def _paged_chunk(
+    *,
+    record_id: str,
+    index: int,
+    char_start: int,
+    char_end: int,
+    page_start: int,
+    page_end: int,
+    carries_pages: bool,
+) -> ChunkRecord:
+    """A chunk of ``doc-rec-1`` in the v19 shape: its OWN spans, cut from the two-page map.
+
+    ``carries_pages=False`` models the only remaining unresolvable case — a Chunker that
+    stamped no page spans at all — which the seam must surface, not paper over.
+    """
+    return ChunkRecord(
+        record_id=record_id,
+        provenance=Provenance(
+            source_uri="file://x/doc.pdf",
+            file_name="doc.pdf",
+            file_type="pdf",
+            file_size=120,
+            document_id="doc-1",
+            char_start=char_start,
+            char_end=char_end,
+            page_start=page_start,
+            page_end=page_end,
+        ),
+        classification=Classification(language="en", sensitivity="internal"),
+        document_record_id="doc-rec-1",
+        index=index,
+        content="x" * (char_end - char_start),
+        token_count=1,
+        page_slice=(
+            PageSlice.for_span(_two_page_map(), char_start, char_end) if carries_pages else None
+        ),
     )
+
+
+def test_resolve_pages_uses_page_index_seam() -> None:
+    chunk = _paged_chunk(
+        record_id="chunk-0",
+        index=0,
+        char_start=0,
+        char_end=120,
+        page_start=1,
+        page_end=2,
+        carries_pages=True,
+    )
+    # A span at [60, 70) falls on page 2 via the PageIndexResolver seam (ADR-0031).
+    ps, pe = AdapterBase.resolve_pages(chunk, 60, 70, resolver=PageIndexResolver())
     assert ps == 2
     assert pe == 2
 
 
-def test_resolve_pages_falls_back_without_page_map() -> None:
-    ps, pe = AdapterBase.resolve_pages(
-        60, 70, page_map=None, fallback_page_start=3, fallback_page_end=4
+def test_resolve_pages_resolves_a_later_chunk_that_arrives_alone() -> None:
+    """A chunk cites its OWN page with no sibling ever handed to the resolver (v19).
+
+    The intent this preserves is the one v18 could only satisfy by discipline: chunk 1
+    straddles the page break, so inheriting its ``(1, 2)`` range is a plausible-looking
+    WRONG page (audit R2). Under v18 the map rode chunk 0 and the resolver had to have
+    ``observe``d it first; here chunk 0 is never constructed at all and the answer is still
+    exact, because the property is the RECORD's, not the stream's.
+    """
+    later = _paged_chunk(
+        record_id="chunk-1",
+        index=1,
+        char_start=40,
+        char_end=80,
+        page_start=1,  # the chunk straddles the page boundary: inherited range is (1, 2)
+        page_end=2,
+        carries_pages=True,
     )
-    assert ps == 3
-    assert pe == 4
+    resolver = PageIndexResolver()
+    ps, pe = AdapterBase.resolve_pages(later, 60, 70, resolver=resolver)
+    assert (ps, pe) == (2, 2)
+
+
+def test_resolve_pages_raises_when_the_chunk_carries_no_page_spans() -> None:
+    # A Chunker that stamped no spans at all (its document never parsed a page map) is a
+    # producer defect. It surfaces as a typed error rather than degrading to the chunk's
+    # inherited range, which would emit a page that looks resolved and is not (ADR-0034).
+    chunk = _paged_chunk(
+        record_id="chunk-1",
+        index=1,
+        char_start=40,
+        char_end=80,
+        page_start=3,
+        page_end=4,
+        carries_pages=False,
+    )
+    with pytest.raises(PageSliceMissingError) as excinfo:
+        AdapterBase.resolve_pages(chunk, 60, 70, resolver=PageIndexResolver())
+    assert excinfo.value.record_id == "chunk-1"
+    # The identifier, never the content (the no-PII discipline of the error taxonomy).
+    assert "xxx" not in str(excinfo.value)
 
 
 # -- optionality: an AdapterBase subclass still satisfies a Capability structurally --

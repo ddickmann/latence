@@ -77,13 +77,68 @@ the `op`, and the native exception's **type name** — **never the native except
   maps a chunk-local span to true original-markdown offsets, **reusing the existing
   `OffsetIndex` seam** (ADR-0031) — never a weaker hand-rolled mapper. It degrades to the
   exact `chunk_char_start + local` shift when a chunk carries no offset map.
-- `resolve_pages(doc_char_start, doc_char_end, page_map=chunk.page_map, fallback_page_start=…,
-  fallback_page_end=…)` resolves a document-offset span to its source page(s) via
-  `PageOffsetIndex` (the never-crashes, fuzzy drift-recovering resolver), falling back to the
-  inherited chunk page range when there is no page map.
+- `resolve_pages(chunk, doc_char_start, doc_char_end, resolver=…)` resolves a document-offset
+  span to its **own** source page(s) through the `PageIndexResolver` seam (which owns the
+  never-crashes, fuzzy drift-recovering `PageOffsetIndex`, the half-open end clamp, and the
+  corpus-level drift roll-up). It returns `(page_start, page_end)` — there is no `None` to
+  degrade on.
 
 These make the "offsets/page-provenance intact" invariant the **default**, not a per-adapter
 reimplementation.
+
+### The page resolver: one per call, and the chunk answers for itself
+
+Since **schema v19** every `ChunkRecord` carries its own `page_slice`: exactly the document page
+spans overlapping that chunk's `[char_start, char_end)`, in the document's original coordinates.
+One span for a chunk inside a page, two for a chunk straddling a page break. So resolution needs
+nothing but the record in hand — any order, any subset of the stream, no `observe()`, no
+per-document state:
+
+```python
+from latence_core import PageIndexResolver
+
+def extract(self, chunks):
+    resolver = PageIndexResolver()          # ONE per call — for the drift roll-up, not state
+
+    def run_batch(batch):
+        out = []
+        for chunk in batch:
+            out.extend(self._extract_one(chunk, resolver))
+        return out
+
+    yield from self.batched(chunks, run_batch)
+
+# ...and inside _extract_one, per span:
+page_start, page_end = self.resolve_pages(chunk, doc_start, doc_end, resolver=resolver)
+```
+
+**Do not read the page field off the record**, and never build a page index per chunk in your
+own code: the seam owns the end clamp and the drift accounting, and re-deriving them is how
+they drift apart. A chunk whose producing Chunker stamped no spans raises
+`PageSliceMissingError` rather than returning `None` — degrading to the chunk's *inherited*
+`page_start`/`page_end` emits a page that looks resolved and is not, which is the exact
+provenance regression this seam exists to prevent (ADR-0021/0031, ADR-0034).
+
+**A relation's covering span is different.** It runs from one endpoint mention to the other and
+those may live in *different* chunks, so no single chunk can answer for it — and it is not a
+sub-chunk offset, so `resolve_pages` is the wrong tool. Both endpoints already resolved their own
+pages exactly when they were emitted, so the covering span's pages are their union:
+
+```python
+from latence_core import pages_for_covering_span
+
+pages = pages_for_covering_span(head.provenance, tail.provenance)
+```
+
+"One per call" does **not** mean "keeps the corpus". The resolver holds no document state at
+all — it accumulates only the drift roll-up (counts of what already happened), so its footprint
+is constant whatever the corpus looks like (ADR-0033). Earlier shapes needed more: while the
+whole document map rode the chunk stream, the resolver memoised one index per document behind an
+LRU retention window, and a corpus of short documents could stream hundreds of them past while
+one batch of long-document chunks accumulated, evicting a document the batch was still resolving
+— whose later chunks carried no map of their own, so their spans inherited the chunk's page
+range: a plausible-looking **wrong** page (audit R4). A self-describing chunk cannot express
+that, so the window, its budget knob and its eviction counter are gone.
 
 ## Malformed-profile: fail loud (P3-F2 §2)
 

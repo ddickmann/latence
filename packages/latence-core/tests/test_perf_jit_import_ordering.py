@@ -261,6 +261,15 @@ def _load_glinker_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     GLinkerBackend(device="cpu", reranker_model=None)._init_executor()  # noqa: SLF001
 
 
+# CURATED BY NECESSITY, and therefore NOT the completeness guard. Every entry needs a hand-written
+# load driver, so this list can only ever contain Providers somebody remembered to add — the exact
+# blind spot that left ``disambiguation.glinker`` with zero #190 coverage until R2/#190-5. The
+# completeness half is structural and DISCOVERED by glob: the parametrized
+# ``test_deberta_backed_sources_neutralize_the_jit_before_importing_the_backbone`` in
+# ``test_perf_fp32_regression_guard.py`` covers every in-tree source that imports a DeBERTa
+# backbone, and flags the module-scope hoist (``from gliner import GLiNER`` at top level +
+# ``lambda: GLiNER`` handed to the seam) that no behavioural driver here can be written for,
+# because no driver exists for a Provider nobody listed.
 _PROVIDERS = [
     pytest.param(("gliner", "GLiNER"), _load_entity_extractor, id="entity.gliner"),
     pytest.param(("gliner", "GLiNER"), _load_pii_redactor, id="redaction.gliner_pii"),

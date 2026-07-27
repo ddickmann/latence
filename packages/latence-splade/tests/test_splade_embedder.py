@@ -319,11 +319,29 @@ _TRANSFORMERS_VOCAB = 48
 
 
 class _FakeArr:
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, device: str = "cpu") -> None:
         self._data = data
+        self.device = device
 
     def tolist(self) -> Any:
         return self._data
+
+    def to(self, target: Any) -> _FakeArr:
+        """A real torch tensor moves; the fake tracks where it was moved to (see _FakeEncoding)."""
+        return _FakeArr(self._data, str(target))
+
+
+class _FakeEncoding(dict[str, _FakeArr]):
+    """A ``BatchEncoding`` stand-in.
+
+    Faithful in the way the adapter now depends on: ``AutoTokenizer(..., return_tensors="pt")``
+    returns a ``BatchEncoding``, which is a mapping (so ``**encoding`` spreads) AND carries a
+    ``.to(device)`` that moves its tensors. The encoding always comes back on CPU no matter where
+    the model was placed — which is exactly why the adapter has to move it.
+    """
+
+    def to(self, target: Any) -> _FakeEncoding:
+        return _FakeEncoding({key: value.to(target) for key, value in self.items()})
 
 
 def _fake_tok_ids(text: str) -> list[int]:
@@ -350,7 +368,7 @@ class _FakeTokenizer:
         width = max((len(s) for s in seqs), default=0)
         padded = [s + [0] * (width - len(s)) for s in seqs]
         mask = [[1] * len(s) + [0] * (width - len(s)) for s in seqs]
-        return {"input_ids": _FakeArr(padded), "attention_mask": _FakeArr(mask)}
+        return _FakeEncoding({"input_ids": _FakeArr(padded), "attention_mask": _FakeArr(mask)})
 
 
 class _FakeConfig:
@@ -363,12 +381,26 @@ class _FakeOutput:
 
 
 class _FakeMaskedLM:
+    """A faithful stand-in for a transformers ``AutoModelForMaskedLM``.
+
+    Faithful in the two ways the load choreography now depends on: a real ``nn.Module`` HAS a
+    ``.to(device)`` and reports a ``.device``, so the fake does too — otherwise the seam's "prove it
+    landed or raise" step would fail here against a fake that is simply less capable than the real
+    dependency, which is a fake bug, not a seam bug. ``device`` starts at ``"cpu"`` exactly like a
+    freshly ``from_pretrained``-ed model (which is the whole reason placement has to happen at all).
+    """
+
     def __init__(self) -> None:
         self.config = _FakeConfig()
+        self.device = "cpu"
 
     @classmethod
     def from_pretrained(cls, _model_id: str, **_kw: Any) -> _FakeMaskedLM:
         return cls()
+
+    def to(self, device: str) -> _FakeMaskedLM:
+        self.device = device
+        return self
 
     def eval(self) -> _FakeMaskedLM:
         return self

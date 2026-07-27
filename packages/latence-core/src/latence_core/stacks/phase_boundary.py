@@ -29,6 +29,16 @@ for every valid execution order rather than for the one the runner happens to pi
 It is a pure, static, dependency-free predicate over a :class:`~latence_core.pipeline.Pipeline`: no
 run, no providers, no I/O. ``latence stack validate`` reports it as a check and ``latence setup``'s
 dry validation refuses to emit a config that violates it.
+
+**Where the levels come from.** This module used to keep its own two hand-written kind sets, and
+they drifted: ``TYPE_CONSOLIDATION`` was added to the Runner's and the DeltaRunner's corpus-level
+tuples but to neither set here, so :func:`is_corpus_level` answered *False* for a Stage that
+collapses the whole run's mentions into one canonical type vocabulary and this check waved a
+front-half ``consolidate_types`` straight through. (The chunk-level set was worse: no code read it
+at all — documentation posing as a guard.) A Capability's level is a fact about the **Capability**,
+so it is declared once on its :class:`~latence_core.capability_descriptor.CapabilityDescriptor` and
+imported here. A new Capability that does not declare its level now fails at import instead of
+silently defaulting to chunk-level.
 """
 
 from __future__ import annotations
@@ -36,70 +46,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from latence_core.pipeline import CapabilityKind
+from latence_core.capability_descriptor import (
+    CORPUS_LEVEL_KINDS,
+    DOCUMENT_LEVEL_KINDS,
+    is_corpus_level,
+)
 
 if TYPE_CHECKING:
-    from latence_core.pipeline import Pipeline, Stage
+    from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 
-#: The Capability kinds that are CORPUS-LEVEL by construction: they consume the whole corpus (or an
-#: artifact built from it) to produce their output, so they cannot run before the per-chunk front
-#: half has finished. Profiling computes corpus statistics; Disambiguation resolves mentions across
-#: documents; Graph Assembly/Completion build and extend the corpus KG; Context Enrichment projects
-#: that KG back onto chunks; Export materializes the whole corpus (and, with BM25, its term
-#: statistics). Every one of them is a *resolution/corpus-building* operation — the back half.
-CORPUS_LEVEL_KINDS: frozenset[CapabilityKind] = frozenset(
-    {
-        CapabilityKind.PROFILING,
-        CapabilityKind.DISAMBIGUATION,
-        CapabilityKind.GRAPH_ASSEMBLY,
-        CapabilityKind.GRAPH_COMPLETION,
-        CapabilityKind.CONTEXT_ENRICHMENT,
-        CapabilityKind.EXPORT,
-    }
-)
+__all__ = [
+    "CHUNK_LEVEL_KINDS",
+    "CORPUS_LEVEL_KINDS",
+    "PhaseBoundaryViolation",
+    "check_phase_boundary",
+    "is_corpus_level",
+]
 
 #: The Capability kinds that are CHUNK- or DOCUMENT-level: they see one unit at a time and never
-#: aggregate. These are the front half, and the invariant is about what may feed them.
-#: ``SCHEMA_INDUCTION`` is listed here because per-chunk / per-document induction is chunk-level —
-#: but it is the ONE kind whose level depends on its config (``granularity: corpus`` makes that
-#: single stage a corpus-level operation), which is why :func:`is_corpus_level` reads the config
-#: rather than the kind alone.
-CHUNK_LEVEL_KINDS: frozenset[CapabilityKind] = frozenset(
-    {
-        CapabilityKind.SOURCE,
-        CapabilityKind.INTAKE_SCREENING,
-        CapabilityKind.PARSE,
-        CapabilityKind.CHUNK,
-        CapabilityKind.CONTENT_SCREENING,
-        CapabilityKind.SCHEMA_INDUCTION,
-        CapabilityKind.ENTITY_EXTRACTION,
-        CapabilityKind.RELATION_EXTRACTION,
-        CapabilityKind.FUSED_ENTITY_RELATION,
-        CapabilityKind.REDACTION,
-    }
-)
-
-#: The ``schema_induction`` config value that turns that stage into a corpus-level operation: it
-#: induces per document, MERGES every document's labels into one salience-capped schema, and stamps
-#: that single schema onto every chunk. Selectable by hand, but it is a corpus-level operation and
-#: this check says so.
-_CORPUS_GRANULARITY = "corpus"
-
-
-def is_corpus_level(stage: Stage) -> bool:
-    """Whether this Stage performs a CORPUS-LEVEL operation (aggregates across documents).
-
-    Decided by Capability kind (:data:`CORPUS_LEVEL_KINDS`), with the one config-dependent case:
-    a ``schema_induction`` Stage at ``granularity: corpus`` collapses every document's labels into
-    one shared, salience-capped schema, which is an aggregation no matter where it sits in the DAG.
-    An unknown/absent granularity is NOT treated as corpus (the Provider's own default is
-    per-document), so this never fabricates a violation from a missing key.
-    """
-    if stage.capability in CORPUS_LEVEL_KINDS:
-        return True
-    if stage.capability is CapabilityKind.SCHEMA_INDUCTION:
-        return str(stage.config.get("granularity", "")).strip().lower() == _CORPUS_GRANULARITY
-    return False
+#: aggregate. These are the front half, and the invariant is about what may feed them. Kept as an
+#: alias of the descriptor-derived :data:`~latence_core.capability_descriptor.DOCUMENT_LEVEL_KINDS`,
+#: which is the exact COMPLEMENT of :data:`CORPUS_LEVEL_KINDS` over the DAG kinds — so no kind can
+#: land in neither, which is precisely how the corpus-collapsing Stage slipped through.
+#: ``SCHEMA_INDUCTION`` is in it because per-chunk / per-document induction is chunk-level — it is
+#: the ONE kind whose level depends on its config (``granularity: corpus`` makes that single stage a
+#: corpus-level operation), which is why :func:`is_corpus_level` reads the Stage, not the kind.
+CHUNK_LEVEL_KINDS: frozenset[CapabilityKind] = DOCUMENT_LEVEL_KINDS
 
 
 @dataclass(frozen=True)

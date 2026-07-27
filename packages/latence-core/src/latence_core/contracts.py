@@ -9,6 +9,7 @@ record can never silently lose its source or attributes at a Stage boundary.
 
 from __future__ import annotations
 
+import bisect
 from enum import StrEnum
 from typing import Any
 
@@ -157,7 +158,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # clean chunk ``content`` stays UNMASKED so extraction still sees full entities, while the Export
 # materializes ``masked_content`` for the PII-safe RAG corpus), ``pii_spans: list[PIISpan]`` (the
 # chunk-local, counts-only detected spans — offsets into the chunk ``content``, source pages
-# resolved through the chunk's offset_map+page_map, never the raw value), and
+# resolved through the chunk's offset_map+page_slice, never the raw value), and
 # ``redaction_disabled_for_sensitive: bool`` (the H-C1 §4 no-op floor carried per chunk). Default
 # ``None`` / ``[]`` / ``False`` ⇒ every existing stack + record is byte-identical for its corpus
 # text (a run with no Redaction Stage never populates them, the Export falls back to ``content``),
@@ -195,7 +196,50 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # corpus's canonical type vocabulary rather than recomputing it. Additive and defaulted 0, and the
 # vocabulary itself is Corpus-Version state (an additive file), so no number bump — the same rule
 # ADR-0043's own additive ``documents_reused`` / ``documents_extracted`` fields followed.
-SCHEMA_VERSION = 17
+# v18 (C1 — the document page map stops riding every chunk): :class:`PageMap` is
+# DOCUMENT-scoped state — contiguous spans over the whole assembled markdown, invariant
+# across every chunk of that document — yet :class:`ChunkRecord` carried it BY VALUE on all
+# N chunks so a Stage could read it off the record. Measured on a 519-page document chunked
+# at 640 tokens: ~30 KB of JSON on each of ~399 chunk records, i.e. ~92% of every chunk
+# checkpoint line (~12 MB redundant per document, ~12 GB across a 1,000-document corpus),
+# paid again on every checkpoint write, every streaming read-back and every decode.
+# ``ChunkRecord.page_map`` is now stamped on a document's FIRST chunk only, and downstream
+# resolution goes through :class:`latence_core.page_index.PageIndexResolver` — a narrow,
+# document-keyed seam that memoises ONE :class:`latence_core.pagemap.PageOffsetIndex` per
+# ``document_record_id`` (and can equally be seeded from the parsed DocumentRecords, the
+# authoritative on-disk copy, ADR-0017). The FIELD is unchanged and still optional, so a
+# v17 record — which carried the map on every chunk — still validates and still resolves
+# identically (the resolver adopts whichever record carries the map first). Provenance is
+# byte-identical: offsets and pages are unchanged (ADR-0021/0031). This is a payload
+# change, not a shape change; the number bumps because the *meaning* of a populated
+# ``page_map`` narrows from "every chunk" to "the document's first chunk".
+#
+# NOTE for ADR-0033 (streaming, memory-bounded runner): that ADR bounds the runner's
+# in-flight record COUNT but never named per-record PAYLOAD as a memory axis — a stream of
+# bounded length whose every record embeds document-scoped state is still O(documents ×
+# chunks × page_map). Worth an amendment; see the C1 report.
+# v19 (C1 rebuilt — the chunk describes its own pages): v18 kept the payload win but bought it
+# with a SHAPE defect. ``ChunkRecord.page_map`` made DOCUMENT-scoped state ride ONE record of the
+# chunk stream (the document's first chunk) and ``PageIndexResolver`` adopted it from whichever
+# record it saw first, so page resolution depended on two things that are not properties of the
+# chunk being resolved: that the map-carrying record was OBSERVED first, and that it SURVIVED
+# every filtering Stage. Neither holds in general — every batching extractor resolves out of
+# stream order, and any chunk→chunk Capability may drop chunk 0 — and both failures degraded
+# SILENTLY to the chunk's inherited page range, i.e. a plausible-looking WRONG page. Four audit
+# rounds patched the consequences (``rehome_page_maps()``, then an LRU retention window, then
+# that window's own justification) and never the shape.
+# ``ChunkRecord.page_map: PageMap`` is therefore REPLACED by ``ChunkRecord.page_slice:
+# PageSlice`` — exactly the document page spans overlapping this chunk's own
+# ``[char_start, char_end)``, in the document's original coordinates. A chunk never needed the
+# whole document's map: the only question asked of it is which page a SUB-CHUNK offset falls on.
+# Order- and drop-independence are now properties of the record, not of the stream, so the
+# failure mode cannot be expressed. Provenance is byte-identical (ADR-0021/0031) and ~99.8% of
+# the v18 payload win is kept (~2 spans, ~60 bytes, vs a ~30 KB whole-document map).
+# This is a BREAKING field change, not an additive one: a v18 chunk record carries ``page_map``,
+# which ``ChunkRecord`` (``extra="forbid"``) now rejects. Chunk checkpoints are run-scoped
+# artifacts and a run is re-chunked from its Parse checkpoint, so there is no migration path to
+# provide — the number bump is the notice.
+SCHEMA_VERSION = 19
 
 
 class Provenance(BaseModel):
@@ -351,6 +395,107 @@ class PageMapAssembly(BaseModel):
 
     text: str
     page_map: PageMap
+
+
+class PageSlice(BaseModel):
+    """The page spans overlapping ONE chunk — that chunk's own, self-describing page map.
+
+    A :class:`PageMap` covers a whole document and therefore starts at page 1 and at
+    character 0. A slice is a **window** onto one: exactly the :class:`PageSpan`\\ s that
+    overlap ``[chunk.char_start, chunk.char_end)``, in the document's ORIGINAL character
+    coordinates and with their original ``page_number``\\ s. A chunk that sits inside one
+    page carries one span; a chunk straddling a page break carries two; the pathological
+    case (a chunk spanning many tiny pages) carries a handful. That is the whole of what a
+    chunk needs, because the only question asked of it is *sub-chunk*: which page does an
+    offset INSIDE this chunk fall on.
+
+    **Why this exists (v19).** The map used to be document-scoped state carried on ONE
+    record of the chunk stream — the document's first chunk (v18) — and adopted by a
+    resolver from whichever record it happened to see first. That made page resolution
+    depend on two things that are not properties of the chunk being resolved: that the
+    map-carrying record was observed FIRST (order dependence), and that it SURVIVED every
+    filtering Stage (drop dependence). Both failure modes returned a plausible-looking
+    WRONG page. A slice removes the dependency by removing the shared state: every chunk
+    answers for itself, in any order, with any other chunk missing.
+
+    The payload win the v18 carriage existed for is kept: ~2 spans (~60 bytes) per chunk
+    against the ~30 KB whole-document map a 519-page document would otherwise duplicate.
+
+    Coordinates are NOT rebased to the chunk. ``char_start``/``char_end`` stay in
+    document space so resolution arithmetic is identical to the document map's and the
+    provenance a record cites is the document's own (ADR-0021/0031).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    pages: list[PageSpan] = Field(
+        ..., min_length=1, description="The document page spans overlapping this chunk."
+    )
+    total_chars: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "The PARENT DOCUMENT's assembled length — not the slice's. Keeping the document's "
+            "own end here makes past-the-end offset recovery resolve identically to the full "
+            "document map."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _contiguous(self) -> PageSlice:
+        """Spans must be a contiguous, ascending run of real document pages.
+
+        A slice is cut from a validated :class:`PageMap`, so its spans are already
+        contiguous and consecutively numbered; enforcing it here is what stops a
+        hand-built or corrupted slice from resolving to a confidently wrong page.
+        """
+        first = self.pages[0]
+        prev_end = first.char_start
+        prev_number = first.page_number - 1
+        for span in self.pages:
+            if span.page_number != prev_number + 1:
+                msg = (
+                    f"Slice pages must be consecutive; page {span.page_number} follows "
+                    f"page {prev_number}"
+                )
+                raise ValueError(msg)
+            if span.char_start != prev_end:
+                msg = (
+                    f"Page {span.page_number} starts at {span.char_start}, expected "
+                    f"{prev_end} (slice spans must be contiguous)"
+                )
+                raise ValueError(msg)
+            prev_number = span.page_number
+            prev_end = span.char_end
+        if prev_end > self.total_chars:
+            msg = (
+                f"Slice ends at {prev_end}, past the document's total_chars "
+                f"{self.total_chars}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def for_span(cls, page_map: PageMap, char_start: int, char_end: int) -> PageSlice:
+        """The slice of ``page_map`` overlapping the half-open ``[char_start, char_end)``.
+
+        ``char_end`` is exclusive, so the last page included is the one holding the last
+        included character — a chunk ending exactly on a page boundary does NOT drag in the
+        page that starts there. A zero-length or inverted span still yields the one page
+        containing ``char_start``, so a slice is never empty.
+        """
+        last_included = max(char_end - 1, char_start)
+        # Cut by INDEX with the same ``bisect_right - 1`` the live index resolves with
+        # (:meth:`latence_core.pagemap.PageOffsetIndex.page_for_offset`), so the slice
+        # provably contains the page the full document map would have answered for every
+        # offset in the span — and, being an index range, is contiguous and consecutively
+        # numbered even when the document contains a zero-length page.
+        starts = [span.char_start for span in page_map.pages]
+        last = len(page_map.pages) - 1
+        lo = min(max(bisect.bisect_right(starts, char_start) - 1, 0), last)
+        hi = min(max(bisect.bisect_right(starts, last_included) - 1, lo), last)
+        return cls(pages=page_map.pages[lo : hi + 1], total_chars=page_map.total_chars)
 
 
 class Disposition(StrEnum):
@@ -819,14 +964,28 @@ class ChunkRecord(Record):
     ``document_record_id`` links the chunk back to its parent document; ``index``
     is the chunk's ordinal within that document (0-based, contiguous).
 
-    ``page_map`` carries the parent document's page-boundary map forward so a
-    *downstream* Stage that finds a sub-chunk offset (an entity mention) can
-    resolve **that offset's own** source page through
-    :class:`~latence_core.pagemap.PageOffsetIndex` — not merely inherit the
-    chunk's whole ``[page_start, page_end]`` range. Without it, a mention on a
-    later page of a multi-page chunk would cite the chunk's first page. Optional
-    (a chunk produced before S4, or from a document with no page map, has ``None``
-    and downstream falls back to the inherited chunk page range).
+    ``page_slice`` carries **this chunk's own** page spans so a *downstream* Stage
+    that finds a sub-chunk offset (an entity mention) can resolve **that offset's
+    own** source page — not merely inherit the chunk's whole
+    ``[page_start, page_end]`` range. Without it, a mention on a later page of a
+    multi-page chunk would cite the chunk's first page.
+
+    Since v19 the chunk is SELF-DESCRIBING (:class:`PageSlice`): it holds exactly
+    the document page spans overlapping its own ``[char_start, char_end)`` — one
+    for a chunk inside a page, two for a chunk straddling a page break — in the
+    document's original coordinates. v18 instead carried the whole document map on
+    the document's FIRST chunk and had every Stage adopt it from the stream, which
+    made resolution depend on that one record being seen first and surviving every
+    filtering Stage; when it was not, resolution silently degraded to the chunk's
+    inherited page range — a plausible-looking WRONG page. A slice cannot express
+    that failure: there is no shared state and no ordering to depend on.
+
+    Resolve through :class:`~latence_core.page_index.PageIndexResolver` rather than
+    reading the field: the resolver owns the half-open end-of-span clamp and the
+    drift diagnostics. A ``None`` here means the producing Chunker supplied no page
+    spans at all — resolution raises
+    :class:`~latence_core.errors.PageSliceMissingError` rather than guessing
+    (ADR-0034).
 
     ``offset_map`` carries the stripped-``content``→original-markdown offset map
     (:class:`OffsetMap`) so a downstream Stage can recover a sub-chunk offset's TRUE
@@ -841,9 +1000,14 @@ class ChunkRecord(Record):
     content: str = Field(default="")
     media_type: str = Field(default="text/markdown")
     token_count: int = Field(..., ge=0, description="Budgeted token count for the chunk text.")
-    page_map: PageMap | None = Field(
+    page_slice: PageSlice | None = Field(
         default=None,
-        description="Parent document's page map, so a sub-chunk offset resolves to its own page.",
+        description=(
+            "THIS chunk's own page spans — exactly the document page spans overlapping "
+            "[char_start, char_end), in document coordinates (v19). Self-describing: it "
+            "resolves a sub-chunk offset in any order, with any other chunk missing. Read it "
+            "through latence_core.page_index.PageIndexResolver, never directly."
+        ),
     )
     offset_map: OffsetMap | None = Field(
         default=None,
@@ -892,9 +1056,9 @@ class ChunkRecord(Record):
             "The chunk-local PII spans the Redaction Stage detected (W16, ADR-0042): each span's "
             "``char_start``/``char_end`` are offsets into THIS chunk's ``content`` (the coordinate "
             "system ``masked_content`` is masked in), while ``page_start``/``page_end`` resolve to "
-            "the original source page through the chunk's offset_map+page_map. Counts-only: a span "
-            "never stores the raw PII value (S6 AC). Empty (default) ⇒ no Redaction Stage ran, "
-            "or a clean chunk."
+            "the original source page through the chunk's offset_map+page_slice. Counts-only: a "
+            "span never stores the raw PII value (S6 AC). Empty (default) ⇒ no Redaction Stage "
+            "ran, or a clean chunk."
         ),
     )
     redaction_disabled_for_sensitive: bool = Field(
@@ -1311,7 +1475,7 @@ class PIISpan(BaseModel):
     Redactor produced: ``char_start``/``char_end`` are then offsets into that chunk's
     ``content`` (the coordinate system its ``masked_content`` is masked in — chunk-LOCAL, not
     document-global), while ``page_start``/``page_end`` still resolve to the ORIGINAL source
-    page through the chunk's offset_map+page_map. On the DEPRECATED document-level
+    page through the chunk's offset_map+page_slice. On the DEPRECATED document-level
     :class:`RedactionRecord` path the offsets are document-global (the historical shape below).
 
     The structured, auditable record of a single redaction: *what* type of PII was

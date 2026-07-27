@@ -19,6 +19,7 @@ prove the extraction met its guarantee:
 
 from __future__ import annotations
 
+import tracemalloc
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -276,3 +277,109 @@ def test_airflow_report_path_has_no_slf001_reach_for_report_building() -> None:
     assert "quality_report_builder" in text
     assert ".report_uri(" in text
     assert ".run_dir(" in text
+
+
+def _streaming_pipeline(store: str, docs_dir: Path) -> Pipeline:
+    """Source→Parse→Chunk. The Chunk Stage is the DAG's sink, so its output IS the sink stream."""
+    return Pipeline.from_yaml_text(
+        f"""
+name: sink-memory
+storage_uri: {store}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs_dir}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+"""
+    )
+
+
+def _corpus(root: Path, ndocs: int) -> Path:
+    docs = root / "docs"
+    docs.mkdir()
+    body = " ".join(f"Sentence {i} of a paragraph with a little body text." for i in range(40))
+    for d in range(ndocs):
+        (docs / f"doc{d:04d}.txt").write_text(f"# Document {d}\n\n{body}\n", encoding="utf-8")
+    return docs
+
+
+def test_the_runners_report_phase_never_materialises_the_sink_corpus(tmp_path: Path) -> None:
+    """The Runner's OWN report call site costs far less than one whole-corpus sink list.
+
+    C5's headline bound is *"peak memory is O(aggregators x bounded state) instead of O(corpus x
+    sections)"*. The aggregator fold delivered that, but the Runner's own call site handed
+    ``build()`` a fully materialised whole-corpus sink list (``final_records`` did
+    ``final.extend(reader.stage_records(...))``), so report-time peak stayed strictly linear in the
+    corpus — measured at ~4.8 KB per sink record, i.e. ~99.6% of the report phase's peak — after
+    every Stage had already been streamed and released. At the 1M-document ceiling the ADRs size
+    against, the report phase alone would allocate tens of GB and OOM a run whose Stages all stayed
+    ``O(checkpoint batch)``.
+
+    The measurement replays exactly what :meth:`LocalRunner.run` does once the last Stage committed
+    (build the sink stream, hand it to the report builder), with ``outputs`` empty — what the
+    default streaming knob leaves behind (#69, ADR-0033). The calibration is the pre-fix return
+    value itself: ``list(...)`` of the same stream is precisely the list ``final_records`` used to
+    hand over, so the assertion is *"the whole report phase costs a fraction of what its INPUT
+    used to cost on its own"*.
+
+    Honest scope: this bounds Python-heap allocations (``tracemalloc``) and it is not a claim of a
+    flat report phase — the completeness fold keeps one id per distinct source document, and the
+    drift aggregator's :class:`~latence_core.page_index.PageIndexResolver` retains page maps up to
+    its own page window. Both are per-DOCUMENT and bounded; what must not be there, and is what this
+    measures, is a per-RECORD whole-corpus copy of the sinks.
+    """
+    docs = _corpus(tmp_path, 120)
+    store = f"file://{tmp_path}/store"
+    pipeline = _streaming_pipeline(store, docs)
+    engine = LocalRunner()
+    persisted = engine.run(pipeline, run_id="mem")
+
+    s = Storage.for_uri(store)
+    ordered = topological_order(list(pipeline.stages))
+    empty_outputs: dict[str, list[StageOutput]] = {}
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    final_records = engine._final_records(  # noqa: SLF001 - the runner's own report call site
+        ordered, empty_outputs, storage=s, pipeline=pipeline, run_id="mem"
+    )
+    report = engine._build_report(  # noqa: SLF001 - the runner's own report call site
+        pipeline, "mem", s, ordered, list(persisted.stages), empty_outputs, final_records
+    )
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Calibrate: what ONE materialised copy of the sink stream costs — the pre-fix return value.
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    materialised = list(
+        engine._final_records(  # noqa: SLF001 - the runner's own report call site
+            ordered, empty_outputs, storage=s, pipeline=pipeline, run_id="mem"
+        )
+    )
+    _, one_copy = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Not vacuous: the sinks are a real, corpus-sized stream and the report actually folded all of
+    # them (a report built from an empty sink stream would pass any memory assertion).
+    assert len(materialised) >= 120
+    assert report.completeness.records_checked == len(materialised)
+    assert report.document_count == 120
+    del materialised
+
+    assert peak < one_copy * 0.5, (
+        f"the whole report phase peaked at {peak} bytes while ONE materialised copy of its sink "
+        f"stream costs {one_copy} bytes ({report.completeness.records_checked} records): the sinks "
+        "are being materialised, so report-time peak is still O(corpus)."
+    )

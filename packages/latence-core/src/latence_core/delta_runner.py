@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from latence_core.capability import DeltaProcessor, DocumentEnumerator, ProviderRegistry
+from latence_core.capability_descriptor import CORPUS_LEVEL_KINDS
 from latence_core.contracts import (
     ChunkRecord,
     DeletionMode,
@@ -77,12 +78,14 @@ from latence_core.contracts import (
     TypeKind,
     TypeVocabulary,
 )
+from latence_core.observability import OpenLineageEmitter
 from latence_core.pipeline import CapabilityKind, Pipeline
 from latence_core.runner import LocalRunner, StageOutput, topological_order
 from latence_core.state.corpus_store import CorpusStore
 from latence_core.state.delta_detector import DeltaDetector, ManifestEntry, content_hash
 from latence_core.state.incremental import compute_drift
 from latence_core.storage import Storage
+from latence_core.tracing import SpanSink
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -101,19 +104,19 @@ _CORPUS_LEVEL = (DisambiguationRecord, GraphRecord)
 # so an unchanged document's records are reused across a delta instead of re-extracted.
 _DOC_LEVEL = (DocumentRecord, ChunkRecord, EntityMention, RelationMention)
 
-# The Stage kinds whose checkpoint the reuse store must NOT read (T4). Every one of them is either
-# a sink that re-emits its input verbatim (Export) or a CORPUS-LEVEL accumulator — and a
-# corpus-level accumulator can ride a doc-level carrier: Type Consolidation re-emits the whole
-# run's mentions/relations relabelled, so its checkpoint spans the REUSED documents too. See
-# :meth:`DeltaRunner._doc_level_records` for why that distinction has to be drawn by Stage kind
-# rather than by carrier type.
-_CORPUS_LEVEL_KINDS = (
-    CapabilityKind.PROFILING,
-    CapabilityKind.TYPE_CONSOLIDATION,
-    CapabilityKind.DISAMBIGUATION,
-    CapabilityKind.GRAPH_ASSEMBLY,
-    CapabilityKind.GRAPH_COMPLETION,
-    CapabilityKind.EXPORT,
+# The Stage kinds whose checkpoint the reuse store must NOT read (T4): every CORPUS-LEVEL kind.
+# A corpus-level Stage can ride a doc-level carrier — Type Consolidation re-emits the whole run's
+# mentions/relations relabelled, Context Enrichment re-emits the whole chunk stream with a header
+# summarizing the assembled graph, and an Export sink re-emits its input verbatim — so the
+# distinction has to be drawn by Stage KIND, not by carrier type (see
+# :meth:`DeltaRunner._doc_level_records`).
+#
+# Derived from the Capability descriptors rather than hand-listed: this tuple and the
+# phase-boundary check are the SAME fact ("does this Stage aggregate across documents?"), and when
+# they were two hand-written lists they disagreed — ``TYPE_CONSOLIDATION`` was here but missing
+# there. Sorted by CapabilityKind declaration order so the tuple is deterministic.
+_CORPUS_LEVEL_KINDS: tuple[CapabilityKind, ...] = tuple(
+    kind for kind in CapabilityKind if kind in CORPUS_LEVEL_KINDS
 )
 
 
@@ -126,9 +129,16 @@ class DeltaRunner:
         *,
         drift_threshold: float = 0.5,
         delta_provider: str = DEFAULT_DELTA_PROVIDER,
+        span_sink: SpanSink | None = None,
+        lineage: OpenLineageEmitter | None = None,
     ) -> None:
         self._registry = registry or ProviderRegistry()
-        self._runner = LocalRunner(self._registry)
+        # C3: the delta's own Runner is a fully-configured Runner, not a stripped one. Before this
+        # the DeltaRunner constructed ``LocalRunner(registry)`` with no way to pass either
+        # observability seam, so ``latence delta`` — the DAILY enterprise path — structurally could
+        # not emit OpenLineage or per-Stage spans while ``latence process`` could. Both default to
+        # ``None`` (off), so an un-wired delta run is byte- and behaviour-identical to before.
+        self._runner = LocalRunner(self._registry, span_sink=span_sink, lineage=lineage)
         self._drift_threshold = drift_threshold
         self._delta_provider = delta_provider
 
@@ -628,7 +638,12 @@ class DeltaRunner:
             if not storage.exists(ckpt):
                 continue
             record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
-            for record in self._runner._read_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+            # C6: STREAM the checkpoint rather than buffering it. ``_read_checkpoint`` returned
+            # the whole Stage's records as a list before this line even began filtering them, so
+            # peak memory was O(largest checkpoint) on top of the collected set — in the one
+            # operation whose entire purpose is to be O(changed). ``_stream_checkpoint`` decodes
+            # one line at a time and yields byte-identical records in the same order.
+            for record in self._runner._stream_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
                 # A ParserInput (Source/Intake output) carries no record_id; key it by its
                 # source document id. Everything else is a Record keyed by record_id.
                 rid = getattr(record, "record_id", None) or record.provenance.document_id
@@ -817,7 +832,8 @@ class DeltaRunner:
             if not storage.exists(ckpt):
                 continue
             record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
-            for record in self._runner._read_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+            # C6: streamed, not buffered — same reason as ``_collect_outputs``.
+            for record in self._runner._stream_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
                 if not isinstance(record, _DOC_LEVEL):
                     continue
                 collected[f"{type(record).__name__}:{record.record_id}"] = record

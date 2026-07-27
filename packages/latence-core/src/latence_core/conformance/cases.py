@@ -27,6 +27,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
+from latence_core.capability_descriptor import (
+    ENTRY_POINT_PREFIX_HEADS,
+    descriptor_for,
+    kind_for_entry_point,
+)
 from latence_core.conformance import fixtures
 from latence_core.conformance import stub as stubs
 from latence_core.contracts import (
@@ -34,6 +39,8 @@ from latence_core.contracts import (
     Classification,
     Disposition,
     DocumentRecord,
+    PageSlice,
+    PageSpan,
     ParserInput,
     Provenance,
     Record,
@@ -75,40 +82,21 @@ class Capability(StrEnum):
     DELTA = "delta"
 
 
-# Map a Provider entry-point **name prefix** to its Capability. The prefix is the substring
-# before the first ``.`` (``entity.gliner`` → ``entity``), EXCEPT where two Screening
-# Capabilities share the ``screening`` prefix (``screening.intake_*`` vs ``screening.content_*``)
-# and where ``parser.*`` and ``parse.*`` both name the Parse Capability. Those are handled by
-# :func:`capability_of`, which reads the second segment for Screening.
-_PREFIX_TO_CAPABILITY: dict[str, Capability] = {
-    "source": Capability.SOURCE,
-    "parse": Capability.PARSE,
-    "parser": Capability.PARSE,
-    "chunk": Capability.CHUNK,
-    "label_inducer": Capability.SCHEMA_INDUCTION,
-    "entity": Capability.ENTITY,
-    "relation": Capability.RELATION,
-    # A FUSED Entity+Relation provider (extract_fused) is checked against the RELATION case (the
-    # fused branch drives extract_fused). ``relation.gliner_relex`` uses the ``relation`` prefix for
-    # back-compat; ``fused_entity_relation.gliner2`` (W9) names the fused Capability explicitly.
-    "fused_entity_relation": Capability.RELATION,
-    "redaction": Capability.REDACTION,
-    "profiling": Capability.PROFILING,
-    "type_consolidation": Capability.TYPE_CONSOLIDATION,
-    "disambiguation": Capability.DISAMBIGUATION,
-    "graph": Capability.GRAPH,
-    "graph_completion": Capability.GRAPH_COMPLETION,
-    "graph_features": Capability.GRAPH_FEATURES,
-    "context": Capability.CONTEXT_ENRICHMENT,
-    "export": Capability.EXPORT,
-    "embedding": Capability.EMBEDDING,
+# The entry-point prefixes of the seams that are NOT pipeline Stages, so they have no
+# :class:`~latence_core.pipeline.CapabilityKind` and no CapabilityDescriptor to read the prefix
+# from. Every prefix that DOES name a Stage Capability lives on that Capability's descriptor
+# (``CapabilityDescriptor.entry_point_prefixes``) alongside the rest of its facts — including the
+# ``screening.intake_*`` / ``screening.content_*`` split, which used to be an if-chain here.
+_NON_STAGE_PREFIX_TO_CAPABILITY: dict[str, Capability] = {
     # Index-time retrieval-signal generators (ADR-0049/0050): siblings of the dense Embedder under
-    # the same latence.providers seam.
+    # the same latence.providers seam, but never DAG Stages.
     "sparse": Capability.SPARSE_EMBEDDING,
     "multivector": Capability.MULTIVECTOR_EMBEDDING,
     "fde": Capability.FDE,
     # #164: the Tokenizer seam of the BM25 term-statistics exporter (ADR-0048/0049).
     "tokenizer": Capability.TOKENIZER,
+    # The corpus-graph feature computer and the delta processor: engine seams, not Stages.
+    "graph_features": Capability.GRAPH_FEATURES,
     "delta": Capability.DELTA,
 }
 
@@ -121,24 +109,28 @@ def capability_of(provider_name: str) -> Capability:
     (both share the ``screening`` prefix), and ``export.knowledge_graph``/``export.demo_site``/
     ``export.jsonl_parquet`` all → Export. A name whose prefix names no known Capability raises
     ``KeyError`` — a Provider the suite cannot classify is a loud failure, not a silent skip.
+
+    For a Stage Capability the prefix is read from its
+    :class:`~latence_core.capability_descriptor.CapabilityDescriptor`, so a new Capability is
+    auto-classified the moment it declares its facts — and cannot be declared without a prefix.
+    Only the non-Stage seams (sparse/multivector/fde/tokenizer/graph_features/delta) still carry
+    their prefix here, because they have no CapabilityKind to hang it on.
     """
-    prefix, _, rest = provider_name.partition(".")
-    if prefix == "screening":
-        if rest.startswith("intake"):
-            return Capability.INTAKE_SCREENING
-        if rest.startswith("content"):
-            return Capability.CONTENT_SCREENING
-        msg = f"Screening Provider {provider_name!r} is neither intake_* nor content_*."
-        raise KeyError(msg)
-    try:
-        return _PREFIX_TO_CAPABILITY[prefix]
-    except KeyError as exc:
-        msg = (
-            f"Provider {provider_name!r} has an unknown Capability prefix {prefix!r}; "
-            "add it to _PREFIX_TO_CAPABILITY (or write a ConformanceCase) — a Provider the "
-            "conformance suite cannot classify is a loud failure, never a silent skip."
-        )
-        raise KeyError(msg) from exc
+    prefix, _, _rest = provider_name.partition(".")
+    non_stage = _NON_STAGE_PREFIX_TO_CAPABILITY.get(prefix)
+    if non_stage is not None:
+        return non_stage
+    if prefix in ENTRY_POINT_PREFIX_HEADS:
+        # Raises KeyError naming the expected second segments when a dotted prefix (``screening``)
+        # matches no discriminator — the same loud failure, one level down.
+        return Capability(descriptor_for(kind_for_entry_point(provider_name)).conformance_case)
+    msg = (
+        f"Provider {provider_name!r} has an unknown Capability prefix {prefix!r}; "
+        "declare it on the Capability's CapabilityDescriptor (or, for a non-Stage seam, in "
+        "_NON_STAGE_PREFIX_TO_CAPABILITY) — a Provider the conformance suite cannot classify "
+        "is a loud failure, never a silent skip."
+    )
+    raise KeyError(msg)
 
 
 # The invoke signature: given a constructed Provider instance, run it and return the records it
@@ -284,29 +276,70 @@ def _records_contract_valid(records: Sequence[object], *, empty_ok: bool) -> boo
     return _provenance_and_classification_present(recs) and _offsets_in_range(recs)
 
 
-def _page_offsets_resolve(records: Sequence[object]) -> bool:
-    """A stronger offset audit for sub-document carriers: the char span resolves with ZERO drift.
+def _zero_length_page_slice() -> PageSlice:
+    """The page slice of an empty chunk anchored at document offset 0: page 1, zero-length.
 
-    For an EntityMention/RelationMention the char span must resolve back to a source page through
-    the parent's page map (the ADR-0031/S10 round-trip). :meth:`PageOffsetIndex.page_for_offset`
-    is deliberately non-raising — it clamps an out-of-range offset and *records the drift* rather
-    than crashing — so the in-range assertion is the drift diagnostic, not a caught exception: a
-    faithful mention resolves EXACTLY (``max_drift_chars == 0``); an out-of-bounds mention drifts.
-    We reuse the same :class:`PageOffsetIndex` the Runner's drift audit uses.
+    Every adversarial "graceful empty" probe below builds a zero-length chunk. Since v19 a
+    chunk describes its own pages, so the probe stamps one rather than leaving the field
+    ``None`` — a missing slice is a different failure (a Chunker defect,
+    :class:`~latence_core.errors.PageSliceMissingError`) and conflating the two would let a
+    Provider pass the empty-input case for the wrong reason.
     """
-    page_map = fixtures.canonical_corpus().documents[0].page_map
-    if page_map is None:  # pragma: no cover - the canonical doc always has a page map
+    return PageSlice(
+        pages=[PageSpan(page_number=1, char_start=0, char_end=0)], total_chars=0
+    )
+
+
+def _page_offsets_resolve(records: Sequence[object]) -> bool:
+    """A stronger offset audit for sub-document carriers: the span resolves, and to the CITED page.
+
+    Two assertions, and the second is the one that has teeth:
+
+    1. **The span is resolvable.** :meth:`PageOffsetIndex.page_for_offset` is deliberately
+       non-raising — it clamps an out-of-range offset and *records the drift* rather than crashing
+       — so the in-range assertion is the drift diagnostic, not a caught exception: a faithful
+       mention resolves EXACTLY (``max_drift_chars == 0``); an out-of-bounds mention drifts. We
+       reuse the same :class:`PageOffsetIndex` the Runner's drift audit uses.
+    2. **The record CITES the page it resolved to.** The resolved page numbers used to be
+       discarded, which made the whole audit blind to the failure rule 3 of docs/CONFORMANCE.md
+       exists to prevent: a Provider that never resolves a sub-chunk offset at all just stamps the
+       parent chunk's *inherited* page range on every mention it emits. (Before v19 the same
+       failure arrived by a second route: the document's map rode its FIRST chunk only, so a
+       Provider resolving out of stream order, or after a Stage dropped that chunk, silently
+       degraded too.) Those records are perfectly resolvable — they just
+       cite the wrong page. Comparing ``prov.page_start``/``page_end`` against what the parent
+       DOCUMENT's map says is therefore the actual machine gate behind rule 3, and it is what makes
+       the paginated canonical corpus (:data:`fixtures.CANONICAL_PAGES`) worth having.
+
+    A record that cites no page at all is not failed here: ``page_start``/``page_end`` are optional
+    on :class:`~latence_core.contracts.Provenance`, and "no page claim" is honest. What is failed
+    is a page claim that contradicts the map.
+    """
+    page_maps = {
+        doc.record_id: doc.page_map
+        for doc in fixtures.canonical_corpus().documents
+        if doc.page_map is not None
+    }
+    if not page_maps:  # pragma: no cover - the canonical doc always has a page map
         return True
-    index = PageOffsetIndex(page_map)
+    indices = {doc_id: PageOffsetIndex(pm) for doc_id, pm in page_maps.items()}
     for r in _as_records(records):
         prov = r.provenance
         if prov.char_start is None or prov.char_end is None:
             continue
+        index = indices.get(getattr(r, "document_record_id", ""))
+        if index is None:
+            continue
         # Resolving never raises; an out-of-range offset clamps + records drift. A faithful
         # mention resolves with zero drift — the ADR-0031 round-trip invariant.
-        index.page_for_offset(prov.char_start)
-        index.page_for_offset(max(prov.char_end - 1, prov.char_start))
-    return index.diagnostics.max_drift_chars == 0
+        resolved_start = index.page_for_offset(prov.char_start)
+        resolved_end = index.page_for_offset(max(prov.char_end - 1, prov.char_start))
+        # The v18 carriage gate: a cited page must BE the page the offset resolves to.
+        if prov.page_start is not None and prov.page_start != resolved_start:
+            return False
+        if prov.page_end is not None and prov.page_end != resolved_end:
+            return False
+    return all(index.diagnostics.max_drift_chars == 0 for index in indices.values())
 
 
 # ---------------------------------------------------------------------------
@@ -355,11 +388,11 @@ def _pii_chunk() -> ChunkRecord:
 
     W16 (ADR-0042): Redaction is a chunk→chunk transform, so its adversarial input is a chunk
     carrying the PII payload. A Redactor must handle it gracefully (mask + return the chunk, never
-    a crash, never PII in any raised error). Built with a single-page page_map + identity
+    a crash, never PII in any raised error). Built with a single-page page_slice + identity
     offset_map so a chunk-local span still resolves to a page (the shared chunk page-resolution
     seam).
     """
-    from latence_core.contracts import OffsetMap, OffsetSegment, PageMap
+    from latence_core.contracts import OffsetMap, OffsetSegment, PageMap, PageSlice
 
     text = fixtures.PII_ADVERSARIAL_TEXT
     assembly = PageMap.from_page_texts([text])
@@ -372,7 +405,7 @@ def _pii_chunk() -> ChunkRecord:
         classification=_ADVERSARIAL_CLASSIFICATION,
         content=text,
         token_count=len(text.split()),
-        page_map=assembly.page_map,
+        page_slice=PageSlice.for_span(assembly.page_map, 0, len(text)),
         offset_map=OffsetMap(
             segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)
         ),
@@ -823,7 +856,7 @@ def _content_screening_case() -> ConformanceCase:
             classification=base.classification,
             content=fixtures.PII_ADVERSARIAL_TEXT,
             token_count=base.token_count,
-            page_map=base.page_map,
+            page_slice=base.page_slice,
         )
         return _capture_raise(lambda: provider.screen_content([injected]))
 
@@ -974,6 +1007,10 @@ def _entity_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
             classification=base.classification,
             content="",
             token_count=0,
+            # A zero-length chunk at offset 0 still describes its own page (v19): the
+            # adversarial case under test is "graceful empty", not a producer that forgot
+            # to stamp page spans, which is a separate typed failure.
+            page_slice=_zero_length_page_slice(),
         )
         return _capture_raise(lambda: list(provider.extract([empty_chunk])))
 
@@ -1054,6 +1091,7 @@ def _relation_case(*, stub_scoped: bool, gliner: bool, backend: str = "gliner") 
                 classification=base.classification,
                 content="",
                 token_count=0,
+                page_slice=_zero_length_page_slice(),
             )
             return _capture_raise(
                 lambda: [*provider.extract_fused([empty_chunk]).mentions,
@@ -1154,6 +1192,10 @@ def _header_refs_case() -> ConformanceCase:
             classification=base.classification,
             content="",
             token_count=0,
+            # A zero-length chunk at offset 0 still describes its own page (v19): the
+            # adversarial case under test is "graceful empty", not a producer that forgot
+            # to stamp page spans, which is a separate typed failure.
+            page_slice=_zero_length_page_slice(),
         )
         return _capture_raise(
             lambda: [
@@ -1208,6 +1250,10 @@ def _inline_refs_case() -> ConformanceCase:
             classification=base.classification,
             content="",
             token_count=0,
+            # A zero-length chunk at offset 0 still describes its own page (v19): the
+            # adversarial case under test is "graceful empty", not a producer that forgot
+            # to stamp page spans, which is a separate typed failure.
+            page_slice=_zero_length_page_slice(),
         )
         return _capture_raise(
             lambda: [

@@ -20,6 +20,16 @@ contract every Wave-1 provider adapter is written against — dependency-light, 
   and Provenance/offset carry over the existing OffsetIndex/PageOffsetIndex seam
   (ADR-0031). Convenience, never a required layer — a Provider still satisfies a
   Capability structurally without it.
+* :mod:`~latence_core.providers.perf` — the **load choreography**: three deep entry
+  points (:func:`~latence_core.providers.perf.load_gliner_model`,
+  :func:`~latence_core.providers.perf.load_gliner2_model`,
+  :func:`~latence_core.providers.perf.load_transformers_model`), one per native-library
+  family, each of which takes a backbone-import factory + a
+  :class:`~latence_core.providers.device.DeviceDecision` and returns a model that is
+  ready to run. The ordering the three field bugs (#190/#191/the bare ``.to``) came out
+  of lives inside them. Re-exported here because this index is where a Provider author
+  looks for the seam — its absence is how the largest module at the seam stayed
+  invisible while every Provider hand-assembled its steps.
 """
 
 from __future__ import annotations
@@ -30,6 +40,11 @@ from latence_core.providers.device import (
     DeviceDecision,
     cuda_available,
     select_device,
+)
+from latence_core.providers.perf import (
+    load_gliner2_model,
+    load_gliner_model,
+    load_transformers_model,
 )
 from latence_core.providers.profile import (
     REPO_LICENSE_SOURCE,
@@ -49,6 +64,9 @@ __all__ = [
     "HasProfile",
     "ProviderProfile",
     "cuda_available",
+    "load_gliner2_model",
+    "load_gliner_model",
+    "load_transformers_model",
     "profile_of",
     "select_device",
 ]
