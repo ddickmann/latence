@@ -53,7 +53,11 @@ original, never the local text):
   chunks that carry a faithful map. Precedent: `ChunkRecord` already carries the parent
   `page_map` forward (ADR-0022) for exactly this shape of problem (sub-chunk offset → its
   own page); this is the same move one level finer (sub-chunk offset → its own original
-  offset → its own page).
+  offset → its own page). *(Since schema v18 that precedent's carriage is narrower — the
+  `page_map` rides a document's **first** chunk only and resolution goes through
+  `PageIndexResolver`; see ADR-0022's C1 amendment. The `offset_map` decided here is
+  genuinely per chunk: it is chunk-scoped state, not document-scoped, so v18 did not touch
+  it.)*
 
 ## Decision: a compact run-length offset map + a resolver, mirroring PageMap/PageOffsetIndex
 
@@ -68,7 +72,9 @@ in an `OffsetMap` contract (`segments` + `length`), and resolve through `OffsetI
   char_start + k` — the plain-text path is byte-identical to before (no fixture churn,
   determinism preserved).
 - Weight is proportional to the number of stripped gaps in the chunk (typically a
-  handful), far smaller than the whole-document `page_map` already carried per chunk.
+  handful), far smaller than the whole-document `page_map`, which at the time rode every
+  chunk (since schema v18 it rides a document's first chunk only — ADR-0022's C1 amendment —
+  which is why that comparison no longer holds and this map, being chunk-scoped, still does).
 - The engine stays contract-free: `chunking.Chunk` carries the raw `(local_start,
   doc_start)` tuples; the reference `MarkdownChunker` Provider wraps them in the
   `OffsetMap` contract (the same engine/Provider split the module already uses).

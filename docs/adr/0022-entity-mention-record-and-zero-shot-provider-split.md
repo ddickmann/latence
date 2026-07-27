@@ -41,6 +41,37 @@ to re-resolve offsets).
 > "the lower-bound shift the offset map replaced". The page-resolution reasoning is unchanged
 > — it simply now runs on the corrected offset.
 
+> **C1 amendment (2026-07-26, schema v18 — the page map stops riding every chunk).** The decision
+> below originally read: "Chunk now carries the parent document's `page_map` forward on **each**
+> `ChunkRecord` (optional field; absent ⇒ the mention degrades to the inherited chunk range)."
+> **That mechanism is superseded, and the degradation contract it prescribes is now a bug.**
+> `PageMap` is DOCUMENT-scoped state — contiguous spans covering the whole assembled markdown,
+> invariant across every chunk of its document — so carrying it by value on all N chunks was pure
+> duplication: on a 519-page document chunked at 640 tokens, ~30 KB of JSON on each of ~399 records,
+> ~92% of every chunk checkpoint line, paid again on every checkpoint write, streaming read-back and
+> decode. Since **schema v18** the Chunk Stage stamps `page_map` on a document's **first** chunk only
+> (`stages/chunk.py`: `page_map=doc.page_map if i == 0 else None`), and offset→page resolution lives
+> behind `latence_core.page_index.PageIndexResolver`: ONE memoised `PageOffsetIndex` per
+> `document_record_id`, absorbed from whichever record of that document carries the map first (or
+> seeded straight from the parsed `DocumentRecord`s — `from_documents`, ADR-0017), owning the
+> half-open-span end clamp, and **counting** its degradations (`resolver.unresolved`, ADR-0034)
+> instead of letting each caller fall back silently. `rehome_page_maps` keeps the stream invariant
+> the carriage now rests on (a Stage that drops the map-carrying chunk — Screening quarantining a
+> title page — re-stamps the map onto the first survivor).
+>
+> **What this changes for a Provider author.** Do **not** read `chunk.page_map` per chunk. Under v18
+> it is `None` on every chunk after a document's first, so the "absent ⇒ inherit the chunk range"
+> fallback this section used to prescribe hands those mentions the parent chunk's whole page range —
+> a plausible-looking WRONG page, and exactly the ADR-0021/0031 violation audit R1 found in four
+> shipped ecosystem Providers that had followed this ADR verbatim. Instead: create **one**
+> `PageIndexResolver` per Capability call, `resolver.observe(chunk)` at the top of the loop **before**
+> any `min_chars`/interest filter (a document's map-carrying first chunk is very often the one that
+> filter drops), and stamp provenance from `resolver.pages_for_span(chunk, doc_start, doc_end)` —
+> whose `None` return is the single degradation contract. See `docs/writing-an-adapter.md` § "The page
+> resolver: one per call, observe every chunk", and the schema-v18 CHANGELOG entry titled "The
+> document page map stops riding every chunk". The page-resolution *reasoning* below is unchanged: a mention still resolves
+> its OWN page from its own document offset, never inherits the chunk's.
+
 An extractor sees a *chunk's* text and returns *chunk-local* offsets. But a mention
 must resolve back to its source **page** via `PageOffsetIndex`, which indexes the
 **parent document's** assembled markdown (ADR-0020/0021). The Provider maps each
@@ -53,9 +84,12 @@ chunk's `page_start`/`page_end`. A default chunk budget (512 tokens) routinely s
 several short source pages, so a mention on a later page of a multi-page chunk must
 cite *its own* page; inheriting the chunk's first page would violate the S4 core
 requirement "Provenance resolving to the correct source page". To make this
-resolvable at the mention Stage, Chunk now carries the parent document's `page_map`
-forward on each `ChunkRecord` (optional field; absent ⇒ the mention degrades to the
-inherited chunk range). A boundary-straddling mention resolves `page_start` from its
+resolvable at the mention Stage, Chunk carries the parent document's `page_map` forward on
+the chunk stream — as first shipped on each `ChunkRecord`, and since **schema v18** on the
+document's **first** chunk only, with the mention Stage resolving through the
+document-scoped `PageIndexResolver` (C1 amendment above; a lookup that finds no map for the
+document *at all* is the only case that degrades to the inherited chunk range).
+A boundary-straddling mention resolves `page_start` from its
 start offset and `page_end` from its last included character, so it records both
 pages. This completes the S4 round-trip (mention → offset → original page). The
 `EntityMention` contract *enforces* the span: a mention with no char span or no page

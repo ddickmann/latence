@@ -66,8 +66,9 @@ Induction) Stage, **not** Parse.
   replaced by its placeholder). Default `None` ⇒ no Redaction Stage ran.
 * `pii_spans: list[PIISpan]` — the chunk-local detected spans. `char_start`/`char_end` are offsets into
   the chunk's `content` (the coordinate system `masked_content` is masked in); `page_start`/`page_end`
-  resolve to the ORIGINAL source page through the chunk's `offset_map` + `page_map` (the ADR-0031 round
-  trip). Counts-only: a span never stores the raw value.
+  resolve to the ORIGINAL source page through the chunk's `offset_map` and the document-scoped
+  `PageIndexResolver` (the ADR-0031 round trip; since schema v18 the `page_map` itself rides a
+  document's first chunk only — ADR-0022's C1 amendment). Counts-only: a span never stores the raw value.
 * `redaction_disabled_for_sensitive: bool` — the H-C1 §4 no-op floor, carried per chunk.
 
 The chunk's `content` is **byte-unchanged** — extraction (upstream, on the same chunk stream) still sees
@@ -105,7 +106,7 @@ The W13 `context_header` still prepends to the EMBEDDING input only. A chunk wit
 ### 5. Shared chunk-redaction machinery; a Provider owns only detection
 
 `latence_core.redaction_policy` gains `plan_chunk_redaction` (policy resolution + the §4 no-op floor +
-the chunk `offset_map`/`page_map` resolvers) and `finalize_redacted_chunk` (build the chunk-local spans
+the chunk `offset_map` resolver + the call-scoped `PageIndexResolver`) and `finalize_redacted_chunk` (build the chunk-local spans
 with original-resolved pages, mask right-to-left, `model_copy` the chunk). All four Providers
 (`redaction.hybrid_rule`, `.gliner_pii`, `.gliner2`, `.presidio`) share this tail and differ only in
 detection — the gliner-family keep their `quantize`/`compile`/`max_len` guard and label-set batching, and
