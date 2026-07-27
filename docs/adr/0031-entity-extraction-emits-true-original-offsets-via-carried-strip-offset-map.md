@@ -50,14 +50,15 @@ original, never the local text):
   *Chosen.* It completes the contract the engine already promises (chunking.py part 3,
   "offset preservation") at the layer that owns it, makes the mention offset **exact**
   (not a search), and needs no seam change — the extractor still sees only chunks, now
-  chunks that carry a faithful map. Precedent: `ChunkRecord` already carries the parent
+  chunks that carry a faithful map. Precedent: `ChunkRecord` already carried the parent
   `page_map` forward (ADR-0022) for exactly this shape of problem (sub-chunk offset → its
   own page); this is the same move one level finer (sub-chunk offset → its own original
-  offset → its own page). *(Since schema v18 that precedent's carriage is narrower — the
-  `page_map` rides a document's **first** chunk only and resolution goes through
-  `PageIndexResolver`; see ADR-0022's C1 amendment. The `offset_map` decided here is
-  genuinely per chunk: it is chunk-scoped state, not document-scoped, so v18 did not touch
-  it.)*
+  offset → its own page). *(That precedent's carriage was replaced twice and no longer
+  exists: v18 narrowed it to a document's first chunk, and schema v19 removed the whole-map
+  carriage entirely in favour of a per-chunk `page_slice` — see ADR-0022's C1 amendment. The
+  `offset_map` decided here was always genuinely per chunk: chunk-scoped state, not
+  document-scoped, so neither change touched it — and v19 makes the two fields the same
+  shape, each describing only its own chunk.)*
 
 ## Decision: a compact run-length offset map + a resolver, mirroring PageMap/PageOffsetIndex
 
@@ -73,8 +74,9 @@ in an `OffsetMap` contract (`segments` + `length`), and resolve through `OffsetI
   determinism preserved).
 - Weight is proportional to the number of stripped gaps in the chunk (typically a
   handful), far smaller than the whole-document `page_map`, which at the time rode every
-  chunk (since schema v18 it rides a document's first chunk only — ADR-0022's C1 amendment —
-  which is why that comparison no longer holds and this map, being chunk-scoped, still does).
+  chunk (that comparison no longer holds: v18 narrowed the carriage to a document's first
+  chunk and schema v19 replaced it with a per-chunk `page_slice` of ~2 spans — ADR-0022's
+  C1 amendment — so both fields are now chunk-scoped and comparably small).
 - The engine stays contract-free: `chunking.Chunk` carries the raw `(local_start,
   doc_start)` tuples; the reference `MarkdownChunker` Provider wraps them in the
   `OffsetMap` contract (the same engine/Provider split the module already uses).

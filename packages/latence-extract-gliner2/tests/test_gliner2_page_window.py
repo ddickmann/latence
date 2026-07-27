@@ -1,20 +1,25 @@
-"""The page-index window must not evict a document the Provider is still resolving (audit R4).
+"""A streamed mixed-length corpus must never mis-page a long document (audit R4).
 
 This is the ADR-0021/0031 regression the C1 seam exists to prevent, exercised on the SHIPPED
-wiring rather than on a hand-built resolver: the real :func:`_iter_batches` (which observes every
-chunk, including the ones ``min_chars`` drops), a bare ``PageIndexResolver()`` — the exact
-construction at ``provider.py`` — and the real :func:`_mention_provenance`. No torch, no gliner2:
-the failure is in the streaming/observation shape, not in the model.
+wiring rather than on a hand-built resolver: the real :func:`_iter_batches` (including the
+``min_chars`` drop), a bare ``PageIndexResolver()`` — the exact construction at ``provider.py``
+— and the real :func:`_mention_provenance`. No torch, no gliner2: the failure was in the
+streaming shape, not in the model.
 
-The shape that breaks it is ordinary, not adversarial: a corpus of mostly SHORT documents
-(memos, notes, covering letters — each one page, each below the extractor's ``min_chars`` floor)
-with occasional long ones. Every short document must still be observed (its map rides its first
-chunk and that chunk is exactly the one the floor drops), so it consumed a slot in a window that
-counted DOCUMENTS. Hundreds of them streamed past while ONE batch of long-document chunks
-accumulated, evicting the long document whose chunks the batch was still holding — and those
-chunks carry no map of their own (schema v18), so their mentions inherited the chunk's whole page
-range. Not a missing page: a WRONG, plausible-looking one, in the knowledge graph, with no
-production reader for the counter that noticed.
+The shape that broke it is ordinary, not adversarial: a corpus of mostly SHORT documents
+(memos, notes, covering letters — each one page, each below the extractor's ``min_chars``
+floor) with occasional long ones. Under schema v18 a document's page map rode its FIRST chunk
+and the resolver memoised one index per document behind an LRU window, so hundreds of short
+documents streaming past while ONE batch of long-document chunks accumulated evicted the long
+document the batch was still holding — and its later chunks carried no map of their own, so
+their mentions inherited the chunk's whole page range. Not a missing page: a WRONG,
+plausible-looking one, in the knowledge graph, with no production reader for the counter that
+noticed.
+
+Since v19 every chunk carries its OWN page spans and the resolver holds no document state, so
+there is no window, nothing to evict, and no stream position for an answer to depend on. The
+corpus-scale property is unchanged and still worth running at full size: every mention cites
+the page its own span falls on, at the shipped batch ceiling, over 400 interleaved documents.
 """
 
 from __future__ import annotations
@@ -88,8 +93,9 @@ def test_a_streamed_short_document_corpus_never_mis_pages_a_long_one() -> None:
 
     ``batch_size: 64`` is in range for an operator — the Provider clamps to ``_MAX_BATCH_SIZE``,
     which IS 64 — so this is a configuration the shipped stack accepts, not an abuse of it.
-    Ground truth is a per-document ``PageOffsetIndex``, i.e. what pre-C1 code produced when the
-    map rode every chunk.
+    Ground truth is a per-document ``PageOffsetIndex`` over the PARENT DOCUMENT's whole map,
+    i.e. what pre-C1 code produced when that map rode every chunk — an independent oracle, not
+    the mechanism under test.
     """
     chunks, truth = _corpus()
     resolver = PageIndexResolver()  # the bare construction every shipped Provider uses
@@ -130,40 +136,42 @@ def test_a_streamed_short_document_corpus_never_mis_pages_a_long_one() -> None:
         f"{len(wrong)} of {straddling} mentions were stamped with a WRONG page range because "
         f"the resolver evicted a document the batch was still resolving: {wrong[:5]}"
     )
-    assert resolver.evicted_reentries == 0
-    assert resolver.unresolved == 0
+    # Every resolution was EXACT: the drift roll-up is the corpus-level statement that no
+    # offset had to be recovered by the fuzzy fallback (ADR-0034 counts it rather than hiding
+    # it, so a zero here is a claim with a reader).
+    assert resolver.diagnostics.max_drift_chars == 0
+    assert resolver.diagnostics.recovered == 0
 
 
-def test_the_short_documents_are_what_fills_the_window() -> None:
-    """Pin the mechanism, so a future change cannot make the test above pass for free.
+def test_the_fixture_produces_the_shape_that_could_detect_the_defect() -> None:
+    """Pin the fixture, so the test above cannot pass for free.
 
-    The defect needs (a) the Provider to observe far more DISTINCT documents than its batch
-    holds, and (b) a long document's chunks to straddle a batch boundary, so the chunk carrying
-    its map is consumed one batch before the chunks that need it. Both are properties of the
-    fixture; if either stops holding, the regression test is no longer testing anything.
+    The historical defect needed (a) far more DISTINCT documents streaming past than one batch
+    holds, and (b) a long document's chunks straddling a batch boundary, so a chunk consumed in
+    one batch was needed by chunks in the next. v19 makes that arrangement harmless, but it is
+    still the arrangement worth resolving at scale — and both are properties of the FIXTURE, so
+    if either stops holding, the regression test above is no longer testing anything.
     """
     chunks, _ = _corpus()
     resolver = PageIndexResolver()
 
     batches: list[list[ChunkRecord]] = []
-    observed_per_batch: list[int] = []
-    seen = 0
+    documents_per_batch: list[int] = []
     for batch in _iter_batches(iter(chunks), _MAX_BATCH_SIZE, _MIN_CHARS, resolver):
         batches.append(batch)
-        # The trailing partial batch is whatever the corpus had left; only FULL ones say
-        # anything about how many documents a batch's worth of stream carries.
-        if len(batch) == _MAX_BATCH_SIZE:
-            observed_per_batch.append(resolver.documents - seen)
-        seen = resolver.documents
+        documents_per_batch.append(len({c.document_record_id for c in batch}))
 
     assert len(batches) > 1, "a single batch cannot straddle a boundary"
-    assert min(observed_per_batch) > 64, (
-        "accumulating ONE batch must push more distinct documents through the resolver than "
-        "the old 64-document window held; otherwise nothing is ever evicted mid-batch"
+    # Distinct documents streamed past while ONE batch accumulated, counted over the WHOLE
+    # stream rather than over the resolver (which no longer knows what a document is).
+    distinct_documents = len({c.document_record_id for c in chunks})
+    assert distinct_documents > 64, (
+        "the corpus must push more distinct documents through the Provider than the old "
+        "64-document window held; otherwise nothing would ever have been evicted mid-batch"
     )
     per_batch = [{c.document_record_id for c in b} for b in batches]
-    assert max(len(d) for d in per_batch) <= _MAX_BATCH_SIZE
+    assert max(documents_per_batch) <= _MAX_BATCH_SIZE
     assert any(a & b for a, b in zip(per_batch, per_batch[1:], strict=False)), (
-        "no document's chunks straddle a batch boundary — nothing would need a map that was "
-        "absorbed during an earlier batch"
+        "no document's chunks straddle a batch boundary — nothing would need page spans first "
+        "seen during an earlier batch"
     )

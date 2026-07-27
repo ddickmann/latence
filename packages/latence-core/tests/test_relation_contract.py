@@ -54,7 +54,7 @@ def _relation(**overrides: object) -> RelationMention:
 def test_schema_version_is_current() -> None:
     # SCHEMA_VERSION is corpus-wide (14 after the W4 induced-labels field); a
     # RelationMention serialized now stamps the current version, still a valid RelationMention.
-    assert SCHEMA_VERSION == 18
+    assert SCHEMA_VERSION == 19
     assert _relation().schema_version == SCHEMA_VERSION
 
 

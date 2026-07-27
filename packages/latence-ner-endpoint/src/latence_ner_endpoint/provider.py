@@ -15,11 +15,11 @@ stripped-``content``→original ``offset_map`` (carried since v11) via
 :class:`~latence_core.offsetmap.OffsetIndex` (so a mention resolves to its exact source offset even
 when markdown markup was stripped before it — ADR-0022 corrected, ADR-0031; a pre-v11 chunk degrades
 to the ``char_start + local`` shift), then re-resolved to the source page(s) through the
-document-scoped :class:`~latence_core.page_index.PageIndexResolver` (the S4 round-trip) —
-byte-for-byte the same contract the CPU learned Provider produces, so the output is identical modulo
-the model. ONE resolver serves the whole ``extract`` call, so a chunk that carries no page map
-(every non-first chunk since schema v18) still resolves from the map its document's first chunk
-carried, and a document's index is built once rather than once per chunk.
+:class:`~latence_core.page_index.PageIndexResolver` (the S4 round-trip) — byte-for-byte the same
+contract the CPU learned Provider produces, so the output is identical modulo the model. The
+resolver reads the chunk's OWN ``page_slice`` (v19), so every chunk resolves exactly whatever
+order they arrive in and whichever the ``min_chars`` filter drops; ONE resolver serves the whole
+``extract`` call so the drift roll-up is per call.
 
 Fault tolerance is the ported endpoint machinery (:mod:`latence_core.endpoint`): a shared
 reference-counted :class:`~latence_core.endpoint.EndpointLease` means N Stages against one served
@@ -157,15 +157,12 @@ class EndpointEntityExtractor:
     # -- extraction ---------------------------------------------------------
 
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
-        # ONE resolver for the whole call: page maps are DOCUMENT-scoped, so a document's index
-        # is built on the first chunk of it we see and reused for every later chunk. Observe
-        # BEFORE the min_chars filter — the map rides a document's FIRST chunk (schema v18) and
-        # that chunk is very often the one the filter drops, which would lose the map for the
-        # whole document.
+        # ONE resolver for the whole call, purely so the drift roll-up is per-call. It is
+        # stateless (v19): every chunk carries its own page spans, so a chunk the min_chars
+        # filter drops teaches it nothing and resolution order does not matter.
         resolver = PageIndexResolver()
         chunk_list: list[ChunkRecord] = []
         for chunk in chunks:
-            resolver.observe(chunk)
             if len(chunk.content.strip()) >= self._min_chars:
                 chunk_list.append(chunk)
         if not chunk_list:

@@ -19,6 +19,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
@@ -59,7 +61,16 @@ def _chunk(
         classification=Classification(language="en", sensitivity=sensitivity),
         content=text,
         token_count=max(len(text.split()), 0),
-        page_map=page_map,
+        # v19: the chunk carries its OWN page spans, cut from the parent document's map.
+        # Absent a map the fixture is a one-page document, so the slice is that page.
+        page_slice=(
+            PageSlice.for_span(page_map, 0, len(text))
+            if page_map is not None
+            else PageSlice(
+                pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+                total_chars=len(text),
+            )
+        ),
         offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text))
         if text
         else None,

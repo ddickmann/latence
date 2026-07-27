@@ -78,35 +78,31 @@ the `op`, and the native exception's **type name** — **never the native except
   `OffsetIndex` seam** (ADR-0031) — never a weaker hand-rolled mapper. It degrades to the
   exact `chunk_char_start + local` shift when a chunk carries no offset map.
 - `resolve_pages(chunk, doc_char_start, doc_char_end, resolver=…)` resolves a document-offset
-  span to its **own** source page(s) through the document-scoped `PageIndexResolver` seam (which
-  owns the memoised, never-crashes, fuzzy drift-recovering `PageOffsetIndex`, the half-open end
-  clamp, and the degradation counter), falling back to the chunk's inherited page range only when
-  no map is available for the document at all.
+  span to its **own** source page(s) through the `PageIndexResolver` seam (which owns the
+  never-crashes, fuzzy drift-recovering `PageOffsetIndex`, the half-open end clamp, and the
+  corpus-level drift roll-up). It returns `(page_start, page_end)` — there is no `None` to
+  degrade on.
 
 These make the "offsets/page-provenance intact" invariant the **default**, not a per-adapter
 reimplementation.
 
-### The page resolver: one per call, observe every chunk
+### The page resolver: one per call, and the chunk answers for itself
 
-A `PageMap` is **document**-scoped, and since schema v18 the Chunk Stage stamps it on a
-document's **first** chunk only (it used to ride all N chunks — ~92% of a chunk checkpoint line
-on a long PDF). So `chunk.page_map` is `None` on every later chunk, and a per-chunk index built
-from it would silently give every mention after the first chunk its chunk's *inherited* page
-range — a plausible-looking wrong page. Create **one** `PageIndexResolver` per Capability call
-and `observe()` **every** chunk you are handed, before any filter decides it is uninteresting
-(a document's first chunk — the map carrier — is very often the one your `min_chars` floor
-drops):
+Since **schema v19** every `ChunkRecord` carries its own `page_slice`: exactly the document page
+spans overlapping that chunk's `[char_start, char_end)`, in the document's original coordinates.
+One span for a chunk inside a page, two for a chunk straddling a page break. So resolution needs
+nothing but the record in hand — any order, any subset of the stream, no `observe()`, no
+per-document state:
 
 ```python
 from latence_core import PageIndexResolver
 
 def extract(self, chunks):
-    resolver = PageIndexResolver()          # ONE per call, across batches
+    resolver = PageIndexResolver()          # ONE per call — for the drift roll-up, not state
 
     def run_batch(batch):
         out = []
         for chunk in batch:
-            resolver.observe(chunk)         # BEFORE the "is this chunk interesting" filter
             out.extend(self._extract_one(chunk, resolver))
         return out
 
@@ -116,29 +112,33 @@ def extract(self, chunks):
 page_start, page_end = self.resolve_pages(chunk, doc_start, doc_end, resolver=resolver)
 ```
 
-A `Runner` that holds the parsed documents can seed the resolver authoritatively instead
-(`PageIndexResolver.from_documents(documents)`, ADR-0017: files are the source of truth).
+**Do not read the page field off the record**, and never build a page index per chunk in your
+own code: the seam owns the end clamp and the drift accounting, and re-deriving them is how
+they drift apart. A chunk whose producing Chunker stamped no spans raises
+`PageSliceMissingError` rather than returning `None` — degrading to the chunk's *inherited*
+`page_start`/`page_end` emits a page that looks resolved and is not, which is the exact
+provenance regression this seam exists to prevent (ADR-0021/0031, ADR-0034).
 
-"One per call" does **not** mean "keeps the corpus": the resolver retains the most recently used
-indices up to a budget of `DEFAULT_MAX_LIVE_PAGES` (50,000) **page spans** and releases the rest
-with their page maps, so a Stage's page state has a fixed ceiling (~27 MB) instead of growing with
-the corpus (ADR-0033).
+**A relation's covering span is different.** It runs from one endpoint mention to the other and
+those may live in *different* chunks, so no single chunk can answer for it — and it is not a
+sub-chunk offset, so `resolve_pages` is the wrong tool. Both endpoints already resolved their own
+pages exactly when they were emitted, so the covering span's pages are their union:
 
-The budget is counted in pages, not documents, and that is not cosmetic. A page span is what the
-retained state is *made of* (~550 bytes; the measured 519-page document is ~279 KB), and a
-document-count window priced a one-page memo the same as a 519-page contract. Because you must
-`observe()` every chunk — including the ones your `min_chars` floor drops — a corpus of short
-documents streamed hundreds of them through a 64-document window while one batch of long-document
-chunks accumulated, evicting a document the batch was still resolving; its later chunks carry no
-map of their own, so their spans inherited the chunk's page range: a plausible-looking **wrong**
-page (audit R4). Priced in pages, those short documents cost ~1/500th of a slot and cannot do
-that.
+```python
+from latence_core import pages_for_covering_span
 
-If your Provider deliberately holds more page state than the ceiling — a very wide batch over
-genuinely large documents, or a two-pass shape that resolves long after it observed — construct it
-as `PageIndexResolver(max_live_pages=N)`. You will be told if you needed to and did not: a lookup
-for a document whose index was already released is counted (`resolver.evicted_reentries`) and
-warned once, counts-only, instead of quietly inheriting the chunk's page range.
+pages = pages_for_covering_span(head.provenance, tail.provenance)
+```
+
+"One per call" does **not** mean "keeps the corpus". The resolver holds no document state at
+all — it accumulates only the drift roll-up (counts of what already happened), so its footprint
+is constant whatever the corpus looks like (ADR-0033). Earlier shapes needed more: while the
+whole document map rode the chunk stream, the resolver memoised one index per document behind an
+LRU retention window, and a corpus of short documents could stream hundreds of them past while
+one batch of long-document chunks accumulated, evicting a document the batch was still resolving
+— whose later chunks carried no map of their own, so their spans inherited the chunk's page
+range: a plausible-looking **wrong** page (audit R4). A self-describing chunk cannot express
+that, so the window, its budget knob and its eviction counter are gone.
 
 ## Malformed-profile: fail loud (P3-F2 §2)
 

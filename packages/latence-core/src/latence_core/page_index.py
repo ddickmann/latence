@@ -1,454 +1,186 @@
-"""PageIndexResolver — document-scoped offset→page resolution behind one narrow seam.
+"""PageIndexResolver — STATELESS offset→page resolution from a self-describing chunk.
 
-A :class:`~latence_core.contracts.PageMap` is **document**-scoped state: contiguous
-spans covering a document's whole assembled markdown, invariant across every one of its
-chunks. Before this module every downstream Stage learned that state the hard way —
-each one had to know that :class:`~latence_core.pagemap.PageOffsetIndex` exists, that
-``ChunkRecord.page_map`` may be ``None``, that the index must be rebuilt per chunk (or
-cached by hand, keyed on ``document_record_id``), that a half-open span needs *two*
-lookups with the ``max(end - 1, start)`` clamp, and that the ``None`` case degrades to
-the chunk's inherited page range. Five call sites in core alone re-derived that
-knowledge; exactly one of them remembered to cache. That is the definition of a missing
-seam: the same complexity reappearing across N callers.
+A chunk needs to answer exactly one page question: **which source page does an offset
+INSIDE me fall on?** An entity mention, a PII span, a citation — each is found at some
+offset within a chunk's text, and the record that cites it must name the page that offset
+really came from, not merely the chunk's whole ``[page_start, page_end]`` range
+(ADR-0021/0031).
 
-This module is that seam. A caller now knows **one** thing:
+Since v19 the chunk answers that itself. The Chunk Stage stamps a
+:class:`~latence_core.contracts.PageSlice` on every chunk — exactly the document page spans
+overlapping that chunk's own ``[char_start, char_end)``, in the document's original
+coordinates. Typically one span; two when the chunk straddles a page break. This module is
+the seam that reads it, and a caller knows one thing:
 
-    resolver.pages_for_span(chunk, start, end)  ->  (page_start, page_end) | None
+    resolver.pages_for_span(chunk, start, end)  ->  (page_start, page_end)
 
-``None`` means "this document's page map is not available — degrade to whatever page
-range you already hold", which is the identical fallback every call site hand-rolled.
-Everything else — per-document memoisation of the underlying
-:class:`~latence_core.pagemap.PageOffsetIndex`, absorbing the map from whichever record
-carries it, the end-of-span clamp, and cross-document drift aggregation for the Quality
-Report — lives here, once.
+Everything else — the half-open end-of-span clamp, and the corpus-level drift roll-up the
+Quality Report reads — lives here, once. It used to be re-derived, identically, at every
+call site.
 
-**Where the map comes from.** Two routes, in precedence order:
+**Why stateless, and what was deleted.** Until v19 the page map was DOCUMENT-scoped state
+that rode ONE record of the chunk stream (the document's first chunk), and this resolver
+adopted it from whichever record it saw first, memoised per ``document_record_id``. That
+made page resolution depend on two things that are not properties of the chunk being
+resolved:
 
-1. **Seeded** — :meth:`PageIndexResolver.from_documents` (or the ``page_maps`` mapping
-   the constructor takes) builds the resolver from the parsed
-   :class:`~latence_core.contracts.DocumentRecord`\\ s, which are the authoritative,
-   already-persisted copy (ADR-0017: files are the source of truth). This is the route a
-   Runner should use when it has the Documents checkpoint in hand.
-2. **Absorbed from the stream** — :meth:`PageIndexResolver.observe` adopts the
-   ``page_map`` a :class:`~latence_core.contracts.ChunkRecord` carries, if any, and
-   memoises it. This is what makes the seam work for a Provider whose Capability
-   signature is ``(chunks)`` and nothing else: the Chunk Stage stamps the map on a
-   document's **first** chunk only (schema v18) and every later chunk of that document
-   resolves from the memoised index.
+* **Order.** A Provider that resolves in any order other than stream order — every
+  batching extractor does — asked for a page for chunk *N* before the resolver had seen
+  chunk 0, and got ``None``.
+* **Survival.** Any Stage that REMOVES chunks could remove the map-carrying one and take
+  the whole document's page resolution with it.
 
-   **A Stage MUST ``observe`` every chunk it is handed**, at the top of its loop, before
-   it decides whether that chunk is interesting. A document's first chunk is very often
-   the *least* interesting one — too short for the extractor's ``min_chars`` floor, no
-   self-declaration to match, no PII to mask — and if the resolver only saw the chunks a
-   Stage actually queried, the map would be skipped exactly when the document's first
-   chunk produced nothing, silently degrading every later chunk of that document to its
-   inherited page range. (A lookup also absorbs, as a backstop, so a forgotten
-   ``observe`` costs completeness rather than correctness on the chunks it did see.)
+Both degraded SILENTLY to the chunk's inherited page range: a plausible-looking wrong page,
+indistinguishable from a correct one in the output. Four audit rounds patched the
+consequences — ``rehome_page_maps()`` to re-home the map past a filtering Stage, then an LRU
+retention window to bound what memoisation kept alive, then a fix to that window's own
+justification — and never the shape. Each layer made the wrong shape more robust.
 
-   Route 2 also puts an invariant on the chunk **stream**: the map-carrying chunk must
-   SURVIVE to the consumer. A Stage that removes chunks — Content Screening quarantines
-   them — can drop exactly that one record and take the whole document's page resolution
-   with it. :func:`rehome_page_maps` is where that invariant is kept, applied by the
-   Runner at the point chunks leave the stream so every Screening Provider inherits it.
+A slice removes the dependency by removing the shared state. There is no per-document
+memoisation, no absorption from the stream, no retention window and no ``observe`` — so
+there is nothing for an ordering or a dropped record to be wrong about. The failure mode is
+not mitigated; it is **inexpressible**. What is kept is the payload win that shape was
+bought for: ~2 spans (~60 bytes) per chunk against the ~30 KB whole-document map a 519-page
+document would otherwise duplicate onto ~399 records — ~99.8% of it, with no run-scoped
+sidecar and no Runner involvement, so ADR-0033's memory boundary is untouched.
 
-Route 2 is why the map no longer has to ride on all N chunks. For a 519-page document
-chunked at 640 tokens that is ~30 KB of JSON on 1 record instead of ~399 — ~92% of every
-chunk checkpoint line was the duplicated map, and every checkpoint write, streaming
-read-back and decode paid for it.
+**No silent errors (ADR-0034).** A chunk carrying no slice raises
+:class:`~latence_core.errors.PageSliceMissingError`. It does not return ``None`` for the
+caller to degrade on, because "degrade" meant emitting a page that looks right and is not.
 
-**What it keeps alive (ADR-0033).** A resolver is built per Stage invocation and the Stage's
-Provider is handed the WHOLE corpus stream in one call, so "memoise per document" meant, until
-R3, "retain every document's page map for the length of the run": ~284 KB per 519-page document
-(279 KB of :class:`~latence_core.contracts.PageMap` objects, 5 KB of index), i.e. ~284 MB at 1k
-documents and ~2.8 GB at 10k — inside a Stage ADR-0033's *Honest memory boundary* declares
-``O(checkpoint batch)`` on both sides. Absorbed maps are therefore held in a **bounded LRU
-window**, and the budget is measured in the unit those bytes are actually made of: PAGE SPANS
-(:data:`DEFAULT_MAX_LIVE_PAGES`, overridable per resolver). R3 budgeted DOCUMENTS instead, which
-priced a 1-page note and a 519-page contract the same and therefore bounded neither the memory
-nor the caller's in-flight set — audit R4 measured a corpus of short documents evicting, mid
-batch, the long document a Provider was still resolving, whose later chunks then inherited a
-plausible-looking WRONG page range. Eviction folds the evicted index's drift into the corpus
-roll-up, the most recently used index is never evicted (a document whose map alone exceeds the
-budget still resolves), and a chunk arriving for an already-evicted document is COUNTED and
-warned (:attr:`PageIndexResolver.evicted_reentries`), never silently mis-paged (ADR-0034).
-Seeded maps (route 1) are the caller's own materialised state and are pinned, not windowed.
-
-**Never raises, never guesses silently.** Resolution degrades exactly as the ported
-``PageOffsetIndex`` does (Provenance resolution must not be the thing that fails a run),
-and a degradation is *counted* rather than swallowed: :attr:`PageIndexResolver.unresolved`
-is the number of lookups that found no map, instead of the caller silently emitting an
-inherited page range (ADR-0034: no silent errors — failures are observable). The count has
-a consumer: the Quality Report's drift audit
-(``quality_report_builder._DriftAggregator``) reads it and warns, counts-only, when chunks
-went unaudited — a section that merely shrank would otherwise read as a confident
-``clean``. The *preventable* half of the degradation is prevented rather than reported —
-see :func:`rehome_page_maps`.
+**Cross-chunk spans are not this seam's job.** A relation's covering span runs from its head
+mention to its tail mention and those may live in different chunks, so no single chunk can
+answer for it. It does not need to: both endpoints already carry their own exactly-resolved
+pages, and the covering span's pages are their union. That is what
+:func:`pages_for_covering_span` computes — arithmetic on two records, no index, no lookup.
+The previous code instead resolved the covering span against an arbitrary "anchor" chunk of
+the document, which only worked because the anchor happened to carry the WHOLE document's
+map.
 """
 
 from __future__ import annotations
 
-import logging
-from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from latence_core.errors import PageSliceMissingError
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
-
-    from latence_core.contracts import ChunkRecord, DocumentRecord, PageMap
-
-logger = logging.getLogger("latence.provenance")
-
-#: How many PAGE SPANS one resolver keeps live at once (ADR-0033).
-#:
-#: The window exists to bound one thing: the bytes of :class:`~latence_core.contracts.PageMap`
-#: a Stage holds while it streams. Those bytes are pages — ~550 per
-#: :class:`~latence_core.contracts.PageSpan`, ~279 KB for the measured 519-page document — so
-#: pages are the unit the budget is stated in. 50,000 spans is a ~27 MB ceiling that does not
-#: move with the corpus, and it holds ~96 documents of 519 pages **or** 50,000 single-page ones.
-#:
-#: It used to be a count of DOCUMENTS (64), justified by "every shipped batching Provider uses
-#: ``batch_size`` 16, so 64 is 4× the widest in-flight set". Audit R4 measured both halves false
-#: and the wrong-page regression they permit (``issues/audit-arch/R4-memory_claims_real-0.md``):
-#:
-#: * ``batch_size`` does not bound the DISTINCT DOCUMENTS a Provider observes before it resolves.
-#:   A Provider must ``observe`` every chunk — including the ones its ``min_chars`` floor drops
-#:   (see below) — so a corpus of short documents streams hundreds of them through the window
-#:   while one batch of long-document chunks accumulates. Those short documents each consumed a
-#:   whole window slot and evicted the documents the batch was still working on, whose later
-#:   chunks then carried no map of their own (schema v18) and inherited a WRONG page range.
-#: * ``latence_extract_gliner2`` clamps ``batch_size`` to 64 and the PII Providers clamp it not at
-#:   all, so an in-range operator config already presented a window-sized or wider in-flight set.
-#:
-#: Counting pages removes the pathology at its root: a slot is now priced at what it weighs, so
-#: the short documents that dominate a real stream cost ~1/500th of what a long one does and can
-#: no longer evict it. The bound stays honest for the shape it was written for — a corpus of
-#: genuinely huge maps still evicts, is counted, and is warned (:attr:`PageIndexResolver
-#: .evicted_reentries`), and a caller that deliberately holds more says so with
-#: ``max_live_pages``.
-DEFAULT_MAX_LIVE_PAGES = 50_000
-
-#: How many evicted document ids are remembered, purely to TELL a re-entry (window too small)
-#: apart from a document that never carried a map. Diagnostics only — ids, not maps — so it is
-#: sized for coverage of a plausible over-run rather than tied to the page budget.
-_EVICTED_RING = 1024
+    from latence_core.contracts import ChunkRecord, Provenance
 
 
-def rehome_page_maps(
-    kept: Sequence[ChunkRecord], *, dropped_from: Iterable[ChunkRecord]
-) -> list[ChunkRecord]:
-    """Re-stamp each document's page map onto the first chunk of it that SURVIVED.
+def pages_for_covering_span(
+    head: Provenance, tail: Provenance
+) -> tuple[int, int] | None:
+    """The ``(page_start, page_end)`` of the span covering two already-resolved records.
 
-    Route 2 (above) rests on an invariant that is about the chunk **stream**, not about any
-    one record: a document's map rides its first chunk, so that chunk must reach the
-    consumer. Any Stage that REMOVES chunks can break it — Content Screening quarantines a
-    chunk carrying a prompt-injection marker, and a document's opening chunk (title page,
-    header block, a pasted instruction) is a likely place for one. Dropping it destroyed
-    page resolution for the *whole* document: every later chunk resolved to ``None`` and
-    every mention/relation/PII span in it degraded to its chunk's inherited page range.
-    Before C1 the map rode all N chunks, so filtering could not do that — the invariant is
-    what C1 introduced, and this is where it is kept.
+    A relation's covering span is ``[min(starts), max(ends))`` over its two endpoint
+    mentions. Because pages increase monotonically with offset, the page of ``min(starts)``
+    is simply the earlier endpoint's own ``page_start``, and the page of ``max(ends) - 1``
+    is the later endpoint's own ``page_end`` — both of which were resolved exactly, from
+    their own chunk's slice, when those mentions were emitted. So the answer is a ``min``
+    and a ``max``, not a lookup, and it is correct even when the endpoints are in different
+    chunks (which an anchor-chunk lookup could not be).
 
-    Call it at the point chunks leave the stream, with ``kept`` the survivors and
-    ``dropped_from`` the stream they were selected out of (the Runner does this for every
-    Content-Screening Provider, so a third-party screener inherits the guarantee). A
-    document whose map-carrier survived, or which never had a map, is returned untouched —
-    identical objects, so an unfiltered stream is byte-identical to its input.
-
-    O(len(kept)) time and one map reference per document (the maps already exist in
-    ``dropped_from``); it materialises nothing the caller was not already holding.
+    ``None`` only when neither endpoint recorded a page at all, which leaves the caller
+    nothing to be right or wrong with.
     """
-    carried: dict[str, PageMap] = {}
-    for chunk in dropped_from:
-        if chunk.page_map is not None:
-            carried.setdefault(chunk.document_record_id, chunk.page_map)
-    if not carried:
-        return list(kept)
-    seen: set[str] = set()
-    restamped: list[ChunkRecord] = []
-    for chunk in kept:
-        document_record_id = chunk.document_record_id
-        if document_record_id in seen or chunk.page_map is not None:
-            seen.add(document_record_id)
-            restamped.append(chunk)
-            continue
-        seen.add(document_record_id)
-        page_map = carried.get(document_record_id)
-        restamped.append(
-            chunk if page_map is None else chunk.model_copy(update={"page_map": page_map})
-        )
-    return restamped
+    starts = [p for p in (head.page_start, tail.page_start) if p is not None]
+    ends = [p for p in (head.page_end, tail.page_end) if p is not None]
+    if not starts and not ends:
+        return None
+    page_start = min(starts) if starts else min(ends)
+    page_end = max(ends) if ends else max(starts)
+    return page_start, page_end
 
 
 class PageIndexResolver:
-    """Memoised offset→page resolution for a whole corpus, keyed by document.
+    """Offset→page resolution over a chunk's own page spans. Holds no document state.
 
-    One live resolver per Stage invocation. It holds at most one
-    :class:`~latence_core.pagemap.PageOffsetIndex` per ``document_record_id``, built
-    lazily on first use and reused for every subsequent lookup against that document —
-    so a 400-chunk document builds the ``bisect`` array once, not 400 times.
+    Construct one per Stage invocation and hand it every chunk you resolve against; it
+    carries nothing between calls except the drift ROLL-UP (which aggregates per-resolution
+    *results*, and so cannot make one chunk's answer depend on another's). Resolving the
+    same chunk twice, resolving chunks in any order, and resolving a chunk whose siblings
+    were never seen are all identical operations.
 
-    **Memoised, not accumulated.** The indices it absorbs from the stream live in an LRU
-    window of ``max_live_pages`` page spans; the ``PageMap`` an absorbed index was built from
-    is reachable only from that index, so evicting the index frees the map with it. That is
-    what keeps a doc-level Stage's page-map retention a fixed ceiling rather than linear in the
-    corpus (ADR-0033) — see :data:`DEFAULT_MAX_LIVE_PAGES` for why the budget is stated in
-    pages and not in documents, and :attr:`evicted_reentries` for what happens, loudly, when a
-    caller does hold more than the budget. Maps handed in at construction (route 1) are the
-    caller's own state and are pinned outside the window.
-
-    Not a Pydantic model: like the indices it owns, this is live state with mutable
-    diagnostics, distinct from the serialized :class:`~latence_core.contracts.PageMap`
-    contracts it is built from.
+    Not a Pydantic model: like the index it builds, this is live state with mutable
+    diagnostics, distinct from the serialized :class:`~latence_core.contracts.PageSlice`
+    contracts it reads.
     """
 
-    __slots__ = (
-        "_diag",
-        "_evicted",
-        "_evicted_reentries",
-        "_indices",
-        "_live_pages",
-        "_max_live_pages",
-        "_pinned",
-        "_seen",
-        "_unresolved",
-        "_warned_reentry",
-    )
+    __slots__ = ("_diag",)
 
-    def __init__(
-        self,
-        page_maps: Mapping[str, PageMap] | None = None,
-        *,
-        max_live_pages: int = DEFAULT_MAX_LIVE_PAGES,
-    ) -> None:
-        """Seed the resolver with ``document_record_id -> PageMap`` (optional).
-
-        An empty resolver is perfectly usable: it absorbs each document's map from the
-        first record it sees that carries one.
-
-        ``max_live_pages`` bounds how many ABSORBED page spans are kept live at once (LRU by
-        document). Raise it only for a caller that resolves against more page state than the
-        default ceiling — the failure it prevents is measured, counted and warned, never
-        guessed at. The most recently used index is always retained, so a single document
-        larger than the whole budget still resolves.
-        """
-        if max_live_pages < 1:
-            msg = f"max_live_pages must be >= 1, got {max_live_pages}"
-            raise ValueError(msg)
-        # Seeded maps are PINNED: the caller already materialised them (they came off
-        # DocumentRecords it holds), route 1 promises resolution in any order, and dropping
-        # them would free nothing the caller was not keeping anyway.
-        self._pinned: dict[str, PageMap] = dict(page_maps) if page_maps else {}
-        # LRU by last use. An absorbed PageMap is referenced ONLY by its index here, so
-        # eviction releases the map (the ~279 KB of a 519-page document) and not just the
-        # ~5 KB bisect array.
-        self._indices: OrderedDict[str, PageOffsetIndex] = OrderedDict()
-        self._max_live_pages = max_live_pages
-        # The window's occupancy, in the unit the budget is stated in.
-        self._live_pages = 0
-        # Drift for documents whose index has been discarded is folded in here as it is
-        # produced, so the aggregate survives even if an index is never queried again.
+    def __init__(self) -> None:
         self._diag = PageDriftDiagnostics()
-        self._unresolved = 0
-        self._seen = len(self._pinned)
-        # A bounded ring of the ids most recently evicted — enough to TELL a re-entry
-        # (window too small) apart from a document that simply never had a map.
-        self._evicted: OrderedDict[str, None] = OrderedDict()
-        self._evicted_reentries = 0
-        self._warned_reentry = False
-
-    @classmethod
-    def from_documents(cls, documents: Iterable[DocumentRecord]) -> PageIndexResolver:
-        """Seed from parsed documents — the authoritative copy of each page map.
-
-        Documents without a page map (a ``PARSE_ERROR`` record) are skipped; their
-        chunks, if any, simply resolve to ``None`` and the caller degrades.
-        """
-        return cls({doc.record_id: doc.page_map for doc in documents if doc.page_map is not None})
-
-    # -- ingestion ----------------------------------------------------------
-
-    def observe(self, chunk: ChunkRecord) -> None:
-        """Adopt the page map ``chunk`` carries, if any (idempotent, ~free when known).
-
-        Call this for EVERY chunk a Stage is handed, before deciding whether the chunk is
-        worth processing — see the module docstring for why skipping the uninteresting
-        ones silently loses the document's map.
-        """
-        self._index_for(chunk)
 
     # -- resolution ---------------------------------------------------------
 
-    def page_for(self, chunk: ChunkRecord, offset: int) -> int | None:
+    def page_for(self, chunk: ChunkRecord, offset: int) -> int:
         """The 1-based source page of ``offset`` (a parent-document character offset).
 
-        ``None`` when this chunk's document has no page map available — the caller
-        degrades to the page range it already holds. Never raises: an out-of-range
-        offset is recovered by the underlying index and recorded as drift.
+        Raises :class:`~latence_core.errors.PageSliceMissingError` if the chunk carries no
+        page spans. An out-of-range offset never raises — it is recovered by the underlying
+        index and recorded as drift, because Provenance resolution must not be the thing
+        that fails a run.
         """
         index = self._index_for(chunk)
-        if index is None:
-            self._unresolved += 1
-            return None
-        return index.page_for_offset(offset)
+        page = index.page_for_offset(offset)
+        self._fold(index.diagnostics)
+        return page
 
-    def pages_for_span(
-        self, chunk: ChunkRecord, start: int, end: int
-    ) -> tuple[int, int] | None:
+    def pages_for_span(self, chunk: ChunkRecord, start: int, end: int) -> tuple[int, int]:
         """The ``(page_start, page_end)`` a half-open ``[start, end)`` span falls on.
 
         ``end`` is **exclusive**, so ``page_end`` is resolved from the last *included*
-        character (``max(end - 1, start)``) — a record straddling a page boundary
-        therefore records both pages, and a zero-length span records one. Owning that
-        clamp here is the point: it used to be re-derived, identically, at every call
-        site. ``None`` when the document has no page map available.
+        character (``max(end - 1, start)``) — a record straddling a page boundary therefore
+        records both pages, and a zero-length span records one. Owning that clamp here is
+        the point: it used to be re-derived, identically, at every call site.
+
+        Raises :class:`~latence_core.errors.PageSliceMissingError` if the chunk carries no
+        page spans.
         """
         index = self._index_for(chunk)
-        if index is None:
-            self._unresolved += 1
-            return None
-        return (
+        pages = (
             index.page_for_offset(start),
             index.page_for_offset(max(end - 1, start)),
         )
+        self._fold(index.diagnostics)
+        return pages
 
     # -- diagnostics --------------------------------------------------------
 
     @property
     def diagnostics(self) -> PageDriftDiagnostics:
-        """Drift aggregated across every document this resolver has resolved through.
+        """Drift aggregated across every resolution this resolver has performed.
 
-        The corpus-level roll-up the per-chunk ``PageOffsetIndex`` construction made
-        impossible: previously each throwaway index carried its own diagnostics and no
-        caller summed them.
+        The corpus-level roll-up a per-chunk, throwaway ``PageOffsetIndex`` made impossible:
+        each index carried its own diagnostics and no caller summed them. This aggregates
+        RESULTS — counts of what already happened — so it is order-independent and holds no
+        document state.
         """
-        total = self._diag
-        for index in self._indices.values():
-            diag = index.diagnostics
-            total = total.model_copy(
-                update={
-                    "resolutions": total.resolutions + diag.resolutions,
-                    "recovered": total.recovered + diag.recovered,
-                    "max_drift_chars": max(total.max_drift_chars, diag.max_drift_chars),
-                }
-            )
-        return total
-
-    @property
-    def unresolved(self) -> int:
-        """Lookups that found no page map for their document (the counted degradation)."""
-        return self._unresolved
-
-    @property
-    def documents(self) -> int:
-        """How many distinct documents this resolver has learned a page map for.
-
-        Cumulative, not live: evicting a document's index (see
-        :data:`DEFAULT_MAX_LIVE_PAGES`) does not un-learn it. :attr:`live_documents` is
-        the retained window.
-        """
-        return self._seen
-
-    @property
-    def live_documents(self) -> int:
-        """How many document indices are retained right now."""
-        return len(self._indices)
-
-    @property
-    def live_pages(self) -> int:
-        """How many page spans are retained right now — the window's occupancy.
-
-        ``<= max_live_pages`` except when a SINGLE document's map is bigger than the whole
-        budget, which is retained rather than evicted (see :meth:`_evict_beyond_window`).
-        """
-        return self._live_pages
-
-    @property
-    def evicted_reentries(self) -> int:
-        """Lookups for a document whose index had been evicted and that carried no map.
-
-        Non-zero means the caller resolves against more page state than the budget retains —
-        i.e. ``max_live_pages`` is smaller than the caller's live set — and those lookups
-        degraded to the inherited page range. They are also counted in :attr:`unresolved`;
-        this is the half that names the CAUSE, so the degradation is never silent
-        (ADR-0034). The fix is the constructor argument.
-        """
-        return self._evicted_reentries
+        return self._diag
 
     # -- internals ----------------------------------------------------------
 
-    def _index_for(self, chunk: ChunkRecord) -> PageOffsetIndex | None:
-        """The memoised index for ``chunk``'s document, adopting a carried map if new."""
-        document_record_id = chunk.document_record_id
-        index = self._indices.get(document_record_id)
-        if index is not None:
-            self._indices.move_to_end(document_record_id)
-            return index
-        page_map = self._pinned.get(document_record_id)
-        if page_map is None:
-            # Absorb from the stream: the Chunk Stage stamps the map on a document's
-            # first chunk (and a pre-v18 record carries it on every chunk), so the first
-            # record of a document teaches the resolver and the rest resolve for free.
-            carried = chunk.page_map
-            if carried is None:
-                if document_record_id in self._evicted:
-                    self._note_reentry()
-                return None
-            page_map = carried
-            # A re-absorbed document was already counted; the ring is what tells them apart.
-            if document_record_id in self._evicted:
-                del self._evicted[document_record_id]
-            else:
-                self._seen += 1
-        else:
-            # A pinned map can always be rebuilt into an index, so its id leaving the window
-            # is not a re-entry to report when it comes back.
-            self._evicted.pop(document_record_id, None)
-        index = PageOffsetIndex(page_map)
-        self._indices[document_record_id] = index
-        self._live_pages += index.page_count
-        self._evict_beyond_window()
-        return index
+    def _index_for(self, chunk: ChunkRecord) -> PageOffsetIndex:
+        """A fresh index over this chunk's own spans — the whole of the resolver's "state".
 
-    def _evict_beyond_window(self) -> None:
-        """Drop least-recently-used document indices until the page budget fits.
-
-        Never drops the last one: an index is inserted before this runs, so a document whose
-        map alone exceeds the whole budget would otherwise be evicted the instant it was
-        absorbed and EVERY lookup against it would degrade — trading the bug this bound
-        exists to prevent for a worse one.
+        A slice is 1-2 spans, so this is a two-element list comprehension: cheaper than the
+        bookkeeping any cache would need, and it is what keeps the resolver genuinely
+        stateless. Because the index is per-call, its diagnostics are exactly that call's
+        and the caller folds them into the roll-up.
         """
-        while self._live_pages > self._max_live_pages and len(self._indices) > 1:
-            document_record_id, evicted = self._indices.popitem(last=False)
-            self._live_pages -= evicted.page_count
-            diag = evicted.diagnostics
-            # Fold the evicted index's drift into the running aggregate BEFORE it dies, so
-            # the corpus-level roll-up the Quality Report's drift section reads (ADR-0008)
-            # is exactly what an unbounded resolver would have produced.
-            self._diag = self._diag.model_copy(
-                update={
-                    "resolutions": self._diag.resolutions + diag.resolutions,
-                    "recovered": self._diag.recovered + diag.recovered,
-                    "max_drift_chars": max(self._diag.max_drift_chars, diag.max_drift_chars),
-                }
-            )
-            self._evicted[document_record_id] = None
-            while len(self._evicted) > _EVICTED_RING:
-                self._evicted.popitem(last=False)
+        page_slice = chunk.page_slice
+        if page_slice is None:
+            raise PageSliceMissingError(chunk.record_id)
+        return PageOffsetIndex(page_slice)
 
-    def _note_reentry(self) -> None:
-        """Count — and, once, say — that the live window was too small for this caller."""
-        self._evicted_reentries += 1
-        if self._warned_reentry:
-            return
-        self._warned_reentry = True
-        # Counts only: no record id, no document id, no content (ADR-0034).
-        logger.warning(
-            "page index: a chunk arrived for a document whose page index had already been "
-            "evicted from the %d-page live window and carried no page map of its own; its "
-            "page provenance is inherited, not resolved. Construct the PageIndexResolver "
-            "with max_live_pages >= the page state this caller holds in flight. Further "
-            "occurrences are counted in PageIndexResolver.evicted_reentries.",
-            self._max_live_pages,
+    def _fold(self, diag: PageDriftDiagnostics) -> None:
+        """Accumulate one call's drift into the corpus roll-up (a result, not a state)."""
+        self._diag = self._diag.model_copy(
+            update={
+                "resolutions": self._diag.resolutions + diag.resolutions,
+                "recovered": self._diag.recovered + diag.recovered,
+                "max_drift_chars": max(self._diag.max_drift_chars, diag.max_drift_chars),
+            }
         )

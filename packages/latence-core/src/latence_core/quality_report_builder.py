@@ -78,7 +78,7 @@ from latence_core.contracts import (
     ScreeningCheckpoint,
     ScreeningFinding,
 )
-from latence_core.errors import ConfigError, ContractError
+from latence_core.errors import ConfigError, ContractError, PageSliceMissingError
 from latence_core.goldset import (
     ConfusionCounts,
     GoldSet,
@@ -702,18 +702,15 @@ class _DriftAggregator:
     run, or a corpus whose documents all failed to parse), so a pipeline with nothing to audit
     reports no drift section rather than a misleading all-zero one.
 
-    **Why the resolver and not a per-record index.** This audit used to gate on
-    ``record.page_map is not None`` and build a throwaway :class:`PageOffsetIndex` per chunk. That
-    read the map off the record — precisely what C1 (schema v18) stopped guaranteeing: the map now
-    rides a document's FIRST chunk only, so the gate silently narrowed the corpus-integrity audit
-    to one chunk per document (~1/N coverage) while still reporting a confident ``clean``. Drift is
-    most likely at LARGE offsets, i.e. in exactly the later chunks the gate dropped. The resolver
-    is document-keyed and memoised, so every chunk of a document resolves against that document's
-    map whichever record carried it, and its corpus-level
+    **Why the resolver and not a per-record index.** This audit used to build a throwaway
+    :class:`PageOffsetIndex` per chunk and discard its diagnostics. The resolver's corpus-level
     :attr:`~latence_core.page_index.PageIndexResolver.diagnostics` roll-up — which exists for this
-    section — replaces the hand-summed per-index tallies. Every chunk is ``observe``d before it is
-    judged interesting, per the resolver's contract: a document's map-bearing first chunk may be
-    the one with no char span.
+    section — replaces the hand-summed per-index tallies. Since v19 every chunk carries its own
+    page spans, so coverage is every chunk in the stream, in any order: the v18 shape (map on the
+    document's first chunk, adopted from the stream) meant an audit that ran before that record
+    arrived, or after a filtering Stage dropped it, silently fell to ~1/N coverage while still
+    reporting a confident ``clean`` — and drift is likeliest at LARGE offsets, i.e. in exactly the
+    later chunks that lost their map.
 
     Subscribes to the same chunk stream as :class:`_ChunkAggregator`; the builder decodes it once
     and hands each record to both.
@@ -725,6 +722,7 @@ class _DriftAggregator:
     def __init__(self) -> None:
         self._resolver = PageIndexResolver()
         self._audited = 0
+        self._unresolved = 0
 
     @classmethod
     def for_run(cls, context: QualityRunContext) -> _DriftAggregator | None:
@@ -739,31 +737,32 @@ class _DriftAggregator:
         """Fold one record into the drift tally (the Stage is irrelevant — see the compat shim)."""
         if not isinstance(record, ChunkRecord):
             return
-        # Teach the resolver first, always: the map rides the document's first chunk, which is
-        # often the least interesting one, and skipping it would degrade every later chunk.
-        self._resolver.observe(record)
         prov = record.provenance
         if prov.char_start is None or prov.char_end is None:
             return
-        if self._resolver.pages_for_span(record, prov.char_start, prov.char_end) is None:
-            # No page map for this chunk's document (an unparsed parent) — nothing to audit it
-            # against. Counted as an unresolved lookup by the resolver, never a silent clean.
+        try:
+            self._resolver.pages_for_span(record, prov.char_start, prov.char_end)
+        except PageSliceMissingError:
+            # A chunk whose producing Chunker stamped no page spans — nothing to audit it
+            # against. The REPORT is a reporter: it counts the gap and says so in
+            # :meth:`finish` rather than failing a run that has already produced its records.
+            # Every other caller lets the error propagate, which is what keeps a missing slice
+            # from being absorbed anywhere it could become a wrong page.
+            self._unresolved += 1
             return
         self._audited += 1
 
     def finish(self) -> DriftDiagnostics | None:
-        # ADR-0034, the other half of "counted rather than swallowed": a chunk whose document
-        # has no page map is not audited, so it is invisible in ``records_audited`` — and a
-        # report section that simply shrank would read as a confident ``clean``. This is the
-        # resolver's ``unresolved`` count's consumer: an operator sees the gap. Counts only
-        # (no record id, no document id, no content) — the report's own no-PII discipline.
-        unresolved = self._resolver.unresolved
-        if unresolved:
+        # ADR-0034, the other half of "counted rather than swallowed": a chunk that carried no
+        # page spans is not audited, so it is invisible in ``records_audited`` — and a report
+        # section that simply shrank would read as a confident ``clean``. Counts only (no
+        # record id, no document id, no content) — the report's own no-PII discipline.
+        if self._unresolved:
             logger.warning(
-                "provenance drift audit: %d chunk offset lookup(s) found no page map for "
-                "their document and were not audited (%d chunk(s) audited); those chunks' "
-                "page provenance is inherited, not resolved",
-                unresolved,
+                "provenance drift audit: %d chunk(s) carried no page_slice and were not "
+                "audited (%d chunk(s) audited); the Chunk Provider that produced them stamps "
+                "no page spans, so their page provenance is inherited, not resolved",
+                self._unresolved,
                 self._audited,
             )
         if self._audited == 0:

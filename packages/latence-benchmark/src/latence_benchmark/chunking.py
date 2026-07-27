@@ -5,7 +5,7 @@ Entity Extraction, Relation Extraction, Disambiguation and Redaction all consume
 of plain text with character offsets into *that* text. This module is the one place the two are
 reconciled, and it does so by making the mapping the identity: one chunk per document, whose
 ``content`` **is** the document text, with an identity ``offset_map`` and a single-page
-``page_map``.
+``page_slice``.
 
 That is what keeps the scoring honest. Offsets emitted by the Stages
 (``EntityMention.provenance.char_start``, ``PIISpan.char_start``) are then directly comparable
@@ -22,7 +22,7 @@ from latence_core.contracts import (
     Classification,
     OffsetMap,
     OffsetSegment,
-    PageMap,
+    PageSlice,
     PageSpan,
     Provenance,
 )
@@ -70,8 +70,9 @@ def as_chunk(
             if text
             else None
         ),
-        page_map=(
-            PageMap(
+        # The whole benchmark document is one chunk on one page, so its slice is that page.
+        page_slice=(
+            PageSlice(
                 pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
                 total_chars=len(text),
             )

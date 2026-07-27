@@ -71,7 +71,6 @@ from latence_core.observability import (
     RunLineage,
     dataset_for_uri,
 )
-from latence_core.page_index import rehome_page_maps
 from latence_core.pipeline import CapabilityKind, ExtractOn, Pipeline, Stage
 from latence_core.quality import (
     DriftDiagnostics,
@@ -1309,17 +1308,15 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # Passed chunks (some now carrying propagated RiskMarkers) proceed to
             # Export; quarantined chunks are removed and persisted for audit.
             #
-            # Removing a chunk must not remove its DOCUMENT's page map. Since C1 (schema
-            # v18) the map rides a document's first chunk only, so quarantining that one
-            # chunk — a document's opening chunk is a likely place for an injection marker
-            # — would leave every later chunk of that document with no map at all, and
-            # every mention/relation/PII span downstream would silently inherit its
-            # chunk's page range instead of resolving its own source page (ADR-0021/0031).
-            # Re-stamping it onto the first surviving chunk keeps the stream invariant the
-            # PageIndexResolver's absorb-from-the-stream route depends on, for EVERY
-            # ContentScreener Provider rather than only the ones that remember. A stream
-            # nothing was dropped from comes back untouched.
-            return iter(rehome_page_maps(content_outcome.passed, dropped_from=chunk_records))
+            # Nothing has to be re-homed when a chunk is removed. Since v19 each chunk
+            # carries its OWN page spans, so dropping one takes only that chunk's page
+            # resolution with it — which is the correct outcome, since the chunk is gone.
+            # v18 needed a ``rehome_page_maps()`` pass here because a document's whole map
+            # rode its first chunk, and quarantining that one record (a document's opening
+            # chunk is a likely place for an injection marker) silently destroyed page
+            # resolution for every later chunk of the document. That patch also only ever
+            # covered THIS Stage — every other chunk→chunk Capability kept the hole.
+            return iter(content_outcome.passed)
 
         if stage.capability is CapabilityKind.SCHEMA_INDUCTION:
             label_inducer = self._capability_provider(stage, provider, LabelInducer)
@@ -1379,7 +1376,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # the PII-safe RAG corpus. It depends on Chunk (or Content Screening / Schema
             # Induction), NOT Parse: scanning each chunk in full masks PII anywhere in it, and a
             # chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map +
-            # page_map (the ADR-0031/0042 coordinate-correctness guarantee).
+            # page_slice (the ADR-0031/0042 coordinate-correctness guarantee).
             #
             # The induced PII schema (W4/ADR-0038) is read directly off each chunk's
             # ``induced_labels`` — no document bridge needed (chunks already carry it when a

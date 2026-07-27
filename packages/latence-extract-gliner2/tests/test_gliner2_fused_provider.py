@@ -32,6 +32,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
     RelationMention,
 )
@@ -65,7 +67,24 @@ def _chunk(
         classification=Classification(language="en", sensitivity="internal"),
         content=content,
         token_count=len(content.split()),
-        page_map=page_map,
+        # v19: the chunk carries its OWN page spans, cut from the parent document's map.
+        # Absent a map the fixture is a one-page document, so the slice is that page.
+        page_slice=(
+            PageSlice.for_span(
+                page_map, char_start, char_start + len(content) if char_end is None else char_end
+            )
+            if page_map is not None
+            else PageSlice(
+                pages=[
+                    PageSpan(
+                        page_number=2,
+                        char_start=char_start,
+                        char_end=char_start + len(content) if char_end is None else char_end,
+                    )
+                ],
+                total_chars=char_start + len(content) if char_end is None else char_end,
+            )
+        ),
         offset_map=offset_map,
     )
 
@@ -508,18 +527,18 @@ def test_relation_endpoint_offsets_shift_to_document_pages(
     assert rel.provenance.page_end == 2
 
 
-def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
-    """A v18 document stream: the page map rides the FIRST chunk only (schema v18).
+def _two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
+    """A v19 document stream: each chunk carries the page spans it overlaps.
 
-    Page 1 is ``[0,16)``, page 2 is ``[16,37)``. Chunk 0 covers page 1 and carries the map;
-    chunk 1 STRADDLES the boundary (doc ``[13,37)``, inherited page range ``1..2``) and
-    carries NO map. In chunk 1, "Bob" is doc ``[16,19)`` and "Globex" is doc ``[30,36)`` —
+    Page 1 is ``[0,16)``, page 2 is ``[16,37)``. Chunk 0 lies wholly on page 1; chunk 1
+    STRADDLES the boundary (doc ``[13,37)``, inherited page range ``1..2``) so its own slice
+    holds BOTH spans. In chunk 1, "Bob" is doc ``[16,19)`` and "Globex" is doc ``[30,36)`` —
     both wholly on page 2, as is the relation's covering span.
     """
     assembly = PageMap.from_page_texts(["Alice is here.", "Bob works for Globex."])
 
     def _mk(
-        *, index: int, char_start: int, char_end: int, pages: tuple[int, int], carry: bool
+        *, index: int, char_start: int, char_end: int, pages: tuple[int, int]
     ) -> ChunkRecord:
         return ChunkRecord(
             record_id=f"doc1#chunk-{index}",
@@ -539,24 +558,24 @@ def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
             classification=Classification(language="en", sensitivity="internal"),
             content=assembly.text[char_start:char_end],
             token_count=4,
-            page_map=assembly.page_map if carry else None,
+            page_slice=PageSlice.for_span(assembly.page_map, char_start, char_end),
             offset_map=None,
         )
 
-    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1), carry=True)
-    second = _mk(index=1, char_start=13, char_end=37, pages=(1, 2), carry=False)
+    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1))
+    second = _mk(index=1, char_start=13, char_end=37, pages=(1, 2))
     return first, second
 
 
-def test_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+def test_page_resolves_on_a_page_straddling_later_chunk(
     fake_gliner2: type[_FakeGLiNER2],
 ) -> None:
-    """v18: only chunk 0 carries the page map — a later chunk must still resolve its OWN pages.
+    """A later, page-straddling chunk must resolve its OWN pages (mentions AND relations).
 
-    Reading ``chunk.page_map`` per chunk silently degrades every non-first chunk (mentions AND
-    relations) to the chunk's inherited page range — an ADR-0021/0031 provenance regression.
+    Inheriting the chunk's page range degrades everything on it to ``(1, 2)`` — an
+    ADR-0021/0031 provenance regression, and a plausible-looking wrong page.
     """
-    first, second = _v18_two_chunk_document()
+    first, second = _two_chunk_document()
     fake_gliner2.entities = [
         {"start": 3, "end": 6, "label": "person", "confidence": 0.9},
         {"start": 17, "end": 23, "label": "organization", "confidence": 0.9},
@@ -577,15 +596,16 @@ def test_page_resolves_on_a_later_chunk_that_carries_no_page_map(
     assert (rel.provenance.page_start, rel.provenance.page_end) == (2, 2)
 
 
-def test_page_map_is_absorbed_even_when_the_first_chunk_is_below_min_chars(
+def test_pages_still_resolve_when_the_first_chunk_is_below_min_chars(
     fake_gliner2: type[_FakeGLiNER2],
 ) -> None:
-    """The map rides the first chunk — which is often the one ``min_chars`` skips.
+    """A chunk ``_iter_batches`` drops must not cost any OTHER chunk its page.
 
-    ``_iter_batches`` drops those chunks before the model ever sees them, so the resolver has
-    to observe there or the whole document silently degrades.
+    Under v18 it did: the map rode the document's first chunk, dropped here before the model
+    ever saw it, so the whole document silently degraded. Since v19 the property is the
+    record's — this pins the observable outcome either way.
     """
-    first, second = _v18_two_chunk_document()
+    first, second = _two_chunk_document()
     assert len(first.content.strip()) == 14  # below the min_chars floor set below
     fake_gliner2.entities = [{"start": 3, "end": 6, "label": "person", "confidence": 0.9}]
     result = Gliner2FusedExtractor({**_config(), "min_chars": 15}).extract_fused([first, second])

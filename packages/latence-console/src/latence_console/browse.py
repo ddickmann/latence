@@ -11,7 +11,7 @@ person debugging a corpus actually needs.
 * **Why is this chunk wrong** — :func:`inspect_chunk` resolves a chunk back through its
   **Provenance** to the source document, the source *page*, and the character offsets it
   occupies there, and states its Classification and its Redaction disposition. The offsets
-  are resolved through the record's own ``offset_map``/``page_map`` with the framework's own
+  are resolved through the record's own ``offset_map``/``page_slice`` with the framework's own
   resolvers (:class:`~latence_core.offsetmap.OffsetIndex`,
   :class:`~latence_core.pagemap.PageOffsetIndex`) — never re-derived here, so the console
   cannot disagree with the pipeline about where a chunk came from.
@@ -34,14 +34,13 @@ from typing import TYPE_CHECKING
 
 from latence_core.contracts import ChunkRecord
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.pagemap import PageOffsetIndex, PageSpans
 
 if TYPE_CHECKING:
     from latence_core.contracts import (
         EntityMention,
         GraphEdge,
         GraphNode,
-        PageMap,
         RiskMarker,
     )
 
@@ -224,7 +223,12 @@ def inspect_chunk(artifacts: RunArtifacts, chunk: ChunkRecord) -> ChunkInspectio
     """Resolve one chunk: source document, page, character offsets, and disposition."""
     provenance = chunk.provenance
     document = artifacts.document(provenance.document_id)
-    page_map = chunk.page_map or (document.page_map if document is not None else None)
+    # DOCUMENT-level facts (page count, assembled length) come from the DOCUMENT's map; the
+    # chunk's own ``page_slice`` is a window onto it and cannot answer them. Span resolution
+    # prefers the chunk's slice — it is the same arithmetic on the same coordinates, and it is
+    # present even for a run whose Parse checkpoint is not being read back.
+    page_map = document.page_map if document is not None else None
+    span_pages = chunk.page_slice or page_map
 
     resolved_start, resolved_end = _resolved_span(chunk)
     masked = chunk.masked_content
@@ -242,7 +246,7 @@ def inspect_chunk(artifacts: RunArtifacts, chunk: ChunkRecord) -> ChunkInspectio
         provenance_pages=_page_range(provenance.page_start, provenance.page_end),
         provenance_span=_span(provenance.char_start, provenance.char_end),
         resolved_span=_span(resolved_start, resolved_end),
-        resolved_pages=_pages_for_span(page_map, resolved_start, resolved_end),
+        resolved_pages=_pages_for_span(span_pages, resolved_start, resolved_end),
         document_pages=len(page_map.pages) if page_map is not None else None,
         document_chars=page_map.total_chars if page_map is not None else None,
         document_parsed=document is not None,
@@ -252,7 +256,7 @@ def inspect_chunk(artifacts: RunArtifacts, chunk: ChunkRecord) -> ChunkInspectio
         sensitivity=chunk.classification.sensitivity,
         token_count=chunk.token_count,
         character_count=len(chunk.content),
-        redaction=_redaction_disposition(chunk, page_map),
+        redaction=_redaction_disposition(chunk, span_pages),
         risk_markers=list(chunk.risk_markers),
         excerpt=text[:EXCERPT_CHARS],
         excerpt_truncated=len(text) > EXCERPT_CHARS,
@@ -274,7 +278,7 @@ def _resolved_span(chunk: ChunkRecord) -> tuple[int | None, int | None]:
     return index.resolve_span(0, chunk.offset_map.length)
 
 
-def _redaction_disposition(chunk: ChunkRecord, page_map: PageMap | None) -> RedactionDisposition:
+def _redaction_disposition(chunk: ChunkRecord, page_map: PageSpans | None) -> RedactionDisposition:
     """What Redaction did — stated so an empty span list is never read as "clean"."""
     offsets = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
     # A PII span's ``char_start``/``char_end`` are CHUNK-LOCAL. Without an offset map the
@@ -522,7 +526,7 @@ def _span(start: int | None, end: int | None) -> str:
     return f"{start}–{end}"
 
 
-def _pages_for_span(page_map: PageMap | None, start: int | None, end: int | None) -> str:
+def _pages_for_span(page_map: PageSpans | None, start: int | None, end: int | None) -> str:
     """The source page(s) a character span falls on, via the framework's own resolver."""
     if page_map is None or start is None or end is None:
         return "—"

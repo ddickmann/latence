@@ -196,7 +196,7 @@ def test_schema_version_is_current() -> None:
     # Provider prompts with has a per-record slot. Additive + defaulted to []. Both T2's and T3's
     # additions ship in the SAME revision — they land together, so no record carries one without
     # the other.
-    assert SCHEMA_VERSION == 18
+    assert SCHEMA_VERSION == 19
 
 
 def test_chunk_record_requires_provenance_and_classification() -> None:

@@ -438,34 +438,31 @@ class AdapterBase:
         doc_char_end: int,
         *,
         resolver: PageIndexResolver,
-    ) -> tuple[int | None, int | None]:
+    ) -> tuple[int, int]:
         """Resolve a document-offset span to its source page(s) via the page seam (ADR-0031).
 
-        Goes through the document-scoped :class:`~latence_core.page_index.PageIndexResolver` —
-        the ONE seam that owns offset→page resolution — so a produced sub-record cites **its
-        own** page, not merely the parent chunk's inherited range. The resolver owns the
-        half-open end clamp, the per-document memoisation of the underlying never-crashes
-        :class:`~latence_core.pagemap.PageOffsetIndex`, and the corpus-wide drift/degradation
-        counters; this helper adds exactly the one thing a record-producing adapter needs on
-        top: the degrade to the source chunk's inherited page range when no map is available.
+        Goes through :class:`~latence_core.page_index.PageIndexResolver` — the ONE seam that
+        owns offset→page resolution — so a produced sub-record cites **its own** page, not
+        merely the parent chunk's inherited range. The resolver owns the half-open end clamp
+        and the corpus-wide drift roll-up.
 
-        **Pass ONE resolver per Capability call, and ``resolver.observe(chunk)`` every chunk
-        you are handed, before any filter** — since schema v18 a document's ``page_map`` rides
-        its FIRST chunk only, and that chunk is very often the one an adapter's ``min_chars``
-        (or term-match) filter drops. A per-chunk resolver, or one that only ever sees the
-        interesting chunks, silently degrades every later chunk of the document to its
-        inherited range: a plausible-looking WRONG page (audit R2)::
+        ``doc_char_start``/``doc_char_end`` must be offsets **inside ``chunk``**, which is what
+        :meth:`resolve_offsets` produces. Since v19 the chunk carries its own page spans, so
+        resolution needs nothing but the record in hand: any order, any subset of the stream,
+        no ``observe`` and no per-document state::
 
-            resolver = PageIndexResolver()          # one per extract() call
+            resolver = PageIndexResolver()          # one per extract() call, for the roll-up
             for chunk in chunks:
-                resolver.observe(chunk)             # BEFORE deciding it is uninteresting
                 ...
                 pages = self.resolve_pages(chunk, doc_start, doc_end, resolver=resolver)
+
+        A chunk whose producing Chunker stamped no page spans raises
+        :class:`~latence_core.errors.PageSliceMissingError`. It does NOT degrade to the chunk's
+        inherited range: that produced a page that looks resolved and is not, which is the
+        exact provenance regression (audit R2/R4) this seam exists to prevent.
+
+        For a span whose endpoints may lie in DIFFERENT chunks — a relation's covering span —
+        use :func:`~latence_core.page_index.pages_for_covering_span` instead; no single chunk
+        can answer for it.
         """
-        pages = resolver.pages_for_span(chunk, doc_char_start, doc_char_end)
-        if pages is None:
-            # No page map available for this document at all — inherit the chunk's range. The
-            # resolver has COUNTED the degradation (``resolver.unresolved``, ADR-0034); this is
-            # not a silent fallback.
-            return chunk.provenance.page_start, chunk.provenance.page_end
-        return pages
+        return resolver.pages_for_span(chunk, doc_char_start, doc_char_end)

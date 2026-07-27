@@ -23,6 +23,7 @@ from latence_core.contracts import (
     Classification,
     EntityMention,
     PageMap,
+    PageSlice,
     Provenance,
     RelationMention,
 )
@@ -82,7 +83,10 @@ def chunk(rid: str, doc: str, content: str) -> ChunkRecord:
         token_count=20,
         provenance=prov(doc, 0, len(content)),
         classification=_CLS,
-        page_map=PageMap.from_page_texts([content]).page_map,
+        # v19: the chunk carries its own spans; a one-page fixture, so exactly that page.
+        page_slice=PageSlice.for_span(
+            PageMap.from_page_texts([content]).page_map, 0, len(content)
+        ),
     )
 
 

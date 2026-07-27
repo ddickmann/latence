@@ -274,12 +274,14 @@ class GlinerPIIRedactor:
         Each chunk's ``content`` (≤ the model window) is scanned in full — no truncation — and the
         chunk is re-emitted with ``masked_content`` + ``pii_spans`` set (``content`` UNCHANGED).
         Chunks are threaded 1:1 in first-seen order; a chunk-local span resolves to its ORIGINAL
-        source page through the chunk's offset_map + the document-scoped
-        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042).
+        source page through the chunk's offset_map + the
+        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042), which reads the
+        chunk's own ``page_slice`` (v19) — so resolution is exact whatever order chunks arrive
+        in and whichever of them a Stage dropped.
 
-        ONE resolver covers the whole call: since schema v18 a document's ``page_map`` rides its
-        FIRST chunk only, so a per-chunk resolver would resolve pages for that chunk and emit
-        ``page_start=None`` on every later one.
+        ONE resolver covers the whole call so the drift roll-up is per call rather than thrown
+        away per chunk; it holds no document state, so that is a reporting choice, not a
+        correctness one.
         """
         resolver = PageIndexResolver()
         buffer: list[_PendingChunk] = []

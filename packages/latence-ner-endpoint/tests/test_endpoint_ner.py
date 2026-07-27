@@ -21,6 +21,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
 )
 from latence_ner_endpoint import EndpointEntityExtractor
@@ -54,7 +56,24 @@ def _chunk(
         classification=Classification(language="en", sensitivity="internal"),
         content=text,
         token_count=len(text.split()),
-        page_map=page_map,
+        # v19: the chunk carries its OWN page spans, cut from the parent document's map.
+        # Absent a map the fixture is a one-page document, so the slice is that page.
+        page_slice=(
+            PageSlice.for_span(
+                page_map, char_start, char_start + len(text) if char_end is None else char_end
+            )
+            if page_map is not None
+            else PageSlice(
+                pages=[
+                    PageSpan(
+                        page_number=1,
+                        char_start=char_start,
+                        char_end=char_start + len(text) if char_end is None else char_end,
+                    )
+                ],
+                total_chars=char_start + len(text) if char_end is None else char_end,
+            )
+        ),
         offset_map=offset_map,
     )
 
@@ -128,18 +147,18 @@ def test_extracts_and_resolves_offsets(fake_openai: None) -> None:
     assert m.classification.sensitivity == "internal"
 
 
-def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
-    """A v18 document stream: the page map rides the FIRST chunk only (schema v18).
+def _two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
+    """A v19 document stream: each chunk carries the page spans it overlaps.
 
-    Page 1 is ``[0,16)``, page 2 is ``[16,33)``. Chunk 0 covers page 1 and carries the map;
-    chunk 1 STRADDLES the boundary (doc ``[13,33)``, inherited page range ``1..2``) and
-    carries NO map. A chunk-local ``[3,6)`` span is ``"ce "`` on page 1 in chunk 0 and
+    Page 1 is ``[0,16)``, page 2 is ``[16,33)``. Chunk 0 lies wholly on page 1; chunk 1
+    STRADDLES the boundary (doc ``[13,33)``, inherited page range ``1..2``) so its own slice
+    holds BOTH spans. A chunk-local ``[3,6)`` span is ``"ce "`` on page 1 in chunk 0 and
     ``"Bob"`` at doc ``[16,19)`` — wholly on page 2 — in chunk 1.
     """
     assembly = PageMap.from_page_texts(["Alice is here.", "Bob is over here."])
 
     def _mk(
-        *, index: int, char_start: int, char_end: int, pages: tuple[int, int], carry: bool
+        *, index: int, char_start: int, char_end: int, pages: tuple[int, int]
     ) -> ChunkRecord:
         return ChunkRecord(
             record_id=f"d1#chunk-{index}",
@@ -159,25 +178,25 @@ def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
             classification=Classification(language="en", sensitivity="internal"),
             content=assembly.text[char_start:char_end],
             token_count=4,
-            page_map=assembly.page_map if carry else None,
+            page_slice=PageSlice.for_span(assembly.page_map, char_start, char_end),
             offset_map=None,
         )
 
-    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1), carry=True)
-    second = _mk(index=1, char_start=13, char_end=33, pages=(1, 2), carry=False)
+    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1))
+    second = _mk(index=1, char_start=13, char_end=33, pages=(1, 2))
     return first, second
 
 
-def test_mention_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+def test_mention_page_resolves_on_a_page_straddling_later_chunk(
     fake_openai: None,
 ) -> None:
-    """v18: only chunk 0 carries the page map — a later chunk must still resolve its OWN page.
+    """A later, page-straddling chunk must resolve its mention's OWN page (ADR-0021/0031).
 
-    Reading ``chunk.page_map`` per chunk silently degrades every non-first chunk to the
-    chunk's inherited page range (ADR-0021/0031). The second half also proves the map is
-    absorbed when ``min_chars`` drops the very chunk that carries it.
+    Inheriting the chunk's page range degrades "Bob" to ``(1, 2)`` — a plausible-looking
+    wrong page. The second half proves the resolution survives ``min_chars`` dropping the
+    document's first chunk, which under v18 took the whole document's map with it.
     """
-    first, second = _v18_two_chunk_document()
+    first, second = _two_chunk_document()
     _FakeCompletions.reply = json.dumps(
         {"entities": [{"start": 3, "end": 6, "label": "person", "confidence": 0.9}]}
     )
@@ -189,7 +208,7 @@ def test_mention_page_resolves_on_a_later_chunk_that_carries_no_page_map(
     pages = by_chunk["d1#chunk-1"].provenance
     assert (pages.page_start, pages.page_end) == (2, 2)
 
-    # Observe-before-filter: the map rides the first chunk, which min_chars often drops.
+    # min_chars drops the document's FIRST chunk — under v18 that lost its map.
     assert len(first.content.strip()) == 14
     filtered = list(
         EndpointEntityExtractor({"labels": ["person"], "min_chars": 15}).extract([first, second])

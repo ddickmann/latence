@@ -48,14 +48,12 @@ from latence_core.stages.relation import PatternRelationExtractor
 #
 # It is MULTI-PAGE, and the second sentence deliberately STRADDLES the page 2 / page 3 boundary,
 # because a one-page document cannot observe the invariant rule 3 of docs/CONFORMANCE.md states:
-# since schema v18 a document's ``page_map`` rides its FIRST chunk only, so every later chunk must
-# resolve a sub-chunk offset's page through a ``PageIndexResolver`` that absorbed the map earlier
-# in the stream. On a single page every degradation — including the pre-v18 "rebuild a throwaway
-# ``PageOffsetIndex`` per chunk, degrade to the chunk's inherited range when it carries no map"
-# pattern R1 had to remove from seven shipped Providers — is *coincidentally* correct, so the suite
-# reported a silently mis-paging Provider as conformance-verified
-# (``issues/audit-arch/R4-invariants_and_adrs-2.md``). Paginated, chunk 1 spans pages 2–3 and its
-# mentions land on page 2 or page 3, so an inherited range is a WRONG range and C1 sees it.
+# every Provider must resolve a sub-chunk offset's OWN page through a ``PageIndexResolver`` rather
+# than stamp the parent chunk's inherited range on it. On a single page every such degradation is
+# *coincidentally* correct, so the suite reported a silently mis-paging Provider as
+# conformance-verified (``issues/audit-arch/R4-invariants_and_adrs-2.md``). Paginated, chunk 1
+# spans pages 2–3 and its mentions land on page 2 or page 3, so an inherited range is a WRONG
+# range and the suite sees it.
 CANONICAL_PAGES: tuple[str, ...] = (
     "Alice works for Acme Corp in Berlin.",
     "Contact alice@example.com about",
@@ -68,10 +66,10 @@ CANONICAL_PAGE_SEPARATOR = " "
 CANONICAL_TEXT = CANONICAL_PAGE_SEPARATOR.join(CANONICAL_PAGES)
 
 # The Chunker config the canonical corpus is built with. Deliberately a small token budget: the
-# canonical document is tiny and at the 512-token default it produces exactly ONE chunk — the
-# chunk that carries the page map — so no consumer of the corpus ever sees the map-less chunks
-# that schema v18 created. Packing one sentence per chunk gives the corpus a second chunk which
-# carries ``page_map=None`` and spans two pages, the shape rule 3 is actually about.
+# canonical document is tiny and at the 512-token default it produces exactly ONE chunk, whose
+# single page makes every page claim coincidentally right. Packing one sentence per chunk gives
+# the corpus a second chunk that STRADDLES two pages — the shape rule 3 is actually about, and the
+# case a per-chunk ``page_slice`` has to carry both spans for.
 _CANONICAL_CHUNKER_CONFIG = {"max_tokens": 16, "overlap_tokens": 0, "min_tokens": 4}
 
 # A PII value that appears verbatim in the canonical text; the C6 no-leak check asserts this

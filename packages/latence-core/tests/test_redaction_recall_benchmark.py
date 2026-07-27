@@ -37,6 +37,8 @@ from latence_core.contracts import (
     Classification,
     OffsetMap,
     OffsetSegment,
+    PageSlice,
+    PageSpan,
     Provenance,
 )
 from latence_core.stages.redaction import HybridPIIRedactor
@@ -174,6 +176,11 @@ def _chunk(text: str, record_id: str) -> ChunkRecord:
         classification=Classification(language="en", sensitivity="public"),
         content=text,
         token_count=max(len(text.split()), 0),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
         offset_map=OffsetMap(segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text))
         if text
         else None,

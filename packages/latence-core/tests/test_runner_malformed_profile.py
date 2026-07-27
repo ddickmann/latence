@@ -71,11 +71,11 @@ class _NoProfileExtractor:
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
         from latence_core.contracts import EntityMention as _EM
         from latence_core.offsetmap import OffsetIndex
-        from latence_core.pagemap import PageOffsetIndex
+        from latence_core.page_index import PageIndexResolver
 
+        resolver = PageIndexResolver()
         for chunk in chunks:
             offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
-            page_index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
             base = chunk.provenance.char_start or 0
             idx = 0
             for label, term in self._terms:
@@ -86,14 +86,8 @@ class _NoProfileExtractor:
                     ds, de = offset_index.resolve_span(pos, pos + len(term))
                 else:
                     ds, de = base + pos, base + pos + len(term)
-                ps: int | None
-                pe: int | None
-                if page_index is not None:
-                    ps = page_index.page_for_offset(ds)
-                    pe = page_index.page_for_offset(max(de - 1, ds))
-                else:
-                    ps = chunk.provenance.page_start
-                    pe = chunk.provenance.page_end
+                # Through the seam, which owns the half-open end clamp (v19).
+                ps, pe = resolver.pages_for_span(chunk, ds, de)
                 prov = chunk.provenance.model_copy(
                     update={"char_start": ds, "char_end": de, "page_start": ps, "page_end": pe}
                 )

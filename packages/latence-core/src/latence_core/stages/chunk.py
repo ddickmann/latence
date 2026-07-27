@@ -15,10 +15,11 @@ CONTEXT definition of Chunk):
 * each chunk's Provenance ``page_start``/``page_end`` is resolved from the parent's
   page map via the core :class:`~latence_core.pagemap.PageOffsetIndex`, so a chunk
   spanning a page boundary records the real source pages;
-* the parent's page map itself rides the stream **once per document** — on the
-  document's first chunk (schema v18) — and downstream Stages resolve sub-chunk
-  offsets through :class:`~latence_core.page_index.PageIndexResolver`, which memoises
-  one index per ``document_record_id``;
+* each chunk carries its own :class:`~latence_core.contracts.PageSlice` — the document
+  page spans overlapping that chunk, and only those (schema v19) — so a downstream
+  Stage resolves a sub-chunk offset through
+  :class:`~latence_core.page_index.PageIndexResolver` from the record in hand, in any
+  order, with any other chunk missing;
 * Classification is inherited from the parent document unchanged;
 * the parent document's Provenance identity (source_uri, file_name, document_id, …)
   is carried onto every chunk.
@@ -37,7 +38,13 @@ from latence_core.chunking import (
     chunk_document,
     chunk_document_by_sentence,
 )
-from latence_core.contracts import ChunkRecord, Disposition, OffsetMap, OffsetSegment
+from latence_core.contracts import (
+    ChunkRecord,
+    Disposition,
+    OffsetMap,
+    OffsetSegment,
+    PageSlice,
+)
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
@@ -173,9 +180,9 @@ def _emit_chunk_records(doc: DocumentRecord, chunks: list[Chunk]) -> Iterator[Ch
     """Turn a document's engine :class:`Chunk`s into contract :class:`ChunkRecord`s.
 
     Shared by both reference Chunker Providers so the contract-stamping — page resolution
-    through the parent :class:`PageOffsetIndex`, the once-per-document page map + the
-    per-chunk stripped→original offset map, inherited Provenance/Classification — is
-    identical regardless of which segmentation strategy produced the chunks.
+    through the parent :class:`PageOffsetIndex`, the per-chunk page slice + the per-chunk
+    stripped→original offset map, inherited Provenance/Classification — is identical
+    regardless of which segmentation strategy produced the chunks.
     """
     # Resolve page alignment through the parent's page map (present after a successful
     # Parse). Absent (shouldn't happen for a PARSED doc), fall back to page 1 so a chunk
@@ -205,19 +212,23 @@ def _emit_chunk_records(doc: DocumentRecord, chunks: list[Chunk]) -> Iterator[Ch
             content=ch.text,
             media_type="text/markdown",
             token_count=ch.token_count,
-            # Carry the parent's page map forward ONCE per document — on its first chunk
-            # (schema v18). The page map is DOCUMENT-scoped state, invariant across every
-            # chunk of the document, so a copy on all N chunks was pure duplication: for a
-            # 519-page document chunked at 640 tokens it was ~30 KB of JSON on each of ~399
-            # records, i.e. ~92% of every chunk checkpoint line, paid again on every
-            # checkpoint write, streaming read-back and decode.
+            # Stamp THIS chunk's own page spans (schema v19): exactly the document page
+            # spans overlapping [char_start, char_end), in the document's original
+            # coordinates. Usually one; two when the chunk straddles a page break.
             #
-            # Downstream Stages resolve a sub-chunk offset's own source page through
-            # :class:`~latence_core.page_index.PageIndexResolver`, which memoises one
-            # PageOffsetIndex per ``document_record_id`` — it adopts the map from the first
-            # chunk it sees for a document (this one) and every later chunk of that document
-            # resolves from the memoised index, so page accuracy is unchanged.
-            page_map=doc.page_map if i == 0 else None,
+            # This is everything a downstream Stage needs, because the only page question
+            # asked of a chunk is sub-chunk: which page does an offset INSIDE it fall on.
+            # Carrying the whole document map instead — on every chunk (pre-v18), or on the
+            # document's first chunk with the resolver adopting it from the stream (v18) —
+            # either duplicated ~30 KB of JSON onto each of ~399 records, or made resolution
+            # depend on that one record being seen FIRST and SURVIVING every filtering
+            # Stage. A slice keeps the payload win (~2 spans, ~60 bytes) and makes both
+            # dependencies inexpressible: the chunk answers for itself.
+            page_slice=(
+                None
+                if doc.page_map is None
+                else PageSlice.for_span(doc.page_map, ch.char_start, ch.char_end)
+            ),
             # Carry the stripped→original offset map so that same sub-chunk offset resolves
             # to its TRUE original offset (content is markup-stripped, so char_start + local
             # is only a lower bound once markup precedes it).

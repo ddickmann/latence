@@ -1,27 +1,34 @@
-"""R2-invariants_and_adrs-4 — the ADR set may not document a page-map carriage the code abandoned.
+"""R2-invariants_and_adrs-4 — the ADR set may not document a page carriage the code abandoned.
 
 ADR-0017 makes the committed files the source of truth, and the ADR set is the design half of
 that: a Provider author (first- or third-party) is told to read it before writing a Capability.
-C1 (schema v18) moved the parent document's ``PageMap`` off every ``ChunkRecord`` and onto a
-document's **first** chunk only, putting offset→page resolution behind the document-scoped
-:class:`~latence_core.page_index.PageIndexResolver` seam — but it amended no ADR. ADR-0022 was
-left stating, as its *decision*:
+The page carriage has been rewritten twice, and each rewrite made the previous ADR prose not
+merely stale but *actively wrong*:
 
-    Chunk now carries the parent document's ``page_map`` forward on each ``ChunkRecord``
-    (optional field; absent ⇒ the mention degrades to the inherited chunk range)
+* **as first shipped** — the parent document's whole ``PageMap`` rode **every** ``ChunkRecord``,
+  and ADR-0022 stated as its decision "Chunk now carries the parent document's ``page_map``
+  forward on each ``ChunkRecord`` (optional field; absent ⇒ the mention degrades to the
+  inherited chunk range)";
+* **schema v18** — the map rode a document's **first** chunk only, so that "absent ⇒ inherit"
+  rule silently mis-paged every mention on every later chunk (audit R1 found the pattern
+  reproduced from the ADR in four shipped ecosystem Providers and the PII redactors);
+* **schema v19** — no map rides any chunk at all. Each chunk carries its OWN
+  :class:`~latence_core.contracts.PageSlice`: exactly the page spans overlapping that chunk,
+  in document coordinates. Resolution is a property of the record, so it cannot depend on
+  stream order or on another chunk surviving.
 
-which is not merely stale — it prescribes the exact wrong contract. An author who follows it writes
-``PageOffsetIndex(chunk.page_map)`` per chunk and degrades to the chunk's inherited page range when
-it is ``None``; under v18 that is *every* chunk after a document's first, so every mention, relation
-and PII span on them silently cites a plausible-looking wrong page. R1 found that code in four
-shipped ecosystem Providers and in the PII redactors — reproduced from the record, which is why
-fixing the call sites without fixing the record fixes nothing durable.
+An author following the superseded prose writes ``PageOffsetIndex(chunk.page_map)`` — which
+under v19 does not even exist on the contract, and whose intent (degrade to the chunk's
+inherited page range) is the exact ADR-0021/0031 violation. So: **no ADR may state, in
+present-tense normative voice, that the parent document's page MAP rides a ``ChunkRecord``**,
+and any ADR discussing chunk-level page carriage must name the mechanism that is actually
+shipped.
 
-**Anti-tautology.** Nothing about the carriage is hard-coded here. :func:`_carrying_chunk_indices`
-*runs* the reference Chunk Provider over a multi-page document and observes which chunk indices come
-back with a ``page_map``. The documentation gates are predicated on that observation: if the
-framework ever legitimately returns to per-chunk carriage, the observation changes and the gates
-stand down (:func:`_skip_unless_single_carrier`) instead of pinning prose to a constant.
+**Anti-tautology.** Nothing about the carriage is hard-coded here. :func:`_observed_carriage`
+*runs* the reference Chunk Provider over a multi-page document and observes what comes back on
+the records. The documentation gates are predicated on that observation: if the framework ever
+legitimately returns to carrying whole page maps on chunks, the observation changes and the
+gates stand down (:func:`_skip_unless_slice_carriage`) instead of pinning prose to a constant.
 """
 
 from __future__ import annotations
@@ -43,7 +50,8 @@ from latence_core.stages.chunk import MarkdownChunker
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ADR_DIR = _REPO_ROOT / "docs" / "adr"
 
-#: Any spelling of the page map, in prose or as the field name.
+#: Any spelling of the page MAP, in prose or as the field name. Deliberately does NOT match
+#: ``page_slice``/"page slice" — the slice is the current mechanism, not a superseded one.
 _PAGE_MAP = re.compile(r"page[ _\-]?maps?", re.I)
 
 #: Verbs that make a sentence a claim about the map *travelling on a record*, as opposed to a claim
@@ -53,31 +61,48 @@ _CARRIAGE_VERB = (
     r"duplicat(?:e|es|ed)|copie[sd]|copy)\b"
 )
 
-#: The SUPERSEDED shape: carried onto each/every/all chunks, or per chunk.
-_MULTI_CHUNK_CARRIAGE = re.compile(
-    _CARRIAGE_VERB
-    + r"[^.]{0,80}?\b(?:each|every|all)\b[^.]{0,30}?\b(?:chunks?|`?ChunkRecord`?s?)\b"
-    r"|" + _CARRIAGE_VERB + r"[^.]{0,30}?\bper[ \-]chunk\b",
+_CHUNK = r"\b(?:chunks?|`?ChunkRecord`?s?)\b"
+_MAP = r"page[ _\-]?maps?"
+
+#: A carriage claim about a chunk, in any of the three word orders, where the thing CARRIED is
+#: the whole page MAP. Under v19 every such claim is superseded — on each chunk (as first
+#: shipped) and on the first chunk (v18) alike — so one pattern covers both abandoned shapes.
+#: The proximity bounds are what keep it a claim about the map's carriage rather than a sentence
+#: that happens to mention a map, a chunk and a verb.
+_MAP_RIDES_CHUNK = re.compile(
+    _MAP + r"[^.]{0,60}?" + _CARRIAGE_VERB + r"[^.]{0,60}?" + _CHUNK
+    + r"|" + _CARRIAGE_VERB + r"[^.]{0,60}?" + _MAP + r"[^.]{0,60}?" + _CHUNK
+    + r"|" + _CHUNK + r"[^.]{0,60}?" + _CARRIAGE_VERB + r"[^.]{0,60}?" + _MAP,
     re.I,
 )
 
-#: Any carriage claim at all, superseded or not — the trigger for the "names the mechanism" gate.
+#: A weaker probe used only by the "name the mechanism" gate: any carriage claim about a chunk,
+#: in a sentence that also mentions a page map.
 _ANY_CHUNK_CARRIAGE = re.compile(
-    _CARRIAGE_VERB + r"[^.]{0,80}?\b(?:chunks?|`?ChunkRecord`?s?)\b"
-    r"|\b(?:chunks?|`?ChunkRecord`?s?)\b[^.]{0,40}?" + _CARRIAGE_VERB,
+    _CARRIAGE_VERB + r"[^.]{0,80}?" + _CHUNK + r"|" + _CHUNK + r"[^.]{0,40}?" + _CARRIAGE_VERB,
     re.I,
 )
 
-#: Markers that put a sentence in the PAST — describing what the design used to do. A sentence in
-#: this voice may (and should) restate the superseded mechanism; that is what an amendment is.
-_SUPERSESSION = re.compile(
-    r"(?:used to|previously|no longer|supersed\w+|originally|as first shipped|before C1|"
-    r"pre-v18|until schema v18|v18|was\b[^.]{0,40}\breplaced)",
+#: Markers that take a sentence out of present-tense normative voice — it describes what the
+#: design used to do, or DENIES that the carriage exists. Either way it is not a prescription.
+#: A bare "v18" is deliberately NOT such a marker: v18 is now the NAME of a superseded mechanism,
+#: so "since schema v18 the map rides the first chunk" is exactly what this gate must catch.
+#: A past-tense carriage verb IS one: "ChunkRecord already carried the page map forward" is
+#: history by construction.
+_HISTORICAL = re.compile(
+    r"(?:used to|previously|no longer|supersed\w+|abandon\w+|originally|as first shipped|"
+    r"before C1|pre-v18|pre-v19|until v19|until schema v19|\bstopped\b|"
+    r"was\b[^.]{0,40}\b(?:replaced|removed|deleted)"
+    # denial
+    r"|\bno\b|\bnot\b|\bnever\b|\bnothing\b"
+    # past tense
+    r"|\b(?:carried|rode|stamped|duplicated|copied)\b)",
     re.I,
 )
 
-#: The v18 mechanism, named. An ADR that makes a carriage claim must say which one it means.
-_V18_MECHANISM = re.compile(r"v18|PageIndexResolver|first\W{0,4}chunk", re.I)
+#: The v19 mechanism, named. An ADR that discusses chunk-level page carriage must say which
+#: mechanism it means, and the only shipped one is the per-chunk slice.
+_V19_MECHANISM = re.compile(r"v19|page[ _\-]?slice", re.I)
 
 
 def _sentences(text: str) -> list[str]:
@@ -127,76 +152,79 @@ def _multi_page_document() -> DocumentRecord:
     )
 
 
-def _carrying_chunk_indices() -> tuple[set[int], int]:
-    """OBSERVE the real Chunk Stage: which chunk indices come back carrying a page map?"""
+def _observed_carriage() -> tuple[set[int], set[int], int]:
+    """OBSERVE the real Chunk Stage: which chunks carry a SLICE, and which carry a whole MAP?"""
     doc = _multi_page_document()
     chunks = list(
         MarkdownChunker({"max_tokens": 40, "overlap_tokens": 8, "min_tokens": 4}).chunk([doc])
     )
     assert len(chunks) > 3, "fixture must produce several chunks for the carriage question to exist"
-    return {c.index for c in chunks if c.page_map is not None}, len(chunks)
+    with_slice = {c.index for c in chunks if c.page_slice is not None}
+    with_map = {c.index for c in chunks if getattr(c, "page_map", None) is not None}
+    return with_slice, with_map, len(chunks)
 
 
-def _skip_unless_single_carrier() -> None:
-    carriers, total = _carrying_chunk_indices()
-    if carriers == set(range(total)):  # pragma: no cover - only if v18 is ever reverted
+def _skip_unless_slice_carriage() -> None:
+    _, with_map, _ = _observed_carriage()
+    if with_map:  # pragma: no cover - only if whole-map carriage is ever reinstated
         pytest.skip(
-            "the Chunk Stage carries the page map on every chunk again — the per-chunk prose in "
-            "the ADR set would then be CURRENT, and this gate must be rewritten with that change"
+            "the Chunk Stage carries a whole page map on a chunk again — the page-map carriage "
+            "prose in the ADR set would then be CURRENT, and these gates must be rewritten with "
+            "that change"
         )
 
 
-def test_the_chunk_stage_stamps_the_page_map_on_exactly_one_chunk_per_document() -> None:
-    """The code fact the documentation gates below are derived from (schema v18, C1)."""
-    carriers, total = _carrying_chunk_indices()
-    assert carriers == {0}, (
-        f"expected the page map on the first chunk only; {total} chunks carried it on {sorted(carriers)}"
+def test_every_chunk_carries_its_own_page_slice_and_no_chunk_carries_the_document_map() -> None:
+    """The code fact the documentation gates below are derived from (schema v19)."""
+    with_slice, with_map, total = _observed_carriage()
+    assert with_slice == set(range(total)), (
+        f"expected a page slice on every chunk; {total} chunks carried one on {sorted(with_slice)}"
     )
+    assert not with_map, "no chunk may carry the whole document's page map (v19)"
 
 
-def test_no_adr_asserts_the_superseded_per_chunk_page_map_carriage() -> None:
-    """An ADR may describe the old carriage as history; it may not still PRESCRIBE it.
+def test_no_adr_asserts_a_page_map_riding_a_chunk() -> None:
+    """An ADR may describe the abandoned carriages as history; it may not still PRESCRIBE one.
 
-    Fails pre-fix on ADR-0022 (its decision sentence) and ADR-0031 (the precedent it cites from it).
+    Both abandoned shapes are caught by the one gate, because under v19 neither is true: the
+    whole page map rides no chunk at all — not the first, not any other.
     """
-    _skip_unless_single_carrier()
+    _skip_unless_slice_carriage()
     offenders: list[str] = []
     for adr in _adr_files():
         for sentence in _sentences(adr.read_text(encoding="utf-8")):
-            if not _PAGE_MAP.search(sentence):
+            if not _MAP_RIDES_CHUNK.search(sentence):
                 continue
-            if not _MULTI_CHUNK_CARRIAGE.search(sentence):
-                continue
-            if _SUPERSESSION.search(sentence):
+            if _HISTORICAL.search(sentence):
                 continue
             offenders.append(f"{adr.name}: {sentence.strip()[:220]}")
     assert not offenders, (
-        "these ADRs still state, in present-tense normative voice, that the parent page map rides "
-        "each/every chunk — the mechanism C1 (schema v18) replaced. A Provider author following "
-        "them writes PageOffsetIndex(chunk.page_map) per chunk and silently degrades every chunk "
-        "after a document's first to its inherited page range (ADR-0021/0031 violation). Amend the "
-        "ADR (past voice + the v18 mechanism), do not delete the history:\n  "
-        + "\n  ".join(offenders)
+        "these ADRs still state, in present-tense normative voice, that the parent document's "
+        "page MAP rides a ChunkRecord — on each chunk (as first shipped) or on the document's "
+        "first chunk (v18). Both are gone: since v19 a chunk carries only its own PageSlice. A "
+        "Provider author following them writes PageOffsetIndex(chunk.page_map) and degrades a "
+        "mention to its chunk's inherited page range (ADR-0021/0031 violation). Amend the ADR "
+        "(past voice + the v19 mechanism), do not delete the history:\n  " + "\n  ".join(offenders)
     )
 
 
-def test_every_adr_that_claims_page_map_carriage_names_the_v18_mechanism() -> None:
-    """Carriage is now a *conditional* property of a chunk, so an ADR that mentions it must say so.
+def test_every_adr_that_claims_chunk_page_carriage_names_the_v19_mechanism() -> None:
+    """An ADR that discusses page carriage on a chunk must say WHICH carriage it means.
 
-    Fails pre-fix on ADR-0022, which discusses the carriage at length without naming the first-chunk
-    stamp or the ``PageIndexResolver`` seam that makes it resolvable.
+    History is welcome, but an ADR that only ever describes the superseded shapes leaves a reader
+    with no way to find the one that ships.
     """
-    _skip_unless_single_carrier()
+    _skip_unless_slice_carriage()
     silent: list[str] = []
     for adr in _adr_files():
         body = adr.read_text(encoding="utf-8")
         claims = [
             s for s in _sentences(body) if _PAGE_MAP.search(s) and _ANY_CHUNK_CARRIAGE.search(s)
         ]
-        if claims and not _V18_MECHANISM.search(body):
+        if claims and not _V19_MECHANISM.search(body):
             silent.append(f"{adr.name}: {claims[0].strip()[:220]}")
     assert not silent, (
-        "these ADRs describe the page map riding a ChunkRecord without naming the schema-v18 "
-        "mechanism (first chunk only) or the PageIndexResolver seam that resolves it, so a reader "
-        "cannot tell which carriage they mean:\n  " + "\n  ".join(silent)
+        "these ADRs describe a page map riding a ChunkRecord without anywhere naming the schema "
+        "v19 mechanism (the per-chunk PageSlice) that replaced it, so a reader cannot tell which "
+        "carriage they mean:\n  " + "\n  ".join(silent)
     )

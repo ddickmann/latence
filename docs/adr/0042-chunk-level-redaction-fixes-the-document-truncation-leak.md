@@ -66,9 +66,10 @@ Induction) Stage, **not** Parse.
   replaced by its placeholder). Default `None` ⇒ no Redaction Stage ran.
 * `pii_spans: list[PIISpan]` — the chunk-local detected spans. `char_start`/`char_end` are offsets into
   the chunk's `content` (the coordinate system `masked_content` is masked in); `page_start`/`page_end`
-  resolve to the ORIGINAL source page through the chunk's `offset_map` and the document-scoped
-  `PageIndexResolver` (the ADR-0031 round trip; since schema v18 the `page_map` itself rides a
-  document's first chunk only — ADR-0022's C1 amendment). Counts-only: a span never stores the raw value.
+  resolve to the ORIGINAL source page through the chunk's `offset_map` and the stateless
+  `PageIndexResolver` (the ADR-0031 round trip; since schema v19 the chunk carries its own
+  `page_slice` and no whole `page_map` rides a chunk at all — ADR-0022's C1 amendment).
+  Counts-only: a span never stores the raw value.
 * `redaction_disabled_for_sensitive: bool` — the H-C1 §4 no-op floor, carried per chunk.
 
 The chunk's `content` is **byte-unchanged** — extraction (upstream, on the same chunk stream) still sees

@@ -27,14 +27,14 @@ so a mention resolves back to its EXACT source offset even when markdown markup 
 stripped before it within the chunk. (Chunk ``content`` is markup-stripped, so the
 naive ``char_start + local`` shift is only a lower bound — ADR-0022 corrected,
 ADR-0031.) A pre-v11 chunk with no offset map degrades to that shift. From the
-resolved offset the page span is re-resolved through the document-scoped
+resolved offset the page span is re-resolved through
 :class:`~latence_core.page_index.PageIndexResolver` to its original source page(s)
 (the S4 round-trip) — a mention on a later page of a multi-page chunk cites that
-page, not the chunk's first page, degrading to the chunk's inherited range only when
-no page map is available for the document. ONE resolver serves the whole ``extract``
-call, so a document's page index is built once (not once per chunk) and a chunk that
-carries no map — every non-first chunk since schema v18 — still resolves from the map
-its document's first chunk carried. An empty/near-empty chunk yields no mentions
+page, not the chunk's first page. The resolver reads the chunk's OWN ``page_slice``
+(v19), so every chunk resolves exactly whatever order they arrive in and whichever
+the ``min_chars`` filter drops; a chunk stamped with no spans raises rather than
+inheriting a plausible-looking wrong page. ONE resolver serves the whole ``extract``
+call so the drift roll-up is per call. An empty/near-empty chunk yields no mentions
 (S4 AC).
 
 The ``gliner`` import is deferred to first use so importing this module (for
@@ -289,10 +289,6 @@ class GlinerEntityExtractor:
             batch_labels = None
 
         for chunk in chunks:
-            # Observe BEFORE the min_chars filter: a document's page map rides its FIRST chunk
-            # (schema v18) and that chunk is very often the one this filter drops, so absorbing
-            # only from chunks that reach the model would lose the map for the whole document.
-            resolver.observe(chunk)
             if len(chunk.content.strip()) < self._min_chars:
                 # Empty / near-empty chunk: no mentions, no model call (S4 AC).
                 continue

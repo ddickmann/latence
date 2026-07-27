@@ -485,14 +485,11 @@ class GazetteerEntityExtractor:
     # -- extraction ---------------------------------------------------------
 
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
-        # ONE resolver for the whole call: page maps are document-scoped, so the index for
-        # a document is built on its first chunk and reused for every later chunk of it.
+        # ONE resolver for the whole call, purely so the drift roll-up is per-call. It is
+        # stateless (v19): each chunk carries its own page spans, so a chunk skipped by the
+        # min_chars filter teaches it nothing and costs nothing.
         resolver = PageIndexResolver()
         for chunk in chunks:
-            # Observe BEFORE the min_chars filter: a document's first chunk is the one
-            # carrying its page map (v18) and is often too short to yield any mention, so
-            # absorbing only from chunks that produce mentions would lose the map.
-            resolver.observe(chunk)
             yield from self._extract_one(chunk, resolver)
 
     def _extract_one(
@@ -513,8 +510,8 @@ class GazetteerEntityExtractor:
         chunk_char_start = chunk.provenance.char_start or 0
         # Resolve each mention's OWN page, not the chunk's whole page range: a mention on
         # a later page of a multi-page chunk must cite that page (S4 "correct source page").
-        # The resolver owns the document→index memoisation; ``None`` from it means no page
-        # map is available for this document → inherit the chunk range.
+        # The resolver reads the chunk's own page spans, so this is exact whatever order
+        # chunks arrive in and whichever of them are missing.
         for i, (label, surface, local_start, local_end, confidence) in enumerate(matches):
             if offset_index is not None:
                 doc_char_start, doc_char_end = offset_index.resolve_span(local_start, local_end)
@@ -572,7 +569,7 @@ class GazetteerEntityExtractor:
         chunk_prov: Provenance,
         doc_char_start: int,
         doc_char_end: int,
-        pages: tuple[int, int] | None,
+        pages: tuple[int, int],
     ) -> Provenance:
         """Provenance for a mention: chunk lineage + the mention's own span AND page.
 
@@ -580,13 +577,12 @@ class GazetteerEntityExtractor:
         doc_char_end)`` in the parent document. ``pages`` is what the
         :class:`~latence_core.page_index.PageIndexResolver` resolved for that span — so a
         mention on a later page of a multi-page chunk cites *its own* page, and one
-        straddling a page boundary records both. ``None`` (no page map available for the
-        document) degrades to inheriting the chunk's page range.
+        straddling a page boundary records both. There is no "unresolved" case to degrade
+        on: the chunk carries its own page spans or resolution raises (v19).
         """
         update: dict[str, int] = {
             "char_start": doc_char_start,
             "char_end": doc_char_end,
         }
-        if pages is not None:
-            update["page_start"], update["page_end"] = pages
+        update["page_start"], update["page_end"] = pages
         return chunk_prov.model_copy(update=update)

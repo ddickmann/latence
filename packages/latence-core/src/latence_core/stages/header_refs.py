@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
 from latence_core.offsetmap import OffsetIndex
-from latence_core.page_index import PageIndexResolver
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
@@ -242,13 +242,11 @@ class HeaderReferenceExtractor:
         """
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
-        # ONE resolver for the whole call: the page map is document-scoped, so a document's
-        # index is built on the first chunk that carries it and reused for all the rest.
+        # ONE resolver for the whole call, purely so the drift roll-up is per-call. It is
+        # stateless (v19): each chunk carries its own page spans, so a chunk with no self
+        # declaration teaches it nothing and skipping one costs nothing.
         resolver = PageIndexResolver()
         for chunk in chunks:
-            # Observe BEFORE the self-match filter: the chunk carrying the document's page
-            # map (its first, v18) frequently has no self declaration of its own.
-            resolver.observe(chunk)
             chunk_mentions, chunk_relations = self._extract_chunk(chunk, resolver)
             mentions.extend(chunk_mentions)
             relations.extend(chunk_relations)
@@ -338,9 +336,7 @@ class HeaderReferenceExtractor:
                     seen_edges.add(edge_key)
                     emitted_for_header += 1
                     relations.append(
-                        self._relation(
-                            chunk, len(relations), rule, head, tail, resolver
-                        )
+                        self._relation(chunk, len(relations), rule, head, tail)
                     )
         return mentions, relations
 
@@ -351,7 +347,6 @@ class HeaderReferenceExtractor:
         rule: _RelationRule,
         head: EntityMention,
         tail: EntityMention,
-        resolver: PageIndexResolver,
     ) -> RelationMention:
         span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
         span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
@@ -369,7 +364,11 @@ class HeaderReferenceExtractor:
                 head.provenance,
                 span_start,
                 span_end,
-                resolver.pages_for_span(chunk, span_start, span_end),
+                # A covering span runs from one endpoint to the other, so it is not a
+                # sub-chunk offset and no single chunk answers for it. Both endpoints already
+                # resolved their own pages exactly, from their own chunk's spans, so the
+                # covering span's pages are their union — arithmetic, not a lookup.
+                pages_for_covering_span(head.provenance, tail.provenance),
             ),
             classification=chunk.classification,
         )
@@ -394,11 +393,12 @@ def _span_provenance(
     """A synthesized record's Provenance: the chunk lineage + the resolved char/page span.
 
     The char span is the true original-markdown span of the surface (or, for a relation, the
-    covering span of both endpoints). ``pages`` is what the
-    :class:`~latence_core.page_index.PageIndexResolver` resolved for that span, so the record
-    cites the page(s) it actually falls on; ``None`` (no page map available for the document)
-    inherits the chunk's own recorded ``page_start``/``page_end`` (never left ``None`` — the
-    mention contract requires a page span).
+    covering span of both endpoints). ``pages`` is what was resolved for that span — from the
+    chunk's own page spans for a surface, or from the two endpoints' already-exact pages for a
+    relation's covering span (:func:`~latence_core.page_index.pages_for_covering_span`). ``None``
+    only when neither endpoint of a relation recorded a page at all, which inherits the chunk's
+    own ``page_start``/``page_end`` (never left ``None`` — the mention contract requires a page
+    span).
     """
     update: dict[str, int] = {"char_start": doc_char_start, "char_end": doc_char_end}
     if pages is not None:

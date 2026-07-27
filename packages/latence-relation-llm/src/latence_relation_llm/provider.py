@@ -66,7 +66,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import RelationMention
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
 from latence_core.induced import LabelSlot, effective_labels
-from latence_core.pagemap import PageOffsetIndex
+from latence_core.page_index import pages_for_covering_span
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
@@ -76,7 +76,6 @@ if TYPE_CHECKING:
         ChunkRecord,
         EntityMention,
         InducedLabels,
-        PageMap,
         Provenance,
     )
 
@@ -109,14 +108,13 @@ class _DocJob:
     """One document's fully-resolved relate job: everything the network + resolution steps need.
 
     Built ONCE per document (in first-seen order) before the concurrent fetch, so the effective
-    label resolution, reading-ordered + capped mention list, text, and page map are all fixed and
-    the fan-out is pure network — the resolution afterward is deterministic and network-free.
+    label resolution, reading-ordered + capped mention list and text are all fixed and the
+    fan-out is pure network — the resolution afterward is deterministic and network-free.
     """
 
     doc_id: str
     mentions: list[EntityMention]
     text: str
-    page_map: PageMap | None
     labels: list[str]
 
 
@@ -250,7 +248,6 @@ class LLMRelationExtractor:
     ) -> Iterator[RelationMention]:
         chunk_list = list(chunks)
         doc_text = _document_texts(chunk_list)
-        doc_page_map = _document_page_maps(chunk_list)
         # W4 label-source seam (ADR-0038): the relation types the OPTIONAL schema_induction Stage
         # induced per document, read off the document's chunks. UNIONed onto the config labels
         # per document below; absent (the default) ⇒ the effective labels are exactly the config
@@ -281,7 +278,6 @@ class LLMRelationExtractor:
                     doc_id=doc_id,
                     mentions=ordered,
                     text=doc_text.get(doc_id, ""),
-                    page_map=doc_page_map.get(doc_id),
                     labels=labels,
                 )
             )
@@ -335,12 +331,11 @@ class LLMRelationExtractor:
         Runs AFTER the concurrent fetch, in input document order, so the offset math + index
         resolution + provenance stamping are byte-identical to the pre-W6 sequential path.
         """
-        page_index = PageOffsetIndex(job.page_map) if job.page_map is not None else None
         for emitted, rel in enumerate(self._valid_relations(raw, job.mentions, job.labels)):
             head, tail, label, confidence = rel
             span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
             span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
-            provenance = _relation_provenance(head, tail, span_start, span_end, page_index)
+            provenance = _relation_provenance(head, tail, span_start, span_end)
             yield RelationMention(
                 record_id=f"{job.doc_id}#relation-{emitted}",
                 document_record_id=job.doc_id,
@@ -506,33 +501,25 @@ def _document_induced_labels(chunks: list[ChunkRecord]) -> dict[str, InducedLabe
     return labels
 
 
-def _document_page_maps(chunks: list[ChunkRecord]) -> dict[str, PageMap | None]:
-    maps: dict[str, PageMap | None] = {}
-    for chunk in chunks:
-        if chunk.document_record_id not in maps and chunk.page_map is not None:
-            maps[chunk.document_record_id] = chunk.page_map
-    return maps
-
-
 def _relation_provenance(
     head: EntityMention,
     tail: EntityMention,
     span_start: int,
     span_end: int,
-    page_index: PageOffsetIndex | None,
 ) -> Provenance:
-    """Provenance for a relation: shared lineage + covering span AND its page(s)."""
+    """Provenance for a relation: shared lineage + covering span AND its page(s).
+
+    A covering span runs from one endpoint mention to the other, which may be in different
+    chunks, so it is not a sub-chunk offset any one chunk can resolve. Both endpoints already
+    carry their own exactly-resolved pages, so the covering span's pages are their union
+    (:func:`~latence_core.page_index.pages_for_covering_span`). This Provider used to rebuild a
+    whole-document ``PageOffsetIndex`` from the map it scraped off the chunk stream and look the
+    span up in it — which needed the map-carrying chunk to be present, and fell back to exactly
+    this union when it was not.
+    """
     base = head.provenance
     update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
-    if page_index is not None:
-        update["page_start"] = page_index.page_for_offset(span_start)
-        update["page_end"] = page_index.page_for_offset(max(span_end - 1, span_start))
-    else:
-        hp, tp = head.provenance, tail.provenance
-        starts = [p for p in (hp.page_start, tp.page_start) if p is not None]
-        ends = [p for p in (hp.page_end, tp.page_end) if p is not None]
-        if starts:
-            update["page_start"] = min(starts)
-        if ends:
-            update["page_end"] = max(ends)
+    pages = pages_for_covering_span(head.provenance, tail.provenance)
+    if pages is not None:
+        update["page_start"], update["page_end"] = pages
     return base.model_copy(update=update)

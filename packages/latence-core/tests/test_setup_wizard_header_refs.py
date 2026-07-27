@@ -25,7 +25,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from _setup_stack import stage, try_stage
-from latence_core.contracts import ChunkRecord, Classification, Provenance
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    PageSlice,
+    PageSpan,
+    Provenance,
+)
 from latence_core.setup import SetupAnswers, build_stack_config, detect_header_family
 from latence_core.setup.wizard import PROFILE_LITE, PROFILE_SOTA
 from latence_core.stages.header_refs import HeaderReferenceExtractor
@@ -182,6 +188,11 @@ def _chunk(text: str) -> ChunkRecord:
         classification=Classification(language="en", sensitivity="internal"),
         content=text,
         token_count=len(text.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
     )
 
 

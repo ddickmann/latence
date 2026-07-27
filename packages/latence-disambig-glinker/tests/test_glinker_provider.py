@@ -31,6 +31,7 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
     Provenance,
 )
 from latence_core.disambiguation import normalize_text
@@ -339,7 +340,10 @@ def test_mention_context_uses_offset_map_inverse_resolution() -> None:
     chunk_rec = ChunkRecord(
         record_id="ch1", document_record_id="d1:doc", index=0, content=content, token_count=20,
         provenance=prov, classification=cls,
-        page_map=PageMap.from_page_texts([content]).page_map, offset_map=offset_map,
+        page_slice=PageSlice.for_span(
+            PageMap.from_page_texts([content]).page_map, 0, len(content)
+        ),
+        offset_map=offset_map,
     )
     m = EntityMention(
         record_id="m1", document_record_id="d1:doc", chunk_record_id="ch1", index=0,

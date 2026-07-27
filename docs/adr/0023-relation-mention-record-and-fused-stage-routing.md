@@ -28,10 +28,15 @@ and cannot express a relation whose endpoints live in different chunks).
 An `EntityMention` anchors one span; a relation anchors *two*. The relation's
 Provenance char span is the covering `[min(head.start, tail.start),
 max(head.end, tail.end))` in the parent document's assembled markdown, and its page
-span is re-resolved from that covering span through the parent's page map via
-`PageOffsetIndex` — so a relation whose endpoints straddle a page boundary records
-*both* pages (the S5 round-trip: relation → offset → original page), degrading to the
-union of the two mentions' own pages only when no page map is available. The
+span is the union of its two endpoints' own already-exact pages
+(`pages_for_covering_span`) — so a relation whose endpoints straddle a page boundary
+records *both* pages (the S5 round-trip: relation → offset → original page).
+*(Amended for schema v19: this was originally re-resolved by looking the covering span up
+against the parent's whole page map through `PageOffsetIndex`, with the endpoint union as a
+fallback. Since v19 a chunk carries only its OWN `page_slice`, and a covering span is not a
+sub-chunk offset — its endpoints may sit in DIFFERENT chunks, so no single chunk can answer
+for it. The endpoint union was the correct answer all along; the lookup was the redundant
+path, and it only ever worked because some chunk happened to carry the whole map.)* The
 `RelationMention` contract *enforces* the span (no char span or no page span ⇒
 validation failure) and *enforces distinct head/tail* (no self-relation), so a
 Provider that forgets to resolve the endpoint offsets, or hallucinates a

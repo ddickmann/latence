@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING, Any
 from latence_core.capability import FusedExtraction
 from latence_core.contracts import EntityMention, RelationMention
 from latence_core.offsetmap import OffsetIndex
-from latence_core.page_index import PageIndexResolver
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 from latence_core.stages.header_refs import _span_provenance
 
@@ -280,15 +280,11 @@ class InlineReferenceExtractor:
         """
         mentions: list[EntityMention] = []
         relations: list[RelationMention] = []
-        # ONE resolver for the whole call. It replaces the hand-rolled per-chunk page-index
-        # cache this Provider used to keep — the only one of the five core call sites that
-        # cached at all, and even it re-derived an index per CHUNK rather than per document.
+        # ONE resolver for the whole call, purely so the drift roll-up is per-call. It is
+        # stateless (v19): each chunk carries its own page spans, so a chunk that cites
+        # nothing teaches it nothing and skipping one costs nothing.
         resolver = PageIndexResolver()
         for doc_chunks in self._group_by_document(chunks):
-            # Observe EVERY chunk of the document, not just the ones a citation lands in:
-            # the page map rides the first chunk (v18), which often cites nothing.
-            for chunk in doc_chunks:
-                resolver.observe(chunk)
             doc_mentions, doc_relations = self._extract_document(doc_chunks, resolver)
             mentions.extend(doc_mentions)
             relations.extend(doc_relations)
@@ -435,7 +431,7 @@ class InlineReferenceExtractor:
                 if tail.record_id == head.record_id:
                     continue
                 relations.append(
-                    self._relation(chunk, len(relations), head, tail, resolver)
+                    self._relation(chunk, len(relations), head, tail)
                 )
         return mentions, relations
 
@@ -445,7 +441,6 @@ class InlineReferenceExtractor:
         index: int,
         head: EntityMention,
         tail: EntityMention,
-        resolver: PageIndexResolver,
     ) -> RelationMention:
         span_start = min(head.provenance.char_start or 0, tail.provenance.char_start or 0)
         span_end = max(head.provenance.char_end or 0, tail.provenance.char_end or 0)
@@ -463,7 +458,11 @@ class InlineReferenceExtractor:
                 head.provenance,
                 span_start,
                 span_end,
-                resolver.pages_for_span(chunk, span_start, span_end),
+                # Genuinely cross-chunk: the head is the document's SELF declaration (often in
+                # chunk 0) and the tail is wherever the citation was found, so no one chunk
+                # spans it. Both endpoints resolved their own pages exactly from their own
+                # chunk's spans, so the covering span's pages are their union.
+                pages_for_covering_span(head.provenance, tail.provenance),
             ),
             classification=chunk.classification,
         )

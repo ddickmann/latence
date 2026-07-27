@@ -28,6 +28,7 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
     PageSpan,
     PIISpan,
     Provenance,
@@ -248,7 +249,8 @@ def _chunk(*, redacted: bool) -> ChunkRecord:
         index=0,
         content=CHUNK_TEXT,
         token_count=12,
-        page_map=_PAGE_MAP,
+        # v19: the chunk carries the spans it overlaps, cut from the document's map.
+        page_slice=PageSlice.for_span(_PAGE_MAP, 10, 91),
         offset_map=_OFFSET_MAP,
         risk_markers=[_RISK_MARKER],
         masked_content=MASKED_CHUNK_TEXT if redacted else None,
@@ -278,7 +280,7 @@ def _sensitive_chunk() -> ChunkRecord:
         index=1,
         content="Board pay review, see appendix.",
         token_count=7,
-        page_map=_PAGE_MAP,
+        page_slice=PageSlice.for_span(_PAGE_MAP, 91, 120),
         redaction_disabled_for_sensitive=True,
     )
 

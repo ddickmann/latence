@@ -20,7 +20,7 @@ Since W16 (ADR-0042) Redaction is a **chunk→chunk transform**: a detector scan
 PII is truncated) and the shared :func:`plan_chunk_redaction` / :func:`finalize_redacted_chunk`
 tail produces the redacted chunk (``masked_content`` + chunk-local ``pii_spans``, ``content``
 unchanged). A span's chunk-local offset resolves to its ORIGINAL source page through the chunk's
-``offset_map`` + ``page_map`` (the ADR-0031 round trip). The deprecated document-level helpers
+``offset_map`` + ``page_slice`` (the ADR-0031 round trip). The deprecated document-level helpers
 (:func:`build_span`, the :class:`RedactionPolicy` resolve, :func:`apply_masking`) remain for the
 superseded ``RedactionRecord`` path.
 
@@ -232,16 +232,14 @@ def plan_chunk_redaction(
     A chunk classified in ``sensitive_set`` whose control runs no detector carries
     ``disabled_for_sensitive=True`` (the LOUD H-C1 §4 signal). ``offset_index`` is built from the
     chunk's offset_map (chunk-scoped, so genuinely per chunk); page resolution goes through
-    ``resolver``, the DOCUMENT-scoped :class:`~latence_core.page_index.PageIndexResolver`, so a
-    chunk-content span resolves to its ORIGINAL source page.
+    ``resolver``, the :class:`~latence_core.page_index.PageIndexResolver`, so a chunk-content span
+    resolves to its ORIGINAL source page.
 
-    **``resolver`` is REQUIRED, and must outlive the chunk loop.** A Redactor builds ONE
-    :class:`~latence_core.page_index.PageIndexResolver` per ``redact`` call and hands it to every
-    ``plan_chunk_redaction``: since v18 a document's page map rides its FIRST chunk only, so a
-    resolver that does not span the whole call resolves pages for that chunk and emits
-    ``page_start=None`` on every later one. It has no default *because* it once had one — all
-    three shipped learned Redactors omitted it, and the resulting provenance loss (ADR-0021/0031)
-    was silent. A missing resolver is now a ``TypeError`` at the call site, not a null page.
+    ``resolver`` is REQUIRED. It has no default *because* it once had one — all three shipped
+    learned Redactors omitted it, and the resulting provenance loss (ADR-0021/0031) was silent. A
+    missing resolver is a ``TypeError`` at the call site, not a null page. Since v19 the resolver
+    is stateless, so it need not outlive anything and the order chunks are planned in is
+    irrelevant; one per ``redact`` call is simply the cheapest way to get one drift roll-up.
     """
     from latence_core.offsetmap import OffsetIndex
 
@@ -254,9 +252,6 @@ def plan_chunk_redaction(
     disabled_for_sensitive = not would_run_detectors and sensitivity in sensitive_set
     offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
     base_char_start = chunk.provenance.char_start or 0
-    # Planning happens for EVERY chunk (before detection, before the skip decision), which
-    # makes it the one place guaranteed to see the chunk that carries the document's map.
-    resolver.observe(chunk)
     return ChunkRedactionPlan(
         action=action,
         allowed=allowed,
@@ -287,11 +282,11 @@ def build_chunk_span(
     :func:`apply_masking` masks in, so they are stored verbatim on the span). The source page(s) are
     resolved by mapping the local offset back to its ORIGINAL-markdown offset through the chunk's
     :class:`~latence_core.offsetmap.OffsetIndex` (identity ``base_char_start + local`` when the
-    chunk carries no offset_map) and then to a page through the plan's document-scoped
-    :class:`~latence_core.page_index.PageIndexResolver`. Both pages are ``None`` when no page map
-    is available for the document — the same degradation the doc-level path used, now counted on
-    the resolver rather than silently branched on here. The raw ``value`` derives the
-    deterministic placeholder and is never stored (S6 AC).
+    chunk carries no offset_map) and then to a page through the plan's
+    :class:`~latence_core.page_index.PageIndexResolver`, which reads the chunk's own page spans.
+    A chunk carrying none raises :class:`~latence_core.errors.PageSliceMissingError` rather than
+    emitting a span whose page is the chunk's inherited range dressed up as a resolved one. The
+    raw ``value`` derives the deterministic placeholder and is never stored (S6 AC).
     """
     placeholder = placeholder_for(pii_type, value, action, salt)
     if plan.offset_index is not None:

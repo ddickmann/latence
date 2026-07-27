@@ -22,6 +22,8 @@ from latence_core.contracts import (
     Classification,
     OffsetMap,
     OffsetSegment,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
@@ -62,6 +64,11 @@ def _chunk(text: str, *, sensitivity: str = "public") -> ChunkRecord:
         classification=Classification(language="en", sensitivity=sensitivity),
         content=text,
         token_count=len(text.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
         offset_map=OffsetMap(
             segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)
         ),

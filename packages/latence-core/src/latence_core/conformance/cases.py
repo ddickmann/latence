@@ -39,6 +39,8 @@ from latence_core.contracts import (
     Classification,
     Disposition,
     DocumentRecord,
+    PageSlice,
+    PageSpan,
     ParserInput,
     Provenance,
     Record,
@@ -274,6 +276,20 @@ def _records_contract_valid(records: Sequence[object], *, empty_ok: bool) -> boo
     return _provenance_and_classification_present(recs) and _offsets_in_range(recs)
 
 
+def _zero_length_page_slice() -> PageSlice:
+    """The page slice of an empty chunk anchored at document offset 0: page 1, zero-length.
+
+    Every adversarial "graceful empty" probe below builds a zero-length chunk. Since v19 a
+    chunk describes its own pages, so the probe stamps one rather than leaving the field
+    ``None`` — a missing slice is a different failure (a Chunker defect,
+    :class:`~latence_core.errors.PageSliceMissingError`) and conflating the two would let a
+    Provider pass the empty-input case for the wrong reason.
+    """
+    return PageSlice(
+        pages=[PageSpan(page_number=1, char_start=0, char_end=0)], total_chars=0
+    )
+
+
 def _page_offsets_resolve(records: Sequence[object]) -> bool:
     """A stronger offset audit for sub-document carriers: the span resolves, and to the CITED page.
 
@@ -286,10 +302,11 @@ def _page_offsets_resolve(records: Sequence[object]) -> bool:
        reuse the same :class:`PageOffsetIndex` the Runner's drift audit uses.
     2. **The record CITES the page it resolved to.** The resolved page numbers used to be
        discarded, which made the whole audit blind to the failure rule 3 of docs/CONFORMANCE.md
-       exists to prevent: since schema v18 a document's page map rides its FIRST chunk only, so a
-       Provider that rebuilds a throwaway ``PageOffsetIndex`` per chunk (the pre-v18 pattern) finds
-       ``chunk.page_map is None`` on every later chunk and silently degrades that chunk's mentions
-       to the chunk's *inherited* page range. Those records are perfectly resolvable — they just
+       exists to prevent: a Provider that never resolves a sub-chunk offset at all just stamps the
+       parent chunk's *inherited* page range on every mention it emits. (Before v19 the same
+       failure arrived by a second route: the document's map rode its FIRST chunk only, so a
+       Provider resolving out of stream order, or after a Stage dropped that chunk, silently
+       degraded too.) Those records are perfectly resolvable — they just
        cite the wrong page. Comparing ``prov.page_start``/``page_end`` against what the parent
        DOCUMENT's map says is therefore the actual machine gate behind rule 3, and it is what makes
        the paginated canonical corpus (:data:`fixtures.CANONICAL_PAGES`) worth having.
@@ -371,11 +388,11 @@ def _pii_chunk() -> ChunkRecord:
 
     W16 (ADR-0042): Redaction is a chunk→chunk transform, so its adversarial input is a chunk
     carrying the PII payload. A Redactor must handle it gracefully (mask + return the chunk, never
-    a crash, never PII in any raised error). Built with a single-page page_map + identity
+    a crash, never PII in any raised error). Built with a single-page page_slice + identity
     offset_map so a chunk-local span still resolves to a page (the shared chunk page-resolution
     seam).
     """
-    from latence_core.contracts import OffsetMap, OffsetSegment, PageMap
+    from latence_core.contracts import OffsetMap, OffsetSegment, PageMap, PageSlice
 
     text = fixtures.PII_ADVERSARIAL_TEXT
     assembly = PageMap.from_page_texts([text])
@@ -388,7 +405,7 @@ def _pii_chunk() -> ChunkRecord:
         classification=_ADVERSARIAL_CLASSIFICATION,
         content=text,
         token_count=len(text.split()),
-        page_map=assembly.page_map,
+        page_slice=PageSlice.for_span(assembly.page_map, 0, len(text)),
         offset_map=OffsetMap(
             segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(text)
         ),
@@ -839,7 +856,7 @@ def _content_screening_case() -> ConformanceCase:
             classification=base.classification,
             content=fixtures.PII_ADVERSARIAL_TEXT,
             token_count=base.token_count,
-            page_map=base.page_map,
+            page_slice=base.page_slice,
         )
         return _capture_raise(lambda: provider.screen_content([injected]))
 
@@ -990,6 +1007,10 @@ def _entity_case(*, stub_scoped: bool, gliner: bool) -> ConformanceCase:
             classification=base.classification,
             content="",
             token_count=0,
+            # A zero-length chunk at offset 0 still describes its own page (v19): the
+            # adversarial case under test is "graceful empty", not a producer that forgot
+            # to stamp page spans, which is a separate typed failure.
+            page_slice=_zero_length_page_slice(),
         )
         return _capture_raise(lambda: list(provider.extract([empty_chunk])))
 
@@ -1070,6 +1091,7 @@ def _relation_case(*, stub_scoped: bool, gliner: bool, backend: str = "gliner") 
                 classification=base.classification,
                 content="",
                 token_count=0,
+                page_slice=_zero_length_page_slice(),
             )
             return _capture_raise(
                 lambda: [*provider.extract_fused([empty_chunk]).mentions,
@@ -1170,6 +1192,10 @@ def _header_refs_case() -> ConformanceCase:
             classification=base.classification,
             content="",
             token_count=0,
+            # A zero-length chunk at offset 0 still describes its own page (v19): the
+            # adversarial case under test is "graceful empty", not a producer that forgot
+            # to stamp page spans, which is a separate typed failure.
+            page_slice=_zero_length_page_slice(),
         )
         return _capture_raise(
             lambda: [
@@ -1224,6 +1250,10 @@ def _inline_refs_case() -> ConformanceCase:
             classification=base.classification,
             content="",
             token_count=0,
+            # A zero-length chunk at offset 0 still describes its own page (v19): the
+            # adversarial case under test is "graceful empty", not a producer that forgot
+            # to stamp page spans, which is a separate typed failure.
+            page_slice=_zero_length_page_slice(),
         )
         return _capture_raise(
             lambda: [

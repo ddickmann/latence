@@ -31,6 +31,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
@@ -73,7 +75,17 @@ def _chunk(
         classification=Classification(language="en", sensitivity=sensitivity),
         content=content,
         token_count=max(len(content.split()), 0),
-        page_map=page_map,
+        # v19: the chunk carries its OWN page spans. Cut them from ``page_map`` when the
+        # test supplies a real multi-page document; otherwise the fixture is a one-page
+        # document and the chunk's slice is that single page.
+        page_slice=(
+            PageSlice.for_span(page_map, char_start, char_start + len(content))
+            if page_map is not None
+            else PageSlice(
+                pages=[PageSpan(page_number=1, char_start=0, char_end=char_start + len(content))],
+                total_chars=char_start + len(content),
+            )
+        ),
         offset_map=OffsetMap(
             segments=[OffsetSegment(local_start=0, doc_start=char_start)], length=len(content)
         )
@@ -334,15 +346,17 @@ def test_span_page_resolves_through_page_map(fake_presidio: type[_FakeAnalyzerEn
     assert rec.pii_spans[0].page_start == 2
 
 
-def test_span_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+def test_span_page_resolves_on_a_later_chunk_handed_over_first(
     fake_presidio: type[_FakeAnalyzerEngine],
 ) -> None:
-    """REGRESSION (audit R1): the ONE resolver must span the whole ``redact`` call.
+    """REGRESSION (audit R1/R4): a later chunk's PII span cites its OWN source page.
 
-    Schema v18 stamps a document's ``page_map`` on its **first** chunk only, so a Provider that
-    lets :func:`plan_chunk_redaction` mint a throwaway ``PageIndexResolver`` per chunk has no map
-    for chunk 1..N and every PIISpan there is emitted with ``page_start=None`` — provenance lost
-    for ~every chunk of every real document (ADR-0021/0031).
+    Chunk 1 sits wholly on page 2 of a two-page document. The failure this stands against is
+    a span emitted with ``page_start=None`` or with the parent chunk's inherited page —
+    provenance lost for ~every chunk of every real document (ADR-0021/0031). Under v18 the
+    map rode chunk 0 only, so the property held only if one resolver spanned the whole
+    ``redact`` call AND chunk 0 arrived first. Since v19 the chunk carries its own page
+    spans, so the later chunk is handed over FIRST here and the answer is still exact.
     """
     assembly = PageMap.from_page_texts(["Nothing here.", "Reach alice@example.com."])
     text = assembly.text
@@ -355,16 +369,23 @@ def test_span_page_resolves_on_a_later_chunk_that_carries_no_page_map(
          "score": 0.9}
     ]
     chunks = [
-        # v18 carriage: the map rides chunk 0 ONLY.
+        # v19 carriage: every chunk carries its own slice, so stream order is irrelevant —
+        # the later chunk is fed FIRST, which under v18 lost its page entirely.
+        _chunk(
+            tail,
+            page_map=assembly.page_map,
+            record_id="doc1#chunk:1",
+            index=1,
+            char_start=boundary,
+        ),
         _chunk(head, page_map=assembly.page_map, record_id="doc1#chunk:0", index=0),
-        _chunk(tail, record_id="doc1#chunk:1", index=1, char_start=boundary),
     ]
     recs = list(PresidioRedactor(_config()).redact(chunks))
-    assert recs[0].pii_spans == []
-    span = recs[1].pii_spans[0]
+    assert recs[1].pii_spans == []  # the HEAD chunk, fed second
+    span = recs[0].pii_spans[0]  # the TAIL chunk, fed first
     assert (span.page_start, span.page_end) == (2, 2), (
-        "a PII span on a non-first v18 chunk must resolve its OWN source page through the "
-        "document-scoped resolver, not degrade to None"
+        "a PII span on a later chunk must resolve its OWN source page from that chunk's own "
+        "page spans, whatever order the chunks arrive in"
     )
 
 

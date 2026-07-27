@@ -40,6 +40,8 @@ from latence_core.contracts import (
     InducedLabels,
     OffsetMap,
     OffsetSegment,
+    PageSlice,
+    PageSpan,
     Provenance,
 )
 from latence_core.pipeline import Pipeline
@@ -183,6 +185,11 @@ def _chunk() -> ChunkRecord:
         classification=Classification(language="de", sensitivity="public"),
         content=_TEXT,
         token_count=len(_TEXT.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(_TEXT))],
+            total_chars=len(_TEXT),
+        ),
         offset_map=OffsetMap(
             segments=[OffsetSegment(local_start=0, doc_start=0)], length=len(_TEXT)
         ),

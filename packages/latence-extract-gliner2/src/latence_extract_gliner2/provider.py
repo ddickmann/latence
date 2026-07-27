@@ -52,11 +52,11 @@ Offsets (the recurring coordinate trap, ADR-0031): the chunk-local model offsets
 TRUE original-markdown offsets through the chunk's stripped→original ``offset_map`` via
 :class:`~latence_core.offsetmap.OffsetIndex` (``char_start + local`` is only a lower bound once
 markdown markup was stripped; a pre-v11 chunk with no map degrades to that shift). Each page span is
-re-resolved through the document-scoped :class:`~latence_core.page_index.PageIndexResolver`; ONE
-resolver serves the whole ``extract_fused`` call, so a chunk that carries no page map (every
-non-first chunk since schema v18) still resolves from the map its document's first chunk carried,
-and a document's index is built once rather than once per chunk. A relation's covering span is the
-min/max of its resolved endpoints, so it inherits the correction.
+re-resolved through :class:`~latence_core.page_index.PageIndexResolver`, which reads the chunk's
+OWN ``page_slice`` (v19) — so every chunk resolves exactly, in any order, whichever siblings a
+Stage dropped. ONE resolver serves the whole ``extract_fused`` call so the drift roll-up is per
+call. A relation's covering span spans two chunks, so it is answered from the endpoints' own
+already-exact pages (:func:`~latence_core.page_index.pages_for_covering_span`), not by a lookup.
 
 Licensing (ADR-0012 / research-diligence, verified 2026-07-10 — weights AND code, separately):
     * ``gliner2`` library (PyPI + github.com/fastino-ai/GLiNER2): **Apache-2.0** (code) — LICENSE
@@ -91,7 +91,7 @@ from latence_core.contracts import EntityMention, RelationMention
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.induced import LabelFloor, LabelSlot, effective_labels, resolve_label_floor
 from latence_core.offsetmap import OffsetIndex
-from latence_core.page_index import PageIndexResolver
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.providers.adapter import validate_batch_size
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import (
@@ -928,7 +928,10 @@ class Gliner2FusedExtractor:
                 tail,
                 span_start,
                 span_end,
-                resolver.pages_for_span(chunk, span_start, span_end),
+                # A covering span runs between two endpoints and is not a sub-chunk offset,
+                # so it is answered from the endpoints' own already-exact pages rather than by
+                # a lookup against any one chunk.
+                pages_for_covering_span(head.provenance, tail.provenance),
             )
             relations.append(
                 RelationMention(
@@ -967,10 +970,6 @@ def _iter_batches(
     """
     batch: list[ChunkRecord] = []
     for chunk in chunks:
-        # Observe BEFORE the min_chars drop: a document's page map rides its FIRST chunk (schema
-        # v18) and that chunk is very often the one dropped here, so absorbing only from chunks
-        # that reach the model would lose the map for the whole document.
-        resolver.observe(chunk)
         if len(chunk.content.strip()) < min_chars:
             continue
         batch.append(chunk)

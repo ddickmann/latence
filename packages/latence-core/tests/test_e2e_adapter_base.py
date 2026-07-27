@@ -33,6 +33,7 @@ from latence_core.contracts import (
     Classification,
     EntityMention,
     PageMap,
+    PageSlice,
     PageSpan,
     Provenance,
 )
@@ -92,8 +93,9 @@ class _AdapterGazetteer(AdapterBase):
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
         # Batch the chunks through the AdapterBase helper (grouped iff profile.batch),
         # deterministic input order either way. Each batch is mapped by _run_batch.
-        # ONE resolver for the whole call: page maps are DOCUMENT-scoped and (since v18) ride
-        # a document's FIRST chunk only, so a per-chunk resolver would lose them.
+        # ONE resolver for the whole call — not for correctness (since v19 the chunk carries
+        # its own spans, so resolution is per-record) but so the drift roll-up covers the
+        # whole call rather than being thrown away per chunk.
         resolver = PageIndexResolver()
 
         def run_batch(chunks_in: list[ChunkRecord]) -> list[EntityMention]:
@@ -106,9 +108,6 @@ class _AdapterGazetteer(AdapterBase):
     ) -> list[EntityMention]:
         out: list[EntityMention] = []
         for chunk in chunks:
-            # Observe EVERY chunk, before the term filter decides it is uninteresting: the
-            # map-carrying first chunk of a document is often the one with no match at all.
-            resolver.observe(chunk)
             out.extend(self._extract_one(chunk, resolver))
         return out
 
@@ -317,16 +316,18 @@ def test_adapter_native_error_maps_to_provider_error_and_fails_stage(
     assert '"provider"' in s.read_text(report_uri)
 
 
-# -- the v18 page-map shape through the PUBLIC adapter seam (audit R2) ---------
+# -- the v19 page-slice shape through the PUBLIC adapter seam (audit R2) -------
 
 
 def _two_chunk_document() -> list[ChunkRecord]:
-    """A 2-page document in the SHIPPED v18 chunk shape: the map rides chunk 0 only.
+    """A 2-page document in the SHIPPED v19 chunk shape: every chunk carries its own spans.
 
-    Page 1 is ``[0, 100)``, page 2 is ``[100, 200)``. Chunk 0 is the map carrier and holds
-    no term (a document's first chunk is very often the least interesting one). Chunk 1
-    straddles the page boundary (``[90, 119)``, provenance pages 1-2) and carries the term
-    at document offset 102 — i.e. on page **2**, not on the first page of its own chunk.
+    Page 1 is ``[0, 100)``, page 2 is ``[100, 200)``. Chunk 0 holds no term (a document's
+    first chunk is very often the least interesting one, and under v18 it was also the only
+    map carrier — so an adapter's term filter dropping it took the whole document's page
+    resolution with it). Chunk 1 straddles the page boundary (``[90, 119)``, provenance
+    pages 1-2) and carries the term at document offset 102 — i.e. on page **2**, not on the
+    first page of its own chunk.
     """
     page_map = PageMap(
         pages=[
@@ -358,7 +359,7 @@ def _two_chunk_document() -> list[ChunkRecord]:
         index=0,
         content="Title page.",
         token_count=2,
-        page_map=page_map,  # v18: the ONLY carrier of this document's map
+        page_slice=PageSlice.for_span(page_map, 0, 12),  # v19: its own page, page 1
     )
     second_content = "pad pad pad Acme Corp tail xx"  # 'Acme Corp' at local 12 -> doc 102
     second = ChunkRecord(
@@ -369,22 +370,21 @@ def _two_chunk_document() -> list[ChunkRecord]:
         index=1,
         content=second_content,
         token_count=6,
-        page_map=None,  # v18: every chunk after the first carries no map
+        # v19: the chunk STRADDLES the break, so its own slice carries both spans.
+        page_slice=PageSlice.for_span(page_map, 90, 90 + len(second_content)),
     )
     return [first, second]
 
 
 def test_reference_adapter_cites_the_mentions_own_page_on_a_later_chunk() -> None:
-    """A mention on page 2 of a page-straddling, map-less chunk must cite page 2 (ADR-0021/0031).
+    """A mention on page 2 of a page-straddling chunk must cite page 2 (ADR-0021/0031).
 
     The regression this pins is about the PUBLIC seam third parties are pointed at: the
     reference adapter resolves pages exactly the way ``docs/writing-an-adapter.md`` instructs.
-    Under schema v18 a document's ``page_map`` rides its FIRST chunk only, so a helper that
-    reads ``chunk.page_map`` sees ``None`` on every later chunk and silently degrades the
-    mention to its chunk's INHERITED range ``(1, 2)`` — a plausible-looking wrong page, which
-    is why no existing test caught it. Going through the ``PageIndexResolver`` seam (which the
-    adapter feeds with EVERY chunk, including the term-free carrier) resolves the mention's own
-    page: ``(2, 2)``.
+    The defect it stands against is inheriting the parent chunk's whole ``(1, 2)`` range —
+    a plausible-looking wrong page, which is why no existing test caught it. Note the adapter
+    never sees chunk 0's spans here: chunk 1 is the only record consulted, and under v19 that
+    is enough because the chunk carries its own slice.
     """
     adapter = _AdapterGazetteer({"labels": {"ORG": {"terms": ["Acme Corp"]}}})
     mentions = list(adapter.extract(_two_chunk_document()))

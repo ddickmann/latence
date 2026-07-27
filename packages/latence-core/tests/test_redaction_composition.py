@@ -39,6 +39,8 @@ import yaml
 from latence_core.contracts import (
     ChunkRecord,
     Classification,
+    PageSlice,
+    PageSpan,
     Provenance,
     RedactionAction,
 )
@@ -249,6 +251,11 @@ def _chunk(text: str) -> ChunkRecord:
         classification=Classification(language="en", sensitivity="internal"),
         content=text,
         token_count=len(text.split()),
+        # v19: a one-page fixture — the chunk's own page spans are that single page.
+        page_slice=PageSlice(
+            pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
+            total_chars=len(text),
+        ),
     )
 
 

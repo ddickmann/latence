@@ -81,6 +81,7 @@ from latence_core.contracts import (
     OffsetSegment,
     PageMap,
     PageMapAssembly,
+    PageSlice,
     PageSpan,
     ParserInput,
     PIISpan,
@@ -112,6 +113,7 @@ from latence_core.errors import (
     ConfigError,
     ContractError,
     LatenceError,
+    PageSliceMissingError,
     ProviderError,
     ScreeningQuarantineError,
     StorageError,
@@ -149,7 +151,7 @@ from latence_core.observability import (
     validate_run_event,
 )
 from latence_core.offsetmap import OffsetIndex
-from latence_core.page_index import PageIndexResolver, rehome_page_maps
+from latence_core.page_index import PageIndexResolver, pages_for_covering_span
 from latence_core.pagemap import PageDriftDiagnostics, PageOffsetIndex
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.providers import (
@@ -332,6 +334,8 @@ __all__ = [
     "PageIndexResolver",
     "PageMap",
     "PageMapAssembly",
+    "PageSlice",
+    "PageSliceMissingError",
     "PageOffsetIndex",
     "PrometheusMetricSink",
     "PIIDetector",
@@ -402,9 +406,9 @@ __all__ = [
     "estimate_tokens",
     "make_graph_id",
     "observability_available",
+    "pages_for_covering_span",
     "profile_of",
     "record_quality_report",
-    "rehome_page_maps",
     "score_entities",
     "score_relations",
     "select_device",

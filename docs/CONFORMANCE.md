@@ -14,7 +14,7 @@ quality/throughput needs a rig, #64 — flagged, never fabricated).
 
 | Check | What it asserts |
 |---|---|
-| **C1** valid typed records | On the canonical input your Provider emits contract-valid records: every record carries `Provenance` + `Classification` and in-range, well-ordered offsets (reusing the S10 completeness + ADR-0031 `PageOffsetIndex` seams). For a **sub-document carrier** (a mention/relation) a cited `page_start`/`page_end` must **be the page the record's own offset resolves to** through the parent document's page map — the machine gate on rule 3 below. The canonical corpus is deliberately multi-page and multi-chunk (its second chunk carries `page_map=None` and spans two pages), so a Provider that inherits the chunk's page range instead of resolving **FAILs**. An empty result is allowed **only** where your Capability legitimately produces none. |
+| **C1** valid typed records | On the canonical input your Provider emits contract-valid records: every record carries `Provenance` + `Classification` and in-range, well-ordered offsets (reusing the S10 completeness + ADR-0031 `PageOffsetIndex` seams). For a **sub-document carrier** (a mention/relation) a cited `page_start`/`page_end` must **be the page the record's own offset resolves to** through the parent document's page map — the machine gate on rule 3 below. The canonical corpus is deliberately multi-page and multi-chunk (its second chunk STRADDLES a page break, so its `page_slice` holds two spans), so a Provider that inherits the chunk's page range instead of resolving **FAILs**. An empty result is allowed **only** where your Capability legitimately produces none. |
 | **C2** graceful failure | On an adversarial input (malformed / oversized / injection-bearing / empty) your Provider raises a **typed** `LatenceError` (a `ProviderError`/`ConfigError`), **or** takes your Capability's defined graceful path (a Screening quarantine, a `PARSE_ERROR` disposition, or an empty/no-op result) — **never** a bare crash, hang, or silent-wrong output. The surfaced message / reason carries **no PII or record content** (proven against a PII-bearing payload). |
 | **C3** license recorded + permissive-or-opt-in | Your Provider declares a `ProviderProfile` (a missing profile **FAILs**). Its `license` is a real SPDX id or the `UNVERIFIED` sentinel; `UNVERIFIED` must never appear with `license_verified=True`; a **restricted** (non-permissive) license must be `license_verified=True` (flagged opt-in, ADR-0012). |
 | **C4** determinism-or-documented | If your profile says `deterministic=True`, running the canonical input **twice** must yield byte-identical output. If not, declare `deterministic=False` — the suite records the declaration, no assertion. Declaring `True` and not being is a **FAIL**. |
@@ -37,10 +37,11 @@ quality/throughput needs a rig, #64 — flagged, never fabricated).
    Screening quarantine, a `PARSE_ERROR` record, an empty result).
 3. **Keep offsets/Provenance intact.** Every emitted record carries `Provenance` + `Classification`;
    a sub-document carrier (a mention/relation) resolves its char span back to a source page through
-   the parent's page map (reuse `OffsetIndex`/`PageIndexResolver` — `AdapterBase.rebase_offsets` /
-   `resolve_pages` — not a weaker copy, and not a throwaway per-chunk page index: since v18 the
-   map rides a document's FIRST chunk only, so use ONE `PageIndexResolver` per call and
-   `observe()` every chunk).
+   the parent's page spans (reuse `OffsetIndex`/`PageIndexResolver` — `AdapterBase.rebase_offsets`
+   / `resolve_pages` — not a weaker copy, and not a hand-rolled page index: since v19 the chunk
+   carries its OWN `page_slice`, so one `PageIndexResolver` per call resolves any chunk, in any
+   order. A relation's covering span spans two chunks and is answered by
+   `pages_for_covering_span(head.provenance, tail.provenance)` instead).
 4. **Be deterministic, or say you are not.** Emit records in a stable order; if learned float
    inference makes byte-identical output impossible, declare `deterministic=False`.
 5. **Stay dep-light at import.** Defer your heavy `import` to first use so Provider discovery (and

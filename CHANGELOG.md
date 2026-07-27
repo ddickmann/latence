@@ -261,6 +261,42 @@ workspace are versioned and released together under one version number.
 
 ### Changed
 
+- **A chunk describes its OWN pages — `ChunkRecord.page_map` becomes `ChunkRecord.page_slice`
+  and `PageIndexResolver` becomes STATELESS (`SCHEMA_VERSION` 18 → 19, BREAKING).** v18 kept the
+  payload win (below) but bought it with a SHAPE defect: the whole document's `PageMap` rode ONE
+  record of the chunk stream — the document's first chunk — and the resolver adopted it from
+  whichever record it saw first. That made page resolution depend on two things that are not
+  properties of the chunk being resolved: that the map-carrying record was **observed first**
+  (every batching extractor resolves out of stream order) and that it **survived every filtering
+  Stage** (any chunk→chunk Capability may drop chunk 0, and Screening quarantining a title page
+  routinely did). Both failures degraded SILENTLY to the chunk's inherited page range — a
+  plausible-looking WRONG page, indistinguishable from a correct one in the output. Four audit
+  rounds patched the consequences (`rehome_page_maps()`, then an LRU retention window, then that
+  window's own justification) and never the shape.
+  `ChunkRecord.page_map: PageMap` is therefore **replaced** by `ChunkRecord.page_slice: PageSlice`
+  — exactly the document page spans overlapping that chunk's own `[char_start, char_end)`, in the
+  document's original coordinates. One span for a chunk inside a page, two for a chunk straddling
+  a page break. A chunk never needed the whole document's map: the only question asked of it is
+  which page a SUB-CHUNK offset falls on. Order- and drop-independence are now properties of the
+  record rather than of the stream, so the failure mode is not mitigated but **inexpressible** —
+  and ~99.8% of the v18 payload win is kept (~2 spans, ~60 bytes, against a ~30 KB whole-document
+  map). Provenance is byte-identical (ADR-0021/0031).
+  **Deleted, not deprecated:** `PageIndexResolver.observe()`, its per-document memoisation, the
+  `max_live_pages` retention window and its `evicted_reentries`/`documents`/`unresolved`
+  counters, `PageIndexResolver.from_documents()`, `rehome_page_maps()` and
+  `DEFAULT_MAX_LIVE_DOCUMENTS` — every one of them was compensating mechanism for the old shape.
+  `page_for(chunk, offset) -> int` and `pages_for_span(chunk, start, end) -> tuple[int, int]` no
+  longer return `None`: a chunk carrying no spans raises `PageSliceMissingError` (ADR-0034 — a
+  failure is observable or it is not handled), and `AdapterBase.resolve_pages` no longer degrades
+  to the chunk's inherited range. A relation's **covering span** — whose endpoints may sit in
+  different chunks, so no single chunk can answer for it — is now computed by the new
+  `pages_for_covering_span(head, tail)`, arithmetic on the two endpoints' already-exact pages,
+  replacing the "anchor chunk" lookup that only ever worked because the anchor carried the whole
+  map. **Migration:** chunk checkpoints are run-scoped artifacts and a run is re-chunked from its
+  Parse checkpoint, so there is no data migration to perform — the schema bump is the notice. A
+  Provider that read `chunk.page_map` must go through `PageIndexResolver`; see ADR-0022's C1
+  amendment and `docs/writing-an-adapter.md`. `DocumentRecord.page_map` is **unchanged** — the
+  document genuinely has a whole-document map, and it is what the slice is cut from.
 - **The document page map stops riding every chunk — one `PageIndexResolver` seam replaces five
   hand-rolled per-chunk indices (`SCHEMA_VERSION` 17 → 18).** `PageMap` is DOCUMENT-scoped state,
   invariant across every chunk of its document, yet `ChunkRecord` carried it by value on all N

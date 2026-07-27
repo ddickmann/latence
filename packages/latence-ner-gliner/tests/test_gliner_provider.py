@@ -23,6 +23,8 @@ from latence_core.contracts import (
     OffsetMap,
     OffsetSegment,
     PageMap,
+    PageSlice,
+    PageSpan,
     Provenance,
 )
 from latence_core.errors import ConfigError, ProviderError
@@ -60,7 +62,24 @@ def _chunk(
         classification=Classification(language="en", sensitivity="internal"),
         content=content,
         token_count=len(content.split()),
-        page_map=page_map,
+        # v19: the chunk carries its OWN page spans, cut from the parent document's map.
+        # Absent a map the fixture is a one-page document, so the slice is that page.
+        page_slice=(
+            PageSlice.for_span(
+                page_map, char_start, char_start + len(content) if char_end is None else char_end
+            )
+            if page_map is not None
+            else PageSlice(
+                pages=[
+                    PageSpan(
+                        page_number=2,
+                        char_start=char_start,
+                        char_end=char_start + len(content) if char_end is None else char_end,
+                    )
+                ],
+                total_chars=char_start + len(content) if char_end is None else char_end,
+            )
+        ),
         offset_map=offset_map,
     )
 
@@ -302,19 +321,19 @@ def test_mention_page_resolves_to_its_own_page_in_multipage_chunk(
     assert (by_text["Bob"].provenance.page_start, by_text["Bob"].provenance.page_end) == (2, 2)
 
 
-def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
-    """A v18 document stream: the page map rides the FIRST chunk only (schema v18).
+def _two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
+    """A v19 document stream: each chunk carries the page spans it overlaps.
 
-    Page 1 is ``[0,16)``, page 2 is ``[16,33)``. Chunk 0 covers page 1 and carries the map;
-    chunk 1 STRADDLES the boundary (doc ``[13,33)``, inherited page range ``1..2``) and
-    carries NO map — exactly what the Chunk Stage now emits. A mention at doc ``[16,19)``
+    Page 1 is ``[0,16)``, page 2 is ``[16,33)``. Chunk 0 lies wholly on page 1; chunk 1
+    STRADDLES the boundary (doc ``[13,33)``, inherited page range ``1..2``) so its own slice
+    holds BOTH spans — exactly what the Chunk Stage emits. A mention at doc ``[16,19)``
     ("Bob") lies wholly on page 2, so its Provenance must say ``(2, 2)``, not the chunk's
     inherited ``(1, 2)``.
     """
     assembly = PageMap.from_page_texts(["Alice is here.", "Bob is over here."])
 
     def _mk(
-        *, index: int, char_start: int, char_end: int, pages: tuple[int, int], carry: bool
+        *, index: int, char_start: int, char_end: int, pages: tuple[int, int]
     ) -> ChunkRecord:
         return ChunkRecord(
             record_id=f"doc1#chunk-{index}",
@@ -334,46 +353,48 @@ def _v18_two_chunk_document() -> tuple[ChunkRecord, ChunkRecord]:
             classification=Classification(language="en", sensitivity="internal"),
             content=assembly.text[char_start:char_end],
             token_count=4,
-            page_map=assembly.page_map if carry else None,
+            page_slice=PageSlice.for_span(assembly.page_map, char_start, char_end),
             offset_map=None,
         )
 
-    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1), carry=True)
-    second = _mk(index=1, char_start=13, char_end=33, pages=(1, 2), carry=False)
+    first = _mk(index=0, char_start=0, char_end=14, pages=(1, 1))
+    second = _mk(index=1, char_start=13, char_end=33, pages=(1, 2))
     return first, second
 
 
-def test_mention_page_resolves_on_a_later_chunk_that_carries_no_page_map(
+def test_mention_page_resolves_on_a_page_straddling_later_chunk(
     fake_gliner: type[_FakeGLiNER],
 ) -> None:
-    """v18: only chunk 0 carries the page map — a later chunk must still resolve its OWN page.
+    """A later, page-straddling chunk must resolve its mention's OWN page (ADR-0021/0031).
 
-    Reading ``chunk.page_map`` per chunk silently degrades every non-first chunk to the
-    chunk's inherited page range (ADR-0021/0031 provenance regression). The document-scoped
-    :class:`~latence_core.page_index.PageIndexResolver` memoises the map from chunk 0.
+    Inheriting the chunk's page range degrades "Bob" to ``(1, 2)`` — a plausible-looking
+    wrong page. The chunks are fed in REVERSE stream order here: under v18 the map rode
+    chunk 0 and this ordering lost it, and under v19 the answer cannot depend on it.
     """
-    first, second = _v18_two_chunk_document()
+    first, second = _two_chunk_document()
     fake_gliner.per_text = {
         first.content: [{"start": 0, "end": 5, "label": "person", "score": 0.9}],
         # "Bob" is at doc [16,19) → chunk-local [3,6) of the straddling chunk.
         second.content: [{"start": 3, "end": 6, "label": "person", "score": 0.9}],
     }
-    mentions = list(GlinerEntityExtractor({"labels": ["person"]}).extract([first, second]))
+    mentions = list(GlinerEntityExtractor({"labels": ["person"]}).extract([second, first]))
     by_text = {m.text: m for m in mentions}
     assert (by_text["Alice"].provenance.page_start, by_text["Alice"].provenance.page_end) == (1, 1)
     # The whole point: page 2, NOT the chunk's inherited (1, 2).
     assert (by_text["Bob"].provenance.page_start, by_text["Bob"].provenance.page_end) == (2, 2)
 
 
-def test_page_map_is_absorbed_even_when_the_first_chunk_is_below_min_chars(
+def test_pages_still_resolve_when_the_first_chunk_is_below_min_chars(
     fake_gliner: type[_FakeGLiNER],
 ) -> None:
-    """The map rides the first chunk — which is often the one ``min_chars`` skips.
+    """A chunk the ``min_chars`` filter skips must not cost any OTHER chunk its page.
 
-    If the resolver only saw the chunks that survive the filter, the document's map would be
-    lost exactly when its first chunk is too short, degrading every later chunk.
+    Under v18 it did: the map rode the document's first chunk, which is very often the one
+    this filter drops, so every later chunk of the document silently degraded to its
+    inherited range. Since v19 the property is the record's, so the skip is irrelevant —
+    this pins the observable outcome either way.
     """
-    first, second = _v18_two_chunk_document()
+    first, second = _two_chunk_document()
     assert len(first.content.strip()) == 14  # below the min_chars floor set below
     fake_gliner.per_text = {
         second.content: [{"start": 3, "end": 6, "label": "person", "score": 0.9}],

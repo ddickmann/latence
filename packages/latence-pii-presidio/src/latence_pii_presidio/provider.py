@@ -309,11 +309,12 @@ class PresidioRedactor(AdapterBase):
         never the whole corpus) and emitted in first-seen order. The analyzer is loaded once on the
         first chunk that needs it (a batch of only clean/skipped chunks never loads spaCy). A
         chunk-local span resolves to its ORIGINAL source page through the chunk's offset_map + the
-        document-scoped :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042).
+        :class:`~latence_core.page_index.PageIndexResolver` (ADR-0031/0042), which reads the
+        chunk's own ``page_slice`` (v19) — so resolution is exact whatever order chunks arrive in
+        and whichever of them a Stage dropped.
 
-        ONE resolver covers the whole call — across batches: since schema v18 a document's
-        ``page_map`` rides its FIRST chunk only, so a per-chunk resolver would resolve pages for
-        that chunk and emit ``page_start=None`` on every later one.
+        ONE resolver covers the whole call — across batches — so the drift roll-up is per call
+        rather than thrown away per batch; it holds no document state.
         """
         analyzer_state: dict[str, Any] = {"engine": None}
         resolver = PageIndexResolver()
@@ -367,7 +368,7 @@ class PresidioRedactor(AdapterBase):
         Returns ``(local_start, local_end, pii_type, value, detector, confidence)`` tuples
         (chunk-content offsets); :func:`~latence_core.redaction_policy.finalize_redacted_chunk`
         derives the spans + ORIGINAL-resolved pages + placeholders + masking (the ADR-0031/0042 page
-        seam, via the chunk's offset_map+page_map, never a weaker mapper).
+        seam, via the chunk's offset_map+page_slice, never a weaker mapper).
 
         The whole Presidio call is inside :meth:`guard`, so a native spaCy/Presidio failure becomes
         a typed :class:`~latence_core.errors.ProviderError` carrying **no source text / PII**.

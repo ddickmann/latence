@@ -1,10 +1,10 @@
-"""Page resolution must be ORDER-independent and DROP-independent (the C1 sidecar).
+"""Page resolution must be ORDER-independent and DROP-independent (the C1 per-chunk page slice).
 
-The defect this pins is a *shape* defect, not a call-site defect. Until the run-scoped page-map
-sidecar, a document's :class:`~latence_core.contracts.PageMap` — DOCUMENT-scoped state — rode ONE
-record of the chunk stream (the document's first chunk, schema v18) and the resolver adopted it
-from whichever record it happened to see first. Two consequences follow directly from that shape,
-and both silently produce a *plausible-looking wrong page* rather than an error:
+The defect this pins is a *shape* defect, not a call-site defect. Until each chunk became
+self-describing, a document's :class:`~latence_core.contracts.PageMap` — DOCUMENT-scoped state —
+rode ONE record of the chunk stream (the document's first chunk, schema v18) and the resolver
+adopted it from whichever record it happened to see first. Two consequences follow directly from
+that shape, and both silently produce a *plausible-looking wrong page* rather than an error:
 
 * **Order dependence.** A Provider that buffers chunks and resolves them in any order other than
   stream order (every batching extractor does: ``latence_extract_gliner2`` clamps ``batch_size``
@@ -16,8 +16,10 @@ and both silently produce a *plausible-looking wrong page* rather than an error:
   the Content-Screening path — but a chunk→chunk Capability that filters (schema induction,
   redaction, any third-party chunk transform) was never covered by it.
 
-Both are gone by construction once the map is a run-scoped, disk-backed sidecar the resolver reads
-lazily by ``document_record_id``: there is no first-record-wins state left to depend on.
+Both are gone by construction once every chunk carries its OWN page spans
+(:class:`~latence_core.contracts.PageSlice`, schema v19): the resolver holds no per-document state
+and reads nothing but the record in hand, so there is no first-record-wins state left to depend on
+and no ordering for anything to be wrong about.
 
 **Anti-tautology.** Nothing here asserts against the resolver in isolation. Every case runs a real
 Pipeline through the real :class:`~latence_core.runner.LocalRunner` and then checks each emitted
@@ -408,8 +410,8 @@ def test_page_resolution_is_order_and_drop_independent(tmp_path: Path) -> None:
 
     Under the carried-map shape this is doubly unresolvable — the record that carried the map was
     removed from the stream, and the first record the resolver is asked about is the document's
-    LAST chunk. Under the run-scoped sidecar neither fact is reachable from the mechanism: the map
-    is fetched by ``document_record_id`` on demand.
+    LAST chunk. Under the per-chunk slice neither fact is reachable from the mechanism: the chunk
+    being resolved carries the spans that answer for it.
     """
     mentions, documents, chunks = _run(
         tmp_path, "both", middle=_SCREEN_STAGE, entity_parent="screen", reverse=True
@@ -440,7 +442,8 @@ def test_page_resolution_survives_a_non_screening_chunk_filter(tmp_path: Path) -
     """A chunk→chunk Stage that is NOT Content Screening drops chunk 0; survivors still resolve.
 
     ``rehome_page_maps()`` was wired for the screening path only, so this hole stayed open for
-    every other chunk→chunk Capability. Under the sidecar there is no hole to wire.
+    every other chunk→chunk Capability. Under the per-chunk slice there is no hole to wire: a
+    dropped chunk takes only its own page spans with it, and it is gone anyway.
     """
     mentions, documents, chunks = _run(
         tmp_path, "filter", middle=_INDUCE_STAGE, entity_parent="induce", reverse=False

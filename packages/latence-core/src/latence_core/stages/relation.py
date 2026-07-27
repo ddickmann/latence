@@ -24,10 +24,11 @@ Each emitted :class:`~latence_core.contracts.RelationMention` carries:
   mention's start to the later mention's end), so the relation resolves back to
   source offsets;
 * Provenance ``page_start``/``page_end`` — the source page(s) that covering span
-  falls on, resolved from the parent document's page map (carried on the mentions'
-  chunks) via :class:`~latence_core.page_index.PageIndexResolver` — the S5 round-trip
-  (relation → offset → original page); degrading to the endpoints' own recorded
-  pages when no page map is available;
+  falls on, taken from the two endpoint mentions' own exactly-resolved pages via
+  :func:`~latence_core.page_index.pages_for_covering_span` — the S5 round-trip
+  (relation → offset → original page). A covering span is not a sub-chunk offset:
+  its endpoints may sit in different chunks, so it is answered by arithmetic on the
+  endpoints rather than by a page lookup against any one chunk;
 * the parent document's Classification, inherited unchanged.
 
 A document with fewer than two mentions, or no rule-matching pair, yields no
@@ -81,7 +82,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
-from latence_core.page_index import PageIndexResolver
+from latence_core.page_index import pages_for_covering_span
 from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
 
 if TYPE_CHECKING:
@@ -327,11 +328,6 @@ class PatternRelationExtractor:
         # trigger phrase be tested against the real between-mention text, and lets a
         # relation's covering span resolve to a page.
         doc_text = self._document_texts(chunk_list)
-        # ONE resolver for the whole call, memoising a page index per document. It replaces
-        # the hand-rolled ``dict`` keyed by document_record_id this Provider used to build:
-        # the same idea, but now the seam every Stage shares rather than one local fix.
-        resolver = PageIndexResolver()
-        doc_anchor = self._document_anchor_chunks(chunk_list)
 
         mentions_by_doc: dict[str, list[EntityMention]] = {}
         doc_order: list[str] = []
@@ -348,8 +344,6 @@ class PatternRelationExtractor:
                 doc_id,
                 mentions_by_doc[doc_id],
                 doc_text.get(doc_id, ""),
-                doc_anchor.get(doc_id),
-                resolver,
             )
 
     def _relate_one_document(
@@ -357,8 +351,6 @@ class PatternRelationExtractor:
         doc_id: str,
         mentions: list[EntityMention],
         text: str,
-        anchor: ChunkRecord | None,
-        resolver: PageIndexResolver,
     ) -> Iterator[RelationMention]:
         if len(mentions) < 2:
             # Fewer than two mentions ⇒ no relatable pair (S5 AC: no error).
@@ -397,9 +389,6 @@ class PatternRelationExtractor:
                 tail,
                 span_start,
                 span_end,
-                None
-                if anchor is None
-                else resolver.pages_for_span(anchor, span_start, span_end),
             )
             yield RelationMention(
                 record_id=f"{doc_id}#relation-{i}",
@@ -523,54 +512,30 @@ class PatternRelationExtractor:
         return texts
 
     @staticmethod
-    def _document_anchor_chunks(chunks: list[ChunkRecord]) -> dict[str, ChunkRecord]:
-        """One representative chunk per document — the resolver's key for that document.
-
-        A relation's covering span is document-scoped, so it is not resolved against any
-        particular chunk; the anchor exists only to name the document to the
-        :class:`~latence_core.page_index.PageIndexResolver`. A chunk that CARRIES the page
-        map is preferred (since v18 that is the document's first chunk, and in a pre-v18
-        stream it is every chunk), so the resolver can adopt the map even when it was not
-        seeded from the parsed documents.
-        """
-        anchors: dict[str, ChunkRecord] = {}
-        for chunk in chunks:
-            existing = anchors.get(chunk.document_record_id)
-            if existing is None or (existing.page_map is None and chunk.page_map is not None):
-                anchors[chunk.document_record_id] = chunk
-        return anchors
-
-    @staticmethod
     def _relation_provenance(
         head: EntityMention,
         tail: EntityMention,
         span_start: int,
         span_end: int,
-        pages: tuple[int, int] | None,
     ) -> Provenance:
         """Provenance for a relation: shared lineage + the covering span AND its page.
 
-        The char span covers both endpoints (``[span_start, span_end)``). ``pages`` is what
-        the :class:`~latence_core.page_index.PageIndexResolver` resolved for that covering
-        span, so the relation cites the page(s) its endpoints actually fall on (a relation
-        straddling a page boundary records both). ``None`` (no page map available for the
-        document) degrades to the union of the two mentions' own recorded pages.
-        Source-document identity is inherited from the head mention (head and tail share a
-        document).
+        The char span covers both endpoints (``[span_start, span_end)``), so the relation
+        cites the page(s) its endpoints actually fall on and one straddling a page boundary
+        records both. Those pages come from the endpoints themselves
+        (:func:`~latence_core.page_index.pages_for_covering_span`) rather than from a lookup:
+        a covering span is not a sub-chunk offset — its endpoints may be in different chunks
+        — and each endpoint already resolved its own page exactly when it was emitted.
+
+        This used to resolve the span against an arbitrary "anchor" chunk of the document,
+        which only worked because that chunk carried the WHOLE document's map, and fell back
+        to the endpoint union whenever it did not. The fallback was the correct answer all
+        along; the lookup was the redundant path. Source-document identity is inherited from
+        the head mention (head and tail share a document).
         """
         base = head.provenance
         update: dict[str, int] = {"char_start": span_start, "char_end": span_end}
+        pages = pages_for_covering_span(head.provenance, tail.provenance)
         if pages is not None:
             update["page_start"], update["page_end"] = pages
-        else:
-            head_ps = head.provenance.page_start
-            tail_ps = tail.provenance.page_start
-            head_pe = head.provenance.page_end
-            tail_pe = tail.provenance.page_end
-            starts = [p for p in (head_ps, tail_ps) if p is not None]
-            ends = [p for p in (head_pe, tail_pe) if p is not None]
-            if starts:
-                update["page_start"] = min(starts)
-            if ends:
-                update["page_end"] = max(ends)
         return base.model_copy(update=update)
