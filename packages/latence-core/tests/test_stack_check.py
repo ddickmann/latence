@@ -484,10 +484,70 @@ def test_the_blessed_sota_stack_nested_blocks_are_enumerable(tmp_path: Path) -> 
     assert check_stack(pipeline).ok, check_stack(pipeline).render()
 
 
-def test_the_declared_slot_keys_cover_the_former_hard_coded_walker_list() -> None:
-    """The bespoke ``_NESTED_COMPONENT_KEYS`` tuple is a strict subset of the declaration."""
-    assert {"embedder", "sparse_embedder", "multivector_embedder"} <= declared_slot_keys()
-    assert {"fde_converter", "bm25", "graph_features"} <= declared_slot_keys()
+def test_the_declared_slot_keys_are_exactly_the_frameworks_nested_keys() -> None:
+    """EXACT, not a superset: a superset assertion cannot notice a walker that fell behind.
+
+    The former version of this test asserted ``{embedder, sparse_embedder, multivector_embedder}
+    <= declared_slot_keys()`` and stayed green for the whole time ``envspec`` kept walking its own
+    hard-coded 3-key tuple (R3-seams_real_not_hypothetical-0).
+    """
+    assert declared_slot_keys() == frozenset(
+        {
+            "bm25",
+            "embedder",
+            "fde_converter",
+            "graph_features",
+            "multivector_embedder",
+            "ocr",
+            "sparse_embedder",
+        }
+    )
+
+
+def test_a_newly_declared_slot_is_walked_without_editing_envspec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """THE seam: ``envspec``'s stack walker reads THIS declaration, live, at walk time.
+
+    Declaring a new nested slot here must be enough — no second key list to update, and no
+    module-level snapshot taken at import that freezes the walker at the value it saw first. That
+    is the property ``declared_slot_keys`` was introduced for and did not have: the walker kept its
+    own tuple, so four of the seven declared slots were invisible to the GPU placement probe and to
+    the env-stack constructibility gate.
+    """
+    from latence_core import subprovider
+    from latence_core.capability import Embedder
+    from latence_core.envspec import stack_components
+
+    stack = tmp_path / "stack.yaml"
+    stack.write_text(
+        "name: s\nstages:\n"
+        "  - name: export_corpus\n"
+        "    capability: export\n"
+        "    provider: export.jsonl_parquet\n"
+        "    config:\n"
+        "      reranker_embedder:\n"
+        "        provider: embedding.brand_new\n"
+        "        config: {device: cuda}\n",
+        encoding="utf-8",
+    )
+
+    assert "embedding.brand_new" not in {c.provider for c in stack_components(stack)}
+
+    slot = subprovider.SubProviderSlot("reranker_embedder", Embedder)
+    monkeypatch.setitem(
+        subprovider._SLOTS,  # noqa: SLF001 - the declaration under test
+        CapabilityKind.EXPORT,
+        (*subprovider.slots_for(CapabilityKind.EXPORT), slot),
+    )
+
+    walked = {c.provider: c for c in stack_components(stack)}
+    assert "embedding.brand_new" in walked, (
+        "envspec's walker did not see a slot declared in subprovider._SLOTS — it is carrying its "
+        "own key list again"
+    )
+    assert walked["embedding.brand_new"].capability == "reranker_embedder"
+    assert walked["embedding.brand_new"].config["device"] == "cuda"
 
 
 @pytest.mark.parametrize(

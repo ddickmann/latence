@@ -214,8 +214,14 @@ def slot_for(capability: CapabilityKind, key: str) -> SubProviderSlot | None:
 def declared_slot_keys() -> frozenset[str]:
     """Every nested key any Capability declares — the walker's key set (envspec, placement probe).
 
-    Replaces the bespoke ``_NESTED_COMPONENT_KEYS`` tuples: a walker that reads this cannot fall
-    behind a newly declared slot.
+    Read by :func:`latence_core.envspec.stack_components`, the walker that feeds the GPU-placement
+    probe and the env-stack constructibility gate, AT WALK TIME — so a newly declared slot cannot
+    leave it behind. It kept its own three-key tuple until R3-seams_real_not_hypothetical-0, and
+    four of the seven slots below (``ocr``, ``fde_converter``, ``bm25``, ``graph_features``) were
+    invisible to both gates the whole time.
+
+    A *Stage-scoped* consumer wants :func:`stage_sub_providers` instead: this set is
+    capability-agnostic on purpose, because a structural YAML walk has no Stage to ask.
     """
     return frozenset(slot.key for slots in _SLOTS.values() for slot in slots)
 
