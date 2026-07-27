@@ -132,6 +132,24 @@ per-transient** boundary, not the aspirational end state.
     already rejected an input if *any* record was wrong), and still strictly before the Stage's
     checkpoint is published — no torn commit, no silent acceptance (ADR-0034).
 
+* **The end-of-run report phase (C5 + audit R4).** Assembling the Quality Report happens *after*
+  every Stage has been streamed and released, and it re-reads the corpus from the checkpoints. C5
+  made the thirteen per-kind gathers a fold (`QualityAggregator`), but the report's other input —
+  the DAG's SINK records, which the completeness check and the document count are folded from —
+  was still handed to `build()` as one materialised whole-corpus list, because
+  `QualityReportBuilder.final_records` did `final.extend(reader.stage_records(...))` and both
+  Runners call it at their report call site. Measured on a real `LocalRunner` run, report-time peak
+  was strictly linear at ~4.8 KB per sink record while the fold itself added 0.2–0.4%: ~99.6% of
+  the peak was the list C5 was supposed to have removed, and at the 1M-document ceiling this
+  section is sized against the report phase alone would allocate tens of GB — an Export- or
+  Redaction-sink run would OOM at report time with every Stage still `O(checkpoint batch)`.
+  `final_records` now yields from the reader instead (`build()` consumes it exactly once, in
+  `_fold_final_records`, and nothing else reads it), so the report phase holds no per-record
+  whole-corpus copy. What it does still hold is per-DOCUMENT and bounded: one document id per
+  distinct source document (that IS the document count) and the drift aggregator's
+  `PageIndexResolver` window above. Record order — and therefore the report's bytes (ADR-0008) —
+  is unchanged.
+
 **NOT bounded today:**
 * **The doc-level INPUT of the remaining four Capabilities.** **Intake/Content Screening**
   (`screen_*` returns a `ScreeningOutcome` holding passed + quarantined lists, and Content

@@ -2522,13 +2522,17 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-    ) -> list[StageOutput]:
-        """The DAG's sink-Stage records for the Quality Report (delegates to the builder).
+    ) -> Iterator[StageOutput]:
+        """Stream the DAG's sink-Stage records for the Quality Report (delegates to the builder).
 
         Kept as a thin shim over :meth:`QualityReportBuilder.final_records
         <latence_core.quality_report_builder.QualityReportBuilder.final_records>` so the executor's
         own call sites (the end-of-run build and the mid-run FAIL-report build) read the same way;
         the report logic itself now lives in the extracted builder (H-F1).
+
+        Lazy: the sinks are streamed into the report's completeness fold one record at a time, never
+        materialised, so the report phase costs ``O(1)`` in the corpus after every Stage has already
+        been streamed and released (#69, ADR-0033).
         """
         return self._report_builder.final_records(
             ordered, outputs, storage=storage, pipeline=pipeline, run_id=run_id

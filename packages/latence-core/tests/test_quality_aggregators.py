@@ -143,12 +143,15 @@ class _CountingLazyReader:
     * every record is allocated at ``yield`` time, so anything the consumer retains shows up as
       live memory (the fold must not);
     * ``calls`` records how many times each Stage's stream was opened, so a duplicated decode is
-      directly observable.
+      directly observable;
+    * ``yielded`` records how many records have left the reader SO FAR, so a consumer that drains a
+      stream eagerly (rather than pulling one record at a time) is directly observable too.
     """
 
     def __init__(self, per_stage: Mapping[str, int]) -> None:
         self._per_stage = dict(per_stage)
         self.calls: dict[str, int] = {}
+        self.yielded = 0
 
     def stage_records(
         self,
@@ -161,6 +164,7 @@ class _CountingLazyReader:
     ) -> Iterator[StageOutput]:
         self.calls[stage_name] = self.calls.get(stage_name, 0) + 1
         for i in range(self._per_stage.get(stage_name, 0)):
+            self.yielded += 1
             yield _mention(i)
 
     def read_findings(
@@ -256,6 +260,93 @@ def test_the_fold_never_materialises_the_whole_corpus(tmp_path: Path) -> None:
     assert peak < full * 0.25, (
         f"build() peaked at {peak} bytes; one materialised copy of the stream is {full} bytes — "
         "the fold is retaining the corpus"
+    )
+
+
+def test_final_records_pulls_no_sink_record_until_the_report_asks_for_one(
+    tmp_path: Path,
+) -> None:
+    """``final_records`` hands back a STREAM of the sink records, not a whole-corpus list.
+
+    ``build()`` folds the sink records exactly once (``_fold_final_records`` — completeness +
+    distinct-document count) and nothing else in the process touches them, so the sinks never need
+    to exist all at once. ``final_records`` used to ``list.extend`` every sink Stage's stream and
+    return the list, which is the SAME defeat of the lazy reader seam that C5 removed from the
+    per-kind gathers: report-time peak stayed ``O(corpus)`` after every Stage had already been
+    streamed and released (#69, ADR-0033).
+
+    Measured at the seam: after the call returns, the reader must have emitted NOTHING; pulling one
+    record must cost exactly one record.
+    """
+    store = f"file://{tmp_path}/store"
+    pipeline = _mentions_pipeline(store)
+    ordered = topological_order(list(pipeline.stages))
+    n = 512
+    reader = _CountingLazyReader({"entities": n})
+    builder = QualityReportBuilder(reader)
+
+    stream = builder.final_records(
+        ordered, {}, storage=Storage.for_uri(store), pipeline=pipeline, run_id="sinks"
+    )
+    assert reader.yielded == 0, (
+        f"final_records drained {reader.yielded} of {n} sink records before the report asked for "
+        "one — the sinks are being materialised, so report-time peak is O(corpus)"
+    )
+
+    iterator = iter(stream)
+    next(iterator)
+    assert reader.yielded == 1, (
+        f"pulling ONE sink record cost {reader.yielded} records — the stream is not incremental"
+    )
+    # Not vacuous: the sink Stage really does have a corpus-sized stream behind it, and it is the
+    # DAG's sink (nothing depends on ``entities``), so this is the stream the report reads.
+    assert sum(1 for _ in iterator) == n - 1
+
+
+def test_the_report_phase_never_materialises_the_sink_records(tmp_path: Path) -> None:
+    """Peak allocation across ``final_records`` + ``build()`` is a fraction of ONE sink copy.
+
+    The companion to :func:`test_the_fold_never_materialises_the_whole_corpus`: that one measures
+    the aggregator fold, this one measures the OTHER half of the report phase — the sink stream the
+    completeness check and the document count are folded from. Both must be streamed for the report
+    phase to be ``O(1)`` in the corpus; a materialised sink list made the fold's win irrelevant
+    (~99.6% of report-time peak was the sink list).
+    """
+    store = f"file://{tmp_path}/store"
+    pipeline = _mentions_pipeline(store)
+    ordered = topological_order(list(pipeline.stages))
+    n = 4000
+
+    # Calibrate: what does ONE materialised copy of the sink stream cost?
+    calib = _CountingLazyReader({"entities": n})
+    tracemalloc.start()
+    materialised = list(
+        calib.stage_records(
+            "entities", {}, storage=Storage.for_uri(store), pipeline=pipeline, run_id="sinks"
+        )
+    )
+    _, full = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert len(materialised) == n
+    del materialised
+
+    reader = _CountingLazyReader({"entities": n})
+    builder = QualityReportBuilder(reader)
+    storage = Storage.for_uri(store)
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    final_records = builder.final_records(
+        ordered, {}, storage=storage, pipeline=pipeline, run_id="sinks"
+    )
+    report = builder.build(pipeline, "sinks", storage, ordered, [], {}, final_records)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # The sinks really were read (the completeness check saw every one of them).
+    assert report.completeness.records_checked == n
+    assert peak < full * 0.25, (
+        f"the report phase peaked at {peak} bytes; one materialised copy of the sink stream is "
+        f"{full} bytes — the sinks are being retained"
     )
 
 

@@ -41,7 +41,10 @@ The gather is now a FOLD. Each section is a :class:`QualityAggregator` that decl
 Capabilities it subscribes to and consumes records one at a time; ``build()`` makes ONE pass over
 the DAG, opens each subscribed Stage's stream once, fans each record out to that Stage's
 subscribers, and drops it. Peak memory is ``O(aggregators x bounded state)`` instead of
-``O(corpus x sections)``; the duplicate decode is gone; and adding a Stage's metric is one class
+``O(corpus x sections)`` — including the SINK stream ``build()`` folds into the completeness check,
+which :meth:`QualityReportBuilder.final_records` used to hand over as one whole-corpus list (audit
+R4: the fold's win was real but the sink list it did not remove was ~99.6% of report-time peak, so
+the bound did not ship). The duplicate decode is gone; and adding a Stage's metric is one class
 plus one entry in :data:`QUALITY_AGGREGATORS` rather than an edit to ``build()``. The report
 remains **byte-identical** — ADR-0008's H-F1 amendment makes its bytes the contract, and the fold
 preserves the gather's record order, which is what keeps the order-sensitive accumulations (float
@@ -343,24 +346,32 @@ class QualityReportBuilder:
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-    ) -> list[StageOutput]:
-        """Records for the Quality Report: the outputs of the DAG's sink Stages.
+    ) -> Iterator[StageOutput]:
+        """Stream the records for the Quality Report: the outputs of the DAG's sink Stages.
 
         A sink is a Stage nothing depends on. Reporting on sinks (rather than a
         single threaded ``current``) keeps the report correct for a fan-out or
         converging DAG, where the last topological Stage is not the whole story.
         A sink whose retained output was released (#69) is streamed back from its checkpoint.
+
+        **Lazy, like the reader it wraps (C5).** This used to ``list.extend`` each sink Stage's
+        stream and hand back the list — the same defeat of the lazy
+        :class:`StageRecordReader` seam that C5 removed from the per-kind gathers, and the one place
+        it survived. Both Runners call this at their report call site, so report-time peak stayed
+        ``O(corpus)`` (measured: ~4.8 KB per sink record, ~99.6% of the report phase's peak) after
+        every Stage had already been streamed and released — C5's ``O(aggregators x bounded state)``
+        bound did not reach the shipped path. :meth:`build` consumes this exactly once, in
+        :func:`_fold_final_records`, and nothing else reads it, so yielding is sufficient and the
+        report phase is now ``O(1)`` in the corpus (ADR-0033). Order is unchanged — sink Stages in
+        topological order, reader order within a Stage — so the report stays byte-identical
+        (ADR-0008).
         """
         depended_on = {p for s in ordered for p in s.depends_on}
         sinks = [s.name for s in ordered if s.name not in depended_on]
-        final: list[StageOutput] = []
         for name in sinks:
-            final.extend(
-                self._reader.stage_records(
-                    name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
+            yield from self._reader.stage_records(
+                name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
             )
-        return final
 
     def build(
         self,
