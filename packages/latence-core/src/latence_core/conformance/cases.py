@@ -275,28 +275,54 @@ def _records_contract_valid(records: Sequence[object], *, empty_ok: bool) -> boo
 
 
 def _page_offsets_resolve(records: Sequence[object]) -> bool:
-    """A stronger offset audit for sub-document carriers: the char span resolves with ZERO drift.
+    """A stronger offset audit for sub-document carriers: the span resolves, and to the CITED page.
 
-    For an EntityMention/RelationMention the char span must resolve back to a source page through
-    the parent's page map (the ADR-0031/S10 round-trip). :meth:`PageOffsetIndex.page_for_offset`
-    is deliberately non-raising — it clamps an out-of-range offset and *records the drift* rather
-    than crashing — so the in-range assertion is the drift diagnostic, not a caught exception: a
-    faithful mention resolves EXACTLY (``max_drift_chars == 0``); an out-of-bounds mention drifts.
-    We reuse the same :class:`PageOffsetIndex` the Runner's drift audit uses.
+    Two assertions, and the second is the one that has teeth:
+
+    1. **The span is resolvable.** :meth:`PageOffsetIndex.page_for_offset` is deliberately
+       non-raising — it clamps an out-of-range offset and *records the drift* rather than crashing
+       — so the in-range assertion is the drift diagnostic, not a caught exception: a faithful
+       mention resolves EXACTLY (``max_drift_chars == 0``); an out-of-bounds mention drifts. We
+       reuse the same :class:`PageOffsetIndex` the Runner's drift audit uses.
+    2. **The record CITES the page it resolved to.** The resolved page numbers used to be
+       discarded, which made the whole audit blind to the failure rule 3 of docs/CONFORMANCE.md
+       exists to prevent: since schema v18 a document's page map rides its FIRST chunk only, so a
+       Provider that rebuilds a throwaway ``PageOffsetIndex`` per chunk (the pre-v18 pattern) finds
+       ``chunk.page_map is None`` on every later chunk and silently degrades that chunk's mentions
+       to the chunk's *inherited* page range. Those records are perfectly resolvable — they just
+       cite the wrong page. Comparing ``prov.page_start``/``page_end`` against what the parent
+       DOCUMENT's map says is therefore the actual machine gate behind rule 3, and it is what makes
+       the paginated canonical corpus (:data:`fixtures.CANONICAL_PAGES`) worth having.
+
+    A record that cites no page at all is not failed here: ``page_start``/``page_end`` are optional
+    on :class:`~latence_core.contracts.Provenance`, and "no page claim" is honest. What is failed
+    is a page claim that contradicts the map.
     """
-    page_map = fixtures.canonical_corpus().documents[0].page_map
-    if page_map is None:  # pragma: no cover - the canonical doc always has a page map
+    page_maps = {
+        doc.record_id: doc.page_map
+        for doc in fixtures.canonical_corpus().documents
+        if doc.page_map is not None
+    }
+    if not page_maps:  # pragma: no cover - the canonical doc always has a page map
         return True
-    index = PageOffsetIndex(page_map)
+    indices = {doc_id: PageOffsetIndex(pm) for doc_id, pm in page_maps.items()}
     for r in _as_records(records):
         prov = r.provenance
         if prov.char_start is None or prov.char_end is None:
             continue
+        index = indices.get(getattr(r, "document_record_id", ""))
+        if index is None:
+            continue
         # Resolving never raises; an out-of-range offset clamps + records drift. A faithful
         # mention resolves with zero drift — the ADR-0031 round-trip invariant.
-        index.page_for_offset(prov.char_start)
-        index.page_for_offset(max(prov.char_end - 1, prov.char_start))
-    return index.diagnostics.max_drift_chars == 0
+        resolved_start = index.page_for_offset(prov.char_start)
+        resolved_end = index.page_for_offset(max(prov.char_end - 1, prov.char_start))
+        # The v18 carriage gate: a cited page must BE the page the offset resolves to.
+        if prov.page_start is not None and prov.page_start != resolved_start:
+            return False
+        if prov.page_end is not None and prov.page_end != resolved_end:
+            return False
+    return all(index.diagnostics.max_drift_chars == 0 for index in indices.values())
 
 
 # ---------------------------------------------------------------------------

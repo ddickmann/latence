@@ -43,7 +43,9 @@ from latence_core.conformance.harness import (
     _run_conformance_checks_for,
 )
 from latence_core.conformance.report import CheckStatus
+from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.profile import ProviderProfile
+from latence_core.stages.entity import GazetteerEntityExtractor
 
 # Evidence-bearing verified profiles (H-B1) built in-test. A pure-code profile cites the repo
 # LICENSE (weights None); a model-bearing profile records the weights SPDX + a model-card
@@ -647,6 +649,135 @@ def test_c1_bites_an_out_of_range_mention_offset() -> None:
     # And a faithful in-range mention still passes both.
     assert conf_cases._offsets_in_range([good_mention]) is True
     assert conf_cases._page_offsets_resolve([good_mention]) is True
+
+
+class _Prev18EntityExtractor(GazetteerEntityExtractor):
+    """The reference extractor with EXACTLY one flaw: the pre-v18 per-chunk page index.
+
+    ``PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None``, degrading to the
+    chunk's inherited page range when the chunk carries no map. That was CORRECT until schema v18
+    made the map ride a document's first chunk only; afterwards it silently mis-pages every mention
+    in every later chunk. It is the pattern R1 had to remove from four shipped ecosystem Providers
+    and three PII Providers, and it is what rule 3 of docs/CONFORMANCE.md now forbids. Everything
+    else here — matching, offset-map resolution, ordering, provenance stamping — is the reference
+    implementation, so a conformance FAIL can only come from the page claim.
+    """
+
+    def extract(self, chunks: Any) -> Any:  # noqa: ANN401 - mirrors the Capability signature
+        for chunk in chunks:
+            index = PageOffsetIndex(chunk.page_map) if chunk.page_map is not None else None
+            yield from self._extract_one_prev18(chunk, index)
+
+    def _extract_one_prev18(self, chunk: Any, index: Any) -> Any:  # noqa: ANN401
+        from latence_core.contracts import EntityMention
+        from latence_core.offsetmap import OffsetIndex
+
+        text = chunk.content
+        if len(text.strip()) < self._min_chars:
+            return
+        offset_index = OffsetIndex(chunk.offset_map) if chunk.offset_map is not None else None
+        chunk_char_start = chunk.provenance.char_start or 0
+        for i, (label, surface, local_start, local_end, confidence) in enumerate(
+            self._find_matches(text)
+        ):
+            if offset_index is not None:
+                doc_start, doc_end = offset_index.resolve_span(local_start, local_end)
+            else:  # pragma: no cover - canonical chunks always carry an offset map
+                doc_start, doc_end = chunk_char_start + local_start, chunk_char_start + local_end
+            pages = (
+                None
+                if index is None
+                else (
+                    index.page_for_offset(doc_start),
+                    index.page_for_offset(max(doc_end - 1, doc_start)),
+                )
+            )
+            yield EntityMention(
+                record_id=f"{chunk.record_id}#entity-{i}",
+                document_record_id=chunk.document_record_id,
+                chunk_record_id=chunk.record_id,
+                index=i,
+                label=label,
+                text=surface,
+                confidence=confidence,
+                provenance=self._mention_provenance(
+                    chunk.provenance,
+                    doc_char_start=doc_start,
+                    doc_char_end=doc_end,
+                    pages=pages,
+                ),
+                classification=chunk.classification,
+            )
+
+
+def test_the_canonical_corpus_has_the_shape_v18_carriage_is_defined_over() -> None:
+    """The fixture corpus must be MULTI-page and MULTI-chunk, with a map-less multi-page chunk.
+
+    Regression guard for ``issues/audit-arch/R4-invariants_and_adrs-2.md``. The canonical corpus
+    used to be one page and one chunk — the chunk that carries the page map — so no consumer ever
+    saw the map-less chunks schema v18 created, and every page fallback was *coincidentally*
+    correct. On that corpus the C1 page audit could not distinguish a v18-compliant Provider from a
+    silently mis-paging one, whatever it asserted. This pins the three properties that make the
+    audit capable of observing the failure at all; if the fixture ever collapses back to one page
+    or one chunk, this fails before the (now vacuously green) provider checks do.
+    """
+    from latence_core.conformance import fixtures as conf_fixtures
+
+    corpus = conf_fixtures.canonical_corpus()
+    page_map = corpus.documents[0].page_map
+    assert page_map is not None
+    # 1. more than one PAGE, so a wrong page number is expressible at all.
+    assert len(page_map.pages) > 1
+    # 2. more than one CHUNK, so a chunk carrying page_map=None exists (v18 carriage).
+    assert len(corpus.chunks) > 1
+    assert corpus.chunks[0].page_map is not None
+    map_less = [c for c in corpus.chunks[1:] if c.page_map is None]
+    assert map_less, "v18: every chunk after the first must carry page_map=None"
+    # 3. at least one map-less chunk SPANS pages, so inheriting its range is a WRONG range for
+    #    any mention in it — the discriminating shape.
+    assert any(c.provenance.page_end != c.provenance.page_start for c in map_less)
+    # and the pagination did not change one byte of the document.
+    assert corpus.documents[0].content == conf_fixtures.CANONICAL_TEXT
+
+
+def test_c1_bites_a_provider_that_inherits_the_chunk_page_instead_of_resolving() -> None:
+    """C1 FAILs a Provider carrying the pre-v18 page-map pattern; the compliant one still PASSes.
+
+    THE regression guard for ``issues/audit-arch/R4-invariants_and_adrs-2.md``. This change set
+    amended rule 3 of docs/CONFORMANCE.md to mandate one ``PageIndexResolver`` per call plus
+    ``observe()`` on every chunk, and added a machine gate for the ADR *prose* — but the suite that
+    actually gates Providers ran a one-page/one-chunk corpus and threw the resolved page numbers
+    away, so ``entity.prev18`` (below) passed all six checks green while mis-paging 54 of 62
+    mentions on a 24-page document. The audit now compares each record's CITED page against the
+    page its offset resolves to through the parent document's map.
+    """
+    verdict = _run_conformance_checks_for(
+        provider_name="entity.prev18",
+        capability=Capability.ENTITY,
+        provider_cls=_Prev18EntityExtractor,
+    )
+    assert verdict.passed is False
+    c1 = next(c for c in verdict.checks if c.check == "C1_valid_records")
+    assert c1.status is CheckStatus.FAIL
+    # It is the PAGE claim that fails, not a crash or an out-of-range offset: the same records
+    # pass the bounded in-range half of C1.
+    from latence_core.conformance import cases as conf_cases
+
+    produced = list(
+        _Prev18EntityExtractor({"labels": {"person": {"terms": ["Alice"]}, "org": {"terms": ["Acme Corp"]}}})
+        .extract(_valid_chunks())
+    )
+    assert produced, "the probe must actually emit mentions (a vacuous pass proves nothing)"
+    assert conf_cases._offsets_in_range(produced) is True
+    assert conf_cases._page_offsets_resolve(produced) is False
+
+    # The v18-compliant reference Provider — same corpus, same labels — still PASSes both.
+    compliant = _run_conformance_checks_for(
+        provider_name="entity.gazetteer",
+        capability=Capability.ENTITY,
+        provider_cls=GazetteerEntityExtractor,
+    )
+    assert compliant.passed is True
 
 
 def test_report_is_deterministic() -> None:
