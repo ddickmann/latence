@@ -192,7 +192,9 @@ def test_a_failed_sweep_is_reported_on_the_original_error_never_masking_it(
     assert "store refused the delete" in notes
 
 
-def test_a_successful_sweep_is_reported_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_successful_sweep_is_reported_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The disposal is never silent: a swept temp file is recorded on the propagating error."""
     _fail_the_rename(monkeypatch, matching="checkpoint.jsonl")
     with (
@@ -203,6 +205,71 @@ def test_a_successful_sweep_is_reported_too(tmp_path: Path, monkeypatch: pytest.
     notes = " ".join(getattr(caught.value, "__notes__", ()))
     assert "was removed" in notes
     assert ".tmp" in notes
+
+
+def test_a_partially_published_set_names_what_landed_and_never_claims_nothing_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publish loop is N renames: when it dies mid-way, the notes must name what LANDED.
+
+    ``atomic_writers`` documents this as its honest limit — "a failure *during* the publish loop
+    leaves the already-renamed siblings in place and sweeps the rest; the exception's notes name
+    what landed". The sweep is a cleanup helper and knows only what it removed; asserting
+    publication state from there produced the exact inversion of the truth: a published
+    ``a.jsonl`` sitting on the store while every note said nothing was published.
+
+    That is the Export's live shape (``records.jsonl`` + ``records.parquet`` ride one block), so
+    the operator reading "nothing was published" would skip cleaning up a published,
+    corpus-incomplete deliverable that a downstream reader will happily consume.
+    """
+    _fail_the_rename(monkeypatch, matching="b.parquet")
+    storage = Storage()
+    out = tmp_path / "export"
+    a, b, c = (str(out / name) for name in ("a.jsonl", "b.parquet", "c.bin"))
+    with (
+        pytest.raises(OSError, match="simulated transport drop") as caught,
+        storage.atomic_writers([a, b, c]) as (first, second, third),
+    ):
+        first.write(b"landed\n")
+        second.write(b"never landed")
+        third.write(b"never landed")
+
+    # The first rename really did land: this is the state the notes have to describe.
+    assert storage.read_bytes(a) == b"landed\n"
+    assert not storage.exists(b)
+    assert not storage.exists(c)
+    assert _leftover_temp_files(tmp_path) == []
+
+    notes = getattr(caught.value, "__notes__", ())
+    joined = " ".join(notes)
+    assert "nothing was published" not in joined, joined
+    assert a in joined, joined  # the published sibling is named
+    # Named once, as a publication-state note — not repeated per swept file.
+    landed_notes = [note for note in notes if a in note]
+    assert len(landed_notes) == 1, notes
+    # And the sweep still reports both disposals.
+    assert sum("was removed" in note for note in notes) == 2, notes
+
+
+def test_a_failed_first_rename_still_reports_that_nothing_was_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the loop dies on its FIRST target, nothing landed — and that is still said, once."""
+    _fail_the_rename(monkeypatch, matching="a.jsonl")
+    storage = Storage()
+    out = tmp_path / "export"
+    a, b = (str(out / name) for name in ("a.jsonl", "b.parquet"))
+    with (
+        pytest.raises(OSError, match="simulated transport drop") as caught,
+        storage.atomic_writers([a, b]) as (first, second),
+    ):
+        first.write(b"x")
+        second.write(b"y")
+
+    assert not storage.exists(a)
+    assert not storage.exists(b)
+    notes = getattr(caught.value, "__notes__", ())
+    assert sum("nothing was published" in note for note in notes) == 1, notes
 
 
 def test_atomic_writers_sweeps_every_stream_when_one_fails(tmp_path: Path) -> None:

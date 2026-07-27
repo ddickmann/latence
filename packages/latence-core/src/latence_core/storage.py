@@ -171,11 +171,12 @@ class Storage:
         best-effort and the **original error is re-raised untouched** (ADR-0034: the failure is
         never masked by its own cleanup).
 
-        The sweep is *reported, not silent*: the propagating exception carries a PEP-678 note
-        (``exc.__notes__``) saying either that the partial write was removed and nothing was
-        published, or — when the store refused the delete — naming the exact path that still
-        holds the bytes so an operator can delete it by hand. A caller that wraps the failure in
-        its own typed error can fold those notes into its message.
+        The sweep is *reported, not silent*: the propagating exception carries PEP-678 notes
+        (``exc.__notes__``) — one stating what the publication published (for the single-file face,
+        always nothing), and one per temp file saying either that it was removed or — when the
+        store refused the delete — naming the exact path that still holds the bytes so an operator
+        can delete it by hand. A caller that wraps the failure in its own typed error can fold
+        those notes into its message.
 
         ``destination`` is for a **content-addressed** artifact whose final name is only knowable
         once its bytes have been written (the Iceberg data file, named after the sha256 of its own
@@ -251,22 +252,56 @@ class Storage:
                 yield handles
             # Past here every handle is closed and every temp file is complete on the store.
         except BaseException as exc:
+            self._report_publication_state(exc, [])
             self._sweep(tmp_uris, exc)
             raise
-        published = 0
+        resolved = 0
+        landed: list[str] = []
         try:
             for tmp, uri, destination in zip(tmp_uris, uris, destinations, strict=True):
                 target = uri if destination is None else destination()
                 if target is None:
+                    # The "an identical file is already there" case: this slot is resolved, but
+                    # nothing was published under it — it is not part of ``landed``.
                     self.remove(tmp)
                 else:
                     self.finalize_atomic(tmp, target)
-                published += 1
+                    landed.append(target)
+                resolved += 1
         except BaseException as exc:
             # Whatever already landed stays landed (there is no cross-object rollback); sweep
-            # only the siblings this run never published.
-            self._sweep(tmp_uris[published:], exc)
+            # only the siblings this run never published. The publication state is reported here
+            # because this loop is the only scope that knows it (the sweep does not).
+            self._report_publication_state(exc, landed)
+            self._sweep(tmp_uris[resolved:], exc)
             raise
+
+    @staticmethod
+    def _report_publication_state(exc: BaseException, landed: Sequence[str]) -> None:
+        """Record on ``exc`` what the failed publication actually published — once.
+
+        The publish phase is N renames, not one transaction (:meth:`atomic_writers` states this as
+        its honest limit), so a failure part-way through leaves the already-renamed siblings in
+        place. The operator's recovery decision turns on that: "nothing landed" means there is
+        nothing to clean up and nothing a downstream reader can have consumed, while a partial
+        publication has left an INCOMPLETE deliverable under its real name.
+
+        This belongs to the publish loop, not to :meth:`_sweep`. The sweep is handed a list of temp
+        paths and knows only what it removed; when it also asserted publication state it asserted
+        it blind, and on the partial-publish path it told the operator "nothing was published" while
+        a published ``records.jsonl`` sat on the store (ADR-0034: a failure report that is confident
+        and wrong is worse than a silent one).
+        """
+        if not landed:
+            exc.add_note("latence.Storage: nothing was published.")
+            return
+        exc.add_note(
+            "latence.Storage: PARTIAL PUBLICATION — the publish phase is one rename per file and "
+            "no store offers a cross-object commit, so these files WERE published and stay in "
+            f"place: {', '.join(repr(uri) for uri in landed)}. They are an incomplete set: remove "
+            "them or re-run to overwrite. The rest were not published; their partial writes are "
+            "disposed of below."
+        )
 
     def _sweep(self, tmp_uris: Iterable[str], exc: BaseException) -> None:
         """Best-effort remove the temp files of a failed publication, reporting on ``exc``.
@@ -274,6 +309,9 @@ class Storage:
         Never raises and never masks ``exc`` — a cleanup failure is appended as a PEP-678 note
         (ADR-0034: no silent errors, and the operator is told the exact path still holding the
         bytes rather than being left to discover it on a storage bill).
+
+        Reports its OWN disposal and nothing else. What the publication did or did not publish is
+        :meth:`_report_publication_state`'s note, because that is the scope that knows it.
         """
         for tmp in tmp_uris:
             try:
@@ -286,10 +324,7 @@ class Storage:
                 )
             else:
                 if existed:
-                    exc.add_note(
-                        f"latence.Storage: nothing was published; the partial write {tmp!r} "
-                        f"was removed."
-                    )
+                    exc.add_note(f"latence.Storage: the partial write {tmp!r} was removed.")
 
     def temp_uri(self, uri: str) -> str:
         """A unique sibling temp path for ``uri`` (the write side of :meth:`finalize_atomic`).
