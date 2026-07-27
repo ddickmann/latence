@@ -77,13 +77,47 @@ the `op`, and the native exception's **type name** — **never the native except
   maps a chunk-local span to true original-markdown offsets, **reusing the existing
   `OffsetIndex` seam** (ADR-0031) — never a weaker hand-rolled mapper. It degrades to the
   exact `chunk_char_start + local` shift when a chunk carries no offset map.
-- `resolve_pages(doc_char_start, doc_char_end, page_map=chunk.page_map, fallback_page_start=…,
-  fallback_page_end=…)` resolves a document-offset span to its source page(s) via
-  `PageOffsetIndex` (the never-crashes, fuzzy drift-recovering resolver), falling back to the
-  inherited chunk page range when there is no page map.
+- `resolve_pages(chunk, doc_char_start, doc_char_end, resolver=…)` resolves a document-offset
+  span to its **own** source page(s) through the document-scoped `PageIndexResolver` seam (which
+  owns the memoised, never-crashes, fuzzy drift-recovering `PageOffsetIndex`, the half-open end
+  clamp, and the degradation counter), falling back to the chunk's inherited page range only when
+  no map is available for the document at all.
 
 These make the "offsets/page-provenance intact" invariant the **default**, not a per-adapter
 reimplementation.
+
+### The page resolver: one per call, observe every chunk
+
+A `PageMap` is **document**-scoped, and since schema v18 the Chunk Stage stamps it on a
+document's **first** chunk only (it used to ride all N chunks — ~92% of a chunk checkpoint line
+on a long PDF). So `chunk.page_map` is `None` on every later chunk, and a per-chunk index built
+from it would silently give every mention after the first chunk its chunk's *inherited* page
+range — a plausible-looking wrong page. Create **one** `PageIndexResolver` per Capability call
+and `observe()` **every** chunk you are handed, before any filter decides it is uninteresting
+(a document's first chunk — the map carrier — is very often the one your `min_chars` floor
+drops):
+
+```python
+from latence_core import PageIndexResolver
+
+def extract(self, chunks):
+    resolver = PageIndexResolver()          # ONE per call, across batches
+
+    def run_batch(batch):
+        out = []
+        for chunk in batch:
+            resolver.observe(chunk)         # BEFORE the "is this chunk interesting" filter
+            out.extend(self._extract_one(chunk, resolver))
+        return out
+
+    yield from self.batched(chunks, run_batch)
+
+# ...and inside _extract_one, per span:
+page_start, page_end = self.resolve_pages(chunk, doc_start, doc_end, resolver=resolver)
+```
+
+A `Runner` that holds the parsed documents can seed the resolver authoritatively instead
+(`PageIndexResolver.from_documents(documents)`, ADR-0017: files are the source of truth).
 
 ## Malformed-profile: fail loud (P3-F2 §2)
 

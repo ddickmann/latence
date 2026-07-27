@@ -38,11 +38,13 @@ The four reusable pieces (compose them; the base does not force a god-class shap
    an operator bad-config → :class:`~latence_core.errors.ConfigError`), tagged with the
    provider name + op and **carrying no record content / PII**. A framework
    :class:`~latence_core.errors.LatenceError` passes through unwrapped.
-4. :meth:`AdapterBase.carry_provenance` + :meth:`AdapterBase.rebase_offsets` — map a native
-   library's output back onto the input's Provenance/Classification and character offsets,
-   reusing the existing :class:`~latence_core.offsetmap.OffsetIndex` /
-   :class:`~latence_core.pagemap.PageOffsetIndex` seam (ADR-0031) — never a weaker hand-rolled
-   offset mapper — so the "offsets/page-provenance intact" invariant is the default.
+4. :meth:`AdapterBase.carry_provenance` + :meth:`AdapterBase.rebase_offsets` +
+   :meth:`AdapterBase.resolve_pages` — map a native library's output back onto the input's
+   Provenance/Classification and character offsets, reusing the existing
+   :class:`~latence_core.offsetmap.OffsetIndex` seam and the document-scoped
+   :class:`~latence_core.page_index.PageIndexResolver` seam (ADR-0031) — never a weaker
+   hand-rolled offset mapper, and never a throwaway per-chunk page index — so the
+   "offsets/page-provenance intact" invariant is the default.
 """
 
 from __future__ import annotations
@@ -52,7 +54,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, cast, runtim
 
 from latence_core.errors import ConfigError, LatenceError, ProviderError
 from latence_core.offsetmap import OffsetIndex
-from latence_core.pagemap import PageOffsetIndex
 from latence_core.providers.device import DeviceDecision, select_device
 from latence_core.providers.perf import load_perf_kwargs as _resolve_perf_kwargs
 from latence_core.providers.perf import maybe_compile as _maybe_compile
@@ -62,11 +63,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
     from latence_core.contracts import (
+        ChunkRecord,
         Classification,
         OffsetMap,
-        PageMap,
         Provenance,
     )
+    from latence_core.page_index import PageIndexResolver
 
 # The default batch size when a batch-capable adapter's config supplies none. Small,
 # sensible, and (like every batching knob) purely memory-shaping — the outputs are
@@ -431,28 +433,39 @@ class AdapterBase:
 
     @staticmethod
     def resolve_pages(
+        chunk: ChunkRecord,
         doc_char_start: int,
         doc_char_end: int,
         *,
-        page_map: PageMap | None,
-        fallback_page_start: int | None,
-        fallback_page_end: int | None,
+        resolver: PageIndexResolver,
     ) -> tuple[int | None, int | None]:
         """Resolve a document-offset span to its source page(s) via the page seam (ADR-0031).
 
-        Reuses :class:`~latence_core.pagemap.PageOffsetIndex` — the never-crashes, fuzzy
-        drift-recovering offset→page resolver (the ported ``PageOffsetIndex`` asset) — so a
-        produced sub-record cites **its own** page, not merely the parent chunk's inherited
-        range. The ``page_end`` resolves from the last included character (``doc_char_end - 1``)
-        so a span straddling a page boundary cites the page its last character lands on.
+        Goes through the document-scoped :class:`~latence_core.page_index.PageIndexResolver` —
+        the ONE seam that owns offset→page resolution — so a produced sub-record cites **its
+        own** page, not merely the parent chunk's inherited range. The resolver owns the
+        half-open end clamp, the per-document memoisation of the underlying never-crashes
+        :class:`~latence_core.pagemap.PageOffsetIndex`, and the corpus-wide drift/degradation
+        counters; this helper adds exactly the one thing a record-producing adapter needs on
+        top: the degrade to the source chunk's inherited page range when no map is available.
 
-        When the chunk carries no page map, this degrades to the inherited
-        ``fallback_page_start``/``fallback_page_end`` (the parent chunk's page range) — the exact
-        same fallback the in-core gazetteer uses, so the carry helper matches the reference path.
+        **Pass ONE resolver per Capability call, and ``resolver.observe(chunk)`` every chunk
+        you are handed, before any filter** — since schema v18 a document's ``page_map`` rides
+        its FIRST chunk only, and that chunk is very often the one an adapter's ``min_chars``
+        (or term-match) filter drops. A per-chunk resolver, or one that only ever sees the
+        interesting chunks, silently degrades every later chunk of the document to its
+        inherited range: a plausible-looking WRONG page (audit R2)::
+
+            resolver = PageIndexResolver()          # one per extract() call
+            for chunk in chunks:
+                resolver.observe(chunk)             # BEFORE deciding it is uninteresting
+                ...
+                pages = self.resolve_pages(chunk, doc_start, doc_end, resolver=resolver)
         """
-        if page_map is None:
-            return fallback_page_start, fallback_page_end
-        index = PageOffsetIndex(page_map)
-        page_start = index.page_for_offset(doc_char_start)
-        page_end = index.page_for_offset(max(doc_char_end - 1, doc_char_start))
-        return page_start, page_end
+        pages = resolver.pages_for_span(chunk, doc_char_start, doc_char_end)
+        if pages is None:
+            # No page map available for this document at all — inherit the chunk's range. The
+            # resolver has COUNTED the degradation (``resolver.unresolved``, ADR-0034); this is
+            # not a silent fallback.
+            return chunk.provenance.page_start, chunk.provenance.page_end
+        return pages

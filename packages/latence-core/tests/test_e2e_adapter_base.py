@@ -28,16 +28,22 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from latence_core import AdapterBase, ProviderProfile, ProviderRegistry
-from latence_core.contracts import EntityMention
+from latence_core.contracts import (
+    ChunkRecord,
+    Classification,
+    EntityMention,
+    PageMap,
+    PageSpan,
+    Provenance,
+)
 from latence_core.errors import ProviderError
+from latence_core.page_index import PageIndexResolver
 from latence_core.pipeline import Pipeline
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-
-    from latence_core.contracts import ChunkRecord
 
 
 class _AdapterGazetteer(AdapterBase):
@@ -86,15 +92,27 @@ class _AdapterGazetteer(AdapterBase):
     def extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]:
         # Batch the chunks through the AdapterBase helper (grouped iff profile.batch),
         # deterministic input order either way. Each batch is mapped by _run_batch.
-        yield from self.batched(list(chunks), self._run_batch)
+        # ONE resolver for the whole call: page maps are DOCUMENT-scoped and (since v18) ride
+        # a document's FIRST chunk only, so a per-chunk resolver would lose them.
+        resolver = PageIndexResolver()
 
-    def _run_batch(self, chunks: list[ChunkRecord]) -> list[EntityMention]:
+        def run_batch(chunks_in: list[ChunkRecord]) -> list[EntityMention]:
+            return self._run_batch(chunks_in, resolver)
+
+        yield from self.batched(list(chunks), run_batch)
+
+    def _run_batch(
+        self, chunks: list[ChunkRecord], resolver: PageIndexResolver
+    ) -> list[EntityMention]:
         out: list[EntityMention] = []
         for chunk in chunks:
-            out.extend(self._extract_one(chunk))
+            # Observe EVERY chunk, before the term filter decides it is uninteresting: the
+            # map-carrying first chunk of a document is often the one with no match at all.
+            resolver.observe(chunk)
+            out.extend(self._extract_one(chunk, resolver))
         return out
 
-    def _extract_one(self, chunk: ChunkRecord) -> list[EntityMention]:
+    def _extract_one(self, chunk: ChunkRecord, resolver: PageIndexResolver) -> list[EntityMention]:
         with self.guard("extract"):
             if self._explode:
                 # A "native library" failure: mapped to a typed ProviderError by the guard,
@@ -118,12 +136,10 @@ class _AdapterGazetteer(AdapterBase):
                     chunk_char_start=chunk_char_start,
                     offset_map=chunk.offset_map,
                 )
+                # The mention's OWN page through the document-scoped resolver seam — never a
+                # throwaway index over ``chunk.page_map`` (None on every non-first chunk, v18).
                 page_start, page_end = self.resolve_pages(
-                    doc_start,
-                    doc_end,
-                    page_map=chunk.page_map,
-                    fallback_page_start=chunk.provenance.page_start,
-                    fallback_page_end=chunk.provenance.page_end,
+                    chunk, doc_start, doc_end, resolver=resolver
                 )
                 provenance, classification = self.carry_provenance(
                     chunk,
@@ -299,3 +315,83 @@ def test_adapter_native_error_maps_to_provider_error_and_fails_stage(
     report_uri = f"{store}/_latence/runs/boom/quality-report.json"
     assert s.exists(report_uri)
     assert '"provider"' in s.read_text(report_uri)
+
+
+# -- the v18 page-map shape through the PUBLIC adapter seam (audit R2) ---------
+
+
+def _two_chunk_document() -> list[ChunkRecord]:
+    """A 2-page document in the SHIPPED v18 chunk shape: the map rides chunk 0 only.
+
+    Page 1 is ``[0, 100)``, page 2 is ``[100, 200)``. Chunk 0 is the map carrier and holds
+    no term (a document's first chunk is very often the least interesting one). Chunk 1
+    straddles the page boundary (``[90, 119)``, provenance pages 1-2) and carries the term
+    at document offset 102 — i.e. on page **2**, not on the first page of its own chunk.
+    """
+    page_map = PageMap(
+        pages=[
+            PageSpan(page_number=1, char_start=0, char_end=100),
+            PageSpan(page_number=2, char_start=100, char_end=200),
+        ],
+        total_chars=200,
+    )
+    classification = Classification(language="en", sensitivity="internal")
+
+    def _prov(char_start: int, char_end: int, page_start: int, page_end: int) -> Provenance:
+        return Provenance(
+            source_uri="file://x/report.pdf",
+            file_name="report.pdf",
+            file_type="pdf",
+            file_size=200,
+            document_id="doc-1",
+            char_start=char_start,
+            char_end=char_end,
+            page_start=page_start,
+            page_end=page_end,
+        )
+
+    first = ChunkRecord(
+        record_id="chunk-0",
+        provenance=_prov(0, 12, 1, 1),
+        classification=classification,
+        document_record_id="doc-rec-1",
+        index=0,
+        content="Title page.",
+        token_count=2,
+        page_map=page_map,  # v18: the ONLY carrier of this document's map
+    )
+    second_content = "pad pad pad Acme Corp tail xx"  # 'Acme Corp' at local 12 -> doc 102
+    second = ChunkRecord(
+        record_id="chunk-1",
+        provenance=_prov(90, 90 + len(second_content), 1, 2),
+        classification=classification,
+        document_record_id="doc-rec-1",
+        index=1,
+        content=second_content,
+        token_count=6,
+        page_map=None,  # v18: every chunk after the first carries no map
+    )
+    return [first, second]
+
+
+def test_reference_adapter_cites_the_mentions_own_page_on_a_later_chunk() -> None:
+    """A mention on page 2 of a page-straddling, map-less chunk must cite page 2 (ADR-0021/0031).
+
+    The regression this pins is about the PUBLIC seam third parties are pointed at: the
+    reference adapter resolves pages exactly the way ``docs/writing-an-adapter.md`` instructs.
+    Under schema v18 a document's ``page_map`` rides its FIRST chunk only, so a helper that
+    reads ``chunk.page_map`` sees ``None`` on every later chunk and silently degrades the
+    mention to its chunk's INHERITED range ``(1, 2)`` — a plausible-looking wrong page, which
+    is why no existing test caught it. Going through the ``PageIndexResolver`` seam (which the
+    adapter feeds with EVERY chunk, including the term-free carrier) resolves the mention's own
+    page: ``(2, 2)``.
+    """
+    adapter = _AdapterGazetteer({"labels": {"ORG": {"terms": ["Acme Corp"]}}})
+    mentions = list(adapter.extract(_two_chunk_document()))
+
+    assert [m.chunk_record_id for m in mentions] == ["chunk-1"]
+    mention = mentions[0]
+    # The span itself is unchanged by this fix — offset 102 is where 'Acme Corp' starts.
+    assert (mention.provenance.char_start, mention.provenance.char_end) == (102, 111)
+    # ...and page 2 is where offset 102 lives. Inheriting the chunk's (1, 2) is the defect.
+    assert (mention.provenance.page_start, mention.provenance.page_end) == (2, 2)

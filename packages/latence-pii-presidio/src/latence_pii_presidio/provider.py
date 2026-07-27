@@ -24,11 +24,12 @@ to derive a deterministic surrogate, and it is never interpolated into an error 
 ``end`` on the text it analysed. Redaction scans the **parsed document** markdown directly
 (``record.content`` at its original-document offsets — capability.py:228), so the analyzed text
 IS the document text and Presidio's spans ARE document offsets. Each span's source page is
-resolved through the AdapterBase :meth:`~latence_core.providers.adapter.AdapterBase.resolve_pages`
-seam over the parent :class:`~latence_core.contracts.PageMap` — the ported ``PageOffsetIndex``
-asset (never a weaker hand-rolled mapper), so a span straddling a page boundary cites its own
-page. Provenance is carried onto the RedactionRecord via
-:meth:`~latence_core.providers.adapter.AdapterBase.carry_provenance` (the source lineage intact,
+resolved through the document-scoped :class:`~latence_core.page_index.PageIndexResolver` seam
+(which owns the memoised ported ``PageOffsetIndex`` asset — never a weaker hand-rolled mapper, and
+never a per-chunk index, which since v18 would see no map on any chunk after a document's first),
+so a span straddling a page boundary cites its own page. Provenance is carried onto the
+RedactionRecord via :meth:`~latence_core.providers.adapter.AdapterBase.carry_provenance`
+(the source lineage intact,
 the offset span narrowed to ``[0, len)``). Spans are made **non-overlapping + stable** (the
 RedactionRecord invariant): earlier start wins, then longer span, then type name.
 
@@ -129,7 +130,8 @@ class PresidioRedactor(AdapterBase):
     cpu/cuda placement (spaCy is CPU-first, GPU-optional), :meth:`batched` for input-order
     document batching, :meth:`guard` for native-exception → typed
     :class:`~latence_core.errors.ProviderError` mapping (NO raw text / PII in the message), and
-    :meth:`carry_provenance` / :meth:`resolve_pages` for the ADR-0031 offset/page carry.
+    :meth:`carry_provenance` + the :class:`~latence_core.page_index.PageIndexResolver` seam for the
+    ADR-0031 offset/page carry.
 
     Config:
         model: str  — the spaCy model id (default ``en_core_web_sm``, MIT; ``en_core_web_lg``,

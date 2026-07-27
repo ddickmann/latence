@@ -278,6 +278,17 @@ workspace are versioned and released together under one version number.
   identically: the resolver adopts whichever record carries the map first, or is seeded straight
   from the parsed `DocumentRecord`s (`PageIndexResolver.from_documents`, ADR-0017). Degradation is
   now COUNTED (`resolver.unresolved`) instead of a silent per-caller fallback.
+  **`AdapterBase.resolve_pages` — the PUBLIC helper third-party adapters are pointed at — goes
+  through that seam too (BREAKING, audit R2).** It signature changed from
+  `resolve_pages(doc_char_start, doc_char_end, page_map=…, fallback_page_start=…,
+  fallback_page_end=…)` to `resolve_pages(chunk, doc_char_start, doc_char_end, resolver=…)`: the
+  old form built a throwaway `PageOffsetIndex` from `chunk.page_map`, which under v18 is `None`
+  on every chunk after a document's first, so an adapter following `docs/writing-an-adapter.md`
+  verbatim silently degraded those mentions to the parent chunk's inherited page range — the
+  exact regression ADR-0021/0031 forbids, on the seam that is supposed to make the invariant the
+  default. The interface got *smaller* (the two fallback arguments are now derived from the
+  source chunk, which is what every caller passed), the guide documents the one-resolver-per-call
+  + `observe()`-every-chunk discipline, and the reference adapter demonstrates it.
 - **The benchmark guide no longer describes numbers the results page does not carry (audit
   R1-docs_truth-9, #187).** `docs/running-the-benchmarks.md` said in the present tense that the
   Entity/Relation Extraction, Disambiguation and Redaction slices were published on

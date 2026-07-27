@@ -37,8 +37,10 @@ quality/throughput needs a rig, #64 — flagged, never fabricated).
    Screening quarantine, a `PARSE_ERROR` record, an empty result).
 3. **Keep offsets/Provenance intact.** Every emitted record carries `Provenance` + `Classification`;
    a sub-document carrier (a mention/relation) resolves its char span back to a source page through
-   the parent's page map (reuse `OffsetIndex`/`PageOffsetIndex` — `AdapterBase.rebase_offsets` /
-   `resolve_pages` — not a weaker copy).
+   the parent's page map (reuse `OffsetIndex`/`PageIndexResolver` — `AdapterBase.rebase_offsets` /
+   `resolve_pages` — not a weaker copy, and not a throwaway per-chunk page index: since v18 the
+   map rides a document's FIRST chunk only, so use ONE `PageIndexResolver` per call and
+   `observe()` every chunk).
 4. **Be deterministic, or say you are not.** Emit records in a stable order; if learned float
    inference makes byte-identical output impossible, declare `deterministic=False`.
 5. **Stay dep-light at import.** Defer your heavy `import` to first use so Provider discovery (and
