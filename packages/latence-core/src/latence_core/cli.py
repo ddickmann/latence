@@ -647,6 +647,70 @@ def setup(
             "induction (it rides `induce.config.domain`) and is recorded as a header note.",
         ),
     ] = None,
+    chunk_max_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--chunk-max-tokens",
+            help="Per-chunk token ceiling (default 768 — the GLiNER2 window). The gliner-family "
+            "`max_len` is DERIVED from this: the chunker counts ~1.2x fewer tokens than the "
+            "mdeberta encoder, so raising the budget raises the model window with it.",
+        ),
+    ] = None,
+    chunk_overlap_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--chunk-overlap-tokens",
+            help="Tokens of the previous chunk repeated at the start of the next (default 80).",
+        ),
+    ] = None,
+    chunk_min_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--chunk-min-tokens",
+            help="A trailing remnant below this merges into the previous chunk (default 8).",
+        ),
+    ] = None,
+    ocr_dpi: Annotated[
+        int | None,
+        typer.Option(
+            "--ocr-dpi",
+            help="PDF→image rasterisation DPI for the OCR parse paths (default 200 — LightOn's "
+            "published value). Higher = sharper and slower.",
+        ),
+    ] = None,
+    ocr_max_longest_dim: Annotated[
+        int | None,
+        typer.Option(
+            "--ocr-max-longest-dim",
+            help="Target longest image side in px, aspect preserved (default 1540 — LightOn's "
+            "published value; 0 disables the downscale).",
+        ),
+    ] = None,
+    microbatch_max_texts: Annotated[
+        int | None,
+        typer.Option(
+            "--microbatch-max-texts",
+            help="GLiNER2 extract/redact: hard cap on texts packed into ONE model forward. "
+            "Default is derived from the model window so the padded forward stays at the "
+            "pod-safe 4x768 token positions.",
+        ),
+    ] = None,
+    microbatch_token_budget: Annotated[
+        int | None,
+        typer.Option(
+            "--microbatch-token-budget",
+            help="GLiNER2 extract/redact: token budget for ONE model forward (provider default "
+            "3072). Lower it on a smaller card.",
+        ),
+    ] = None,
+    intra_op_threads: Annotated[
+        int | None,
+        typer.Option(
+            "--intra-op-threads",
+            help="GLiNER2 extract/redact: torch intra-op thread cap at load (provider default 8; "
+            "<= 0 disables the cap).",
+        ),
+    ] = None,
     predefined_labels: Annotated[
         Path | None,
         typer.Option(
@@ -695,10 +759,15 @@ def setup(
         _KNOWN_PARSERS,
         _KNOWN_PROFILES,
         _KNOWN_SOTA_PARSERS,
+        CHUNK_MAX_TOKENS,
+        CHUNK_MIN_TOKENS,
+        CHUNK_OVERLAP_TOKENS,
         DEFAULT_LLM_BASE_URL,
         DEFAULT_LLM_MODEL,
         DEFAULT_OCR_BASE_URL,
         DEFAULT_OCR_MODEL,
+        DEFAULT_RASTER_DPI,
+        DEFAULT_RASTER_MAX_LONGEST_DIM,
         INTAKE_MAX_BYTES_FLOOR,
         PARSER_OCR_VLLM,
         PARSER_PLAINTEXT,
@@ -958,6 +1027,47 @@ def setup(
             err=True,
         )
 
+    # h. The tuning knobs (T-WIZ-1 chunk budget, T-OCR-3 rasterisation, T-WIZ-3 GLiNER2 perf).
+    # Flags only (never prompted): they are advanced knobs whose defaults are the validated ones,
+    # so a guided run must not make the operator answer five questions to reach the blessed stack.
+    # Validated HERE and loudly: an out-of-range budget would otherwise surface as a ValueError
+    # from ChunkBudget at run time, hours later, with a stack config already saved.
+    chunk_max = chunk_max_tokens if chunk_max_tokens is not None else CHUNK_MAX_TOKENS
+    chunk_overlap = (
+        chunk_overlap_tokens if chunk_overlap_tokens is not None else CHUNK_OVERLAP_TOKENS
+    )
+    chunk_min = chunk_min_tokens if chunk_min_tokens is not None else CHUNK_MIN_TOKENS
+    if chunk_max < 1:
+        typer.echo(f"--chunk-max-tokens must be >= 1, got {chunk_max}.", err=True)
+        raise typer.Exit(code=2)
+    if not 0 <= chunk_overlap < chunk_max:
+        typer.echo(
+            f"--chunk-overlap-tokens must be in [0, --chunk-max-tokens); got {chunk_overlap} "
+            f"against a {chunk_max}-token budget.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if chunk_min < 0:
+        typer.echo(f"--chunk-min-tokens must be >= 0, got {chunk_min}.", err=True)
+        raise typer.Exit(code=2)
+    dpi = ocr_dpi if ocr_dpi is not None else DEFAULT_RASTER_DPI
+    longest = (
+        ocr_max_longest_dim if ocr_max_longest_dim is not None else DEFAULT_RASTER_MAX_LONGEST_DIM
+    )
+    if dpi < 1:
+        typer.echo(f"--ocr-dpi must be >= 1, got {dpi}.", err=True)
+        raise typer.Exit(code=2)
+    if longest < 0:
+        typer.echo(f"--ocr-max-longest-dim must be >= 0 (0 disables), got {longest}.", err=True)
+        raise typer.Exit(code=2)
+    for flag, value in (
+        ("--microbatch-max-texts", microbatch_max_texts),
+        ("--microbatch-token-budget", microbatch_token_budget),
+    ):
+        if value is not None and value < 1:
+            typer.echo(f"{flag} must be >= 1, got {value}.", err=True)
+            raise typer.Exit(code=2)
+
     answers = SetupAnswers(
         source=src,
         storage=store,
@@ -976,6 +1086,14 @@ def setup(
         header_refs=header_refs_family,
         inline_refs=inline_refs_family,
         predefined_labels=fixed_labels,
+        chunk_max_tokens=chunk_max,
+        chunk_overlap_tokens=chunk_overlap,
+        chunk_min_tokens=chunk_min,
+        ocr_dpi=dpi,
+        ocr_max_longest_dim=longest,
+        microbatch_max_texts=microbatch_max_texts,
+        microbatch_token_budget=microbatch_token_budget,
+        intra_op_threads=intra_op_threads,
     )
 
     # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.

@@ -279,7 +279,7 @@ capability wiring — the SAME machinery `latence stack validate` builds on, no 
 **saves** `./latence.stack.yaml`. The generated stack is exactly the SOTA stack of §4:
 
 ```text
-source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
+source → intake_screen → parse[lighton_vllm] → chunk[768] → content_screen
   → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
   → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra, skip_if_unavailable]
   → enrich(context) → export_kg + export_corpus[Granite r2, context_columns, bm25]
@@ -358,19 +358,27 @@ every knob. Save it as `stacks/my-corpus.yaml`. This is the **exact** enterprise
 > corpus-wide merged schema has to be salience-capped, which drops the rare-but-critical type from
 > the one chunk that needed it and scores every other chunk against types that are not in it; type
 > consistency is earned downstream in the resolution phase), give redaction real **financial-PII**
-> labels, cap chunks at
-> **`max_tokens: 640`**, and let the GLinker disambiguator's precision defaults ride. Then entities
-> are correctly typed and the relations are meaningful.
+> labels, set the chunk budget with
+> **`--chunk-max-tokens`** (default **768**), and let the GLinker disambiguator's precision defaults
+> ride. Then entities are correctly typed and the relations are meaningful.
 >
-> **Why 640.** The GLiNER2 extractor/redactor run on mdeberta-v3, whose token window is **768**.
-> `chunk.markdown`'s `max_tokens` is counted by the *chunker's* tokenizer, which runs ~1.2× the
-> model's (pod-measured: a 768-chunker-token cap hit mdeberta median 666 / max 921). So 640
-> chunker-tokens ≈ ≤768 mdeberta-tokens — as big as is safe. The providers also carry a
-> `max_len: 768` guard as the hard backstop.
+> **Why the budget and the window move together (T-WIZ-1).** The GLiNER2 extractor/redactor run on
+> mdeberta-v3, and past their `max_len` the encoder **silently truncates** — tail entities and
+> relations are lost and offsets past the window are unreliable. `chunk.markdown`'s `max_tokens` is
+> counted by the *chunker's* tokenizer, which runs ~1.2× **fewer** tokens than the model's
+> (pod-measured: a 768-chunker-token cap hit mdeberta median 666 / **max 921**). So the budget alone
+> means nothing — what matters is the pair. The wizard derives the window from the budget
+> (`recipe.model_window_for`): 640 → `max_len: 768` (the old, hand-calibrated pairing, reproduced
+> exactly) and the current default 768 → `max_len: 960`, which covers the measured 921.
+>
+> Widening the window is not free: GLiNER2 pads a micro-batch up to its longest sequence, so the
+> padded forward is `microbatch_max_texts × max_len`, and the pod's safe point was 4 × 768 = 21.6 GiB
+> peak. So the wizard buys the positions back — at a 960 window it emits `microbatch_max_texts: 3`,
+> holding the padded forward at the same 3072 token positions.
 
 ```yaml
 # stacks/my-corpus.yaml — the enterprise-SOTA stack:
-#   source → intake_screen → parse[lighton_vllm] → chunk[640] → content_screen
+#   source → intake_screen → parse[lighton_vllm] → chunk[768] → content_screen
 #     → induce[corpus] → extract[gliner2, thr 0.3] → redact[gliner2, financial-PII]
 #     → profiling → consolidate_types → disambiguate[glinker] → graph[+pagerank features] → complete[ultra]
 #     → enrich(context) → export_kg + export_corpus[Granite r2 + bm25]
@@ -407,12 +415,12 @@ stages:
       api_key: EMPTY
       max_concurrency: 8
 
-  # 4) Chunk at 640 (the mdeberta-window-calibrated max — see the callout above).
+  # 4) Chunk at 768 (the budget; the gliner max_len below is DERIVED from it — see the callout).
   - name: chunk
     capability: chunk
     provider: chunk.markdown
     depends_on: [parse]
-    config: {max_tokens: 640, overlap_tokens: 80, min_tokens: 8}
+    config: {max_tokens: 768, overlap_tokens: 80, min_tokens: 8}
 
   # 5) Content screening: flag/quarantine injection & keyword-risk chunks before extraction.
   - name: content_screen
@@ -452,6 +460,8 @@ stages:
       labels: [person, organization]         # entity floor; induced entity_types union on
       relation_labels: [works for, partner of]  # relation floor; induced relation_types union on
       threshold: 0.3
+      max_len: 960                 # derived from the 768 chunk budget (~1.2x chunker→mdeberta)
+      microbatch_max_texts: 3      # 3 x 960 = the pod-safe 3072 padded token positions
 
   # 8) Learned PII redaction with FINANCIAL PII, not just person/email/phone. The provider is
   #    `redaction.gliner2` — the SAME unified GLiNER2 engine `extract` above already runs (#197,
@@ -476,8 +486,9 @@ stages:
       device: cuda
       pii_labels: [person, email, phone number, address, iban, credit card number, tax id, bank account number, social security number]
       guardrails: true
-      max_len: 768
+      max_len: 960                 # same derivation as `extract` — same encoder, same chunks
       threshold: 0.5
+      microbatch_max_texts: 3
 
   # 9) Corpus profiling (statistics + drift diagnostics) over docs + mentions.
   - name: profiling
@@ -734,7 +745,7 @@ PY
 ### 5.4 `chunk` → `chunk.jsonl` (`ChunkRecord`s — sizes)
 ```bash
 peek $CK/chunk.jsonl
-# look for: token_count clustered at/under 640; index runs 0..k per document; content is coherent.
+# look for: token_count clustered at/under 768; index runs 0..k per document; content is coherent.
 python - <<PY
 import json, statistics as st
 tc=[json.loads(l)["token_count"] for l in open("$CK/chunk.jsonl")]
@@ -1152,7 +1163,7 @@ under `_latence/runs/<run-id>/`, exactly like `latence run`.
 | GLinker over-merges distinct entities / two people collapse into one | the embedding-by-label rung was turned on with the retrieval embedder | keep `use_embedding_merge` at its **default OFF** — recall is carried by the neural linker + string cascade + the conservative fuzzy rung; re-enable ONLY with a discriminative STS embedder (§5.8). |
 | Look-alikes wrongly merged (`§3 GwG` with `§11 GwG`, `K²` with `D²`) | should not happen — the distinguishing-token guard vetoes these | if it does, you overrode the guard; leave the GLinker precision defaults to ride (ADR-0046, §5.8). |
 | `complete` (ULTRA) reports `skipped` | no ULTRA checkpoint is vendored; `skip_if_unavailable: true` skips gracefully | expected — supply an ULTRA `.pth` via `complete.config.checkpoint` to enable inferred edges. |
-| Tail entities/relations missing; offsets look off on long chunks | chunk tokenised past the mdeberta **768** window and was silently truncated | keep `chunk.markdown max_tokens ≤ 640` (~≤768 mdeberta-tokens); the provider `max_len: 768` guard is the backstop (§4 callout). |
+| Tail entities/relations missing; offsets look off on long chunks | chunk tokenised past the gliner `max_len` and was silently truncated | the wizard derives `max_len` from `--chunk-max-tokens` (~1.2× chunker→mdeberta): 768 → `max_len: 960`. A hand-edited stack must keep the pair (§4 callout). |
 | GPU Stages report `skipped` / `skip_reason` in the report | CPU-only host (device honesty — skipped-with-flag, never faked) | run on a real CUDA pod with a vLLM OCR endpoint up; the CPU-reachable spine still validates. |
 | `context_header` / `neighbor_entity_ids` absent from `records.parquet` | `context_columns` not set on `export_corpus`, or the corpus was exported from `redact` not `enrich` | set `context_columns: true` and wire `export_corpus → enrich` (§4). |
 | A re-run didn't pick up a config change to an early Stage | resume is keyed by **stage name**; an existing checkpoint under the same name is skipped | delete that Stage's checkpoint (`rm $CK/<stage>.jsonl`) or use a fresh `--run-id`. |

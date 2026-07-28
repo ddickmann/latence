@@ -55,7 +55,6 @@ from latence_core.setup.recipe import (
 )
 from latence_core.setup.wizard import SetupAnswers, build_pipeline_dict, build_stack_config
 from latence_core.stages.chunk import MarkdownChunker
-from typer.testing import CliRunner
 
 # The real Providers that READ these knobs — the fourth hop. Installed --no-deps from source in
 # CI + scripts/verify-local.sh; every constructor below is pure config validation (no weights, no
@@ -66,6 +65,7 @@ from latence_parser_lighton.rasterize import DEFAULT_DPI, DEFAULT_MAX_LONGEST_DI
 from latence_parser_lighton_vllm.provider import LightOnVllmParser
 from latence_parser_render.provider import UniversalRenderParser
 from latence_pii_gliner2.provider import Gliner2PIIRedactor
+from typer.testing import CliRunner
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Iterator

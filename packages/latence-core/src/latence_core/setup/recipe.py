@@ -29,9 +29,10 @@ canvas": this is NOT an entry-point registry a third party plugs into. Every con
 this module, and the only recipes are :data:`LITE_RECIPE` and :data:`SOTA_RECIPE`. The
 operator-facing interface is unchanged — answers in, one validated YAML out.
 
-The deletion test: deleting the two old builders does NOT make complexity vanish. chunk 640/80, the
-0.3-vs-0.5 extraction threshold, the ADR-0044 financial-PII floor, the ``redact -> enrich ->
-export_corpus`` dataflow are all real, load-bearing knowledge. It RELOCATES to N small,
+The deletion test: deleting the two old builders does NOT make complexity vanish. the chunk
+budget's coupling to the mdeberta window, the 0.3-vs-0.5 extraction threshold, the ADR-0044
+financial-PII floor, the ``redact -> enrich -> export_corpus`` dataflow are all real, load-bearing
+knowledge. It RELOCATES to N small,
 individually-testable declarations behind one assembler — which is the depth gain: a caller still
 learns one function, and a maintainer changing one Stage now reads one declaration instead of two
 procedural scripts and a header renderer.
@@ -39,6 +40,7 @@ procedural scripts and a header renderer.
 
 from __future__ import annotations
 
+import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -178,6 +180,101 @@ _DEFAULT_EXTENSIONS: tuple[str, ...] = (
 # Default LLM endpoint for schema induction (OpenRouter + a small, cheap, capable model).
 DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_LLM_MODEL = "openai/gpt-4.1-mini"
+
+# --------------------------------------------------------------------------------------------
+# The chunk token budget, and the model window it IMPLIES (T-WIZ-1)
+# --------------------------------------------------------------------------------------------
+#
+# The chunk budget used to be a literal — `{"max_tokens": 640, "overlap_tokens": 80,
+# "min_tokens": 8}` — with no answer, no flag, and no way to retune a run without hand-editing the
+# emitted YAML. It is now an ANSWER; these are its defaults.
+#
+# 768 is the GLiNER2 window, and picking it is only safe because the model-side bound moves WITH
+# it. The trap, pod-measured (docs/TUTORIAL-fresh-pod-walkthrough.md §4): `chunk.markdown` counts
+# in its OWN tokenizer (`chunking.estimate_tokens`), which runs ~1.2x FEWER tokens than the
+# mdeberta-v3 encoder the gliner family runs — a 768-chunker-token cap measured mdeberta **median
+# 666 / MAX 921**, i.e. 2 chunks in 7 past the 768 window, where the encoder SILENTLY truncates
+# (tail entities/relations lost, offsets past the window unreliable). So the old 640 was not a
+# taste; it was 768/1.2, the largest budget that fit a fixed 768 window.
+#
+# Making the budget an answer therefore means deriving the window from it rather than pinning
+# either: `extract`/`redact` emit `max_len = model_window_for(budget)` on BOTH profiles (the SOTA
+# profile used to emit no `max_len` at all and ride the Provider's 768 default — which silently
+# truncates the moment an operator raises the budget). At the historical 640 the derivation
+# reproduces exactly the historical 768, so the constant GENERALISES the calibration rather than
+# replacing it.
+CHUNK_MAX_TOKENS = 768
+CHUNK_OVERLAP_TOKENS = 80
+CHUNK_MIN_TOKENS = 8
+
+#: Pod-measured chunker-token -> mdeberta-token expansion (768 chunker tokens -> max 921 mdeberta,
+#: 921/768 = 1.199). Used to size the model window from the chunk budget. Deliberately the MAX
+#: observed ratio, not the median (666/768 = 0.87): the window is a truncation boundary, so it must
+#: cover the worst chunk, not the typical one.
+MDEBERTA_TOKEN_EXPANSION = 1.2
+
+#: Model windows are rounded UP to a multiple of this. A tidy, legible number in the emitted YAML,
+#: and it keeps the derived window stable under small budget changes.
+MODEL_WINDOW_GRANULARITY = 64
+
+#: The gliner-family model window the PROVIDER defaults to — mirrored from
+#: ``providers/perf.py::DEFAULT_GLINER_MAX_LEN`` rather than imported, so the setup module stays a
+#: leaf (ADR-0016) and so nothing here depends on the Provider-side perf seam. The mirror is held
+#: in sync by ``test_setup_wizard_knobs.py``. It is the reference point for "does this derived knob
+#: differ from what the Provider would have done anyway?" — if not, nothing is emitted.
+DEFAULT_MODEL_WINDOW = 768
+
+#: The padded micro-batch size (token POSITIONS) the pod measured as safe: GLiNER2 pads every text
+#: in a micro-batch up to the batch's longest sequence, so the padded worst case is
+#: ``len(batch) x longest`` — and ``DEFAULT_MICROBATCH_MAX_TEXTS = 4`` x ``DEFAULT_GLINER_MAX_LEN =
+#: 768`` peaked at **21.6 GiB** and passed on the 32 GB pod (batch_size=32 OOM'd). DECISIONS.md §D3
+#: records that on the 24 GB target card that is only 2.4 GiB of headroom, so widening the model
+#: window must NOT widen this product: a wider window buys its positions back out of
+#: ``microbatch_max_texts`` (:func:`microbatch_max_texts_for`).
+POD_SAFE_PADDED_POSITIONS = 4 * 768
+
+
+def model_window_for(chunk_max_tokens: int) -> int:
+    """The gliner-family ``max_len`` that COVERS a chunk budget of ``chunk_max_tokens``.
+
+    ``ceil(budget x MDEBERTA_TOKEN_EXPANSION)`` rounded up to :data:`MODEL_WINDOW_GRANULARITY`.
+    640 -> 768 (the historical pairing, reproduced exactly); 768 -> 960 (which covers the pod's
+    measured 921). Pure arithmetic, so the byte-identical determinism contract holds.
+    """
+    needed = math.ceil(max(1, chunk_max_tokens) * MDEBERTA_TOKEN_EXPANSION)
+    rounded = -(-needed // MODEL_WINDOW_GRANULARITY) * MODEL_WINDOW_GRANULARITY
+    return max(MODEL_WINDOW_GRANULARITY, rounded)
+
+
+def microbatch_max_texts_for(window: int) -> int:
+    """The micro-batch text cap that holds the PADDED forward at :data:`POD_SAFE_PADDED_POSITIONS`.
+
+    A wider model window costs VRAM quadratically in the attention and linearly in the padded
+    batch; the pod-safe point is 4 texts x 768 positions. So the cap is
+    ``POD_SAFE_PADDED_POSITIONS // window``, clamped ``>= 1`` — 768 -> 4 (the Provider's own
+    default, so nothing is emitted for the historical window), 960 -> 3. The operator's explicit
+    ``microbatch_max_texts`` answer always wins over this.
+    """
+    return max(1, POD_SAFE_PADDED_POSITIONS // max(1, window))
+
+
+# --------------------------------------------------------------------------------------------
+# Rasterisation policy (T-OCR-3)
+# --------------------------------------------------------------------------------------------
+#
+# LightOn's published preprocessing recipe — render PDFs at 200 DPI to a target longest dimension
+# of 1540 px, aspect preserved — is the DEFAULT and stays the default. What changes is that it was
+# unreachable from `latence setup` on EVERY parse path: `parser.lighton` and `parser.lighton_vllm`
+# emitted no raster config at all, and `parser.render`'s DPI was a literal. Both are now answers,
+# emitted only when they deviate from these values, so an unset flag leaves every parse block
+# byte-identical to before (reachability, not retuning).
+#
+# MIRRORED, not imported: `latence-core` must not depend on a Provider package (ADR-0016), and the
+# source of truth is `latence_parser_lighton.rasterize.DEFAULT_DPI` / `DEFAULT_MAX_LONGEST_DIM`.
+# `test_setup_wizard_knobs.py::test_raster_defaults_mirror_the_rasteriser` holds the two in sync,
+# because an unchecked mirror is the drift class ADR-0041 §7a recorded.
+DEFAULT_RASTER_DPI = 200
+DEFAULT_RASTER_MAX_LONGEST_DIM = 1540
 
 
 class SetupConfigError(ValueError):
@@ -593,6 +690,50 @@ def _embedder_for(answers: SetupAnswers, *, gpu: bool) -> StageBlock:
     return gpu_embedder_block() if gpu else tiered_embedder_block(answers)
 
 
+def _add_raster_knobs(
+    config: StageBlock, answers: SetupAnswers, *, dpi: bool, longest: bool
+) -> None:
+    """Thread the T-OCR-3 rasterisation knobs onto ``config`` — omitting the untouched defaults.
+
+    ``dpi``/``longest`` say which of the two this particular block is the one that applies (the
+    universal renderer's OCR sub-provider only ever sees images, so DPI would be a dead key there).
+    A knob equal to LightOn's published default is not emitted at all: the ticket asks for
+    reachability, and the acceptance bar is that an unset flag leaves the block byte-identical.
+    """
+    if dpi and answers.ocr_dpi != DEFAULT_RASTER_DPI:
+        config["dpi"] = answers.ocr_dpi
+    if longest and answers.ocr_max_longest_dim != DEFAULT_RASTER_MAX_LONGEST_DIM:
+        config["max_longest_dim"] = answers.ocr_max_longest_dim
+
+
+def _add_gliner2_perf_knobs(config: StageBlock, answers: SetupAnswers, *, window: int) -> None:
+    """Thread the T-WIZ-3 GLiNER2 performance knobs onto a gliner2 Stage's ``config``.
+
+    ``microbatch_max_texts`` / ``microbatch_token_budget`` / ``intra_op_threads`` are read by BOTH
+    gliner2 Providers (``providers/perf.py`` ``resolve_microbatch_bounds`` /
+    ``resolve_intra_op_threads``) and were emitted by nothing. ``compile``/``quantize`` stay
+    deliberately absent — the Provider resolves them per resolved device (True on cuda, False on
+    cpu), so a stack emitted for a GPU box degrades correctly if it is later run on cpu.
+
+    ``microbatch_max_texts`` additionally carries a DERIVED default when the model window is wider
+    than the Provider's own 768: GLiNER2 pads a micro-batch to its longest sequence, so the padded
+    forward is ``max_texts x window`` and the pod's safe point is 4 x 768 = 21.6 GiB peak. A wider
+    window therefore has to buy its positions back out of the text cap
+    (:func:`microbatch_max_texts_for`) or the 24 GB card loses its 2.4 GiB of headroom (D3). An
+    explicit operator answer always wins; a derived value equal to the Provider default is omitted.
+    """
+    derived = microbatch_max_texts_for(window)
+    max_texts = answers.microbatch_max_texts
+    if max_texts is None and derived != POD_SAFE_PADDED_POSITIONS // DEFAULT_MODEL_WINDOW:
+        max_texts = derived
+    if max_texts is not None:
+        config["microbatch_max_texts"] = max_texts
+    if answers.microbatch_token_budget is not None:
+        config["microbatch_token_budget"] = answers.microbatch_token_budget
+    if answers.intra_op_threads is not None:
+        config["intra_op_threads"] = answers.intra_op_threads
+
+
 # --------------------------------------------------------------------------------------------
 # The contributions — one Stage, one declaration
 # --------------------------------------------------------------------------------------------
@@ -652,6 +793,13 @@ class ParseContribution(StageContribution):
     the in-process OCR VLM, plain text) emits the same block in either profile. Routing the text
     case is what makes the SOTA profile yield a RUNNABLE stack for a .txt/.md/.jsonl corpus instead
     of forcing OCR at an endpoint that is not served for it.
+
+    T-OCR-3: the rasterisation policy (``dpi`` + ``max_longest_dim`` — LightOn's published
+    200/1540) is threaded onto whichever path actually rasterises. ``parser.render`` rasterises
+    PDFs ITSELF and hands its OCR sub-provider page IMAGES, never a PDF, so the DPI rides the outer
+    block and the downscale rides the sub-block; the two OCR parsers own both. A knob left at its
+    default is OMITTED, so an unset flag leaves every parse block byte-identical to before — this
+    ticket is reachability, not retuning.
     """
 
     served_ocr: bool = False
@@ -660,17 +808,19 @@ class ParseContribution(StageContribution):
 
     def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock:
         if self.served_ocr and answers.parser == PARSER_OCR_VLLM:
+            served: StageBlock = {
+                "base_url": answers.ocr_base_url,
+                "model": answers.ocr_model,
+                "api_key": SOTA_OCR_API_KEY,
+                "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
+            }
+            _add_raster_knobs(served, answers, dpi=True, longest=True)
             return {
                 "name": self.name,
                 "capability": "parse",
                 "provider": PARSER_OCR_VLLM,
                 "depends_on": ["intake_screen"],
-                "config": {
-                    "base_url": answers.ocr_base_url,
-                    "model": answers.ocr_model,
-                    "api_key": SOTA_OCR_API_KEY,
-                    "max_concurrency": SOTA_OCR_MAX_CONCURRENCY,
-                },
+                "config": served,
             }
         stage: StageBlock = {
             "name": self.name,
@@ -679,31 +829,39 @@ class ParseContribution(StageContribution):
             "depends_on": ["intake_screen"],
         }
         if answers.parser == PARSER_UNIVERSAL:
+            sub: StageBlock = {"device": answers.device, "max_new_tokens": 4096}
+            _add_raster_knobs(sub, answers, dpi=False, longest=True)
             stage["config"] = {
                 "device": answers.device,  # OCR sub-provider is GPU; skip-with-flag on a CPU host
-                "dpi": 200,
+                "dpi": answers.ocr_dpi,
                 "soffice_timeout_s": 120,
-                "ocr": {
-                    "provider": PARSER_OCR,
-                    "config": {"device": answers.device, "max_new_tokens": 4096},
-                },
+                "ocr": {"provider": PARSER_OCR, "config": sub},
             }
         elif answers.parser == PARSER_OCR:
-            stage["config"] = {"device": answers.device, "max_new_tokens": 4096}
+            direct: StageBlock = {"device": answers.device, "max_new_tokens": 4096}
+            _add_raster_knobs(direct, answers, dpi=True, longest=True)
+            stage["config"] = direct
         # parser.pdfplumber / parser.plaintext: born-digital text, no config block (CPU).
         return stage
 
 
 @dataclass(frozen=True)
 class ChunkContribution(StageContribution):
-    """``chunk`` — 640 tokens / 80 overlap, the mdeberta-window-calibrated near-max.
+    """``chunk`` — the operator's token budget, defaulting to the GLiNER2 window (T-WIZ-1).
+
+    The budget was a literal (640/80/8) with no answer and no flag: retuning a run meant
+    hand-editing the emitted YAML, which is exactly what ``latence setup`` exists to avoid. It is
+    now :attr:`SetupAnswers.chunk_max_tokens` / ``chunk_overlap_tokens`` / ``chunk_min_tokens``,
+    defaulting to :data:`CHUNK_MAX_TOKENS` (768) — and the gliner-family Stages derive their
+    ``max_len`` from it (:func:`model_window_for`), because the chunker counts ~1.2x FEWER tokens
+    than the mdeberta encoder and a budget raised without the window would silently truncate.
 
     Opens :data:`ANCHOR_CHUNK_STREAM`: from here on, every chunk-level Stage reads whatever the
     anchor points at rather than the literal name ``chunk``.
     """
 
     name: str = "chunk"
-    why: str = "split parsed documents at the mdeberta-window-calibrated near-max (640/80)"
+    why: str = "split parsed documents at the operator's token budget (default: the GLiNER2 window)"
 
     def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock:
         ctx.set_anchor(ANCHOR_CHUNK_STREAM, self.name)
@@ -712,8 +870,30 @@ class ChunkContribution(StageContribution):
             "capability": "chunk",
             "provider": "chunk.markdown",
             "depends_on": ["parse"],
-            "config": {"max_tokens": 640, "overlap_tokens": 80, "min_tokens": 8},
+            "config": {
+                "max_tokens": answers.chunk_max_tokens,
+                "overlap_tokens": answers.chunk_overlap_tokens,
+                "min_tokens": answers.chunk_min_tokens,
+            },
         }
+
+    def header_lines(self, answers: SetupAnswers, block: StageBlock | None) -> tuple[str, ...]:
+        if block is None:
+            return ()
+        config = block.get("config")
+        assert isinstance(config, dict)  # noqa: S101 - the block this contribution just emitted
+        budget = int(config["max_tokens"])
+        return (
+            "#",
+            f"# Chunk budget: {budget} chunker tokens / {config['overlap_tokens']} overlap"
+            " (`--chunk-max-tokens`).",
+            f"#   `extract`/`redact` bound the model window at {model_window_for(budget)} to match."
+            " The chunker",
+            "#   counts in its OWN tokenizer, ~1.2x FEWER tokens than the mdeberta-v3 encoder",
+            "#   GLiNER2 runs (pod-measured: a 768-chunker-token cap hit mdeberta median 666 /",
+            "#   MAX 921) and the encoder SILENTLY truncates past its window — so raising the",
+            "#   budget raises the window with it.",
+        )
 
 
 @dataclass(frozen=True)
@@ -844,8 +1024,15 @@ class ExtractContribution(StageContribution):
     (``depends_on: [redact]``, which sets each chunk's masked_content) so PII never reaches the KG;
     the default ``unmasked`` keeps the pre-W18 wiring, so the KG keeps the real entities.
 
+    T-WIZ-1: ``max_len`` is DERIVED from the chunk budget (:func:`model_window_for`) and emitted on
+    BOTH profiles. It used to be a per-profile literal — 768 on lite, *omitted entirely* on SOTA —
+    which was safe only while the budget was frozen at 640. With the budget an operator answer, a
+    fixed (or silently defaulted) window is the silent-truncation bug the pod measured: 768 chunker
+    tokens reach up to 921 mdeberta tokens. T-WIZ-3: the micro-batch + intra-op knobs both
+    Providers read ride here too (:func:`_add_gliner2_perf_knobs`).
+
     Overrides carry the profile's tuning: ``threshold`` (0.5 on lite, the 0.3 SOTA recall floor),
-    the default label sets, ``max_len`` (omitted entirely on SOTA), and ``device`` (``None`` ⇒ the
+    the default label sets, and ``device`` (``None`` ⇒ the
     operator's resolved device; pinned to ``cuda`` on the GPU-pod profile). T7: the extractor
     buckets each batch by label set and runs ONE native batched forward per bucket, and gliner2's
     native ``compile`` rides its own cuda default — deliberately NOT pinned here, so the Provider
@@ -856,21 +1043,21 @@ class ExtractContribution(StageContribution):
     threshold: float
     entity_defaults: tuple[str, ...]
     relation_defaults: tuple[str, ...]
-    max_len: int | None = None
     device: str | None = None
     name: str = "extract"
     why: str = "fused entity + relation extraction in one zero-shot pass"
 
     def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock:
         upstream = "redact" if answers.extract_on == "masked" else ctx.anchor(ANCHOR_LABELS)
+        window = model_window_for(answers.chunk_max_tokens)
         config: StageBlock = {
             "device": self.device or answers.device,
             "labels": _entity_labels(answers, self.entity_defaults),
             "relation_labels": _relation_labels(answers, self.relation_defaults),
             "threshold": self.threshold,
+            "max_len": window,
         }
-        if self.max_len is not None:
-            config["max_len"] = self.max_len
+        _add_gliner2_perf_knobs(config, answers, window=window)
         ctx.add_fanin(FANIN_MENTIONS, self.name)
         return {
             "name": self.name,
@@ -958,20 +1145,27 @@ class RedactContribution(StageContribution):
     def contribute(self, answers: SetupAnswers, ctx: RecipeContext) -> StageBlock | None:
         if not answers.pii:
             return None
+        # T-WIZ-1: the redactor runs the SAME mdeberta encoder the extractor does over the SAME
+        # chunks, so its window is derived from the same chunk budget. A fixed 768 here would have
+        # truncated the tail of a longer chunk — i.e. left PII in the exported corpus UNMASKED,
+        # which is a correctness failure, not a throughput one.
+        window = model_window_for(answers.chunk_max_tokens)
+        config: StageBlock = {
+            "device": self.device or answers.device,
+            # T1: the ADR-0044 financial floor, plus any operator-fixed pii_types
+            # (predefined-only fixes the RELEVANCE schema, never the SAFETY schema).
+            "pii_labels": _pii_labels(answers),
+            "guardrails": True,
+            "max_len": window,
+            "threshold": 0.5,
+        }
+        _add_gliner2_perf_knobs(config, answers, window=window)
         return {
             "name": self.name,
             "capability": "redaction",
             "provider": BLESSED_REDACT_PROVIDER,
             "depends_on": [ctx.anchor(ANCHOR_LABELS)],
-            "config": {
-                "device": self.device or answers.device,
-                # T1: the ADR-0044 financial floor, plus any operator-fixed pii_types
-                # (predefined-only fixes the RELEVANCE schema, never the SAFETY schema).
-                "pii_labels": _pii_labels(answers),
-                "guardrails": True,
-                "max_len": 768,
-                "threshold": 0.5,
-            },
+            "config": config,
         }
 
     def header_lines(self, answers: SetupAnswers, block: StageBlock | None) -> tuple[str, ...]:
@@ -1324,7 +1518,6 @@ LITE_RECIPE = StackRecipe(
             threshold=0.5,
             entity_defaults=("organization", "person"),
             relation_defaults=("works for", "partner of"),
-            max_len=768,
         ),
         RedactContribution(),
         ProfilingContribution(),
