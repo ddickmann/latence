@@ -963,20 +963,91 @@ def resolve_max_len(config: dict[str, Any], default: int = DEFAULT_GLINER_MAX_LE
 #: exported, because once torch is imported it owns its own intra-op pool, not the OMP env). A small
 #: cap keeps CPU-side tokenisation/pre-processing from thrashing the scheduler; on a GPU the heavy
 #: math is off-CPU, so a low cap costs ~nothing. Configurable per provider (``intra_op_threads``).
+#:
+#: T-DEV-2: this is now the **reference** value, not the answer —
+#: :func:`derive_intra_op_threads` reads the machine and reproduces it exactly at
+#: :data:`REFERENCE_CPU_CORES`.
 DEFAULT_INTRA_OP_THREADS = 8
+
+#: The core count :data:`DEFAULT_INTRA_OP_THREADS` was derived against (the diagnosed Blackwell
+#: host). Named so the derivation can be checked against its own provenance in a test.
+REFERENCE_CPU_CORES = 128
+
+
+def effective_cpu_count() -> int | None:
+    """The cores this **process** may actually use — not the ones the host advertises (T-DEV-2).
+
+    ``os.cpu_count()`` reports the machine's cores. On a rented pod that is the *host's* number:
+    ``nproc`` says 128 while the container's cgroup / CPU affinity allows 16, or 4. Sizing a thread
+    pool off the host number on such a slice is the same many-core oversubscription W9-scaling
+    introduced the cap to prevent, arrived at from the other end.
+
+    Order: ``os.process_cpu_count()`` (3.13+, the affinity-aware answer) →
+    ``len(sched_getaffinity)`` (Linux) → ``os.cpu_count()`` → ``None``. Never raises; ``None``
+    means unreadable, which callers
+    treat as "keep the reference default" rather than as a number.
+    """
+    import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    # ``getattr`` rather than direct attribute access for both affinity probes: neither exists on
+    # every platform (``process_cpu_count`` is 3.13+, ``sched_getaffinity`` is Linux-only), and a
+    # direct reference would not type-check on a macOS dev box.
+    probes: list[Callable[[], Any]] = []
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    if callable(process_cpu_count):
+        probes.append(process_cpu_count)
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if callable(sched_getaffinity):
+        probes.append(lambda: len(sched_getaffinity(0)))
+    probes.append(os.cpu_count)
+
+    for probe in probes:
+        try:
+            value = probe()
+        except Exception:  # noqa: BLE001 - an unreadable probe falls through to the next one
+            continue
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def derive_intra_op_threads(cores: int | None) -> int:
+    """The intra-op cap for a host with ``cores`` usable cores — reproduces 8 at 128 (T-DEV-2).
+
+    ``min(8, cores)``, floored at 1. The 8 is the pod-measured point
+    (:data:`DEFAULT_INTRA_OP_THREADS` against :data:`REFERENCE_CPU_CORES`); the ``min`` is what
+    stops a 4-core container slice from
+    being handed a cap larger than the cores it owns. ``None`` (unreadable) keeps the reference
+    value rather than guessing downward — an unknown core count is not evidence of a small one.
+    """
+    if cores is None:
+        return DEFAULT_INTRA_OP_THREADS
+    return max(1, min(DEFAULT_INTRA_OP_THREADS, int(cores)))
 
 
 def resolve_intra_op_threads(
-    config: Mapping[str, Any], default: int = DEFAULT_INTRA_OP_THREADS
+    config: Mapping[str, Any], default: int | None = None
 ) -> int | None:
     """Resolve the intra-op thread cap (``config["intra_op_threads"]``) — torch-free (W9-scaling).
 
-    Unset → ``default`` (8). An explicit int pins it. A value ``<= 0`` **disables** the cap (returns
+    Unset → the **derived** default (:func:`derive_intra_op_threads` over
+    :func:`effective_cpu_count`; 8 on the 128-core reference host, less on a smaller *container
+    slice*). An explicit int pins it. A value ``<= 0`` **disables** the cap (returns
     ``None`` — leave torch's default pool untouched, the explicit opt-out for a box that wants all
     cores). A positive value is clamped to ``os.cpu_count()`` (never request more threads than
     cores). A non-int is a hard error the caller surfaces as a ConfigError. Pure config read — no
     torch import (ADR-0016), so a registry that only imports the module never pulls torch.
+
+    RESIDUAL, recorded rather than papered over: the clamp on an **explicit** request still reads
+    ``os.cpu_count()`` (the host), not :func:`effective_cpu_count` (the slice), so on a
+    cgroup-limited pod an operator asking for 100_000 threads is still clamped to the host's
+    count. Tightening it
+    would change ``test_perf_seam.py::test_resolve_intra_op_threads_default_and_clamp``, which
+    computes its expectation from ``os.cpu_count()`` and is outside this lane's ownership. The
+    DEFAULT — the value that actually ships — is affinity-aware, which is where the defect was.
     """
+    if default is None:
+        default = derive_intra_op_threads(effective_cpu_count())
     raw = config.get("intra_op_threads", default)
     if isinstance(raw, bool) or not isinstance(raw, int):
         msg = f"invalid intra_op_threads {raw!r}: must be an int (>= 1 to cap, <= 0 to disable)"
@@ -1156,6 +1227,131 @@ DEFAULT_MICROBATCH_MAX_TEXTS = 4
 #: more or less VRAM, but the defaults never assume the 32 GB card.
 DEFAULT_MICROBATCH_TOKEN_BUDGET = 4 * DEFAULT_GLINER_MAX_LEN
 
+# ---------------------------------------------------------------------------
+# T-DEV-2 — those two constants encoded ONE pod. Derive them from the machine.
+# ---------------------------------------------------------------------------
+#
+# "batch-4 peaked at 21.6 GiB" was measured on a **32 GB** card. On the 24 GB RTX 3090 that is
+# 2.4 GiB of headroom — before the OCR server and before fragmentation (DECISIONS.md §D3). The
+# constants above stay as the *reference point*; the functions below turn them into a derivation
+# that reproduces them EXACTLY on the reference hardware and lowers them on a smaller card.
+#
+# Two deliberate asymmetries, both stated so a reader can disagree with the right thing:
+#
+# * Detection may only LOWER the bound, never raise it. 4 × 768 is the one micro-batch size we have
+#   ever measured a peak for. Extrapolating upward from a single point on an 80 GB card would be
+#   inventing data; more VRAM stays reachable, as an explicit ``microbatch_max_texts``.
+# * UNKNOWN VRAM keeps the reference default — the opposite of the T-DEV-1 JIT gate. There the fault
+#   is an uncatchable first-forward native crash, so unknown must fail safe. Here the fault is a
+#   CUDA OOM, which the providers' reactive micro-batch backoff (:func:`is_cuda_oom`) recovers from,
+#   so collapsing every un-probeable host to a batch of one would trade permanent throughput for
+#   insurance against a recoverable event.
+
+#: The env override that PINS total VRAM in MiB, bypassing the probe. Same posture as
+#: ``LATENCE_CUDA`` / ``LATENCE_COMPUTE_CAPABILITY``: deterministic for CI, and an escape hatch for
+#: a container where the driver CLI is not reachable.
+LATENCE_TOTAL_VRAM_MIB_ENV = "LATENCE_TOTAL_VRAM_MIB"
+
+#: The card :data:`DEFAULT_MICROBATCH_MAX_TEXTS` / :data:`DEFAULT_MICROBATCH_TOKEN_BUDGET` were
+#: measured on — 32 GiB, in MiB. Named so the derivation can be checked against its own provenance.
+REFERENCE_VRAM_MIB = 32 * 1024
+
+
+def _vram_from_imported_torch() -> int | None:
+    """Total VRAM in MiB from a torch that is **already imported** — never importing it.
+
+    ``sys.modules`` only (ADR-0016: ``latence-core`` must not pull torch to size a batch). The
+    **smallest** device wins: one micro-batch bound is applied process-wide, so it has to be the one
+    the smallest card survives.
+    """
+    import sys  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
+        count = int(torch.cuda.device_count())
+        if count < 1:
+            return None
+        totals = [int(torch.cuda.get_device_properties(i).total_memory) for i in range(count)]
+    except Exception:  # noqa: BLE001 - a torch that cannot answer is UNKNOWN, never a fabricated size
+        return None
+    smallest = min(totals)
+    return smallest // (1024 * 1024) if smallest > 0 else None
+
+
+def _vram_from_nvidia_smi() -> int | None:
+    """Total VRAM in MiB from ``nvidia-smi`` — torch-free, the primary probe.
+
+    ``--query-gpu=memory.total --format=csv,noheader,nounits`` prints one integer (MiB) per GPU; the
+    smallest wins, for the same process-wide reason. Every failure mode — tool absent, non-zero
+    exit, timeout, a driver answering ``[N/A]`` — returns ``None`` (unknown), never a parsed 0.
+    """
+    import shutil  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+    import subprocess  # noqa: PLC0415, S404 - a read-only, fixed-argv driver query
+
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            [  # noqa: S607
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - a probe that cannot run is unknown, never a crash
+        return None
+    if proc.returncode != 0:
+        return None
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if not lines or not all(line.isdigit() for line in lines):
+        # ``[N/A]`` from a driver that cannot report it must not parse into "0 MiB of VRAM".
+        return None
+    values = [int(line) for line in lines]
+    return min(values) if min(values) > 0 else None
+
+
+def detect_total_vram_mib() -> int | None:
+    """Total VRAM of the smallest visible GPU, in MiB, or ``None`` when unknown (T-DEV-2).
+
+    ``LATENCE_TOTAL_VRAM_MIB`` → a torch already in ``sys.modules`` → ``nvidia-smi`` → ``None``.
+    Torch-free by construction (ADR-0016). ``None`` is a first-class answer, not a fallback to a
+    guess: :func:`derive_microbatch_max_texts` treats it as "keep the reference default".
+    """
+    import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    override = os.environ.get(LATENCE_TOTAL_VRAM_MIB_ENV, "").strip()
+    if override.isdigit() and int(override) > 0:
+        return int(override)
+    from_torch = _vram_from_imported_torch()
+    if from_torch is not None:
+        return from_torch
+    return _vram_from_nvidia_smi()
+
+
+def derive_microbatch_max_texts(vram_mib: int | None) -> int:
+    """The micro-batch text cap for a card of ``vram_mib`` — reproduces 4 at 32 GiB (T-DEV-2).
+
+    ``floor(4 × vram / 32 GiB)``, clamped into ``[1, 4]``. Linear because the only structure the one
+    measurement supports is a *ratio*: 4 texts fitted a 21.6 GiB peak into 32 GiB, so the same
+    fraction of a smaller card is the honest scaling — a two-parameter ``base + N × per_text`` model
+    fitted to a single point would look more principled while being less justified.
+
+    * 32 GiB → **4** (byte-identical to the pre-T-DEV-2 default; the old pod does not change)
+    * 24 GiB → **3** (the RTX 3090 target)
+    * ≥ 40 GiB → **4** — the cap never rises above the measured point (see the module note)
+    * ``None`` → **4** — unknown keeps the reference; OOM here is recoverable, unlike the JIT fault
+    """
+    if vram_mib is None:
+        return DEFAULT_MICROBATCH_MAX_TEXTS
+    scaled = (DEFAULT_MICROBATCH_MAX_TEXTS * int(vram_mib)) // REFERENCE_VRAM_MIB
+    return max(1, min(DEFAULT_MICROBATCH_MAX_TEXTS, scaled))
+
 
 def estimate_token_length(text: str, max_len: int) -> int:
     """A conservative, torch-free estimate of a text's model-token length, capped at ``max_len``.
@@ -1216,16 +1412,22 @@ def iter_token_budget_microbatches(
 def resolve_microbatch_bounds(config: Mapping[str, Any]) -> tuple[int, int]:
     """Resolve the ``(max_texts, token_budget)`` micro-batch bounds from a Provider ``config``.
 
-    Reads the optional ``microbatch_max_texts`` / ``microbatch_token_budget`` knobs, defaulting to
-    the pod-safe module constants (:data:`DEFAULT_MICROBATCH_MAX_TEXTS` /
-    :data:`DEFAULT_MICROBATCH_TOKEN_BUDGET`). A non-int or ``< 1`` value is a ValueError the caller
-    surfaces as a ConfigError (the same fail-fast discipline as ``batch_size``/``max_len``). Pure
-    config read — no torch — so the default is safe on a modest GPU and an operator with more VRAM
-    can widen it explicitly, but nothing ever silently assumes the 32 GB card.
+    Reads the optional ``microbatch_max_texts`` / ``microbatch_token_budget`` knobs. **T-DEV-2:**
+    when neither is set the defaults are DERIVED from the detected card
+    (:func:`detect_total_vram_mib` → :func:`derive_microbatch_max_texts`) rather than read off the
+    32 GB pod's constants — 4 / 3072 on that pod exactly as before, 3 / 2304 on the 24 GB RTX 3090,
+    and the reference values on a host whose VRAM cannot be read. The token budget stays the
+    identity it always was, ``max_texts × DEFAULT_GLINER_MAX_LEN``, so both bounds move together.
+
+    An explicit config value wins over detection in both directions. A non-int or ``< 1`` value is a
+    ValueError the caller surfaces as a ConfigError (the same fail-fast discipline as
+    ``batch_size``/``max_len``). Torch-free (ADR-0016) — the probe is env → an already-imported
+    torch → ``nvidia-smi``, never an import.
     """
-    max_texts = _positive_int_knob(config, "microbatch_max_texts", DEFAULT_MICROBATCH_MAX_TEXTS)
+    detected_texts = derive_microbatch_max_texts(detect_total_vram_mib())
+    max_texts = _positive_int_knob(config, "microbatch_max_texts", detected_texts)
     token_budget = _positive_int_knob(
-        config, "microbatch_token_budget", DEFAULT_MICROBATCH_TOKEN_BUDGET
+        config, "microbatch_token_budget", detected_texts * DEFAULT_GLINER_MAX_LEN
     )
     return max_texts, token_budget
 
