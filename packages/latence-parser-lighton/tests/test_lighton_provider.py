@@ -501,15 +501,24 @@ def test_ocr_batch_size_config_validated() -> None:
 def test_oversized_image_downscaled_to_longest_side_1540_aspect_preserved(
     fake_lighton: None, make_lighton_image: Callable[..., bytes]
 ) -> None:
-    """A 1200×2339 image downscales so its longest side == 1540, aspect ratio preserved (default)."""
+    """A 1200×2339 image downscales so its longest side == 1540, aspect ratio preserved (default).
+
+    T-OCR-2 amended the width assertion: exact proportional scaling puts it at ≈790, which is 56.4
+    patches — an odd patch grid, whose trailing column ``Mistral3PatchMerger``'s 2×2 ``unfold``
+    silently discards. Both sides now snap onto the 28-px merge grid, so 790 → 784 (28 patches).
+    The invariants themselves are property-tested in ``test_rasterize_merge_grid.py``.
+    """
     img_bytes = make_lighton_image("scanned page text\n", dims=(1200, 2339))
     provider = LightOnOcrParser({})  # default max_longest_dim = 1540
     image = provider._image_from_bytes(img_bytes)
     w, h = image.size
-    assert max(w, h) == 1540  # longest side capped to LightOn's target
-    # Aspect ratio preserved: 1200/2339 ≈ 0.513 → width ≈ 1540 * 0.513 ≈ 790.
-    assert w == round(1200 * (1540 / 2339))
+    assert max(w, h) == 1540  # longest side capped to LightOn's target (1540 = 110 patches, even)
+    # Aspect ratio preserved to the finest granularity the merge grid can express: 1200/2339 ≈
+    # 0.513 → width ≈ 1540 * 0.513 ≈ 790 → the nearest grid point at or below the page is 784.
+    assert abs(w - round(1200 * (1540 / 2339))) <= 28
+    assert w == 784
     assert h == 1540
+    assert (w % 28, h % 28) == (0, 0)
 
 
 def test_image_untouched_when_cap_disabled(
@@ -525,8 +534,24 @@ def test_image_untouched_when_cap_disabled(
 def test_image_untouched_when_already_within_cap(
     fake_lighton: None, make_lighton_image: Callable[..., bytes]
 ) -> None:
-    """An image already within the cap is not upscaled or resampled."""
+    """An image already within the cap AND on the merge grid is not upscaled or resampled.
+
+    T-OCR-2 split the old single case in two. Being under the 1540 cap is no longer sufficient to
+    be left alone — the sides must also be multiples of 28, or the vision tower drops the trailing
+    patch row/column. 1120×1540 is under/at the cap and on the grid, so it is passed through with
+    no resample at all; the "under the cap but off the grid" case is the test below.
+    """
+    img_bytes = make_lighton_image("text\n", dims=(1120, 1540))
+    image = LightOnOcrParser({"max_longest_dim": 1540})._image_from_bytes(img_bytes)
+    assert image.size == (1120, 1540)
+    assert image.resized_to is None
+
+
+def test_image_under_the_cap_is_snapped_down_to_the_merge_grid_never_up(
+    fake_lighton: None, make_lighton_image: Callable[..., bytes]
+) -> None:
+    """800×1000 is under the cap but off the grid — it snaps DOWN to 784×980, never up to 1008."""
     img_bytes = make_lighton_image("text\n", dims=(800, 1000))
     image = LightOnOcrParser({"max_longest_dim": 1540})._image_from_bytes(img_bytes)
-    assert image.size == (800, 1000)
-    assert image.resized_to is None
+    assert image.size == (784, 980)
+    assert image.size[0] <= 800 and image.size[1] <= 1000  # no upscaling, ever
