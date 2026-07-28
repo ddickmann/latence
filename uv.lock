@@ -31,6 +31,7 @@ members = [
     "latence-embedder-st",
     "latence-extract-gliner2",
     "latence-framework-dev",
+    "latence-label-profiler",
     "latence-linkpred-ultra",
     "latence-muvera",
     "latence-ner-endpoint",
@@ -2279,6 +2280,11 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.6" },
 ]
+
+[[package]]
+name = "latence-label-profiler"
+version = "0.1.0"
+source = { editable = "packages/latence-label-profiler" }
 
 [[package]]
 name = "latence-linkpred-ultra"
