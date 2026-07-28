@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import socket
 import sys
+import urllib.request  # imported HERE: importing it under the poisoned socket pulls ssl and dies
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
@@ -39,8 +40,6 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(socket, "create_connection", _boom)
     monkeypatch.setattr(socket, "getaddrinfo", _boom)
     monkeypatch.setattr(socket, "gethostbyname", _boom)
-    import urllib.request
-
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
 

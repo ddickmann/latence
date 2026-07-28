@@ -32,6 +32,7 @@ def test_zipf_alpha_recovers_a_synthetic_power_law() -> None:
     true_alpha = 1.0
     counts = {f"t{r}": max(1, int(round(100000 / (r**true_alpha)))) for r in range(1, 200)}
     fit = fit_zipf(counts)
+    assert fit.rank_slope is not None
     assert 0.85 <= fit.rank_slope <= 1.15
     assert fit.n_types == 199
     assert fit.total_mass == sum(counts.values())

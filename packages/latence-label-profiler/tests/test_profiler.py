@@ -7,8 +7,9 @@ from __future__ import annotations
 import json
 import math
 from itertools import combinations
+from typing import Any
 
-from latence_label_profiler import CorpusProfiler, ProfilerConfig
+from latence_label_profiler import CorpusProfile, CorpusProfiler, ProfilerConfig
 from latence_label_profiler.coverage import WORST_CASE_RATIO
 
 # A synthetic corpus whose optimal 2-type cover is KNOWN by construction.
@@ -38,9 +39,8 @@ _MIXED_CORPUS = [
 ]
 
 
-def _profile(texts: list[str], **overrides: object) -> object:
-    config = ProfilerConfig(**overrides)  # type: ignore[arg-type]
-    return CorpusProfiler(config).profile(texts)
+def _profile(texts: list[str], **overrides: Any) -> CorpusProfile:
+    return CorpusProfiler(ProfilerConfig(**overrides)).profile(texts)
 
 
 # -- acceptance 1: determinism ------------------------------------------------
@@ -59,12 +59,12 @@ def test_sampling_is_seeded_and_reproducible() -> None:
     b = _profile(corpus, seed=3, sample_size=17).to_json()
     assert a == b
     c = _profile(corpus, seed=4, sample_size=17)
-    assert c.corpus.sample_seed == 4  # type: ignore[attr-defined]
+    assert c.corpus.sample_seed == 4
 
 
 def test_the_artifact_is_valid_json_and_records_its_own_inputs() -> None:
     profile = _profile(list(_MIXED_CORPUS), seed=1)
-    payload = json.loads(profile.to_json())  # type: ignore[attr-defined]
+    payload = json.loads(profile.to_json())
     assert payload["artifact_version"] == 1
     assert payload["corpus"]["texts_seen"] == len(_MIXED_CORPUS)
     assert payload["corpus"]["sample_seed"] == 1
@@ -75,8 +75,8 @@ def test_the_artifact_is_valid_json_and_records_its_own_inputs() -> None:
 
 def test_greedy_lands_within_one_minus_one_over_e_on_a_known_optimal_corpus() -> None:
     profile = _profile(_KNOWN_CORPUS, seed=0, min_mention_mass=1, min_document_frequency=2)
-    problem = profile.problem("entity_types")  # type: ignore[attr-defined]
-    selection = profile.slots["entity_types"]  # type: ignore[attr-defined]
+    problem = profile.problem("entity_types")
+    selection = profile.slots["entity_types"]
 
     budget = 2
     optimum = 0.0
@@ -92,11 +92,23 @@ def test_greedy_lands_within_one_minus_one_over_e_on_a_known_optimal_corpus() ->
     assert greedy_at_2 == optimum  # greedy is exact here; the bound is the floor, not the claim
 
 
-def test_the_certificate_beats_the_worst_case_floor_on_a_real_corpus() -> None:
+def test_the_certificate_is_a_real_bound_and_never_exceeds_the_universe() -> None:
     profile = _profile(list(_MIXED_CORPUS), seed=0, min_mention_mass=1, min_document_frequency=1)
-    entity = profile.slots["entity_types"]  # type: ignore[attr-defined]
+    entity = profile.slots["entity_types"]
     assert entity.result.certificate_bound >= entity.result.value
-    assert entity.result.certificate_ratio >= WORST_CASE_RATIO
+    assert entity.result.certificate_bound <= entity.result.total_weight
+    # The certificate can only be WEAKER than the true optimality ratio (it bounds OPT from above),
+    # so it must at minimum dominate the raw coverage fraction.
+    assert entity.result.certificate_ratio >= entity.result.coverage_fraction - 1e-9
+
+
+def test_the_certificate_is_exact_when_greedy_reaches_full_coverage() -> None:
+    """The per-corpus certificate earning its keep: 'provably optimal', not 'within 63.2%'."""
+    profile = _profile(_KNOWN_CORPUS, seed=0, min_mention_mass=1, min_document_frequency=2)
+    entity = profile.slots["entity_types"]
+    assert entity.result.coverage_fraction == 1.0
+    assert entity.result.certificate_ratio == 1.0
+    assert entity.result.certificate_ratio > WORST_CASE_RATIO
 
 
 # -- acceptance 3: the artifact reports its own uncertainty --------------------
@@ -104,7 +116,7 @@ def test_the_certificate_beats_the_worst_case_floor_on_a_real_corpus() -> None:
 
 def test_the_artifact_carries_curve_certificate_coverage_and_good_turing() -> None:
     payload = json.loads(
-        _profile(  # type: ignore[attr-defined]
+        _profile(
             list(_MIXED_CORPUS), seed=0, min_mention_mass=1, min_document_frequency=1
         ).to_json()
     )
@@ -131,12 +143,18 @@ def test_the_artifact_carries_curve_certificate_coverage_and_good_turing() -> No
 
 def test_a_logarithmic_corpus_is_reported_as_a_budget_decision_not_a_boundary() -> None:
     """The ticket's honesty bar: alpha ~ 1 -> no knee -> say N is a budget, do not imply a knee."""
+    # Type names must be ALPHABETIC: the tokenizer treats any token containing a digit as an
+    # instance and breaks the phrase on it, so "type001" would mine nothing at all.
+    def _name(rank: int) -> str:
+        letters = "abcdefghijklmnopqrstuvwxyz"
+        return letters[rank // 26 % 26] + letters[rank % 26] + "kind"
+
     corpus: list[str] = []
     for rank in range(1, 120):
         occurrences = max(1, int(round(600 / rank)))
-        corpus.extend([f"the type{rank:03d} record was filed"] * occurrences)
+        corpus.extend([f"the {_name(rank)} was filed"] * occurrences)
     payload = json.loads(
-        _profile(corpus, seed=0, min_mention_mass=1, min_document_frequency=1).to_json()  # type: ignore[attr-defined]
+        _profile(corpus, seed=0, min_mention_mass=1, min_document_frequency=1).to_json()
     )
     entity = payload["slots"]["entity_types"]
     assert entity["knee"]["sharp"] is False
@@ -147,7 +165,7 @@ def test_a_logarithmic_corpus_is_reported_as_a_budget_decision_not_a_boundary() 
 
 def test_the_artifact_reports_n_star_alongside_the_cap() -> None:
     payload = json.loads(
-        _profile(  # type: ignore[attr-defined]
+        _profile(
             list(_MIXED_CORPUS), seed=0, min_mention_mass=1, min_document_frequency=1
         ).to_json()
     )
@@ -157,9 +175,16 @@ def test_the_artifact_reports_n_star_alongside_the_cap() -> None:
 
 
 def test_the_cap_is_never_exceeded() -> None:
-    corpus = [f"the alpha{i:03d} widget and the beta{i:03d} module" for i in range(300)] * 2
+    # 300 DISJOINT types: no shared head, so no small set of types can cover the corpus and greedy
+    # genuinely runs into the cap instead of exhausting the universe first.
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    corpus = [
+        f"the {letters[i % 26]}{letters[i // 26 % 26]}wid was filed" for i in range(300)
+    ] * 2
     profile = _profile(corpus, seed=0, max_types=12, min_mention_mass=1, min_document_frequency=1)
-    for slot in profile.lexicon_candidates().values():  # type: ignore[attr-defined]
+    candidates = profile.lexicon_candidates()
+    assert len(candidates["entity_types"]) == 12, "the cap must actually bite in this test"
+    for slot in candidates.values():
         assert len(slot) <= 12
 
 
@@ -170,7 +195,7 @@ def test_lexicon_candidates_are_exactly_the_inducer_config_shape() -> None:
     from latence_schema_inducer.lexicon import LexiconLabelInducer
 
     profile = _profile(list(_MIXED_CORPUS), seed=0, min_mention_mass=1, min_document_frequency=1)
-    candidates = profile.lexicon_candidates()  # type: ignore[attr-defined]
+    candidates = profile.lexicon_candidates()
 
     assert set(candidates) <= {"entity_types", "relation_types", "pii_types"}
     for slot, mapping in candidates.items():
@@ -191,7 +216,7 @@ def test_the_pool_is_a_corpus_level_pool_not_a_per_chunk_schema() -> None:
     from latence_schema_inducer.lexicon import LexiconLabelInducer
 
     profile = _profile(list(_MIXED_CORPUS), seed=0, min_mention_mass=1, min_document_frequency=1)
-    candidates = profile.lexicon_candidates()  # type: ignore[attr-defined]
+    candidates = profile.lexicon_candidates()
     pool = set(candidates.get("entity_types", {}))
     assert len(pool) >= 3, "the corpus must yield a pool worth narrowing"
 
@@ -226,7 +251,7 @@ def test_no_pii_value_ever_reaches_the_emitted_candidate_space() -> None:
         "Write to john.roe@example.org about GB33BUKB20201555555555 tomorrow.",
     ] * 3
     profile = _profile(corpus, seed=0, min_mention_mass=1, min_document_frequency=1)
-    blob = profile.to_json()  # type: ignore[attr-defined]
+    blob = profile.to_json()
     for secret in (
         "jane.doe@example.com",
         "john.roe@example.org",
@@ -240,7 +265,7 @@ def test_no_pii_value_ever_reaches_the_emitted_candidate_space() -> None:
 def test_a_detector_only_type_is_flagged_as_such_in_the_artifact() -> None:
     corpus = ["Write to jane.doe@example.com about the shipment."] * 4
     payload = json.loads(
-        _profile(corpus, seed=0, min_mention_mass=1, min_document_frequency=1).to_json()  # type: ignore[attr-defined]
+        _profile(corpus, seed=0, min_mention_mass=1, min_document_frequency=1).to_json()
     )
     pii = payload["slots"]["pii_types"]["selection"]
     email = next(item for item in pii if item["label"] == "email address")
@@ -250,9 +275,9 @@ def test_a_detector_only_type_is_flagged_as_such_in_the_artifact() -> None:
 
 def test_an_empty_corpus_yields_an_empty_but_honest_artifact() -> None:
     profile = _profile([], seed=0)
-    payload = json.loads(profile.to_json())  # type: ignore[attr-defined]
+    payload = json.loads(profile.to_json())
     assert payload["corpus"]["texts_seen"] == 0
-    assert profile.lexicon_candidates() == {}  # type: ignore[attr-defined]
+    assert profile.lexicon_candidates() == {}
     assert any("no candidate" in note.lower() for note in payload["notes"])
 
 

@@ -16,24 +16,24 @@ from pathlib import Path
 
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 
-_SCRIPT = """
-import json, sys
-sys.path.insert(0, %r)
+_SCRIPT = f"""
+import sys
+sys.path.insert(0, {_SRC!r})
 from latence_label_profiler import CorpusProfiler, ProfilerConfig
 
+letters = "abcdefghijklmnopqrstuvwxyz"
 corpus = []
 for i in range(40):
-    corpus.append(
-        "The commodity code %%03d maps to the tariff heading of the customs schedule." %% i
-    )
-    corpus.append("The export licence %%03d was issued by the customs authority." %% i)
-    corpus.append("Contact officer%%03d@example.org about the binding ruling." %% i)
+    tag = letters[i % 26] + letters[i // 26 % 26]
+    corpus.append("The " + tag + "code maps to the tariff heading of the customs schedule.")
+    corpus.append("The " + tag + "licence was issued by the customs authority.")
+    corpus.append("Contact officer" + tag + "@example.org about the binding ruling.")
 
 profile = CorpusProfiler(ProfilerConfig(seed=11, sample_size=60, min_mention_mass=1)).profile(
     corpus
 )
 sys.stdout.write(profile.to_json())
-""" % _SRC
+"""
 
 
 def _run(hash_seed: str) -> str:
