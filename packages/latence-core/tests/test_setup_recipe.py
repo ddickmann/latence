@@ -51,6 +51,7 @@ from latence_core.setup.recipe import (
     InduceContribution,
     RedactContribution,
     SourceContribution,
+    model_window_for,
 )
 
 
@@ -71,14 +72,18 @@ def _answers(**overrides: Any) -> SetupAnswers:
 
 
 def test_a_stage_block_is_assertable_without_rendering_the_whole_config() -> None:
-    """The chunk Stage's 640/80 calibration is one call away — no YAML, no Pipeline, no search."""
+    """The chunk Stage's budget is one call away — no YAML, no Pipeline, no search.
+
+    T-WIZ-1 turned 640/80/8 from a recipe literal into a :class:`SetupAnswers` field defaulting to
+    the GLiNER2 window (768); the block is still assertable in one call, it just reads the answer.
+    """
     block = ChunkContribution().contribute(_answers(), RecipeContext())
     assert block == {
         "name": "chunk",
         "capability": "chunk",
         "provider": "chunk.markdown",
         "depends_on": ["parse"],
-        "config": {"max_tokens": 640, "overlap_tokens": 80, "min_tokens": 8},
+        "config": {"max_tokens": 768, "overlap_tokens": 80, "min_tokens": 8},
     }
 
 
@@ -95,8 +100,13 @@ def test_the_profile_override_is_the_only_difference_between_the_two_extract_blo
     assert sota_config["threshold"] == 0.3  # the SOTA recall floor
     assert sota_config["device"] == "cuda"  # the GPU-pod pin
     assert lite_config["device"] == answers.device  # the operator's resolved device
-    assert "max_len" in lite_config
-    assert "max_len" not in sota_config
+    # T-WIZ-1: `max_len` is no longer a per-profile literal (768 on lite, omitted on SOTA) — it is
+    # DERIVED from the chunk budget on BOTH profiles, because the chunker counts ~1.2x fewer tokens
+    # than the mdeberta encoder and an omitted window silently truncates the moment an operator
+    # raises the budget. So it is shared wiring now, not an override.
+    assert lite_config["max_len"] == sota_config["max_len"] == model_window_for(
+        answers.chunk_max_tokens
+    )
     # Everything else is shared, so a change to fused extraction is a change to ONE declaration.
     assert lite["provider"] == sota["provider"] == "fused_entity_relation.gliner2"
 

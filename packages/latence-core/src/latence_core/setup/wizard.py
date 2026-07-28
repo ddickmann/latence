@@ -4,7 +4,7 @@ Given a resolved :class:`SetupAnswers` (from the interactive prompts OR the ``--
 flags — the SAME struct either way), :func:`build_stack_config` emits a full-spine stack YAML that
 reproduces the pod-validated GOOD stack (see ``docs/TUTORIAL-fresh-pod-walkthrough.md`` §3):
 
-    source → intake_screen → parse → chunk[640] → [content_screen] → induce[chunk]
+    source → intake_screen → parse → chunk[768] → [content_screen] → induce[chunk]
       → extract[gliner2, thr 0.5] → [redact[gliner2, financial-PII]] → profiling
       → disambiguate → graph → enrich(context) → export_kg + export_corpus(context_columns)
 
@@ -47,10 +47,15 @@ import yaml
 from latence_core.setup.recipe import (
     _DEFAULT_EXTENSIONS,
     BLESSED_REDACT_PROVIDER,
+    CHUNK_MAX_TOKENS,
+    CHUNK_MIN_TOKENS,
+    CHUNK_OVERLAP_TOKENS,
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL,
     DEFAULT_OCR_BASE_URL,
     DEFAULT_OCR_MODEL,
+    DEFAULT_RASTER_DPI,
+    DEFAULT_RASTER_MAX_LONGEST_DIM,
     DOMAIN_HINT_MAX_CHARS,
     FINANCIAL_PII_LABELS,
     INTAKE_HEADROOM,
@@ -86,10 +91,15 @@ from latence_core.setup.recipe import (
 # values and meanings did not.
 __all__ = [
     "BLESSED_REDACT_PROVIDER",
+    "CHUNK_MAX_TOKENS",
+    "CHUNK_MIN_TOKENS",
+    "CHUNK_OVERLAP_TOKENS",
     "DEFAULT_LLM_BASE_URL",
     "DEFAULT_LLM_MODEL",
     "DEFAULT_OCR_BASE_URL",
     "DEFAULT_OCR_MODEL",
+    "DEFAULT_RASTER_DPI",
+    "DEFAULT_RASTER_MAX_LONGEST_DIM",
     "DOMAIN_HINT_MAX_CHARS",
     "FINANCIAL_PII_LABELS",
     "INTAKE_HEADROOM",
@@ -333,6 +343,29 @@ class SetupAnswers:
     # the redactor's labels: a fixed relevance schema is an operator's choice, the safety floor is
     # not (README invariant 3).
     predefined_labels: dict[str, list[str]] | None = None
+    # T-WIZ-1 — the chunk token budget. It was a literal (640/80/8) in the recipe, so retuning a
+    # run meant hand-editing the emitted YAML. The default is the GLiNER2 window (768); the
+    # gliner-family Stages derive their `max_len` from THIS value (`recipe.model_window_for`),
+    # because the chunker counts ~1.2x FEWER tokens than the mdeberta encoder and a budget raised
+    # without the window silently truncates (pod-measured: 768 chunker -> max 921 mdeberta).
+    chunk_max_tokens: int = CHUNK_MAX_TOKENS
+    chunk_overlap_tokens: int = CHUNK_OVERLAP_TOKENS
+    chunk_min_tokens: int = CHUNK_MIN_TOKENS
+    # T-OCR-3 — the rasterisation policy, LightOn's published 200 DPI / 1540 px longest side. These
+    # ARE the defaults and stay them; the ticket is that they were unreachable from setup on every
+    # parser path. A value equal to the default is not emitted at all, so an unset flag leaves the
+    # `parse` block byte-identical.
+    ocr_dpi: int = DEFAULT_RASTER_DPI
+    ocr_max_longest_dim: int = DEFAULT_RASTER_MAX_LONGEST_DIM
+    # T-WIZ-3 — the GLiNER2 performance knobs both gliner2 Providers read
+    # (`providers/perf.py::resolve_microbatch_bounds` / `resolve_intra_op_threads`) and the wizard
+    # emitted none of. ``None`` ⇒ not emitted ⇒ the Provider's own default rides, EXCEPT that
+    # `microbatch_max_texts` carries a window-derived default so a wider model window cannot widen
+    # the padded forward past the pod-safe 4x768 token positions (DECISIONS.md §D3: 21.6 GiB peak,
+    # 2.4 GiB of headroom on the 24 GB card). An explicit answer always wins.
+    microbatch_max_texts: int | None = None
+    microbatch_token_budget: int | None = None
+    intra_op_threads: int | None = None
 
 
 def detect_extensions(path: str | Path) -> tuple[str, ...]:
@@ -615,6 +648,7 @@ def _render_header(answers: SetupAnswers, recipe: StackRecipe, stack: AssembledS
     lines += list(stack.header_lines.get("redact", ()))
     lines += list(stack.header_lines.get("extract", ()))
     lines += list(stack.header_lines.get("induce", ()))
+    lines += list(stack.header_lines.get("chunk", ()))
     domain = normalize_domain_hint(answers.domain)
     if domain:
         # Provenance AND a pointer at where it acts: the same hint rides `induce.config.domain`,

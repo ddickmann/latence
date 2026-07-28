@@ -60,9 +60,12 @@ serve); anything with scans, PDFs, office docs, or images goes to the **served O
 - Output: a `DocumentRecord` — clean markdown plus a page map that preserves where every span came
   from. Provenance is never lost; it is threaded through every subsequent stage.
 
-**4 · Chunk** — `chunk.markdown`. Splits the markdown into retrieval-sized pieces (`max_tokens: 640`,
-calibrated to the downstream encoder's window, with 80-token overlap), preserving character offsets and
-page alignment so any later result can be traced back to its exact source location. Deterministic.
+**4 · Chunk** — `chunk.markdown`. Splits the markdown into retrieval-sized pieces
+(`max_tokens: 768` by default, `--chunk-max-tokens` to change it, with 80-token overlap), preserving
+character offsets and page alignment so any later result can be traced back to its exact source
+location. Deterministic. The downstream encoder's window is *derived* from this budget rather than
+fixed: the chunker counts ~1.2× fewer tokens than mdeberta-v3, so `extract`/`redact` bound
+`max_len` above the budget and a raised budget cannot silently truncate.
 
 **5 · Content screening** — `screening.content_keyword` (when PII handling is on). The second
 checkpoint, *after* chunking: a guardrail against prompt-injection, harmful content, and sensitivity
