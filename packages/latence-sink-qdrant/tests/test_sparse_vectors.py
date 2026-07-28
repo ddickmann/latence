@@ -108,17 +108,17 @@ def rewrite_column(export_dir: str, name: str, column: pa.Array | pa.ChunkedArra
     vector and the payload — which is exactly what the digest test has to isolate.
     """
     uri = f"{export_dir}/records.parquet"
-    table = pq.read_table(uri)
+    table = pq.read_table(uri)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     table = table.set_column(table.schema.get_field_index(name), name, column)
-    pq.write_table(table, uri)
+    pq.write_table(table, uri)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
 
 
 def rename_columns(export_dir: str, mapping: dict[str, str]) -> None:
     """Rename Export columns in place — how a differently-named sparse signal is simulated."""
     uri = f"{export_dir}/records.parquet"
-    table = pq.read_table(uri)
+    table = pq.read_table(uri)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
     table = table.rename_columns([mapping.get(n, n) for n in table.schema.names])
-    pq.write_table(table, uri)
+    pq.write_table(table, uri)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
 
 
 def sink(client: FakeQdrantClient, **config: Any) -> QdrantSink:
@@ -154,6 +154,9 @@ def test_fake_stores_a_named_sparse_vector_alongside_the_dense_one() -> None:
         ids=["11111111-1111-5111-8111-111111111111"],
         with_vectors=True,
     )
+    # ``with_vectors=True`` must actually carry vectors back — narrowing the Optional is itself
+    # the assertion that it did (real Qdrant returns ``vector=None`` when it did not).
+    assert record.vector is not None
     assert record.vector["dense"] == [1.0, 2.0, 3.0]
     assert record.vector["sparse"] == SparseVector(indices=[2, 7], values=[0.5, 0.25])
 
@@ -286,6 +289,7 @@ def test_fake_accepts_an_empty_sparse_vector() -> None:
         points=[PointStruct(id=1, vector={"sparse": SparseVector()})],
     )
     (record,) = client.retrieve(collection_name=_COLLECTION, ids=[1], with_vectors=True)
+    assert record.vector is not None
     assert record.vector["sparse"] == SparseVector(indices=[], values=[])
 
 
@@ -304,6 +308,9 @@ def test_created_collection_carries_a_named_sparse_vector(tmp_path: Path) -> Non
 
     info = client.get_collection(_COLLECTION)
     assert set(info.config.params.sparse_vectors) == {"sparse"}
+    # Sparse implies a *named* dense config too — an unnamed ``VectorParams`` cannot coexist with a
+    # named sparse vector in Qdrant, so the isinstance narrowing is part of the claim, not scaffolding.
+    assert isinstance(info.config.params.vectors, dict)
     assert set(info.config.params.vectors) == {"dense"}
     assert report.sparse_vector_name == "sparse"
     assert report.points == 2
