@@ -223,6 +223,37 @@ Caveat: the NIST manifest is **TIFF images only** — no OCR/XML component. If w
 text as a comparison baseline, that comes from the IDL Box bulk dumps or `pixparse/idl-wds`
 (Textract OCR, ~2 TB), both under the weaker IDL posture.
 
+### Late addition — SEC VPRR is the scanned axis we can actually PUBLISH
+
+IIT-CDIP and IDL are fair-use postures, which means **nothing derived from them can go into a public
+artifact**. That is a real constraint given the stated goal of producing something shareable.
+
+**SEC VPRR** (`https://www.sec.gov/Archives/edgar/vprr/`) solves it: **315,037 PDFs, 113 GB, 100%
+scans** of paper-filed SEC submissions — corporate content, OCR-hostile by construction, and
+enumerable via per-directory `index.json`.
+
+The licence posture is the best available for scanned corporate material. SEC's own statement
+(`sec.gov/about/privacy-information`): *"Information presented on sec.gov is considered public
+information and may be copied or further distributed by users of the web site without the SEC's
+permission."* No EULA, no API key, no redistribution restriction. Carve-outs are narrow: don't use
+the SEC seal, logos, or the "EDGAR" trademark.
+
+Two operational requirements, both hard:
+- **Declare a User-Agent** (`Sample Company Name admin@domain.com`) — a client without one gets
+  **HTTP 403** at the edge, and the block is real, not advisory.
+- **10 requests/second**, enforced per-entity across machines, with a 10-minute IP cooldown.
+
+So the scanned axis becomes **VPRR first** (113 GB, publishable, corporate) with **IIT-CDIP** kept in
+reserve for scale (1.41 TB) if 315k scans prove too few. That ordering means the shareable proof can
+show real scanned pages instead of describing them.
+
+**Rejected despite being technically excellent:** CourtListener RECAP (~17.1 M PDFs, ~5.5 TB,
+anonymously listable S3, genuine Paper-Capture OCR back to 1893). Two reasons — it is the
+highest-PII corpus surveyed (unredacted party filings), and its ToS carries an explicit **FCRA
+restriction**: no use as a factor in eligibility for credit, insurance, employment, housing, or any
+FCRA purpose. That is a constraint we would have to propagate downstream forever, for an axis VPRR
+already covers.
+
 ### Final corpus composition
 
 | Axis | Source | Licence posture |
