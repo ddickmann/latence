@@ -377,15 +377,65 @@ def test_ragged_sparse_columns_are_a_loud_export_error(tmp_path: Path) -> None:
 
 
 def test_sparse_knobs_are_rejected_when_sparse_is_not_being_loaded(tmp_path: Path) -> None:
-    """A knob that silently does nothing is the failure mode this framework refuses everywhere."""
+    """A knob that silently does nothing is the failure mode this framework refuses everywhere.
+
+    The message must name the *conflict* — the key AND the mode that makes it inert. An "unknown
+    config key" would pass a laxer assertion here while telling the operator nothing about why a
+    sparse flag they deliberately set loaded no sparse vector.
+    """
     with pytest.raises(SinkConfigError) as excinfo:
         QdrantSink({"collection": _COLLECTION, "sparse_source": "splade"})
-    assert "vector" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "sparse_source" in message
+    assert "'dense'" in message
+
+
+def test_vector_name_is_rejected_on_a_sparse_only_load() -> None:
+    """The mirror image: there is no dense vector to name, so naming one is inert too."""
+    with pytest.raises(SinkConfigError) as excinfo:
+        QdrantSink({"collection": _COLLECTION, "vector": "sparse", "vector_name": "dense"})
+    message = str(excinfo.value)
+    assert "vector_name" in message
+    assert "'sparse'" in message  # the mode that makes it inert, named — not just "unknown key"
+
+
+def test_a_dense_and_sparse_name_collision_is_refused() -> None:
+    """One point carries ONE vector map, so a shared name silently keeps only one of the two."""
+    with pytest.raises(SinkConfigError) as excinfo:
+        QdrantSink(
+            {
+                "collection": _COLLECTION,
+                "vector": "both",
+                "vector_name": "v",
+                "sparse_vector_name": "v",
+            }
+        )
+    assert "must differ" in str(excinfo.value)
 
 
 def test_unknown_vector_mode_is_a_config_error() -> None:
-    with pytest.raises(SinkConfigError):
+    with pytest.raises(SinkConfigError) as excinfo:
         QdrantSink({"collection": _COLLECTION, "vector": "hybrid"})
+    message = str(excinfo.value)
+    assert "'hybrid'" in message
+    assert "'sparse'" in message and "'both'" in message
+
+
+def test_an_empty_sparse_vector_loads_rather_than_failing(tmp_path: Path) -> None:
+    """A chunk whose text carries no terms is a legitimate point, not a failed load.
+
+    Redaction can empty a chunk's indexable text (ADR-0044), and a loader that treated the
+    resulting empty ``SparseVector`` as an error would make a *correct* redaction abort the load.
+    """
+    export = write_sparse_export(tmp_path, {"r1": "alpha"})
+    rewrite_column(export, "sparse_indices", pa.array([[]], type=pa.list_(pa.int64())))
+    rewrite_column(export, "sparse_values", pa.array([[]], type=pa.list_(pa.float64())))
+    client = FakeQdrantClient()
+    report = sink(client, vector="both").load(export)
+
+    assert report.points == 1
+    stored_vector, _ = client.points[_COLLECTION][point_id("r1")]
+    assert stored_vector["sparse"] == SparseVector(indices=[], values=[])
 
 
 def test_sparse_load_into_an_existing_dense_only_collection_is_named_not_a_raw_400(
@@ -524,3 +574,39 @@ def test_cli_rejects_an_unknown_vector_mode(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["load", str(tmp_path), "--vector", "hybrid"])
+
+
+def test_cli_sparse_vector_name_reaches_the_collection(
+    tmp_path: Path, cli_store: FakeQdrantClient
+) -> None:
+    """The fourth hop of the field→flag→config→store chain, for the name the QUERY side needs."""
+    from latence_sink_qdrant import cli
+
+    export = write_sparse_export(tmp_path, {"r1": "alpha"}, dense=False)
+    code = cli.main(
+        [
+            "load",
+            export,
+            "--collection",
+            _COLLECTION,
+            "--vector",
+            "sparse",
+            "--sparse-vector-name",
+            "splade-v3",
+        ]
+    )
+    assert code == 0
+    info = cli_store.get_collection(_COLLECTION)
+    assert set(info.config.params.sparse_vectors) == {"splade-v3"}
+    assert info.config.params.vectors == {}
+
+
+def test_cli_names_the_conflict_when_a_sparse_flag_cannot_apply(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--sparse-source`` without ``--vector`` exits 2 with the conflict named, not a traceback."""
+    from latence_sink_qdrant import cli
+
+    export = write_sparse_export(tmp_path, {"r1": "alpha"})
+    assert cli.main(["load", export, "--collection", _COLLECTION, "--sparse-source", "x"]) == 2
+    assert "sparse_source" in capsys.readouterr().err

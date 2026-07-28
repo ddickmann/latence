@@ -35,21 +35,53 @@ if TYPE_CHECKING:
 EMBEDDING_COLUMN = "embedding"
 #: The Export column carrying the content-addressed record identity — the sink's upsert key.
 RECORD_ID_COLUMN = "record_id"
+#: The default Export column-pair *stem* for the sparse retrieval signal. ``JsonlParquetExport``
+#: writes ``sparse_indices`` (native ``list<int64>``) + ``sparse_values`` (native ``list<double>``)
+#: when — and only when — a ``sparse_embedder`` is wired (ADR-0050/0053). A different SPLADE
+#: checkpoint exported under a different stem is named with ``sparse_source``.
+DEFAULT_SPARSE_SOURCE = "sparse"
+
+
+def sparse_columns(source: str) -> tuple[str, str]:
+    """The ``(indices, values)`` Export column names for a sparse signal named ``source``."""
+    return f"{source}_indices", f"{source}_values"
+
+
+@dataclass(frozen=True, slots=True)
+class SparseSignal:
+    """One record's sparse vector as the Export carries it: two parallel lists.
+
+    Term ids and their weights, kept in the Export's own order (a sparse index is a set of
+    ``(term, weight)`` pairs, so the order is not meaning) and validated *here* rather than at the
+    wire: an Export whose two columns disagree in length is a corrupt Export, and finding that out
+    as an opaque 400 from the store halfway through a load is exactly the deferred-error case
+    ADR-0034 exists to prevent.
+    """
+
+    indices: list[int]
+    values: list[float]
 
 
 @dataclass(frozen=True, slots=True)
 class ExportRow:
-    """One exported record, projected into the three things a vector store needs.
+    """One exported record, projected into the things a vector store needs.
 
     ``record_id`` is the corpus's own content-addressed identity (the idempotency key — see
-    :func:`~latence_sink_qdrant.sink.point_id`), ``vector`` is the dense embedding, and ``payload``
-    is every remaining exported column verbatim (including ``record_id`` itself, so the identity is
-    filterable and readable back out of the store without decoding a point id).
+    :func:`~latence_sink_qdrant.sink.point_id`), ``vector`` is the dense embedding (empty when the
+    caller asked for a sparse-only load), ``sparse`` is the named sparse signal when one was asked
+    for, and ``payload`` is every remaining exported column verbatim (including ``record_id``
+    itself, so the identity is filterable and readable back out of the store without decoding a
+    point id).
+
+    The sparse columns are **removed** from ``payload`` when they are read as a vector. That is the
+    whole defect this field exists to fix: they used to ride into the payload as ordinary lists —
+    stored, and never queryable by the sparse ANN leg that was already asking for them.
     """
 
     record_id: str
     vector: list[float]
     payload: dict[str, Any]
+    sparse: SparseSignal | None = None
 
 
 def read_export(
@@ -58,19 +90,26 @@ def read_export(
     *,
     basename: str = "records",
     batch_size: int = 1024,
+    dense: bool = True,
+    sparse_source: str | None = None,
 ) -> Iterator[list[ExportRow]]:
     """Stream ``<export_dir>/<basename>.parquet`` as batches of at most ``batch_size`` rows.
 
-    Raises :class:`~latence_sink_qdrant.errors.SinkExportError` — never a bare pyarrow error — when
-    the file is absent (wrong directory, or the pipeline never reached Export), when the corpus was
-    exported **without** an Embedder (no ``embedding`` column: there is no vector to load, and a
-    payload-only collection would answer no vector query, so the sink says so instead of loading a
-    useless index), when a row carries no vector or a vector of a different width than the first
-    row's, or when a ``record_id`` is missing/empty.
+    ``dense`` and ``sparse_source`` say which signals the caller intends to *load*, and each is
+    required to exist only because it was asked for — a sparse-only (SPLADE) collection is a real
+    shape, so demanding an ``embedding`` column for it would refuse a correct Export.
 
-    Yields nothing at all for an empty (but well-formed, embedding-bearing) corpus — an empty
-    Export is a legitimate state after purging every document, and the caller's reconciling sweep
-    still runs, which is precisely how "purge everything" reaches the store.
+    Raises :class:`~latence_sink_qdrant.errors.SinkExportError` — never a bare pyarrow error — when
+    the file is absent (wrong directory, or the pipeline never reached Export), when a dense load
+    was asked for over a corpus exported **without** an Embedder (no ``embedding`` column: there is
+    no vector to load, and a payload-only collection would answer no vector query, so the sink says
+    so instead of loading a useless index), when a row carries no vector or a vector of a different
+    width than the first row's, when a sparse load was asked for and the named column pair is
+    absent or its two columns disagree in length, or when a ``record_id`` is missing/empty.
+
+    Yields nothing at all for an empty (but well-formed) corpus — an empty Export is a legitimate
+    state after purging every document, and the caller's reconciling sweep still runs, which is
+    precisely how "purge everything" reaches the store.
     """
     uri = f"{export_dir.rstrip('/')}/{basename}.parquet"
     if not storage.exists(uri):
@@ -84,26 +123,49 @@ def read_export(
     with storage.open(uri, "rb") as fh:
         parquet = pq.ParquetFile(fh)  # type: ignore[no-untyped-call]
         columns = set(parquet.schema_arrow.names)
-        if EMBEDDING_COLUMN not in columns:
+        if dense and EMBEDDING_COLUMN not in columns:
             msg = (
                 f"The Export at {uri!r} has no {EMBEDDING_COLUMN!r} column, so it carries no "
                 "vectors to load. Wire an Embedder on the Export Stage (config "
-                "`embedder: {provider: ..., config: {...}}`, ADR-0017) and re-run, then load."
+                "`embedder: {provider: ..., config: {...}}`, ADR-0017) and re-run, then load — or "
+                "load the sparse signal only, with `vector: sparse`."
             )
             raise SinkExportError(msg)
         if RECORD_ID_COLUMN not in columns:  # pragma: no cover - the Export always writes it
             msg = f"The Export at {uri!r} has no {RECORD_ID_COLUMN!r} column; it is not a corpus."
             raise SinkExportError(msg)
+        if sparse_source is not None:
+            _require_sparse_columns(columns, sparse_source, uri)
 
         ordinal = 0
         for batch in parquet.iter_batches(batch_size=batch_size):  # type: ignore[no-untyped-call]
             rows: list[ExportRow] = []
             for raw in batch.to_pylist():
-                row, width = _to_row(raw, width, uri, ordinal)
+                row, width = _to_row(raw, width, uri, ordinal, dense, sparse_source)
                 ordinal += 1
                 rows.append(row)
             if rows:
                 yield rows
+
+
+def _require_sparse_columns(columns: set[str], source: str, uri: str) -> None:
+    """Both halves of the sparse signal must be there, and the message names both.
+
+    Asking for a signal the Export does not carry is an operator/wiring fault, and the useful
+    message is the *column names it looked for* — the stem is configurable, so "no sparse vectors"
+    alone would leave the operator guessing between a missing ``sparse_embedder`` on the Export
+    Stage and a mistyped ``--sparse-source``.
+    """
+    indices, values = sparse_columns(source)
+    missing = sorted({indices, values} - columns)
+    if missing:
+        msg = (
+            f"The Export at {uri!r} does not carry the sparse signal {source!r}: column(s) "
+            f"{missing} are absent (it needs both {indices!r} and {values!r}). Wire a "
+            "`sparse_embedder` on the Export Stage (ADR-0050/0053) and re-run, or name the stem "
+            "the Export actually wrote with --sparse-source."
+        )
+        raise SinkExportError(msg)
 
 
 def read_record_ids(
@@ -147,7 +209,12 @@ def read_record_ids(
 
 
 def _to_row(
-    raw: dict[str, Any], width: int | None, uri: str, ordinal: int
+    raw: dict[str, Any],
+    width: int | None,
+    uri: str,
+    ordinal: int,
+    dense: bool = True,
+    sparse_source: str | None = None,
 ) -> tuple[ExportRow, int]:
     """Project one raw Parquet row into an :class:`ExportRow`, pinning/checking the vector width.
 
@@ -164,6 +231,14 @@ def _to_row(
             "an Export carries corpus content. Re-run the Export, or drop the row."
         )
         raise SinkExportError(msg)
+
+    sparse = _to_sparse(raw, record_id, uri, sparse_source) if sparse_source else None
+    if not dense:
+        # A sparse-only (SPLADE) load: there is no dense side to demand, and the width stays 0 so
+        # the created collection declares no dense vector at all.
+        payload = {k: v for k, v in raw.items() if k != EMBEDDING_COLUMN}
+        _drop_sparse(payload, sparse_source)
+        return ExportRow(record_id=record_id, vector=[], payload=payload, sparse=sparse), 0
 
     vector = raw.get(EMBEDDING_COLUMN)
     if vector is None:
@@ -191,13 +266,70 @@ def _to_row(
         raise SinkExportError(msg)
 
     payload = {k: v for k, v in raw.items() if k != EMBEDDING_COLUMN}
-    return ExportRow(record_id=record_id, vector=values, payload=payload), width
+    _drop_sparse(payload, sparse_source)
+    return ExportRow(record_id=record_id, vector=values, payload=payload, sparse=sparse), width
+
+
+def _drop_sparse(payload: dict[str, Any], source: str | None) -> None:
+    """Take the sparse columns *out* of the payload once they are being loaded as a vector.
+
+    Leaving them in would duplicate every term id and weight in the point's payload — the exact
+    shape the sink shipped before this (stored, never queryable) — and would also mean a re-embed
+    of the sparse signal changed both the vector and the payload, doubling the write for no gain.
+    """
+    if source is None:
+        return
+    for name in sparse_columns(source):
+        payload.pop(name, None)
+
+
+def _to_sparse(
+    raw: dict[str, Any], record_id: str, uri: str, source: str
+) -> SparseSignal:
+    """Project one row's sparse column pair, refusing anything a sparse index cannot hold.
+
+    Named by ``record_id`` and by *counts* only — never by the term ids or weights themselves. The
+    sparse signal is derived from redacted corpus text (ADR-0053), and a message that printed it
+    would walk term-level content into a log file (ADR-0034/0044).
+    """
+    indices_column, values_column = sparse_columns(source)
+    indices = raw.get(indices_column)
+    values = raw.get(values_column)
+    if indices is None or values is None:
+        missing = [n for n, v in ((indices_column, indices), (values_column, values)) if v is None]
+        msg = (
+            f"Record {record_id!r} in {uri!r} has a null {missing} — every record of a sparse load "
+            "must carry both halves of the signal. Re-run the Export with the sparse_embedder "
+            "wired, or load without --sparse-source."
+        )
+        raise SinkExportError(msg)
+    if len(indices) != len(values):
+        msg = (
+            f"Record {record_id!r} in {uri!r} has {len(indices)} {indices_column!r} but "
+            f"{len(values)} {values_column!r}. A sparse vector is two PARALLEL columns; this "
+            "Export is corrupt and a real Qdrant would reject the point with an opaque 400."
+        )
+        raise SinkExportError(msg)
+    out_indices: list[int] = []
+    for index in indices:
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            msg = (
+                f"Record {record_id!r} in {uri!r} has a {indices_column!r} entry that is not a "
+                "non-negative integer term id; the value is not shown because an Export carries "
+                "corpus-derived content."
+            )
+            raise SinkExportError(msg)
+        out_indices.append(index)
+    return SparseSignal(indices=out_indices, values=[float(v) for v in values])
 
 
 __all__ = [
+    "DEFAULT_SPARSE_SOURCE",
     "EMBEDDING_COLUMN",
     "RECORD_ID_COLUMN",
     "ExportRow",
+    "SparseSignal",
     "read_export",
     "read_record_ids",
+    "sparse_columns",
 ]

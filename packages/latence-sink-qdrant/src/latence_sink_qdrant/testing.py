@@ -24,9 +24,9 @@ status  what the real store rejects, and this fake rejects too
 **Sparse vectors are modelled here for the same reason the point-id rejection is** (T-RET-1,
 ``issues/dogfood/qdrant-native-sparse.md``): before this, the class contained zero occurrences of
 "sparse", so the suite was *structurally unable* to catch a sink that created dense-only
-``VectorParams`` while the retrieval side already queried ``using=<sparse vector name>``. A fake that
-cannot express a feature manufactures green just as surely as one that accepts what the real store
-rejects — so the sparse surface is written from the rejection side first, exactly like the rest.
+``VectorParams`` while the retrieval side already queried ``using=<sparse vector name>``. A fake
+that cannot express a feature manufactures green just as surely as one that accepts what the real
+store rejects — so the sparse surface is written from the rejection side first, like the rest.
 
 It is faithful to the *contract*, not to Qdrant's internals: it stores points in a dict and it
 re-implements none of the HNSW/ANN machinery (there is no search here — the sink never searches,
@@ -593,7 +593,7 @@ def _validate_vector(
     config: VectorParams | dict[str, VectorParams],
     sparse_config: dict[str, SparseVectorParams] | None = None,
 ) -> Any:
-    """A vector must match the collection's declared shape: width, named-vs-unnamed, dense-vs-sparse.
+    """A vector must match the declared shape: width, named-vs-unnamed, and dense-vs-sparse.
 
     With no sparse index declared this is exactly what it always was — an unnamed collection takes a
     bare list and a named one takes a map — so a dense-only load's stored shape is untouched. With a

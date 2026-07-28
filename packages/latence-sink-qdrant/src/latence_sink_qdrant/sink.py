@@ -88,8 +88,10 @@ from latence_sink_qdrant.errors import (
     SinkVerificationError,
 )
 from latence_sink_qdrant.export_reader import (
+    DEFAULT_SPARSE_SOURCE,
     RECORD_ID_COLUMN,
     ExportRow,
+    SparseSignal,
     read_export,
     read_record_ids,
 )
@@ -142,13 +144,30 @@ _SINK_KEYS = frozenset(
         "basename",
         "batch_size",
         "distance",
+        "vector",
         "vector_name",
+        "sparse_source",
+        "sparse_vector_name",
         "reconcile",
         "load_id",
         "id_namespace",
         API_KEY_ENV_KEY,
     }
 )
+
+#: Which of the Export's retrieval signals this load projects into the collection. ``"dense"`` is
+#: the default and is byte-identical to the sink's behaviour before named sparse vectors existed.
+_VECTOR_MODES = ("dense", "sparse", "both")
+
+#: The name the dense vector takes when a sparse vector shares the collection.
+#:
+#: Qdrant's *unnamed* vector is the single-vector legacy shape; a hybrid collection is a
+#: named-vectors collection, and the point's one vector map has to address both halves by name. So
+#: a ``vector: both`` load names the dense side rather than leaving it unnamed — a deliberate,
+#: documented difference from a dense-only load, not an accident. Override with ``vector_name``,
+#: and set the retrieval side's ``vector_name`` to match (``latence_retrieval.qdrant.QdrantBackend``
+#: defaults to the unnamed vector, which a hybrid collection does not have).
+DEFAULT_DENSE_VECTOR_NAME = "dense"
 
 
 def point_id(record_id: str, namespace: uuid.UUID = DEFAULT_ID_NAMESPACE) -> str:
@@ -196,6 +215,11 @@ class LoadReport:
     duplicate_rows: int = 0
     deleted: int = 0
     reconciled: bool = False
+    #: The named sparse vector this load wrote, or ``None`` for a dense-only load. Reported because
+    #: it is the one thing the *query* side must be told: ``query_points(..., using=<this>)``.
+    sparse_vector_name: str | None = None
+    #: The named dense vector this load wrote, or ``None`` for the collection's unnamed vector.
+    dense_vector_name: str | None = None
 
     @property
     def points(self) -> int:
@@ -221,8 +245,13 @@ class LoadReport:
             if self.duplicate_rows
             else ""
         )
+        # Printed only on a sparse load, and printed because the operator has to carry it to the
+        # query side: an unnamed `using=` against a named sparse index returns nothing, silently.
+        sparse = (
+            f", sparse vector {self.sparse_vector_name!r}" if self.sparse_vector_name else ""
+        )
         return (
-            f"collection {self.collection!r} ({created}, dim {self.dimension}): "
+            f"collection {self.collection!r} ({created}, dim {self.dimension}{sparse}): "
             f"{self.records} record(s) read — upserted {self.upserted}, "
             f"unchanged {self.unchanged}{repeats}, {sweep} [load_id={self.load_id}]"
         )
@@ -237,6 +266,7 @@ class _Point:
     vector: list[float]
     payload: dict[str, Any] = field(default_factory=dict)
     digest: str = ""
+    sparse: SparseSignal | None = None
 
 
 class QdrantSink:
@@ -251,10 +281,22 @@ class QdrantSink:
             request size; the Export is streamed, so this is the only thing that grows with it.
         distance: str — ``"cosine"`` (default) / ``"dot"`` / ``"euclid"`` / ``"manhattan"``. Used
             **only** when the collection is created; an existing collection's metric is left alone.
-        vector_name: str | None — the named vector to write (``None`` ⇒ the collection's single
-            unnamed vector). Named *sparse* vectors are deliberately out of scope: the Export's
-            ``sparse_indices`` / ``sparse_values`` columns ride through as payload, and sparse
-            wiring is the engine's concern (#156).
+        vector: str — which of the Export's retrieval signals to project: ``"dense"`` (default,
+            byte-identical to the sink before sparse existed), ``"sparse"`` (a SPLADE-only
+            collection: no Embedder needed on the Export), or ``"both"`` (a hybrid collection —
+            one point, one dense vector, one named sparse vector).
+        vector_name: str | None — the named dense vector to write (``None`` ⇒ the collection's
+            single unnamed vector). Under ``vector: both`` the dense vector is *always* named,
+            defaulting to :data:`DEFAULT_DENSE_VECTOR_NAME`: a point carrying a sparse vector
+            carries a vector **map**, and a map addresses its members by name.
+        sparse_source: str — the Export column-pair stem holding the sparse signal, i.e.
+            ``<source>_indices`` + ``<source>_values``. Default ``"sparse"``, which is what
+            ``JsonlParquetExport`` writes for a wired ``sparse_embedder`` (ADR-0050/0053). Only
+            meaningful when ``vector`` names a sparse mode — set otherwise, it is a loud
+            :class:`SinkConfigError` rather than a knob that quietly does nothing.
+        sparse_vector_name: str — the name the sparse vector takes **in the collection**, which is
+            what the query side passes as ``using=``. Defaults to ``sparse_source``, so the
+            common case needs neither key.
         reconcile: bool — default ``True``. Sweep this corpus's points that are not present in this
             Export (the Retraction/Purge path). Scoped to ``id_namespace``, so a co-tenant corpus in
             the same collection is never swept. Set ``False`` when loading an *incremental* Export
@@ -322,6 +364,57 @@ class QdrantSink:
                 f"got {vector_name!r}."
             )
             raise SinkConfigError(msg)
+
+        mode = cfg.get("vector", "dense")
+        if mode not in _VECTOR_MODES:
+            msg = (
+                f"QdrantSink 'vector' must be one of {list(_VECTOR_MODES)}, got {mode!r}. "
+                "'dense' writes the Export's embedding, 'sparse' writes only the named sparse "
+                "vector (a SPLADE-only collection), 'both' writes a hybrid collection."
+            )
+            raise SinkConfigError(msg)
+        self._dense = mode in ("dense", "both")
+        self._wants_sparse = mode in ("sparse", "both")
+
+        # A knob that silently does nothing is the failure mode this framework refuses everywhere:
+        # naming the sparse column pair while loading dense-only would look wired and load nothing
+        # queryable — which is exactly the defect this feature exists to remove.
+        stray = sorted(
+            k
+            for k in ("sparse_source", "sparse_vector_name")
+            if k in cfg and not self._wants_sparse
+        )
+        if "vector_name" in cfg and not self._dense:
+            stray.append("vector_name")
+        if stray:
+            msg = (
+                f"QdrantSink: {sorted(stray)} set but 'vector' is {mode!r}, so the key(s) address "
+                "a vector this load does not write and would silently do nothing. Set "
+                "vector: 'sparse'/'both' for the sparse keys and 'dense'/'both' for 'vector_name', "
+                "or drop them."
+            )
+            raise SinkConfigError(msg)
+
+        self._sparse_source: str | None = None
+        self._sparse_vector_name: str | None = None
+        if self._wants_sparse:
+            self._sparse_source = _require_name(
+                cfg.get("sparse_source", DEFAULT_SPARSE_SOURCE), "sparse_source"
+            )
+            self._sparse_vector_name = _require_name(
+                cfg.get("sparse_vector_name", self._sparse_source), "sparse_vector_name"
+            )
+            # Under 'both' the point carries ONE vector map, so the dense and sparse halves cannot
+            # share a name — and the map would silently keep only one of them.
+            if self._dense and vector_name is None:
+                vector_name = DEFAULT_DENSE_VECTOR_NAME
+            if self._dense and vector_name == self._sparse_vector_name:
+                msg = (
+                    f"QdrantSink: the dense and sparse vectors are both named "
+                    f"{vector_name!r}. One point carries one vector map, so the two names must "
+                    "differ — set 'vector_name' or 'sparse_vector_name'."
+                )
+                raise SinkConfigError(msg)
         self._vector_name: str | None = vector_name
 
         reconcile = cfg.get("reconcile", True)
@@ -372,7 +465,12 @@ class QdrantSink:
         store = storage or Storage.for_uri(export_dir)
         load_id = _load_marker(self._configured_load_id)
         batches = read_export(
-            export_dir, store, basename=self._basename, batch_size=self._batch_size
+            export_dir,
+            store,
+            basename=self._basename,
+            batch_size=self._batch_size,
+            dense=self._dense,
+            sparse_source=self._sparse_source,
         )
 
         dimension: int | None = None
@@ -424,6 +522,8 @@ class QdrantSink:
             duplicate_rows=duplicate_rows,
             deleted=deleted,
             reconciled=self._reconcile,
+            sparse_vector_name=self._sparse_vector_name,
+            dense_vector_name=self._vector_name,
         )
 
     def verify_absent(self, record_ids: Iterable[str]) -> list[str]:
@@ -479,7 +579,7 @@ class QdrantSink:
                 "fresh one."
             )
             raise SinkExportError(msg)
-        digest = _digest(row.vector, row.payload)
+        digest = _digest(row.vector, row.payload, row.sparse)
         payload = {
             **row.payload,
             DIGEST_KEY: digest,
@@ -492,6 +592,7 @@ class QdrantSink:
             vector=row.vector,
             payload=payload,
             digest=digest,
+            sparse=row.sparse,
         )
 
     def _partition(
@@ -531,7 +632,7 @@ class QdrantSink:
     def _upsert(self, points: list[_Point]) -> None:
         models = self._load_models()
         structs = [
-            models.PointStruct(id=p.id, vector=self._vector_arg(p.vector), payload=p.payload)
+            models.PointStruct(id=p.id, vector=self._vector_arg(p, models), payload=p.payload)
             for p in points
         ]
         self._call(
@@ -765,24 +866,85 @@ class QdrantSink:
         )
 
     def _ensure_collection(self, dimension: int) -> bool:
-        """Create the collection at the Export's vector width if absent. Returns whether it was."""
+        """Create the collection at the Export's vector width if absent. Returns whether it was.
+
+        A sparse load declares the named sparse index **here**, at creation, because that is the
+        only moment it can be declared: an existing collection's vector shape is not something a
+        loader rewrites. So when the collection is already there, the sparse index is *verified*
+        instead (:meth:`_require_sparse_index`) — otherwise the first upsert would die on an opaque
+        400 naming a vector the operator would have to go and look up.
+        """
         if self._collection_exists():
+            if self._wants_sparse:
+                self._require_sparse_index()
             return False
         models = self._load_models()
-        params = models.VectorParams(
-            size=dimension, distance=getattr(models.Distance, self._distance.upper())
-        )
-        config = {self._vector_name: params} if self._vector_name else params
+        vectors_config: Any = {}
+        if self._dense:
+            params = models.VectorParams(
+                size=dimension, distance=getattr(models.Distance, self._distance.upper())
+            )
+            vectors_config = {self._vector_name: params} if self._vector_name else params
+        if not self._wants_sparse:
+            self._call(
+                "create_collection",
+                lambda c: c.create_collection(
+                    collection_name=self._collection, vectors_config=vectors_config
+                ),
+            )
+            return True
+        sparse_config = {self._sparse_vector_name: models.SparseVectorParams()}
         self._call(
             "create_collection",
             lambda c: c.create_collection(
-                collection_name=self._collection, vectors_config=config
+                collection_name=self._collection,
+                vectors_config=vectors_config,
+                sparse_vectors_config=sparse_config,
             ),
         )
         return True
 
-    def _vector_arg(self, vector: list[float]) -> Any:
-        return {self._vector_name: vector} if self._vector_name else vector
+    def _require_sparse_index(self) -> None:
+        """Refuse to load a sparse signal into a collection that has no sparse index for it.
+
+        The realistic case is an upgrade: the collection was created by an earlier, dense-only load
+        (this sink's own behaviour before named sparse vectors existed), and ``vector: both`` is
+        being run over it now. Qdrant answers that with a 400 on the first upsert; this turns it
+        into a message naming the collection, the vector, and the one thing that fixes it — because
+        the fix is not a config change, it is a re-created collection.
+        """
+        info = self._call("get_collection", lambda c: c.get_collection(self._collection))
+        declared = getattr(info.config.params, "sparse_vectors", None) or {}
+        if self._sparse_vector_name in declared:
+            return
+        msg = (
+            f"collection {self._collection!r} exists but declares no sparse vector named "
+            f"{self._sparse_vector_name!r} (it has {sorted(declared)}). A collection's vector "
+            "shape is fixed at creation, so a sparse index cannot be added to it by loading into "
+            "it. Load into a new collection (--collection), or drop this one and re-load with "
+            "--vector both. Nothing was written."
+        )
+        raise SinkLoadError(msg)
+
+    def _vector_arg(self, point: _Point, models: Any) -> Any:
+        """The ``PointStruct.vector`` for one point — a bare list, or the named map.
+
+        A dense-only load with no ``vector_name`` still sends the bare list it always did, so the
+        stored shape of every existing collection is untouched by this feature.
+        """
+        sparse_name = self._sparse_vector_name
+        if sparse_name is None:
+            return {self._vector_name: point.vector} if self._vector_name else point.vector
+        sparse = point.sparse
+        vectors: dict[str, Any] = {
+            sparse_name: models.SparseVector(
+                indices=list(sparse.indices) if sparse else [],
+                values=list(sparse.values) if sparse else [],
+            )
+        }
+        if self._dense:
+            vectors[self._vector_name or DEFAULT_DENSE_VECTOR_NAME] = point.vector
+        return vectors
 
     # -- client plumbing --------------------------------------------------------------------
 
@@ -883,21 +1045,29 @@ def _collapse_repeats(points: list[_Point]) -> tuple[list[_Point], int]:
     return list(by_id.values()), len(points) - len(by_id)
 
 
-def _digest(vector: list[float], payload: dict[str, Any]) -> str:
+def _digest(
+    vector: list[float], payload: dict[str, Any], sparse: SparseSignal | None = None
+) -> str:
     """A stable content fingerprint of one record as it would be stored.
 
     Covers the vector *and* the payload, so a re-embed, a re-chunk, a redaction change or a
     provenance change all count as "changed" — and nothing else does. Sorted keys + a canonical
     float repr make it identical across processes and machines (the sink must agree with the run
     that wrote the point last month, on another host).
+
+    The sparse signal joins the material **only on a sparse load**, and it has to join it for the
+    same reason the dense vector does: on a sparse load its two columns have left the payload, so a
+    digest that ignored it would report ``unchanged`` after a re-embed and leave the collection
+    serving last month's term weights forever. Keeping it out of the dense-only digest is equally
+    load-bearing — folding it in unconditionally would change the digest of every point of every
+    collection ever loaded, and the next run of an unchanged corpus would re-upsert all of it.
     """
-    material = json.dumps(
-        {"v": [float(x) for x in vector], "p": payload},
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    material: dict[str, Any] = {"v": [float(x) for x in vector], "p": payload}
+    if sparse is not None:
+        material["s"] = [[int(i) for i in sparse.indices], [float(v) for v in sparse.values]]
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def _require_name(value: object, key: str) -> str:
@@ -960,6 +1130,7 @@ def _require_positive_int(value: object, key: str) -> int:
 
 
 __all__ = [
+    "DEFAULT_DENSE_VECTOR_NAME",
     "DEFAULT_ID_NAMESPACE",
     "DIGEST_KEY",
     "LOAD_ID_KEY",
