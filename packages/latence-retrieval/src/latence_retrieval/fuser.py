@@ -13,9 +13,16 @@ The seam has two real adapters because the *combination rule* is exactly where b
 * :class:`RrfFuser` — **Reciprocal Rank Fusion**: score by *rank position only*, scale-free, so a
   dense-cosine list and a BM25 list combine without their incomparable score ranges distorting the
   result. The robust default.
-* :class:`WeightedFuser` — **weighted score fusion**: min-max-normalise each list's own scores, then
-  take a weighted sum, so the *magnitude* of a hit's relevance (not just its rank) carries through —
-  the stronger fusion the spec calls for when ranks alone throw information away.
+* :class:`WeightedFuser` — **weighted score fusion**: normalise each list's scores to ``[0, 1]``,
+  then take a weighted sum, so the *magnitude* of a hit's relevance (not just its rank) carries
+  through — the normalized-convex-combination family Bruch et al. (TOIS 2023) measure as beating
+  RRF, with two normalisations: per-query ``min_max`` and query-independent
+  ``theoretical_min_max`` (safe at serving time). RRF is **kept**, not deprecated: with no labelled
+  queries there is nothing to tune, so it remains the no-labels fallback and the default.
+
+:mod:`latence_retrieval.tuning` is the other half of that choice: it evaluates a fuser on a small
+labelled slice, sweeps the weights on it, and renders the RRF-vs-tuned comparison table — so
+"which fuser wins" is a measurement a harness runs, not a preference the library encodes.
 
 Both are selected by config through :func:`~latence_retrieval.registry.resolve_fuser`
 (``{"provider": "fuser.rrf" | "fuser.weighted", "config": {…}}``), so swapping the fusion algorithm
@@ -155,45 +162,166 @@ class RrfFuser:
         )
 
 
+_NORMALIZATIONS = ("min_max", "theoretical_min_max")
+_WEIGHTED_CONFIG_KEYS = frozenset({"normalization", "bounds"})
+
+
 class WeightedFuser:
-    """Weighted score fusion: min-max-normalise each list's own scores, then take a weighted sum.
+    """Weighted score fusion: normalise each list's scores to ``[0, 1]``, then take a weighted sum.
 
-    Ranks throw away *how much* better a hit is; this adapter keeps that magnitude. Within each list
-    the scores are min-max-normalised to ``[0, 1]`` (so a list scored 0.9–0.95 and one scored 2–40
-    contribute on the same footing), then each candidate's fused score is the weighted sum of its
-    normalised scores across the lists it appears in. A candidate absent from a list contributes
-    nothing from it. When a list's scores are all equal (including a single-element list) its range
-    is zero and every member normalises to ``1.0`` — the list expresses no preference, so each gets
-    that list's full weight rather than a divide-by-zero. The emitted candidate keeps the
-    ``text``/``metadata`` of its first appearance with its ``score`` replaced by the fused score.
+    Ranks throw away *how much* better a hit is; this adapter keeps that magnitude — the
+    normalized-convex-combination family Bruch et al. (TOIS 2023) measure as beating RRF both
+    in-domain and out-of-domain, and the one RRF was explicitly written to be a *baseline* for
+    (D6). Each candidate's fused score is the weighted sum of its normalised scores across the
+    lists it appears in; a candidate absent from a list contributes nothing from it. The emitted
+    candidate keeps the ``text``/``metadata`` of its first appearance with its ``score`` replaced
+    by the fused score.
 
-    Config: currently none beyond the defaults; ``normalization`` accepts only ``"min_max"`` (the
-    default) so an unrecognised value fails loudly rather than silently changing the maths.
+    Config:
+        normalization: ``"min_max"`` (default) or ``"theoretical_min_max"``. An unrecognised value
+            fails loudly rather than silently changing the maths.
+        bounds: **required for, and only for,** ``"theoretical_min_max"`` — either one ``[lo, hi]``
+            pair applied to every list, or one pair per list (matched positionally at fuse time).
+
+    **min_max** (per-query): within each list the scores are min-max-normalised against *that
+    list's own* observed range, so a list scored 0.9–0.95 and one scored 2–40 contribute on the
+    same footing. When a list's scores are all equal (including a single-element list) its range is
+    zero and every member normalises to ``1.0`` — the list expresses no preference, so each gets
+    that list's full weight rather than a divide-by-zero.
+
+    **theoretical_min_max** (query-independent): the range comes from the operator's declared
+    *theoretical* bounds of each scoring function (cosine ``[-1, 1]``, a lexical score ``[0, m]``),
+    not from this query's hits. That is the property Bruch recommends for **serving time**: a
+    document's normalised contribution no longer depends on which other documents happened to be
+    retrieved for this particular query, so the fusion is stable across queries and a tuned weight
+    transfers. A score outside its declared range is **clamped** into ``[0, 1]``: a theoretical
+    bound is a claim about the score *function*, so an overshoot means the bound was mis-declared —
+    clamping keeps the combination convex (and surfaces the mistake as saturation) instead of
+    letting one list's overshoot silently dominate.
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = dict(config or {})
+        unknown = set(config) - _WEIGHTED_CONFIG_KEYS
+        if unknown:
+            msg = f"WeightedFuser: unknown config key(s) {sorted(unknown)}."
+            raise ValueError(msg)
         normalization = config.get("normalization", "min_max")
-        if normalization != "min_max":
+        if normalization not in _NORMALIZATIONS:
             msg = (
-                f"WeightedFuser 'normalization' must be 'min_max' (the only supported mode), "
+                f"WeightedFuser 'normalization' must be one of {list(_NORMALIZATIONS)}, "
                 f"got {normalization!r}."
             )
             raise ValueError(msg)
+        self._normalization = normalization
+        raw_bounds = config.get("bounds")
+        if normalization == "min_max":
+            if raw_bounds is not None:
+                msg = (
+                    "WeightedFuser 'bounds' applies only to normalization="
+                    "'theoretical_min_max'; per-query 'min_max' derives its range from each list. "
+                    "Remove 'bounds' or switch the normalization — a silently ignored knob is how "
+                    "a config stops reaching the provider."
+                )
+                raise ValueError(msg)
+            self._uniform_bounds: tuple[float, float] | None = None
+            self._per_list_bounds: tuple[tuple[float, float], ...] | None = None
+        else:
+            if raw_bounds is None:
+                msg = (
+                    "WeightedFuser normalization='theoretical_min_max' requires 'bounds': either "
+                    "one [lo, hi] pair for every list, or one pair per list."
+                )
+                raise ValueError(msg)
+            self._uniform_bounds, self._per_list_bounds = _parse_bounds(raw_bounds)
 
     def fuse(
         self,
         rankings: Sequence[Sequence[Candidate]],
         weights: Sequence[float] | None = None,
     ) -> list[Candidate]:
-        """Fuse by weighted, per-list min-max-normalised score; see the class docstring."""
+        """Fuse by weighted, normalised score; see the class docstring for the two modes."""
         resolved = _validate_weights(rankings, weights)
-        normalised = [_min_max_normalised(ranking) for ranking in rankings]
+        if self._normalization == "min_max":
+            normalised = [_min_max_normalised(ranking) for ranking in rankings]
+        else:
+            per_list = self._bounds_for(len(rankings))
+            normalised = [
+                _theoretical_normalised(ranking, per_list[index])
+                for index, ranking in enumerate(rankings)
+            ]
         return _fuse_by_score(
             rankings,
             resolved,
             lambda rank, candidate, list_index: normalised[list_index][candidate.id],
         )
+
+    def _bounds_for(self, count: int) -> list[tuple[float, float]]:
+        """Align the declared bounds to the ranked lists actually passed *this* call.
+
+        A single declared pair applies to every list; per-list pairs must match the number of lists
+        the caller passed, because a positional mapping that silently truncates or recycles would
+        normalise a list against another list's score function.
+        """
+        if self._uniform_bounds is not None:
+            return [self._uniform_bounds] * count
+        per_list = list(self._per_list_bounds or ())
+        if len(per_list) != count:
+            msg = (
+                f"WeightedFuser 'bounds' has {len(per_list)} pairs but {count} ranked lists were "
+                "passed; supply exactly one pair per list (or a single pair for all)."
+            )
+            raise ValueError(msg)
+        return per_list
+
+
+def _parse_bounds(
+    raw: Any,
+) -> tuple[tuple[float, float] | None, tuple[tuple[float, float], ...] | None]:
+    """Parse ``bounds`` into ``(uniform_pair, per_list_pairs)`` — exactly one of them is set."""
+    if _is_pair(raw):
+        return _validate_pair(raw), None
+    if isinstance(raw, (list, tuple)) and raw and all(_is_pair(item) for item in raw):
+        return None, tuple(_validate_pair(item) for item in raw)
+    msg = (
+        "WeightedFuser 'bounds' must be one [lo, hi] number pair, or a non-empty list of such "
+        f"pairs (one per ranked list), got {raw!r}."
+    )
+    raise ValueError(msg)
+
+
+def _is_pair(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+    )
+
+
+def _validate_pair(pair: Any) -> tuple[float, float]:
+    lo, hi = float(pair[0]), float(pair[1])
+    if not lo < hi:
+        msg = f"WeightedFuser 'bounds' pair must satisfy lo < hi, got [{lo}, {hi}]."
+        raise ValueError(msg)
+    return (lo, hi)
+
+
+def _theoretical_normalised(
+    ranking: Sequence[Candidate], bounds: tuple[float, float]
+) -> dict[str, float]:
+    """Map each candidate id to ``(score - lo) / (hi - lo)``, clamped into ``[0, 1]``.
+
+    Query-independent by construction: the range is the score *function*'s declared one, not this
+    list's observed one, so the same raw score always maps to the same normalised score.
+    """
+    lo, hi = bounds
+    span = hi - lo
+    result: dict[str, float] = {}
+    for candidate in ranking:
+        if candidate.id in result:
+            continue
+        result[candidate.id] = min(1.0, max(0.0, (candidate.score - lo) / span))
+    return result
 
 
 def _min_max_normalised(ranking: Sequence[Candidate]) -> dict[str, float]:

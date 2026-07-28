@@ -38,6 +38,7 @@ fusion, and re-ranking it by RRF would discard the store's own scores); then the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +49,7 @@ from latence_retrieval.errors import OrchestrationError
 from latence_retrieval.fuser import RrfFuser
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from latence_retrieval.backend import RetrievalBackend
     from latence_retrieval.fuser import Fuser

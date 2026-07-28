@@ -184,6 +184,17 @@ from latence_retrieval.rerank import (
     SentenceTransformersCrossEncoder,
 )
 from latence_retrieval.sparse import SparseQueryEncoder, SpladeQueryEncoder
+from latence_retrieval.tuning import (
+    FuserComparisonRow,
+    FusionRun,
+    FusionScore,
+    WeightSweep,
+    WeightSweepRow,
+    compare_fusers,
+    evaluate_fusion,
+    format_comparison_table,
+    sweep_fusion_weights,
+)
 
 __all__ = [
     "ENTRY_POINT_GROUP",
@@ -202,6 +213,9 @@ __all__ = [
     "DuckDBGraphSource",
     "Expander",
     "Fuser",
+    "FuserComparisonRow",
+    "FusionRun",
+    "FusionScore",
     "GraphDocument",
     "GraphDocumentSource",
     "GraphRetriever",
@@ -236,13 +250,19 @@ __all__ = [
     "SpladeQueryEncoder",
     "TiktokenCounter",
     "TokenCounter",
+    "WeightSweep",
+    "WeightSweepRow",
     "WeightedFuser",
     "build_graph_document_source",
     "build_graph_source",
+    "compare_fusers",
+    "evaluate_fusion",
+    "format_comparison_table",
     "max_sim",
     "resolve_fuser",
     "resolve_multivector_encoder",
     "resolve_processor",
     "resolve_sparse_encoder",
     "retrieve",
+    "sweep_fusion_weights",
 ]
