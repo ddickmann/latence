@@ -146,17 +146,17 @@ claimed 25 packages / 56 distributions / 58 assets against a tree that had none 
 
 | measured | value | derivation |
 | --- | --- | --- |
-| packages built | 32 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
-| distributions | 64 | one sdist + one wheel per package (every package builds with `hatchling`) |
-| assets checksummed | 66 | the 64 distributions + `sbom.cdx.json` + `VERIFY.md` |
+| packages built | 33 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
+| distributions | 66 | one sdist + one wheel per package (every package builds with `hatchling`) |
+| assets checksummed | 68 | the 66 distributions + `sbom.cdx.json` + `VERIFY.md` |
 
-`shasum -a 256 -c SHA256SUMS` verified all 66. The CycloneDX 1.6 SBOM was generated from
-`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 179 components — 147 pinned
-third-party requirements plus 32 workspace path entries (see below). Running
+`shasum -a 256 -c SHA256SUMS` verified all 68. The CycloneDX 1.6 SBOM was generated from
+`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 180 components — 147 pinned
+third-party requirements plus 33 workspace path entries (see below). Running
 `scripts/generate-sbom.sh` twice produced a byte-identical `sbom.cdx.json`
 (`--output-reproducible`), so the release is reproducible from the same lockfile.
 
-> Those 32 components are emitted as `unknown`: they are the `./packages/...` path
+> Those 33 components are emitted as `unknown`: they are the `./packages/...` path
 > requirements that `uv export --no-emit-project` does not strip and that `cyclonedx-py`
 > cannot resolve to a name or version. They are inert for CVE matching — the third-party
 > surface an adopter scans is the 147 pinned components — but they do pad the component

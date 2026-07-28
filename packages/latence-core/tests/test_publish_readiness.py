@@ -175,10 +175,25 @@ def test_project_urls_did_not_swallow_dependencies() -> None:
     # non-empty [project.dependencies] (the footgun guard) — they are exempt only from the
     # latence-core-edge proxy, not from the "dependencies survived parsing" check.
     _standalone_roots = {"latence-core", "latence-retrieval"}
+    # Packages that are DELIBERATELY dependency-free, where `dependencies = []` is the
+    # declared design and not a parsing casualty: latence-label-profiler is a build-time
+    # corpus analysis tool whose whole claim (zero network, zero cost, zero model,
+    # reproducible anywhere) a spurious dependency would make unverifiable. Non-emptiness
+    # is only a PROXY for "the key survived parsing", so for these the real invariant is
+    # asserted directly — the KEY must be present in [project]. If [project.urls] ever
+    # re-parented it, `dependencies` would vanish from `proj` entirely and this still fails.
+    _zero_dependency_packages = {"latence-label-profiler"}
     for pp in _package_pyprojects():
         proj = tomllib.loads(pp.read_text())["project"]
         name = pp.parent.name
         deps = proj.get("dependencies")
+        if name in _zero_dependency_packages:
+            assert "dependencies" in proj, f"{name}: dependencies lost from [project]"
+            assert deps == [], (
+                f"{name} is registered as deliberately dependency-free but declares {deps} — "
+                "either drop the dependency or drop it from _zero_dependency_packages"
+            )
+            continue
         assert deps, f"{name}: dependencies lost from [project]"
         if name not in _standalone_roots:
             assert any(d.startswith("latence-core") for d in deps), (
