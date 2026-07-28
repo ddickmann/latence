@@ -261,23 +261,38 @@ densification that improves MRR and degrades retrieval is a failure.
 
 ## Lane E — corpus
 
-### T-CORPUS-1 — Acquire, and decide the office-format question · M
+### T-CORPUS-1 — Acquire the three-axis corpus · M
 
-Sources and licences in DECISIONS.md §D4. DocLayNet-v1.2 (CDLA-Permissive, commercial-OK, embeds real
-PDF bytes + layout GT) + IDL-wds (real scanned corporate archive; **real PII, which is the only
-honest way to exercise the redaction and guardrail stages**) + OHR-Bench (CC-BY-4.0, scored).
+Sources and licence posture in DECISIONS.md §D4. **The office-format question is closed** —
+GovDocs1 supplies genuine file-type diversity under CC0, so no synthetic slice is needed.
 
-**Hard constraints, recorded so they are not assumed:** IDL never leaves the pod, is never
-redistributed, and nothing derived from it enters a public artifact.
+| Axis | Source | Pull |
+|---|---|---|
+| Format diversity | GovDocs1, 333 GB, CC0 | `aws s3 sync --no-sign-request s3://digitalcorpora/corpora/files/govdocs1/zipfiles/` |
+| Scanned realism | IIT-CDIP @ NIST, 1.41 TB, 656 shards | `curl -O https://data.nist.gov/od/ds/ark:/88434/mds2-2531/cdip-images/images.<a>.<b>.tar` |
+| Scored control | OHR-Bench, 1.84 GB, CC-BY-4.0 | `hf download opendatalab/OHR-Bench --include "pdfs.zip"` |
 
-**The open decision:** all three are PDF/image. None supplies DOCX/XLSX/PPTX at scale. Either
-generate a small, clearly-labelled synthetic office slice (LibreOffice headless) to exercise
-`parser.render`, reported as synthetic and never folded into quality numbers — or accept a
-PDF-dominant corpus and state that office handling is untested at scale. **Awaiting the call. Do not
-silently pick the second.**
+Start with GovDocs1's ten pre-built 1,000-file `threads/` subsets (3.09 GB) as a smoke test before
+committing to the full pull.
 
-**Acceptance:** manifest with per-source counts, bytes, licence, and the file-type histogram — so the
-write-up cannot overclaim coverage it does not have.
+**Two hard operational constraints, both non-negotiable:**
+
+1. **GovDocs1 contains live malware, deliberately retained** — *"the malware will not be removed
+   from the files because it is legitimately part of the corpus."* The pod is untrusted: no host
+   mounts, no credential material in the environment, expect AV noise. We only ever *parse* these
+   files, never execute them — but this must be a deliberate posture, not a surprise at 2am.
+2. **CDIP/IDL material never leaves the pod** and nothing derived from it enters a public artifact.
+   Its rights posture is fair use, not a grant. Anything we publish comes from GovDocs1 (CC0),
+   OHR-Bench (CC-BY-4.0) or DocLayNet (CDLA-Permissive).
+
+**Watch for the `by_type/` trap:** there is no `pdf.zip` and no `html.zip` — the per-type archives
+omit exactly the two largest classes. Take `zipfiles/`.
+
+**Acceptance:** a manifest with per-source counts, bytes, licence, and the **measured** file-type
+histogram — so the write-up cannot overclaim coverage it does not have. Specifically record that
+office formats are legacy OLE (DOC/XLS/PPT), not modern OOXML: GovDocs1 has only 164 DOCX / 39 XLSX
+/ 220 PPTX, so **modern OOXML at volume remains untested in this run**. Say so rather than letting
+"many file types" imply it.
 
 ---
 

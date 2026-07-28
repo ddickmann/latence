@@ -145,20 +145,107 @@ into a public artifact. Recorded here so that constraint is explicit rather than
 - **ESG/sustainability report corpora** — surveyed thoroughly; no free, large, clearly-licensed
   corpus of original PDFs exists. The largest archives are scrape-only with unverified terms.
 
-### The gap we cannot close from public data — stated, not hidden
+### The file-type gap is CLOSED — GovDocs1, and it is the best-licensed corpus in the survey
 
-**All three sources are PDF/image.** None supplies DOCX, XLSX, PPTX or HTML at scale. The request
-asks for "many different file types" and for "file preprocessing converting any filetype to image
-batches", and public corpora do not provide that.
+I initially concluded that public data could not supply genuine file-type diversity and was about to
+ask for a scope decision between a synthetic office slice and admitting the gap. **That question is
+withdrawn — the answer exists.**
 
-Options, in preference order:
-1. Generate a **modest, clearly-labelled office-format slice** (LibreOffice headless round-trip of a
-   DocLayNet subset into DOCX/PPTX/XLSX) purely to exercise the `parser.render` path, and report it
-   as synthetic — never folded into the quality numbers.
-2. Accept a PDF/image-dominant corpus and state that office-format handling is **untested at scale**
-   in this run.
+**GovDocs1** (Digital Corpora): **986,278 files, 333 GB zipped / ~500 GB uncompressed**, harvested
+from `.gov` web servers, with a *published* file-type histogram:
 
-Do NOT silently pick (2) and let the write-up imply full file-type coverage. See T-CORPUS-1.
+| Type | Count | Type | Count |
+|---|---|---|---|
+| PDF | 231,106 | DOC (OLE) | 76,605 |
+| HTML | 202,440 | XLS (OLE) | 62,876 |
+| JPEG | 109,283 | PPT (OLE) | 51,292 |
+| TXT | 88,856 | CSV | 18,717 |
+| PostScript | 20,630 | RTF | 1,067 |
+| GIF/PNG/BMP | ~40,000 | DOCX/XLSX/PPTX | 164 / 39 / 220 |
+
+**License: CC0.** Verbatim from the Digital Corpora terms: *"all original content on this site …
+are made available under the CC0 license. CC0 is in effect because these materials were made by US
+Government employees as part of their official duties."* This is the **only** corpus in the entire
+survey where redistribution is defensible without argument — which also makes it the right home for
+any public artifact we produce.
+
+Three properties make it better than a synthetic slice would have been:
+
+1. **33,917 files have the wrong extension**, deliberately. The corpus page: *"The file extension is
+   a suggestion — it is not part of the corpus."* That is a genuine adversarial test of
+   content-based type detection, which a LibreOffice round-trip could never have produced.
+2. Real legacy-office messiness, not clean re-exports.
+3. Ten pre-built random 1,000-file subsets (`threads/`, 3.09 GB total) — graduated slices for smoke
+   tests before committing to the full pull.
+
+```bash
+aws s3 sync --no-sign-request s3://digitalcorpora/corpora/files/govdocs1/zipfiles/ ./govdocs1/
+```
+
+⚠️ **Two operational constraints, both non-negotiable:**
+
+- **The corpus contains live malware** — the maintainers keep it deliberately: *"some of these files
+  contain malware in the form of JavaScript exploits and Windows malware … the malware will not be
+  removed from the files because it is legitimately part of the corpus."* The pod must be treated as
+  untrusted: no host mounts, no credential material in the environment, expect AV noise. This is
+  fine — we only ever parse these files, never execute them — but it must be a deliberate posture,
+  not a surprise.
+- **`by_type/` has no `pdf.zip` and no `html.zip`.** The per-type archives cover jpg/ppt/doc/txt/xls/
+  swf/csv/pptx/log/rtf/docx/xlsx only. To get PDF and HTML you must take `zipfiles/`.
+
+**The honest residual:** GovDocs1 is a 2009 harvest, so office formats skew heavily to **legacy OLE**
+(DOC/XLS/PPT) over modern OOXML (DOCX 164, XLSX 39, PPTX 220). That still exercises the
+`parser.render` office path — arguably harder, since legacy binary formats are the nastier parse —
+but it does not prove modern OOXML at volume. If that matters, the source is **SAM.gov** attachments
+(measured: PDF 70% / DOCX 20% / XLSX 5.7%), whose **ToU explicitly prohibits scraping**; it must go
+through the keyed public API with rate limiting, not the UI endpoint. Recorded as a known limit of
+this run rather than papered over.
+
+### The scanned axis: prefer IIT-CDIP via NIST over raw IDL
+
+Later research found a materially better-licensed route to the *same underlying documents*.
+**IIT-CDIP Test Collection 1.0** is built from the UCSF Legacy Tobacco library and is now re-hosted
+by **NIST**: `https://data.nist.gov/od/id/mds2-2531`, DOI `10.18434/mds2-2531`. **1.41 TB, ~7 M
+documents / ~40 M scanned pages**, free, **unauthenticated**, direct HTTP, 656 tar shards of
+~2.0–2.5 GB.
+
+NIST's description is exactly our messiness requirement: *"preprocessed with 90s-era OCR, and also
+the original page scans in TIFF format … There is handwriting on the documents, stains, etc."*
+
+**Why prefer it to pulling IDL directly:** the NIST record carries an actual rights statement
+(`nist.gov/open/license` — royalty-free, worldwide right to publish and prepare derivative works),
+where IDL grants **access only** and shifts all liability to the user via a hold-harmless clause.
+Neither clears the underlying tobacco-industry copyrights — that remains a fair-use posture in both
+cases — but the distribution layer is materially cleaner, and "we took it from a NIST public data
+record" is a better answer than "we scripted 28 M downloads off a university SPA."
+
+Caveat: the NIST manifest is **TIFF images only** — no OCR/XML component. If we want the legacy OCR
+text as a comparison baseline, that comes from the IDL Box bulk dumps or `pixparse/idl-wds`
+(Textract OCR, ~2 TB), both under the weaker IDL posture.
+
+### Final corpus composition
+
+| Axis | Source | Licence posture |
+|---|---|---|
+| **Format diversity** | **GovDocs1** — 986,278 files, 333 GB, PDF/HTML/DOC/XLS/PPT/JPEG/TXT/CSV/RTF/PS | **CC0** — redistributable |
+| **Scanned realism** | **IIT-CDIP @ NIST** — 1.41 TB, ~7 M docs, 1990s OCR, handwriting, stains | NIST open on the distribution; fair use on the documents |
+| **Scored control** | **OHR-Bench** — 1.84 GB, raw PDFs + QA GT, Finance/Law/Manual/Administration | **CC-BY-4.0** |
+| **Layout GT** (optional) | **DocLayNet-v1.2** — financial reports, tenders, manuals, embeds source PDFs | **CDLA-Permissive-1.0** |
+
+GovDocs1 covers what CDIP cannot (office formats, HTML, born-digital, deliberate extension-lying);
+CDIP covers what GovDocs1 cannot (decades of scan degradation at 40 M pages, real PII to exercise
+redaction and guardrails).
+
+**Excluded on licence grounds, recorded so nobody re-proposes them:** OmniDocBench (*"for research
+purposes only and not for commercial use"*), FUNSD (explicitly non-commercial), Kleister NDA/Charity
+(**no licence at all** — GitHub API returns `license: null`, i.e. all-rights-reserved by default),
+`anon-rabbit/annual_reports` (a robots.txt-disallowed scrape of annualreports.com, relicensed
+Apache-2.0 by an uploader with no standing to do so), and Podesta/Wikileaks material (no lawful
+disclosure event in the chain of custody).
+
+If a *synthetic* invoice leg is ever wanted, **FATURA** (Zenodo record 8261508, **CC-BY-4.0**, 10,000
+images, zero PII) is the clean choice — note the arXiv page shows CC-BY-**NC**-SA, but that is the
+paper's licence, not the dataset's. Cite Zenodo.
 
 ---
 
