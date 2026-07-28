@@ -125,6 +125,24 @@ latence-label-profile ./corpus --pattern '*.txt' --max-types 40 \
     -o profile.json --candidates-out candidates.json
 ```
 
+## Integration: three release-gate edits this package requires, in files it does not own
+
+Adding a 33rd package trips three `latence-core` release gates **by design** — they exist precisely
+so a new distribution cannot ship without the release evidence being updated. Verified by causation,
+not inference: with `packages/latence-label-profiler/` removed, both files pass in full; with it
+present, exactly these three fail.
+
+| Test | Why it fires | Fix |
+|---|---|---|
+| `latence-core/tests/test_release_integrity.py::test_releasing_dry_run_evidence_matches_the_tree` | `docs/RELEASING.md` records a dry run that built **32** packages; the tree now holds 33. `release.yml` builds `for pkg in packages/*/`, so the release genuinely changed. | Re-run the dry run and update the evidence block. |
+| `…::test_releasing_sbom_component_arithmetic_is_consistent` | The SBOM evidence block records **32** workspace path entries (`docs/RELEASING.md:155`). | Re-run `uv export --all-packages`, update the count and the component arithmetic. |
+| `latence-core/tests/test_publish_readiness.py::test_project_urls_did_not_swallow_dependencies` | It asserts `[project.dependencies]` is non-empty for **every** package, as a proxy for "a `[project.urls]` sub-table did not re-parent the `dependencies` key". This package has **genuinely zero** runtime dependencies, which that proxy cannot distinguish from the footgun. | Give the guard a way to express "deliberately dependency-free" — e.g. a `_zero_dependency_packages = {"latence-label-profiler"}` exemption alongside the existing `_standalone_roots`, still asserting the KEY is present (`"dependencies" in proj`) so the footgun stays caught. |
+
+The third one was not worked around by declaring an unused `latence-core` dependency. Metadata that
+claims a dependency the code never imports is a lie that survives forever, and this package's whole
+claim — zero network, zero cost, zero model, reproducible anywhere — is exactly the claim a spurious
+dependency would make unverifiable.
+
 ## Licensing
 
 Framework code, **Apache-2.0**. Ships **no weights and no model**, so there is no weights licence to
