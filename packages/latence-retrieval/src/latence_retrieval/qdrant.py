@@ -170,7 +170,9 @@ class QdrantBackend:
                 supported = sorted(c.value for c in _SUPPORTED)
                 msg = (
                     f"QdrantBackend does not serve capability {cap.value!r}; this reference "
-                    f"adapter supports {supported} (bm25/multivector are follow-ons)."
+                    f"adapter supports {supported} (bm25/multivector are follow-ons; 'graph' is "
+                    "served by GraphRetriever, composed alongside this store with "
+                    "CompositeBackend)."
                 )
                 raise ValueError(msg)
             parsed.add(cap)
