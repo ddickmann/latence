@@ -371,8 +371,9 @@ class LatenceRetrievalEngine:
 
     def _splade(self, query: str) -> list[Any]:
         from latence_retrieval import Capability, RetrievalQuery
+        from sparse_terms import sparse_vector_to_terms
 
-        sparse_terms = dict(self._sparse_encoder(query))
+        sparse_terms = sparse_vector_to_terms(self._sparse_encoder(query))
         hits = self._sparse_backend.search(
             RetrievalQuery(
                 mode=Capability.SPARSE, sparse_terms=sparse_terms, top_k=self._pool
@@ -460,7 +461,7 @@ def _read_graph_edges(edges_path: Path) -> list[tuple[str, str]]:  # pragma: no 
     import duckdb
 
     rows = duckdb.sql(
-        f"SELECT source, target FROM read_parquet('{edges_path}')"  # noqa: S608 - trusted local path
+        f"SELECT source_node_id, target_node_id FROM read_parquet('{edges_path}')"  # noqa: S608 - trusted local path
     ).fetchall()
     return [(str(s), str(t)) for s, t in rows]
 
@@ -513,7 +514,7 @@ def build_real_engine(  # pragma: no cover - exercised only on the pod (real dep
         return [float(x) for x in dense_model.encode(text).tolist()]
 
     sparse_query_encoder = resolve_sparse_encoder(
-        {"provider": "query_sparse.splade", "config": {"model_id": args.splade_model}}
+        {"provider": "query_sparse.splade", "config": {"model": args.splade_model}}
     )
 
     def sparse_encoder(text: str) -> Mapping[str, float]:

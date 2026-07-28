@@ -650,7 +650,7 @@ class LatenceSignals:
 
         self._dense_encoder = SentenceTransformer(self._dense_model)
         self._sparse_encoder = resolve_sparse_encoder(
-            {"provider": "query_sparse.splade", "config": {"model_id": self._splade_model}}
+            {"provider": "query_sparse.splade", "config": {"model": self._splade_model}}
         )
         self._bm25 = Bm25Rescorer()
         self._corpus_candidates = [
@@ -670,12 +670,13 @@ class LatenceSignals:
         if not self._built:
             self._build()
         from latence_retrieval import Candidate, Capability, RetrievalQuery
+        from sparse_terms import sparse_vector_to_terms
 
         dense_vec = tuple(float(x) for x in self._dense_encoder.encode(query).tolist())
         dense_hits = self._dense_backend.search(
             RetrievalQuery(mode=Capability.DENSE, vector=dense_vec, top_k=self._pool)
         )
-        sparse_terms = self._sparse_encoder.encode(query)
+        sparse_terms = sparse_vector_to_terms(self._sparse_encoder.encode(query))
         splade_hits = self._sparse_backend.search(
             RetrievalQuery(
                 mode=Capability.SPARSE, sparse_terms=sparse_terms, top_k=self._pool
