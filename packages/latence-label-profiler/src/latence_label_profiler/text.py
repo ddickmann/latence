@@ -148,9 +148,6 @@ class Sentence:
     def run_tokens(self, span: tuple[int, int]) -> tuple[Token, ...]:
         return self.tokens[span[0] : span[1]]
 
-    def gap_tokens(self, left: tuple[int, int], right: tuple[int, int]) -> tuple[Token, ...]:
-        return self.tokens[left[1] : right[0]]
-
 
 @dataclass(frozen=True)
 class TokenizedText:

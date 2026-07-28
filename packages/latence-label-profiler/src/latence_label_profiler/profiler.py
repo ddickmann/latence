@@ -70,6 +70,7 @@ class ProfilerConfig:
     seed: int = 0
     #: Texts to mine. A profiler samples by construction — reading a 300 GB corpus to pick 40 labels
     #: would be a bad trade. Reservoir sampling keeps the draw uniform without a length probe.
+    #: ``0`` or negative means NO cap: mine every text handed in.
     sample_size: int = 5000
     max_types: int = DEFAULT_MAX_TYPES
     #: Per-slot override of ``max_types``, e.g. ``{"relation_types": 20}``.
