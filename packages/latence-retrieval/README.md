@@ -16,7 +16,7 @@ extras in later tickets.
 | Piece | What it is |
 |---|---|
 | `Candidate` | The retrieved-hit contract: `id`, `score`, `text`, `metadata`. Frozen; round-trips losslessly through dict + JSON. |
-| `Capability` | The closed set a store declares: `dense`, `sparse`, `bm25`, `filter`, `multivector`. |
+| `Capability` | The closed set a store declares: `dense`, `sparse`, `bm25`, `graph`, `filter`, `multivector`. |
 | `RetrievalQuery` | A first-stage request handed to *your* engine — validated so a mode/payload contradiction fails at the boundary. |
 | `RetrievalBackend` | The bring-your-own-engine seam: declares `capabilities` and runs one `search`. Never replaced by the tooling (ADR-0052). |
 | `FakeBackend` (`latence_retrieval.testing`) | The faithful offline adapter every query-time test drives through — rejects **exactly** what a real store rejects (capability + dimension mismatches). |
@@ -27,6 +27,8 @@ extras in later tickets.
 | `Bm25Rescorer` | The `bm25` transform (`processor.bm25`): **exact** Okapi BM25 rescoring of a caller-supplied candidate set — IDF from supplied corpus `stats` or the candidate pool itself, query-term-driven so it stays fast on large sets. Pure-Python, deterministic, no extra. **Never** a first-stage index (ADR-0048). |
 | `SpladeQueryEncoder` + `SparseQueryEncoder` | Query-side sparse generation (`query_sparse.splade`, via `resolve_sparse_encoder`): `query text → SparseVector`, **reusing** the index-time ADR-0053 SPLADE composition (`latence-splade`) so the query lands in the corpus's sparse space. `latence-splade` rides the `[sparse]` extra, imported lazily; offline tests inject the faithful `FakeSpladeModel`. |
 | `MaxSimReranker` + `MultiVectorQueryEncoder` + `max_sim` | The **experimental** MaxSim (late-interaction) rerank (`processor.maxsim`, ADR-0050, **off by default**): re-score one candidate list by **exact** MaxSim over the raw `multivectors.parquet` sidecar the caller loaded onto each candidate, against the query's multi-vector. `max_sim` is the real (not faked) reference scorer; `MultiVectorQueryEncoder` is a two-adapter seam — `HashingMultiVectorQueryEncoder` (real, **reuses** the index-time `multivector.hashing` embedder so the query matches the corpus contract, behind the `[multivector]` extra, via `resolve_multivector_encoder` as `query_multivector.hashing`) + `FakeMultiVectorEmbedder` (shipped faithful fake). A numpy/SIMD MaxSim kernel is the deferred accelerator (ADR-0049/0050). |
+| `GraphRetriever` + `GraphDocumentSource` + `CompositeBackend` | The graph **retrieval leg** (T-RET-2): a `RetrievalBackend` declaring `Capability.GRAPH` that seeds from the query's linked entity nodes (`RetrievalQuery.seed_node_ids`), traverses the emitted graph to a **bounded** depth through the `GraphSource` seam, resolves the reached nodes back to chunks through `GraphDocumentSource` (`DuckDBGraphDocumentSource` real over the emitted chunk parquet — zero-ops, read-only per call — + the shipped faithful `FakeGraphDocumentSource`), and returns its **own** hop-decayed ranked list that enters fusion as a **peer** of dense/sparse/bm25. `CompositeBackend` presents your store and the graph leg to the orchestrator as one backend (union of query modes; `filter` declared only when *every* member can serve a predicate, so an unserveable filter is refused **before any fetch** instead of being dropped on one leg). `AliasQuerySeeder` is the dependency-free reference for deriving seeds from query text. **This is the difference between retrieving and reordering:** the `expand` / `multihop_expand` processors below run *after* fusion and therefore cannot introduce a candidate the first stage missed — they are kept as a legitimate second use of the graph, but only this leg can recover a document dense and sparse never returned. |
+| `tuning` (`FusionRun`, `evaluate_fusion`, `sweep_fusion_weights`, `compare_fusers`, `format_comparison_table`) | Offline fusion tuning (T-FUSE-1): record each labelled question's per-mode ranked lists **once**, then score any fuser over them (recall@k / MRR / nDCG@k), sweep a deterministic weight grid, and render the RRF-vs-tuned comparison table. Weights are keyed by mode name and aligned exactly as `OrchestrationPipeline.fuse_weights` is, so a weight tuned offline means the same thing at serving time. RRF stays the default and the no-labels fallback — the module reports the comparison, it does not prefer an outcome. |
 | `RetrievalRegistry` + `resolve_processor` / `resolve_fuser` / `resolve_sparse_encoder` / `resolve_multivector_encoder` | Discovery + config-resolution over the new `latence.retrieval` entry-point group (separate from `latence.providers`). |
 
 ## The stateless boundary (ADR-0048)
@@ -186,6 +188,60 @@ The real client rides `pip install 'latence-retrieval[backend-qdrant]'` (`qdrant
 Apache-2.0 — code; a vector store ships **no** model weights, ADR-0012). Protocol conformance is
 unit-tested against a faithful fake `qdrant_client` module; live-store validation against a running
 Qdrant is done out of band (`LATENCE_QDRANT_URL`).
+
+### Retrieve *through* the knowledge graph (`GraphRetriever`)
+
+```python
+from latence_retrieval import (
+    CompositeBackend, GraphRetriever, OrchestrationPipeline, QueryBundle, retrieve,
+)
+
+# The graph leg reads the two artifacts the pipeline ALREADY emitted, read-only, per call.
+# No graph database, no server, no new artifact (ADR-0051).
+graph_leg = GraphRetriever({
+    "max_hops": 2,
+    "graph": {"source": "duckdb", "edges_uri": "out/graph-edges.parquet"},
+    "documents": {"source": "duckdb", "chunks_uri": "out/chunks.parquet"},
+})
+
+# Your store cannot traverse and the graph leg cannot do ANN — compose them.
+backend = CompositeBackend([my_qdrant_backend, graph_leg])
+
+result = retrieve(
+    QueryBundle(
+        text="which RFC obsoletes the one that updates 2119?",
+        vector=my_query_vector,
+        sparse_terms=my_sparse_terms,
+        seed_node_ids=("rfc-2119",),      # the query's linked entities — your linker's output
+    ),
+    backend,
+    OrchestrationPipeline(fetch_top_k=50),
+)
+assert Capability.GRAPH in result.fetched_modes   # the traversal ran as its own first-stage leg
+```
+
+Drop the graph leg from the composite and re-run to get the D7 ablation on the same questions.
+
+### Tune the fusion weights on a labelled slice (`tuning`)
+
+```python
+from latence_retrieval import RrfFuser, WeightedFuser
+from latence_retrieval.tuning import (
+    FusionRun, compare_fusers, format_comparison_table, sweep_fusion_weights,
+)
+
+# Record each question's per-mode ranked lists ONCE, so every fuser sees the same pool.
+runs = [FusionRun(query_id=q.id, gold_ids=q.gold, rankings=q.per_mode_lists) for q in questions]
+
+tuned = sweep_fusion_weights(runs, grid={"dense": (1, 2, 4), "sparse": (1, 2), "graph": (0, 1, 2)}, k=10)
+
+print(format_comparison_table(compare_fusers(runs, {
+    "rrf-k60":  (RrfFuser(), None),
+    "weighted": (WeightedFuser(), tuned.best.weights),
+}, k=10)))
+```
+
+Whichever wins, wins. RRF is the no-labels fallback and stays the orchestrator's default.
 
 ## Licensing
 
