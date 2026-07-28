@@ -89,19 +89,40 @@ RELATION_TAIL_WORDS: frozenset[str] = frozenset(
     """.split()  # noqa: SIM905 - as above
 )
 
-#: Verbs that carry a relation but have no usable morphology (copulas + high-frequency auxiliaries),
-#: English and German. Everything else is caught by :data:`_VERB_SUFFIXES`.
-CLOSED_VERBS: frozenset[str] = frozenset(
+#: Copulas and auxiliaries: verb-like enough to break a noun phrase, but SEMANTICALLY EMPTY as a
+#: relation. A relation type called "is" would be worthless to an extractor, and greedy
+#: max-coverage ranks it FIRST because a copula covers every relation phrase it appears in — so
+#: these are the tokens the vacuous-relation filter tests (ReVerb's lexical constraint, Fader 2011).
+COPULA_VERBS: frozenset[str] = frozenset(
     """
-    is are was were be been being has have had contains includes requires maps refers relates
-    ist sind war waren sein gewesen hat haben hatte hatten wird werden wurde wurden enthält
+    is are was were be been being has have had
+    ist sind war waren sein gewesen hat haben hatte hatten wird werden wurde wurden
     """.split()  # noqa: SIM905 - as above
 )
 
-#: Morphological verb evidence, in the absence of a POS tagger. Deliberately conservative: a bare
-#: ``-s`` is excluded because it is far more often a plural noun than a verb, and a false relation
-#: type is worse than a missing one (it burns one of the <= N label slots on noise).
-_VERB_SUFFIXES: tuple[str, ...] = ("ed", "ing", "ates", "ised", "ized", "ifies", "fies", "iert")
+#: Lexical verbs with no usable suffix morphology. Unlike a copula, each of these CARRIES the
+#: relation ("maps to", "refers to"), so a phrase built from one is not vacuous.
+LEXICAL_VERBS: frozenset[str] = frozenset(
+    """
+    contains includes requires maps refers relates enthält
+    """.split()  # noqa: SIM905 - as above
+)
+
+#: Every verb recognisable without morphology. Everything else is caught by :data:`_VERB_SUFFIXES`.
+CLOSED_VERBS: frozenset[str] = COPULA_VERBS | LEXICAL_VERBS
+
+#: Morphological verb evidence, in the absence of a POS tagger. Deliberately conservative, because
+#: this predicate now does two jobs — it decides what gets TRIMMED off a noun phrase as well as
+#: what counts as a relation — so a false positive costs a mangled entity type, not just noise.
+#:
+#: ``-s`` is excluded: far more often a plural noun than a verb.
+#: ``-ing`` is excluded too, and that one is measured rather than assumed: "heading", "building",
+#: "meeting", "training", "reporting" are all NOUNS and all common in exactly the corporate corpus
+#: this profiler targets. With ``-ing`` in the list, ``the tariff heading of the commodity code``
+#: trims "heading" out of its own noun phrase and mines the nonsense relation "heading of". The cost
+#: of excluding it is that a genuine gerund relation ("issuing") is missed; that is the cheaper
+#: error, and it is the same asymmetry the rest of this table is built on.
+_VERB_SUFFIXES: tuple[str, ...] = ("ed", "ates", "ised", "ized", "ifies", "fies", "iert")
 
 
 @dataclass(frozen=True)

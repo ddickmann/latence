@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from latence_label_profiler.text import (
+    CLOSED_VERBS,
+    COPULA_VERBS,
     DEFAULT_STOPWORDS,
     RELATION_TAIL_WORDS,
     Token,
@@ -159,13 +161,51 @@ def _mask_pii(text: str) -> tuple[str, dict[str, int]]:
     return masked, counts
 
 
-def _phrase_surfaces(
-    tokens: tuple[Token, ...], *, max_phrase_tokens: int
-) -> tuple[str, ...] | None:
-    """One content run reduced to its canonical surface, or ``None`` if it is not a type at all."""
-    if not tokens or all(is_verb_like(token) for token in tokens):
-        # An all-verbal run is the relation, not an argument. Admitting it would spend label slots
-        # on "recorded" / "issued" in the ENTITY space.
+def argument_spans(
+    tokens: tuple[Token, ...], runs: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """Trim each content run down to its ARGUMENT core: strip verb-like tokens off both ends.
+
+    A verb that is also a content word ("maps", "recorded", "wurde") does not break a RAKE run,
+    because it is not a stopword. Untrimmed, ``Each commodity code maps to a tariff heading`` mines
+    the entity type ``commodity code maps`` — and never mines the relation ``maps to`` at all,
+    because the verb is sitting inside an argument instead of in the gap between two of them.
+    Trimming both ends fixes both halves at once: the entity slot loses the verb and the relation
+    slot gains it. A run that trims to nothing was pure relation material and is not an argument.
+    """
+    spans: list[tuple[int, int]] = []
+    for start, end in runs:
+        left, right = start, end
+        while left < right and _is_leading_verb(tokens, left):
+            left += 1
+        while right > left and is_verb_like(tokens[right - 1]):
+            right -= 1
+        if left < right:
+            spans.append((left, right))
+    return tuple(spans)
+
+
+def _is_leading_verb(tokens: tuple[Token, ...], index: int) -> bool:
+    """Is the token at the START of a run a verb, or a participial ADJECTIVE modifying the head?
+
+    ``combined nomenclature`` and ``is classified under`` share a suffix and nothing else. The
+    signal that separates them is the token immediately before: a participle after a copula is a
+    verb, a participle after a determiner is an adjective. So an unambiguous closed-set verb
+    ("maps", "wurde") is trimmed on sight, while a suffix-derived one is trimmed only when a copula
+    precedes it. Without this, ``combined`` is cut out of its own noun phrase and mined as a
+    relation type — measured, not hypothetical: it is what this miner did before the check existed.
+    """
+    token = tokens[index]
+    if token.text in CLOSED_VERBS:
+        return True
+    if not is_verb_like(token):
+        return False
+    return index > 0 and tokens[index - 1].text in COPULA_VERBS
+
+
+def _phrase_surface(tokens: tuple[Token, ...], *, max_phrase_tokens: int) -> tuple[str, ...] | None:
+    """One trimmed argument span reduced to its surface token tuple."""
+    if not tokens:
         return None
     words = tuple(token.text for token in tokens)
     if len(words) > max_phrase_tokens:
@@ -192,17 +232,13 @@ def _relation_surface(
     return tuple(kept[:max_relation_tokens])
 
 
-def _argument_and_relation_spans(
-    tokens: tuple[Token, ...], runs: tuple[tuple[int, int], ...], *, max_relation_tokens: int
+def _relation_surfaces(
+    tokens: tuple[Token, ...],
+    arguments: tuple[tuple[int, int], ...],
+    *,
+    max_relation_tokens: int,
 ) -> list[tuple[str, ...]]:
-    """Every relation surface in one sentence: the material between consecutive ARGUMENT runs.
-
-    A content run that is entirely verb-like is not an argument — it is part of the relation — so it
-    is folded into the span rather than terminating it.
-    """
-    arguments = [
-        span for span in runs if not all(is_verb_like(t) for t in tokens[span[0] : span[1]])
-    ]
+    """Every relation surface in one sentence: the material between consecutive argument spans."""
     surfaces: list[tuple[str, ...]] = []
     for left, right in zip(arguments, arguments[1:], strict=False):
         gap = tokens[left[1] : right[0]]
@@ -265,8 +301,9 @@ def mine_corpus(
         tokenized = tokenize(masked, stopwords=stopwords)
         seen: dict[str, set[tuple[str, ...]]] = {"entity_types": set(), "relation_types": set()}
         for sentence in tokenized.sentences:
-            for span in sentence.runs:
-                words = _phrase_surfaces(
+            arguments = argument_spans(sentence.tokens, sentence.runs)
+            for span in arguments:
+                words = _phrase_surface(
                     sentence.run_tokens(span), max_phrase_tokens=max_phrase_tokens
                 )
                 if words is None:
@@ -275,8 +312,8 @@ def mine_corpus(
                     surface_mass["entity_types"].get(words, 0) + 1
                 )
                 seen["entity_types"].add(words)
-            for words in _argument_and_relation_spans(
-                sentence.tokens, sentence.runs, max_relation_tokens=max_relation_tokens
+            for words in _relation_surfaces(
+                sentence.tokens, arguments, max_relation_tokens=max_relation_tokens
             ):
                 surface_mass["relation_types"][words] = (
                     surface_mass["relation_types"].get(words, 0) + 1
@@ -297,6 +334,16 @@ def mine_corpus(
             min_mention_mass=min_mention_mass,
             min_document_frequency=min_document_frequency,
             max_cues=max_cues,
+            vacuous_tokens=(
+                # ReVerb's lexical constraint (Fader et al. 2011), applied to the relation slot
+                # only. A phrase built entirely from copulas, prepositions and function words says
+                # nothing — and greedy max-coverage ranks exactly those FIRST, because a copula
+                # appears in every relation phrase it occurs in. "is" would win the top slot and be
+                # useless to the extractor; "is classified under" and "maps to" survive.
+                COPULA_VERBS | RELATION_TAIL_WORDS | stopwords
+                if slot == "relation_types"
+                else None
+            ),
         )
     slots["pii_types"] = _build_pii_slot(
         pii_detected,
@@ -316,6 +363,7 @@ def _build_slot(
     min_mention_mass: int,
     min_document_frequency: int,
     max_cues: int,
+    vacuous_tokens: frozenset[str] | None = None,
 ) -> SlotMining:
     """Turn surface counts into the candidate universe: every sub-sequence, with its covered mass.
 
@@ -334,6 +382,10 @@ def _build_slot(
     mass_by_surface = {" ".join(words): count for words, count in surface_mass.items()}
     candidates: dict[str, Candidate] = {}
     for label in sorted(covers):
+        if vacuous_tokens is not None and all(
+            token in vacuous_tokens for token in label.split(" ")
+        ):
+            continue
         covered = sorted(covers[label])
         mass = sum(surface_mass[words] for words in covered)
         documents: set[int] = set()
