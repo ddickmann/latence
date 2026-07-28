@@ -167,13 +167,46 @@ Do NOT silently pick (2) and let the write-up imply full file-type coverage. See
 The request forbids LLM-induced labels ("too expensive") and asks for a sampled top-N (N ≤ 40) on a
 Pareto frontier. Two findings shape the design.
 
-### D5a. The seam already exists
+### D5a. `predefined_labels` is the WRONG seam — and taking it would repeat the defect we just fixed
 
-`predefined_labels` (T1) makes the generator emit **no `induce` stage at all** — not a disabled one,
-not a short-circuited Provider. Every extraction stage then runs each chunk against the operator's
-fixed label set, and the ADR-0044 financial-PII floor still unions onto the redactor. A
-corpus-sampled top-40 set is, from the pipeline's point of view, a *predefined* set. **The plumbing
-is built and tested; only the profiler that produces the 40 is missing.**
+My first read was that a corpus-sampled top-40 set should ride `predefined_labels`, which emits no
+`induce` stage at all. The wizard audit shows what that actually does at runtime, and it is a trap.
+
+With no `induce` stage, no chunk carries `induced_labels`, and `effective_labels`
+(`latence-core/src/latence_core/induced.py:146-179`) returns the config labels **unchanged** under
+either policy (`induced.py:169-172`, implemented `:175-179`). So **every chunk would be scored
+against all 40 labels** — precisely the corpus-level-schema-applied-to-every-chunk behaviour the
+extraction redesign (T1–T7) was built to remove, and precisely the zero-shot degradation identified
+when this was first raised: *"applying hundreds of labels to each chunk will probably regress the
+performance of the gliner models, as zero-shot NER suffers from more labels than in training."*
+
+`InduceContribution`'s own docstring argues against it (`recipe.py:748-753`). Going down this path
+would have reintroduced the defect while appearing to satisfy the requirement.
+
+### D5a′. The right seam already exists, fully built — `label_inducer.lexicon`
+
+`LexiconLabelInducer` (`packages/latence-schema-inducer/src/latence_schema_inducer/lexicon.py:131`,
+entry point `label_inducer.lexicon`, pyproject line 56) is *exactly* the missing piece: a
+**deterministic, CPU-only, zero-network** tagger that narrows an operator-declared candidate type
+space **per chunk**. Its config: `candidates` (slot → type names, or type → surface cues),
+`granularity: "chunk"` (the default), `min_hits`, `whole_word`, `label_ceiling`, `dedup`,
+`min_chars`. Its docstring is explicit that there is deliberately **no corpus mode** — *"a
+corpus-merged schema is the very thing the redesign removed."*
+
+So the architecture is three steps, and **only the first is missing**:
+
+1. **NEW — the profiler.** Sample the corpus, derive the top-N (N ≤ 40) candidate type space by
+   submodular greedy over mention coverage (D5c), emit it as a `candidates` mapping with surface
+   cues. No LLM, one pass over a sample.
+2. **EXISTING — `label_inducer.lexicon`** narrows that pool per chunk, so a chunk carries only the
+   handful of types its own text evidences. This is what keeps us inside GLiNER2's 20–30 uni-encoder
+   ceiling (D5b) instead of firing all 40 at every chunk.
+3. **EXISTING — extraction** unions each chunk's induced set onto the config floor, per chunk,
+   with the ADR-0044 financial-PII floor still non-bypassable at `redaction_policy.py:558`.
+
+This satisfies both halves of the request — no LLM induction **and** small per-chunk label sets —
+without inventing a mechanism. The wizard work is: emit `label_inducer.lexicon` as the `induce`
+provider with the profiler's output as `candidates`. See T-LABEL-1 (profiler) and T-WIZ-2 (wiring).
 
 ### D5b. 40 is above the safe ceiling for a uni-encoder, and GLiNER2 is a uni-encoder
 
