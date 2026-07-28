@@ -298,14 +298,186 @@ office formats are legacy OLE (DOC/XLS/PPT), not modern OOXML: GovDocs1 has only
 
 ## Lane F — retrieval and benchmark
 
-Blocked on the retrieval-surface audit. Known shape from the wizard audit: there is **no sink or
-retrieval stage in either recipe**; `latence-sink-qdrant` and `latence-retrieval` carry **no
-`latence.providers` entry point**; `sparse.splade` exists but is unreachable from setup.
+The audit changed the shape of this lane substantially. Three findings drive it:
 
-Placeholders: **T-RET-1** (SPLADE as a real fused signal, not a payload blob) · **T-FUSE-1**
-(normalized convex combination, RRF retained as the no-labels fallback — see D6) · **T-BENCH-1**
-(hop-stratified generation, 2–4 depth / 5–7 breadth) · **T-BENCH-2** (the eight necessity gates,
-D9) · **T-BENCH-3** (the KG ablation, D7) · **T-BENCH-4** (StrategyQA + BEIR/HotpotQA).
+- **SPLADE cannot be a signal today.** The query side is real; the *load* side does not exist.
+- **The KG is a post-fusion rescorer, not a retrieval leg** — architecturally it cannot recover a
+  document the first stage missed, which is the exact claim we want to make.
+- **The prior proof's headline is close to tautological**, and we must not repeat that shape.
+
+### T-RET-1 — Make SPLADE a real signal: write named sparse vectors to Qdrant · L
+
+**Now:** `sink.py:767-782` creates **dense-only** `VectorParams`. There is no `sparse_vectors_config`,
+no `SparseVectorParams`, and grep returns **zero Python hits** for either across the repo. The CLI has
+no `--vector sparse` flag (`cli.py:47-68`). `FakeQdrantClient` contains **zero occurrences of
+"sparse"**, so no test could ever have caught this.
+
+The Export's `sparse_indices` / `sparse_values` columns ride through into the **payload** as ordinary
+lists (`export_reader.py:193`) — stored, never queryable. Meanwhile the query side is genuinely
+complete: `QdrantBackend` builds `models.SparseVector` and issues
+`query_points(..., using=sparse_vector_name)` (`qdrant.py:245-265`). We have a query for an index
+that is never built.
+
+This is `issues/dogfood/qdrant-native-sparse.md`, still open, all acceptance criteria unchecked.
+
+**Do:** `sparse_vectors_config` at collection creation; `--vector sparse` / `--sparse-source` on the
+CLI; **teach `FakeQdrantClient` sparse vectors first** — a fake that cannot express the feature makes
+the tests structurally unable to fail.
+
+**Acceptance:**
+1. `FakeQdrantClient` models named sparse vectors and **rejects** what a real Qdrant rejects.
+2. A test asserting the created collection carries a named sparse vector. Red before.
+3. `GPU-ONLY`, **against a real Qdrant binary**: a sparse-only query returns documents a dense-only
+   query does not. Per the standing rule, the fake is offline-CI only — this leg is proven live.
+
+Also fix, in the same lane, the two harness bugs that would have made SPLADE silently useless even
+once loaded: `run_benchmark.py:516` and `build_questions.py:653` pass `{"model_id": ...}` but
+`SpladeCompositionEmbedder` reads `cfg.get("model", "")` (`provider.py:177`) and does **not** reject
+unknown keys — so the model id silently resolves to `""`. And `build_questions.py:678-683` passes a
+`SparseVector` object where `RetrievalQuery.sparse_terms` is `dict[str, float]`
+(`contracts.py:79`); `run_benchmark.py:519-521` converts correctly, `build_questions.py` does not.
+
+### T-RET-2 — The KG must be able to RETRIEVE, not only reorder · L
+
+**This is the architectural one, and it decides whether the KG claim is provable at all.**
+
+`MultiHopExpander` (`multihop.py:503`) and `Expander` (`expand.py:71`) are real, tested and
+DuckDB-backed — but both are `CandidateProcessor`s applied **after** fusion
+(`orchestrator.py:266-269`). They add a hop-decayed bonus to already-fused scores and **cannot
+introduce a candidate the first stage missed** (`multihop.py:621-628`). `Capability`
+(`contracts.py:21-35`) has no `GRAPH` member.
+
+So if the benchmark's premise is *"graph traversal recovers documents dense+sparse never
+retrieved"* — **the current architecture cannot express that claim.** Every KG "win" it can produce
+is a reordering of a pool the graph did not choose.
+
+**Do:** add a graph **retrieval leg** — seed from query entities, traverse to bounded depth, return a
+ranked candidate list that enters fusion as a peer of dense/sparse/BM25. Keep the existing expander:
+rescoring after fusion is a legitimate *second* use, just not evidence for the recovery claim.
+
+**Acceptance:**
+1. A test where the gold document is **unreachable** by dense and sparse but reachable by traversal,
+   asserting the fused result contains it. This is impossible to pass today — that is the point.
+2. `Capability.GRAPH` declared, and the orchestrator's refuse-if-unserveable path
+   (`orchestrator.py:291-297`) honours it.
+3. The ablation of D7 becomes runnable: retrieval with and without the graph leg.
+
+### T-FUSE-1 — Wire the fuser we already have, and tune it · M
+
+**Good news:** `WeightedFuser` (`fuser.py:158-216`) already does per-list **min-max-normalised
+weighted sum** — the Bruch-recommended family. It is tested (22 tests) and registered
+(`fuser.weighted`).
+
+**The gap is wiring, not building.** Every fusion call in every harness is `RrfFuser()` with default
+`k=60` and **uniform weights** — `run_benchmark.py:396`, `build_questions.py:690`,
+`rfc_bench.py:82`. No harness passes weights; no code tunes them. `normalization` accepts only
+`"min_max"` (`fuser.py:176-182`), so theoretical-min-max is a small addition if we want the
+query-independent variant.
+
+**Do:** run both fusers over the same candidate lists; sweep weights on a small labelled slice
+(Bruch: "a handful of labeled queries" suffices); report both. Keep RRF as the no-labels fallback.
+
+**Acceptance:** a table of RRF-k=60 vs tuned convex combination on the same questions. Whichever
+wins, wins — we report the comparison, not a preferred outcome.
+
+### T-BENCH-1 — Question generation with hop stratification · L
+
+**Now:** two harnesses that disagree, and the shipped proof came from the *ad-hoc* one.
+
+`benchmark/rfc/build_questions.py` uses fixed string templates; `gen_semantic` emits **one identical
+sentence for every RFC** (`:351-372`) carrying no topic information at all — that flavour cannot be a
+semantic probe. `results/dogfood-rfc/report/rfc_bench.py` — the script that actually produced the
+proof — uses gpt-4.1-mini, a different gate, and a different stack (**no SPLADE, no Packer**).
+
+**Do:** one harness. Generate 2–4 as serial depth chains and 5–7 as fan-out/constraint-intersection
+(D1b), from the gold graph, with the shape recorded per question. Report **stratified by hop count
+and by shape**, never pooled.
+
+**Acceptance:** every question carries its verified hop count and shape; the report has no pooled
+"multi-hop accuracy" number anywhere.
+
+### T-BENCH-2 — The necessity gates · L
+
+**Now: essentially none exist.** The current gate is
+`recall[fused] > best_single + 0.24` (`build_questions.py:495`) — a *retrieval-lift* condition, not a
+hop-necessity one. A question passes if fusion happens to win, for any reason.
+
+Worse, the multi-hop template **names the whole chain in the question text** —
+`"RFC {a} obsoletes RFC {b}, which {rel} RFC {c}"` (`:310`) — and gold is defined as chunks literally
+containing `"RFC {c}"` (`:302-303`). **The bridge and terminal entities are handed to the retriever
+verbatim.** A plain BM25 query for `RFC 5226` finds those chunks; nothing is forced to traverse.
+
+**And the prior headline must be read in that light.** `rfc_bench.py:120` gates on
+`rf > rd and rf > rb` — it **selects** the rows where fused beats both singles. On that kept set,
+"dense 0.000 / bm25 0.000 / fused 1.000" is close to definitional given single-passage gold and
+binary recall@10. The strict set was **7 questions**. We do not repeat that shape.
+
+**Do:** implement G1–G8 from D9. Report the **funnel** — enumerated → structural → G3 → G4 →
+human-audited. MuSiQue's tail-survival was 26.5%; expect similar and publish it.
+
+**Acceptance:** a question that names its own bridge entity is **rejected** by G5. Red before.
+
+### T-BENCH-3 — The KG ablation · M
+
+Depends on T-RET-2. Retrieval with and without the graph leg, stratified by hop count. Report
+whatever it says — D7's literature says the honest expectation is a **narrow** win concentrated in
+multi-hop, and a possible *loss* on single-hop through relevance dilution.
+
+### T-BENCH-4 — External benchmarks: StrategyQA + BEIR/HotpotQA · L
+
+**Now: ABSENT.** Searched `hotpot`, `beir`, `musique`, `2wiki`, `msmarco` — the only hits are prose in
+our own DECISIONS.md. `latence-benchmark` has suites for parse, redaction and relation extraction;
+**there is no retrieval suite at all**.
+
+StrategyQA is the best fit (official Recall@10 scorer; stale 2022 SOTA of **0.457**; nobody has
+published retrieval numbers since). Its licence is **UNVERIFIED** — AI2's dataset page is dead —
+confirm before any external claim.
+
+**Blocker to size first:** `Bm25Rescorer` is a **rescorer, not an index** (`bm25.py:9-11`). Both
+harnesses hand it the *entire corpus* as candidates (`run_benchmark.py:331-333`). At 3.5k chunks that
+is fine; at BEIR scale it is O(corpus) pure-Python tokenisation per query and a hard wall. Either
+build a first-stage index or scope to a corpus size where the rescorer is honest — and say which.
+
+### T-RET-3 — Prove the retrieval leg against a real Qdrant · M
+
+**Now:** `test_live_smoke.py` is the only `LATENCE_QDRANT_URL`-gated test and it covers
+**load/converge/purge, not search**. Every `QdrantBackend` test monkeypatches the client. The
+retrieval path has never been proven against a real Qdrant by any test — only by the ad-hoc
+`rfc_bench.py` run.
+
+That is precisely the standing rule: fakes are offline-CI only and must reject what the real
+dependency rejects.
+
+**Acceptance:** a `LATENCE_QDRANT_URL`-gated search test — dense, sparse, and filtered — against the
+real Qdrant binary. `GPU-ONLY`/pod.
+
+### T-RET-4 — Fix the three latent breakages on the pod path · S
+
+All three sit inside `# pragma: no cover - pod path`, so the green suite says **nothing** about them:
+
+1. **Wrong graph-edge columns.** `run_benchmark.py:462-464` selects `source, target`; the actual
+   schema is `source_node_id` / `target_node_id`. DuckDB binder error → the whole hub-filter and
+   multi-hop leg dies before the first query. (`DuckDBGraphSource` itself is correct at
+   `multihop.py:193-194` — only the harness is wrong.)
+2. SPLADE `model_id` vs `model` — see T-RET-1.
+3. `SparseVector` vs `dict[str, float]` — see T-RET-1.
+
+**Acceptance:** the pod path gets offline coverage against the **real** parquet schema, so a column
+rename cannot pass again. Red before.
+
+### T-RET-5 — Metadata filters: index them, and actually measure them · M
+
+Plumbing exists — `RetrievalQuery.filter`, `_build_filter` (`qdrant.py:267-281`), and the sink writes
+every enrichment column into the payload so `kg_node_community`, `classification`, `provenance` are
+filterable in principle. Three gaps:
+
+- Filters are **exact equality, AND-ed only** — no ranges, no `in`, no boolean composition.
+- **No payload indexes are ever created** (zero `create_payload_index` in code, and
+  `README.md:100-103` says this is left to the operator). Every filter is an unindexed payload scan.
+- **No benchmark ever sets a filter.** Filtered retrieval is entirely unmeasured.
+
+Since the request explicitly asks for "metadata management through extraction and enrichment", this
+has to be measured, not merely present.
 
 ---
 
