@@ -562,7 +562,7 @@ def _write_chunks_parquet(path: str, documents: list[GraphDocument]) -> None:
             "content": [d.text for d in documents],
         }
     )
-    pq.write_table(table, path)
+    pq.write_table(table, path)  # type: ignore[no-untyped-call]  # pyarrow ships no stubs
 
 
 @pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
