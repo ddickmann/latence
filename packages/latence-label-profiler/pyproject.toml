@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-label-profiler"
+version = "0.1.0"
+description = "Zero-network corpus profiler that mines a candidate type space (entity/relation/PII) from a corpus sample and selects it by greedy submodular max-coverage, emitting the `label_inducer.lexicon` candidate pool plus its own optimality certificate, coverage curve, Zipf fit and Good-Turing residual."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "schema-induction", "keyphrase-extraction", "submodular", "max-coverage", "zipf"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# ZERO dependencies — not even latence-core.
+#
+# This is a build-time analysis tool, not a pipeline Stage: it consumes text and emits a config
+# fragment, so it has no reason to import the record contracts. Keeping it dependency-free is what
+# makes the "zero network, zero cost, byte-reproducible" claim checkable rather than aspirational,
+# and it means the package can be run against a corpus sample on a laptop before any of the
+# framework is installed.
+#
+# LICENCE POSTURE (ADR-0012, weights and code checked separately). This package ships NO weights and
+# NO model: there is nothing to verify on the weights side, and the code side is this repo's
+# Apache-2.0. Every method it implements is a PUBLISHED ALGORITHM implemented here from the paper,
+# not a vendored library:
+#   * RAKE stopword-segmented candidate phrases — Rose, Engel, Cramer & Cowley (2010).
+#   * ReVerb-style relation phrases between two argument phrases — Fader, Soderland & Etzioni (2011).
+#   * Greedy submodular max-coverage + the (1 - 1/e) guarantee — Nemhauser, Wolsey & Fisher (1978);
+#     optimality of that ratio — Feige (1998).
+#   * Kneedle knee detection — Satopaa, Albrecht, Irwin & Raghavan (2011).
+#   * Good-Turing missing-mass estimate — Good (1953).
+#   * Discrete power-law / Zipf fitting — Clauset, Shalizi & Newman (2009).
+# The reference IMPLEMENTATIONS were deliberately NOT adopted: `kneed` (BSD-3-Clause per its PyPI
+# metadata) requires numpy + scipy, and `yake` / `rake-nltk` / c-TF-IDF pull nltk or scikit-learn
+# (and, for nltk, a runtime CORPUS DOWNLOAD — an outright violation of the zero-network bar). The
+# CPU-first dev env is deliberately numpy-free (ADR-0016), so adopting any of them would have cost
+# more than implementing the papers. A licence we do not rely on is not load-bearing; none of the
+# above libraries' terms constrain this package.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+# Deliberately registers NOTHING under `latence.providers`. The profiler is not a Stage: it runs
+# ONCE, before a pipeline, over a corpus SAMPLE, and its output is config (the `candidates` block of
+# `label_inducer.lexicon`). Registering it would put a non-Stage into the Capability conformance
+# suite for no gain. The Provider that consumes its output is the already-registered
+# `label_inducer.lexicon`.
+[project.scripts]
+latence-label-profile = "latence_label_profiler.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_label_profiler"]
