@@ -376,6 +376,21 @@ def test_ragged_sparse_columns_are_a_loud_export_error(tmp_path: Path) -> None:
     assert "r1" in str(excinfo.value)
 
 
+def test_duplicate_sparse_term_ids_are_caught_at_the_export(tmp_path: Path) -> None:
+    """A repeated term id is a 400 from Qdrant — so it is caught before a single point is written.
+
+    The ragged-column case already fails at the Export; this one is the same class of corruption and
+    must not be the exception that gets discovered halfway through a load as an opaque store fault.
+    """
+    export = write_sparse_export(tmp_path, {"r1": "alpha beta"})
+    rewrite_column(export, "sparse_indices", pa.array([[5, 5]], type=pa.list_(pa.int64())))
+    client = FakeQdrantClient()
+    with pytest.raises(SinkExportError) as excinfo:
+        sink(client, vector="both").load(export)
+    assert "r1" in str(excinfo.value)
+    assert "upsert" not in client.calls
+
+
 def test_sparse_knobs_are_rejected_when_sparse_is_not_being_loaded(tmp_path: Path) -> None:
     """A knob that silently does nothing is the failure mode this framework refuses everywhere.
 

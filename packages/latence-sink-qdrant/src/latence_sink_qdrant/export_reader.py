@@ -320,6 +320,14 @@ def _to_sparse(
             )
             raise SinkExportError(msg)
         out_indices.append(index)
+    if len(set(out_indices)) != len(out_indices):
+        msg = (
+            f"Record {record_id!r} in {uri!r} repeats a term id in {indices_column!r} "
+            f"({len(out_indices)} entries, {len(set(out_indices))} distinct). A sparse vector maps "
+            "each term to ONE weight, so a real Qdrant rejects the point with an opaque 400 — "
+            "caught here instead, before the collection is written to."
+        )
+        raise SinkExportError(msg)
     return SparseSignal(indices=out_indices, values=[float(v) for v in values])
 
 
