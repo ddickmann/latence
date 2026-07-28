@@ -237,6 +237,7 @@ class GLinkerBackend(InferenceBackend):
         precompute_batch_size: int = 16,
         max_candidates: int = 100,
         l2_search_mode: str = "exact",
+        torch_jit: str | bool = "auto",
     ) -> None:
         self.model_name = model_name
         self.device = device
@@ -251,6 +252,11 @@ class GLinkerBackend(InferenceBackend):
         self.precompute_batch_size = precompute_batch_size
         self.max_candidates = max_candidates
         self.l2_search_mode = l2_search_mode
+        # T-DEV-1: the TorchScript-JIT kill is capability-gated, and this is its operator override.
+        # "auto" (the default) consults the detected compute capability and FAILS SAFE — it kills
+        # the JIT on unknown/unreadable/>= 10.0 and skips only on a positively-read known-good
+        # architecture. "off" pins the kill, "on" keeps the JIT even where the gate would kill it.
+        self.torch_jit = torch_jit
         self._executor: Any = None
         self._executor_lock = threading.Lock()
         self._kb_loaded = False
@@ -333,9 +339,18 @@ class GLinkerBackend(InferenceBackend):
         # shared seam (latence_core.providers.perf) directly — the mdeberta relative-position helper
         # is otherwise scripted with @torch.jit.script and dies in nvrtc on Blackwell/CUDA-13
         # (libnvrtc-builtins.so.13.0) on the first forward. Throughput-only, byte-identical output.
+        #
+        # T-DEV-1: the kill is now CAPABILITY-GATED, and this Stage is why it matters.
+        # `disambiguate` is one of the three stages that consumed 1,604 s of the prior run's
+        # 1,743 s (DECISIONS.md §D2), and the nvrtc fault it defends against is a Blackwell/CUDA-13
+        # condition that does not exist on sm_86. `torch_jit` ("auto"|"on"|"off") is the override;
+        # "auto" fails SAFE — it kills the JIT on an unknown/unreadable/>=10.0 capability and skips
+        # only on a positively-read known-good one.
         from latence_core.providers.perf import neutralize_torch_jit
 
-        neutralize_torch_jit(provider_name="disambiguation.glinker")
+        neutralize_torch_jit(
+            provider_name="disambiguation.glinker", config={"torch_jit": self.torch_jit}
+        )
 
         import torch
 
@@ -868,6 +883,7 @@ def get_backend(config: Any) -> InferenceBackend:
             precompute_batch_size=getattr(config, "precompute_batch_size", 16),
             max_candidates=getattr(config, "max_candidates", 100),
             l2_search_mode=getattr(config, "l2_search_mode", "exact"),
+            torch_jit=getattr(config, "torch_jit", "auto"),
         )
     if backend_type == "vllm_inprocess":
         return VLLMGLiNERBackend(

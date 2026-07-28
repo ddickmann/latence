@@ -302,8 +302,10 @@ def load_then_cast(
     relative-position helpers at module-import time, and nothing here can un-script them. The
     Provider's own call *ahead of that import* is the fix (ADR-0036 W9-jit); this one covers a
     caller that arrives with the backbone not yet imported. Throughput-only, byte-identical output.
+    **Capability-gated (T-DEV-1):** ``config`` is threaded through, so on a known-good architecture
+    this is a no-op and the JIT stays enabled.
     """
-    neutralize_torch_jit()
+    neutralize_torch_jit(config=config)
     model = loader(model_id)
     dtype_name = resolve_dtype_name(device, config)
     if dtype_name == DTYPE_FP32 or not _effective_is_cuda(device):
@@ -535,9 +537,233 @@ def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str =
 #: ScriptFunction whose fused kernels are compiled at runtime by nvrtc.
 TORCH_JIT_ENV = "PYTORCH_JIT"
 
+#: The env override that PINS the detected compute capability (``"8.6"``, ``"12.0"``). Same posture
+#: as ``LATENCE_CUDA`` in the device seam: honoured first so a CI host, a container without
+#: ``nvidia-smi``, or an operator who knows better is deterministic; an unparseable value is ignored
+#: (falls through to the probe) rather than guessed.
+LATENCE_COMPUTE_CAPABILITY_ENV = "LATENCE_COMPUTE_CAPABILITY"
 
-def neutralize_torch_jit(*, provider_name: str = "provider") -> bool:
-    """Turn the TorchScript JIT OFF for this process — guarded, never crashes (W9-jit).
+#: The highest compute capability positively known to have a **healthy nvrtc JIT path**, i.e. the
+#: ceiling of the "leave the TorchScript JIT alone" set. Hopper (9.0) and everything below it —
+#: Volta 7.0, Turing 7.5, Ampere 8.0/8.6, Ada 8.9 — shipped against CUDA 11/12 toolchains whose
+#: ``libnvrtc-builtins`` is present, and the FM-NVRTC-JIT fault has never been observed on them.
+#:
+#: Blackwell starts at **10.0** (B100/B200/GB200) and the RTX 50-series / RTX PRO parts report
+#: **12.0** — the box the workaround was written on. 10.0 sits on the KILL side deliberately even
+#: though the observed fault was 12.0: it is the same CUDA-13-era generation, we have never run one,
+#: and the error is asymmetric (a wrong skip is a first-forward native crash; a wrong kill is
+#: throughput). Widen this ceiling only against a measurement, never against a hunch.
+JIT_SAFE_MAX_CAPABILITY = (9, 0)
+
+#: The valid ``torch_jit`` operator-override spellings. ``auto`` (the default) is the capability
+#: gate; a truthy value pins the JIT **on** (skip the kill); a falsy value pins the kill.
+_VALID_TORCH_JIT = frozenset({"auto", "on", "off", "true", "false", "1", "0", "yes", "no"})
+_TORCH_JIT_ON = frozenset({"on", "true", "1", "yes"})
+
+
+def _parse_capability(text: str) -> tuple[int, int] | None:
+    """Parse a ``"<major>.<minor>"`` capability string, or ``None`` when it is not one.
+
+    Deliberately strict: anything that is not two non-negative integers separated by a dot — an old
+    ``nvidia-smi``'s ``"Field 'compute_cap' invalid"``, an empty line, ``"N/A"`` — is *unknown*, and
+    unknown means the JIT gets killed. A lenient parse here would manufacture a false "known-good"
+    and turn a slow run into a crashing one.
+    """
+    major, _, minor = text.strip().partition(".")
+    if not major.isdigit() or not minor.isdigit():
+        return None
+    parsed = (int(major), int(minor))
+    if parsed[0] < 1:
+        return None  # 0.x is not a real capability; treat it as unreadable
+    return parsed
+
+
+def _capability_from_imported_torch() -> tuple[int, int] | None:
+    """Read the capability from a torch that is **already imported** — never importing it.
+
+    ``sys.modules`` only: importing torch here would defeat the whole mechanism, because torch
+    parses ``PYTORCH_JIT`` once **at import** and the env lever must be set before that happens.
+    When another library has already pulled torch in, this is the most accurate answer available;
+    when it has not, the caller falls through to the torch-free ``nvidia-smi`` probe.
+    """
+    import sys  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
+        cuda = torch.cuda
+        raw = cuda.get_device_capability()
+        major, minor = int(raw[0]), int(raw[1])
+    except Exception:  # noqa: BLE001 - a torch that cannot answer is UNKNOWN, never "safe"
+        return None
+    return _parse_capability(f"{major}.{minor}")
+
+
+def _capability_from_nvidia_smi() -> tuple[int, int] | None:
+    """Read the capability from ``nvidia-smi`` — torch-free (ADR-0016), the primary probe.
+
+    ``nvidia-smi --query-gpu=compute_cap --format=csv,noheader`` prints one line per GPU. The
+    **lowest** wins: the TorchScript switch is process-wide, so a mixed host must not be declared
+    known-good on the strength of its best card. Every failure mode — tool absent, non-zero exit,
+    timeout, an old driver that does not know the ``compute_cap`` field — returns ``None``, i.e.
+    unknown, i.e. the kill stays on.
+    """
+    import shutil  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+    import subprocess  # noqa: PLC0415, S404 - a read-only, fixed-argv driver query
+
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - a probe that cannot run is unknown, never a crash
+        return None
+    if proc.returncode != 0:
+        return None
+    parsed = [_parse_capability(line) for line in (proc.stdout or "").splitlines() if line.strip()]
+    readable = [c for c in parsed if c is not None]
+    if not readable or len(readable) != len(parsed):
+        # An unparseable line means at least one GPU is unaccounted for — unknown, not "the rest".
+        return None
+    return min(readable)
+
+
+def detect_compute_capability() -> tuple[int, int] | None:
+    """The host's CUDA compute capability as ``(major, minor)``, or ``None`` when unknown.
+
+    Probe order, and every step of it torch-free:
+
+    1. ``LATENCE_COMPUTE_CAPABILITY`` — the deterministic override (CI, a container without the
+       driver CLI, an operator who knows the box).
+    2. A torch that is **already in** ``sys.modules`` — the most accurate reading, and free.
+    3. ``nvidia-smi --query-gpu=compute_cap`` — the same torch-free signal class
+       :func:`~latence_core.providers.device.cuda_available` already probes with.
+    4. ``None``. Unknown is a first-class answer here, not a fallback to a guess: every caller
+       treats it as "assume the worst".
+
+    **This function must never import torch.** ``PYTORCH_JIT`` is read by torch at *torch import*,
+    so a probe that imported torch to answer would spend the lever it is deciding whether to pull.
+    """
+    import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    override = os.environ.get(LATENCE_COMPUTE_CAPABILITY_ENV)
+    if override:
+        pinned = _parse_capability(override)
+        if pinned is not None:
+            return pinned
+    from_torch = _capability_from_imported_torch()
+    if from_torch is not None:
+        return from_torch
+    return _capability_from_nvidia_smi()
+
+
+def resolve_torch_jit_policy(config: Mapping[str, Any]) -> str:
+    """Resolve the ``torch_jit`` operator override to ``"auto"`` / ``"on"`` / ``"off"``.
+
+    ``auto`` (unset, the default) hands the decision to :func:`detect_compute_capability`. ``on``
+    keeps the TorchScript JIT — the escape hatch for an operator who has a working nvrtc on a box
+    the gate would otherwise be conservative about. ``off`` pins the neutralization regardless of
+    what the capability says. A bool is accepted (``True`` → ``on``), as are the usual string
+    spellings; anything else is a hard :class:`ValueError` the caller surfaces as a ConfigError —
+    a typo must never resolve to a silently different policy on a box where the wrong answer is a
+    native crash.
+    """
+    raw = config.get("torch_jit", "auto")
+    if isinstance(raw, bool):
+        return "on" if raw else "off"
+    text = str(raw).strip().lower()
+    if text not in _VALID_TORCH_JIT:
+        valid = ", ".join(sorted(_VALID_TORCH_JIT))
+        msg = f"invalid torch_jit {raw!r}: must be a bool or one of {valid}"
+        raise ValueError(msg)
+    if text == "auto":
+        return "auto"
+    return "on" if text in _TORCH_JIT_ON else "off"
+
+
+def torch_jit_must_be_neutralized(
+    config: Mapping[str, Any], *, provider_name: str = "provider"
+) -> bool:
+    """Whether this host needs the TorchScript JIT killed — **fail safe** (T-DEV-1).
+
+    The whole decision, in one readable place, because the cost of the two errors is not
+    symmetric. ``neutralize_torch_jit`` exists for FM-NVRTC-JIT alone: a missing
+    ``libnvrtc-builtins.so.13.0`` on Blackwell / CUDA-13. That fault surfaces on the **first
+    forward**, so no load-time ``try/except`` can catch it — a wrong "skip" is a native **crash**,
+    while a wrong "kill" is merely **slow** (throughput-only, byte-identical output). So:
+
+    * ``torch_jit: off``/``on`` — the operator's explicit call wins outright.
+    * capability **unknown** (no torch, no ``nvidia-smi``, an unreadable answer) → **kill**.
+    * capability **> (9, 0)** (:data:`JIT_SAFE_MAX_CAPABILITY`) → **kill**.
+    * a positively-read capability at or below the ceiling → **skip**, and log the fact so the
+      pod's own log is the record that the JIT ran enabled.
+
+    Measured stake (DECISIONS.md §D2): the kill fires on every GLiNER/GLiNER2/GLinker load, i.e. on
+    ``extract``, ``redact`` and ``disambiguate`` — the three stages that were **1,604 s of the prior
+    run's 1,743 s**. On sm_86 that cost bought nothing.
+    """
+    policy = resolve_torch_jit_policy(config)
+    if policy != "auto":
+        _log.info(
+            "%s: torch JIT policy pinned to %r by config (capability gate bypassed)",
+            provider_name,
+            policy,
+        )
+        return policy == "off"
+    capability = detect_compute_capability()
+    if capability is None:
+        _log.info(
+            "%s: compute capability unknown (no torch, no nvidia-smi, or an unreadable answer) — "
+            "neutralizing the torch JIT to fail SAFE (a wrong skip is a first-forward nvrtc crash; "
+            "a wrong kill is throughput only). Pin %s to take it back.",
+            provider_name,
+            LATENCE_COMPUTE_CAPABILITY_ENV,
+        )
+        return True
+    if capability > JIT_SAFE_MAX_CAPABILITY:
+        _log.info(
+            "%s: compute capability %d.%d is above the nvrtc-safe ceiling %d.%d — neutralizing the "
+            "torch JIT (FM-NVRTC-JIT: libnvrtc-builtins.so.13.0 on Blackwell/CUDA-13)",
+            provider_name,
+            capability[0],
+            capability[1],
+            JIT_SAFE_MAX_CAPABILITY[0],
+            JIT_SAFE_MAX_CAPABILITY[1],
+        )
+        return True
+    _log.info(
+        "%s: compute capability %d.%d is a known-good nvrtc architecture — leaving the TorchScript "
+        "JIT ENABLED (the FM-NVRTC-JIT workaround is a Blackwell/CUDA-13 tax, not an Ampere one)",
+        provider_name,
+        capability[0],
+        capability[1],
+    )
+    return False
+
+
+def neutralize_torch_jit(
+    *, provider_name: str = "provider", config: Mapping[str, Any] | None = None
+) -> bool:
+    """Turn the TorchScript JIT OFF for this process — **capability-gated**, never crashes (W9-jit).
+
+    **T-DEV-1 — read this first.** Handed a Provider ``config`` this is *conditional*: it consults
+    :func:`torch_jit_must_be_neutralized` and does nothing at all on a positively-identified
+    known-good architecture (Hopper and below — Ampere sm_86 is the target pod). The kill exists
+    only for FM-NVRTC-JIT on Blackwell/CUDA-13, and it fires on every GLiNER/GLiNER2/GLinker load,
+    i.e. on ``extract``/``redact``/``disambiguate`` — the three stages that were 1,604 s of the
+    prior run's 1,743 s. Running it unconditionally was an Ampere tax (DECISIONS.md §D2).
+
+    Called **bare** (``config=None``) it is the unconditional applier it has always been — the shape
+    the gate itself delegates to, and the shape a caller with no config in hand takes. The gate is
+    therefore opt-in at the CALL SITE, which is also what lets this keep one name: the AST ordering
+    guard in ``test_perf_fp32_regression_guard.py`` matches ``neutralize_torch_jit`` lexically to
+    prove the backbone import cannot precede it.
 
     The **gap** the W9 compile guard did not cover. :func:`maybe_compile` /
     :func:`load_gliner2_optimized` neutralize ``torch.compile`` (dynamo/inductor); they do NOT touch
@@ -572,9 +798,16 @@ def neutralize_torch_jit(*, provider_name: str = "provider") -> bool:
     Torch-free-safe and never raises: on a host without torch (the offline test env) the env switch
     is still set — so a torch imported later is still JIT-free — and the runtime lever is a logged
     no-op. Returns whether the **in-process** JIT state is now known-off (``False`` when torch is
-    absent or exposes no JIT state to read back; the env switch is set either way).
+    absent or exposes no JIT state to read back; the env switch is set either way). A **gated call
+    that decides to skip** also returns ``False`` — the in-process JIT is then known-ON, and neither
+    lever is pulled (an operator's externally-exported ``PYTORCH_JIT`` is left exactly as it was).
     """
     import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+    if config is not None and not torch_jit_must_be_neutralized(
+        config, provider_name=provider_name
+    ):
+        return False
 
     os.environ[TORCH_JIT_ENV] = "0"
     try:
@@ -676,7 +909,7 @@ def load_gliner2_optimized(
     """
     quantize = resolve_gliner2_knob("quantize", device, config)
     compile_ = resolve_gliner2_knob("compile", device, config)
-    neutralize_torch_jit(provider_name=provider_name)
+    neutralize_torch_jit(provider_name=provider_name, config=config)
     if not quantize and not compile_:
         return loader(model_id)
     try:
@@ -1132,7 +1365,10 @@ def _import_backbone(
        evaluates transformers' ``deberta_v2`` module whose relative-position helpers carry
        ``@torch.jit.script``; once they are ``ScriptFunction``s no lever can un-script them, and
        on a
-       Blackwell/CUDA-13 box they die in nvrtc on the FIRST forward.
+       Blackwell/CUDA-13 box they die in nvrtc on the FIRST forward. **Capability-gated since
+       T-DEV-1** (``config`` is threaded in): on a positively-identified known-good architecture
+       the JIT is left enabled and step 1 is a logged no-op, because the fault it defends against
+       does not exist there.
     2. :func:`cap_intra_op_threads` — the many-core oversubscription guard (~520% CPU spin with the
        GPU at 0%). It imports torch, which is *why* it must come after step 1 and not before: the
        env switch has to be in place for the import torch reads it at. Applied for EVERY family,
@@ -1144,7 +1380,7 @@ def _import_backbone(
        here. An ``ImportError`` from it propagates unwrapped — a missing optional dep is an
        actionable operator message ("pip install latence-…"), not a runtime provider fault.
     """
-    neutralize_torch_jit(provider_name=provider_name)
+    neutralize_torch_jit(provider_name=provider_name, config=config)
     cap_intra_op_threads(resolve_intra_op_threads(config), provider_name=provider_name)
     return import_model_cls()
 
