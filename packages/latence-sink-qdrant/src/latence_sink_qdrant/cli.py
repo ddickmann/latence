@@ -53,6 +53,31 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("cosine", "dot", "euclid", "manhattan"),
         help="metric used only when creating the collection (default: cosine)",
     )
+    load.add_argument(
+        "--vector",
+        choices=("dense", "sparse", "both"),
+        help=(
+            "which retrieval signal to load: 'dense' (default) writes the Export's embedding; "
+            "'sparse' writes ONLY the named sparse vector (a SPLADE-only collection, no Embedder "
+            "needed); 'both' writes a hybrid collection. Under 'both' the dense vector is named "
+            "(default 'dense'), because a point carrying a sparse vector carries a vector map."
+        ),
+    )
+    load.add_argument(
+        "--sparse-source",
+        help=(
+            "Export column-pair stem holding the sparse signal (<stem>_indices + <stem>_values); "
+            "default 'sparse', what a wired sparse_embedder writes. Requires --vector "
+            "sparse/both."
+        ),
+    )
+    load.add_argument(
+        "--sparse-vector-name",
+        help=(
+            "name the sparse vector takes in the collection — what the query side passes as "
+            "`using=` (default: the --sparse-source stem). Requires --vector sparse/both."
+        ),
+    )
     load.add_argument("--vector-name", help="named vector to write (default: the unnamed vector)")
     load.add_argument(
         "--load-id",
@@ -141,7 +166,10 @@ def _config_from(args: argparse.Namespace) -> dict[str, Any]:
         "basename",
         "batch_size",
         "distance",
+        "vector",
         "vector_name",
+        "sparse_source",
+        "sparse_vector_name",
         "load_id",
         "api_key_env",
     ):

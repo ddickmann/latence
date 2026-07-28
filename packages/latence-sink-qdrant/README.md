@@ -34,9 +34,48 @@ column name**, so the chunk text is the payload field **`content`** (and `record
 override — `Candidate.text` is the chunk text. (A backend pointed at a key the payload lacks raises
 `BackendSearchError` rather than returning empty text.)
 
-Out of scope on purpose: sparse/named-sparse vector wiring (the Export's `sparse_indices` /
-`sparse_values` columns ride through as payload — see [#156](https://github.com/ddickmann/latence-framework/issues/156)),
-and the KG (`graph.ttl` / `graph.graphml`), which is a different store's problem.
+Out of scope on purpose: the KG (`graph.ttl` / `graph.graphml`), which is a different store's
+problem.
+
+## Sparse vectors (SPLADE), loaded as a real index
+
+By default the sink loads the dense `embedding` column and nothing else. If the Export was written
+with a `sparse_embedder` wired, `--vector both` projects the `sparse_indices` / `sparse_values`
+columns into a **named Qdrant sparse vector** instead of leaving them in the payload:
+
+```bash
+latence-sink-qdrant load ./out/export --collection corpus --vector both --url http://localhost:6333
+```
+
+```yaml
+vector: both              # dense (default) | sparse | both
+sparse_source: sparse     # reads <stem>_indices + <stem>_values
+sparse_vector_name: sparse   # the name the query side passes as `using=`
+```
+
+Three things to know before you run it, because each of them changes what you must configure
+downstream:
+
+- **Under `vector: both` the dense vector is named** (`dense` by default, `vector_name` to change
+  it). Qdrant's *unnamed* vector is the single-vector legacy shape, and a point carrying a sparse
+  vector carries a vector **map** — which addresses its members by name. So set
+  `latence-retrieval`'s `QdrantBackend` `vector_name: dense` and `sparse_vector_name: sparse` for a
+  collection loaded this way; its default is the unnamed vector, which a hybrid collection has not
+  got.
+- **A collection's vector shape is fixed at creation.** Running `--vector both` over a collection an
+  earlier dense-only load created fails with a named error telling you so — the fix is a new
+  collection, not a config change.
+- `--vector sparse` needs **no Embedder at all** on the Export: a SPLADE-only collection is a real
+  shape and the sink will not demand a dense column it is not going to load.
+
+The sparse columns are removed from the payload once they are loaded as a vector (keeping them would
+store every term id twice), and the change digest folds the sparse signal in **only** on a sparse
+load — so a re-embed of the sparse signal alone is correctly detected as changed, while a dense-only
+collection's digests are untouched and a re-run of an unchanged corpus still upserts nothing.
+
+The model behind the signal is the operator's choice and the operator's licence to accept — this
+wires the *mechanism*, and pins no checkpoint. (`naver/splade-v3` is CC-BY-NC-SA-4.0; the in-core
+`sparse.hashing` reference is Apache-2.0 and makes no retrieval-quality claim.)
 
 ## Re-running converges
 
@@ -128,6 +167,7 @@ url: https://qdrant.internal:6333
 api_key_env: QDRANT_API_KEY   # the NAME of the env var, never the key itself
 batch_size: 512
 distance: cosine        # only used when the collection is created
+vector: dense           # dense | sparse | both
 vector_name: null       # or a named vector
 reconcile: true
 ```
@@ -138,7 +178,10 @@ reconcile: true
 | `basename` | `records` | Export file stem |
 | `batch_size` | `256` | records per store round-trip (bounds memory *and* request size) |
 | `distance` | `cosine` | `cosine` / `dot` / `euclid` / `manhattan`, used only at collection creation |
-| `vector_name` | `null` | named vector to write; `null` ⇒ the collection's single unnamed vector |
+| `vector` | `dense` | which retrieval signal to load: `dense` (the Export's `embedding`), `sparse` (a SPLADE-only collection), `both` (hybrid) |
+| `vector_name` | `null` | named dense vector to write; `null` ⇒ the collection's single unnamed vector. Under `vector: both` it defaults to `dense` instead, because a point carrying a sparse vector carries a vector *map* |
+| `sparse_source` | `sparse` | Export column-pair stem (`<stem>_indices` + `<stem>_values`). Requires `vector: sparse`/`both` — set otherwise it is a loud error, never an inert key |
+| `sparse_vector_name` | `sparse_source` | the name the sparse vector takes in the collection — what the query side passes as `using=` |
 | `reconcile` | `true` | sweep this corpus's points absent from this Export (scoped to `id_namespace`) |
 | `load_id` | none | audit **label** for the run, prefixed onto the per-run sweep marker (`<label>:<nonce>`). It is a label, never the marker itself: the sweep deletes everything *not* stamped with this run's marker, so a marker reused across runs would match nothing and silently keep serving retracted points |
 | `id_namespace` | fixed UUID | point-id derivation namespace **and** the reconciling sweep's ownership scope — two corpora sharing one collection each get their own |
@@ -173,6 +216,13 @@ unknown collection, 409 for a duplicate create, 403 for a bad api key, and 400 f
 vector, a named/unnamed vector mismatch, a non-JSON payload — and for **a point id that is not an
 unsigned integer or a UUID**, so a loader that handed Qdrant a raw `record_id` string fails here
 exactly as it would against a real server.
+
+It models named **sparse** vectors on the same terms: a sparse config that is not a named mapping, a
+sparse name colliding with a dense one, indices and values of unequal length, non-integer/negative/
+duplicate indices, a dense list under a sparse name — all 400, all rejected here rather than
+discovered against a live server. What it deliberately does **not** do is rank: there is no search
+in it (the sink never searches), so whether a real Qdrant *scores* a sparse query the way we expect
+is settled by the live test below and is never asserted offline.
 
 A live smoke test against a running Qdrant is included and skipped unless you opt in:
 
