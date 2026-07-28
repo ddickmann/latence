@@ -38,6 +38,7 @@ fusion, and re-ranking it by RRF would discard the store's own scores); then the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +49,7 @@ from latence_retrieval.errors import OrchestrationError
 from latence_retrieval.fuser import RrfFuser
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from latence_retrieval.backend import RetrievalBackend
     from latence_retrieval.fuser import Fuser
@@ -72,7 +73,11 @@ class QueryBundle(BaseModel):
     (always required — ``rerank`` scores against it, a ``bm25`` leg searches it) and each optional
     field is the signal for one first-stage mode: ``vector`` (a dense — or multi-vector — query
     embedding), ``sparse_terms`` (a SPLADE/BM25 term-weight map from
-    :class:`~latence_retrieval.sparse.SpladeQueryEncoder`), and an optional metadata ``filter``
+    :class:`~latence_retrieval.sparse.SpladeQueryEncoder`), ``seed_node_ids`` (the query's linked
+    KG entity nodes a ``graph`` retrieval leg anchors its traversal on — produced by the caller's
+    entity linker, or by the dependency-free
+    :class:`~latence_retrieval.graph_retrieval.AliasQuerySeeder`), and an optional metadata
+    ``filter``
     predicate. A mode's leg fires only when its signal is present *and non-empty*, so leaving a
     field unset (or empty) is how a caller says "I did not generate that signal" — the orchestrator
     drops that leg (AC2). It is frozen and rejects unknown fields (``extra="forbid"``), so a
@@ -84,6 +89,7 @@ class QueryBundle(BaseModel):
     text: str = Field(min_length=1)
     vector: tuple[float, ...] | None = None
     sparse_terms: dict[str, float] | None = None
+    seed_node_ids: tuple[str, ...] | None = None
     filter: dict[str, Any] | None = None
 
 
@@ -318,7 +324,7 @@ def _plan_fetch_legs(
         msg = (
             f"no runnable fetch leg: the backend declares {declared} but the query bundle carries "
             "no matching signal (a dense/multivector mode needs 'vector', a sparse mode needs "
-            "'sparse_terms', a bm25 mode needs 'text')."
+            "'sparse_terms', a graph mode needs 'seed_node_ids', a bm25 mode needs 'text')."
         )
         raise OrchestrationError(msg)
     return legs
@@ -328,13 +334,16 @@ def _mode_payload(mode: Capability, bundle: QueryBundle) -> dict[str, Any] | Non
     """The mode's first-stage payload from the bundle, or ``None`` when its signal is absent/empty.
 
     Mirrors :class:`~latence_retrieval.contracts.RetrievalQuery`'s own mode→payload rule: dense and
-    multivector need a non-empty ``vector``; sparse needs non-empty ``sparse_terms``; bm25 needs
-    only the (always-present) ``text``, so its payload is empty.
+    multivector need a non-empty ``vector``; sparse needs non-empty ``sparse_terms``; graph needs
+    non-empty ``seed_node_ids`` (the entity anchors a traversal starts from); bm25 needs only the
+    (always-present) ``text``, so its payload is empty.
     """
     if mode in (Capability.DENSE, Capability.MULTIVECTOR):
         return {"vector": bundle.vector} if bundle.vector else None
     if mode is Capability.SPARSE:
         return {"sparse_terms": bundle.sparse_terms} if bundle.sparse_terms else None
+    if mode is Capability.GRAPH:
+        return {"seed_node_ids": bundle.seed_node_ids} if bundle.seed_node_ids else None
     if mode is Capability.BM25:
         return {}
     # Unreachable: _QUERY_MODES excludes FILTER and enumerates every other Capability. Guarding

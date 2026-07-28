@@ -58,6 +58,20 @@ already fetched. This foundation ticket ships the seam every query-time capabili
   /
   networkx / Neo4j engines ride the ``[graph-duckdb]`` / ``[graph-networkx]`` / ``[graph-neo4j]``
   extras and are imported lazily.
+* :class:`~latence_retrieval.graph_retrieval.GraphRetriever` +
+  :class:`~latence_retrieval.graph_retrieval.CompositeBackend` — the graph **retrieval leg**
+  (T-RET-2): a :class:`~latence_retrieval.backend.RetrievalBackend` declaring
+  :attr:`~latence_retrieval.contracts.Capability.GRAPH` that seeds from the query's linked entity
+  nodes, traverses the emitted graph to a bounded depth through the
+  :class:`~latence_retrieval.multihop.GraphSource` seam, resolves the reached nodes back to chunks
+  through a :class:`~latence_retrieval.graph_retrieval.GraphDocumentSource`
+  (:class:`~latence_retrieval.graph_retrieval.DuckDBGraphDocumentSource` real over the emitted
+  chunk parquet + :class:`~latence_retrieval.testing.FakeGraphDocumentSource` faithful fake), and
+  returns its own ranked list that enters **fusion as a peer** of dense/sparse/bm25.
+  ``CompositeBackend`` presents the customer's store and the graph leg to the orchestrator as one
+  backend (union of modes; ``FILTER`` only when every member can serve it). This is the only
+  architecture in which "traversal recovered a document dense+sparse never retrieved" is
+  expressible — the post-fusion expanders below are kept, but they can *reorder* only.
 * :class:`~latence_retrieval.bm25.Bm25Rescorer` — the ``bm25`` transform: **exact** Okapi BM25
   rescoring of a caller-supplied candidate set (IDF from supplied corpus ``stats`` or the candidate
   pool), query-term-driven so it stays fast on large candidate sets — **never** a first-stage index
@@ -119,6 +133,15 @@ from latence_retrieval.errors import (
 )
 from latence_retrieval.expand import Expander
 from latence_retrieval.fuser import Fuser, RrfFuser, WeightedFuser
+from latence_retrieval.graph_retrieval import (
+    AliasQuerySeeder,
+    CompositeBackend,
+    DuckDBGraphDocumentSource,
+    GraphDocument,
+    GraphDocumentSource,
+    GraphRetriever,
+    build_graph_document_source,
+)
 from latence_retrieval.maxsim import (
     HashingMultiVectorQueryEncoder,
     MaxSimReranker,
@@ -161,9 +184,21 @@ from latence_retrieval.rerank import (
     SentenceTransformersCrossEncoder,
 )
 from latence_retrieval.sparse import SparseQueryEncoder, SpladeQueryEncoder
+from latence_retrieval.tuning import (
+    FuserComparisonRow,
+    FusionRun,
+    FusionScore,
+    WeightSweep,
+    WeightSweepRow,
+    compare_fusers,
+    evaluate_fusion,
+    format_comparison_table,
+    sweep_fusion_weights,
+)
 
 __all__ = [
     "ENTRY_POINT_GROUP",
+    "AliasQuerySeeder",
     "BackendCapabilityError",
     "BackendDimensionError",
     "BackendSearchError",
@@ -172,10 +207,18 @@ __all__ = [
     "CandidateProcessor",
     "CandidateProcessorError",
     "Capability",
+    "CompositeBackend",
     "CrossEncoderModel",
+    "DuckDBGraphDocumentSource",
     "DuckDBGraphSource",
     "Expander",
     "Fuser",
+    "FuserComparisonRow",
+    "FusionRun",
+    "FusionScore",
+    "GraphDocument",
+    "GraphDocumentSource",
+    "GraphRetriever",
     "GraphSource",
     "GraphSourceError",
     "HashingMultiVectorQueryEncoder",
@@ -207,12 +250,19 @@ __all__ = [
     "SpladeQueryEncoder",
     "TiktokenCounter",
     "TokenCounter",
+    "WeightSweep",
+    "WeightSweepRow",
     "WeightedFuser",
+    "build_graph_document_source",
     "build_graph_source",
+    "compare_fusers",
+    "evaluate_fusion",
+    "format_comparison_table",
     "max_sim",
     "resolve_fuser",
     "resolve_multivector_encoder",
     "resolve_processor",
     "resolve_sparse_encoder",
     "retrieve",
+    "sweep_fusion_weights",
 ]

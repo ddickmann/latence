@@ -22,15 +22,26 @@ class Capability(StrEnum):
     """A first-stage capability a :class:`~latence_retrieval.backend.RetrievalBackend` may declare.
 
     The closed set a store advertises (CONTEXT ``RetrievalBackend`` — ``{dense, sparse, bm25,
-    filter, multivector}``). ``DENSE``/``SPARSE``/``BM25``/``MULTIVECTOR`` are *query modes* (how
-    the first-stage search is scored); ``FILTER`` is *orthogonal* — a metadata predicate any mode
-    may carry. The orchestrator composes only the legs a backend declares and drops the rest
-    (ADR-0052); the tooling itself runs none of them.
+    graph, filter, multivector}``). ``DENSE``/``SPARSE``/``BM25``/``GRAPH``/``MULTIVECTOR`` are
+    *query modes* (how the first-stage search is scored); ``FILTER`` is *orthogonal* — a metadata
+    predicate any mode may carry. The orchestrator composes only the legs a backend declares and
+    drops the rest (ADR-0052); the tooling itself runs none of them.
+
+    ``GRAPH`` is a **first-stage retrieval mode, not a rescoring pass** (T-RET-2). The post-fusion
+    expanders (:class:`~latence_retrieval.expand.Expander`,
+    :class:`~latence_retrieval.multihop.MultiHopExpander`) are ``CandidateProcessor``\\ s that run
+    *after* fusion and therefore cannot introduce a candidate the first stage missed — so a KG
+    "win" they produce is only a reordering of a pool the graph did not choose. A ``GRAPH`` leg
+    seeds from the query's entity nodes, traverses the emitted graph to a bounded depth, and returns
+    its own ranked list that enters fusion as a **peer** of dense/sparse/bm25, which is the only
+    architecture in which "traversal recovered a document dense+sparse never retrieved" is even
+    expressible. Its payload is :attr:`RetrievalQuery.seed_node_ids`.
     """
 
     DENSE = "dense"
     SPARSE = "sparse"
     BM25 = "bm25"
+    GRAPH = "graph"
     FILTER = "filter"
     MULTIVECTOR = "multivector"
 
@@ -61,11 +72,12 @@ class RetrievalQuery(BaseModel):
 
     The tooling never runs this — a :class:`~latence_retrieval.backend.RetrievalBackend` adapter
     passes it to the customer's engine. It is modelled here so the seam can validate it: ``mode`` is
-    the scoring capability the search uses (dense/sparse/bm25/multivector — **not** ``FILTER``,
-    which is a predicate, not a mode); the mode's payload must be present (a dense/multivector
-    search needs ``vector``, a sparse search needs ``sparse_terms``, a lexical search needs
-    ``text``); and an optional ``filter`` is a metadata predicate that additionally requires the
-    backend to declare
+    the scoring capability the search uses (dense/sparse/bm25/graph/multivector — **not**
+    ``FILTER``, which is a predicate, not a mode); the mode's payload must be present (a
+    dense/multivector search needs ``vector``, a sparse search needs ``sparse_terms``, a lexical
+    search needs ``text``, a graph search needs ``seed_node_ids`` — the query's linked entity nodes
+    a traversal anchors on); and an optional ``filter`` is a metadata predicate that additionally
+    requires the backend to declare
     :attr:`Capability.FILTER`. ``top_k`` bounds the returned list. Construction is validated so a
     mode/payload contradiction (a dense query with no vector) fails at the boundary, leaving the
     backend to enforce only capability and dimension — the things only *it* knows.
@@ -77,6 +89,7 @@ class RetrievalQuery(BaseModel):
     text: str | None = None
     vector: tuple[float, ...] | None = None
     sparse_terms: dict[str, float] | None = None
+    seed_node_ids: tuple[str, ...] | None = None
     top_k: int = Field(default=10, ge=1)
     filter: dict[str, Any] | None = None
 
@@ -86,7 +99,8 @@ class RetrievalQuery(BaseModel):
 
         ``FILTER`` is not a query mode (it is a predicate) so it is invalid as ``mode``; ``DENSE``
         and ``MULTIVECTOR`` require ``vector``; ``SPARSE`` requires ``sparse_terms``; ``BM25``
-        requires a non-empty ``text``. This keeps mode/payload consistency out of every backend so
+        requires a non-empty ``text``; ``GRAPH`` requires non-empty ``seed_node_ids`` (a traversal
+        with no anchor is not a search). This keeps mode/payload consistency out of every backend so
         each adapter enforces only what is store-specific (declared capabilities + vector width).
         """
         if self.mode is Capability.FILTER:
@@ -100,5 +114,11 @@ class RetrievalQuery(BaseModel):
             raise ValueError(msg)
         if self.mode is Capability.BM25 and not self.text:
             msg = "RetrievalQuery.mode='bm25' requires non-empty 'text'."
+            raise ValueError(msg)
+        if self.mode is Capability.GRAPH and not self.seed_node_ids:
+            msg = (
+                "RetrievalQuery.mode='graph' requires non-empty 'seed_node_ids' — the query's "
+                "linked entity nodes the traversal anchors on."
+            )
             raise ValueError(msg)
         return self

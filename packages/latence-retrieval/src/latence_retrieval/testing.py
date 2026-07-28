@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 
 from latence_retrieval.contracts import Candidate, Capability
 from latence_retrieval.errors import BackendCapabilityError, BackendDimensionError
+from latence_retrieval.graph_retrieval import GraphDocument
 from latence_retrieval.multihop import _traverse, _validate_max_hops
 
 if TYPE_CHECKING:
@@ -264,3 +265,45 @@ class FakeGraphSource:
         if not seed_list:
             return {}
         return _traverse(self._edges, seed_list, max_hops)
+
+
+class FakeGraphDocumentSource:
+    """A faithful offline :class:`~latence_retrieval.graph_retrieval.GraphDocumentSource`.
+
+    The second adapter of the node→document seam the graph **retrieval leg** resolves through
+    (T-RET-2); the real one is
+    :class:`~latence_retrieval.graph_retrieval.DuckDBGraphDocumentSource` over the emitted chunk
+    parquet. A test plants the documents exactly as that table holds them — a chunk id, the
+    denormalised ``kg_node_ids`` it carries, its text/metadata — and asserts which chunks a
+    traversal's node set resolves to.
+
+    What it mirrors exactly (anti-false-green — it returns what a real index returns and nothing
+    more):
+
+    * **empty ``node_ids`` → ``[]``** — nothing to resolve; no engine is touched, so neither is
+      this.
+    * **each document at most once**, however many of its nodes matched — a real ``SELECT … WHERE
+      list_has_any(...)`` returns one row per chunk, not one per matching node.
+    * **a node with no documents contributes nothing** — never a crash, never a fabricated row.
+    * **deterministic ascending-``id`` order**, matching the real adapter's ``ORDER BY id``, so a
+      fused rank list is reproducible.
+
+    It invents no behaviour a real index lacks: it never returns a document that mentions none of
+    the requested nodes.
+    """
+
+    def __init__(self, documents: Iterable[GraphDocument]) -> None:
+        self._documents: list[GraphDocument] = list(documents)
+
+    def documents(self, node_ids: Collection[str]) -> list[GraphDocument]:
+        """Return the planted documents mentioning any of ``node_ids``, each once, id-ordered."""
+        wanted = set(node_ids)
+        if not wanted:
+            return []
+        matched = [
+            document
+            for document in self._documents
+            if wanted.intersection(document.node_ids)
+        ]
+        matched.sort(key=lambda d: d.id)
+        return matched
