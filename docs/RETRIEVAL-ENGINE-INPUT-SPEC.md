@@ -8,11 +8,15 @@ Schema-version constants, read from source at time of writing:
 
 | Constant | Value | Defined in |
 |---|---|---|
-| `SCHEMA_VERSION` (all record contracts) | **15** | `packages/latence-core/src/latence_core/contracts.py:150` |
-| `QUALITY_SCHEMA_VERSION` (Quality Report) | **19** | `packages/latence-core/src/latence_core/quality.py:97` |
+| `SCHEMA_VERSION` (all record contracts) | **19** | `packages/latence-core/src/latence_core/contracts.py:242` |
+| `QUALITY_SCHEMA_VERSION` (Quality Report) | **20** | `packages/latence-core/src/latence_core/quality.py:123` |
 | `PIPELINE_SCHEMA_VERSION` | **2** | `packages/latence-core/src/latence_core/pipeline.py:25` |
 
-Every record carries its `schema_version` field (serialized with the record). Contracts are **additive and versioned**: new fields default to `None`/empty so an older consumer keeps validating (e.g. v11 `offset_map`, v14 `induced_labels`, v15 `context_header` are all optional additive fields — see the changelog banner at `contracts.py:17-149`).
+Every record carries its `schema_version` field (serialized with the record), and every contract's field defaults to the SAME module-level `SCHEMA_VERSION` — so a record dumped today stamps **19** everywhere, whatever version first introduced the field it sits beside.
+
+Contracts are **usually additive**: a new field defaults to `None`/empty so an older consumer keeps validating (v11 `offset_map`, v14 `induced_labels`, v15 `context_header`, v16 `masked_content`/`pii_spans`, v17 `guard_types`/`raw_label` are all optional additive fields).
+
+**v19 is the exception, and it is BREAKING for `ChunkRecord`.** `page_map` (the parent document's whole page map, carried by value) was REPLACED by `page_slice` (only the page spans overlapping this chunk). `ChunkRecord` is `extra="forbid"`, so a v18 chunk record carrying `page_map` is now REJECTED, not ignored — an integrator holding v18 chunk JSONL must re-run Chunk from the Parse checkpoint. See the changelog banner at `contracts.py:18-241` for the per-version detail.
 
 ---
 
@@ -59,7 +63,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 
 | Field | Type | Optional? | Meaning (source: `contracts.py` `ChunkRecord` / `Record`) |
 |---|---|---|---|
-| `schema_version` | int | no | Contract version (15). |
+| `schema_version` | int | no | Contract version (19). |
 | `record_id` | string | no | The chunk's stable id (content-addressed). **Primary key.** |
 | `provenance` | object | no | `Provenance` — source lineage + offsets (see 2.9). |
 | `classification` | object | no | `Classification` — language/category/sensitivity (see 2.10). |
@@ -78,7 +82,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 **Example line** (abridged, chunk with a context header, no embedding):
 
 ```json
-{"classification":{"category":"contract","language":"en","schema_version":15,"sensitivity":"confidential"},"content":"Acme Corporation entered into a master services agreement with Beta LLC on 3 March 2024.","context_header":{"entities":["Acme Corporation","Beta LLC"],"entity_types":["Organization","Organization"],"kg_node_ids":["b1c2...","d3e4..."],"neighbor_node_ids":["f5a6..."],"neighbor_triples":["Acme Corporation —acquired→ Gamma Inc"],"situating_sentence":null,"model_id":null,"schema_version":15},"document_record_id":"sha256:9a…","index":4,"media_type":"text/markdown","offset_map":{"length":88,"segments":[{"doc_start":512,"local_start":0}],"schema_version":15},"page_slice":{"pages":[{"char_end":640,"char_start":420,"page_number":2,"schema_version":15}],"schema_version":15,"total_chars":1180},"provenance":{"char_end":600,"char_start":512,"document_id":"sha256:9a…","file_name":"msa.pdf","file_size":48210,"file_type":"pdf","page_end":2,"page_start":2,"schema_version":15,"source_system":null,"source_uri":"file:///corpus/msa.pdf"},"record_id":"sha256:1f…","risk_markers":[],"induced_labels":null,"schema_version":15,"token_count":21}
+{"classification":{"category":"contract","language":"en","schema_version":19,"sensitivity":"confidential"},"content":"Acme Corporation entered into a master services agreement with Beta LLC on 3 March 2024.","context_header":{"entities":["Acme Corporation","Beta LLC"],"entity_types":["Organization","Organization"],"kg_node_ids":["b1c2...","d3e4..."],"neighbor_node_ids":["f5a6..."],"neighbor_triples":["Acme Corporation —acquired→ Gamma Inc"],"situating_sentence":null,"model_id":null,"schema_version":19},"document_record_id":"sha256:9a…","index":4,"media_type":"text/markdown","offset_map":{"length":88,"segments":[{"doc_start":512,"local_start":0}],"schema_version":19},"page_slice":{"pages":[{"char_end":640,"char_start":420,"page_number":2,"schema_version":19}],"schema_version":19,"total_chars":1180},"provenance":{"char_end":600,"char_start":512,"document_id":"sha256:9a…","file_name":"msa.pdf","file_size":48210,"file_type":"pdf","page_end":2,"page_start":2,"schema_version":19,"source_system":null,"source_uri":"file:///corpus/msa.pdf"},"record_id":"sha256:1f…","risk_markers":[],"induced_labels":null,"schema_version":19,"token_count":21}
 ```
 
 ### 2.2 `records.parquet` — RAG corpus (Parquet / Arrow)
@@ -182,11 +186,11 @@ Writer: `_render_graphml` (`graph_export.py:279-315`). XML, `edgedefault="direct
 
 ### 2.8 `quality-report.json` (+ `.md`)
 
-Writers: `runner.py:1075` (`report.to_json()` → `quality-report.json`); `cli.py:112` (`report.render()` → `quality-report.md`). Contract: `quality.py` `QualityReport` (`schema_version` = 19). Top-level fields:
+Writers: `runner.py:1075` (`report.to_json()` → `quality-report.json`); `cli.py:112` (`report.render()` → `quality-report.md`). Contract: `quality.py` `QualityReport` (`schema_version` = 20 — the Quality Report versions INDEPENDENTLY of the record contracts). Top-level fields:
 
 | Field | Type | Present when | Meaning |
 |---|---|---|---|
-| `schema_version` | int | always | 19. |
+| `schema_version` | int | always | 20. |
 | `pipeline_name` / `run_id` | string | always | Run identity. |
 | `document_count` | int | always | Distinct source documents. |
 | `total_duration_seconds` | float | always | Sum of Stage durations. |
@@ -212,11 +216,11 @@ The `.md` is the same numbers rendered deterministically (`QualityReport.render`
 
 ### 2.9 `Provenance` (embedded in every record)
 
-`contracts.py:153-172`, `frozen`, `extra="forbid"`.
+`contracts.py:245-266`, `frozen`, `extra="forbid"`.
 
 | Field | Type | Optional? | Meaning |
 |---|---|---|---|
-| `schema_version` | int | no | 15. |
+| `schema_version` | int | no | 19. |
 | `source_uri` | string (min 1) | no | Storage URI the source was read from. |
 | `file_name` | string (min 1) | no | Source file name. |
 | `file_type` | string (min 1) | no | Lowercased extension, no dot. |
@@ -228,22 +232,22 @@ The `.md` is the same numbers rendered deterministically (`QualityReport.render`
 
 ### 2.10 `Classification` (embedded in every record)
 
-`contracts.py:175-186`, `frozen`.
+`contracts.py:267-288`, `frozen`.
 
 | Field | Type | Optional? | Meaning |
 |---|---|---|---|
-| `schema_version` | int | no | 15. |
+| `schema_version` | int | no | 19. |
 | `language` | string (min 1) | no | BCP-47-ish tag; `und` if unknown. |
 | `category` | string\|null | yes | e.g. `contract`. |
 | `sensitivity` | string | no (default `unknown`) | `public`/`internal`/`confidential`/… — the ACL/filter key. |
 
 ### 2.11 `ContextHeader` (W13; on `ChunkRecord.context_header`)
 
-`contracts.py:615-695`, `frozen`. Built deterministically (sorted, capped, content-addressed ids) from the run's `EntityMention` + `GraphRecord` streams.
+`contracts.py:825-890`, `frozen`. Built deterministically (sorted, capped, content-addressed ids) from the run's `EntityMention` + `GraphRecord` streams.
 
 | Field | Type | Optional? | Meaning |
 |---|---|---|---|
-| `schema_version` | int | no | 15. |
+| `schema_version` | int | no | 19. |
 | `entities` | list<string> | no (default `[]`) | The chunk's canonical entity names (sorted, deduped). |
 | `entity_types` | list<string> | no (default `[]`) | Entity type per name (same length + order as `entities`; validator-enforced). |
 | `neighbor_triples` | list<string> | no (default `[]`) | Top-k KG-neighbor relations rendered `A —label→ B`, confidence-sorted and **capped** (`max_neighbors_per_entity`, `max_triples`). |
