@@ -424,13 +424,20 @@ def test_oversized_pdf_page_clamped_not_crashed(
 def test_oversized_image_downscaled_to_longest_side_1540(
     fake_vllm: None, make_image: Callable[..., bytes]
 ) -> None:
-    """A 1200×2339 image downscales so its longest side == 1540, aspect preserved (shared recipe)."""
+    """A 1200×2339 image downscales so its longest side == 1540, aspect preserved (shared recipe).
+
+    T-OCR-2 amended the width: both sides now snap onto the 28-px patch-merge grid, so the exact
+    proportional ≈790 becomes 784. The served path shares ``PageRasteriser`` with the in-process
+    path precisely so this cannot diverge — that is what this assertion is for.
+    """
     img_bytes = make_image("scanned page text\n", dims=(1200, 2339))
     image = _provider()._rasteriser._image_from_bytes(img_bytes)
     w, h = image.size
     assert max(w, h) == 1540  # LightOn's official longest-side target, identical to parser.lighton
     assert h == 1540
-    assert w == round(1200 * (1540 / 2339))
+    assert w == 784  # == parser.lighton's width for the same page (the no-divergence check)
+    assert abs(w - round(1200 * (1540 / 2339))) <= 28
+    assert (w % 28, h % 28) == (0, 0)
 
 
 def test_unsupported_file_type_is_parse_error(fake_vllm: None) -> None:

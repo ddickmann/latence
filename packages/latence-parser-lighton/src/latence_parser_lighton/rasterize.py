@@ -17,10 +17,13 @@ What it does per document (LightOn's OFFICIAL preprocessing, verified from the m
   **max-megapixel budget** (:data:`MAX_RENDER_MEGAPIXELS`) so a giant page cannot force a gigapixel
   bitmap, and Pillow's ``Image.MAX_IMAGE_PIXELS`` is tightened so a decompression-bomb image
   **raises** rather than allocating multi-GB (restored afterward, no global side effect).
-* **Longest-side downscale** — after the bomb-clamp, a page/image whose longest side exceeds
-  ``max_longest_dim`` (default **1540**, LightOn's recipe: "render PDFs at 200 DPI to a target
-  longest dimension of 1540px, aspect preserved") is downscaled with **LANCZOS**; ``0``/``None``
-  disables it.
+* **Longest-side downscale, onto the 28-px patch-merge grid** — after the bomb-clamp, a
+  page/image whose longest side exceeds ``max_longest_dim`` (default **1540**, LightOn's recipe:
+  "render PDFs at 200 DPI to a target longest dimension of 1540px, aspect preserved") is
+  downscaled with **LANCZOS**, and BOTH sides are snapped down to a multiple of **28** px
+  (:func:`merge_grid_target`) because ``Mistral3PatchMerger`` merges 14-px patches 2x2 with
+  ``unfold(kernel=2, stride=2)`` and silently drops an odd trailing patch row/column. Never an
+  upscale; ``0``/``None`` disables both.
 * **Offset-0 type-spoof guards** — a ``.pdf`` whose bytes are not a PDF, or an image whose bytes
   match no known image magic, is rejected as a graceful :class:`RasterFailure` (defense-in-depth,
   #62).
@@ -50,6 +53,66 @@ DEFAULT_DPI = 200
 # A4 at 200 DPI is ~2339px tall — fed full-size that is ~2.3x the vision tokens vs the target. NOT
 # byte-identical (OCR output changes with resolution), so a config knob; 0/None disables.
 DEFAULT_MAX_LONGEST_DIM = 1540
+
+# --- The patch-merge grid BOTH sides must land on (T-OCR-2) -----------------------------------
+# LightOnOCR is a ``mistral3`` model over a ``pixtral`` vision tower: the page is cut into 14-px
+# patches, and ``Mistral3PatchMerger.forward`` then merges them 2x2 with
+# ``torch.nn.functional.unfold(kernel_size=2, stride=2)``. ``unfold`` emits ONLY COMPLETE WINDOWS,
+# so an odd patch row or column has no 2x2 partner and is **silently discarded** together with the
+# ~14 px of page it covered. 14 x 2 = 28: a side that is a multiple of 28 always has an even patch
+# count, so nothing is dropped. 1540 is already safe (1540/14 = 110, even) — but the SHORTER side
+# used to land wherever the aspect ratio put it, and a US-Letter page at 200 DPI (1700x2200) scales
+# to width 1190 = 85 patches = ODD, losing the right-hand 14 px of every such page.
+#
+# Honest scope (issues/e2e-extended/DECISIONS.md § D1a): the mechanism is verified in the
+# vLLM/transformers source; the visible-loss consequence is inferred, not LightOn-confirmed. It is
+# cheap to satisfy and cheap to test, so it is satisfied.
+PATCH_SIZE = 14
+PATCH_MERGE = 2
+MERGE_GRID = PATCH_SIZE * PATCH_MERGE
+
+
+def merge_grid_target(width: int, height: int, cap: int) -> tuple[int, int] | None:
+    """The page size to resize ``width x height`` to so BOTH sides sit on the 28-px merge grid.
+
+    Returns ``None`` when the image must be left exactly as it is — either it is already aligned
+    and within ``cap`` (no needless resample), or a side is narrower than one 28-px merge window,
+    where aligning it would mean **enlarging** the page. Never upscaling is a hard rule: LightOn's
+    recipe caps resolution, it does not manufacture it, and an upscaled page costs vision tokens
+    without adding information.
+
+    ``cap <= 0`` disables the longest-side knob entirely (``max_longest_dim = 0``, "hand me the raw
+    raster") and therefore disables the grid rounding with it — a deliberate, documented bypass:
+    an operator who turns the preprocessing off owns the patch grid.
+
+    Guarantees, all property-tested in ``test_rasterize_merge_grid.py``:
+
+    * both returned sides are ``0 mod 28`` — no patch row/column is dropped by the 2x2 merge;
+    * ``max(w, h) <= cap`` — LightOn's longest-dimension recipe still holds;
+    * neither side exceeds its input — no upscaling, ever;
+    * each side is within ONE 28-px step of where exact proportional scaling would put it, so the
+      aspect ratio is preserved to the finest granularity the grid can express.
+    """
+    if cap <= 0 or width <= 0 or height <= 0:
+        return None
+    longest = max(width, height)
+    # Downscale-only: an image already inside the cap keeps its scale and is merely snapped.
+    scale = 1.0 if longest <= cap else cap / float(longest)
+
+    sides: list[int] = []
+    for side in (width, height):
+        # The most this side may become: its own size (no upscaling) and never above the cap.
+        limit = min(side, cap)
+        if limit < MERGE_GRID:
+            return None  # a strip thinner than one merge window cannot be aligned downward
+        snapped = int(round(side * scale / MERGE_GRID)) * MERGE_GRID
+        if snapped > limit:  # nearest grid point overshoots -> step down to the one below
+            snapped = (limit // MERGE_GRID) * MERGE_GRID
+        snapped = max(snapped, MERGE_GRID)  # an extreme ratio can round a side to zero
+        sides.append(snapped)
+
+    target = (sides[0], sides[1])
+    return None if target == (width, height) else target
 
 # --- Pixel-bomb DoS cap (the Hardening-bar item; this Parser rasterises untrusted input) ------
 # The maximum megapixels a rasterised page / decoded image may occupy. A PDF page's render scale is
@@ -242,30 +305,32 @@ class PageRasteriser:
             Image.MAX_IMAGE_PIXELS = previous_cap
 
     def _downscale_longest(self, image: Any) -> Any:
-        """Downscale a page image so its LONGEST side == ``max_longest_dim`` px (aspect preserved).
+        """Downscale a page image onto the merge grid, longest side <= ``max_longest_dim`` px.
 
         LightOn's OFFICIAL preprocessing: "render PDFs at 200 DPI to a target longest dimension of
         1540px, maintaining aspect ratio." Applied to BOTH rasterised PDF pages and bare-image
-        inputs, AFTER the megapixel bomb-clamp (so a bomb still degrades gracefully first). When the
-        cap is disabled (``max_longest_dim == 0``) or the image is already within it, the image is
-        returned untouched — no upscaling, no resample cost. A downscale uses LANCZOS (Pillow's
+        inputs, AFTER the megapixel bomb-clamp (so a bomb still degrades gracefully first).
+
+        On top of that cap, BOTH sides are snapped down onto the 28-px patch-merge grid — see
+        :func:`merge_grid_target` for why (an odd patch row is silently dropped by
+        ``Mistral3PatchMerger``'s ``unfold(kernel=2, stride=2)``). That makes this a downscale even
+        for a page already inside the cap, which is the point: 800x1000 becomes 784x980 rather than
+        losing its bottom and right edges inside the vision tower. It is still never an UPSCALE.
+
+        When the cap is disabled (``max_longest_dim == 0``), or the image is already aligned and in
+        budget, the image is returned untouched — no resample cost. A resize uses LANCZOS (Pillow's
         high-quality resampling) so text stays legible. NOT byte-identical to the un-capped path
         (OCR output changes with resolution) — the throughput knob, defaulting to LightOn's 1540.
         """
-        cap = self._max_longest_dim
-        if cap <= 0:
-            return image
         width, height = image.size
-        longest = max(width, height)
-        if longest <= cap:
+        target = merge_grid_target(width, height, self._max_longest_dim)
+        if target is None:
             return image
         from PIL import (
             Image,  # noqa: PLC0415 - deferred heavy dep (ADR-0016); already imported above
         )
 
-        ratio = cap / float(longest)
-        new_size = (max(1, round(width * ratio)), max(1, round(height * ratio)))
-        return image.resize(new_size, Image.Resampling.LANCZOS)
+        return image.resize(target, Image.Resampling.LANCZOS)
 
     def _guarded(self, op: str) -> Any:
         """Open the Provider's guard for ``op`` (native fault → typed ProviderError, no content).
