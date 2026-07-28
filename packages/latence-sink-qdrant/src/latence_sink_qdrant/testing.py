@@ -13,8 +13,20 @@ status  what the real store rejects, and this fake rejects too
 400     a point id that is neither an unsigned integer nor a UUID — **a raw content-addressed**
         ``record_id`` **string is not a legal Qdrant point id**; a vector whose width is not the
         collection's dimension; a named-vector collection given an unnamed vector (or vice versa,
-        or an unknown vector name); a payload that is not a JSON-serialisable string-keyed object
+        or an unknown vector name); a payload that is not a JSON-serialisable string-keyed object;
+        a collection declaring no vector index at all; a **sparse** vector whose ``indices`` and
+        ``values`` are not parallel, whose indices are not unique non-negative integers, or whose
+        values are not numbers; a sparse name colliding with a dense one; a dense list sent under
+        a sparse name (or a ``SparseVector`` under a dense one); a sparse config that is not a
+        *named* mapping — Qdrant has no unnamed sparse vector
 ======  ==========================================================================================
+
+**Sparse vectors are modelled here for the same reason the point-id rejection is** (T-RET-1,
+``issues/dogfood/qdrant-native-sparse.md``): before this, the class contained zero occurrences of
+"sparse", so the suite was *structurally unable* to catch a sink that created dense-only
+``VectorParams`` while the retrieval side already queried ``using=<sparse vector name>``. A fake that
+cannot express a feature manufactures green just as surely as one that accepts what the real store
+rejects — so the sparse surface is written from the rejection side first, exactly like the rest.
 
 It is faithful to the *contract*, not to Qdrant's internals: it stores points in a dict and it
 re-implements none of the HNSW/ANN machinery (there is no search here — the sink never searches,
@@ -79,6 +91,39 @@ class VectorParams:
 
     size: int
     distance: str
+
+
+@dataclass(frozen=True)
+class SparseIndexParams:
+    """Storage/tuning knobs of a sparse index (mirrors ``models.SparseIndexParams``)."""
+
+    on_disk: bool | None = None
+    full_scan_threshold: int | None = None
+
+
+@dataclass(frozen=True)
+class SparseVectorParams:
+    """A **named** sparse vector index definition.
+
+    Deliberately width-less: a sparse index has no fixed dimension — that is the whole point of it —
+    so there is no ``size`` to validate a vector against, only the shape of the vector itself.
+    """
+
+    index: SparseIndexParams | None = None
+    modifier: str | None = None
+
+
+@dataclass(frozen=True)
+class SparseVector:
+    """One sparse vector: parallel ``indices`` (term ids) and ``values`` (weights).
+
+    Mutable list fields, so this is deliberately **not** hashable — matching
+    ``qdrant_client.models.SparseVector``, which is a pydantic model, not a key. Equality is
+    field-wise, which is what a test asserting a round-trip needs.
+    """
+
+    indices: list[int] = field(default_factory=list)
+    values: list[float] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -163,11 +208,42 @@ class CountResult:
     count: int
 
 
+@dataclass(frozen=True)
+class CollectionParams:
+    """The vector shape a collection declares — what ``get_collection`` reports back.
+
+    ``vectors`` mirrors what was passed to ``create_collection``: a bare :class:`VectorParams` for
+    the single unnamed dense vector, or a ``{name: VectorParams}`` mapping (``{}`` for a
+    sparse-only collection). ``sparse_vectors`` is always a mapping, because Qdrant sparse vectors
+    are always named.
+    """
+
+    vectors: dict[str, VectorParams] | VectorParams
+    sparse_vectors: dict[str, SparseVectorParams]
+
+
+@dataclass(frozen=True)
+class CollectionConfig:
+    """``CollectionInfo.config`` — as far as anything here reads it."""
+
+    params: CollectionParams
+
+
+@dataclass(frozen=True)
+class CollectionInfo:
+    """The result of ``get_collection``: the store's own account of a collection's shape."""
+
+    config: CollectionConfig
+
+
 class _Models:
     """The ``qdrant_client.models`` namespace, as far as the sink uses it."""
 
     Distance = Distance
     VectorParams = VectorParams
+    SparseVectorParams = SparseVectorParams
+    SparseIndexParams = SparseIndexParams
+    SparseVector = SparseVector
     PointStruct = PointStruct
     MatchValue = MatchValue
     FieldCondition = FieldCondition
@@ -214,6 +290,7 @@ class FakeQdrantClient:
         #: start failing mid-run — the only way to exercise "the store died half way through".
         self.fail_on = set(fail_on or ())
         self._config: dict[str, VectorParams | dict[str, VectorParams]] = {}
+        self._sparse_config: dict[str, dict[str, SparseVectorParams]] = {}
         self.points: dict[str, dict[Any, tuple[Any, dict[str, Any]]]] = {}
         self.upserted_ids: list[Any] = []
         self.calls: list[str] = []
@@ -232,23 +309,83 @@ class FakeQdrantClient:
     def create_collection(
         self,
         collection_name: str,
-        vectors_config: VectorParams | dict[str, VectorParams],
+        vectors_config: VectorParams | dict[str, VectorParams] | None = None,
+        sparse_vectors_config: dict[str, SparseVectorParams] | None = None,
     ) -> bool:
+        """Declare a collection's dense and/or sparse indexes.
+
+        ``vectors_config`` may now legitimately be an **empty mapping** — a sparse-only collection
+        is a real Qdrant shape (a SPLADE index with no dense side) — but a collection declaring
+        *neither* a dense nor a sparse index is a 400: it could never be queried, and accepting it
+        would let a mis-wired loader create a collection that silently answers nothing.
+        """
         self._enter("create_collection")
         if collection_name in self.points:
             raise FakeUnexpectedResponse(409, f"Collection `{collection_name}` already exists!")
+        sparse = self._check_sparse_config(sparse_vectors_config)
         if isinstance(vectors_config, VectorParams):
             self._check_params(vectors_config)
-        elif isinstance(vectors_config, dict) and vectors_config:
+            dense_names = {""}
+        elif isinstance(vectors_config, dict):
             for name, params in vectors_config.items():
                 if not isinstance(name, str) or not name:
                     raise FakeUnexpectedResponse(400, "vector name must be a non-empty string")
                 self._check_params(params)
+            dense_names = set(vectors_config)
+        elif vectors_config is None:
+            dense_names = set()
         else:
             raise FakeUnexpectedResponse(400, "vectors_config must be VectorParams or a mapping")
-        self._config[collection_name] = vectors_config
+
+        if not dense_names and not sparse:
+            raise FakeUnexpectedResponse(
+                400, "a collection must declare at least one dense or sparse vector"
+            )
+        collision = dense_names & set(sparse)
+        if collision:
+            raise FakeUnexpectedResponse(
+                400,
+                f"vector name(s) {sorted(collision)} are declared both dense and sparse; one point "
+                "carries one vector map, so a name cannot mean two indexes",
+            )
+        self._config[collection_name] = vectors_config if vectors_config is not None else {}
+        self._sparse_config[collection_name] = sparse
         self.points[collection_name] = {}
         return True
+
+    def get_collection(self, collection_name: str) -> CollectionInfo:
+        """The store's own account of a collection's declared vector shape.
+
+        The only way to ask a live Qdrant "does this collection actually carry the sparse index I
+        am about to upsert into?" — which is what turns an otherwise-opaque 400 on the first upsert
+        into a named error.
+        """
+        self._enter("get_collection")
+        self._collection(collection_name)
+        return CollectionInfo(
+            config=CollectionConfig(
+                params=CollectionParams(
+                    vectors=self._config[collection_name],
+                    sparse_vectors=dict(self._sparse_config[collection_name]),
+                )
+            )
+        )
+
+    @staticmethod
+    def _check_sparse_config(raw: object) -> dict[str, SparseVectorParams]:
+        """Sparse vectors are **always named** — there is no unnamed sparse vector in Qdrant."""
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise FakeUnexpectedResponse(
+                400, "sparse_vectors_config must be a mapping of name -> SparseVectorParams"
+            )
+        for name, params in raw.items():
+            if not isinstance(name, str) or not name:
+                raise FakeUnexpectedResponse(400, "sparse vector name must be a non-empty string")
+            if not isinstance(params, SparseVectorParams):
+                raise FakeUnexpectedResponse(400, "expected SparseVectorParams")
+        return dict(raw)
 
     @staticmethod
     def _check_params(params: object) -> None:
@@ -271,6 +408,7 @@ class FakeQdrantClient:
         self._enter("upsert")
         store = self._collection(collection_name)
         config = self._config[collection_name]
+        sparse_config = self._sparse_config[collection_name]
         if not isinstance(points, list) or not points:
             raise FakeUnexpectedResponse(400, "points must be a non-empty list")
         staged: list[tuple[Any, Any, dict[str, Any]]] = []
@@ -278,7 +416,7 @@ class FakeQdrantClient:
             if not isinstance(point, PointStruct):
                 raise FakeUnexpectedResponse(400, "each point must be a PointStruct")
             pid = _validate_point_id(point.id)
-            vector = _validate_vector(point.vector, config)
+            vector = _validate_vector(point.vector, config, sparse_config)
             payload = _validate_payload(point.payload)
             staged.append((pid, vector, payload))
         # All-or-nothing per request, like a real batch upsert: a rejected point does not leave the
@@ -450,43 +588,122 @@ def _validate_point_id(raw: Any) -> Any:
     raise FakeUnexpectedResponse(400, "value is not a valid point ID")
 
 
-def _validate_vector(raw: Any, config: VectorParams | dict[str, VectorParams]) -> Any:
-    """A vector must match the collection's declared shape: width, and named-vs-unnamed."""
-    if isinstance(config, VectorParams):
-        if isinstance(raw, dict):
+def _validate_vector(
+    raw: Any,
+    config: VectorParams | dict[str, VectorParams],
+    sparse_config: dict[str, SparseVectorParams] | None = None,
+) -> Any:
+    """A vector must match the collection's declared shape: width, named-vs-unnamed, dense-vs-sparse.
+
+    With no sparse index declared this is exactly what it always was — an unnamed collection takes a
+    bare list and a named one takes a map — so a dense-only load's stored shape is untouched. With a
+    sparse index declared the point carries **one** vector map spanning both kinds, and each name is
+    checked against the kind it was declared as: a dense list under a sparse name, or a
+    :class:`SparseVector` under a dense name, is the same 400 a real Qdrant returns.
+    """
+    sparse_config = sparse_config or {}
+    if not sparse_config:
+        if isinstance(config, VectorParams):
+            if isinstance(raw, dict):
+                raise FakeUnexpectedResponse(
+                    400, "collection has a single unnamed vector; a named vector map was given"
+                )
+            return _dense(raw, config)
+        if not isinstance(raw, dict):
             raise FakeUnexpectedResponse(
-                400, "collection has a single unnamed vector; a named vector map was given"
+                400, "collection has named vectors; an unnamed vector was given"
             )
-        values = _floats(raw)
-        if len(values) != config.size:
-            raise FakeUnexpectedResponse(
-                400,
-                f"Wrong input: Vector dimension error: expected dim: {config.size}, "
-                f"got {len(values)}",
-            )
-        return values
+        out: dict[str, Any] = {}
+        for name, values in raw.items():
+            if name not in config:
+                raise FakeUnexpectedResponse(
+                    400, f"Wrong input: Not existing vector name error: {name}"
+                )
+            out[name] = _dense(values, config[name])
+        _require_complete(out, set(config))
+        return out
+
+    dense_config = {"": config} if isinstance(config, VectorParams) else dict(config or {})
     if not isinstance(raw, dict):
+        # The unnamed dense vector of a collection that ALSO has a sparse index is addressed by
+        # its real name — the empty string — because the point's sparse half needs a name too.
         raise FakeUnexpectedResponse(
             400, "collection has named vectors; an unnamed vector was given"
         )
-    out: dict[str, list[float]] = {}
+    mixed: dict[str, Any] = {}
     for name, values in raw.items():
-        if name not in config:
+        if name in dense_config:
+            if isinstance(values, SparseVector):
+                raise FakeUnexpectedResponse(
+                    400, f"Wrong input: vector {name!r} is dense; a SparseVector was given"
+                )
+            mixed[name] = _dense(values, dense_config[name])
+        elif name in sparse_config:
+            mixed[name] = _sparse(values, name)
+        else:
             raise FakeUnexpectedResponse(
                 400, f"Wrong input: Not existing vector name error: {name}"
             )
-        floats = _floats(values)
-        if len(floats) != config[name].size:
-            raise FakeUnexpectedResponse(
-                400,
-                f"Wrong input: Vector dimension error: expected dim: {config[name].size}, "
-                f"got {len(floats)}",
-            )
-        out[name] = floats
-    missing = set(config) - set(out)
+    _require_complete(mixed, set(dense_config) | set(sparse_config))
+    return mixed
+
+
+def _require_complete(given: dict[str, Any], declared: set[str]) -> None:
+    missing = declared - set(given)
     if missing:
         raise FakeUnexpectedResponse(400, f"Wrong input: missing vector(s) {sorted(missing)}")
-    return out
+
+
+def _dense(raw: Any, params: VectorParams) -> list[float]:
+    values = _floats(raw)
+    if len(values) != params.size:
+        raise FakeUnexpectedResponse(
+            400,
+            f"Wrong input: Vector dimension error: expected dim: {params.size}, "
+            f"got {len(values)}",
+        )
+    return values
+
+
+def _sparse(raw: Any, name: str) -> SparseVector:
+    """A sparse vector is two parallel lists — and every way they can disagree is a 400.
+
+    An **empty** sparse vector is not one of them: a chunk whose redacted text has no surviving
+    terms genuinely has no term weights, and rejecting it would make redaction a load failure.
+    """
+    if not isinstance(raw, SparseVector):
+        raise FakeUnexpectedResponse(
+            400, f"Wrong input: vector {name!r} is sparse; a SparseVector is required"
+        )
+    if not isinstance(raw.indices, (list, tuple)) or not isinstance(raw.values, (list, tuple)):
+        raise FakeUnexpectedResponse(
+            400, "sparse vector indices and values must both be lists of the same length"
+        )
+    if len(raw.indices) != len(raw.values):
+        raise FakeUnexpectedResponse(
+            400,
+            f"Wrong input: sparse vector {name!r} has {len(raw.indices)} indices and "
+            f"{len(raw.values)} values; they must be of the same length",
+        )
+    indices: list[int] = []
+    for index in raw.indices:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise FakeUnexpectedResponse(400, "sparse vector indices must be integers")
+        if index < 0:
+            raise FakeUnexpectedResponse(
+                400, "sparse vector indices must be non-negative integers"
+            )
+        indices.append(int(index))
+    if len(set(indices)) != len(indices):
+        raise FakeUnexpectedResponse(
+            400, "sparse vector indices must be unique — a duplicate term id is ambiguous"
+        )
+    values: list[float] = []
+    for value in raw.values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise FakeUnexpectedResponse(400, "sparse vector values must be numbers")
+        values.append(float(value))
+    return SparseVector(indices=indices, values=values)
 
 
 def _floats(raw: Any) -> list[float]:
@@ -540,6 +757,9 @@ def _matches(payload: dict[str, Any], filt: Filter) -> bool:
 
 __all__ = [
     "MODELS",
+    "CollectionConfig",
+    "CollectionInfo",
+    "CollectionParams",
     "CountResult",
     "Distance",
     "FakeQdrantClient",
@@ -553,5 +773,8 @@ __all__ = [
     "PointIdsList",
     "PointStruct",
     "Record",
+    "SparseIndexParams",
+    "SparseVector",
+    "SparseVectorParams",
     "VectorParams",
 ]
