@@ -295,26 +295,37 @@ Pre-1.0, and specific about it.
 - Measured per-Stage throughput with hardware, date and a reproduction command on every row, plus an
   explicit *not yet measured* list: [`PERF-RESULTS.md`](./PERF-RESULTS.md).
 
-**Not yet proven, stated plainly:**
+**Not yet proven — and the repository will not go public until it is.**
 
-- **The extended GPU end-to-end run is prepared, not proven.** The pipeline itself is built, merged
-  and green, and the RFC result above was measured on real hardware — but the large, staged run on a
-  24 GB Ampere card is designed down to the ticket level and has **not been executed**. Two defects
-  are already documented against it: a TorchScript-JIT kill that fires unconditionally on hardware
-  that never needed it, and micro-batch/thread defaults that encode one specific 32 GB / 128-core pod
-  instead of reading the machine. [`issues/e2e-extended/`](./issues/e2e-extended/README.md) holds the
-  decisions, the tickets and the evidence for each.
+The unmet claims are not buried in an issue tracker. They are a checklist,
+[`RELEASE-GATES.md`](./RELEASE-GATES.md), whose numbers live on one page,
+[`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md), where **every value is still a `PENDING:`
+token**. Those tokens are load-bearing: `test_public_release_gate.py` inventories them on every
+build, and under `LATENCE_RELEASE_CHECK=1` it **fails** while any remain. Publishing with an
+unfilled table by forgetting is not possible.
+
+What is outstanding:
+
+- **The extended GPU end-to-end run is prepared, not executed.** The pipeline is built, merged and
+  green, and the RFC result above was measured on real hardware — but the large staged run on a 24 GB
+  Ampere card exists as decisions and tickets, not as numbers. Two defects are already documented
+  against it: a TorchScript-JIT kill that fires unconditionally on hardware that never needed it, and
+  micro-batch/thread defaults that encode one specific 32 GB / 128-core pod instead of reading the
+  machine. [`issues/e2e-extended/`](./issues/e2e-extended/README.md) holds the evidence for each.
+- **SPLADE as a fused signal, and graph traversal as a retrieval leg, are implemented but unproven
+  on real data.** Until recently the sparse index was never built despite a complete query path, and
+  the graph could only *reorder* a candidate pool it had not chosen. Both now work; neither has been
+  demonstrated against a live store — a sparse-only query returning documents dense-only does not, and
+  a gold document unreachable by dense and sparse recovered by traversal. Those are Gate 2 line items.
 - **The retrieval benchmark harness is designed but deliberately unbuilt.** Hop stratification, the
   eight necessity gates (closed-book, single-hop baseline, per-edge necessity, DiRe, bridge leakage,
   adversarial distractors, evidence accessibility, human audit) and the KG ablation are specified in
   [`DECISIONS.md`](./issues/e2e-extended/DECISIONS.md) §D9 and remain **unimplemented** — building a
   measurement harness against a stand-in corpus is a mistake this project has already paid for once.
-  The RFC numbers are a real measurement of a narrower thing: one corpus, 90 generated questions,
-  single-passage gold.
+  The RFC numbers above are a real measurement of a narrower thing: one corpus, 90 generated
+  questions, single-passage gold, three signals rather than four.
 - **Scale is characterised, not eliminated.** The 100k / 1M-document envelopes are parked in
   `PERF-RESULTS.md` rather than previewed.
-- **SPLADE's index-time path is built; native sparse wiring into the fused proof is deferred.** The
-  measured stack above is three signals, not four, and says so.
 - **Multi-vector / MUVERA ship as real but experimental, off by default,** naming no checkpoint
   (ADR-0050).
 - **Nothing has been released.** No public artifact exists and nothing is on PyPI. The signing and
@@ -400,7 +411,8 @@ Copyright 2026 Dennis Dickmann (latence.ai). See [`NOTICE`](./NOTICE).
 | **Read the results** | [`docs/getting-started/run-console.md`](./docs/getting-started/run-console.md) — the offline, read-only run console |
 | **Keep a corpus current** | [incremental add / update / retract / GDPR purge](./docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge) |
 | **Compare Providers** | [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) · [`docs/running-a-stack.md`](./docs/running-a-stack.md) |
-| **Check our numbers** | [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) · [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) · [`PERF-RESULTS.md`](./PERF-RESULTS.md) |
+| **Check our numbers** | [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) (measured) · [`PERF-RESULTS.md`](./PERF-RESULTS.md) (measured) · [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) (reproduce them) |
+| **See what is still unproven** | [`RELEASE-GATES.md`](./RELEASE-GATES.md) · [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md) — every value there is still a placeholder, and the build knows it |
 | **Read the decisions** | [`docs/adr/`](./docs/adr/) · [`CONTEXT.md`](./CONTEXT.md) — the glossary |
 | **Contribute** | [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — note the contributor position in `COMMERCIAL.md` |
 | **Evaluate for adoption** | [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) · [`SECURITY.md`](./SECURITY.md) · [`CHANGELOG.md`](./CHANGELOG.md) |
