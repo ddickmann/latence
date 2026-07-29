@@ -34,24 +34,40 @@ outside any employer.
 
 ## 2. What survives the maintainer: license & fork posture
 
-- **Apache License 2.0**, repository root `LICENSE`, with `NOTICE` and per-package
-  `license = "Apache-2.0"` metadata on every publishable distribution. Apache-2.0
-  is irrevocable for code already released: a fork does not need the maintainer's
-  permission, cooperation, or continued existence.
-- **Patent grant.** Apache-2.0 §3 grants adopters a perpetual, worldwide,
-  royalty-free patent licence from every contributor — the reason procurement
-  usually prefers it over MIT/BSD for a single-owner project.
-- **No CLA, no copyright assignment.** `CONTRIBUTING.md` → *Legal* uses an
-  inbound-equals-outbound term: contributions are licensed under the project's
-  Apache-2.0. There is no entity that could relicense the project out from under
-  a fork.
+- **PolyForm Noncommercial License 1.0.0** (SPDX `PolyForm-Noncommercial-1.0.0`),
+  repository root `LICENSE`, with `NOTICE` and per-package
+  `license = "PolyForm-Noncommercial-1.0.0"` metadata on every publishable
+  distribution. Noncommercial use is free and needs nobody's permission: a
+  **noncommercial** fork does not need the maintainer's cooperation or continued
+  existence. **Commercial use requires a separate written agreement** with the
+  copyright holder ([`COMMERCIAL.md`](../COMMERCIAL.md)) — and that agreement *does*
+  depend on the maintainer being reachable, which is the single largest continuity
+  risk on this page. Read §1 and §5 with that in mind.
+- **Patent grant, and its limits.** PolyForm's *Patent License* section grants a
+  patent licence from **the licensor only** — not, as Apache-2.0 §3 would, from every
+  contributor — and only for the licence's *permitted purposes*, i.e. noncommercial
+  ones. A *Patent Defense* clause ends that licence immediately if you assert a patent
+  claim against the software. Procurement teams that require a broad, contributor-wide,
+  commercially-scoped patent grant will not find it here and should raise it as a term
+  of the commercial agreement.
+- **The grant is not irrevocable.** Unlike Apache-2.0, PolyForm's *Violations* section
+  ends all of your licences if a violation notified in writing is not cured within
+  32 days. A fork is durable only for as long as it stays inside the permitted purposes.
+- **A CLA is required, precisely because commercial rights are reserved.**
+  `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement*
+  requires a signed CLA on every contribution, including one-line and documentation
+  changes: the owner can only grant commercial licences over code they hold sufficient
+  rights in. This is a real concentration of rights in one person — it is the
+  deliberate trade for the commercial lane, not an oversight, and it is the opposite of
+  the inbound-equals-outbound posture this section previously described.
 - **Permissive dependencies only.** `THIRD-PARTY-LICENSES.md` records every runtime
   dependency and every default model with its licence, and
   [ADR-0012](adr/0012-permissive-only-reference-providers-gemma-opt-in.md) makes
   permissive-only the *default* rule: restricted-licence models (EmbeddingGemma)
   are opt-in and never a default. Model **weights** and model **code** licences are
-  verified separately. A fork therefore inherits no copyleft or
-  field-of-use surprise. The one disclosed exception is the CUDA wheel set pulled in
+  verified separately. A fork therefore inherits no copyleft or field-of-use surprise
+  *from the dependency tree* — the field-of-use restriction it does inherit is the
+  project's own, stated in the first bullet. The one disclosed exception is the CUDA wheel set pulled in
   by the two pinned GPU environments (`deploy/env/gpu-learned/`,
   `deploy/env/served-ocr-server/`), which carry NVIDIA's proprietary EULAs; each wheel
   is named in `THIRD-PARTY-LICENSES.md` and the disclosure is machine-gated
@@ -230,18 +246,32 @@ Regulation applies from 11 December 2027.
 
 **How this project sits relative to the CRA.**
 
-- The framework is **free and open-source software developed and released by an
-  individual, outside a commercial activity**, under Apache-2.0, with no paid
-  support, no hosted service, and no monetisation attached to it (see §2 and §4).
-  On that basis the CRA's *manufacturer* obligations are not engaged by this
-  repository as it stands.
+- **This classification changed on 2026-07-29 and is no longer a clean "outside a
+  commercial activity" case.** The previous text rested on the project being FOSS
+  released by an individual with "no monetisation attached to it". That premise ended
+  when the project relicensed to PolyForm Noncommercial and began offering commercial
+  licences ([`COMMERCIAL.md`](../COMMERCIAL.md)). This is exactly the trigger the
+  bullet below reserves, and it is recorded here rather than left implicit.
+- **PolyForm Noncommercial is not an OSI-approved open-source licence** (it restricts
+  the field of use), so the CRA's FOSS-specific carve-outs cannot simply be assumed to
+  apply. Recital-level "free and open-source software" framing is not available to this
+  repository in the form it was before.
+- What has **not** changed, and still bears on the analysis: there is no legal person
+  behind the project (§1), no hosted service, no phone-home, and no paid support
+  contract or contractual response time (§4, §5.1). Charging for a commercial licence
+  is monetisation of the *licence*, not the placing of a supported product on the
+  market, and no commercial agreement has been executed at the time of writing.
 - The CRA's lighter **"open-source software steward"** regime applies to a *legal
   person* providing sustained support for FOSS intended for commercial activities.
-  This project has no such legal person behind it (§1), so it does not present
-  itself as a steward either.
-- **If that changes** — commercial support, a sponsoring entity, a hosted offering —
-  the classification changes with it, and this section must be re-examined before
-  the change ships, not after.
+  This project has no such legal person behind it (§1), so it does not present itself
+  as a steward either.
+- **Status: open, and deliberately not asserted.** Whether the *manufacturer*
+  obligations are engaged once a commercial licence is actually sold is a question this
+  page does not answer, because answering it correctly requires the legal advice this
+  section disclaims. An evaluator should treat the CRA position as **unresolved**, not
+  as cleared. If a commercial agreement is executed, a sponsoring entity is formed, or
+  a hosted offering appears, the classification must be settled with counsel **before**
+  that ships, not after.
 
 **What the integrator actually gets.** If you integrate this framework into a
 product you place on the EU market, *you* are the manufacturer of that product and
@@ -258,7 +288,7 @@ you will be asked for:
 | Secure-by-default configuration | scheme allowlist denying `http`/`ftp`/`sftp` by default, two Screening checkpoints, universal redaction floor ([ADR-0044](adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)) |
 | Integrity & authenticity of the delivered artifact | keyless Sigstore signature over `SHA256SUMS` + the VERIFY.md instruction sheet, produced by `scripts/release-integrity.sh` (§5.4) |
 | Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `issues/gate/G1-RESULTS.md` |
-| Ability to remediate independently of the supplier | Apache-2.0 + reproducible local gate (§2) |
+| Ability to remediate independently of the supplier | PolyForm Noncommercial's *Changes and New Works* licence + reproducible local gate (§2) — **for noncommercial use**; a commercial integrator needs the agreement in [`COMMERCIAL.md`](../COMMERCIAL.md) to rely on this |
 
 **What it does not give you**, and you must cover yourself: automated dependency-CVE
 gating (§5.5), a supported-version lifetime with backports (§4), and any contractual
@@ -274,9 +304,9 @@ goes red — so this page cannot quietly become aspirational.
 
 | Claim | Artifact |
 | --- | --- |
-| Apache-2.0, personally owned | `LICENSE`, `NOTICE`, [ADR-0001](adr/0001-open-source-core-owned-personally.md) |
+| PolyForm-Noncommercial-1.0.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](../COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md) |
 | Single maintainer, every path | `.github/CODEOWNERS` |
-| Inbound = outbound, no CLA | `CONTRIBUTING.md` → *Legal* |
+| CLA required on every contribution | `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement* |
 | Docs-as-handover discipline | `CONTEXT.md`, [`docs/adr/`](adr/index.md), `CONTRIBUTING.md` → *ADR + CONTEXT discipline* |
 | Permissive-only defaults, weights ≠ code | `THIRD-PARTY-LICENSES.md`, [ADR-0012](adr/0012-permissive-only-reference-providers-gemma-opt-in.md) |
 | Supported versions = `main` + latest only | `SECURITY.md` → *Supported versions* |
