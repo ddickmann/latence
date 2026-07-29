@@ -1,0 +1,45 @@
+{
+  "entity_types": [
+    "company filing form",
+    "contract or award",
+    "date",
+    "facility",
+    "federal register citation",
+    "financial statement item",
+    "geographic feature",
+    "government agency",
+    "identifier or reference number",
+    "location",
+    "monetary amount",
+    "natural resource or material",
+    "organization",
+    "percentage",
+    "person",
+    "program or project",
+    "publication or report",
+    "quantity or measurement",
+    "security or share class",
+    "statute or regulation",
+    "web address"
+  ],
+  "pii_types": [
+    "address",
+    "bank account number",
+    "credit card number",
+    "email",
+    "person",
+    "phone number",
+    "social security number",
+    "tax id"
+  ],
+  "relation_types": [
+    "administered by",
+    "amends",
+    "authorized by",
+    "filed with",
+    "issued by",
+    "located in",
+    "owned by",
+    "reported for period"
+  ]
+}

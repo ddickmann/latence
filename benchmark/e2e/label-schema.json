@@ -1,0 +1,45 @@
+{
+  "entity_types": {
+    "government agency": ["Department", "Bureau", "Agency", "Administration", "Commission", "Secretary", "Federal", "National", "Division", "Board", "Congress", "Government"],
+    "person": ["Mr", "Mrs", "Ms", "Dr", "Director", "Chairman", "Commissioner", "Administrator", "President", "Senator", "Representative", "Governor", "Judge", "Attorney", "Contact", "signed", "spokesman", "author", "staff", "official", "name", "individual", "employee", "witness", "he", "she", "his", "her"],
+    "organization": ["Inc", "Corp", "Corporation", "Company", "LLC", "Ltd", "Association", "Institute", "Foundation", "University", "College", "Council", "Committee", "Society", "Partnership", "firm"],
+    "location": ["County", "City", "State", "Street", "Avenue", "Road", "District", "Region", "Township", "Village", "north", "south", "east", "west", "located"],
+    "date": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December", "date", "dated", "year", "annual", "fiscal", "quarter", "effective", "expires", "revised", "deadline", "period", "Monday", "Friday"],
+    "monetary amount": ["million", "billion", "dollars", "USD", "cost", "costs", "fee", "fees", "budget", "appropriation", "funding", "price", "paid", "payment", "revenue", "amount", "total", "expenditure", "salary", "charge", "worth", "sum", "funds", "sales", "financial", "expense", "profit", "invoice", "compensation", "penalty", "premium", "bid"],
+    "percentage": ["percent", "percentage", "rate", "ratio", "average"],
+    "quantity or measurement": ["acres", "miles", "feet", "inches", "tons", "degrees", "square", "gallons", "pounds", "meters", "hectares", "hours", "units", "number", "count", "population"],
+    "statute or regulation": ["U.S.C", "CFR", "Public Law", "Act", "section", "subpart", "regulation", "rule", "statute", "title", "code", "amended", "chapter", "paragraph", "law", "requirements"],
+    "federal register citation": ["Federal Register", "FR Doc", "Proposed Rules", "Final Rule", "Notice", "Register", "Volume", "comment", "rulemaking"],
+    "identifier or reference number": ["Docket", "Case", "File", "number", "identifier", "reference", "serial", "ID", "code", "index"],
+    "publication or report": ["Report", "Bulletin", "Publication", "Circular", "Handbook", "Manual", "Appendix", "Table", "Figure", "Study", "Survey", "Form", "Guide", "document", "page"],
+    "program or project": ["Program", "Project", "Initiative", "Grant", "Fund", "Plan", "System", "Service", "activities"],
+    "contract or award": ["Contract", "Award", "Solicitation", "Procurement", "Bid", "Auction", "Sale", "Purchase", "Lease", "Offer", "Terms", "Buyer", "Seller", "bidder"],
+    "facility": ["Facility", "Plant", "Station", "Center", "Laboratory", "Airport", "Port", "Base", "School", "Hospital", "Terminal", "Building", "Site", "Office", "property"],
+    "geographic feature": ["River", "Lake", "Mountain", "Valley", "Creek", "Basin", "Ridge", "Bay", "Island", "Forest", "Coast", "Watershed", "Hill", "slopes", "terrace"],
+    "natural resource or material": ["soil", "series", "species", "mineral", "sediment", "gravel", "sand", "clay", "vegetation", "water", "timber", "wildlife", "habitat", "crop", "land"],
+    "web address": ["http", "https", "www", "gov", "html", "htm", "website", "online", "link"],
+    "company filing form": ["10-K", "8-K", "10-Q", "S-1", "prospectus", "registration statement", "proxy statement", "annual report", "exhibit", "filing", "registrant", "Commission File", "SEC"],
+    "security or share class": ["common stock", "preferred stock", "shares", "securities", "warrant", "debenture", "bond", "equity", "stockholder", "shareholder", "dividend", "capital stock"],
+    "financial statement item": ["assets", "liabilities", "net income", "earnings", "expenses", "cash flow", "balance sheet", "capital", "income", "deficit", "audit", "statement", "accounting"]
+  },
+  "relation_types": {
+    "issued by": ["issued by", "published by", "released by", "promulgated by", "prepared by", "issued", "published", "adopted by"],
+    "located in": ["located in", "located at", "situated", "located", "within", "near", "adjacent"],
+    "administered by": ["administered by", "managed by", "operated by", "overseen by", "maintained by", "administered", "operated", "managed"],
+    "authorized by": ["authorized by", "pursuant to", "under the authority", "in accordance with", "required by", "authorized", "approved by"],
+    "amends": ["amends", "amending", "amendment", "revises", "supersedes", "amended", "replaces"],
+    "filed with": ["filed with", "submitted to", "filed by", "registered with", "submitted", "filed", "sent to"],
+    "owned by": ["subsidiary of", "wholly owned", "parent company", "affiliate of", "subsidiary", "owned by", "owner", "acquired by"],
+    "reported for period": ["year ended", "quarter ended", "for the period", "as of", "for fiscal year", "during the period", "reporting period"]
+  },
+  "pii_types": {
+    "person": ["name", "Mr", "Mrs", "Ms", "Dr", "signature", "contact", "applicant", "respondent"],
+    "email": ["email", "e-mail", "mailto", "gov", "com"],
+    "phone number": ["phone", "telephone", "fax", "call", "TDD", "TTY"],
+    "address": ["address", "street", "Box", "zip", "mailing", "avenue", "suite"],
+    "bank account number": ["account number", "account", "bank", "routing", "deposit"],
+    "tax id": ["tax id", "EIN", "taxpayer", "TIN", "employer identification"],
+    "social security number": ["social security", "SSN"],
+    "credit card number": ["credit card", "card number", "Visa", "MasterCard", "cardholder"]
+  }
+}

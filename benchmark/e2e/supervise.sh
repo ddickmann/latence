@@ -51,11 +51,15 @@ RUN_ID="${RUN_ID:-govdocs1-v1}"
 # pass 2 replays pass 1's `parse` checkpoint. Verified empirically end-to-end.
 STACK_FULL="$RUN_DIR/latence.stack.yaml"
 STACK_PARSE="$RUN_DIR/latence.parse-only.yaml"
-CANDIDATES="$RUN_DIR/label-candidates.json"
-PROFILE_ARTIFACT="$RUN_DIR/label-profile.json"
+LABEL_SCHEMA="${LABEL_SCHEMA:-$REPO/benchmark/e2e/label-schema-predefined.json}"
 # Checkpoints are keyed on STAGE NAME ONLY — no config hash, no provider identity. Parse output is a
 # single JSONL, not a directory (RUNBOOK §6 is wrong about this path).
 CKPT_DIR="$OUT_DIR/_latence/runs/$RUN_ID/checkpoints"
+
+# The SERVICE environment (ADR-0030): vLLM lives in its own venv so its torch cannot fight the
+# pipeline environment's. serve.sh does `exec vllm serve`, so that venv's bin must be on PATH.
+VLLM_BIN="${VLLM_BIN:-/workspace/vllm-env/bin/vllm}"
+[ -x "$VLLM_BIN" ] && export PATH="$(dirname "$VLLM_BIN"):$PATH"
 
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 POLL_SECS="${POLL_SECS:-30}"
@@ -92,7 +96,50 @@ declare -A S_DESC S_DONE S_PROG S_CMD S_KIND
 add_stage() {
   stage_names+=("$1"); S_KIND["$1"]="$2"; S_DESC["$1"]="$3"
   S_DONE["$1"]="$4"; S_PROG["$1"]="$5"; S_CMD["$1"]="$6"
+  # `[ -s file ]` means NON-EMPTY, and `touch` produces an empty file — so a stage can do all of its
+  # real work, succeed, and still be judged incomplete. That cost three attempts and a BLOCKED run
+  # on a preflight whose every actual check had passed. Markers must therefore carry content, and
+  # this catches the mismatch at load time rather than after the work is done.
+  case "$6" in
+    *"touch '$RUN_DIR/"*)
+      case "$4" in
+        *"-s '$RUN_DIR/"*)
+          echo "FATAL: stage '$1' writes its marker with touch (empty) but probes it with -s" >&2
+          echo "       (non-empty). The stage would run, succeed, and never be marked complete." >&2
+          exit 2
+          ;;
+      esac
+      ;;
+  esac
 }
+
+# Fail at second zero, not forty minutes in.
+#
+# `envspec.py` models TWO environments: the pipeline environment (the workspace packages) and the
+# SERVICE environment — the vLLM OCR server behind the ADR-0030 endpoint seam. Installing the first
+# and not the second is invisible until a stage actually reaches for the server, which here meant
+# the corpus finished, the wizard ran, and only then did `vllm: not found` surface at stage 3 of 9.
+#
+# Every external binary the generated stack depends on is checked here, before any work happens. A
+# preflight that runs after the expensive part is not a preflight.
+add_stage preflight task \
+  "Verify the tools every later stage needs are actually present" \
+  "[ -s '$RUN_DIR/.preflight.ok' ]" \
+  "echo 0" \
+  "missing=''; \
+   for tool in uv python3 unzip curl nvidia-smi; do \
+     command -v \$tool >/dev/null 2>&1 || missing=\"\$missing \$tool\"; \
+   done; \
+   command -v vllm >/dev/null 2>&1 || [ -x '$VLLM_BIN' ] || missing=\"\$missing vllm(service-env)\"; \
+   python3 -c 'import yaml' 2>/dev/null || missing=\"\$missing python3-yaml\"; \
+   if [ -n \"\$missing\" ]; then \
+     echo \"PREFLIGHT FAILED — missing:\$missing\"; \
+     echo 'These are needed by LATER stages. Install them before the run rather than discovering'; \
+     echo 'the gap after the corpus and wizard stages have already spent their time.'; \
+     exit 1; \
+   fi; \
+   nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader \
+     | tee '$RUN_DIR/.preflight.ok'"
 
 add_stage corpus task \
   "Acquire GovDocs1 + SEC VPRR + OHR-Bench and write the measured manifest" \
@@ -153,17 +200,39 @@ add_stage ocr_down task \
   "echo 0" \
   "pkill -f 'vllm serve'; sleep 20; nvidia-smi"
 
-# No LLM induction anywhere in this run. The pool is derived from the parsed text by counting.
+# The label pool is PREDEFINED — 37 authored types, no LLM, no profiling pass.
+#
+# This reverses an earlier choice, on measurement. Per-chunk narrowing via label_inducer.lexicon
+# gives a 3.3x reduction in label-slots scored, and it was chosen to respect GLiNER2's uni-encoder
+# cost. Measured against real GovDocs1 text, it also costs recall on exactly the types that matter
+# most, because a lexicon cue only fires when the cue word is part of the entity's own surface form:
+#
+#   monetary amount   36.4% of chunks containing one are ever scored for it
+#   person            64.7%
+#   date              68.8%
+#   organization       100%   (its cues ARE the surface form: Inc, Corp, University)
+#
+# A chunk holding "$3,200,000" that is never asked about money produces no error and no missing-data
+# signal — the question simply was not posed. Worse, `_compile_cue` wraps every cue in \b…\b, so a
+# cue like `$` or `%` can never match, is accepted silently, and is reported nowhere.
+#
+# The compute argument for narrowing was also weaker than it looked: entity, relation and PII slots
+# are bucketed and scored SEPARATELY, so a forward pass sees 21 entity labels, not 37 — already
+# inside the range where GLiNER2 degradation is documented. Full recall is worth 3.3x here.
 add_stage labels task \
-  "Derive the label pool from parsed text by profiling (NO LLM), Pareto-capped at 40" \
-  "[ -s '$CANDIDATES' ]" \
-  "wc -c < '$STAGE_DIR/labels.log' 2>/dev/null || echo 0" \
-  "cd '$REPO' && uv pip install -e packages/latence-label-profiler \
-   && uv run latence-label-profile '$CKPT_DIR' \
-        --pattern 'parse.jsonl' --json-field content \
-        --max-types 40 --sample-size 5000 --seed 0 \
-        --min-mention-mass 3 --min-document-frequency 2 \
-        -o '$PROFILE_ARTIFACT' --candidates-out '$CANDIDATES'"
+  "Install the predefined 37-type label pool (no LLM, no profiling, full recall)" \
+  "[ -s '$LABEL_SCHEMA' ]" \
+  "echo 0" \
+  "test -s '$LABEL_SCHEMA' || { echo \"label schema missing at $LABEL_SCHEMA\"; exit 1; }; \
+   python3 -c \"
+import json, sys
+d = json.load(open('$LABEL_SCHEMA'))
+slots = {k: len(v) for k, v in d.items()}
+total = sum(slots.values())
+if not 30 <= total <= 40:
+    sys.exit('label pool is ' + str(total) + ' types; the operator specified 30-40')
+print('label pool OK:', slots, 'TOTAL', total)
+\""
 
 # Regenerating the stack with the derived pool requires T-WIZ-2 (`--label-candidates`). Riding the
 # pool on `--predefined-labels` instead LOOKS correct and is not: with no induce stage no chunk
@@ -177,10 +246,10 @@ add_stage wizard_full task \
      --source '$CORPUS_ROOT' --storage 'file://$OUT_DIR' \
      --chunk-max-tokens 768 --chunk-overlap-tokens 96 \
      --ocr-dpi 200 --ocr-max-longest-dim 1540 \
-     --label-candidates '$CANDIDATES' \
+     --predefined-labels '$LABEL_SCHEMA' \
      --non-interactive -o '$STACK_FULL' \
    && python3 -c \"
-import yaml, sys
+import json, yaml, sys
 full = {s['name']: s for s in yaml.safe_load(open('$STACK_FULL'))['stages']}
 par  = {s['name']: s for s in yaml.safe_load(open('$STACK_PARSE'))['stages']}
 # The checkpoint skip is keyed on stage NAME alone — no config hash. If pass 2 changed anything
@@ -189,13 +258,23 @@ par  = {s['name']: s for s in yaml.safe_load(open('$STACK_PARSE'))['stages']}
 for name in ('source', 'intake_screen', 'parse'):
     if full.get(name) != par.get(name):
         sys.exit('FATAL: ' + name + ' differs between passes; the name-keyed checkpoint would replay pass 1 under pass 2 config')
-if any(s.get('provider') == 'label_inducer.llm' for s in full.values()):
-    sys.exit('FATAL: stack still wires label_inducer.llm - the run must use zero LLM induction')
-if not any(s.get('provider') == 'label_inducer.lexicon' for s in full.values()):
-    sys.exit('FATAL: stack does not wire label_inducer.lexicon')
+# Zero LLM induction, asserted structurally: predefined-only is an OMISSION, so the proof is that
+# no induce Stage exists at all — not that some flag was set.
+if any('induce' in n for n in full):
+    sys.exit('FATAL: an induce Stage was emitted; predefined-only must emit none')
+if any(s.get('provider', '').startswith('label_inducer') for s in full.values()):
+    sys.exit('FATAL: a label_inducer Provider is wired; the run must make zero induction calls')
+# The pool must actually reach the extractor. A stack that carries the labels nowhere but the
+# config header would extract against demo defaults and look fine.
+pool = json.load(open('$LABEL_SCHEMA'))
+got = len(full['extract']['config'].get('labels', []))
+want = len(pool['entity_types'])
+if got != want:
+    sys.exit('FATAL: extract.config.labels has ' + str(got) + ' types, pool has ' + str(want))
+print('verified: no induce Stage, no inducer Provider, extract carries all ' + str(want) + ' entity types')
 \" \
    && $LATENCE stack check '$STACK_FULL' \
-   && touch '$RUN_DIR/.wizard_full.done'"
+   && date -u +%Y-%m-%dT%H:%M:%SZ > '$RUN_DIR/.wizard_full.done'"
 
 add_stage full_run task \
   "Pass 2 — chunk, PII screen, extract, KG, index (parse replays from checkpoint)" \
