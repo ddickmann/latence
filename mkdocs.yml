@@ -135,100 +135,82 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/ddickmann/latence-framework
 
+# ---------------------------------------------------------------------------------------------
+# NAV — organised by AUDIENCE, matching the four reading paths on the home page:
+#   Get started / Guides  -> the operator      Providers / Reference -> the Provider author
+#   Concepts              -> the evaluator     Decision log / Project -> the contributor
+#
+# TWO THINGS BREAK `mkdocs build --strict`, which is what CI runs:
+#   1. An UNQUOTED COLON in a title. `- 0052 — Retrieval MCP: ported …` is not valid YAML.
+#      Every title containing `:` below is quoted; keep it that way.
+#   2. A nav entry pointing at a file that does not exist — strict turns the warning into an
+#      error. Do not add an entry ahead of its page.
+# ---------------------------------------------------------------------------------------------
 nav:
   - Home: index.md
-  - Getting Started:
+
+  # --- The operator's entry point ------------------------------------------------------------
+  - Get started:
       - getting-started/index.md
+      # PENDING (docs-quickstart lane): `docs/quickstart.md` and `docs/tutorials/1..5*.md` are
+      # being written on a sibling branch. They belong HERE, immediately after the section
+      # index and before the run console. They are commented out rather than wired live
+      # because `mkdocs build --strict` fails on a nav entry whose file is absent — uncomment
+      # each line as its page lands, and correct the slug to the filename that actually shipped.
+      #
+      # - Quickstart — 10 minutes to a corpus: quickstart.md
+      # - Tutorials:
+      #     - tutorials/1-....md
+      #     - tutorials/2-....md
+      #     - tutorials/3-....md
+      #     - tutorials/4-....md
+      #     - tutorials/5-....md
       - Read the results — the run console: getting-started/run-console.md
-      - Fresh-pod walkthrough: TUTORIAL-fresh-pod-walkthrough.md
-      - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
-      - GPU testing guide: GPU-TESTING-GUIDE.md
-  - Concepts & Architecture:
+      - Long-form walkthroughs:
+          - Fresh GPU pod → AI-ready data: TUTORIAL-fresh-pod-walkthrough.md
+          - RFC corpus → fused-retrieval proof: TUTORIAL-rfc-retrieval-proof.md
+          - Testing the retrieval tooling: TUTORIAL-retrieval-tooling.md
+          - GPU testing guide: GPU-TESTING-GUIDE.md
+
+  # --- The evaluator's entry point -----------------------------------------------------------
+  - Concepts:
       - concepts/index.md
       - Architecture: concepts/architecture.md
       - Domain language: concepts/domain-language.md
-      - ProviderProfile & device handling: provider-profile.md
-  - Pipeline Stages:
-      - pipeline/index.md
+      - Pipeline Stages: pipeline/index.md
+      - "Deep dive: messy data → knowledge-graph retrieval": DEEP-DIVE.md
+
+  # --- The Provider author's entry point -----------------------------------------------------
   - Providers:
       - providers/README.md
       - Provider catalog: providers/catalog.md
       - Writing an adapter (AdapterBase): writing-an-adapter.md
+      - ProviderProfile & device handling: provider-profile.md
       - Conformance checklist: CONFORMANCE.md
       - Embedders: embedders.md
+
+  # --- Task-focused operator guides ----------------------------------------------------------
   - Guides:
       - guides/index.md
-      - Run & validate a stack: running-a-stack.md
-      - Run a bake-off: running-a-bakeoff.md
-      - Tune a stack per device: tuning.md
-      - Throughput envelopes (measured): perf-results.md
-      - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
-      - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
-      - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
-      - Iceberg-table Export (optional): iceberg-export.md
-      - Retrieval-quality tooling (design): retrieval-tooling.md
-      - Run the public benchmarks: running-the-benchmarks.md
-      - Deploy (Compose · Helm · air-gapped): deployment.md
-      - Observability (metrics · tracing · export): observability.md
-      - Secrets handling: secrets.md
-  - Benchmarks:
-      - Public benchmark results: BENCHMARKS.md
-  - Decision Log (ADRs):
-      - adr/index.md
-      - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
-      - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
-      - 0003 — Stage library + pluggable Runners: adr/0003-stage-library-with-pluggable-runners.md
-      - 0004 — Capability protocols + provider plugins: adr/0004-capability-protocols-with-provider-plugins.md
-      - 0005 — v1 scope, the AI-ready-data spine: adr/0005-v1-scope-the-ai-ready-data-spine.md
-      - 0006 — One schema, dual serialization: adr/0006-one-schema-dual-serialization.md
-      - 0007 — CPU-first reference Providers: adr/0007-cpu-first-reference-providers.md
-      - 0008 — Quality Report as first-class artifact: adr/0008-quality-report-as-first-class-artifact.md
-      - 0009 — fsspec Storage seam: adr/0009-fsspec-storage-seam.md
-      - 0010 — Local Runner state is files-on-Storage: adr/0010-local-runner-state-is-files-on-storage.md
-      - 0011 — Demo is one command + live swap: adr/0011-demo-is-one-command-plus-live-provider-swap.md
-      - 0012 — Permissive-only weights, Gemma opt-in: adr/0012-permissive-only-reference-providers-gemma-opt-in.md
-      - 0013 — Relation Extraction chosen empirically: adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md
-      - 0014 — Source seam, thin connectors: adr/0014-source-seam-thin-connectors.md
-      - 0015 — Python core, declarative YAML, Rust hot paths: adr/0015-python-core-declarative-yaml-rust-for-hot-paths.md
-      - 0016 — Thin core + per-provider packages: adr/0016-thin-core-per-provider-packages.md
-      - 0017 — AI-ready deliverable = RAG corpus + KG as files: adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md
-      - 0018 — Incremental corpus deltas: adr/0018-incremental-corpus-deltas.md
-      - 0019 — Parser input contract: adr/0019-parser-input-contract.md
-      - 0020 — Parse page map + error disposition: adr/0020-parse-page-map-and-error-disposition.md
-      - 0021 — Chunk offsets + two Screening checkpoints: adr/0021-chunk-offsets-and-screening-two-checkpoints.md
-      - 0022 — Entity mention record + zero-shot split: adr/0022-entity-mention-record-and-zero-shot-provider-split.md
-      - 0023 — Relation mention record + fused routing: adr/0023-relation-mention-record-and-fused-stage-routing.md
-      - 0024 — Redaction record + metadata-aware policy: adr/0024-redaction-record-and-metadata-aware-policy.md
-      - 0025 — Profiling feature record, corpus-level: adr/0025-profiling-feature-record-corpus-level-stage-and-fixed-feature-set.md
-      - 0026 — Disambiguation canonical-entity record: adr/0026-disambiguation-canonical-entity-scoped-record-ported-resolver-cascade-and-cpu-viable-linking.md
-      - 0027 — Graph Assembly + KG export as files: adr/0027-graph-assembly-scoped-graph-record-ported-builder-and-kg-export-as-files.md
-      - 0028 — Quality Report + gold-set harness: adr/0028-quality-report-promoted-gold-set-harness-is-a-runner-side-evaluation-keyed-by-file-name.md
-      - 0029 — Delta Runner affected-set: adr/0029-delta-runner-affected-set-via-blocking-keys-and-source-exclusion-deletion.md
-      - 0030 — Performance path + second Runner adapter: adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md
-      - 0031 — Entity Extraction true original offsets: adr/0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md
-      - 0032 — Strict mypy on tests + conftest collision: adr/0032-strict-mypy-on-tests-and-the-conftest-module-collision.md
-      - 0033 — Streaming, memory-bounded Runner: adr/0033-streaming-memory-bounded-runner.md
-      - 0034 — Observability, typed errors, tracing seam: adr/0034-observability-typed-errors-and-thin-tracing-seam.md
-      - 0035 — Second CPU reference Providers: adr/0035-second-cpu-reference-providers-for-single-provider-capabilities.md
-      - 0036 — Provider ecosystem + bake-off: adr/0036-provider-ecosystem-and-bakeoff.md
-      - 0037 — Graph Completion optional stage: adr/0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md
-      - 0038 — Schema Induction optional LLM stage: adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md
-      - 0039 — Context Enrichment optional stage: adr/0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md
-      - 0041 — Guided setup + process CLI: adr/0041-guided-setup-and-process-cli-opinionated-quality-baked-config-and-one-toggle.md
-      - 0042 — Chunk-level redaction: adr/0042-chunk-level-redaction-fixes-the-document-truncation-leak.md
-      - 0043 — Incremental extraction + frozen schema: adr/0043-incremental-extraction-frozen-schema-and-doc-level-cross-run-reuse.md
-      - 0044 — Universal redaction floor: adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md
-      - 0045 — Granite r2 default Embedder: adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md
-      - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
-      - 0047 — Metrics export seam (Prometheus / OTel): adr/0047-observability-export-seam-prometheus-otel-optional.md
-      - 0048 — Retrieval tooling is strictly stateless: adr/0048-retrieval-tooling-is-strictly-stateless.md
-      - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
-      - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md
-      - 0051 — DuckDB zero-ops multi-hop graph retrieval: adr/0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md
-      # NOTE: the title contains a colon, so it MUST stay quoted — an unquoted
-      # "0052 — Retrieval MCP: ported …" makes mkdocs.yml unparseable YAML.
-      - "0052 — Retrieval MCP: ported hardening + config-driven copy": adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
-      - 0053 — SPLADE structured composition: adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md
+      - Operate a stack:
+          - Run & validate a stack: running-a-stack.md
+          - Tune a stack per device: tuning.md
+          - Run a bake-off: running-a-bakeoff.md
+          - Throughput envelopes (measured): perf-results.md
+      - Deploy & run in production:
+          - Deploy (Compose · Helm · air-gapped): deployment.md
+          - Observability (metrics · tracing · export): observability.md
+          - Secrets handling: secrets.md
+          - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
+          - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
+      - Feed a retrieval engine:
+          - Retrieval-quality tooling (design): retrieval-tooling.md
+          - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
+          - Iceberg-table Export (optional): iceberg-export.md
+      - Measure it:
+          - Public benchmark results: BENCHMARKS.md
+          - Run the public benchmarks: running-the-benchmarks.md
+
   - API Reference:
       - reference/index.md
       - Data contracts: reference/contracts.md
@@ -239,13 +221,93 @@ nav:
       - Provider base & profile: reference/providers.md
       - Errors & tracing: reference/errors.md
       - Example provider (pdfplumber): reference/example-provider.md
-  - Project Internals:
-      - Continuity & security process: CONTINUITY.md
-      - Threat model: THREAT-MODEL.md
-      - SBOM & supply chain: SBOM.md
-      - Releasing: RELEASING.md
-      - Go-live runbook (flip public): GO-LIVE-RUNBOOK.md
-      - Architecture audit (S1): audits/S1-architecture-audit.md
-      - Algorithmic asset inventory: ASSET-INVENTORY.md
-      - Dependency audit: DEPENDENCY-AUDIT.md
-      - Porting map: PORTING-MAP.md
+
+  # --- The contributor's entry point ---------------------------------------------------------
+  # Grouped exactly as docs/adr/index.md groups them, so the tab and the log agree.
+  - Decision Log (ADRs):
+      - adr/index.md
+      - Foundations & scope:
+          - 0001 — OSS core, personally owned: adr/0001-open-source-core-owned-personally.md
+          - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
+          - 0005 — v1 scope, the AI-ready-data spine: adr/0005-v1-scope-the-ai-ready-data-spine.md
+          - 0015 — Python core, declarative YAML, Rust hot paths: adr/0015-python-core-declarative-yaml-rust-for-hot-paths.md
+      - The core seams:
+          - 0003 — Stage library + pluggable Runners: adr/0003-stage-library-with-pluggable-runners.md
+          - 0004 — Capability protocols + provider plugins: adr/0004-capability-protocols-with-provider-plugins.md
+          - 0006 — One schema, dual serialization: adr/0006-one-schema-dual-serialization.md
+          - 0009 — fsspec Storage seam: adr/0009-fsspec-storage-seam.md
+          - 0010 — Local Runner state is files-on-Storage: adr/0010-local-runner-state-is-files-on-storage.md
+          - 0016 — Thin core + per-provider packages: adr/0016-thin-core-per-provider-packages.md
+          - 0017 — AI-ready deliverable = RAG corpus + KG as files: adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md
+          - 0033 — Streaming, memory-bounded Runner: adr/0033-streaming-memory-bounded-runner.md
+          - 0034 — Observability, typed errors, tracing seam: adr/0034-observability-typed-errors-and-thin-tracing-seam.md
+          - 0047 — Metrics export seam (Prometheus / OTel): adr/0047-observability-export-seam-prometheus-otel-optional.md
+          - 0032 — Strict mypy on tests + conftest collision: adr/0032-strict-mypy-on-tests-and-the-conftest-module-collision.md
+      - Providers, licensing & the ecosystem:
+          - 0007 — CPU-first reference Providers: adr/0007-cpu-first-reference-providers.md
+          - 0012 — Permissive-only weights, Gemma opt-in: adr/0012-permissive-only-reference-providers-gemma-opt-in.md
+          - 0035 — Second CPU reference Providers: adr/0035-second-cpu-reference-providers-for-single-provider-capabilities.md
+          - 0036 — Provider ecosystem + bake-off: adr/0036-provider-ecosystem-and-bakeoff.md
+          - 0030 — Performance path + second Runner adapter: adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md
+          - 0045 — Granite r2 default Embedder: adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md
+      - The Stages (contracts per Stage):
+          - 0014 — Source seam, thin connectors: adr/0014-source-seam-thin-connectors.md
+          - 0019 — Parser input contract: adr/0019-parser-input-contract.md
+          - 0020 — Parse page map + error disposition: adr/0020-parse-page-map-and-error-disposition.md
+          - 0021 — Chunk offsets + two Screening checkpoints: adr/0021-chunk-offsets-and-screening-two-checkpoints.md
+          - 0022 — Entity mention record + zero-shot split: adr/0022-entity-mention-record-and-zero-shot-provider-split.md
+          - 0023 — Relation mention record + fused routing: adr/0023-relation-mention-record-and-fused-stage-routing.md
+          - 0024 — Redaction record + metadata-aware policy: adr/0024-redaction-record-and-metadata-aware-policy.md
+          - 0025 — Profiling feature record, corpus-level: adr/0025-profiling-feature-record-corpus-level-stage-and-fixed-feature-set.md
+          - 0026 — Disambiguation canonical-entity record: adr/0026-disambiguation-canonical-entity-scoped-record-ported-resolver-cascade-and-cpu-viable-linking.md
+          - 0027 — Graph Assembly + KG export as files: adr/0027-graph-assembly-scoped-graph-record-ported-builder-and-kg-export-as-files.md
+          - 0031 — Entity Extraction true original offsets: adr/0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md
+          - 0042 — Chunk-level redaction: adr/0042-chunk-level-redaction-fixes-the-document-truncation-leak.md
+          - 0044 — Universal redaction floor: adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md
+      - Optional Stages:
+          - 0037 — Graph Completion optional stage: adr/0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md
+          - 0038 — Schema Induction optional LLM stage: adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md
+          - 0039 — Context Enrichment optional stage: adr/0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md
+          - 0054 — Type-vocabulary canonicalization: adr/0054-type-vocabulary-canonicalization-is-a-capability-of-the-resolution-phase.md
+      - Quality Report, deltas & operations:
+          - 0008 — Quality Report as first-class artifact: adr/0008-quality-report-as-first-class-artifact.md
+          - 0028 — Quality Report + gold-set harness: adr/0028-quality-report-promoted-gold-set-harness-is-a-runner-side-evaluation-keyed-by-file-name.md
+          - 0011 — Demo is one command + live swap: adr/0011-demo-is-one-command-plus-live-provider-swap.md
+          - 0018 — Incremental corpus deltas: adr/0018-incremental-corpus-deltas.md
+          - 0029 — Delta Runner affected-set: adr/0029-delta-runner-affected-set-via-blocking-keys-and-source-exclusion-deletion.md
+          - 0041 — Guided setup + process CLI: adr/0041-guided-setup-and-process-cli-opinionated-quality-baked-config-and-one-toggle.md
+          - 0043 — Incremental extraction + frozen schema: adr/0043-incremental-extraction-frozen-schema-and-doc-level-cross-run-reuse.md
+      - Empirical choices:
+          - 0013 — Relation Extraction chosen empirically: adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md
+          - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md
+      - Retrieval-quality tooling:
+          - 0048 — Retrieval tooling is strictly stateless: adr/0048-retrieval-tooling-is-strictly-stateless.md
+          - 0049 — Clock-split index-time vs query-time: adr/0049-clock-split-index-time-signals-extend-the-pipeline-query-time-is-a-downstream-library.md
+          - 0050 — Multi-vector / MUVERA-FDE experimental stub: adr/0050-multi-vector-and-muvera-fde-ship-as-a-real-but-experimental-off-by-default-stub.md
+          - 0051 — DuckDB zero-ops multi-hop graph retrieval: adr/0051-zero-ops-multi-hop-graph-retrieval-via-duckdb-over-the-emitted-graph-parquet.md
+          # NOTE: the title contains a colon, so it MUST stay quoted — an unquoted
+          # "0052 — Retrieval MCP: ported …" makes mkdocs.yml unparseable YAML.
+          - "0052 — Retrieval MCP: ported hardening + config-driven copy": adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
+          - 0053 — SPLADE structured composition: adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md
+
+  - Project:
+      - Governance & security:
+          - Continuity & security process: CONTINUITY.md
+          - Threat model: THREAT-MODEL.md
+          - SBOM & supply chain: SBOM.md
+          - Dependency audit: DEPENDENCY-AUDIT.md
+      - Release & review:
+          - Releasing: RELEASING.md
+          - Go-live runbook (flip public): GO-LIVE-RUNBOOK.md
+          - Architecture audit (S1): audits/S1-architecture-audit.md
+      - Provenance of the code:
+          - Algorithmic asset inventory: ASSET-INVENTORY.md
+          - Porting map: PORTING-MAP.md
+
+# Pages that are published but deliberately NOT in the nav. Listing them here is how the
+# omission is *declared* rather than merely tolerated: mkdocs otherwise logs an INFO for every
+# unreferenced page, and a real omission hides in that noise.
+#   PITCH-SLIDES.md — speaker notes for a deck, not documentation. It ships in the repo so the
+#   deck and the code stay in one place; it is not a page a reader of this site should land on.
+not_in_nav: |
+  PITCH-SLIDES.md
