@@ -43,11 +43,16 @@ flowchart LR
     Export --> KG["Knowledge graph (files)"]
 ```
 
-That is the spine the blessed GPU stack declares (`stacks/gpu-sota.yaml`). Four further
-Stages — Schema Induction, Type Consolidation, Context Enrichment and Embedding — are
-**optional** and inert unless a stack declares them;
-[Pipeline Stages](pipeline/index.md) documents all of them, with what each consumes and
-produces.
+That is the spine the blessed GPU stack declares (`stacks/gpu-sota.yaml`). Three further
+Stages are **optional** and inert unless a stack declares them — Schema Induction
+([ADR-0038](adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md)),
+Type Consolidation
+([ADR-0054](adr/0054-type-vocabulary-canonicalization-is-a-capability-of-the-resolution-phase.md))
+and Context Enrichment
+([ADR-0039](adr/0039-context-enrichment-optional-stage-kg-projected-onto-chunks-embedding-input-only.md))
+— and embeddings are an opt-in *Export augmentation* rather than a Stage of their own
+([Embedders](embedders.md)). [Pipeline Stages](pipeline/index.md) documents each of them,
+with what it consumes and produces.
 
 A **Pipeline** is a DAG of **Stages** over a set of input documents, declared once and
 executable by any **Runner**. Every record at every Stage carries immutable
