@@ -154,8 +154,11 @@ and the repository ships the bare licence text without a stated per-file electio
 the terms as LGPL-3.0 exactly, and re-check if a downstream ever needs to rely on a later
 version.
 
-**The clean way out, if it matters.** easydict is used only for dotted-attribute access
-on the vendored ULTRA config. Replacing it with a small permissive shim removes the
+**The clean way out, if it matters.** The whole use of easydict is one lazy import and
+two `EasyDict({...})` calls that wrap the ULTRA relation/entity config dicts so the
+vendored model code can read them with dotted attribute access
+(`latence_linkpred_ultra/scorer.py`, the `EasyDict` import and the `rel_cfg`/`ent_cfg`
+construction). A small permissive attribute-dict shim replaces it and removes the
 dependency and the entire obligation. That remains a real option, recorded here so the
 choice stays deliberate (ADR-0012 / research-diligence) rather than defaulted into.
 
