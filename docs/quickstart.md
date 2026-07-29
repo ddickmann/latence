@@ -1,11 +1,11 @@
 # Quickstart — from a folder of documents to a queryable corpus
 
-*Roughly 15 minutes on a laptop. No GPU. Steps 1–2 and 4–6 need no network at all.*
+*Roughly 15 minutes on a laptop. No GPU. Once installed, only step 3 touches the network.*
 
 By the end of this page you will have run the pipeline over your own documents and asked the
 result a question. What you get out is **files** — a chunked, PII-masked RAG corpus with vectors, a
-knowledge graph with evidence on every edge, a BM25 term-statistics artifact, and a Quality Report
-— which is the whole point: nothing is locked inside a service.
+knowledge graph whose every edge carries the evidence it was built from, a BM25 term-statistics
+artifact, and a Quality Report — which is the whole point: nothing is locked inside a service.
 
 If you want the reasoning behind the design before you run anything, read the
 [deep dive](DEEP-DIVE.md). If you want to keep going after this page, the
@@ -72,17 +72,18 @@ uv run latence-demo --storage-uri file://$PWD/demo-out --run-id demo
     - support-ticket.md: expected flag:prompt_injection, got flag:prompt_injection [ok]
 ```
 
-Those four numbers are fixed — the corpus is bundled and every Provider in this stack is
-deterministic, so a different count means something is wrong, not that your machine differs.
+Every count in that block is fixed — the corpus is bundled and every Provider in this stack is
+deterministic, so a different number means something is wrong, not that your machine differs.
 `latence-demo` exits non-zero if a planted hazard slips through or contract-completeness fails, so
 this command is a smoke test as well as a display.
 
-The last line prints a `file://` URL for a **self-contained** HTML viewer of the knowledge graph —
-one file, no CDN, no network. Open it.
+The last line prints a `file://` URL for a **self-contained** HTML viewer — one file, inlined CSS,
+no CDN, no network. Open it.
 
-✓ **look for** — a graph of six entity nodes where every edge you click carries an **Evidence**
-sentence: the actual source text the relation was extracted from. Evidence on every edge is a
-contract, not a nicety — it is what makes an assembled graph auditable.
+✓ **look for** — the six-node graph, and beneath it a table headed **"Edges & per-edge Evidence"**
+with a row per edge: head, relation, tail, confidence, the **evidence mentions** the edge was built
+from, and the source documents. All 33 edges carry it. Evidence on every edge is a contract, not a
+nicety — it is what makes an assembled graph auditable rather than merely plausible.
 
 ---
 
@@ -151,17 +152,21 @@ Drop `--non-interactive` (and most of the other flags) to be walked through it w
 one-line rationale per question. Every unset flag falls back to the same default either way, so the
 same inputs always produce a byte-identical config.
 
-✓ **look for** — a summary that ends with `Run \`latence process\` to start.`, and, above it:
+✓ **look for** — a summary ending in an instruction to run `latence process`, and above it:
 
 ```
-Predefined-only mode: schema induction is OFF (no `induce` stage, zero LLM calls); ...
+Detected file types under the source folder: md
+
+Predefined-only mode: schema induction is OFF (no `induce` stage, zero LLM calls); extraction
+runs every chunk against your fixed labels.
 
 Saved quality-baked stack to: latence.stack.yaml
   profile: lite
   stages (13): source -> intake_screen -> parse -> chunk -> content_screen -> extract -> redact ->
                profiling -> disambiguate -> graph -> enrich -> export_kg -> export_corpus
   parser: parser.pdfplumber   device: cpu
-  intake size cap: <N> bytes — sized from your corpus (largest file <M> bytes)
+  intake size cap: 2097152 bytes — sized from your corpus (largest file 232 bytes)
+  PII redaction + guardrail screening: ON (financial-PII; chunk-level masking + report)
 ```
 
 Two lines are worth reading rather than skimming:
@@ -173,6 +178,11 @@ Two lines are worth reading rather than skimming:
   2 MiB), not a magic constant. If the wizard warns that your largest file is over the cap, those
   files will be quarantined at intake and never reach the corpus — split them or raise
   `intake_screen.config.max_bytes` in the generated file.
+
+The summary also prints a `schema induction:` line naming an LLM endpoint and its key variable. In
+predefined-only mode that is the default it *would* have used; the generated config contains no
+`induce` stage, so nothing reads the key. Confirm it: `grep -c 'name: induce' latence.stack.yaml`
+prints `0`.
 
 The generated `latence.stack.yaml` is a plain, diffable, heavily-commented config. Read it. Every
 stage names a Capability and a Provider, and each one is swappable without touching another.
