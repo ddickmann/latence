@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Stateless query-time retrieval-quality tooling for the Latence framework: the Candidate contract, the RetrievalBackend seam, and the latence.retrieval component registry (candidate processors). Holds no index and runs no first-stage search (ADR-0048)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "rag", "retrieval", "rerank", "fusion", "context-packing", "model-agnostic", "stateless"]
