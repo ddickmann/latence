@@ -272,8 +272,9 @@ A new Provider is a **new package**, not an edit to `latence-core` (ADR-0016):
 1. **Create `packages/latence-<capability>-<name>/`** with its own `pyproject.toml`. Its heavy
    dependencies belong to it and stay out of core.
 2. **Implement the Capability protocol** — the narrow typed interface the Stage depends on
-   (`Parser`, `EntityExtractor`, `RelationExtractor`, `PIIDetector`, `Embedder`,
-   `Disambiguator`, `Runner`, …). Structural typing is enough; no base class is imposed. The
+   (`Source`, `Parser`, `Chunker`, `IntakeScreener`, `ContentScreener`, `EntityExtractor`,
+   `RelationExtractor`, `PIIDetector`, `Disambiguator`, `GraphAssembler`, `Embedder`,
+   `Export`, and the rest). Structural typing is enough; no base class is imposed. The
    optional `AdapterBase` in core factors out the cross-cutting glue — device resolution,
    batching, native-exception-to-typed-error mapping — and adds no heavy dependency; see
    [`docs/writing-an-adapter.md`](docs/writing-an-adapter.md).
@@ -309,6 +310,12 @@ A new Provider is a **new package**, not an edit to `latence-core` (ADR-0016):
 Use the **provider request** issue template to propose one — it collects exactly what the
 licence and conformance gates need, and it is much cheaper to find a blocker there than in
 review.
+
+A **Runner** adapter is a different seam and does not go through the Provider entry point.
+Runners are the execution substrate the Stage library runs on (ADR-0003) — the local
+streaming Runner ships in core, and `latence-runner-airflow` is a separate distribution.
+Adding a third is a package, not a core change, but talk to the maintainer first: the Stage
+contract, not the substrate, is what has to stay stable.
 
 ---
 
