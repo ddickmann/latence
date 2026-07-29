@@ -17,8 +17,8 @@ distribution was ever published to PyPI, no release was ever cut, and every
 commit is authored by the sole copyright holder. The full verified record is at
 the top of the LICENSE file.
 
-The licence terms below apply to the Latence Framework's own code. The
-third-party software, model weights and datasets listed in this file and in
+That licence covers the Latence Framework's own code and nothing else. The
+third-party software, model weights and datasets listed below and in
 THIRD-PARTY-LICENSES.md carry THEIR OWN licences, which the framework's licence
 neither changes nor overrides.
 
