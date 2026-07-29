@@ -91,7 +91,7 @@ is hidden in a proprietary index.
 | Artifact | What it is |
 |---|---|
 | `records.parquet` / `records.jsonl` | the RAG corpus — one row per chunk, with dense embedding, PII-masked text and denormalized KG columns |
-| `graph-nodes.parquet` | resolved canonical entities, with PageRank centrality + community |
+| `graph-nodes.parquet` | resolved canonical entities — plus PageRank centrality and community when the graph-features computer is wired |
 | `graph-edges.parquet` | extracted + reference relations, **every edge carrying its Evidence** |
 | `graph.ttl` / `graph.graphml` | the same graph for RDF and graph-viz tooling |
 | `bm25-stats.json` + `bm25-postings.parquet` | index-time BM25 term statistics whose term unit exactly matches the query-side rescorer |
@@ -209,10 +209,14 @@ Five claims, each with the thing that makes it checkable.
 **1 · Labels are induced per chunk, not fixed corpus-wide.**
 A global schema forces a bad trade: cap it and rare-but-critical types vanish; apply all of it to
 every chunk and zero-shot precision collapses under labels that have nothing to do with the text.
-GLiNER2 is a uni-encoder — labels and text share one sequence — and its maintainers put the safe
-ceiling at 20–30 labels. So each chunk is scored against its own small set, and *consistency* is
-earned later, by a resolution stage that can see the whole corpus. The evidence, including the
-measured label-count degradation and why the `predefined_labels` seam is the wrong one, is in
+GLiNER2 is a uni-encoder — labels and text share one transformer sequence — and the GLiNER
+maintainers put the safe label ceiling at 20 (author) to 30 (docs). So each chunk is scored against
+its own small set, and *consistency* is earned later, by a resolution stage that can see the whole
+corpus. Stated honestly: the *cost* of more labels is measured (CPU latency +60% from 5 → 50 labels;
+throughput −98.7% from 1 → 1,024), while the accuracy claim rests on a maintainer assertion plus a
+confirmed label-order sensitivity — no controlled accuracy-vs-label-count ablation exists in the
+literature, and this project does not pretend otherwise. The full evidence, including why the
+`predefined_labels` seam is the wrong one, is in
 [`issues/e2e-extended/DECISIONS.md`](./issues/e2e-extended/DECISIONS.md) §D5.
 
 **2 · A universal PII floor that no Provider can bypass.**
