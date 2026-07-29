@@ -333,8 +333,20 @@ Nineteen of them for this corpus.
 
 ### `disambiguate.jsonl` — the corpus-level collapse
 
-✓ **look for** — records carrying a `scope` of `entity` or `relation` rather than raw mentions.
-This is the phase boundary: everything above it worked on one chunk or document at a time, with no
+✓ **look for** — records carrying a `scope` of `entity` or `relation` rather than raw mentions —
+five and nine of them respectively, for this corpus:
+
+```bash
+uv run python -c "
+import collections, json
+print(collections.Counter(
+    json.loads(l)['scope']
+    for l in open('latence-out/_latence/runs/run-0001/checkpoints/disambiguate.jsonl')))
+"
+# Counter({'relation': 9, 'entity': 5})
+```
+
+This is the phase boundary. Everything above it worked on one chunk or document at a time, with no
 corpus-wide state. Everything from here down sees the whole corpus. That split is what keeps the
 expensive half parallel and independent of corpus size.
 
