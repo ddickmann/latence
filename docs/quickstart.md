@@ -235,7 +235,7 @@ ls latence-out/_latence/runs/run-0001/export/
 | --- | --- |
 | `records.jsonl` / `records.parquet` | One row per chunk: masked text, provenance, offsets, page span, the dense `embedding`, and the denormalised KG columns (`kg_node_ids`, `neighbor_node_ids`, `kg_node_community`, `kg_node_centrality`). |
 | `graph-nodes.parquet` | Resolved entity nodes — canonical name, type, confidence, member mentions, source documents. |
-| `graph-edges.parquet` | Extracted relations — with the **Evidence** sentence each one came from. |
+| `graph-edges.parquet` | Extracted relations — each with an `evidence` block naming the source documents and the exact mentions it was built from. |
 | `graph.ttl` / `graph.graphml` | The same graph as RDF and as GraphML, for tools that speak them. |
 | `quality-report.md` / `.json` | The artifact that substantiates "AI-ready" — human- and machine-readable. |
 
@@ -318,7 +318,7 @@ ranked = Bm25Rescorer.from_export(export).process(question, pool)
 show("BM25 over the emitted corpus stats", ranked)
 
 expanded = MultiHopExpander(
-    {"seed_top_k": 2, "max_hops": 2, "hop_weight": 1.5},
+    {"seed_top_k": 1, "max_hops": 2, "hop_weight": 1.5},
     graph_source=DuckDBGraphSource(f"{export}/graph-edges.parquet"),
 ).process(question, ranked)
 show("after 2-hop knowledge-graph expansion", expanded)
@@ -332,40 +332,52 @@ uv run python ask.py latence-out/_latence/runs/run-0002/export "<a question abou
 ```
 
 ✓ **look for** — three blocks. The first is lexical: BM25 scores the chunks that share terms with
-your question and leaves the rest at `0.000`. The second is the interesting one: chunks that share
-*entities* with the top hits are lifted off zero by the graph traversal even though they contain
-none of your query's words. The third keeps the highest-value, least-redundant subset that fits the
-token budget. On a four-document corpus it looks like this:
+your question and leaves the rest at exactly `0.000`. The second is the interesting one: chunks that
+share *entities* with the top hit are lifted off zero by the graph traversal even though they
+contain none of your query's words. The third keeps the highest-value, least-redundant subset that
+fits the token budget. On the four-document corpus from
+[Tutorial 1](tutorials/01-your-first-pipeline.md) it looks like this:
 
 ```
 -- BM25 over the emitted corpus stats
-     5.669  Travel and Expense Policy
-     0.000  Master Services Agreement
+     5.576  Travel and Expense Policy
      0.000  Incident Report 2024-07
      0.000  Acme Corporation Employee Handbook
-
--- after 2-hop knowledge-graph expansion
-     5.669  Travel and Expense Policy
-     1.500  Incident Report 2024-07
-     1.500  Acme Corporation Employee Handbook
      0.000  Master Services Agreement
 
--- packed into a 600-token budget
-     5.669  Travel and Expense Policy
+-- after 2-hop knowledge-graph expansion
+     5.576  Travel and Expense Policy
      1.500  Incident Report 2024-07
      1.500  Acme Corporation Employee Handbook
+     1.500  Master Services Agreement
+
+-- packed into a 600-token budget
+     5.576  Travel and Expense Policy
+     1.500  Incident Report 2024-07
+     1.500  Acme Corporation Employee Handbook
+     1.500  Master Services Agreement
 ```
 
-Read the middle block carefully, because it is the whole argument of the framework in four lines.
-BM25 and dense embeddings both retrieve text that is *near the question*. Two of those documents are
-not near it in any lexical or semantic sense — they were reached by following an edge in the
-knowledge graph from a document that was. That is a signal no single-hop retriever exposes, and it
-is why the pipeline bothers to build a graph at all.
+Read the middle block carefully, because it is the argument of the whole framework in four lines.
+BM25 and dense embeddings both retrieve text that is *near the question*. Those three documents are
+not near it lexically at all — they were reached by following edges in the knowledge graph out from
+a document that was. That is a signal no single-hop retriever exposes, and it is why the pipeline
+bothers to build a graph.
 
-!!! note "Your numbers will differ"
+!!! note "Your numbers will differ, and the knobs matter"
     Scores depend on your corpus. The **shapes** are what to check: BM25 leaves non-matching chunks
     at exactly `0.000`, expansion moves graph-adjacent chunks above zero, and packing returns a
-    subset in descending score. If expansion changes nothing, your chunks probably carry no
+    subset in descending score.
+
+    Two settings decide whether you see anything at all. `seed_top_k` is how many top candidates
+    anchor the traversal, and a candidate whose entity nodes are *already in the seed set* earns no
+    bonus — so on a small, densely-connected corpus a large `seed_top_k` can absorb every node and
+    make expansion a no-op. Start at `1` and raise it as the corpus grows. `hop_weight` must be
+    scaled to the score range it is added to: `1.5` is right next to raw BM25 scores of ~5, and far
+    too large next to fused reciprocal-rank scores of ~0.03.
+    [Tutorial 3](tutorials/03-retrieval.md) works through both.
+
+    If expansion changes nothing even at `seed_top_k: 1`, your chunks probably carry no
     `kg_node_ids` — check that the `enrich` stage ran and that `context_columns: true` is set on
     `export_corpus`.
 
