@@ -66,8 +66,22 @@ stated method is worse than a missing one, because it looks checked.
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
 - [ ] `CONTRIBUTING.md` states the CLA requirement
+- [ ] **The benchmark corpus's own licence flags are coherent.**
+      `latence_benchmark/redaction_suite.py` declares the synthetic PII corpus
+      `dataset_license="Apache-2.0", code_license="Apache-2.0", commercial_use=True`, and those
+      values render into `docs/BENCHMARKS.md`. Deferred deliberately, because it is not a mechanical
+      swap: setting PolyForm while leaving `commercial_use=True` states two contradictory things,
+      and setting `commercial_use=False` gates the project's OWN corpus behind
+      `--accept-non-commercial` in `licensing.require_usable`. **Owner decision, not a docstring.**
+- [ ] **`latence-splade`'s `license_code` resolved.** Its prose says "the package code and the
+      `transformers` library are Apache-2.0". The `transformers` half is true; the package-code half
+      is not, post-relicence. `ProviderProfile.license_code` is single-valued, so which claim it
+      carries is a semantics decision. Pinned by `test_splade_embedder.py:309`.
 - [ ] **Legal review completed** — the licence choice, the LGPL interaction, any prior PyPI
-      publication, and the CLA text. This gate is not satisfiable by an automated check.
+      publication, the CLA text, and the **deliberately retained Apache-2.0 subset** in
+      `latence-retrieval` (7 modules keep an outbound Apache grant by decision, not oversight; a
+      scanner will flag the mismatch against the PolyForm package metadata, so the exception must be
+      one the reviewer has actually seen). This gate is not satisfiable by an automated check.
 
 ## Gate 4 — Documentation truthfulness
 
