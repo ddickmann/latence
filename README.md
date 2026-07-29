@@ -6,7 +6,7 @@ you own.**
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](./pyproject.toml)
-[![tests 4,590 passing](https://img.shields.io/badge/tests-4%2C590%20passing-brightgreen)](./CONTRIBUTING.md)
+[![tests 4,605 passing](https://img.shields.io/badge/tests-4%2C605%20passing-brightgreen)](./CONTRIBUTING.md)
 [![mypy --strict](https://img.shields.io/badge/mypy-strict-brightgreen)](./scripts/typecheck.sh)
 [![status pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange)](#status--maturity)
 
@@ -285,8 +285,8 @@ Pre-1.0, and specific about it.
 
 **Green, and reproducible on a laptop:**
 
-- **4,590 tests pass, 33 skipped** — measured at commit `04e8718` with
-  `PYTHONHASHSEED=0 uv run pytest -q` (672 s, CPU, offline). The count carries the commit it was
+- **4,605 tests pass, 36 skipped** — measured at commit `843ce34` with
+  `PYTHONHASHSEED=0 uv run pytest -q` (619 s, CPU, offline). The count carries the commit it was
   taken at, the same convention `PERF-RESULTS.md` uses, because it grows as work lands — the command
   is the source of truth, not this line.
 - **`mypy --strict` over src *and* tests** for every workspace package — `bash scripts/typecheck.sh`.
