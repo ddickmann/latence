@@ -10,6 +10,12 @@ body:
         its language (`CONTEXT.md`). To propose a **new model Provider**, please
         use the *Provider request* template instead — it has the license-verification
         fields that gate a Provider.
+
+        Proposing costs you nothing. If you intend to **implement** it as well, read
+        CONTRIBUTING.md first: every merged contribution requires a signed CLA, because
+        the licence reserves commercial rights to the owner and the owner must hold
+        sufficient rights to grant a commercial licence. Better to know that now than
+        after you have written the code.
   - type: textarea
     id: problem
     attributes:
@@ -58,6 +64,16 @@ body:
         - label: This likely warrants an ADR (numbered, dated, alternatives-considered).
         - label: This changes a versioned inter-Stage contract (SCHEMA_VERSION bump).
         - label: This adds or changes a dependency (license must be verified).
+  - type: dropdown
+    id: who-implements
+    attributes:
+      label: Who would implement this?
+      options:
+        - I am only proposing it
+        - I would like to implement it (I understand a signed CLA is required to merge)
+        - Undecided
+    validations:
+      required: true
   - type: checkboxes
     id: checks
     attributes:
