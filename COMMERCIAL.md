@@ -113,12 +113,22 @@ explicitly — but neither is a substitute for your own review.
 
 ## Contributions
 
-The project does not currently operate a contributor licence agreement. Because
-the copyright holder offers this software under one set of terms to the public
-and separate commercial terms to licensees, an inbound contribution that the
-copyright holder does not own outright would constrain the commercial licence.
-Until a CLA or DCO process is in place, contributions may be declined or asked to
-be re-submitted under an assignment. See `CONTRIBUTING.md`.
+The project has **no signed CLA and no DCO process**. To date it has had no
+outside contributions: every commit in the repository's history was authored by
+the copyright holder.
+
+`CONTRIBUTING.md` currently carries only an inbound-equals-outbound sentence
+("by contributing you agree your contributions are licensed under the project's
+licence"). **That is not sufficient for this licensing model, and it is not yet
+updated for the relicence.** Under a dual arrangement — noncommercial terms to
+the public, commercial terms by agreement — inbound-equals-outbound means the
+copyright holder would receive a contribution under *noncommercial* terms and
+would then have no right to license that contribution commercially. Every
+commercial licence granted after such a contribution would be partly
+unauthorised.
+
+Until a CLA (or a copyright assignment) is in place, outside contributions
+should be declined or held. This is flagged, not solved, here.
 
 ## Legal review
 
@@ -134,4 +144,7 @@ a lawyer confirm at minimum:
    anything is ever shipped as a binary or a container image;
 3. that the Apache-2.0 → PolyForm transition is clean given the repository's
    never-published history (the facts are recorded at the top of `LICENSE`);
-4. the contributor position above, before any outside contribution is accepted.
+4. the contributor position above — specifically, what instrument (CLA or
+   assignment) is needed so that contributions can be licensed commercially, and
+   what `CONTRIBUTING.md` must say instead of inbound-equals-outbound — **before
+   any outside contribution is accepted**.
