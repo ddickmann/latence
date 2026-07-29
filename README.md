@@ -10,8 +10,9 @@ you own.**
 [![mypy --strict](https://img.shields.io/badge/mypy-strict-brightgreen)](./scripts/typecheck.sh)
 [![status pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange)](#status--maturity)
 
-*(No CI or PyPI badge: the repository is private, no distribution has ever been published, and a
-badge for a run that has not happened is a lie. See [Status & maturity](#status--maturity).)*
+*(No CI or PyPI badge: no release has been cut and no distribution has ever been published, so
+either badge would report a state that does not exist. See [Status & maturity](#status--maturity)
+for what is and is not proven.)*
 
 ---
 
@@ -42,7 +43,7 @@ open /tmp/latence-demo/_latence/runs/demo/export/index.html
 ```
 
 That ingests a bundled **deliberately messy** corpus — text/markdown, a real PDF, and four planted
-dangerous files — and prints exactly this:
+dangerous files — and reports:
 
 ```
   documents: 4 ingested, 3 quarantined, 1 flagged
