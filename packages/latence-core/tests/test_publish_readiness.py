@@ -257,8 +257,8 @@ def test_no_owned_licence_document_still_grants_apache_2_0() -> None:
             # not a grant. A GRANT is a line that licenses the work under it.
             if re.search(r"[Ll]icensed under the Apache", line):
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}: {line.strip()}")
-    assert not offenders, "these files still grant the superseded Apache-2.0 licence:\n" + "\n".join(
-        offenders
+    assert not offenders, (
+        "these files still grant the superseded Apache-2.0 licence:\n" + "\n".join(offenders)
     )
 
 
@@ -331,9 +331,9 @@ def test_lgpl_obligation_is_documented_precisely_not_waved_away() -> None:
         "citing §4 without it understates the obligation for a User Product"
     )
     # The trigger has to be named, or a reader cannot tell whether it applies to them.
-    assert "container image" in lowered and (
-        "binary" in lowered or "frozen" in lowered
-    ), "the document does not say WHEN the obligation is triggered (shipping a binary/image)"
+    assert "container image" in lowered and ("binary" in lowered or "frozen" in lowered), (
+        "the document does not say WHEN the obligation is triggered (shipping a binary/image)"
+    )
     # And it must be honest that today nothing is conveyed.
     assert "do not redistribute it" in lowered or "not conveyed" in lowered
 

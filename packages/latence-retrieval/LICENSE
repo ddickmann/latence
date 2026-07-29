@@ -32,12 +32,12 @@ was never distributed. Verified on 2026-07-29:
     is in it.)
   * No GitHub Release has ever been created, and the repository holds no
     version tag matching "v*".
-  * Every commit in the repository's history — 479 at the time of the relicence
-    — was authored by Dennis Dickmann. Three Git identities appear (ddickmann,
-    latenceainew, and the GitHub no-reply address of the same account); all
-    resolve to the same person and the same address, ddickmann81@gmail.com.
-    There are no third-party contributions and no contributor licence
-    agreements to reconcile.
+  * Every commit in the repository's history — 479 on `main` at the time of
+    the relicence — was authored by Dennis Dickmann. Three Git identities
+    appear (ddickmann, latenceainew, and the GitHub no-reply address of the
+    same account); all resolve to the same person and the same address,
+    ddickmann81@gmail.com. There are no third-party contributions and no
+    contributor licence agreements to reconcile.
 
 Dennis Dickmann is therefore the sole copyright holder in this work and is free
 to license it on any terms. No one holds a prior Apache-2.0 grant in this
@@ -58,11 +58,17 @@ text at
 
     https://polyformproject.org/licenses/noncommercial/1.0.0.txt
 
-retrieved 2026-07-29. SPDX identifier: PolyForm-Noncommercial-1.0.0. The SHA-256
-of the text between the markers, excluding the marker lines and the single
-newline that follows the BEGIN marker and precedes the END marker, is
+retrieved 2026-07-29. SPDX identifier: PolyForm-Noncommercial-1.0.0.
+
+Everything between the BEGIN marker line and the END marker line is that file
+byte for byte, including its trailing newline. Its SHA-256 is
 
     ffcca38841adb694b6f380647e15f17c446a4d1656fed51a1e2041d064c94cc8
+
+which is also the SHA-256 of the steward's file as published. A test in this
+repository recomputes it on every run
+(packages/latence-core/tests/test_publish_readiness.py), so an edited clause
+fails the build instead of shipping.
 
 Nothing outside the markers modifies the licence. The licensor is Dennis
 Dickmann, and the Required Notice line at the top of this file is the
