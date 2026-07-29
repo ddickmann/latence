@@ -43,10 +43,10 @@ from __future__ import annotations
 import math
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Sized
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # pragma: no cover - typing only (SetupAnswers stays with the answer-resolution)
     from latence_core.setup.wizard import SetupAnswers
@@ -642,6 +642,21 @@ def _pii_labels(answers: SetupAnswers) -> list[str]:
     return labels
 
 
+def _label_candidates(answers: SetupAnswers) -> dict[str, object]:
+    """The lexicon inducer's candidate type space, copied out of the answers struct.
+
+    A COPY, not the operator's own object: the emitted block is handed to the YAML dumper and to
+    every test that asserts on it, and a Stage config that aliases the answers would let one
+    mutation reach both. Order — the operator's, slot by slot — is preserved, so the emitted YAML
+    stays a byte-stable function of the supplied pool (T-WIZ-2 / ADR-0041 §3).
+    """
+    pool = answers.label_candidates or {}
+    return {
+        slot: (list(value) if isinstance(value, list) else {k: list(v) for k, v in value.items()})
+        for slot, value in pool.items()
+    }
+
+
 def tiered_embedder_block(answers: SetupAnswers) -> StageBlock:
     """The device-TIERED ST embedder block (disambiguation context + RAG-corpus vectors).
 
@@ -922,7 +937,7 @@ class ContentScreenContribution(StageContribution):
 
 @dataclass(frozen=True)
 class InduceContribution(StageContribution):
-    """``induce`` — LLM schema induction at CHUNK granularity (T1), or NOTHING at all.
+    """``induce`` — schema induction at CHUNK granularity, by LLM or by LEXICON, or NOTHING at all.
 
     **Per-chunk.** Each chunk is induced against its own text and carries only its own small,
     relevant label set. That is what the extractor downstream needs: the alternative — inducing per
@@ -947,6 +962,18 @@ class InduceContribution(StageContribution):
     That is the only implementation of "induction is skipped entirely" that cannot regress into a
     quiet LLM call, and it makes the emitted stack self-evidently free of one. The contribution
     still points :data:`ANCHOR_LABELS` at the chunk stream so every label consumer stays wired.
+
+    **The lexicon path (T-WIZ-2) is a PROVIDER swap and nothing else.** With
+    ``answers.label_candidates`` set, the same Stage, on the same upstream, with the same
+    ``granularity: chunk`` and ``dedup: true``, is served by ``label_inducer.lexicon`` — a
+    deterministic, CPU-only, ZERO-NETWORK tagger over the operator's candidate type space (typically
+    the pool ``latence-label-profile --candidates-out`` mines from the corpus). The pool is INLINED
+    rather than referenced by path, so the emitted stack is self-contained: one file reaches the
+    pod, ``stack validate`` sees the whole configuration, and "this run makes no induction call" is
+    readable off the config — there is no endpoint in it to call. The LLM branch's ``model`` /
+    ``base_url`` / ``max_tokens`` / ``temperature`` / ``domain`` are all OMITTED, because the
+    lexicon Provider reads none of them and an emitted key nothing reads is a config that looks
+    tuned and is not.
     """
 
     name: str = "induce"
@@ -957,6 +984,26 @@ class InduceContribution(StageContribution):
         if answers.predefined_labels is not None:
             ctx.set_anchor(ANCHOR_LABELS, chunk_stream)
             return None
+        if answers.label_candidates is not None:
+            ctx.set_anchor(ANCHOR_LABELS, self.name)
+            return {
+                "name": self.name,
+                "capability": "schema_induction",
+                "provider": "label_inducer.lexicon",
+                "depends_on": [chunk_stream],
+                # Exactly the keys `LexiconLabelInducer.__init__` reads. `min_hits` and
+                # `whole_word` are emitted even at their defaults: they are the two knobs that
+                # decide what a chunk induces, and `whole_word: false` is the answer a
+                # compounding language (German `Rechnungsnummernkreis` ⊃ `Rechnungsnummer`) needs
+                # — an operator tuning the run should read them off the stack, not infer them.
+                "config": {
+                    "granularity": "chunk",
+                    "min_hits": answers.label_min_hits,
+                    "whole_word": answers.label_whole_word,
+                    "dedup": True,
+                    "candidates": _label_candidates(answers),
+                },
+            }
         config: StageBlock = {
             "model": answers.llm_model,
             "base_url": answers.llm_base_url,
@@ -992,6 +1039,29 @@ class InduceContribution(StageContribution):
                 "#   a fixed RELEVANCE schema is your choice, the SAFETY floor is not.",
                 "#   Delete `predefined_labels` from your setup flags to get per-chunk induction"
                 " back.",
+            )
+        if block["provider"] == "label_inducer.lexicon":
+            # Derived from the BLOCK, never re-decided from `answers` (the ADR-0041 §7a drift
+            # class): a Stage that stops emitting the lexicon Provider silences this prose.
+            config = cast("StageBlock", block["config"])
+            pool = cast("dict[str, Sized]", config["candidates"])
+            declared = sum(len(types) for types in pool.values())
+            return (
+                "#",
+                "# Schema induction: PER CHUNK, NO LLM (`label_inducer.lexicon`, T-WIZ-2) — every",
+                "#   chunk is tagged against the candidate type space inlined at",
+                f"#   `induce.config.candidates` ({declared} types over {len(pool)} slot(s)), and"
+                " carries",
+                "#   only the types its OWN text evidences. The run makes ZERO induction LLM calls"
+                " and",
+                "#   ZERO network calls of any kind (no key needed): the tagger is pure-CPU and",
+                "#   deterministic, so the induced schema is a byte-reproducible function of the"
+                " text",
+                "#   and this config. Tune it with `min_hits` (how many DISTINCT cues a type"
+                " needs)",
+                "#   and `whole_word` (set false for compounding languages like German).",
+                "#   Drop `--label-candidates` from your setup flags to induce with an LLM"
+                " instead.",
             )
         key_var = llm_key_env_var(answers.llm_base_url)
         return (

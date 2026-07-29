@@ -721,6 +721,35 @@ def setup(
             "corpus with a known taxonomy. The ADR-0044 financial-PII floor still applies.",
         ),
     ] = None,
+    label_candidates: Annotated[
+        Path | None,
+        typer.Option(
+            "--label-candidates",
+            help="NON-LLM induction: a JSON/YAML CANDIDATE TYPE SPACE ({entity_types, "
+            "relation_types, pii_types} -> type names, or type -> surface cues) — typically the "
+            "artifact `latence-label-profile --candidates-out` mines from your corpus. Wires "
+            "`label_inducer.lexicon` instead of `label_inducer.llm`: still per-chunk induction, "
+            "but deterministic, CPU-only and ZERO network. Not combinable with "
+            "--predefined-labels.",
+        ),
+    ] = None,
+    label_min_hits: Annotated[
+        int | None,
+        typer.Option(
+            "--label-min-hits",
+            help="--label-candidates only: how many DISTINCT surface cues of a type must occur in "
+            "a chunk before it is induced (default 1). Raise it on a noisy corpus.",
+        ),
+    ] = None,
+    label_whole_word: Annotated[
+        bool | None,
+        typer.Option(
+            "--label-whole-word/--no-label-whole-word",
+            help="--label-candidates only: match cues on word boundaries (default) so `iban` does "
+            "not fire inside `Caribbean`. Use --no-label-whole-word for compounding languages "
+            "(German `Rechnungsnummernkreis` contains `Rechnungsnummer`).",
+        ),
+    ] = None,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Where to save the generated stack config.")
     ] = Path("latence.stack.yaml"),
@@ -749,6 +778,7 @@ def setup(
         detect_header_family,
         detect_inline_family,
         llm_key_env_var,
+        parse_label_candidates,
         parse_predefined_labels,
         recommend_parser,
         recommend_sota_parser,
@@ -1027,6 +1057,47 @@ def setup(
             err=True,
         )
 
+    # T-WIZ-2 non-LLM induction: the operator supplies a CANDIDATE TYPE SPACE (usually the pool
+    # `latence-label-profile --candidates-out` mined from their corpus) and the `induce` Stage is
+    # served by the deterministic, zero-network `label_inducer.lexicon` instead of an LLM. Rejected
+    # ALONGSIDE --predefined-labels rather than silently preferring one: they are different answers
+    # to the same question (induce per chunk from a pool vs do not induce at all), so a stack that
+    # honoured one would look configured by both flags and obey one.
+    candidate_pool: dict[str, list[str] | dict[str, list[str]]] | None = None
+    if label_candidates is not None:
+        if predefined_labels is not None:
+            typer.echo(
+                "--label-candidates and --predefined-labels are mutually exclusive: the first "
+                "induces per chunk from your pool (no LLM), the second emits no `induce` stage at "
+                "all. Choose one.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if not label_candidates.is_file():
+            typer.echo(f"Label-candidates file not found: {label_candidates}", err=True)
+            raise typer.Exit(code=2)
+        import yaml  # YAML is a superset of JSON, so ONE loader reads either file format.
+
+        try:
+            candidate_pool = parse_label_candidates(
+                yaml.safe_load(label_candidates.read_text(encoding="utf-8"))
+            )
+        except SetupConfigError as exc:
+            typer.echo(f"Invalid --label-candidates file: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        except yaml.YAMLError as exc:
+            typer.echo(f"--label-candidates file is not valid JSON/YAML: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        typer.echo(
+            "Non-LLM induction: schema induction runs per chunk against your candidate type space "
+            "with `label_inducer.lexicon` (deterministic, CPU-only, zero network calls).",
+            err=True,
+        )
+    min_hits = label_min_hits if label_min_hits is not None else 1
+    if min_hits < 1:
+        typer.echo(f"--label-min-hits must be >= 1, got {min_hits}.", err=True)
+        raise typer.Exit(code=2)
+
     # h. The tuning knobs (T-WIZ-1 chunk budget, T-OCR-3 rasterisation, T-WIZ-3 GLiNER2 perf).
     # Flags only (never prompted): they are advanced knobs whose defaults are the validated ones,
     # so a guided run must not make the operator answer five questions to reach the blessed stack.
@@ -1086,6 +1157,9 @@ def setup(
         header_refs=header_refs_family,
         inline_refs=inline_refs_family,
         predefined_labels=fixed_labels,
+        label_candidates=candidate_pool,
+        label_min_hits=min_hits,
+        label_whole_word=label_whole_word if label_whole_word is not None else True,
         chunk_max_tokens=chunk_max,
         chunk_overlap_tokens=chunk_overlap,
         chunk_min_tokens=chunk_min,
@@ -1097,10 +1171,10 @@ def setup(
     )
 
     # Confirm the LLM key env var is set (never store the key). Warn — never crash — if unset.
-    # Predefined-only makes NO induction call, so warning about a key it will never read would be
-    # noise that teaches operators to ignore the warning.
+    # Predefined-only and the lexicon path both make NO induction call, so warning about a key
+    # neither will ever read would be noise that teaches operators to ignore the warning.
     key_var = llm_key_env_var(base_url)
-    if fixed_labels is None and not os.environ.get(key_var):
+    if fixed_labels is None and candidate_pool is None and not os.environ.get(key_var):
         typer.echo(
             f"WARNING: ${key_var} is not set. Schema induction needs it at run time "
             f"(`latence process`). Export it before running, e.g. `export {key_var}=...`.",
@@ -1146,9 +1220,24 @@ def setup(
             "NOT reach the corpus. Split them, or raise `intake_screen.config.max_bytes` by hand "
             "(and expect the memory cost of screening a file that size)."
         )
-    typer.echo(f"  schema induction: {model} @ {base_url}  (key from ${key_var})")
+    # The summary must describe the config that was actually emitted. With --label-candidates the
+    # stack carries `label_inducer.lexicon` and makes ZERO model calls, so naming an LLM and an API
+    # key here told the operator the opposite of the truth about a stack whose whole point was that
+    # no LLM induces its labels.
+    if answers.label_candidates is not None:
+        slots = ", ".join(
+            f"{len(v)} {slot.replace('_types', '')}" for slot, v in answers.label_candidates.items()
+        )
+        typer.echo(
+            f"  schema induction: label_inducer.lexicon — NO LLM, no network, no API key "
+            f"({slots}; narrowed per chunk)"
+        )
+    elif answers.predefined_labels is not None:
+        typer.echo("  schema induction: none — fixed predefined labels, no induce Stage emitted")
+    else:
+        typer.echo(f"  schema induction: {model} @ {base_url}  (key from ${key_var})")
     hint = normalize_domain_hint(domain_hint)
-    if hint:
+    if hint and answers.label_candidates is None and answers.predefined_labels is None:
         typer.echo(f"  domain hint: steering schema induction ({hint})")
     typer.echo(
         "  PII redaction + guardrail screening: "

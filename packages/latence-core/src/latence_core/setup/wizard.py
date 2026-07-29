@@ -135,6 +135,7 @@ __all__ = [
     "intake_max_bytes",
     "llm_key_env_var",
     "normalize_domain_hint",
+    "parse_label_candidates",
     "parse_predefined_labels",
     "recipe_for",
     "recommend_parser",
@@ -274,6 +275,103 @@ def parse_predefined_labels(raw: object) -> dict[str, list[str]]:
     return parsed
 
 
+def parse_label_candidates(raw: object) -> dict[str, list[str] | dict[str, list[str]]]:
+    """Validate an operator-supplied CANDIDATE TYPE SPACE for the ``label_inducer.lexicon`` inducer.
+
+    T-WIZ-2: the non-LLM induction path. The pool is the artifact
+    ``latence-label-profile --candidates-out`` writes — ``{slot: {type name: [surface cue, ...]}}``
+    over :data:`PREDEFINED_LABEL_SLOTS`, with a slot that selected nothing OMITTED rather than
+    emitted empty — and it is INLINED into the emitted stack as the Provider's ``candidates``
+    config, so the generated stack is self-contained (no second file to ship to the pod).
+
+    Both of the Provider's per-slot forms are accepted and preserved as written: a plain LIST of
+    type names (the name is its own cue) or a ``{type: [cue, ...]}`` MAPPING. This is exactly why
+    :func:`parse_predefined_labels` is not the vehicle for it — that one accepts flat name lists
+    only, so it structurally cannot carry cues, which are most of a mined pool's value.
+
+    Every failure is TYPED and loud (:class:`SetupConfigError`), never coerced — the same posture
+    :func:`parse_predefined_labels` takes and for the same reason: a typo'd slot that silently
+    contributed nothing would emit a stack that LOOKS pool-configured while inducing from a pool
+    that is missing a third of itself. Names and cues keep the operator's own ORDER (blank entries
+    dropped), so the emitted YAML is a byte-stable function of the file.
+    """
+    if not isinstance(raw, dict) or not raw:
+        slots = ", ".join(PREDEFINED_LABEL_SLOTS)
+        msg = (
+            f"label candidates must be a non-empty mapping of {{{slots}}} to either a list of type "
+            f"names or a {{type: [cue, ...]}} mapping, got {type(raw).__name__}."
+        )
+        raise SetupConfigError(msg)
+    unknown = sorted(str(k) for k in raw if k not in PREDEFINED_LABEL_SLOTS)
+    if unknown:
+        msg = (
+            f"label candidates carry unknown slot(s) {unknown}; "
+            f"expected only {list(PREDEFINED_LABEL_SLOTS)}."
+        )
+        raise SetupConfigError(msg)
+    parsed: dict[str, list[str] | dict[str, list[str]]] = {}
+    for slot in PREDEFINED_LABEL_SLOTS:
+        if slot not in raw:
+            continue
+        slot_value = _parse_candidate_slot(slot, raw[slot])
+        # An empty slot is a CONFIGURATION ERROR at the Provider, so an operator who supplied one
+        # (or whose profiler selected nothing for it) gets the same OMITTED slot the profiler's own
+        # artifact writes, not a stack that raises hours later at construction.
+        if slot_value:
+            parsed[slot] = slot_value
+    if not parsed:
+        msg = (
+            "label candidates declare no usable types — the lexicon inducer could only ever induce "
+            "nothing. Supply at least one type, or drop the flag to induce with an LLM."
+        )
+        raise SetupConfigError(msg)
+    return parsed
+
+
+def _parse_candidate_slot(slot: str, value: object) -> list[str] | dict[str, list[str]]:
+    """One slot of the candidate space, in whichever of the two forms the operator wrote it."""
+    if isinstance(value, list):
+        names: list[str] = []
+        for name in value:
+            if not isinstance(name, str):
+                msg = f"label candidates slot {slot!r} (list form) must hold type-name strings."
+                raise SetupConfigError(msg)
+            cleaned = name.strip()
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+        return names
+    if isinstance(value, dict):
+        # A type declared with NO cues is kept, not dropped: the Provider reads an empty cue list
+        # as "the type name is its own cue", which is what the list form means — so the mapping
+        # form can express both without the operator having to switch forms mid-file.
+        types: dict[str, list[str]] = {}
+        for name, cues in value.items():
+            if not isinstance(name, str):
+                msg = f"label candidates slot {slot!r} must be keyed by type-name strings."
+                raise SetupConfigError(msg)
+            if not isinstance(cues, list) or not all(isinstance(c, str) for c in cues):
+                msg = (
+                    f"label candidates slot {slot!r}: type {name!r} must map to a list of surface "
+                    f"cue strings (an empty list means 'the type name is its own cue')."
+                )
+                raise SetupConfigError(msg)
+            cleaned_name = name.strip()
+            if not cleaned_name or cleaned_name in types:
+                continue
+            kept: list[str] = []
+            for cue in cues:
+                text = cue.strip()
+                if text and text not in kept:
+                    kept.append(text)
+            types[cleaned_name] = kept
+        return types
+    msg = (
+        f"label candidates slot {slot!r} must be a list of type names or a "
+        f"{{type: [cue, ...]}} mapping, got {type(value).__name__}."
+    )
+    raise SetupConfigError(msg)
+
+
 @dataclass(frozen=True)
 class SetupAnswers:
     """The fully-resolved answers the generator turns into a stack config.
@@ -343,6 +441,22 @@ class SetupAnswers:
     # the redactor's labels: a fixed relevance schema is an operator's choice, the safety floor is
     # not (README invariant 3).
     predefined_labels: dict[str, list[str]] | None = None
+    # T-WIZ-2 — the NON-LLM induction path: an operator-declared CANDIDATE TYPE SPACE (typically
+    # the artifact `latence-label-profile --candidates-out` mines from the corpus). ``None`` (the
+    # default) ⇒ induction is the frontier `label_inducer.llm` path, byte-identical to before. When
+    # set, the `induce` Stage is `label_inducer.lexicon` instead — a deterministic, CPU-only,
+    # ZERO-NETWORK tagger — with this pool inlined as its `candidates` config, so the emitted stack
+    # is self-contained and makes no induction call by construction (there is no endpoint in it to
+    # call). Mutually exclusive with ``predefined_labels``: that one turns induction OFF entirely,
+    # this one changes HOW it induces.
+    label_candidates: dict[str, list[str] | dict[str, list[str]]] | None = None
+    # The lexicon inducer's two precision knobs (only read on that path). ``min_hits`` is how many
+    # DISTINCT cues of a type must occur before it is induced — raise it on a noisy corpus where
+    # single-word cues over-fire. ``whole_word`` matches cues on word boundaries so `iban` does not
+    # fire inside `Caribbean`; German compounding is the reason it must be switchable off
+    # (`Rechnungsnummernkreis` contains `Rechnungsnummer`).
+    label_min_hits: int = 1
+    label_whole_word: bool = True
     # T-WIZ-1 — the chunk token budget. It was a literal (640/80/8) in the recipe, so retuning a
     # run meant hand-editing the emitted YAML. The default is the GLiNER2 window (768); the
     # gliner-family Stages derive their `max_len` from THIS value (`recipe.model_window_for`),
@@ -366,6 +480,27 @@ class SetupAnswers:
     microbatch_max_texts: int | None = None
     microbatch_token_budget: int | None = None
     intra_op_threads: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject the ONE contradictory pair of answers, here, where every caller passes through.
+
+        ``predefined_labels`` means "emit no ``induce`` Stage at all"; ``label_candidates`` means
+        "induce per chunk, from this pool, without an LLM". They are different answers to the same
+        question, so honouring either silently would emit a stack that LOOKS configured by both
+        flags and obeys one. Raised from the struct rather than only from the CLI because the
+        generator is a public entry point (``build_stack_config(answers)``) — a contradiction that
+        only the CLI caught would reach it unchecked.
+        """
+        if self.predefined_labels is not None and self.label_candidates is not None:
+            msg = (
+                "predefined labels and label candidates are mutually exclusive: predefined labels "
+                "emit NO `induce` stage at all, while label candidates induce per chunk from your "
+                "pool with the zero-network lexicon inducer. Choose one."
+            )
+            raise SetupConfigError(msg)
+        if self.label_min_hits < 1:
+            msg = f"label candidates 'min_hits' must be >= 1, got {self.label_min_hits}."
+            raise SetupConfigError(msg)
 
 
 def detect_extensions(path: str | Path) -> tuple[str, ...]:
