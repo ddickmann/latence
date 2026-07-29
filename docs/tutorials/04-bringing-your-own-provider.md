@@ -20,9 +20,12 @@ framework's core to satisfy a Capability**, because a Capability is a structural
 ## 1. Pick a Capability that genuinely varies
 
 The Capabilities you can fulfil: `Source`, `Parser`, `Chunker`, `IntakeScreener`,
-`ContentScreener`, `EntityExtractor`, `RelationExtractor`, `FusedEntityRelationExtractor`,
-`PIIDetector`, `Profiler`, `Disambiguator`, `GraphAssembler`, `GraphCompleter`, `ContextEnricher`,
-`DeltaProcessor`, `Embedder`, `SparseEmbedder`, `Tokenizer`, `LabelInducer`, `Export`.
+`ContentScreener`, `LabelInducer`, `EntityExtractor`, `RelationExtractor`,
+`FusedEntityRelationExtractor`, `PIIDetector`, `Profiler`, `TypeConsolidator`, `Disambiguator`,
+`GraphAssembler`, `GraphCompleter`, `GraphFeatureComputer`, `ContextEnricher`, `DeltaProcessor`,
+`Export` — plus the non-Stage signal seams `Embedder`, `SparseEmbedder`, `MultiVectorEmbedder`,
+`FdeConverter` and `Tokenizer`. Each is a `runtime_checkable` Protocol in
+[`latence_core.capability`](../reference/capability.md).
 
 We will build a **Tokenizer**, because it is small enough to read in one screen and because it is a
 seam that genuinely matters rather than a toy. BM25's whole statistical apparatus — document
