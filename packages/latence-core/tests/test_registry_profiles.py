@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from latence_core import ProviderProfile, ProviderRegistry
+from latence_core.providers.profile import REPO_LICENSE_CODE
 
 
 def test_profile_returns_declared_for_in_core_reference() -> None:
@@ -20,7 +21,7 @@ def test_profile_returns_declared_for_in_core_reference() -> None:
     prof = reg.profile("entity.gazetteer")
     assert prof is not None
     assert prof.compute == "cpu"
-    assert prof.license == "Apache-2.0"
+    assert prof.license == REPO_LICENSE_CODE
     assert prof.license_verified is True
 
 

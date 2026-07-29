@@ -19,6 +19,7 @@ import pytest
 from latence_core.capability import ProviderRegistry
 from latence_core.conformance import run_conformance
 from latence_core.pipeline import Pipeline
+from latence_core.providers.profile import REPO_LICENSE_CODE
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 from latence_source_sharepoint.provider import SharePointSource
@@ -127,7 +128,7 @@ def test_provider_discovered_via_entry_point() -> None:
     assert registry.load("source.sharepoint") is SharePointSource
     profile = registry.profile("source.sharepoint")
     assert profile is not None
-    assert profile.license == "Apache-2.0"
+    assert profile.license == REPO_LICENSE_CODE
     assert profile.license_verified is True
     assert profile.model_id is None  # a connector ships no weights
 

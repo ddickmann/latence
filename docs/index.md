@@ -185,7 +185,11 @@ The core has near-zero dependencies ([ADR-0016](adr/0016-thin-core-per-provider-
 Provider packages, so `pip install latence-core` stays lean.
 
 !!! note "Project status"
-    Latence is a personally-owned, Apache-2.0 open-source framework
+    Latence is a personally-owned, source-available framework licensed under
+    [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/);
+    commercial use is by agreement
+    ([`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md)).
+    Ownership and the personally-owned posture are unchanged
     ([ADR-0001](adr/0001-open-source-core-owned-personally.md)). See the
     [README](https://github.com/ddickmann/latence-framework) for the marketing overview,
     and the [Decision Log](adr/index.md) for the reasoning behind every seam.

@@ -25,7 +25,7 @@ classifiers = [
 # Heavy deps stay OUT of latence-core (ADR-0016). The learned link-prediction stack (torch +
 # torch-geometric + torch-scatter for the vendored MIT ULTRA inference subset; easydict for its
 # EasyDict config; pykeen for the graceful fallback scorer) ships with THIS Provider package, not
-# the thin core. The framework code (this package + latence-core) is Apache-2.0; the vendored
+# the thin core. The framework code (this package + latence-core) is PolyForm-Noncommercial-1.0.0; the vendored
 # ULTRA inference subset is MIT (MilaGraph, cited in NOTICE / THIRD-PARTY-LICENSES) and PyKEEN is
 # MIT — weights AND code verified permissive (ADR-0012, 2026-07-09). No model WEIGHTS are vendored:
 # the ULTRA checkpoint is a config path (default ``ultra_3g``), documented, downloaded only when a

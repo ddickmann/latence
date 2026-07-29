@@ -29,8 +29,8 @@ fails fast). Retries absorbed land on ``endpoint_retries`` for the Quality Repor
 span (out of range, or text that does not match the chunk) is dropped, so a bad model reply never
 yields an un-resolvable record.
 
-Licensing: framework code (Apache-2.0); bundles no weights (calls a user-supplied endpoint). The
-``openai`` client is Apache-2.0 (code). The client import is deferred to first use.
+Licensing: framework code (PolyForm-Noncommercial-1.0.0); bundles no weights (calls a user-supplied
+endpoint). The ``openai`` client is Apache-2.0 (code). The client import is deferred to first use.
 """
 
 from __future__ import annotations
@@ -44,7 +44,11 @@ from latence_core.contracts import EntityMention
 from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
 from latence_core.offsetmap import OffsetIndex
 from latence_core.page_index import PageIndexResolver
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -92,17 +96,17 @@ class EndpointEntityExtractor:
         required); the served NER model lives behind the endpoint, so the device seam does not
         skip it on a CPU-only host. Real quality/throughput needs a live rig (#64); conformance
         verifies it against a stub. ``model_id=None``: ships no weights (the served model id is
-        config-supplied). License is framework code (Apache-2.0, verified; the ``openai`` client
-        is Apache-2.0). ``deterministic=False`` (a served model is not byte-identical);
-        ``cost_per_1k=None`` (deployment/vendor-specific, not fabricated).
+        config-supplied). License is framework code (PolyForm-Noncommercial-1.0.0, verified; the
+        ``openai`` client is Apache-2.0). ``deterministic=False`` (a served model is not byte-
+        identical); ``cost_per_1k=None`` (deployment/vendor-specific, not fabricated).
         """
         return ProviderProfile(
             compute="either",
             memory_mb=64,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=False,

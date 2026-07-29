@@ -83,7 +83,11 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
 from latence_core.page_index import pages_for_covering_span
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -221,20 +225,21 @@ class PatternRelationExtractor:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
         A trigger-phrase relation extractor ships no model weights (``model_id=None``) and
-        is a pure-Python part of ``latence-core`` (Apache-2.0, verified). Deterministic
-        (candidates emitted in covering-span/label/id order), CPU-only, no batching, no
-        per-call cost.
+        is a pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified).
+        Deterministic (candidates emitted in covering-span/label/id order), CPU-only, no batching,
+        no per-call cost.
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=16,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,

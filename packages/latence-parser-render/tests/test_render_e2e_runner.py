@@ -28,6 +28,7 @@ from latence_core.conformance import run_conformance
 from latence_core.contracts import Disposition, PageMap
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.pipeline import Pipeline
+from latence_core.providers.profile import REPO_LICENSE_CODE
 from latence_core.quality import QualityReport
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
@@ -170,6 +171,6 @@ def test_provider_discovered_via_entry_point() -> None:
     assert cls is prov.UniversalRenderParser
     profile = registry.profile("parser.render")
     assert profile is not None
-    assert profile.license == "Apache-2.0"
+    assert profile.license == REPO_LICENSE_CODE
     assert profile.compute == "either"
     assert profile.model_id is None

@@ -46,7 +46,11 @@ from latence_core.contracts import (
     PageSlice,
 )
 from latence_core.pagemap import PageOffsetIndex
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -67,20 +71,21 @@ class MarkdownChunker:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
-        The offset-preserving Chunker is a pure-Python part of ``latence-core`` (Apache-2.0,
-        verified), ships no weights (``model_id=None``), is deterministic, CPU-only, and has
-        no per-call cost. It processes a stream of documents (``batch=True``: it accepts an
-        iterable and folds chunks per document).
+        The offset-preserving Chunker is a pure-Python part of ``latence-core``
+        (PolyForm-Noncommercial-1.0.0, verified), ships no weights (``model_id=None``), is
+        deterministic, CPU-only, and has no per-call cost. It processes a stream of documents
+        (``batch=True``: it accepts an iterable and folds chunks per document).
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=16,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,
@@ -137,19 +142,20 @@ class SentenceWindowChunker:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
-        The sentence-window Chunker is a pure-Python part of ``latence-core`` (Apache-2.0,
-        verified), ships no weights (``model_id=None``), is deterministic (greedy
-        sentence packing), CPU-only, does not batch, and has no per-call cost.
+        The sentence-window Chunker is a pure-Python part of ``latence-core``
+        (PolyForm-Noncommercial-1.0.0, verified), ships no weights (``model_id=None``), is
+        deterministic (greedy sentence packing), CPU-only, does not batch, and has no per-call cost.
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=16,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,

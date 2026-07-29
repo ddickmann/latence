@@ -15,6 +15,7 @@ import pytest
 from latence_core.contracts import Disposition, ParserInput
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.pagemap import PageOffsetIndex
+from latence_core.providers.profile import REPO_LICENSE_CODE
 from latence_parser_render.provider import UniversalRenderParser, size_after_parse
 
 
@@ -31,7 +32,7 @@ def test_profile_is_either_permissive_no_weights() -> None:
     profile = UniversalRenderParser.profile()
     assert profile.compute == "either"
     assert profile.model_id is None
-    assert profile.license == "Apache-2.0"
+    assert profile.license == REPO_LICENSE_CODE
     assert profile.license_verified is True
     assert profile.batch is True
     # deterministic is honestly False (page OCR is a VLM whose float decode is not byte-identical).

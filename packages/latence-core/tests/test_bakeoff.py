@@ -38,7 +38,7 @@ from latence_core.bakeoff.report import CandidateResult, MatrixResult
 from latence_core.capability import ProviderRegistry
 from latence_core.cli import app
 from latence_core.pipeline import CapabilityKind
-from latence_core.providers.profile import ProviderProfile
+from latence_core.providers.profile import REPO_LICENSE_CODE, ProviderProfile
 from latence_core.stacks.validate import load_stack
 from typer.testing import CliRunner
 
@@ -192,8 +192,10 @@ def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
         # memory_mb is READ (declared-vs-measured) — the audit's inert-field is retired.
         assert row.memory.declared_mb is not None
         assert row.memory.measured_mb > 0.0
-        # license is READ off the declared profile (verified permissive for the CPU refs).
-        assert row.license.spdx in {"Apache-2.0", "MIT"}
+        # license is READ off the declared profile. A pure-code CPU reference declares the
+        # REPO's own licence (PolyForm-Noncommercial-1.0.0 since 2026-07-29); a model- or
+        # library-bearing one declares that third party's permissive licence.
+        assert row.license.spdx in {REPO_LICENSE_CODE, "Apache-2.0", "MIT"}
         assert row.license.verified is True
         # deterministic is READ + cross-checked (all three CPU parsers are byte-stable).
         assert row.determinism.declared is True
@@ -298,12 +300,13 @@ def test_embed_matrix_hashing_runs_st_skipped_with_flag(tmp_path: Path) -> None:
         _EMBED_MATRIX, base_stack_path=_DEFAULT, storage_root=f"file://{tmp_path}/store"
     )
     rows = _by_provider(result)
-    # The in-core hashing embedder ran for real (measured, deterministic, its Apache-2.0 license).
+    # The in-core hashing embedder ran for real (measured, deterministic). It is pure framework
+    # code with no weights, so its licence column is the REPO's own, not a permissive default.
     hashing = rows["embedding.hashing"]
     assert hashing.ran
     assert hashing.skipped is False
     assert hashing.determinism.checked is True
-    assert hashing.license is not None and hashing.license.spdx == "Apache-2.0"
+    assert hashing.license is not None and hashing.license.spdx == REPO_LICENSE_CODE
     # The learned ST embedder is skipped-with-flag — no fabricated columns, cites the rig gap.
     st = rows["embedding.sentence_transformers"]
     assert st.skipped is True

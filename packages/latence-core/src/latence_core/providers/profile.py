@@ -39,10 +39,20 @@ _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 UNVERIFIED_LICENSE = "UNVERIFIED"
 
 # The repo's own LICENSE path — the citation a pure-code (framework-code) Provider names
-# as its ``license_source``: its code license IS this repo's Apache-2.0, checked in the
+# as its ``license_source``: its code license IS this repo's license, checked in the
 # tree. A model-bearing Provider instead cites the upstream model-card / LICENSE URL where
 # the weights license was actually read (H-B1: evidence must name *where* a human checked).
 REPO_LICENSE_SOURCE = "LICENSE"
+
+# The SPDX id of THIS repository's own code, and the single seam for it. Any Provider whose
+# ``license_source`` is ``REPO_LICENSE_SOURCE`` is declaring *the framework's own code*, so
+# it MUST take its ``license_code`` from here rather than restating a literal — that is what
+# keeps the machine-readable surface (bake-off matrices, the provider catalog, ProviderProfile
+# JSON) from drifting away from the file it cites. It drifted once: the repo relicensed from
+# Apache-2.0 to PolyForm-Noncommercial-1.0.0 on 2026-07-29 and 41 hardcoded "Apache-2.0"
+# literals kept telling evaluators the code was permissive. Third-party library and weights
+# licences are NOT this constant — they cite their own upstream source.
+REPO_LICENSE_CODE = "PolyForm-Noncommercial-1.0.0"
 
 # The compute a provider requires: it runs on CPU only, needs a GPU, or runs on
 # either (following the requested device / availability). Drives device routing and
@@ -73,7 +83,7 @@ class ProviderProfile(BaseModel):
       no evidence is un-constructable). The :data:`UNVERIFIED_LICENSE` invariant forbids
       a verified unknown.
     * ``license_code`` — SPDX of the **code/library** (a provider's own package code is
-      the repo's ``"Apache-2.0"``). ADR-0012 records code separately from weights.
+      the repo's ``"PolyForm-Noncommercial-1.0.0"``). ADR-0012 records code separately from weights.
     * ``license_weights`` — SPDX of the **weights**, or ``None`` for a pure-code provider
       that ships no model (``model_id is None``). ADR-0012 records these **separately**.
     * ``license_source`` — a citation for the verification: the HF model-card URL, the
@@ -106,9 +116,12 @@ class ProviderProfile(BaseModel):
         ..., description="True only when BOTH weights and code were verified (ADR-0012)."
     )
     license_code: str = Field(
-        default="Apache-2.0",
+        default=REPO_LICENSE_CODE,
         min_length=1,
-        description="SPDX of the code/library (a provider's own code = the repo's Apache-2.0).",
+        description=(
+            "SPDX of the code/library (a provider's own code = the repo's "
+            f"{REPO_LICENSE_CODE}; a third-party library cites its own upstream licence)."
+        ),
     )
     license_weights: str | None = Field(
         default=None,

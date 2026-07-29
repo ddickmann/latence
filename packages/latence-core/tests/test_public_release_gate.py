@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,75 @@ def _text(path: Path) -> str:
 
 def _placeholders(text: str) -> list[str]:
     return _PENDING.findall(text)
+
+
+# --- licence coherence ------------------------------------------------------------------------
+#
+# Parsed with ``tomllib``, not pattern-matched. The regexes this replaced read each declaration
+# TWICE with two different patterns and unioned the results; the first was non-greedy and stopped
+# at ``-\d\.\d``, so a three-part version truncated. On ``PolyForm-Noncommercial-1.0.0`` the union
+# always held both ``…-1.0`` and ``…-1.0.0``, and the gate failed on a perfectly coherent tree. It
+# had only ever passed because ``Apache-2.0`` is a two-part version both patterns spelled the same
+# way — the gate broke at the exact moment the relicense it exists to protect actually happened.
+# ``packages/latence-core/tests/test_publish_readiness.py`` already reads ``project["license"]``
+# this way; a release gate has no business disagreeing with it about what a package declares.
+
+
+def _declared_licence(pyproject: Path) -> str | None:
+    """The SPDX identifier a package declares, or ``None`` if it declares none.
+
+    PEP 639 spells this as a bare string. The superseded PEP 621 table form (``{text = "…"}``) is
+    read too, so a package left on the old spelling is compared rather than silently skipped —
+    skipping is how a stray declaration survives a gate that exists to find stray declarations.
+    """
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - a broken pyproject fails the build
+        raise AssertionError(
+            f"{pyproject} is not valid TOML, so its licence cannot be read: {exc}"
+        ) from exc
+
+    licence = data.get("project", {}).get("license")
+    if isinstance(licence, str):
+        return licence
+    if isinstance(licence, dict):
+        text = licence.get("text")
+        if isinstance(text, str):
+            return text
+    # Either absent, or the ``{file = "LICENSE"}`` form, which names no identifier at all.
+    return None
+
+
+def _licence_incoherence(packages_dir: Path) -> str | None:
+    """``None`` when every package declares one identical licence, else why it does not.
+
+    Returned rather than asserted so the negative control below can run the real logic over a
+    synthetic tree. A gate whose failure path is never executed is an assumption, not a check.
+    """
+    declared = {
+        pyproject.parent.name: _declared_licence(pyproject)
+        for pyproject in sorted(packages_dir.glob("*/pyproject.toml"))
+    }
+    if not declared:
+        return f"no packages found under {packages_dir} — the gate cannot verify coherence"
+
+    missing = sorted(pkg for pkg, ident in declared.items() if ident is None)
+    if missing:
+        return (
+            f"{len(missing)} package(s) declare no licence identifier: {missing}.\n"
+            "A package with no `project.license` publishes a wheel with no declared licence, "
+            "which a licence scanner reads as unlicensed."
+        )
+
+    identifiers = sorted({ident for ident in declared.values() if ident is not None})
+    if len(identifiers) != 1:
+        return (
+            f"packages declare {len(identifiers)} different licences: {identifiers}.\n"
+            + "\n".join(f"  {pkg}: {ident}" for pkg, ident in sorted(declared.items()))
+            + "\nEvery package must agree; a stray declaration is what a licence scanner "
+            "will surface."
+        )
+    return None
 
 
 # --- always-on structural checks -------------------------------------------------------------
@@ -196,18 +266,66 @@ def test_release_every_gate_item_is_checked() -> None:
 @pytest.mark.skipif(not _RELEASE_MODE, reason="set LATENCE_RELEASE_CHECK=1 to run the release gate")
 def test_release_the_licence_is_declared_consistently_across_every_package() -> None:
     """RELEASE MODE: one package still on the old licence undermines the whole relicense."""
-    declared: dict[str, set[str]] = {}
-    for pyproject in sorted((_REPO_ROOT / "packages").glob("*/pyproject.toml")):
-        text = pyproject.read_text(encoding="utf-8")
-        found = set(re.findall(r'license\s*=\s*[{"\']?[^\n]*?([A-Za-z0-9.\-]+-\d\.\d)', text))
-        found |= set(re.findall(r'license\s*=\s*["\']([^"\']+)["\']', text))
-        if found:
-            declared[pyproject.parent.name] = found
+    incoherence = _licence_incoherence(_REPO_ROOT / "packages")
+    assert incoherence is None, incoherence
 
-    assert declared, "no licence metadata found in any package — the gate cannot verify coherence"
-    identifiers = {ident for idents in declared.values() for ident in idents}
-    assert len(identifiers) == 1, (
-        f"packages declare {len(identifiers)} different licences: {sorted(identifiers)}.\n"
-        + "\n".join(f"  {pkg}: {sorted(v)}" for pkg, v in sorted(declared.items()))
-        + "\nEvery package must agree; a stray declaration is what a licence scanner will surface."
+
+def test_the_licence_coherence_check_fails_on_a_divergent_package(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL: prove the gate above still fires when a package disagrees.
+
+    Deliberately NOT release-gated. The check it controls runs only under
+    ``LATENCE_RELEASE_CHECK=1``, so without this its failure path would be exercised for the first
+    time during a release — the worst moment to discover it does not fire. This runs on a synthetic
+    tree on every ordinary test run, and calls the same ``_licence_incoherence`` the gate calls.
+
+    The divergent value is the licence this repo actually came from, so this asserts the precise
+    scenario the gate exists for: a partial revert leaving one package behind on Apache-2.0.
+    """
+
+    def _package(name: str, licence: str) -> None:
+        pkg = tmp_path / name
+        pkg.mkdir()
+        (pkg / "pyproject.toml").write_text(
+            f'[project]\nname = "{name}"\nversion = "0.1.0"\nlicense = "{licence}"\n',
+            encoding="utf-8",
+        )
+
+    _package("agreeing-a", "PolyForm-Noncommercial-1.0.0")
+    _package("agreeing-b", "PolyForm-Noncommercial-1.0.0")
+    assert _licence_incoherence(tmp_path) is None, (
+        "the coherence check reports a problem on a tree where every package agrees — the false "
+        "positive this replaced (a truncating regex splitting `1.0.0` into two identifiers) has "
+        "come back, and the gate is again failing on a correct tree."
+    )
+
+    _package("stray", "Apache-2.0")
+    incoherence = _licence_incoherence(tmp_path)
+    assert incoherence is not None, (
+        "the coherence check passed a tree where `stray` declares Apache-2.0 while every other "
+        "package declares PolyForm-Noncommercial-1.0.0. The gate is inert: it would let a partial "
+        "revert publish wheels that declare a licence the repository no longer grants."
+    )
+    assert "stray" in incoherence and "Apache-2.0" in incoherence, (
+        f"the failure must name the offending package and its licence; got:\n{incoherence}"
+    )
+
+
+def test_the_licence_coherence_check_fails_on_a_package_declaring_nothing(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL: an absent declaration must fail, not be skipped.
+
+    The regex version collected only packages it found a match in, so a package with no
+    ``project.license`` at all dropped silently out of the comparison and the gate went green on a
+    tree that would publish an unlicensed wheel.
+    """
+    for name, body in (
+        ("declares", '[project]\nname = "declares"\nlicense = "PolyForm-Noncommercial-1.0.0"\n'),
+        ("silent", '[project]\nname = "silent"\nversion = "0.1.0"\n'),
+    ):
+        pkg = tmp_path / name
+        pkg.mkdir()
+        (pkg / "pyproject.toml").write_text(body, encoding="utf-8")
+
+    incoherence = _licence_incoherence(tmp_path)
+    assert incoherence is not None and "silent" in incoherence, (
+        f"a package declaring no licence at all must fail the gate by name; got: {incoherence!r}"
     )

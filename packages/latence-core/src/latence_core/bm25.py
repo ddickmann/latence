@@ -40,7 +40,11 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -66,20 +70,22 @@ _WORD = re.compile(r"[^\W_]+")
 
 
 def _reference_profile() -> ProviderProfile:
-    """The shared descriptor for a pure-code, CPU, deterministic, Apache-2.0 reference tokenizer.
+    """The shared descriptor for a pure-code, CPU, deterministic, PolyForm-Noncommercial-1.0.0
+    reference tokenizer.
 
-    Each reference Tokenizer is a pure-Python part of ``latence-core`` (Apache-2.0, verified per
-    ADR-0012 — the package's own code, weights-and-code trivially the same): no model weights
-    (``model_id=None``), deterministic, CPU-only, no batching, no per-call cost — so a
-    conformance / bake-off run reads honest, non-fabricated columns off it (ADR-0036 §2).
+    Each reference Tokenizer is a pure-Python part of ``latence-core``
+    (PolyForm-Noncommercial-1.0.0, verified per ADR-0012 — the package's own code, weights-and-code
+    trivially the same): no model weights (``model_id=None``), deterministic, CPU-only, no batching,
+    no per-call cost — so a conformance / bake-off run reads honest, non-fabricated columns off it
+    (ADR-0036 §2).
     """
     return ProviderProfile(
         compute="cpu",
         memory_mb=8,
         model_id=None,
-        license="Apache-2.0",
+        license=REPO_LICENSE_CODE,
         license_verified=True,
-        license_code="Apache-2.0",
+        license_code=REPO_LICENSE_CODE,
         license_source=REPO_LICENSE_SOURCE,
         license_verified_on="2026-07-16",
         deterministic=True,

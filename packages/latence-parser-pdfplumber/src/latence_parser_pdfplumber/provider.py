@@ -126,20 +126,20 @@ class PdfPlumberParser(AdapterBase):
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, permissive (MIT).
 
         Ships no model weights (``model_id=None``): text-layer extraction is deterministic.
-        This Provider's own code is the repo's Apache-2.0; its direct dep ``pdfplumber`` is **MIT**
-        (``license_code="MIT"``), verified per ADR-0012 from the installed version's PyPI metadata
-        (License classifier ``OSI Approved :: MIT License``) + the upstream GitHub LICENSE.
-        **Honest dependency footprint (NOT pure-Python):** pdfplumber's install closure pulls native
-        code — ``pillow`` (C-extension image decoder, HPND/MIT-CMU) and ``pypdfium2`` (bundles
-        Google's PDFium C++, Apache-2.0/BSD-3) — and ``pdfminer.six`` (MIT) pulls ``cryptography``
-        (compiled, Apache-2.0/BSD-3) for encrypted PDFs. **All permissive** (no ADR-0012 violation),
-        and this Provider's used path calls only ``page.extract_text()`` (stays inside
-        pdfminer.six), so pillow/pypdfium2 are latent, not on the reachable code path — but the
-        native footprint + its CVE surface (pillow especially) is real and is an accepted risk gated
-        by the IntakeScreener (which quarantines malformed/oversized/spoofed input before Parse).
-        CPU-only (``compute="cpu"``). ``batch=True`` — it batches over multiple input *documents*
-        (:meth:`AdapterBase.batched`), input-order-preserving and streaming-friendly. No per-call
-        cost (a local library, not an endpoint).
+        This Provider's own code is the repo's PolyForm-Noncommercial-1.0.0; its direct dep
+        ``pdfplumber`` is **MIT** (``license_code="MIT"``), verified per ADR-0012 from the installed
+        version's PyPI metadata (License classifier ``OSI Approved :: MIT License``) + the upstream
+        GitHub LICENSE. **Honest dependency footprint (NOT pure-Python):** pdfplumber's install
+        closure pulls native code — ``pillow`` (C-extension image decoder, HPND/MIT-CMU) and
+        ``pypdfium2`` (bundles Google's PDFium C++, Apache-2.0/BSD-3) — and ``pdfminer.six`` (MIT)
+        pulls ``cryptography`` (compiled, Apache-2.0/BSD-3) for encrypted PDFs. **All permissive**
+        (no ADR-0012 violation), and this Provider's used path calls only ``page.extract_text()``
+        (stays inside pdfminer.six), so pillow/pypdfium2 are latent, not on the reachable code path
+        — but the native footprint + its CVE surface (pillow especially) is real and is an accepted
+        risk gated by the IntakeScreener (which quarantines malformed/oversized/spoofed input before
+        Parse). CPU-only (``compute="cpu"``). ``batch=True`` — it batches over multiple input
+        *documents* (:meth:`AdapterBase.batched`), input-order-preserving and streaming-friendly. No
+        per-call cost (a local library, not an endpoint).
 
         A subtlety H-A1 asks the seam-report to answer honestly: ``memory_mb`` and ``cost_per_1k``
         are **inert** for this adapter — ``cost_per_1k=None`` (no endpoint) and nothing consumes

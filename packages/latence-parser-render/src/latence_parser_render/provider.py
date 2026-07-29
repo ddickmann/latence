@@ -85,7 +85,11 @@ from latence_core.contracts import (
 from latence_core.errors import ConfigError, LatenceError, ProviderError
 from latence_core.language import detect_language
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -191,7 +195,8 @@ class UniversalRenderParser(AdapterBase):
         dependencies are ALL permissive — pypdfium2 (Apache-2.0/BSD-3), Pillow (HPND), python-docx /
         openpyxl / python-pptx (MIT); LibreOffice, when used, is an EXTERNAL MPL-2.0 subprocess tool
         (not linked/vendored). NO AGPL anywhere (``fitz``/PyMuPDF is never imported — a test
-        enforces it). The headline/code license is this repo's Apache-2.0 (the Provider is code).
+        enforces it). The headline/code license is this repo's PolyForm-Noncommercial-1.0.0 (the
+        Provider is code).
 
         ``deterministic=False``: page OCR is delegated to a VLM OCR Provider whose float decoding is
         not promised byte-identical across hardware/library versions, so this composite Provider
@@ -204,13 +209,14 @@ class UniversalRenderParser(AdapterBase):
             compute="either",
             memory_mb=512,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_weights=None,
             # Where a human checked the permissive deps + the AGPL-free discipline (ADR-0012):
             license_source=(
-                f"{REPO_LICENSE_SOURCE} (framework code Apache-2.0); deps all permissive — "
+                f"{REPO_LICENSE_SOURCE} (framework code {REPO_LICENSE_CODE}); "
+                "deps all permissive — "
                 "pypdfium2 Apache-2.0/BSD-3, Pillow HPND, python-docx/openpyxl/python-pptx MIT; "
                 "LibreOffice MPL-2.0 external subprocess (not vendored); NO fitz/PyMuPDF/AGPL. "
                 "Verified 2026-07-09."

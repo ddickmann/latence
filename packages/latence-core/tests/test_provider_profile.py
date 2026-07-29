@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 from latence_core import ProviderProfile
 from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
     UNVERIFIED_LICENSE,
     HasProfile,
     profile_of,
@@ -324,7 +325,8 @@ def test_hasprofile_protocol_is_structural() -> None:
 
 
 def test_in_core_reference_providers_declare_honest_profiles() -> None:
-    # The in-core references declare CPU, pure-code, verified-Apache profiles.
+    # The in-core references declare CPU, pure-code, verified profiles carrying the REPO's
+    # own licence (they ship no weights, so their headline SPDX IS the framework's).
     from latence_core.stages.chunk import MarkdownChunker
     from latence_core.stages.entity import GazetteerEntityExtractor
     from latence_core.stages.relation import PatternRelationExtractor
@@ -340,7 +342,7 @@ def test_in_core_reference_providers_declare_honest_profiles() -> None:
         assert prof is not None, cls.__name__
         assert prof.compute == "cpu"
         assert prof.model_id is None
-        assert prof.license == "Apache-2.0"
+        assert prof.license == REPO_LICENSE_CODE
         assert prof.license_verified is True
         assert prof.deterministic is True
         assert prof.cost_per_1k is None

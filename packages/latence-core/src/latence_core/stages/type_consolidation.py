@@ -49,7 +49,11 @@ from latence_core.capability import TypeConsolidation
 from latence_core.contracts import EntityMention, RelationMention, TypeKind, TypeVocabulary
 from latence_core.errors import ConfigError
 from latence_core.pipeline import CapabilityKind
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 from latence_core.type_consolidation import TypeCanonicalizer
 
 if TYPE_CHECKING:
@@ -119,7 +123,8 @@ class CascadeTypeConsolidator:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
         Ships no model weights (``model_id=None``) — the optional semantic rung *borrows* an
         Embedder Provider, which declares its own profile, so this Provider never claims a model
@@ -129,9 +134,9 @@ class CascadeTypeConsolidator:
             compute="cpu",
             memory_mb=64,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-25",
             deterministic=True,
@@ -294,14 +299,16 @@ class ExactSurfaceTypeConsolidator(CascadeTypeConsolidator):
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0."""
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, licensed
+        PolyForm-Noncommercial-1.0.0.
+        """
         return ProviderProfile(
             compute="cpu",
             memory_mb=32,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-25",
             deterministic=True,

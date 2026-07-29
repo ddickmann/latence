@@ -103,7 +103,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.contracts import InducedLabels
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 from latence_schema_inducer.prompts import (
     DEFAULT_SYSTEM_PROMPT,
@@ -264,9 +269,9 @@ class LLMLabelInducer:
             compute="either",
             memory_mb=64,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-09",
             deterministic=False,

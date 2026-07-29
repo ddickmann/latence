@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Classification, ParserInput, Provenance
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -59,20 +63,22 @@ class LocalFolderSource:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
-        The local-folder Source is a pure-Python part of ``latence-core`` (Apache-2.0,
-        verified — the package's own code, weights-and-code trivially the same), ships no
-        model weights (``model_id=None``), is deterministic (files are read in sorted order
-        with content-addressed ids), CPU-only, does not batch, and has no per-call cost.
+        The local-folder Source is a pure-Python part of ``latence-core``
+        (PolyForm-Noncommercial-1.0.0, verified — the package's own code, weights-and-code trivially
+        the same), ships no model weights (``model_id=None``), is deterministic (files are read in
+        sorted order with content-addressed ids), CPU-only, does not batch, and has no per-call
+        cost.
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=16,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,

@@ -11,9 +11,9 @@ Providers fulfil it.
 
 | Provider | Package | What it is | License (code / weights) | Runs offline in CI |
 |---|---|---|---|---|
-| `embedding.hashing` | in-core | Deterministic, dependency-free token-hash bag-of-words (the CPU reference — **not** semantic) | Apache-2.0 / — | yes (real) |
+| `embedding.hashing` | in-core | Deterministic, dependency-free token-hash bag-of-words (the CPU reference — **not** semantic) | PolyForm-Noncommercial-1.0.0 / — | yes (real) |
 | `embedding.sentence_transformers` | `latence-embedder-st` | Learned in-process semantic embedder over `sentence-transformers`, default **IBM Granite Embedding r2** — GPU tier `granite-embedding-311m-multilingual-r2` (768-dim, bf16+FA2), CPU tier `granite-embedding-97m-multilingual-r2` (384-dim, fp32) | Apache-2.0 / Apache-2.0 | no (heavy dep; verified against a stub, real weights on a rig) |
-| `embedding.endpoint` | `latence-embedder-endpoint` | Any OpenAI-compatible / vLLM / Triton `/embeddings` endpoint (the served performance path) | Apache-2.0 / — (calls a user endpoint) | no (endpoint; verified against a stub) |
+| `embedding.endpoint` | `latence-embedder-endpoint` | Any OpenAI-compatible / vLLM / Triton `/embeddings` endpoint (the served performance path) | PolyForm-Noncommercial-1.0.0 / — (calls a user endpoint) | no (endpoint; verified against a stub) |
 
 Swapping is a **one-line** config change on the corpus Export (ADR-0007):
 

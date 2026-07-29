@@ -43,7 +43,11 @@ from latence_core.contracts import (
     PageMap,
 )
 from latence_core.language import detect_language
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -85,17 +89,17 @@ class DocumentParser:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, permissive.
 
         Ships no model weights (``model_id=None``): decoding is deterministic pure-Python
-        (this Provider is Apache-2.0 framework code; its one dep ``pypdf`` is pure-Python,
-        BSD-3-Clause — both weights-and-code permissive, verified per ADR-0012). CPU-only,
-        does not batch (a per-document transform), and has no per-call cost.
+        (this Provider is PolyForm-Noncommercial-1.0.0 framework code; its one dep ``pypdf`` is
+        pure-Python, BSD-3-Clause — both weights-and-code permissive, verified per ADR-0012). CPU-
+        only, does not batch (a per-document transform), and has no per-call cost.
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=64,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,

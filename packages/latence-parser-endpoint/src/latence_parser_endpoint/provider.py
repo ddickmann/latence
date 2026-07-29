@@ -15,10 +15,10 @@ AC: endpoint failures retried/surfaced). An unrecoverable failure yields a ``PAR
 (carrying Provenance + the reason) rather than aborting the run — identical graceful-degradation
 contract to the CPU reference, so the output is identical modulo the model.
 
-Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied endpoint; it
-bundles no model weights. The ``openai`` client is Apache-2.0 (code). No key or endpoint is
-embedded — both come from config/environment. The client import is deferred to first use so
-importing this module (for Provider discovery) never needs the client installed.
+Licensing: this Provider is framework code (PolyForm-Noncommercial-1.0.0) and calls a user-supplied
+endpoint; it bundles no model weights. The ``openai`` client is Apache-2.0 (code). No key or
+endpoint is embedded — both come from config/environment. The client import is deferred to first use
+so importing this module (for Provider discovery) never needs the client installed.
 """
 
 from __future__ import annotations
@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import Disposition, DocumentRecord, PageMap
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
 from latence_core.language import detect_language
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -96,19 +100,19 @@ class EndpointDocumentParser:
 
         ``model_id=None``: this package ships **no** model weights — the served model id is
         config-supplied (``config['model']``, default ``paddleocr-vl`` is a served-model id, not
-        a bundled checkpoint). License is framework code (Apache-2.0, verified per ADR-0012;
-        the ``openai`` client is Apache-2.0). ``deterministic=False``: a served LLM/VLM is not
-        guaranteed byte-identical (temperature/model/version), so it does not overclaim.
-        ``cost_per_1k=None``: the per-call cost is deployment/vendor-specific (a self-hosted
-        vLLM has no vendor cost), so a number is left undeclared rather than fabricated.
+        a bundled checkpoint). License is framework code (PolyForm-Noncommercial-1.0.0, verified per
+        ADR-0012; the ``openai`` client is Apache-2.0). ``deterministic=False``: a served LLM/VLM is
+        not guaranteed byte-identical (temperature/model/version), so it does not overclaim.
+        ``cost_per_1k=None``: the per-call cost is deployment/vendor-specific (a self-hosted vLLM
+        has no vendor cost), so a number is left undeclared rather than fabricated.
         """
         return ProviderProfile(
             compute="either",
             memory_mb=64,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=False,

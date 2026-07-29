@@ -18,6 +18,7 @@ import pytest
 from latence_core import ProviderProfile, ProviderRegistry
 from latence_core.contracts import EntityMention
 from latence_core.pipeline import Pipeline
+from latence_core.providers.profile import REPO_LICENSE_CODE
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
@@ -131,7 +132,7 @@ def test_gpu_provider_skipped_with_flag_on_cpu_host(
     assert entities.device_selected is None
     assert entities.compute == "gpu"
     assert entities.model_id == "vendor/gpu-ner-large"
-    assert entities.license == "Apache-2.0"
+    assert entities.license == "Apache-2.0"  # the FAKE vendor model fixture, not repo code
     assert entities.records_out == 0  # no fabricated output
 
     # The skip is real: no entity records were produced (the GPU provider never ran).
@@ -166,7 +167,7 @@ def test_gpu_skip_is_sticky_on_resume(
     assert "GPU" in entities2.skip_reason or "CUDA" in entities2.skip_reason
     assert entities2.compute == "gpu"
     assert entities2.model_id == "vendor/gpu-ner-large"
-    assert entities2.license == "Apache-2.0"
+    assert entities2.license == "Apache-2.0"  # the FAKE vendor model fixture, not repo code
     assert entities2.device == "auto"
     assert entities2.device_selected is None
     assert entities2.records_out == 0
@@ -188,7 +189,7 @@ def test_cpu_provider_runs_with_profile_columns(
     assert entities.compute == "cpu"
     assert entities.device == "auto"
     assert entities.device_selected == "cpu"
-    assert entities.license == "Apache-2.0"
+    assert entities.license == REPO_LICENSE_CODE
     assert entities.records_out >= 1  # the gazetteer actually extracted "Acme Corp"
 
     s = Storage.for_uri(store)

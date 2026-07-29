@@ -36,7 +36,11 @@ from html import escape
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import GraphEdge, GraphNode, GraphRecord, GraphScope
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 from latence_demo.contracts import DemoSiteManifest, GraphSummary
 
@@ -386,7 +390,8 @@ class DemoSiteExport:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
         The demo-site Export renders a standalone HTML KG viewer with a deterministic circular
         layout (dependency-free, no CDN/network). It ships no model weights (``model_id=None``),
@@ -397,9 +402,9 @@ class DemoSiteExport:
             compute="cpu",
             memory_mb=32,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,

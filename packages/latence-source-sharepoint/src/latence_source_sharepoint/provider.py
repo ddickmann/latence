@@ -82,7 +82,11 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import Classification, ParserInput, Provenance
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 from latence_source_sharepoint.auth import build_token_provider, reject_inline_secrets
 from latence_source_sharepoint.graph import DEFAULT_GRAPH_BASE_URL, GraphClient
@@ -193,9 +197,9 @@ class SharePointSource:
 
         Pure-code and dependency-free: this Provider ships **no model weights**
         (``model_id=None``) and pulls no third-party library — it speaks Graph's REST/JSON API
-        over the Python standard library, so its code license is this repo's Apache-2.0
-        (verified per ADR-0012; weights-and-code trivially the same for a pure-code Provider)
-        and ``latence-core`` takes no new dependency (ADR-0016).
+        over the Python standard library, so its code license is this repo's
+        PolyForm-Noncommercial-1.0.0 (verified per ADR-0012; weights-and-code trivially the same for
+        a pure-code Provider) and ``latence-core`` takes no new dependency (ADR-0016).
 
         ``compute="cpu"`` (no accelerator), ``batch=False`` (Graph is fetched per item), and
         ``deterministic=True``: Graph guarantees no ordering for a children collection, so
@@ -209,9 +213,9 @@ class SharePointSource:
             compute="cpu",
             memory_mb=32,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_weights=None,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-18",

@@ -24,7 +24,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 # LICENSE DILIGENCE (ADR-0012, verified 2026-07-18).
-#   * This package's own CODE: Apache-2.0 (the repo LICENSE). It ships NO model weights, so
+#   * This package's own CODE: PolyForm-Noncommercial-1.0.0 (the repo LICENSE). It ships NO model weights, so
 #     there is no separate weights license to verify — the weights/code split is trivially
 #     satisfied for a pure-code connector.
 #   * Third-party runtime dependencies: NONE. The connector speaks Microsoft Graph's REST/JSON

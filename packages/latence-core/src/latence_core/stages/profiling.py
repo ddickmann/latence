@@ -51,7 +51,11 @@ from latence_core.profiling import (
     MentionView,
     document_features,
 )
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -89,21 +93,22 @@ class StatisticalProfiler:
             (default ``"corpus_profile"``).
     """
 
-    # The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0. The
-    # statistical Profiler folds per-document + cross-document features streaming — a pure-Python
-    # part of ``latence-core`` (Apache-2.0, verified per ADR-0012), no model weights
-    # (``model_id=None``), deterministic, CPU-only, non-batching, no per-call cost. Declared as a
-    # ``PROFILE`` ClassVar (not a ``profile`` classmethod) BECAUSE the Profiler Capability's own
-    # I/O method is named ``profile(self, documents, mentions)`` — a ``profile`` classmethod would
-    # be shadowed by that instance method, so :func:`~latence_core.providers.profile.profile_of`
-    # reads the ClassVar form here (the collision the P3-F2 hardening documented).
+    # The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+    # PolyForm-Noncommercial-1.0.0. The statistical Profiler folds per-document + cross-document
+    # features streaming — a pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0,
+    # verified per ADR-0012), no model weights (``model_id=None``), deterministic, CPU-only,
+    # non-batching, no per-call cost. Declared as a ``PROFILE`` ClassVar (not a ``profile``
+    # classmethod) BECAUSE the Profiler Capability's own I/O method is named ``profile(self,
+    # documents, mentions)`` — a ``profile`` classmethod would be shadowed by that instance method,
+    # so :func:`~latence_core.providers.profile.profile_of` reads the ClassVar form here (the
+    # collision the P3-F2 hardening documented).
     PROFILE: ClassVar[ProviderProfile] = ProviderProfile(
         compute="cpu",
         memory_mb=32,
         model_id=None,
-        license="Apache-2.0",
+        license=REPO_LICENSE_CODE,
         license_verified=True,
-        license_code="Apache-2.0",
+        license_code=REPO_LICENSE_CODE,
         license_source=REPO_LICENSE_SOURCE,
         license_verified_on="2026-07-06",
         deterministic=True,
@@ -278,17 +283,17 @@ class LightweightProfiler:
     """
 
     # The declared descriptor (ADR-0036 §2): the lightweight Profiler is the scale-oriented
-    # streaming feature pass — a pure-Python part of ``latence-core`` (Apache-2.0, verified per
-    # ADR-0012), no model weights, deterministic, CPU-only, non-batching, no per-call cost.
-    # Declared as a ``PROFILE`` ClassVar (not a ``profile`` classmethod) because the Profiler
+    # streaming feature pass — a pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0,
+    # verified per ADR-0012), no model weights, deterministic, CPU-only, non-batching, no per-call
+    # cost. Declared as a ``PROFILE`` ClassVar (not a ``profile`` classmethod) because the Profiler
     # Capability's I/O method is itself named ``profile`` (see StatisticalProfiler.PROFILE).
     PROFILE: ClassVar[ProviderProfile] = ProviderProfile(
         compute="cpu",
         memory_mb=32,
         model_id=None,
-        license="Apache-2.0",
+        license=REPO_LICENSE_CODE,
         license_verified=True,
-        license_code="Apache-2.0",
+        license_code=REPO_LICENSE_CODE,
         license_source=REPO_LICENSE_SOURCE,
         license_verified_on="2026-07-06",
         deterministic=True,

@@ -16,7 +16,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, DocumentRecord, PageMap
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -36,20 +40,21 @@ class PlaintextParser:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
         A byte-decoding plain-text Parser ships no model weights (``model_id=None``) and is
-        framework code (Apache-2.0, verified — weights-and-code trivially the same code). The
-        decode is deterministic, CPU-only, does not batch (a per-document transform), and has
-        no per-call cost.
+        framework code (PolyForm-Noncommercial-1.0.0, verified — weights-and-code trivially the same
+        code). The decode is deterministic, CPU-only, does not batch (a per-document transform), and
+        has no per-call cost.
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=16,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,

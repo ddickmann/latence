@@ -53,12 +53,12 @@ vLLM 0.24's bundled FlashInfer cannot JIT the cudagraphs (``FlashInfer requires 
 (Hopper / Ada / Ampere, CUDA >= 12.6) run cudagraphs fine. Full recipe + the pod script live in
 ``docs/serving-lighton-vllm.md`` and ``scripts/validate-lighton-vllm-on-gpu.md``.
 
-Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied vLLM endpoint; it
-bundles no model weights. The served model is **LightOnOCR-2-1B — Apache-2.0 weights AND code**
-(license-verified, the same permissive checkpoint family ``parser.lighton`` carries — see
-:meth:`profile`). The ``openai`` client is Apache-2.0 (code). No key or endpoint is embedded — both
-come from config/environment; the client import is deferred to first use so Provider discovery never
-needs it installed.
+Licensing: this Provider is framework code (PolyForm-Noncommercial-1.0.0) and calls a user-supplied
+vLLM endpoint; it bundles no model weights. The served model is **LightOnOCR-2-1B — Apache-2.0
+weights AND code** (license-verified, the same permissive checkpoint family ``parser.lighton``
+carries — see :meth:`profile`). The ``openai`` client is Apache-2.0 (code). No key or endpoint is
+embedded — both come from config/environment; the client import is deferred to first use so Provider
+discovery never needs it installed.
 """
 
 from __future__ import annotations

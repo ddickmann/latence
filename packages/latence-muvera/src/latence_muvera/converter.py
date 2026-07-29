@@ -48,7 +48,11 @@ import random
 from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ConfigError
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -90,22 +94,24 @@ class MuveraFdeConverter:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): a pure-code, CPU, deterministic, Apache-2.0 FDE.
+        """The declared descriptor (ADR-0036 §2): a pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0 FDE.
 
         MUVERA FDE is **data-oblivious and training-free** — it ships no model weights
         (``model_id=None``, ``license_weights=None``), so its license is trivially the package's own
-        verified Apache-2.0 (this repo's ``LICENSE``); there is no separate weights license to defer
-        (unlike ``sparse.splade`` / the ColBERT multi-vector encoder). Deterministic (seeded
-        hyperplanes, rounded sums) and CPU-only; it does not batch and has no per-call vendor cost —
-        so a bake-off / conformance run reads honest, non-fabricated columns off it (ADR-0036 §2).
+        verified PolyForm-Noncommercial-1.0.0 (this repo's ``LICENSE``); there is no separate
+        weights license to defer (unlike ``sparse.splade`` / the ColBERT multi-vector encoder).
+        Deterministic (seeded hyperplanes, rounded sums) and CPU-only; it does not batch and has no
+        per-call vendor cost — so a bake-off / conformance run reads honest, non-fabricated columns
+        off it (ADR-0036 §2).
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=64,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_weights=None,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-16",

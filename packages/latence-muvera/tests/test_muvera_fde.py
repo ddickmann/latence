@@ -16,7 +16,11 @@ import random
 import pytest
 from latence_core.capability import FdeConverter
 from latence_core.errors import ConfigError
-from latence_core.providers.profile import ProviderProfile, profile_of
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    ProviderProfile,
+    profile_of,
+)
 from latence_muvera import MuveraFdeConverter
 
 # --------------------------------------------------------------------------- #
@@ -236,15 +240,15 @@ def test_single_bucket_is_valid_and_holds_every_token() -> None:
     assert out == [2.0, 2.0, 2.0]  # the mean of the two tokens, in the one cell
 
 
-def test_profile_declares_a_verified_pure_code_apache_license_and_no_model() -> None:
+def test_profile_declares_a_verified_pure_code_repo_license_and_no_model() -> None:
     prof = profile_of(MuveraFdeConverter)
     assert isinstance(prof, ProviderProfile)
     # Training-free, data-oblivious ⇒ no weights to defer: an honest VERIFIED Apache-2.0 (not the
     # UNVERIFIED sentinel sparse.splade must use for its un-chosen model).
     assert prof.model_id is None
-    assert prof.license == "Apache-2.0"
+    assert prof.license == REPO_LICENSE_CODE
     assert prof.license_verified is True
     assert prof.license_weights is None
-    assert prof.license_code == "Apache-2.0"
+    assert prof.license_code == REPO_LICENSE_CODE
     assert prof.deterministic is True
     assert prof.compute == "cpu"

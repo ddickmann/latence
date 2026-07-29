@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import latence_parser_render
+from latence_core.providers.profile import REPO_LICENSE_CODE
 from latence_parser_render.provider import UniversalRenderParser
 
 # The forbidden AGPL PDF library (and its import spellings) — NEVER present in this package.
@@ -58,7 +59,7 @@ def test_pyproject_declares_no_agpl_dep() -> None:
 def test_profile_license_is_permissive_and_evidence_bearing() -> None:
     """The declared license is verified, permissive, and cites where a human checked (H-B1)."""
     profile = UniversalRenderParser.profile()
-    assert profile.license == "Apache-2.0"
+    assert profile.license == REPO_LICENSE_CODE
     assert profile.license_verified is True
     assert profile.license_verified_on == "2026-07-09"
     assert profile.license_source is not None

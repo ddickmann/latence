@@ -74,7 +74,7 @@ from latence_core.disambiguation import (
 from latence_core.errors import ConfigError, ProviderError
 from latence_core.offsetmap import OffsetIndex
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.profile import ProviderProfile
+from latence_core.providers.profile import REPO_LICENSE_CODE, ProviderProfile
 from latence_core.stages.disambiguation import CascadeDisambiguator
 
 if TYPE_CHECKING:
@@ -175,9 +175,9 @@ class EmbeddingDisambiguator(CascadeDisambiguator, AdapterBase):
         ``compute="either"``: the Provider itself is pure-Python (union-find + cosine); the compute
         it needs follows its resolved Embedder — the default ``embedding.hashing`` is CPU, a learned
         embedder opt-in accelerates on GPU (the device seam routes it). License is the *code*
-        license of this pure-Python package (Apache-2.0, verified per ADR-0012 — this package's own
-        code); a learned embedder opt-in carries its OWN verified weights license in ITS profile
-        (H-B1 — this Provider never claims the embedder's license as its own).
+        license of this pure-Python package (PolyForm-Noncommercial-1.0.0, verified per ADR-0012 —
+        this package's own code); a learned embedder opt-in carries its OWN verified weights license
+        in ITS profile (H-B1 — this Provider never claims the embedder's license as its own).
 
         ``deterministic=False`` at the class level: whether a run is byte-identical depends on the
         *resolved* embedder (the default hashing embedder is deterministic; a learned float embedder
@@ -190,9 +190,9 @@ class EmbeddingDisambiguator(CascadeDisambiguator, AdapterBase):
             compute="either",
             memory_mb=128,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source="LICENSE",
             license_verified_on="2026-07-08",
             deterministic=False,

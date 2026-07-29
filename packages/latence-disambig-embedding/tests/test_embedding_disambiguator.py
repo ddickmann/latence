@@ -37,6 +37,7 @@ from latence_core.contracts import (
     RelationMention,
 )
 from latence_core.errors import ConfigError, ProviderError
+from latence_core.providers.profile import REPO_LICENSE_CODE
 from latence_disambig_embedding.provider import EmbeddingDisambiguator
 
 # --------------------------------------------------------------------------- #
@@ -244,7 +245,7 @@ def test_satisfies_disambiguator_protocol_and_names_itself() -> None:
 def test_profile_is_evidence_bearing_and_honest() -> None:
     p = EmbeddingDisambiguator.profile()
     assert p.compute == "either"
-    assert p.license == "Apache-2.0"
+    assert p.license == REPO_LICENSE_CODE
     assert p.license_verified is True
     # The learned path is not promised byte-identical across embedders — declared, not overclaimed.
     assert p.deterministic is False

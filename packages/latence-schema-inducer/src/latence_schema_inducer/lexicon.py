@@ -84,7 +84,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import InducedLabels
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 from latence_schema_inducer.sanitize import (
     CHUNK_LABEL_CEILING,
@@ -167,9 +172,9 @@ class LexiconLabelInducer:
             compute="cpu",
             memory_mb=8,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-25",
             deterministic=True,

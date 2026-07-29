@@ -34,7 +34,7 @@ classifiers = [
 #
 # LICENCE POSTURE (ADR-0012, weights and code checked separately). This package ships NO weights and
 # NO model: there is nothing to verify on the weights side, and the code side is this repo's
-# Apache-2.0. Every method it implements is a PUBLISHED ALGORITHM implemented here from the paper,
+# PolyForm-Noncommercial-1.0.0. Every method it implements is a PUBLISHED ALGORITHM implemented here from the paper,
 # not a vendored library:
 #   * RAKE stopword-segmented candidate phrases — Rose, Engel, Cramer & Cowley (2010).
 #   * ReVerb-style relation phrases between two argument phrases — Fader, Soderland & Etzioni (2011).

@@ -9,7 +9,8 @@ repo_name: ddickmann/latence-framework
 repo_url: https://github.com/ddickmann/latence-framework
 edit_uri: edit/main/docs/
 copyright: >-
-  Apache-2.0 licensed. Reference Providers ship permissive weights only
+  PolyForm Noncommercial 1.0.0 licensed; commercial terms by agreement
+  (COMMERCIAL.md). Reference Providers ship permissive weights only
   (ADR-0012); restricted-license models are opt-in.
 
 docs_dir: docs

@@ -47,6 +47,7 @@ from latence_core.providers.perf import (
     load_transformers_model,
 )
 from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
     UNVERIFIED_LICENSE,
     HasProfile,
@@ -57,6 +58,7 @@ from latence_core.providers.profile import (
 __all__ = [
     "DEFAULT_BATCH_SIZE",
     "LATENCE_CUDA_ENV",
+    "REPO_LICENSE_CODE",
     "REPO_LICENSE_SOURCE",
     "UNVERIFIED_LICENSE",
     "AdapterBase",

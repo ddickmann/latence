@@ -49,7 +49,11 @@ from latence_core.contracts import EntityMention
 from latence_core.errors import ConfigError
 from latence_core.offsetmap import OffsetIndex
 from latence_core.page_index import PageIndexResolver
-from latence_core.providers.profile import REPO_LICENSE_SOURCE, ProviderProfile
+from latence_core.providers.profile import (
+    REPO_LICENSE_CODE,
+    REPO_LICENSE_SOURCE,
+    ProviderProfile,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -414,21 +418,22 @@ class GazetteerEntityExtractor:
 
     @classmethod
     def profile(cls) -> ProviderProfile:
-        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
+        PolyForm-Noncommercial-1.0.0.
 
         A gazetteer/regex extractor ships no model weights (``model_id=None``) and is a
-        pure-Python part of ``latence-core`` (Apache-2.0, verified — the package's own
-        license, weights-and-code trivially the same code). Deterministic by construction
-        (matches emitted in ``(char_start, label)`` order) and CPU-only; it does not batch
-        (a per-chunk scan), and has no per-call cost.
+        pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified — the package's
+        own license, weights-and-code trivially the same code). Deterministic by construction
+        (matches emitted in ``(char_start, label)`` order) and CPU-only; it does not batch (a per-
+        chunk scan), and has no per-call cost.
         """
         return ProviderProfile(
             compute="cpu",
             memory_mb=16,
             model_id=None,
-            license="Apache-2.0",
+            license=REPO_LICENSE_CODE,
             license_verified=True,
-            license_code="Apache-2.0",
+            license_code=REPO_LICENSE_CODE,
             license_source=REPO_LICENSE_SOURCE,
             license_verified_on="2026-07-06",
             deterministic=True,
