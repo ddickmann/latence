@@ -3,7 +3,8 @@
 > **STATUS: UNFILLED — these are the numbers that gate public release.**
 >
 > Every value below is a placeholder. They are filled from a real GPU run, and this repository is
-> **not published publicly until they are**. See [`RELEASE-GATES.md`](../RELEASE-GATES.md).
+> **not published publicly until they are**. See
+> [`RELEASE-GATES.md`](https://github.com/ddickmann/latence-framework/blob/main/RELEASE-GATES.md).
 >
 > The placeholders are **machine-checked**. `test_public_release_gate.py` inventories every
 > `PENDING:` token on this page; under `LATENCE_RELEASE_CHECK=1` it **fails the build** while any
@@ -169,7 +170,8 @@ MRR and degrades retrieval is a failure.
 
 ## 4. Reproduction
 
-Reproduced by [`issues/e2e-extended/RUNBOOK.md`](../issues/e2e-extended/RUNBOOK.md). Corpus
+Reproduced by
+[`issues/e2e-extended/RUNBOOK.md`](https://github.com/ddickmann/latence-framework/blob/main/issues/e2e-extended/RUNBOOK.md). Corpus
 acquisition: `bash benchmark/corpus/fetch_corpus.sh`.
 
 **Corpus:** `PENDING:repro-corpus` · **Date:** `PENDING:repro-date`

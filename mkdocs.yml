@@ -152,19 +152,18 @@ nav:
   # --- The operator's entry point ------------------------------------------------------------
   - Get started:
       - getting-started/index.md
-      # PENDING (docs-quickstart lane): `docs/quickstart.md` and `docs/tutorials/1..5*.md` are
-      # being written on a sibling branch. They belong HERE, immediately after the section
-      # index and before the run console. They are commented out rather than wired live
-      # because `mkdocs build --strict` fails on a nav entry whose file is absent — uncomment
-      # each line as its page lands, and correct the slug to the filename that actually shipped.
-      #
-      # - Quickstart — 10 minutes to a corpus: quickstart.md
-      # - Tutorials:
-      #     - tutorials/1-....md
-      #     - tutorials/2-....md
-      #     - tutorials/3-....md
-      #     - tutorials/4-....md
-      #     - tutorials/5-....md
+      # Wired live at integration time, per the placeholder this replaces: the quickstart and
+      # the five tutorials landed from the docs-quickstart lane, so their nav entries are now
+      # real files and `mkdocs build --strict` resolves them. Slugs are the filenames that
+      # actually shipped (`tutorials/01-…` … `tutorials/05-…`, not the guessed `1-…`).
+      - Quickstart — from a folder to a queryable corpus: quickstart.md
+      - Tutorials:
+          - tutorials/index.md
+          - Your first pipeline: tutorials/01-your-first-pipeline.md
+          - Understanding the output: tutorials/02-understanding-the-output.md
+          - "Retrieval: four signals, fused": tutorials/03-retrieval.md
+          - Bringing your own Provider: tutorials/04-bringing-your-own-provider.md
+          - Production: tutorials/05-production.md
       - Read the results — the run console: getting-started/run-console.md
       - Long-form walkthroughs:
           - Fresh GPU pod → AI-ready data: TUTORIAL-fresh-pod-walkthrough.md
