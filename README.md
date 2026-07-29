@@ -99,35 +99,50 @@ is hidden in a proprietary index.
 | `quality-report.json` + `quality-report.md` | the machine + human artifact that substantiates "AI-ready" |
 | `manifest.json` | the exact pipeline that produced this run, with credentials redacted |
 
-A real corpus row (`records.parquet`; the columns after `media_type` appear only when the stage that
-produces them is wired, so the default schema stays byte-stable):
+A real record, copied out of `records.jsonl` from the quickstart run above and abridged only in the
+`content` field:
 
 ```jsonc
 {
-  "record_id":      "chunk-…",
-  "schema_version": 2,
-  "provenance":     "{\"source_uri\":\"s3://corp/contracts/msa-2019.pdf\", \"file_name\":\"msa-2019.pdf\",
-                      \"file_type\":\"pdf\", \"file_size\":184320, \"document_id\":\"<content-addressed>\",
-                      \"page_start\":7, \"page_end\":8, \"char_start\":14203, \"char_end\":17110}",
-  "classification": "{\"language\":\"en\", \"category\":\"contract\", \"sensitivity\":\"confidential\"}",
-  "content":        "…the chunk text, PII-masked…",
+  "record_id":      "sha256:981bbeb4…#chunk-0",   // content-addressed, so it is stable across runs
+  "schema_version": 19,
+  "document_record_id": "sha256:981bbeb4…",
+  "index":          0,
+  "content":        "Acquisition memo\n\nAlice works at Acme Corporation. …",
+  "masked_content": "…the same text with every PII span replaced by its placeholder…",
   "media_type":     "text/markdown",
+  "token_count":    56,
 
-  "embedding":          [0.0131, -0.0084],  // list<double>, when an Embedder is wired
-  "sparse_indices":     [1204, 8817],       // SPLADE, when wired
-  "sparse_values":      [0.71, 0.44],
-  "context_header":     "{…top neighbours + key triples…}",
-  "kg_node_ids":        ["node-a", "node-b"],  // why multi-hop retrieval can start from a chunk
-  "neighbor_node_ids":  ["node-c"],
-  "kg_node_community":  ["c-12"],
-  "kg_node_centrality": [0.0041]
+  "provenance": {
+    "source_uri":  "file:///…/corpus/memo.md",
+    "file_name":   "memo.md", "file_type": "md", "file_size": 242,
+    "document_id": "sha256:981bbeb4…",
+    "page_start":  1, "page_end": 1,
+    "char_start":  2, "char_end": 242          // exact half-open span in the parsed document
+  },
+  "classification": { "language": "en", "category": null, "sensitivity": "internal" },
+
+  "page_slice":  { "pages": [ { "page_number": 1, "char_start": 0, "char_end": 242 } ] },
+  "offset_map":  { "length": 240, "segments": [ { "local_start": 0, "doc_start": 2 } ] },
+  "pii_spans":   [],        // counts and offsets only — a span never stores the raw PII value
+  "risk_markers": [],       // a flagged chunk carries its screening verdict into the corpus
+  "induced_labels": null,   // this chunk's own label set, when induction ran
+  "context_header": null    // the KG projected back onto this chunk, when enrichment ran
 }
 ```
 
+`records.parquet` is the same data flattened (ADR-0006): `record_id`, `schema_version`, `provenance`,
+`classification`, `content`, `media_type` as columns, with the nested contracts as JSON strings —
+plus native columns that appear **only** when the producing stage is wired, so the default schema
+stays byte-stable: `embedding` (`list<double>`), `sparse_indices`/`sparse_values` (SPLADE),
+`fde_embedding` (MUVERA), and `context_header`, `kg_node_ids`, `neighbor_node_ids`,
+`kg_node_community`, `kg_node_centrality`. Those `kg_node_ids` are why multi-hop retrieval can start
+from a chunk you already found and walk the graph outward.
+
 `provenance` is not decoration. `char_start`/`char_end` are the chunk's exact half-open span in the
-parsed document; `page_start`/`page_end` resolve through a per-chunk page slice; and an `offset_map`
-corrects for markup stripped before extraction, so an entity mention resolves to its **true original
-offset**, not a lower bound (ADR-0031).
+parsed document; `page_start`/`page_end` resolve through the chunk's **own** page slice rather than
+an inherited range; and the `offset_map` corrects for markup stripped before extraction, so an entity
+mention resolves to its **true original offset**, not a lower bound (ADR-0031).
 
 `graph-edges.parquet` carries `edge_id`, `relation_id`, `source_node_id`, `target_node_id`, `label`,
 `confidence`, `properties` and `evidence` — the last one being why a claim in the graph can always be
