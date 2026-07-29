@@ -102,7 +102,7 @@ add_stage wizard_parse task \
   "[ -s '$STACK_PARSE' ]" \
   "ls '$RUN_DIR'/*.yaml 2>/dev/null | wc -l" \
   "$LATENCE setup --profile enterprise-sota \
-     --source '$CORPUS_ROOT/govdocs1' --storage 'file://$OUT_DIR' \
+     --source '$CORPUS_ROOT' --storage 'file://$OUT_DIR' \
      --chunk-max-tokens 768 --chunk-overlap-tokens 96 \
      --ocr-dpi 200 --ocr-max-longest-dim 1540 \
      --non-interactive -o '$STACK_FULL' \
@@ -166,7 +166,7 @@ add_stage wizard_full task \
   "[ -s '$RUN_DIR/.wizard_full.done' ]" \
   "echo 0" \
   "$LATENCE setup --profile enterprise-sota \
-     --source '$CORPUS_ROOT/govdocs1' --storage 'file://$OUT_DIR' \
+     --source '$CORPUS_ROOT' --storage 'file://$OUT_DIR' \
      --chunk-max-tokens 768 --chunk-overlap-tokens 96 \
      --ocr-dpi 200 --ocr-max-longest-dim 1540 \
      --label-candidates '$CANDIDATES' \

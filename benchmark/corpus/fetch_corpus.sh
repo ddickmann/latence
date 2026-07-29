@@ -45,7 +45,11 @@ EDGAR_XLSX="${EDGAR_XLSX:-5000}"
 EDGAR_QUARTERS="${EDGAR_QUARTERS:-2024/QTR1 2024/QTR2 2023/QTR1 2023/QTR3}"
 # .docx and .pptx, per format. Paced by Zenodo's Crawl-delay: 10 on search, so this axis is slow by
 # design — 100 records per search call keeps the number of disallowed-path requests minimal.
-ZENODO_OOXML="${ZENODO_OOXML:-2500}"
+# 1200 per format, not 2500. The binding cost is wall-clock against a rate-limited API, and the GPU
+# sits idle for all of it. 1200 clears the manifest's <1000 "untested at volume" threshold with
+# margin while roughly halving the wait; the corpus is bounded by the pipeline's appetite for
+# format COVERAGE, not by needing every file Zenodo has.
+ZENODO_OOXML="${ZENODO_OOXML:-1200}"
 FETCH_OHR="${FETCH_OHR:-1}"
 KEEP_ZIPS="${KEEP_ZIPS:-0}"             # 1 keeps the .zip after extract (doubles peak disk)
 PARALLEL="${PARALLEL:-4}"
@@ -458,7 +462,7 @@ UA = "Latence Research ddickmann81@gmail.com (benchmark corpus acquisition)"
 # robots.txt: `Disallow: /api`, `Allow: /api/records/*/files`, `Crawl-delay: 10`. Downloads sit on
 # the explicitly allowed path; search does not, so search is paced at the crawl-delay and used as
 # sparingly as possible (100 records per call).
-SEARCH_GAP, FILE_GAP = 10.0, 1.5
+SEARCH_GAP, FILE_GAP = 10.0, 1.0
 ALLOWED = {"cc-by-4.0", "cc-zero", "cc0-1.0"}
 
 
