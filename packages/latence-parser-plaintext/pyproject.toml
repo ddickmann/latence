@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Passthrough plain-text/markdown Parser Provider for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "markdown"]

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Zero-network corpus profiler that mines a candidate type space (entity/relation/PII) from a corpus sample and selects it by greedy submodular max-coverage, emitting the `label_inducer.lexicon` candidate pool plus its own optimality certificate, coverage curve, Zipf fit and Good-Turing residual."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "schema-induction", "keyphrase-extraction", "submodular", "max-coverage", "zipf"]

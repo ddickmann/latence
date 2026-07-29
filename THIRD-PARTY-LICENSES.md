@@ -1,19 +1,56 @@
 # Third-party licenses
 
-The Latence Framework is Apache-2.0 (see `LICENSE` and `NOTICE`). It bundles no
-model weights and no vendored third-party source. This file consolidates the
-licenses of the third-party **Python runtime dependencies** its packages pull in,
-plus the **default reference-model** licenses (the checkpoints the reference
-Providers point at — downloaded only when a Pipeline configures that Provider).
+> **The framework's own licence changed on 2026-07-29.** It is no longer
+> Apache-2.0. It is the **PolyForm Noncommercial License 1.0.0**
+> (SPDX: `PolyForm-Noncommercial-1.0.0`) — free for noncommercial use, commercial
+> use by separate written agreement (see [`LICENSE`](./LICENSE) and
+> [`COMMERCIAL.md`](./COMMERCIAL.md)). The repository was Apache-2.0 internally
+> and **never published publicly** — private since creation, nothing on PyPI, no
+> release cut, sole copyright holder across every commit — so the relicence is
+> clean. The verified provenance record is at the top of `LICENSE`.
+>
+> **What that changes in this file, and what it does not.** The verified facts
+> below are unchanged: every licence, version, and verification date still holds.
+> What changed is the *framing*. This file used to argue that every inbound
+> licence was permissive and therefore compatible with the project's own
+> permissive outbound posture. That argument no longer applies, and the honest
+> version runs in the opposite direction of travel:
+>
+> * **Inbound compatibility got easier, not harder.** A noncommercial outbound
+>   licence imposes no obligations that a permissive inbound licence could
+>   conflict with. Nothing here is now *in*compatible that was compatible before.
+> * **But the outbound licence is not a shield.** Third-party terms bind the
+>   *user* of this framework directly, independently of what licence the framework
+>   itself carries. The LGPL-3.0, Gemma, NVIDIA-EULA and non-commercial-dataset
+>   obligations recorded below apply to a commercial licensee exactly as they did
+>   to a user under the old licence. A commercial agreement with the copyright
+>   holder settles rights in *this* code and nothing else.
+> * **Reciprocal licences are still the thing to watch, in both directions.** A
+>   future inbound GPL/AGPL dependency would be a problem; there is none today.
+>
+> This file records verified facts. It is not legal advice.
 
-Every runtime dependency of `latence-core`, of every Provider package and of every
-optional extra is a permissive license (Apache-2.0 / MIT / BSD / ISC / PSF /
-MPL-2.0). None are copyleft in a way that reaches the framework's code. There is
-exactly ONE carve-out, and it is not a small one: the two **pinned GPU
-environments** under `deploy/env/` (`gpu-learned/` and `served-ocr-server/`) pull
-NVIDIA CUDA wheels that are **not** open-source. Read
-[CUDA runtime wheels — NOT permissive](#cuda-runtime-wheels--not-permissive-issues-198-and-196)
-before installing either one. Nothing outside those two environments is affected.
+The framework bundles no model weights and no vendored third-party source. This
+file consolidates the licenses of the third-party **Python runtime dependencies**
+its packages pull in, plus the **default reference-model** licenses (the
+checkpoints the reference Providers point at — downloaded only when a Pipeline
+configures that Provider).
+
+Every runtime dependency on a **default install path** — `latence-core`, every
+Provider package, and every extra except the two named below — is permissively
+licensed (Apache-2.0 / MIT / BSD / ISC / PSF / MPL-2.0). Two carve-outs sit off
+the default path and neither is small:
+
+1. **`easydict` is LGPL-3.0** — weak copyleft, pulled only by the opt-in
+   `latence-linkpred-ultra[ultra]` extra. Free to use as we use it; it carries
+   real conditions **if a binary or container image is ever shipped**. Read
+   [the LGPL-3.0 obligation, stated precisely](#the-lgpl-30-obligation-stated-precisely).
+2. **NVIDIA CUDA wheels are proprietary** — pulled only by the two pinned GPU
+   environments under `deploy/env/` (`gpu-learned/` and `served-ocr-server/`).
+   Read
+   [CUDA runtime wheels — NOT permissive](#cuda-runtime-wheels--not-permissive-issues-198-and-196)
+   before installing either one. Nothing outside those two environments is
+   affected.
 
 ## Python runtime dependencies
 
@@ -70,13 +107,63 @@ Provider dep not installed in the CPU-first dev env (ADR-0016) — those are mar
 
 > **⚠️ License flag — `easydict` is LGPL-3.0, not permissive.** Pulled only by the opt-in
 > `latence-linkpred-ultra[ultra]` extra (used by the vendored MIT ULTRA inference subset), and
-> off the default install path. LGPL-3.0 is weak copyleft: the framework *dynamically imports*
-> easydict, unmodified, from Apache-2.0 code — that use is permitted without relicensing the
-> framework, and the copyleft reaches only modifications to easydict itself. Surfaced here per
-> ADR-0012 / research-diligence so the choice is conscious (options: keep behind the opt-in extra
-> with this note, or replace easydict's trivial dotted-dict usage in the vendored ULTRA config
-> with a permissive shim to drop the dep). Verified LGPL-3.0 on PyPI 2026-07-10. All other
-> ULTRA/PyKEEN extras are permissive (torch BSD-3-Clause; torch-geometric/torch-scatter/pykeen MIT).
+> off the default install path. All other ULTRA/PyKEEN extras are permissive (torch
+> BSD-3-Clause; torch-geometric/torch-scatter/pykeen MIT). The obligation this creates is
+> stated precisely in the next section — it is **not** "LGPL is fine, move on".
+
+### The LGPL-3.0 obligation, stated precisely
+
+**Verified 2026-07-29** (re-verified under the new licence posture; first verified
+2026-07-10). `easydict` 1.13 on PyPI declares `License: LGPL-3.0` and the classifier
+`License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)`. Its upstream
+repository (github.com/makinacorpus/easydict) ships the verbatim **GNU Lesser General
+Public License, Version 3, 29 June 2007**; GitHub's licence API resolves it to
+`spdx_id: LGPL-3.0`.
+
+**What we actually do with it.** `latence-linkpred-ultra` imports `easydict` at run time,
+unmodified, as a plain Python package that pip installed from PyPI. We do not vendor it,
+do not modify it, and **do not redistribute it** — no wheel or sdist in this repository
+contains a byte of easydict. In LGPL terms nothing here **conveys** the Library, so no §4
+obligation is triggered for this project as it stands today.
+
+**What changes the moment anything is shipped.** If you distribute an artifact that
+*contains* easydict — a container image, a frozen/PyInstaller binary, an appliance, an
+offline wheelhouse, a VM image, a bundled installer — that artifact is a **Combined
+Work** and LGPL-3.0 **§4** applies. §4 permits conveying a Combined Work under terms of
+your choice (including proprietary terms) **only if** those terms, taken together, do not
+restrict modification of the Library portions or reverse engineering for debugging such
+modifications, **and** only if you do *each* of the following:
+
+| LGPL-3.0 §4 | What it requires of a shipped artifact |
+|---|---|
+| §4(a) | Give **prominent notice** with each copy of the Combined Work that the Library is used in it and that the Library and its use are covered by the LGPL. |
+| §4(b) | **Accompany** the Combined Work with a copy of the GNU GPL **and** the LGPL text. |
+| §4(c) | If the Combined Work displays copyright notices during execution, include easydict's copyright notice among them, plus a pointer to the GPL/LGPL copies. |
+| §4(d) | Do **one** of: **(d)(0)** convey the Minimal Corresponding Source for easydict under the LGPL **and** your Corresponding Application Code in a form that lets the user recombine or relink against a modified easydict; **or** **(d)(1)** use a suitable shared-library mechanism that uses at run time a copy of easydict already present on the user's system and that works with any interface-compatible modified version. |
+| §4(e) | Provide **Installation Information** — but only where **GPL-3.0 §6** would otherwise require it (the "User Product" / anti-tivoization case), and only as far as necessary to install and run a Combined Work recombined with a modified easydict. |
+
+Practical reading for a Python distribution: §4(d)(1) is the cheap route, and an ordinary
+`pip install` already satisfies its substance — easydict stays a separate,
+user-replaceable package on the import path, so a user can swap in a modified copy. A
+**frozen binary or a locked-down appliance breaks that**, and then §4(d)(0) — shipping
+relinkable source — is what remains. §4(e) can additionally bite for consumer hardware.
+
+**UNVERIFIED:** whether upstream elected the "or any later version" option of LGPL-3.0
+**§6** (Revised Versions). The package metadata says `LGPL-3.0`, not `LGPL-3.0-or-later`,
+and the repository ships the bare licence text without a stated per-file election. Treat
+the terms as LGPL-3.0 exactly, and re-check if a downstream ever needs to rely on a later
+version.
+
+**The clean way out, if it matters.** The whole use of easydict is one lazy import and
+two `EasyDict({...})` calls that wrap the ULTRA relation/entity config dicts so the
+vendored model code can read them with dotted attribute access
+(`latence_linkpred_ultra/scorer.py`, the `EasyDict` import and the `rel_cfg`/`ent_cfg`
+construction). A small permissive attribute-dict shim replaces it and removes the
+dependency and the entire obligation. That remains a real option, recorded here so the
+choice stays deliberate (ADR-0012 / research-diligence) rather than defaulted into.
+
+**Not legal advice.** This is a reading of the licence text, not counsel's opinion. See
+the legal-review list in `COMMERCIAL.md`.
 
 `gliner`, `openai`, `presidio-analyzer`/`spacy`, and `apache-airflow` are heavy/optional
 dependencies kept out of the CPU-first dev environment by design (ADR-0016); their licenses
@@ -125,8 +212,14 @@ project under Apache-2.0. The framework bundles none of it.
 **All runtime dependencies on the default install path are permissive. No GPL/AGPL
 runtime dependency is present.** Two exceptions are called out explicitly and neither
 is on a default install path: `easydict` (**LGPL-3.0**, opt-in `latence-linkpred-ultra[ultra]`
-extra only — see the flag above), and the MPL-2.0 `pathspec` (a mypy transitive, dev-only,
-never shipped in any wheel).
+extra only — see [the LGPL-3.0 obligation, stated
+precisely](#the-lgpl-30-obligation-stated-precisely)), and the MPL-2.0 `pathspec` (a mypy
+transitive, dev-only, never shipped in any wheel).
+
+That statement is about **inbound** licences only. It says nothing about whether *your*
+use of the framework is permitted — that is governed by `LICENSE` (PolyForm Noncommercial
+1.0.0) and, for commercial use, by a separate agreement (`COMMERCIAL.md`). A commercial
+licensee is bound by the third-party terms above exactly as anyone else is.
 
 ## Default reference-model weights
 
@@ -255,7 +348,8 @@ What that means for this project, stated plainly:
 * Nothing changes for the framework's own licence, or for the CPU/text environment, or for the
   OCR **client** environment — the CUDA wheels are pulled in **only** by `gpu-learned/` and
   `served-ocr-server/`, and only because the operator chose to install a GPU stack.
-  `latence-core` and every Provider package remain permissively licensed and CUDA-free (ADR-0016).
+  `latence-core` and every Provider package remain CUDA-free (ADR-0016) and carry the
+  framework's own licence (PolyForm Noncommercial 1.0.0), never NVIDIA's terms.
 * An operator installing `deploy/env/gpu-learned/` **or** `deploy/env/served-ocr-server/` accepts
   NVIDIA's terms for those runtime libraries, exactly as they would installing CUDA from NVIDIA
   directly. This is normal for GPU serving and is called out here so it is a decision, not a
@@ -299,7 +393,7 @@ UNVERIFIED one unconditionally.
 | allenai/olmOCR-bench | Parse benchmark suite (default) | ODC-BY-1.0 (dataset-card `license: odc-by`) | Apache-2.0 (github.com/allenai/olmocr) | Yes, with attribution | Default; attribution carried on the published results page |
 | opendatalab/OmniDocBench | Parse benchmark suite (opt-in) | **research-only, non-commercial** (project Copyright Statement: "The dataset is for research purposes only and not for commercial use.") | Apache-2.0 | **No** | Registered but GATED behind `--accept-non-commercial`; never a default, never vendored |
 | Babelscape/REDFM | Entity-Extraction, Relation-Extraction and Disambiguation suites (#187) | CC BY-SA 4.0 (dataset-card `license: cc-by-sa-4.0` **and** its prose License section) | Apache-2.0 (the repo's own `REDFM.py` loader, per its file header) | Yes, with attribution | Default for the three suites; fetched at run time, never vendored, and only aggregate metrics are published — so ShareAlike, which binds adaptations of the corpus, is not triggered |
-| Latence synthetic PII corpus | Redaction suite (#187) | Apache-2.0 (this repository) | Apache-2.0 (this repository) | Yes | SHIPPED in `latence_benchmark/corpora/`. Contains **no real personal data**: RFC 2606 example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone numbers, published test card/IBAN values, AWS's `AKIAIOSFODNN7EXAMPLE` docs key, fictional names. Generated by a committed generator and pinned by content digest |
+| Latence synthetic PII corpus | Redaction suite (#187) | PolyForm-Noncommercial-1.0.0 (this repository) | PolyForm-Noncommercial-1.0.0 (this repository) | Noncommercial free; commercial by agreement (`COMMERCIAL.md`) | SHIPPED in `latence_benchmark/corpora/`. Contains **no real personal data**: RFC 2606 example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone numbers, published test card/IBAN values, AWS's `AKIAIOSFODNN7EXAMPLE` docs key, fictional names. Generated by a committed generator and pinned by content digest |
 
 Datasets considered and **excluded** on license grounds (recorded so the decision
 is not silently re-litigated):

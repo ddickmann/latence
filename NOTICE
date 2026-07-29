@@ -1,8 +1,26 @@
 Latence Framework
 Copyright 2026 Dennis Dickmann (latence.ai)
 
+Required Notice: Copyright 2026 Dennis Dickmann
+(https://github.com/ddickmann/latence-framework)
+
 This product includes software developed by Dennis Dickmann (latence.ai).
-Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+Licensed under the PolyForm Noncommercial License 1.0.0 — SPDX identifier
+PolyForm-Noncommercial-1.0.0, reproduced verbatim in the LICENSE file.
+Noncommercial use is free under those terms. COMMERCIAL USE REQUIRES A SEPARATE
+WRITTEN AGREEMENT with the copyright holder; see COMMERCIAL.md.
+
+PROVENANCE (not part of the licence terms): this repository carried an
+Apache-2.0 LICENSE internally from its first commit until 2026-07-29. It was
+never published — the GitHub repository has been private since creation, no
+distribution was ever published to PyPI, no release was ever cut, and every
+commit is authored by the sole copyright holder. The full verified record is at
+the top of the LICENSE file.
+
+That licence covers the Latence Framework's own code and nothing else. The
+third-party software, model weights and datasets listed below and in
+THIRD-PARTY-LICENSES.md carry THEIR OWN licences, which the framework's licence
+neither changes nor overrides.
 
 ================================================================================
 Third-party model weights offered as DEFAULT reference Providers
@@ -48,8 +66,12 @@ weights-and-code license verification recorded before it ships (ADR-0012).
 Third-party Python runtime dependencies
 ================================================================================
 
-The framework's own packages depend only on permissively-licensed libraries.
-Full list with verified licenses in THIRD-PARTY-LICENSES.md. Notable ones that
+Every runtime dependency on a DEFAULT install path is permissively licensed.
+Two named exceptions sit off that path and are documented in full in
+THIRD-PARTY-LICENSES.md: `easydict` (LGPL-3.0, pulled only by the opt-in
+`latence-linkpred-ultra[ultra]` extra) and the NVIDIA CUDA wheels pinned by the
+two GPU environments under `deploy/env/`, which are proprietary. Full list with
+verified licenses in THIRD-PARTY-LICENSES.md. Notable dependencies that
 distribute their own NOTICE (Apache-2.0) and whose attribution is preserved here:
 
   - Apache Arrow / PyArrow  — Copyright The Apache Software Foundation, Apache-2.0
