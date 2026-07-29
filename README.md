@@ -285,7 +285,10 @@ Pre-1.0, and specific about it.
 
 **Green, and reproducible on a laptop:**
 
-- **4,590 tests pass, 33 skipped** — `PYTHONHASHSEED=0 uv run pytest -q` (~11 min, CPU, offline).
+- **4,590 tests pass, 33 skipped** — measured at commit `04e8718` with
+  `PYTHONHASHSEED=0 uv run pytest -q` (672 s, CPU, offline). The count carries the commit it was
+  taken at, the same convention `PERF-RESULTS.md` uses, because it grows as work lands — the command
+  is the source of truth, not this line.
 - **`mypy --strict` over src *and* tests** for every workspace package — `bash scripts/typecheck.sh`.
 - **`bash scripts/verify-local.sh` exits 0** — the full merge gate: secret scan, ruff, strict types,
   the suite, provider conformance, end-to-end validation of 9 stack configs, the reproducible
