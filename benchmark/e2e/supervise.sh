@@ -30,6 +30,12 @@
 
 set -u -o pipefail
 
+# A detached, non-interactive shell does not read the rc files that put `uv` on PATH, so the
+# supervisor saw `uv: command not found` while an interactive SSH session ran it fine. Anything
+# installed to a user-local bin has to be put back on PATH explicitly here — the run must not depend
+# on how the process happened to be started.
+export PATH="${HOME:-/root}/.local/bin:${HOME:-/root}/.cargo/bin:/usr/local/bin:$PATH"
+
 REPO="${REPO:-/workspace/latence-framework}"
 CORPUS_ROOT="${CORPUS_ROOT:-/workspace/corpus}"
 RUN_DIR="${RUN_DIR:-/workspace/run}"
@@ -92,7 +98,9 @@ add_stage corpus task \
   "Acquire GovDocs1 + SEC VPRR + OHR-Bench and write the measured manifest" \
   "[ -s '$CORPUS_ROOT/manifest.json' ]" \
   "echo \$(find '$CORPUS_ROOT' -type f ! -path '*_work*' 2>/dev/null | wc -l)\$(du -sk '$CORPUS_ROOT/_work' 2>/dev/null | cut -f1)" \
-  "cd '$REPO' && CORPUS_ROOT='$CORPUS_ROOT' GOVDOCS_ZIPS=90 VPRR_PDFS=8000 FETCH_OHR=1 bash benchmark/corpus/fetch_corpus.sh"
+  "cd '$REPO' && CORPUS_ROOT='$CORPUS_ROOT' GOVDOCS_ZIPS=90 VPRR_PDFS=${VPRR_PDFS:-0} \
+     EDGAR_XLSX=${EDGAR_XLSX:-0} ZENODO_OOXML=${ZENODO_OOXML:-0} FETCH_OHR=${FETCH_OHR:-0} \
+     bash benchmark/corpus/fetch_corpus.sh"
 
 # The wizard is the entry gate. The parse-only YAML is DERIVED from the wizard's output by dropping
 # stages, never by authoring config — the emitted header explicitly invites diffable edits, and

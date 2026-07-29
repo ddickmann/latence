@@ -19,20 +19,25 @@ publish-readiness fix is reverted:
 * ``.gitignore`` denies the secret patterns a credential leak would ride in on;
 * the audited ``.secrets.baseline`` exists and every entry is audited
   ``is_secret == false`` (a genuine secret would not be pre-audited, so the CI
-  ``detect-secrets`` step would surface it).
+  ``detect-secrets`` step would surface it);
+* the **retained Apache-2.0 subset** is exactly the seven modules the owner meant
+  to keep permissive — no eighth file has quietly acquired a non-PolyForm
+  file-level grant, and none of the seven has quietly lost one.
 
 LICENCE HISTORY. The project was Apache-2.0 internally until 2026-07-29 and was
 never published under it (private repository, nothing on PyPI, no release cut,
 sole copyright holder). These gates are written so that a drift BACK to
 Apache-2.0 — in the LICENSE text, in the NOTICE, or in any single package's
 metadata — fails the build rather than shipping a distribution whose declared
-licence and shipped licence text disagree.
+licence and shipped licence text disagree. The one place Apache-2.0 legitimately
+survives is the bounded carve-out below, which is pinned rather than tolerated.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -59,6 +64,66 @@ _LICENSE_END = "----- END POLYFORM NONCOMMERCIAL LICENSE 1.0.0 -----"
 # only way to assert "verbatim": a keyword check would pass on a licence someone had
 # quietly edited a clause out of, which is precisely the failure that matters here.
 _POLYFORM_TEXT_SHA256 = "ffcca38841adb694b6f380647e15f17c446a4d1656fed51a1e2041d064c94cc8"
+
+# ---------------------------------------------------------------------------
+# The retained Apache-2.0 subset — a deliberate, bounded, PINNED carve-out.
+# ---------------------------------------------------------------------------
+# Seven modules in ``latence-retrieval`` keep a FILE-LEVEL Apache-2.0 grant on
+# purpose, so the query-time retrieval primitives stay permissively reusable —
+# commercially included — by anyone who wants only them. LICENSE, section
+# "SCOPE: THE RETAINED APACHE-2.0 MODULES", is the authoritative statement of why.
+#
+# Unpinned, that intent is indistinguishable from an oversight: a licence scanner
+# sees a permissive file-level grant inside a package whose ``pyproject`` declares
+# PolyForm and reports a contradiction, and a reader has no way to tell a decision
+# from a leftover. Worse, it drifts in BOTH directions — a new module that
+# copy-pastes the header silently widens the permissive hole, and a header dropped
+# in a refactor silently closes a grant the owner meant to keep. Neither shows up
+# in a diff review of a 3000-line retrieval module. So the set is enumerated here
+# and cross-checked three ways: against the tree, against each file's own header,
+# and against LICENSE.
+_RETAINED_APACHE_MODULES = frozenset(
+    {
+        "packages/latence-retrieval/src/latence_retrieval/bm25.py",
+        "packages/latence-retrieval/src/latence_retrieval/graph_retrieval.py",
+        "packages/latence-retrieval/src/latence_retrieval/maxsim.py",
+        "packages/latence-retrieval/src/latence_retrieval/multihop.py",
+        "packages/latence-retrieval/src/latence_retrieval/pack.py",
+        "packages/latence-retrieval/src/latence_retrieval/sparse.py",
+        "packages/latence-retrieval/src/latence_retrieval/tuning.py",
+    }
+)
+
+# A file declares its own outbound grant with an SPDX identifier on a COMMENT line
+# in its header. Only source files are scanned: in Markdown a leading ``#`` is a
+# heading and LICENSE's own SPDX line is prose, so widening the scan would trade a
+# real gate for false positives on files that merely *mention* an identifier.
+_SPDX_SOURCE_SUFFIXES = (".py", ".pyi", ".rs", ".sh")
+_SPDX_COMMENT = re.compile(r"^\s*(?:#|//)\s*SPDX-License-Identifier:\s*(\S+)\s*$")
+_SPDX_HEADER_LINES = 24
+_SPDX_SCAN_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "site",
+        "build",
+        "dist",
+    }
+)
+
+# The marker each retained file must carry NEXT TO its SPDX line. The point is that a
+# reader of the FILE — not only a reader of LICENSE — can tell the grant is intended.
+_DELIBERATE_MARKER = "DELIBERATE, BOUNDED EXCEPTION"
+
+# LICENSE's carve-out section: its heading, and the heading that ends it.
+_RETAINED_SECTION_HEADING = "SCOPE: THE RETAINED APACHE-2.0 MODULES"
+_LICENCE_TERMS_HEADING = "\nLICENCE TERMS\n"
 
 # Every workspace package is publishable to PyPI and must carry release metadata.
 # PEP 639: the license is a bare SPDX *expression* plus a license-files glob. The legacy
@@ -94,6 +159,53 @@ def _license_body(text: str) -> str:
         "framing around them, and no way to prove the terms are unmodified."
     )
     return match.group(1)
+
+
+def _retained_section_bounds(text: str) -> tuple[int, int] | None:
+    """``(start, end)`` of the carve-out section in ``text``, or ``None`` if it has none."""
+    start = text.find(_RETAINED_SECTION_HEADING)
+    if start == -1:
+        return None
+    end = text.find(_LICENCE_TERMS_HEADING, start)
+    return None if end == -1 else (start, end)
+
+
+def _retained_modules_section() -> str:
+    """LICENSE's carve-out section — the authoritative home of the Apache-2.0 exception."""
+    text = (_REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+    start = text.find(_RETAINED_SECTION_HEADING)
+    assert start != -1, (
+        f"LICENSE has no {_RETAINED_SECTION_HEADING!r} section. Seven files carry a "
+        "file-level Apache-2.0 grant; without that section a reader cannot tell the "
+        "exception from an oversight, and a licence scanner reports a contradiction."
+    )
+    end = text.find(_LICENCE_TERMS_HEADING, start)
+    assert end != -1, (
+        "the retained-modules section is not followed by the LICENCE TERMS heading — it "
+        "must sit ABOVE the terms, as a scope note, not inside or after them"
+    )
+    return text[start:end]
+
+
+def _declared_file_licences() -> dict[str, str]:
+    """``repo-relative path -> SPDX identifier`` for every source file that declares one."""
+    found: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(_REPO_ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _SPDX_SCAN_SKIP_DIRS]
+        for name in filenames:
+            if not name.endswith(_SPDX_SOURCE_SUFFIXES):
+                continue
+            path = Path(dirpath) / name
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()[:_SPDX_HEADER_LINES]
+            except (OSError, UnicodeDecodeError):  # pragma: no cover - defensive
+                continue
+            for line in lines:
+                match = _SPDX_COMMENT.match(line)
+                if match:
+                    found[path.relative_to(_REPO_ROOT).as_posix()] = match.group(1)
+                    break
+    return found
 
 
 def test_license_is_polyform_noncommercial_verbatim() -> None:
@@ -243,6 +355,13 @@ def test_no_owned_licence_document_still_grants_apache_2_0() -> None:
 
     Scoped to the files this relicence owns, so it is a real gate and not a proxy: the
     root licence documents, and every package's shipped LICENSE + declared metadata.
+
+    The ONE place an Apache-2.0 grant legitimately survives is the retained-modules
+    carve-out, which LICENSE states in so many words. That section is excluded here — by
+    its own delimiters, not by hoping its wording never matches — and the carve-out has
+    its own, stricter gates below (exact file set, per-file headers, LICENSE section
+    contents). Excluding it explicitly is the point: a reader of this gate should be able
+    to see that the exception exists, rather than discover it as a mysterious near-miss.
     """
     offenders: list[str] = []
     for path in (
@@ -252,6 +371,9 @@ def test_no_owned_licence_document_still_grants_apache_2_0() -> None:
         *sorted(_PACKAGES.glob("*/LICENSE")),
     ):
         text = path.read_text(encoding="utf-8")
+        bounds = _retained_section_bounds(text)
+        if bounds is not None:
+            text = text[: bounds[0]] + text[bounds[1] :]
         for line in text.splitlines():
             # "was Apache-2.0", "superseded", the provenance record: those are history,
             # not a grant. A GRANT is a line that licenses the work under it.
@@ -259,6 +381,137 @@ def test_no_owned_licence_document_still_grants_apache_2_0() -> None:
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}: {line.strip()}")
     assert not offenders, (
         "these files still grant the superseded Apache-2.0 licence:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_retained_apache_subset_is_exactly_the_pinned_set() -> None:
+    """The permissive carve-out is CLOSED: not one file more, not one file fewer.
+
+    This is the gate that turns "seven files happen to say Apache-2.0" into a decision.
+    It fails in both directions on purpose, because both are silent in review:
+
+    * an EIGHTH file acquiring a non-PolyForm grant — usually by copy-pasting a
+      neighbouring module's header — widens the permissive hole without anyone deciding
+      to widen it, and gives away code the commercial lane depends on;
+    * one of the SEVEN losing its grant — a header eaten by a refactor or a file rename —
+      silently retracts a grant the owner made deliberately, and makes LICENSE false.
+
+    Any non-PolyForm identifier counts, not just Apache-2.0: a stray ``MIT`` header would
+    be exactly the same defect wearing a different name.
+    """
+    declared = _declared_file_licences()
+    assert declared, "the SPDX scan found no source file at all — the walk is broken"
+
+    non_polyform = {path for path, spdx in declared.items() if spdx != _SPDX_LICENSE}
+    added = sorted(non_polyform - _RETAINED_APACHE_MODULES)
+    lost = sorted(_RETAINED_APACHE_MODULES - non_polyform)
+
+    assert not added and not lost, (
+        "the retained-Apache-2.0 boundary moved.\n"
+        + (
+            "  NEWLY permissive (not in the pinned set): "
+            + ", ".join(f"{p} -> {declared[p]}" for p in added)
+            + "\n"
+            if added
+            else ""
+        )
+        + ("  NO LONGER permissive (pinned but not found): " + ", ".join(lost) + "\n" if lost else "")
+        + "The exception is deliberate and bounded (LICENSE, "
+        + f"{_RETAINED_SECTION_HEADING!r}). If the move is intended, change it in three "
+        "places together — the file header, the LICENSE section, and this pinned set — "
+        "so the code, the licence document and the gate cannot disagree."
+    )
+
+
+def test_every_retained_module_declares_apache_2_0_and_says_why_in_the_file() -> None:
+    """A bare ``SPDX-License-Identifier: Apache-2.0`` line reads as an oversight.
+
+    The reader who has to judge this is looking at ONE file — a scanner's hit, a diff, a
+    vendored copy — not at LICENSE. So the intent has to travel with the grant: each
+    retained module states next to its SPDX line that the exception is deliberate and
+    bounded, and points at the authoritative section.
+    """
+    declared = _declared_file_licences()
+    problems: list[str] = []
+    for rel in sorted(_RETAINED_APACHE_MODULES):
+        path = _REPO_ROOT / rel
+        if not path.is_file():
+            problems.append(f"{rel}: pinned as a retained module but the file is gone")
+            continue
+        spdx = declared.get(rel)
+        if spdx != _SUPERSEDED_SPDX_LICENSE:
+            problems.append(f"{rel}: declares {spdx!r}, expected {_SUPERSEDED_SPDX_LICENSE!r}")
+        header = "\n".join(path.read_text(encoding="utf-8").splitlines()[:_SPDX_HEADER_LINES])
+        if _DELIBERATE_MARKER not in header:
+            problems.append(
+                f"{rel}: the Apache-2.0 grant carries no {_DELIBERATE_MARKER!r} note, so it "
+                "is indistinguishable from a header nobody updated at the relicence"
+            )
+        if "LICENSE" not in header:
+            problems.append(f"{rel}: the grant note does not point at LICENSE")
+    assert not problems, "retained-module headers:\n" + "\n".join(problems)
+
+
+def test_license_documents_the_retained_subset_and_what_it_means_downstream() -> None:
+    """LICENSE is the ONE authoritative home; it must list the set and its consequence.
+
+    A carve-out that is only visible in seven file headers is not documented — the person
+    who needs it (an evaluator, a scanner's human, a downstream integrator) reads the
+    licence file. It must say which files, that it is intentional, and what a downstream
+    user may actually do: these modules are permissively reusable, the rest is not.
+    """
+    section = _retained_modules_section()
+
+    listed = set(re.findall(r"packages/[A-Za-z0-9_\-/.]+\.py", section))
+    assert listed == set(_RETAINED_APACHE_MODULES), (
+        "the file list in LICENSE disagrees with the pinned set.\n"
+        f"  only in LICENSE: {sorted(listed - _RETAINED_APACHE_MODULES)}\n"
+        f"  only in the pin: {sorted(_RETAINED_APACHE_MODULES - listed)}"
+    )
+
+    lowered = section.lower()
+    assert _SUPERSEDED_SPDX_LICENSE.lower() in lowered, "the section does not name Apache-2.0"
+    assert "deliberate" in lowered or "intentional" in lowered, (
+        "the section does not say the exception is INTENDED — which is the whole point of "
+        "writing it down; without that word it reads as a disclosure of a mistake"
+    )
+    # What it means downstream, in both directions.
+    assert "commercial" in lowered, (
+        "the section does not tell a downstream reader whether commercial use of these "
+        "seven files is allowed — the only question they are here to answer"
+    )
+    assert _SPDX_LICENSE in section, (
+        "the section does not name the licence the REST of the repository carries, so a "
+        "reader can generalise the carve-out to the whole tree"
+    )
+    assert "COMMERCIAL.md" in section, "the section does not route commercial use of the rest"
+
+
+def test_pack_keeps_its_inbound_provenance_distinct_from_the_outbound_grant() -> None:
+    """``pack.py`` carries TWO licence claims. Conflating them would break both.
+
+    *Inbound provenance* — the QKP packer derives from the maintainer's own ``colsearch``
+    project and was relicensed Apache-2.0 for this use — answers "where did this code come
+    from, and was it clean to take". *Outbound grant* — this file is licensed Apache-2.0 —
+    answers "what may you do with it". They are independent: the inbound record would
+    still be true if the file were PolyForm, and the outbound grant would still be the
+    owner's to make if the code had been written from scratch here.
+
+    Collapsing them into one sentence loses the provenance record the relicence rests on,
+    so both must be present and both must be labelled.
+    """
+    header = "\n".join(
+        (_REPO_ROOT / "packages/latence-retrieval/src/latence_retrieval/pack.py")
+        .read_text(encoding="utf-8")
+        .splitlines()[:_SPDX_HEADER_LINES]
+    )
+    assert "colsearch" in header and "relicensed Apache-2.0 for this use" in header, (
+        "pack.py lost the INBOUND provenance record for the ported QKP packer"
+    )
+    assert "OUTBOUND" in header and "INBOUND" in header, (
+        "pack.py states both licence claims but does not label which is which — the one "
+        "shape that lets a reader mistake 'we were allowed to take this' for 'you are "
+        "allowed to take this'"
     )
 
 

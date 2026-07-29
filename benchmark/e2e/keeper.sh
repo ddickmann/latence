@@ -18,6 +18,10 @@
 
 set -u
 
+# Same reason as supervise.sh: a detached shell does not read the rc files that put user-local
+# binaries on PATH, and the keeper relaunches the supervisor, so it must hand down a usable one.
+export PATH="${HOME:-/root}/.local/bin:${HOME:-/root}/.cargo/bin:/usr/local/bin:$PATH"
+
 REPO="${REPO:-/workspace/latence-framework}"
 RUN_DIR="${RUN_DIR:-/workspace/run}"
 STATE="$RUN_DIR/STATE.json"

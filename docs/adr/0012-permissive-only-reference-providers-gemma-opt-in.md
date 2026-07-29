@@ -1,5 +1,11 @@
 # Reference Providers ship permissive weights only; restricted-license models are opt-in
 
+**Amended by [ADR-0055](0055-relicence-to-polyform-noncommercial.md) (2026-07-29): where the H-B1
+amendment below says an in-core pure-code Provider's "code license is this repo's Apache-2.0", read
+`PolyForm-Noncommercial-1.0.0`** (in code, `REPO_LICENSE_CODE`). The *inbound* rule this ADR
+records — permissive weights only for defaults, weights and code verified separately, restricted
+licences opt-in — is unchanged: it governs what the project takes in, not what it grants out.
+
 Every model shipped as a framework DEFAULT must have permissively-licensed weights (Apache-2.0 / MIT / BSD): commercial use, redistribution, and modification allowed with no field-of-use or acceptable-use restriction. Verified 2026-07-06 (weights and code checked separately): PaddleOCR-VL-1.5, LightOnOCR-2-1B, knowledgator/gliner-linker-large + rerank, intfloat/multilingual-e5-small (MIT), sentence-transformers/all-MiniLM-L6-v2, ModernBERT, google/mt5, microsoft/llmlingua-2, and all Qwen3 sizes (dense + MoE) are clean. **Amended 2026-07-14 (ADR-0045):** the default Embedder is now **IBM Granite Embedding r2** — `ibm-granite/granite-embedding-311m-multilingual-r2` (GPU tier) and `ibm-granite/granite-embedding-97m-multilingual-r2` (CPU tier), both **Apache-2.0 weights** (card tag `license: apache-2.0`) on an Apache-2.0 ModernBERT backbone, verified 2026-07-14 (weights and code separately). multilingual-e5-small (MIT) remains a verified-permissive fallback.
 
 The one exception found is **unsloth/embeddinggemma-300m / google/embeddinggemma-300m**: the `gemma` license is NOT OSI open-source — commercial use is allowed but it carries Google's Prohibited Use Policy and flow-down obligations (every downstream recipient must be bound to the Gemma use restrictions, with a Notice). Therefore EmbeddingGemma is NOT a default; the default Embedder is IBM Granite Embedding r2 (Apache-2.0; multilingual-e5-small, MIT, remains a fallback — see ADR-0045). Models like EmbeddingGemma are available as opt-in Providers that surface their license and flow-down obligations at install time.

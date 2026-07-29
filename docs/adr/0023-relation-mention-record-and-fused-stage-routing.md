@@ -1,5 +1,10 @@
 # A RelationMention is a first-class inter-Stage Record; a fused Stage emits both carriers in one pass, threaded by a mixed-carrier checkpoint
 
+**Amended by [ADR-0055](0055-relicence-to-polyform-noncommercial.md) (2026-07-29): where the
+`relation.llm` entry below says "framework code Apache-2.0", read
+`PolyForm-Noncommercial-1.0.0`.** The third-party licences named alongside it (the `openai` client,
+the GLiNER code and weights) are unchanged — only this project's own code was relicensed.
+
 S5 adds **Relation Extraction** (CONTEXT): the Stage that finds typed relations
 between entity mentions within a document. Three design questions had non-obvious
 answers; they extend ADR-0013 (the empirical-choice + fused-Capability decision)

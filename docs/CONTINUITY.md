@@ -43,6 +43,16 @@ outside any employer.
   copyright holder ([`COMMERCIAL.md`](../COMMERCIAL.md)) — and that agreement *does*
   depend on the maintainer being reachable, which is the single largest continuity
   risk on this page. Read §1 and §5 with that in mind.
+- **One deliberate permissive carve-out, and it is bounded.** Seven query-time retrieval
+  modules in `latence-retrieval` keep a file-level Apache-2.0 grant *on purpose*, so those
+  algorithms stay reusable — commercially included — by anyone, with no agreement and no
+  dependence on the maintainer being reachable. That is the one part of this repository the
+  continuity risk in the first bullet does not touch. The exact set is enumerated in
+  [`LICENSE`](../LICENSE), section *"SCOPE: THE RETAINED APACHE-2.0 MODULES"*, which is the
+  authoritative statement, and it is machine-pinned by
+  `packages/latence-core/tests/test_publish_readiness.py` so the boundary cannot widen or
+  narrow silently. It does **not** extend to the rest of the package those modules import
+  from. Recorded in [ADR-0055](adr/0055-relicence-to-polyform-noncommercial.md).
 - **Patent grant, and its limits.** PolyForm's *Patent License* section grants a
   patent licence from **the licensor only** — not, as Apache-2.0 §3 would, from every
   contributor — and only for the licence's *permitted purposes*, i.e. noncommercial

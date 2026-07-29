@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 53 records numbered 0001–0054.
+    the sequence simply skipped it), so the log holds 54 records numbered 0001–0055.
 
 ## Foundations & scope
 
@@ -17,6 +17,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0002](0002-clean-monorepo-mined-from-private-repos.md) | Clean-history monorepo; private repos are quarries, not ancestors |
 | [0005](0005-v1-scope-the-ai-ready-data-spine.md) | v1 scope: the AI-ready-data spine, nothing else |
 | [0015](0015-python-core-declarative-yaml-rust-for-hot-paths.md) | Python core, declarative-YAML Pipeline contract, Rust only for proven hot paths |
+| [0055](0055-relicence-to-polyform-noncommercial.md) | Relicence to PolyForm Noncommercial — free for research, commercial by agreement (supersedes 0001's Apache-2.0; amends 0012, 0023) |
 
 ## The core seams
 

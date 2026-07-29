@@ -231,6 +231,7 @@ nav:
           - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
           - 0005 — v1 scope, the AI-ready-data spine: adr/0005-v1-scope-the-ai-ready-data-spine.md
           - 0015 — Python core, declarative YAML, Rust hot paths: adr/0015-python-core-declarative-yaml-rust-for-hot-paths.md
+          - 0055 — Relicence to PolyForm Noncommercial: adr/0055-relicence-to-polyform-noncommercial.md
       - The core seams:
           - 0003 — Stage library + pluggable Runners: adr/0003-stage-library-with-pluggable-runners.md
           - 0004 — Capability protocols + provider plugins: adr/0004-capability-protocols-with-provider-plugins.md

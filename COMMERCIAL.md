@@ -47,6 +47,19 @@ Two obligations that catch people out:
 2. **Fair use is untouched.** The licence explicitly does not limit rights you
    already have under law.
 
+## What you do not need a licence for at all
+
+Seven modules in `latence-retrieval` — the query-time retrieval primitives — are
+**not** under the PolyForm licence. They carry a file-level
+`SPDX-License-Identifier: Apache-2.0` grant, deliberately, so you may use, modify
+and redistribute those files **commercially** with no agreement here.
+
+That exception is bounded, enumerated and machine-pinned in
+[`LICENSE`](./LICENSE), section *"SCOPE: THE RETAINED APACHE-2.0 MODULES"* — that
+section is authoritative and this is only a pointer to it. Read it before you rely
+on the exception: it names the exact seven files, and it is explicit that the rest
+of `latence-retrieval` (which those seven import from) is **not** covered.
+
 ## What counts as commercial use
 
 Commercial use is **anything that is not a permitted purpose** under the licence.

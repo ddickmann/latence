@@ -49,6 +49,66 @@ and has not been reviewed by counsel. See COMMERCIAL.md, section "Legal review",
 for what still needs a lawyer.
 
 ===============================================================================
+SCOPE: THE RETAINED APACHE-2.0 MODULES
+===============================================================================
+
+Read this if a licence scanner flagged this repository. This is a scope note
+about which files the terms below cover. It is not part of the licence terms and
+it does not modify them.
+
+The licence below governs this repository with ONE exception, and the exception
+is deliberate. Seven modules in the `latence-retrieval` package are licensed
+under the Apache License, Version 2.0, and NOT under the PolyForm Noncommercial
+License. Each of them carries `SPDX-License-Identifier: Apache-2.0` in its
+header, and that identifier is the operative grant for that file:
+
+    packages/latence-retrieval/src/latence_retrieval/bm25.py
+    packages/latence-retrieval/src/latence_retrieval/graph_retrieval.py
+    packages/latence-retrieval/src/latence_retrieval/maxsim.py
+    packages/latence-retrieval/src/latence_retrieval/multihop.py
+    packages/latence-retrieval/src/latence_retrieval/pack.py
+    packages/latence-retrieval/src/latence_retrieval/sparse.py
+    packages/latence-retrieval/src/latence_retrieval/tuning.py
+
+Those seven are the query-time retrieval primitives: Okapi BM25 rescoring, the
+Knapsack QKP context-packer, exact MaxSim late-interaction scoring, SPLADE
+query-side sparse generation, offline fusion tuning, multi-hop graph expansion,
+and the graph retrieval leg. They are algorithms and reference implementations
+the copyright holder wants reusable by anyone on permissive terms, independently
+of what happens to the rest of this project. The grant is his to make and safe to
+make: he is the sole copyright holder (see the provenance record above), and none
+of the seven embeds third-party or copyleft code.
+
+WHAT THIS MEANS IF YOU ARE DOWNSTREAM
+
+  * You may use, modify and redistribute those seven files under Apache-2.0,
+    INCLUDING COMMERCIALLY, with no agreement with the copyright holder and no
+    noncommercial restriction. Apache-2.0's own conditions apply to you instead
+    (attribution and the NOTICE requirement, its patent grant, and its patent
+    termination clause).
+  * Everything else in this repository is PolyForm-Noncommercial-1.0.0 —
+    including every other file in `latence-retrieval`. Commercial use of the rest
+    requires a separate written agreement; see COMMERCIAL.md.
+  * Note what that means in practice. The seven import the package's contracts
+    and error types (`latence_retrieval.contracts`, `latence_retrieval.errors`,
+    `latence_retrieval.processor`), which are NOT part of this exception. You can
+    lift the algorithms and reimplement those small types; you cannot install the
+    package commercially and call this exception your licence.
+  * The set is closed and machine-enforced. `test_publish_readiness.py` in
+    `packages/latence-core/tests/` fails the build if an eighth file acquires a
+    non-PolyForm grant, or if one of the seven loses its grant, so this boundary
+    cannot move without someone deciding to move it.
+
+The Apache-2.0 header on `pack.py` also records a second, unrelated fact: the
+ported QKP packer came from the maintainer's own `colsearch` project and was
+relicensed Apache-2.0 for that port. That is INBOUND provenance — where the code
+came from — and it is not what grants you anything. The grant is the one stated
+here.
+
+The reasoning behind this exception, and behind the relicence it sits inside, is
+recorded in docs/adr/0055-relicence-to-polyform-noncommercial.md.
+
+===============================================================================
 LICENCE TERMS
 ===============================================================================
 

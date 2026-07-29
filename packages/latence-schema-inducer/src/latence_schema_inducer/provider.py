@@ -105,7 +105,6 @@ from latence_core.contracts import InducedLabels
 from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
-    REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
     ProviderProfile,
 )

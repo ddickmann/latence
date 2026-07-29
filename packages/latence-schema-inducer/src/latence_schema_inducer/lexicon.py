@@ -86,7 +86,6 @@ from typing import TYPE_CHECKING, Any
 from latence_core.contracts import InducedLabels
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
-    REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
     ProviderProfile,
 )
