@@ -129,19 +129,36 @@ fetch_zip() {
   curl -fsSL --retry 3 --retry-delay 2 -o "$zip" "$GOVDOCS_BASE/zipfiles/${id}.zip" || {
     printf 'WARN: %s.zip failed to download\n' "$id" >&2; rm -f "$zip"; return 0; }
 
-  # Verify against the published SHA-1 when we have it. A truncated zip that still unzips is the
-  # failure mode this catches — silent partial corpora are worse than loud missing ones.
+  # INTEGRITY. Two checks, and which one is AUTHORITATIVE matters — getting this backwards
+  # silently discards good data.
+  #
+  # MEASURED on the live mirror: Digital Corpora's published SHA-1 manifest is STALE relative to
+  # the bytes it actually serves. 001.zip re-fetches to a stable 9c23f4e7... against a published
+  # a6341dd1..., and `unzip -t` reports "No errors detected" over all 977 entries. So a SHA-1
+  # mismatch here does NOT mean corruption; treating it as fatal threw away ~986 good files per
+  # hit (observed rate ~1 in 27).
+  #
+  # So: `unzip -t` is the authority — it is what actually answers "is this archive usable", and it
+  # catches the truncation the checksum was there for. The published SHA-1 is kept as ADVISORY and
+  # every mismatch is RECORDED, because a stale upstream manifest is a fact about the corpus that
+  # belongs in the manifest rather than in a discarded file.
   if [ -s "$SUMS" ]; then
     local want got
-    want=$(awk -v f="${id}.zip" '$0 ~ f {print $1; exit}' "$SUMS" || true)
+    want=$(awk -v f="/${id}.zip" 'index($0, f) {print $1; exit}' "$SUMS" || true)
     if [ -n "$want" ]; then
-      if command -v sha1sum >/dev/null 2>&1; then got=$(sha1sum "$zip" | cut -d' ' -f1)
-      else got=$(shasum -a 1 "$zip" | cut -d' ' -f1); fi
+      if command -v sha1sum >/dev/null 2>&1; then got=$(sha1sum "$zip" | awk '{print $1}')
+      else got=$(shasum -a 1 "$zip" | awk '{print $1}'); fi
       if [ "$want" != "$got" ]; then
-        printf 'WARN: %s.zip CHECKSUM MISMATCH (want %s got %s) - discarded\n' "$id" "$want" "$got" >&2
-        rm -f "$zip"; return 0
+        printf '%s.zip published=%s served=%s\n' "$id" "$want" "$got" \
+          >> "$CORPUS_ROOT/_work/sha1-advisory-mismatches.txt"
       fi
     fi
+  fi
+
+  # The authoritative gate. A truncated or corrupt archive fails here and IS discarded.
+  if ! unzip -qq -t "$zip" >/dev/null 2>&1; then
+    printf 'WARN: %s.zip failed integrity check (unzip -t) - discarded\n' "$id" >&2
+    rm -f "$zip"; return 0
   fi
 
   mkdir -p "$dest"

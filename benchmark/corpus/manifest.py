@@ -12,11 +12,12 @@ So this module counts what actually landed on disk and writes it down. A histogr
 publisher's documentation would restate the brochure; this one can contradict it, which is the only
 kind worth printing.
 
-**Extension vs content.** GovDocs1 documents that **33,917 of its files carry the wrong extension** —
-*"The file extension is a suggestion; it is not part of the corpus."* So the histogram is reported
-by extension AND, where `libmagic` is available, by sniffed content, with the disagreement counted.
-That disagreement is a headline result for a content-detection pipeline, not a footnote: it is the
-adversarial property that made this corpus preferable to a synthetic office-format slice.
+**Extension vs content.** GovDocs1 documents that **33,917 of its files carry the wrong
+extension** — *"The file extension is a suggestion; it is not part of the corpus."* The histogram
+below is therefore by CLAIMED extension only; it does not sniff content. That is a deliberate
+limit, not an oversight: the extension/content disagreement is a result the *pipeline* should
+produce, and measuring it here with a second, independent detector would pre-empt the very thing
+the corpus was chosen to test.
 """
 
 from __future__ import annotations
@@ -131,6 +132,24 @@ def build_manifest(sources: list[SourceManifest]) -> dict[str, Any]:
         limits.append(
             "NO acquired source permits redistribution — nothing here may enter a public artifact."
         )
+    # A stale upstream checksum manifest is a fact about the corpus, not a footnote. Digital
+    # Corpora's published SHA-1 list does not match the bytes its mirror serves for some zips
+    # (measured ~1 in 27); those archives pass `unzip -t` cleanly. Recording it here means a reader
+    # can see the provenance caveat instead of trusting an unqualified "verified" claim.
+    advisory = Path(sources[0].root).parent / "_work" / "sha1-advisory-mismatches.txt"
+    try:
+        if advisory.exists():
+            n = len([ln for ln in advisory.read_text().splitlines() if ln.strip()])
+            if n:
+                limits.append(
+                    f"{n} GovDocs1 archive(s) did not match the publisher's SHA-1 manifest but "
+                    "passed structural integrity (`unzip -t`). The published manifest is stale "
+                    "relative to the mirror; integrity was verified structurally, not by checksum. "
+                    "See _work/sha1-advisory-mismatches.txt."
+                )
+    except OSError:
+        pass
+
     unpublishable = [s.name for s in sources if not s.publishable]
     if unpublishable:
         limits.append(
