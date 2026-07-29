@@ -12,6 +12,11 @@ body:
         **Do not paste secrets, credentials, or real PII.** If the bug is a
         suspected security vulnerability, do **not** file it here — see the
         [Security Policy](../../security/policy) and report privately.
+
+        A report with a **minimal failing test** is the most useful form this can
+        take, and it is welcome on its own — you do not have to send the fix. If you
+        do want to send the fix, note that every merged contribution requires a
+        signed CLA (CONTRIBUTING.md explains why in one sentence).
   - type: textarea
     id: what-happened
     attributes:
@@ -89,6 +94,17 @@ body:
       label: Logs / traceback
       description: Relevant output. Redact any secrets or PII before pasting.
       render: text
+  - type: textarea
+    id: failing-test
+    attributes:
+      label: A failing test (optional, and the most useful thing you can attach)
+      description: >
+        A test that is RED on current `main` and would go green once this is fixed —
+        the same form a fix is required to land with. Run it with
+        `PYTHONHASHSEED=0 uv run pytest <path> -o addopts=""` (the seed is required by a
+        conftest guard; `-o addopts=""` restores the summary line that a bare `-q`
+        suppresses).
+      render: python
   - type: checkboxes
     id: checks
     attributes:
@@ -96,6 +112,8 @@ body:
       options:
         - label: I searched existing issues and this is not a duplicate.
           required: true
+        - label: I checked this reproduces on current `main`, not only on an older release.
+          required: false
         - label: This is not a security vulnerability (those are reported privately per SECURITY.md).
           required: true
         - label: I have removed any secrets, credentials, and real PII from this report.

@@ -10,3 +10,9 @@ contact_links:
     about: >
       Do NOT open a public issue for a suspected vulnerability. Report it privately via
       GitHub Security Advisories (or email per SECURITY.md) for coordinated disclosure.
+  - name: Contributing guide — read this before writing code
+    url: https://github.com/ddickmann/latence-framework/blob/main/CONTRIBUTING.md
+    about: >
+      Dev setup, the gates, the test-first rule, the ADR process, how to add a Provider
+      without touching core — and the CLA requirement that applies to every merged
+      contribution. Worth ten minutes before you start.

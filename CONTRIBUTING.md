@@ -1,17 +1,54 @@
 # Contributing to the Latence Framework
 
-Thanks for your interest. This is a model-agnostic, cloud-agnostic framework for
-turning messy enterprise data into AI-ready data. It is built to a deliberately
-high bar (see `issues/DEFINITION-OF-DONE.md`); contributions are held to the same
-bar. This guide covers dev setup, the quality gates, and the discipline that
-keeps the codebase navigable.
+Thanks for your interest. This is a model-agnostic, cloud-agnostic framework for turning
+messy enterprise data into AI-ready data. It is built to a deliberately high bar
+(`issues/DEFINITION-OF-DONE.md`); contributions are held to the same bar.
+
+Read this page before you open a pull request. Two things in it are unusual and will
+otherwise cost you a review cycle: the **CLA requirement** below, and the **doc-truth
+gates** — parts of the documentation are machine-checked against the code, so a prose
+change can turn the suite red.
+
+---
+
+## Before you write code: the Contributor Licence Agreement
+
+**Every contribution requires a signed Contributor Licence Agreement (CLA) before it can be
+merged.** No exceptions, including for one-line fixes and documentation.
+
+**Why:** the project's licence reserves commercial rights to the owner, and the owner can
+only grant a commercial licence over code they hold sufficient rights in — so an inbound
+contribution has to arrive with an explicit grant, or it quietly makes those rights
+unenforceable for everyone.
+
+That is the whole reason. It is not a claim on your other work, it does not stop you using
+your own contribution however you like, and it is not a judgement about you. It is the
+mechanical consequence of the licence in [`LICENSE`](LICENSE).
+
+Practically:
+
+- Open the pull request as normal. The CLA is handled as part of review; you do not need to
+  do anything up front beyond being able to sign it.
+- You must have the right to grant what the CLA grants. If you wrote the change on an
+  employer's time or equipment, your employer may own it — get that cleared first. Say so
+  in the PR if you are unsure; it is far cheaper to resolve before review than after.
+- Contributions that cannot be covered by a CLA cannot be merged. They can still be
+  valuable as a **bug report with a reproduction**, and that route is genuinely welcome —
+  see the issue templates in [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/).
+
+> The CLA text is a legal document maintained separately from this page. This section states
+> the *requirement*; it is not itself the agreement and grants nothing.
+
+If the CLA is a blocker for you and the change matters, open an issue and say so. Some
+changes can be re-implemented independently, which is a legitimate outcome.
+
+---
 
 ## Development setup — a uv workspace
 
-The monorepo is a [uv](https://docs.astral.sh/uv/) workspace: a thin
-`latence-core` plus one installable package per Provider family (ADR-0016), so an
-adopter installs only what they use and the CPU-first "runs on a laptop" promise
-holds (ADR-0007).
+The monorepo is a [uv](https://docs.astral.sh/uv/) workspace: a thin `latence-core` plus one
+installable package per Provider family (ADR-0016), so an adopter installs only what they
+use and the CPU-first "runs on a laptop" promise holds (ADR-0007).
 
 ```bash
 # 1. Install uv (https://docs.astral.sh/uv/getting-started/installation/)
@@ -22,101 +59,284 @@ uv sync
 uv run latence-demo
 ```
 
-The heavy/optional Provider packages (`latence-ner-gliner`,
-`latence-relation-gliner`, `latence-pii-gliner`, the `*-endpoint` packages, and
-`latence-runner-airflow`) are workspace members but are **not** installed into the
-default dev env: they pull `torch`/`transformers`, the `openai` client, or
-`apache-airflow`, which would break the CPU-first, offline, deterministic test env
-(ADR-0007/0016). Their *source* is still type-checked, and their tests run offline
-by monkeypatching the heavy/endpoint dep with a fake. To work on one, install its
-source without its heavy deps:
+The heavy and optional Provider packages (the GLiNER-family extractors and redactors, the
+`*-endpoint` packages, the LightOn OCR parsers, `latence-runner-airflow`, …) are workspace
+members but are **not** installed into the default dev env: they pull
+`torch`/`transformers`, an inference client, or `apache-airflow`, any of which would break
+the CPU-first, offline, deterministic test environment (ADR-0007/0016). Their *source* is
+still type-checked, and their tests run offline by monkeypatching the heavy or endpoint
+dependency with a faithful fake. To work on one, install its source without its heavy deps:
 
 ```bash
 uv pip install --no-deps -e packages/latence-ner-gliner
 ```
 
-## The quality gates — all must be green
+`scripts/verify-local.sh` does this for the whole heavy set automatically; read its opening
+section for the exact list.
 
-CI (`.github/workflows/ci.yml`) runs exactly these. Run them locally before you
-push:
+---
+
+## The gates
+
+### `scripts/verify-local.sh` is the merge gate
+
+It mirrors the CI lint · type · test · build lane plus the secret-scan, provider-conformance,
+stack-validate, environment-spec, compatibility-matrix and bake-off gates — same commands,
+same environment (`PYTHONHASHSEED=0`, `LATENCE_CUDA=0`), same order. Exit 0 means every
+mirrored gate is green; non-zero is the first failing gate.
 
 ```bash
-# Lint + import-sort (ruff):
-uv run ruff check packages
-
-# Strict type check over BOTH src AND tests, one strict pass per package:
-MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
-
-# Tests (deterministic, hash-stable):
-uv run pytest
-
-# Build every wheel + sdist:
-uv build --package latence-core   # ...repeat per package, or see CI for the full list
+bash scripts/verify-local.sh > /tmp/verify.log 2>&1; echo "REAL_EXIT=$?"
 ```
 
-Notes:
+**Capture the exit code by redirect, never by piping to `tail`.** A shell pipeline reports
+the status of its *last* command, so `bash scripts/verify-local.sh | tail -20` exits `0` on
+a thoroughly red tree. That mistake was made once in this repo and produced a false green
+that survived into a written summary. Redirect to a file, echo `$?`, then read the log.
 
-- **`scripts/typecheck.sh` runs mypy per-package, not whole-tree.** The package
-  dirs are hyphenated, so a single `mypy --strict packages` maps every
-  `tests/conftest.py` to the same bare `conftest` module and aborts with a
-  duplicate-module error (issue #24). The per-package loop keeps each conftest
-  unique in its process while still strict-checking every `src` **and** `tests`
-  file.
-- **Determinism is required.** Tests are seeded and hash-stable
-  (`PYTHONHASHSEED=0`). A test that depends on dict/set ordering or wall-clock
-  time is a bug.
-- **Secret scan.** CI runs `detect-secrets` over the tree; do not commit secrets,
-  `.env*`, `*.pem`, `*.key`, `.pypirc`, or credentials (all git-ignored).
+The script does not cover the MinIO `s3://` end-to-end lane, the Airflow DAG lane, or real
+GPU-provider runs — those need containers, a heavy install, or a CUDA host. It prints that
+list when it finishes. Say in your PR which of them you could not exercise.
 
-## Definition of Done — pick your tier
+### Running the tests directly
+
+```bash
+PYTHONHASHSEED=0 uv run pytest packages/latence-core -o addopts=""
+```
+
+Both halves are load-bearing:
+
+- **`PYTHONHASHSEED=0`** — some code paths iterate dicts and sets keyed by strings, whose
+  order depends on the per-process hash seed. The seed is read once at interpreter startup,
+  so it must be set *before* the process launches; setting it from a fixture is a no-op that
+  only misleads. The repo-root `conftest.py` is the guard: it inspects
+  `sys.flags.hash_randomization` and fails the run with one clear message rather than letting
+  a hash-order-dependent test flake silently. `make test` sets it for you.
+- **`-o addopts=""`** — `pyproject.toml` sets `addopts = "-q"`. Pass your own `-q` on the
+  command line and pytest resolves it to `-qq`, which suppresses the summary line entirely,
+  so you get no pass/fail counts at all. Clearing `addopts` gives you back the numbers you
+  are presumably running the suite to see.
+
+A test that depends on dict or set ordering, or on wall-clock time, is a bug — not a flake.
+
+### Lint and types
+
+```bash
+uv run ruff check packages
+MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
+```
+
+**mypy runs `--strict` over `src` *and* `tests`, in every package.** Tests are typed to the
+same standard as source, deliberately (ADR-0032): an untyped test is exactly where a
+contract regression hides.
+
+`scripts/typecheck.sh` runs mypy **per-package, not whole-tree**, and that is not a style
+preference. The package directories are hyphenated, so a single `mypy --strict packages`
+maps every `tests/conftest.py` onto the same bare `conftest` module and aborts with a
+duplicate-module error. The per-package loop keeps each `conftest` unique within its own
+process while still strict-checking every `src` and `tests` file.
+
+---
+
+## The test-first rule
+
+**A fix lands with a test that failed before the fix.** Not a test that exercises the new
+code — a test that was *red* on the tree you started from and is *green* on the tree you are
+proposing. If reverting your source change does not turn a test red, the change is
+unprotected and the next refactor will quietly undo it.
+
+Concretely:
+
+- **Bug fix** — reproduce the bug as a test first, watch it fail, then fix it.
+- **Security, DoS or ReDoS fix** — the failing test is the pathological adversarial input
+  itself: a zip bomb, a type-spoofed header, a cross-chunk injection, an oversized file.
+- **Performance change** — assert the new bound, or that the faster path is genuinely wired
+  and taken. A benchmark number in the PR description protects nothing.
+- **A claim added to a published page** — prefer adding it as a doc-truth gate (below) over
+  prose that someone must remember to update.
+
+There is a second rule that is easy to violate honestly: **a fake must be able to disagree
+with you.** Heavy and endpoint Providers are tested with their real dependency
+monkeypatched, and that fake has to mirror the real API's shape and reject what the real one
+rejects. A stub that always agrees turns a passing test into a decoration. If you cannot
+make a fake faithful, run the real dependency or mark the test skipped with a stated reason
+— never fake the green.
+
+---
+
+## Definition of Done — declare your tier
 
 Every change declares which bar it meets (`issues/DEFINITION-OF-DONE.md`):
 
-- **Baseline bar** — works, strictly typed, tested (happy path **and** key
-  failure modes) with ≥1 end-to-end test through the local Runner, CI-green,
-  correctly packaged (heavy deps isolated), licensed, secure-by-default,
-  observable, documented.
-- **Gate bar** — reserved for the G1 profound-testing gate (E2E on real messy
-  corpora, security review, reliability/chaos, perf baseline, gold-set quality,
-  determinism fingerprint).
-- **Hardening bar** — Phase-2: adversarial/property/fuzz tests, scale validation,
-  full observability, ≥2 providers, benchmarks vs a named baseline.
+- **Baseline bar** — works; strictly typed (src **and** tests); tested on the happy path
+  **and** the key failure modes, with at least one end-to-end test through the local Runner;
+  CI-green; correctly packaged (heavy deps isolated); licensed; secure-by-default;
+  observable; documented.
+- **Gate bar** — the G1 profound-testing gate: end-to-end on real messy corpora, security
+  review, reliability and crash-resume, a recorded performance baseline, gold-set quality,
+  determinism fingerprint.
+- **Hardening bar** — Phase-2: adversarial, property-based and fuzz tests; scale validation;
+  full observability; at least two Providers per Capability; benchmarks against a named
+  baseline.
 
-Concretely, for a typical contribution:
+Whatever the tier, preserve the contracts: inter-Stage data is versioned Pydantic;
+`Provenance` and `Classification` are present and validated at every boundary you touch;
+`SCHEMA_VERSION` is bumped on any contract change; offsets, page provenance, Evidence and
+Delta idempotency stay intact. And keep heavy dependencies out of `latence-core` (ADR-0016)
+— core stays near-zero-dep and pure-Python.
 
-- **Add a test that would FAIL if your change were reverted.** For a
-  security/DoS/ReDoS fix, that means a pathological adversarial input. For a perf
-  change, at least an assertion of the new bound or the wired path.
-- **Preserve the contracts.** Inter-Stage data is versioned Pydantic; `Provenance`
-  and `Classification` are present and validated at every boundary you touch;
-  bump `SCHEMA_VERSION` on any contract change. Never break offsets,
-  page-provenance, Evidence, or Delta idempotency.
-- **Keep heavy deps out of `latence-core` (ADR-0016).** Core stays near-zero-dep,
-  pure-Python.
+---
 
-## ADR + CONTEXT discipline
+## The doc-truth gates
 
-- **`CONTEXT.md` is the canonical language.** Use the glossary terms exactly
-  (Stage, Runner, Capability, Provider, Provenance, Evidence, Quarantine, …) and
-  avoid the banned synonyms it lists. New concepts get a glossary entry.
-- **`docs/adr/` records the hard decisions.** If your change makes a surprising,
-  non-obvious trade-off, add an ADR (numbered, dated, alternatives-considered).
-  If an existing docstring or ADR overclaims relative to what the code actually
-  does, correct the wording to match reality as part of your change.
-- **Model licenses.** Any new default model Provider requires per-model weights
-  **and** code license verification, recorded, before it ships (ADR-0012). Only
-  permissive (Apache-2.0 / MIT / BSD) weights ship as defaults; restricted-license
-  models are opt-in and must surface their license at install time.
+Documentation that makes a claim about the code is **machine-checked**. These gates are
+ordinary pytest modules, so a doc that drifts from the tree fails the build like any other
+regression. If your prose edit turns one red, the gate is usually right.
 
-## Verify-before-merge
+The front-door set — `README.md`, `CONTEXT.md`, `CONTRIBUTING.md`, `SECURITY.md`, and every
+tracked page under `docs/` — is checked for, among other things:
 
-Work is tracked as version-controlled issues under `issues/` (WIP = 1 on the
-critical path; see `issues/NEXT.md`). An issue is done only when its declared DoD
-bar is met and CI is green. A change is not "done" because it looks right — it is
-done when the gates pass locally and in CI, and a reviewer has verified the claim
-against the code, not the description.
+- **Dangling cross-references.** No relative markdown link and no backticked reference to a
+  file under `docs/` may point at something that does not exist. The rule extends to
+  `CHANGELOG.md` and to every `packages/*/README.md`, because each of those is a
+  distribution's PyPI long description — a broken link there ships for the life of the
+  release.
+- **Dangling section anchors.** A `#fragment` must resolve to a real heading on the page it
+  points at, under GitHub's own slug rules. A wrong anchor renders perfectly and silently
+  dumps the reader at the top of a long document.
+- **Counts.** A stated size of the Decision Log must equal the files on disk. That one has
+  drifted before, in both directions, across several pages at once.
+- **Shipped versus aspirational.** A substrate the front door says the Stages *run on* must
+  correspond to a real `packages/latence-runner-*` distribution, unless the sentence
+  explicitly marks it as not shipped. Every `pip install` line must name a distribution that
+  actually exists.
+- **Licence summaries.** No published page may describe the dependency tree as uniformly
+  permissive while the disclosure files say otherwise.
 
-## Legal
+Beyond the front door there are targeted gates on individual documents: the benchmarks page
+against the results actually published, the third-party retrieval input spec against the
+current `schema_version`, the pod tutorial against the stack the setup wizard really
+generates, and the GPU compatibility matrix against its own evidence — every cell is either
+measured, carrying date, hardware, command and observation, or explicitly `UNVERIFIED` with
+a runnable reproduce command.
 
-By contributing you agree your contributions are licensed under the project's
-Apache License 2.0 (see `LICENSE`) and that you have the right to submit them.
+The rule underneath all of them: **assert observable repository facts, never a flag that
+records intent.** If you add a doc-truth gate, make it fail on the tree that motivated it
+before you make it pass.
+
+---
+
+## The ADR process
+
+Hard decisions live in `docs/adr/` as numbered Architecture Decision Records. The Decision
+Log is the authoritative account of *why* each seam is shaped the way it is; the concept
+pages are navigational summaries over it.
+
+**What warrants an ADR:** a decision that is surprising, non-obvious, hard to reverse, or
+that someone will otherwise re-litigate in six months. Choosing a default model. Adding or
+changing a Capability. A licence or dependency policy. A trade-off where the rejected option
+was genuinely reasonable. Routine implementation does not need one — if the next reader would
+simply nod, skip it.
+
+**Shape.** `NNNN-kebab-case-title.md`, opening with a `**Status:**` line, then context, the
+decision, and — the part that carries the weight — **the alternatives considered and why they
+were rejected.** An ADR that only records what was chosen is half an ADR; the value is in the
+paths it closes off. Name the existing ADRs it builds on.
+
+**Status is honest.** `accepted`, `proposed`, `partially accepted` and `superseded` are all
+in use. A decision that only half landed says so, and names which half.
+
+**Superseding.** A later ADR supersedes an earlier one by saying so explicitly, in both
+records; the superseded ADR is amended in place with a pointer forward, never deleted. Numbers
+are decision order, so the history stays readable.
+
+**Correcting an overclaim counts as a fix.** If a docstring or an ADR claims more than the
+code does, tighten the wording to match reality as part of your change. That is not scope
+creep here; it is the standard.
+
+`CONTEXT.md` is the canonical language. Use its glossary terms exactly — Stage, Runner,
+Capability, Provider, Provenance, Evidence, Quarantine — and avoid the synonyms it bans. A
+genuinely new concept gets a glossary entry in the same PR.
+
+---
+
+## Adding a Provider without touching core
+
+This is the seam the whole framework rests on (ADR-0004): the framework names **Capabilities**
+and lets **Providers** fulfil them, so it never names a model. An in-process CPU model, a GPU
+model, a remote inference endpoint and a cloud AI service are all just Providers of the same
+Capability.
+
+A new Provider is a **new package**, not an edit to `latence-core` (ADR-0016):
+
+1. **Create `packages/latence-<capability>-<name>/`** with its own `pyproject.toml`. Its heavy
+   dependencies belong to it and stay out of core.
+2. **Implement the Capability protocol** — the narrow typed interface the Stage depends on
+   (`Parser`, `EntityExtractor`, `RelationExtractor`, `PIIDetector`, `Embedder`,
+   `Disambiguator`, `Runner`, …). Structural typing is enough; no base class is imposed. The
+   optional `AdapterBase` in core factors out the cross-cutting glue — device resolution,
+   batching, native-exception-to-typed-error mapping — and adds no heavy dependency; see
+   [`docs/writing-an-adapter.md`](docs/writing-an-adapter.md).
+3. **Declare a `ProviderProfile`** — licence with its evidence trail, determinism, compute
+   (`cpu` / `gpu` / `either`), memory, batching, cost. See
+   [`docs/provider-profile.md`](docs/provider-profile.md). This is not metadata theatre; the
+   conformance gate reads it.
+4. **Register the plugin via an entry point.** One block in your package's `pyproject.toml`:
+
+   ```toml
+   [project.entry-points."latence.providers"]
+   "parser.lighton" = "latence_parser_lighton.provider:LightOnOcrParser"
+   ```
+
+   That is the entire registration. No core file changes and no central list to append to —
+   the conformance roster is *derived* from the workspace's package manifests precisely so it
+   cannot drift from what the workspace actually contains.
+5. **Clear the licence gate before it can ship as a default** (ADR-0012). Weights and code
+   licences are verified **separately**: a checkpoint's licence is per-weight and cannot be
+   inferred from the library it runs under. Only permissive weights (Apache-2.0 / MIT / BSD)
+   ship as defaults; a restricted licence makes the Provider opt-in and non-default, and its
+   flow-down obligations must be surfaced. Record the result in `NOTICE` and
+   `THIRD-PARTY-LICENSES.md`.
+6. **Pass conformance.** The suite in `latence-core` parametrizes over every registered
+   Provider and asserts C1–C6: valid typed records with Provenance, Classification and
+   in-range offsets; graceful failure on adversarial input through a *typed* error, with no
+   PII in the message; a recorded, evidence-bearing licence declaration; determinism where
+   declared; the declared device honoured (a `compute="gpu"` Provider on a CPU host is
+   skipped-with-flag, not failed); and no secret or PII leaking into non-content fields. See
+   [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md). Passing conformance *is* the definition of
+   enterprise-ready here.
+
+Use the **provider request** issue template to propose one — it collects exactly what the
+licence and conformance gates need, and it is much cheaper to find a blocker there than in
+review.
+
+---
+
+## Review and merge
+
+Work is tracked as version-controlled issues under `issues/` (WIP = 1 on the critical path;
+see `issues/NEXT.md`). An issue is done when its declared DoD bar is met and the gates are
+green — not when the change looks right.
+
+The reviewer verifies the claim against the **code**, not against the PR description. Make
+that easy: name the test that fails without your change, and state which gates you ran and
+which you could not.
+
+---
+
+## Security issues
+
+**Do not open a public issue or pull request for a suspected vulnerability.** Report it
+privately — GitHub Security Advisories, or the maintainer email — as described in
+[`SECURITY.md`](SECURITY.md), which also documents the trust model, the built-in controls,
+and what is deliberately out of scope.
+
+If you are contributing to a security-relevant surface, two properties are non-negotiable and
+are enforced by tests: ingested documents are treated as hostile, and the universal
+financial-PII redaction floor cannot be disabled by choosing a different Provider.
+`SECURITY.md` explains both.
+
+## Code of Conduct
+
+This project follows the Contributor Covenant. By participating you are expected to uphold
+it: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).

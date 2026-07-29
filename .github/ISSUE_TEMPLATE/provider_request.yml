@@ -11,6 +11,15 @@ body:
         (ADR-0016) and must clear the license gate (ADR-0012) before it can ship as a
         default. This form collects what that gate needs — especially the **separate
         weights-and-code license verification** for any model.
+
+        A Provider needs **no change to `latence-core`**: implement the Capability
+        protocol, declare a `ProviderProfile`, and register one
+        `[project.entry-points."latence.providers"]` line in your own package. The
+        conformance roster is derived from the workspace's package manifests, so there
+        is no central list to append to. See CONTRIBUTING.md for the full walkthrough.
+
+        If you intend to contribute the implementation, a signed CLA is required before
+        it can be merged (CONTRIBUTING.md explains why).
   - type: dropdown
     id: capability
     attributes:
@@ -121,6 +130,12 @@ body:
         - label: If proposing a default, the weights are permissive (Apache-2.0 / MIT / BSD).
           required: false
         - label: I understand a new Provider lives in its own package and declares a ProviderProfile (license, determinism, compute, cost).
+          required: true
+        - label: >
+            I understand the Provider must pass the C1–C6 conformance contract: valid typed records
+            (Provenance, Classification, in-range offsets); graceful typed failure on adversarial input
+            with no PII in the error; an evidence-bearing license declaration; determinism where declared;
+            the declared device honoured; and no secret/PII leak into non-content fields.
           required: true
         - label: I searched existing Providers and issues and this is not a duplicate.
           required: true
