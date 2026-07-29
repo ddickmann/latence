@@ -120,13 +120,22 @@ def build_manifest(sources: list[SourceManifest]) -> dict[str, Any]:
     summary = diversity_summary(dict(combined))
     limits: list[str] = []
 
-    if summary["office_ooxml"] < 1000:
+    # OOXML is reported per-format, not as one bucket. The SEC EDGAR axis supplies .xlsx at volume,
+    # so a combined count would read as "modern Office covered" while .docx and .pptx — different
+    # parts of the OOXML family, exercised by different code — remained at ~zero.
+    by_ext = dict(combined)
+    docx = by_ext.get("docx", 0) + by_ext.get("docm", 0)
+    xlsx = by_ext.get("xlsx", 0) + by_ext.get("xlsm", 0)
+    pptx = by_ext.get("pptx", 0) + by_ext.get("pptm", 0)
+    thin = [f"{label} ({n})" for label, n in (("docx", docx), ("xlsx", xlsx), ("pptx", pptx))
+            if n < 1000]
+    if thin:
         limits.append(
-            f"Modern OOXML is UNTESTED AT VOLUME: only {summary['office_ooxml']} "
-            f"docx/xlsx/pptx files landed, against {summary['office_legacy_ole']} legacy OLE "
-            "(doc/xls/ppt). GovDocs1 is a 2009 harvest. Do not let 'many file types' imply "
-            "modern-format coverage. The source that would fix this is SAM.gov, whose ToU "
-            "prohibits scraping and requires the keyed public API."
+            f"Modern OOXML is UNTESTED AT VOLUME for: {', '.join(thin)} — against "
+            f"{summary['office_legacy_ole']} legacy OLE (doc/xls/ppt) from the 2009 GovDocs1 "
+            "harvest. OOXML is a zipped-XML container parsed by a different code path than OLE, so "
+            "legacy coverage says nothing about it. Do not let 'many file types' imply modern-format "
+            "coverage for any format listed here."
         )
     if not any(s.publishable for s in sources):
         limits.append(
@@ -147,6 +156,21 @@ def build_manifest(sources: list[SourceManifest]) -> dict[str, Any]:
                     "relative to the mirror; integrity was verified structurally, not by checksum. "
                     "See _work/sha1-advisory-mismatches.txt."
                 )
+    except OSError:
+        pass
+
+    # An axis that was requested and came back empty is the most consequential thing a manifest can
+    # record, because every downstream claim silently narrows in scope. The scanned-PDF axis failing
+    # turns "OCR verified end to end" into "OCR verified on born-digital files" — a different claim.
+    empty = Path(sources[0].root).parent / "_work" / "empty-axes.txt"
+    try:
+        if empty.exists():
+            for line in empty.read_text().splitlines():
+                if line.strip():
+                    limits.append(
+                        f"AXIS ABSENT — {line.strip()}. This source contributed nothing; no claim "
+                        "resting on it is supported by this corpus."
+                    )
     except OSError:
         pass
 

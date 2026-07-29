@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# Drive the extended end-to-end run to completion without a human in the polling loop.
+#
+# The defect this exists to fix, stated plainly: RUNBOOK.md is a procedure for a *person*, and a
+# person supervising a 10-hour GPU run is the least reliable component in it. The first attempt at
+# this run died when the SSH session that launched the corpus fetch went away. Nothing noticed for
+# hours, because "noticing" was a human remembering to look.
+#
+# So this script owns the loop, built around three properties the manual procedure did not have:
+#
+#   1. RESUMABLE BY PROBE, NOT BY EXIT CODE. Each stage declares a `done` probe that asks the
+#      filesystem whether the work exists. Re-running is therefore always safe, and a stage that
+#      exited 0 without producing its artifact is NOT treated as complete — the exact failure mode
+#      that let a "finished" corpus fetch leave two of three sources empty.
+#
+#   2. STALL DETECTION, NOT JUST FAILURE DETECTION. A hung download and a crashed one look identical
+#      to `wait`. Each stage declares a `progress` probe returning a monotonic number. If it does not
+#      advance for $STALL_SECS the stage is killed and retried.
+#
+#   3. ESCALATION IS A STATE, NOT A CRASH. When retries are exhausted the run stops at that stage and
+#      records what was tried. A supervisor that silently skips a broken stage and reports success at
+#      the end is worse than one that stops.
+#
+# Every command below was verified against the code before being written here — an earlier draft of
+# this file guessed `--out`, `--stage` and a `latence labels derive` subcommand, none of which exist.
+# A supervisor full of guesses fails more autonomously, not less.
+#
+# Usage:
+#   setsid nohup bash benchmark/e2e/supervise.sh >> /workspace/run/supervisor.log 2>&1 < /dev/null &
+
+set -u -o pipefail
+
+REPO="${REPO:-/workspace/latence-framework}"
+CORPUS_ROOT="${CORPUS_ROOT:-/workspace/corpus}"
+RUN_DIR="${RUN_DIR:-/workspace/run}"
+OUT_DIR="${OUT_DIR:-/workspace/latence-out}"
+RUN_ID="${RUN_ID:-govdocs1-v1}"
+
+# The two-pass split is forced by VRAM: GLiNER2 at micro-batch 4 peaked at 21.6 GiB on a 32 GB card,
+# so on 24 GB the vLLM OCR server and the learned stages can never co-exist. Pass 1 parses with the
+# server up; pass 2 runs everything with it down, resuming parse from checkpoint.
+#
+# Stage-subsetting does not exist in the CLI (no --only/--until/--stage anywhere; `Pipeline` forbids
+# extra keys). The supported mechanism is two stack YAMLs sharing one run_id + storage_uri, where
+# pass 2 replays pass 1's `parse` checkpoint. Verified empirically end-to-end.
+STACK_FULL="$RUN_DIR/latence.stack.yaml"
+STACK_PARSE="$RUN_DIR/latence.parse-only.yaml"
+CANDIDATES="$RUN_DIR/label-candidates.json"
+PROFILE_ARTIFACT="$RUN_DIR/label-profile.json"
+# Checkpoints are keyed on STAGE NAME ONLY — no config hash, no provider identity. Parse output is a
+# single JSONL, not a directory (RUNBOOK §6 is wrong about this path).
+CKPT_DIR="$OUT_DIR/_latence/runs/$RUN_ID/checkpoints"
+
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
+POLL_SECS="${POLL_SECS:-30}"
+# 20 minutes. Deliberately generous: a torch.compile warmup or a 90-zip unzip legitimately produces
+# no countable progress for a long time, and a watchdog that fires on healthy work trains its
+# operator to disable it.
+STALL_SECS="${STALL_SECS:-1200}"
+DAEMON_READY_SECS="${DAEMON_READY_SECS:-1800}"
+
+STAGE_DIR="$RUN_DIR/stages"
+STATE="$RUN_DIR/STATE.json"
+mkdir -p "$STAGE_DIR"
+
+# One supervisor per run directory. Two would race on STATE.json and start duplicate stage children,
+# which is how two concurrent downloaders came to corrupt a shared archive. The keeper relaunches on
+# death, so without this a slow-dying supervisor and its replacement could briefly coexist.
+exec 8>"$RUN_DIR/.supervisor.lock"
+if command -v flock >/dev/null 2>&1; then
+  flock -n 8 || { echo "another supervisor holds $RUN_DIR/.supervisor.lock — exiting"; exit 0; }
+fi
+
+LATENCE="cd '$REPO' && uv run latence"
+
+# ------------------------------------------------------------------ stage table
+#
+# kind: `task`   — runs to completion under the stall watchdog
+#       `daemon` — launched detached, then polled until its done-probe answers. A server must NOT run
+#                  under the watchdog: the watchdog waits for exit, and a healthy server never exits,
+#                  so the stage would hang until the stall timer killed the thing it just started.
+
+stage_names=()
+declare -A S_DESC S_DONE S_PROG S_CMD S_KIND
+
+add_stage() {
+  stage_names+=("$1"); S_KIND["$1"]="$2"; S_DESC["$1"]="$3"
+  S_DONE["$1"]="$4"; S_PROG["$1"]="$5"; S_CMD["$1"]="$6"
+}
+
+add_stage corpus task \
+  "Acquire GovDocs1 + SEC VPRR + OHR-Bench and write the measured manifest" \
+  "[ -s '$CORPUS_ROOT/manifest.json' ]" \
+  "echo \$(find '$CORPUS_ROOT' -type f ! -path '*_work*' 2>/dev/null | wc -l)\$(du -sk '$CORPUS_ROOT/_work' 2>/dev/null | cut -f1)" \
+  "cd '$REPO' && CORPUS_ROOT='$CORPUS_ROOT' GOVDOCS_ZIPS=90 VPRR_PDFS=8000 FETCH_OHR=1 bash benchmark/corpus/fetch_corpus.sh"
+
+# The wizard is the entry gate. The parse-only YAML is DERIVED from the wizard's output by dropping
+# stages, never by authoring config — the emitted header explicitly invites diffable edits, and
+# `latence stack check` exists to lint them, so the entry-gate discipline survives the trim.
+add_stage wizard_parse task \
+  "Generate the stack from the wizard, derive the parse-only pass, and lint both" \
+  "[ -s '$STACK_PARSE' ]" \
+  "ls '$RUN_DIR'/*.yaml 2>/dev/null | wc -l" \
+  "$LATENCE setup --profile enterprise-sota \
+     --source '$CORPUS_ROOT/govdocs1' --storage 'file://$OUT_DIR' \
+     --chunk-max-tokens 768 --chunk-overlap-tokens 96 \
+     --ocr-dpi 200 --ocr-max-longest-dim 1540 \
+     --non-interactive -o '$STACK_FULL' \
+   && python3 -c \"
+import yaml, sys
+d = yaml.safe_load(open('$STACK_FULL'))
+keep = {'source', 'intake_screen', 'parse'}
+kept = [s for s in d['stages'] if s['name'] in keep]
+missing = keep - {s['name'] for s in kept}
+if missing:
+    sys.exit('wizard emitted no ' + ', '.join(sorted(missing)) + ' stage - cannot derive parse-only pass')
+d['stages'] = kept
+yaml.safe_dump(d, open('$STACK_PARSE','w'), sort_keys=False)
+\" \
+   && $LATENCE stack check '$STACK_PARSE'"
+
+add_stage ocr_server daemon \
+  "Bring up vLLM/LightOnOCR on sm_86 (compiled, CUDA graphs, no enforce-eager)" \
+  "curl -sf --max-time 5 http://127.0.0.1:8000/v1/models >/dev/null 2>&1" \
+  "wc -c < '$STAGE_DIR/ocr_server.log' 2>/dev/null || echo 0" \
+  "cd '$REPO' && bash deploy/env/served-ocr-server/serve.sh"
+
+add_stage parse task \
+  "Pass 1 — parse the corpus with the OCR server up" \
+  "[ -s '$CKPT_DIR/parse.jsonl' ]" \
+  "wc -c < '$CKPT_DIR/parse.jsonl' 2>/dev/null || echo 0" \
+  "$LATENCE process --config '$STACK_PARSE' --run-id '$RUN_ID'"
+
+# Pass 2 overwrites quality-report.json, and replayed rows report duration 0.0 — so the parse timing,
+# VRAM and drift evidence exists ONLY in the pass-1 report. Copy it out before pass 2 can destroy it.
+add_stage parse_evidence task \
+  "Preserve the pass-1 quality report before pass 2 overwrites it" \
+  "[ -s '$RUN_DIR/parse-quality-report.json' ]" \
+  "echo 0" \
+  "cp '$OUT_DIR/_latence/runs/$RUN_ID/quality-report.json' '$RUN_DIR/parse-quality-report.json'"
+
+add_stage ocr_down task \
+  "Tear the OCR server down and confirm VRAM is actually released" \
+  "! pgrep -f 'vllm serve' >/dev/null 2>&1" \
+  "echo 0" \
+  "pkill -f 'vllm serve'; sleep 20; nvidia-smi"
+
+# No LLM induction anywhere in this run. The pool is derived from the parsed text by counting.
+add_stage labels task \
+  "Derive the label pool from parsed text by profiling (NO LLM), Pareto-capped at 40" \
+  "[ -s '$CANDIDATES' ]" \
+  "wc -c < '$STAGE_DIR/labels.log' 2>/dev/null || echo 0" \
+  "cd '$REPO' && uv pip install -e packages/latence-label-profiler \
+   && uv run latence-label-profile '$CKPT_DIR' \
+        --pattern 'parse.jsonl' --json-field content \
+        --max-types 40 --sample-size 5000 --seed 0 \
+        --min-mention-mass 3 --min-document-frequency 2 \
+        -o '$PROFILE_ARTIFACT' --candidates-out '$CANDIDATES'"
+
+# Regenerating the stack with the derived pool requires T-WIZ-2 (`--label-candidates`). Riding the
+# pool on `--predefined-labels` instead LOOKS correct and is not: with no induce stage no chunk
+# carries induced_labels, `effective_labels` returns the config labels unchanged, and every chunk
+# gets all 40 — reintroducing the defect the per-chunk redesign removed.
+add_stage wizard_full task \
+  "Regenerate the full stack wired to label_inducer.lexicon with the derived pool" \
+  "[ -s '$RUN_DIR/.wizard_full.done' ]" \
+  "echo 0" \
+  "$LATENCE setup --profile enterprise-sota \
+     --source '$CORPUS_ROOT/govdocs1' --storage 'file://$OUT_DIR' \
+     --chunk-max-tokens 768 --chunk-overlap-tokens 96 \
+     --ocr-dpi 200 --ocr-max-longest-dim 1540 \
+     --label-candidates '$CANDIDATES' \
+     --non-interactive -o '$STACK_FULL' \
+   && python3 -c \"
+import yaml, sys
+full = {s['name']: s for s in yaml.safe_load(open('$STACK_FULL'))['stages']}
+par  = {s['name']: s for s in yaml.safe_load(open('$STACK_PARSE'))['stages']}
+# The checkpoint skip is keyed on stage NAME alone — no config hash. If pass 2 changed anything
+# about these three, pass 1's output would be replayed silently under the new config and we would
+# measure the old run while believing it was the new one.
+for name in ('source', 'intake_screen', 'parse'):
+    if full.get(name) != par.get(name):
+        sys.exit('FATAL: ' + name + ' differs between passes; the name-keyed checkpoint would replay pass 1 under pass 2 config')
+if any(s.get('provider') == 'label_inducer.llm' for s in full.values()):
+    sys.exit('FATAL: stack still wires label_inducer.llm - the run must use zero LLM induction')
+if not any(s.get('provider') == 'label_inducer.lexicon' for s in full.values()):
+    sys.exit('FATAL: stack does not wire label_inducer.lexicon')
+\" \
+   && $LATENCE stack check '$STACK_FULL' \
+   && touch '$RUN_DIR/.wizard_full.done'"
+
+add_stage full_run task \
+  "Pass 2 — chunk, PII screen, extract, KG, index (parse replays from checkpoint)" \
+  "[ -s '$OUT_DIR/_latence/runs/$RUN_ID/export/corpus.jsonl' ]" \
+  "find '$OUT_DIR/_latence/runs/$RUN_ID' -type f 2>/dev/null | wc -l" \
+  "$LATENCE process --config '$STACK_FULL' --run-id '$RUN_ID'"
+
+# ------------------------------------------------------------------ state
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+declare -A ST_STATUS ST_ATTEMPTS ST_STARTED ST_ENDED ST_NOTE
+# Rewritten in full after every transition via temp file + rename, so a reader never observes a
+# half-written state. STATE.json is never the thing that lies.
+write_state() {
+  local overall="$1" current="$2" tmp="$STATE.tmp"
+  {
+    printf '{\n  "run": "e2e-extended",\n  "updated": "%s",\n' "$(now)"
+    printf '  "overall": "%s",\n  "current_stage": "%s",\n' "$overall" "$current"
+    printf '  "run_id": "%s",\n  "host": "%s",\n  "pid": %s,\n' "$RUN_ID" "$(hostname)" "$$"
+    printf '  "stages": [\n'
+    local first=1 n
+    for n in "${stage_names[@]}"; do
+      [ $first -eq 1 ] || printf ',\n'; first=0
+      printf '    {"name": "%s", "status": "%s", "attempts": %s, "started": "%s", "ended": "%s", "log": "%s", "note": "%s", "description": "%s"}' \
+        "$n" "${ST_STATUS[$n]:-pending}" "${ST_ATTEMPTS[$n]:-0}" \
+        "${ST_STARTED[$n]:-}" "${ST_ENDED[$n]:-}" "$STAGE_DIR/$n.log" \
+        "$(printf '%s' "${ST_NOTE[$n]:-}" | tr '\n' ' ' | sed 's/"/\\"/g')" \
+        "${S_DESC[$n]}"
+    done
+    printf '\n  ]\n}\n'
+  } > "$tmp" && mv "$tmp" "$STATE"
+}
+
+say() { printf '[%s] %s\n' "$(now)" "$*"; }
+
+# ------------------------------------------------------------------ execution
+
+# Run a task stage under stall detection. Returns 0 on clean exit, 124 on stall, else the exit code.
+# The command runs in its own process group so a kill takes its children (curl, xargs, python, vllm)
+# with it — orphans would leave the retry contending with the process it replaced.
+run_with_watchdog() {
+  local name="$1" cmd="$2" log="$STAGE_DIR/$1.log"
+  setsid bash -c "$cmd" >> "$log" 2>&1 < /dev/null &
+  local pid=$! pgid
+  pgid=$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' ') || pgid=""
+
+  local last_metric="" last_change=$SECONDS metric
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$POLL_SECS"
+    metric=$(eval "${S_PROG[$name]}" 2>/dev/null | tr -d ' \n') || metric=""
+    if [ "$metric" != "$last_metric" ]; then
+      last_metric="$metric"; last_change=$SECONDS
+      say "  $name: progress=$metric"
+    elif [ $(( SECONDS - last_change )) -ge "$STALL_SECS" ]; then
+      say "  $name: STALLED at progress=$metric for ${STALL_SECS}s — killing"
+      [ -n "$pgid" ] && kill -TERM -"$pgid" 2>/dev/null
+      sleep 10
+      [ -n "$pgid" ] && kill -KILL -"$pgid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+  done
+  wait "$pid"; return $?
+}
+
+# Launch a server detached and wait for it to answer its own readiness probe.
+run_daemon() {
+  local name="$1" cmd="$2" log="$STAGE_DIR/$1.log"
+  setsid bash -c "$cmd" >> "$log" 2>&1 < /dev/null &
+  local waited=0
+  while [ "$waited" -lt "$DAEMON_READY_SECS" ]; do
+    sleep "$POLL_SECS"; waited=$(( waited + POLL_SECS ))
+    if eval "${S_DONE[$name]}" 2>/dev/null; then
+      say "  $name: ready after ${waited}s"
+      return 0
+    fi
+    say "  $name: waiting for readiness (${waited}s / ${DAEMON_READY_SECS}s)"
+  done
+  return 124
+}
+
+# ------------------------------------------------------------------ main loop
+
+selected=""
+[ -n "${ONLY:-}" ] && selected=",${ONLY},"
+
+say "supervisor up — pid $$, ${#stage_names[@]} stages, run_id=$RUN_ID, stall=${STALL_SECS}s"
+write_state running ""
+
+for name in "${stage_names[@]}"; do
+  if [ -n "$selected" ] && [ "${selected#*,$name,}" = "$selected" ]; then
+    ST_STATUS[$name]=skipped; continue
+  fi
+
+  # The done-probe runs BEFORE any work. This is what makes the supervisor safe to restart at any
+  # moment, including after a pod reboot.
+  if eval "${S_DONE[$name]}" 2>/dev/null; then
+    say "$name: already complete (done-probe satisfied) — skipping"
+    ST_STATUS[$name]=complete; ST_NOTE[$name]="satisfied on entry"
+    write_state running "$name"; continue
+  fi
+
+  ST_STARTED[$name]="$(now)"
+  attempt=1
+  while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+    ST_STATUS[$name]=running; ST_ATTEMPTS[$name]=$attempt
+    write_state running "$name"
+    say "$name: attempt $attempt/$MAX_ATTEMPTS — ${S_DESC[$name]}"
+
+    if [ "${S_KIND[$name]}" = daemon ]; then
+      run_daemon "$name" "${S_CMD[$name]}"; rc=$?
+    else
+      run_with_watchdog "$name" "${S_CMD[$name]}"; rc=$?
+    fi
+
+    # Exit code and completion are independent questions. A stage may exit 0 having produced nothing
+    # (the corpus fetch did exactly this), and may exit non-zero having finished the part we need.
+    # The probe is the authority; the exit code only colours the note.
+    if eval "${S_DONE[$name]}" 2>/dev/null; then
+      ST_STATUS[$name]=complete; ST_ENDED[$name]="$(now)"
+      ST_NOTE[$name]="done-probe satisfied (exit $rc)"
+      say "$name: COMPLETE"
+      write_state running "$name"; break
+    fi
+
+    if [ "$rc" -eq 124 ]; then
+      ST_NOTE[$name]="attempt $attempt stalled/timed out with no progress"
+    else
+      ST_NOTE[$name]="attempt $attempt exited $rc without satisfying the done-probe; see $STAGE_DIR/$name.log"
+    fi
+    say "$name: attempt $attempt failed — ${ST_NOTE[$name]}"
+    attempt=$(( attempt + 1 ))
+    [ "$attempt" -le "$MAX_ATTEMPTS" ] && sleep $(( 30 * attempt ))
+  done
+
+  if [ "${ST_STATUS[$name]}" != "complete" ]; then
+    ST_STATUS[$name]=blocked; ST_ENDED[$name]="$(now)"
+    say "BLOCKED at $name after $MAX_ATTEMPTS attempts. Stopping — later stages consume this one's"
+    say "output, and running them now would measure the previous run and report it as this one."
+    write_state blocked "$name"
+    exit 1
+  fi
+done
+
+say "all stages complete"
+write_state complete ""
