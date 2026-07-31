@@ -678,3 +678,115 @@ def test_kv_format_interop_with_the_retrieval_reader() -> None:
         ids, gammas = kv.postings("nA")
         assert gammas == sorted(gammas, reverse=True) and len(ids) == len(gammas)
         assert kv.alias("acme  CORP") == ["nA"]
+
+
+# -- ticket 10: Hyperedges under Corpus Versions / Purge (inheritance, proven) ----
+
+
+def test_purge_expunges_hyperedges_and_their_tau_text(tmp_path: Path) -> None:
+    """Ticket 10's claim, proven rather than asserted: because corpus-level Stages fully
+    re-run on a delta (the S11 semantic), the hyperedge stream is regenerated per Corpus
+    Version — so Purge's "nothing derived survives" covers Hyperedges BY INHERITANCE, with
+    no new machinery. This pins it: after purging a document, the head Version's live set
+    contains no Hyperedge derived from it (its tau_text gone — GDPR reaches the sidecar,
+    ADR-0056/0057), while a co-resident document's Hyperedges survive."""
+    import hashlib
+
+    from latence_core.contracts import DeletionMode
+    from latence_core.delta_runner import DeltaRunner
+    from latence_core.state.corpus_store import CorpusStore
+
+    docs = _e2e_docs(tmp_path)  # memo.txt: Alice/Acme + Bob/Beta Industries
+    (docs / "purge_me.txt").write_text(
+        "Carol joined Acme in June. Carol works at Acme headquarters.\n", encoding="utf-8"
+    )
+    store_uri = f"file://{tmp_path}/store"
+    pipeline = Pipeline.from_yaml_text(_e2e_yaml_with_carol(store_uri, docs))
+
+    DeltaRunner().apply_delta(pipeline, run_id="hv0")
+    cs = CorpusStore(Storage.for_uri(store_uri), store_uri)
+    head0 = cs.head_version()
+    assert head0 is not None
+    live0 = cs.read_records(head0)
+    hyper0 = [
+        r for r in live0
+        if isinstance(r, GraphRecord) and r.scope is GraphScope.HYPEREDGE
+    ]
+    assert hyper0, "v0 must commit Hyperedge records"
+    assert any("Carol" in (r.hyperedge.tau_text if r.hyperedge else "") for r in hyper0)
+
+    doc_id = "sha256:" + hashlib.sha256((docs / "purge_me.txt").read_bytes()).hexdigest()
+    rp = DeltaRunner().purge(pipeline, run_id="hpurge", document_ids=[doc_id])
+    assert rp.delta is not None and rp.delta.deletion_mode is DeletionMode.PURGE
+
+    head1 = cs.head_version()
+    assert head1 is not None
+    live1 = cs.read_records(head1)
+    hyper1 = [
+        r for r in live1
+        if isinstance(r, GraphRecord) and r.scope is GraphScope.HYPEREDGE
+    ]
+    # nothing derived from the purged document survives — tau_text included
+    assert not any("Carol" in (r.hyperedge.tau_text if r.hyperedge else "") for r in hyper1)
+    # and the co-resident document's Hyperedges are NOT collaterally erased
+    assert any("Alice" in (r.hyperedge.tau_text if r.hyperedge else "") for r in hyper1)
+
+
+def _e2e_yaml_with_carol(store_uri: str, docs: Path) -> str:
+    """The e2e pipeline YAML with Carol in the gazetteer (delta/purge fixture)."""
+    return f"""
+name: hyperedge-purge
+storage_uri: {store_uri}
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://{docs}'
+      sensitivity: internal
+      extensions: [txt]
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [chunk]
+    config:
+      labels:
+        ORG:
+          terms: [Acme, Beta Industries]
+        PERSON:
+          terms: [Alice, Bob, Carol]
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [chunk, entities]
+    config:
+      window_chars: 200
+      relations:
+        works_for:
+          head: PERSON
+          tail: ORG
+          triggers: [works at, joined]
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [entities, relations]
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config:
+      corpus_id: hyperedge-purge
+      hyperedges: true
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+"""

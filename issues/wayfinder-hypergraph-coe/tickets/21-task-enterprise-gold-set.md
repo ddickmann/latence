@@ -17,5 +17,9 @@ corpus. Two halves:
 2. **HITL — the labeling itself.** Dennis (or a delegate) writes the questions and marks
    the facts. Estimated effort: hours, spread over sessions.
 
+3. **Calibration mode (ticket 09):** the same harness labels the ~200-Hyperedge γ-calibration
+   sample (span + correct/incorrect judgment) — one labeling workflow, two artifacts (gold
+   set + calibration sidecar input).
+
 Resolved when ≥100 questions with verified supporting-fact marks exist and ticket 17 can
 read them. Feeds the M6 gate; blocks ticket 17 alongside 08/16.

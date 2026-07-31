@@ -27,9 +27,23 @@ RUN_DIR="${RUN_DIR:-/workspace/run}"
 STATE="$RUN_DIR/STATE.json"
 CHECK_SECS="${CHECK_SECS:-60}"
 
-# A pattern built at runtime never matches this script's own command line, which is exactly how the
-# manual `pkill -f supervise.sh` kept killing the shell that was about to start the supervisor.
-SUP_PAT="supervi""se.sh"
+PIDFILE="$RUN_DIR/supervisor.pid"
+
+# Liveness by PID FILE, never by `pgrep -f`. A pattern matches any command line that merely MENTIONS
+# the script — including an `scp`+`mv` one-liner that happens to carry the path in its argv. That
+# phantom match kept this keeper idle for seven hours while the supervisor was dead: it saw a hit,
+# concluded all was well, and never relaunched.
+#
+# Checking the pid also confirms the process is really the supervisor, so a recycled pid belonging
+# to something else cannot impersonate it either.
+supervisor_alive() {
+  local pid
+  pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "supervi""se.sh" || return 1
+  return 0
+}
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 say() { printf '[%s] keeper: %s\n' "$(now)" "$*"; }
@@ -62,7 +76,7 @@ while true; do
       ;;
   esac
 
-  if ! pgrep -f "$SUP_PAT" > /dev/null 2>&1; then
+  if ! supervisor_alive; then
     restarts=$(( restarts + 1 ))
     say "supervisor not running (state=$state) — relaunch #$restarts"
     # Reap orphans first. A dead supervisor leaves its stage children with ppid 1, still holding
@@ -72,7 +86,7 @@ while true; do
     ( cd "$REPO" && setsid nohup bash benchmark/e2e/supervise.sh \
         >> "$RUN_DIR/supervisor.log" 2>&1 < /dev/null & )
     sleep 20
-    if pgrep -f "$SUP_PAT" > /dev/null 2>&1; then
+    if supervisor_alive; then
       say "supervisor is up"
     else
       say "RELAUNCH FAILED — supervisor did not come up; see $RUN_DIR/supervisor.log"

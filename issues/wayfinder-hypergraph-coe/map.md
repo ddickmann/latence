@@ -7,9 +7,11 @@ Label: `wayfinder:map`
 The framework's retrieval + data-generation layer reaches the frontier defined by [spec.md](spec.md):
 hyperedge Evidence Units emitted by the pipeline as engine-agnostic sidecar **files**, query-aware
 confidence propagation, and the knapsack chain-of-evidence selector shipped in `latence-retrieval` —
-**proven** by MuSiQue/HotpotQA supporting-fact recall@budget curves strictly dominating the current
-chunk-topk baseline AND an enterprise-shaped corpus eval. Plus a data-gen SOTA sweep whose contents
-its own scoping ticket decides. Zero LLM calls in indexing or the online path.
+**proven** by MuSiQue/HotpotQA supporting-fact recall@budget curves dominating the current
+chunk-topk baseline (AUC + endpoints, ticket 08) AND a manually-gold-labeled enterprise corpus
+eval. Zero LLM calls in indexing or the online path. (The data-gen SOTA sweep left this
+destination — ticket 11: hyperedges inherit every upstream improvement by construction, so
+generic pipeline quality is a spin-off map charted after M6 from measured weak spots.)
 
 ## Notes
 
@@ -43,6 +45,14 @@ its own scoping ticket decides. Zero LLM calls in indexing or the online path.
 
 <!-- one line per closed ticket: gist + link -->
 
+- [Task: M4 — chain-of-evidence selector](tickets/15-task-m4-coe-selector.md) — **BUILT + green** (subagent, verified): UtilityModel/HeuristicUtility + lazy greedy with theta_min, **incremental sparse redundancy** (the measured requirement), **ADR-0058 exact verification pass live** (mandatory on counter mismatch, trim not scale); **the M3-deferred ranking claim now pinned — the 2-hop chain beats the maximally-advantaged lexical distractor AT SELECTION**; `knapsack_refine` **dropped with recorded rationale** (same greedy family = no-op; frozen-value DP optimises the wrong objective); dedup invariant makes the hard-redundancy case unrepresentable. Suite 4679→**4694P/0F**. [M4-RESULT.md](M4-RESULT.md).
+
+- [Task: KV under concurrent load](tickets/19-task-kv-concurrency-validation.md) — **measured, fine as-is**: per-call open = 0.04–0.06 ms p50, flat c=1→16 and 50k→500k HEs; c=16 tail is CPU saturation in reads, not open contention — ADR-0056's contingency fix would save nothing and stays unbuilt. Cold-cache honestly unmeasured (needs sudo). ADR-0056's consequences updated.
+- [Grilling: licence placement](tickets/07-grilling-licence-placement.md) — **all hypergraph/CoE modules stay PolyForm-NC** (Dennis); Apache set stays exactly the seven generic primitives, publish-readiness pin untouched; revisitable after the M6 gate as a fresh decision.
+- [Grilling: calibration ownership](tickets/09-grilling-calibration-ownership.md) — **shipped tooling, adopter labels** (Dennis): `latence calibrate` fits isotonic from ~200 labeled Hyperedges → calibration sidecar, absent ⇒ today's uncalibrated γ (default unchanged); the sample rides ticket 21's labeling harness; calibrated-vs-not is an M6 A/B; builds after M5.
+- [Grilling: deltas/Purge integration](tickets/10-grilling-deltas-purge-integration.md) — **correct by inheritance, proven by test**: corpus-level re-runs regenerate hyperedges/parquet/KV per Corpus Version; no query-time tombstones needed; Purge expunges `tau_text` (new e2e pins it, incl. no collateral erasure); churn stats + incremental maintenance = measured-need residuals.
+- [Grilling: data-gen SOTA sweep scope](tickets/11-grilling-datagen-sota-sweep-scope.md) — **premise dissolved by Dennis's question**: Hyperedges re-project the same extracted records, so every upstream improvement flows in by construction; generic pipeline-quality work = spin-off map after M6, charted from measured eval weak spots. Destination narrowed accordingly.
+
 - [Task: M3 — entry + confidence propagation](tickets/14-task-m3-entry-propagation.md) — **BUILT + green** in `latence-retrieval` (new module, nothing existing touched): the **ticket-20-verified order** (expand hop-priority/hub-capped → `s_hyp` prune → RWR on small `B_q` → vertex gate + coverage), **zero-dep pure Python** (viable because prune precedes propagation; package stays pydantic-only); ADR-0059 tiers 0/1 live against the KV alias table; independent format-compatible `HyperedgeKV` reader with **interop pinned** against core's writer; `Propagator` seam (heat-kernel stays fog). Two math-backed spec deviations pinned in tests: the 1e-6@K≤10 convergence claim is impossible worst-case (geometric bound + head-rank-stability instead), and ρ-beats-anchor-touching-distractor is structurally false (the true claim — 2-hop entity gains confidence from zero — is pinned; selection-level ranking is M4's). Suite 4668→**4679P/0F**.
 
 - [Grilling: eval design + enterprise gold set](tickets/08-grilling-eval-design.md) — MuSiQue + HotpotQA supporting-fact **recall@budget curves (1k–16k)** + recall@5 for HippoRAG-2 comparability, vs our own dense+Packer chunk-topk baseline; **gate = AUC + endpoint dominance on both datasets, no point >2% worse** (Dennis); **enterprise eval = MANUAL ~100-question gold set** over the real messy corpus (Dennis labels; harness must make it efficient → ticket 21, now blocking 17); **compute = subset-first, one full pod run at gate time**; per-tier / heuristic-vs-exact / weak-on-off A/Bs all reported.
@@ -67,18 +77,18 @@ its own scoping ticket decides. Zero LLM calls in indexing or the online path.
 - Weighted incidence B + pluggable Propagator kernel A/B (spec Part 6.1–6.2) — graduates after M3
   (ticket 14) and the eval harness exist to arbitrate. Note ADR-0056: weighting applies to the
   query-local `B_q` built per call, not to a stored global matrix.
-- Whether the spec's `knapsack_refine` boundary-repair phase survives — ticket 01 found the existing
-  Packer is the same greedy family, not DP/ILP, so "repair" may be a no-op. Graduates into ticket 15
-  (M4) scope, or its own decision, once M4 is picked up.
 - Learned token-level utility classifier trained on selection traces (spec 3.5) — after traces
   accumulate from real use; the UtilityModel seam ships in M4.
-- Contents of the data-gen SOTA sweep — until its scoping ticket (11) resolves; may spin off its
-  own map.
 - Retrieval MCP surface for chains — exposing CoE output via the Retrieval MCP tools; after M5.
 - Operational policy for incremental sidecar appends vs weekly compaction — after the deltas/purge
   ticket (10).
 
 ## Out of scope
+
+- **The data-gen SOTA sweep** — [ticket 11](tickets/11-grilling-datagen-sota-sweep-scope.md)
+  dissolved the premise: Hyperedges re-project the same extracted records, so upstream
+  improvements flow in by construction. Generic pipeline-quality work becomes a spin-off map
+  charted after the M6 gate, from the eval's measured weak spots.
 
 - Groundedness / contradiction handling — explicitly excluded by the spec for this iteration.
 - True iterative retrieve-resolve-retrieve multi-hop (reasoning step in the loop) — spec 6.3:

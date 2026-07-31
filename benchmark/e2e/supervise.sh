@@ -81,6 +81,18 @@ if command -v flock >/dev/null 2>&1; then
   flock -n 8 || { echo "another supervisor holds $RUN_DIR/.supervisor.lock — exiting"; exit 0; }
 fi
 
+# Liveness is a PID FILE, never a `pgrep -f` pattern.
+#
+# `pgrep -f supervise.sh` matches ANY command line that merely mentions the string — including the
+# shell that launched us, if its argv contained the path (an `scp`+`mv` one-liner does). That
+# phantom cost SEVEN HOURS: the keeper saw a match, concluded the supervisor was healthy, and never
+# relaunched the one that had actually exited. The same unsoundness made `pkill -f` repeatedly kill
+# the SSH session issuing it.
+#
+# A pid file plus a liveness check on that exact pid cannot be fooled by a string in someone's argv.
+echo $$ > "$RUN_DIR/supervisor.pid"
+trap 'rm -f "$RUN_DIR/supervisor.pid"' EXIT
+
 LATENCE="cd '$REPO' && uv run latence"
 
 # ------------------------------------------------------------------ stage table
@@ -91,7 +103,12 @@ LATENCE="cd '$REPO' && uv run latence"
 #                  so the stage would hang until the stall timer killed the thing it just started.
 
 stage_names=()
-declare -A S_DESC S_DONE S_PROG S_CMD S_KIND
+declare -A S_DESC S_DONE S_PROG S_CMD S_KIND S_STALL
+
+# Per-stage stall budget. One global timeout cannot serve both a 30-second copy and a multi-hour
+# GPU pass: 20 minutes killed `parse` three times while it was legitimately working, and each kill
+# abandoned a 57 GB checkpoint temp file — 171 GB of orphans before anyone noticed.
+set_stall() { S_STALL["$1"]="$2"; }
 
 add_stage() {
   stage_names+=("$1"); S_KIND["$1"]="$2"; S_DESC["$1"]="$3"
@@ -180,11 +197,23 @@ add_stage ocr_server daemon \
   "wc -c < '$STAGE_DIR/ocr_server.log' 2>/dev/null || echo 0" \
   "cd '$REPO' && bash deploy/env/served-ocr-server/serve.sh"
 
+# The progress probe must watch what grows DURING the stage, not what appears when it ends.
+# `parse.jsonl` only exists on completion, so probing it read 0 for twenty minutes and the watchdog
+# concluded a healthy stage was hung. The checkpoint DIRECTORY grows continuously — `source.jsonl`
+# alone reaches ~57 GB as file bytes are materialised — so its size is the honest signal.
+#
+# A stale `.tmp` from a previous attempt is removed first: the runner writes checkpoints to a
+# uuid-named temp and renames on success, so a killed attempt leaves tens of GB that nothing will
+# ever claim, and three of them filled 171 GB here.
 add_stage parse task \
   "Pass 1 — parse the corpus with the OCR server up" \
   "[ -s '$CKPT_DIR/parse.jsonl' ]" \
-  "wc -c < '$CKPT_DIR/parse.jsonl' 2>/dev/null || echo 0" \
-  "$LATENCE process --config '$STACK_PARSE' --run-id '$RUN_ID'"
+  "du -sk '$CKPT_DIR' 2>/dev/null | cut -f1" \
+  "rm -f '$CKPT_DIR'/*.tmp; $LATENCE process --config '$STACK_PARSE' --run-id '$RUN_ID'"
+# 96k files, ~48 GB, materialised through a network filesystem and then OCR'd on one 3090. Hours,
+# legitimately. The probe above is what detects a REAL hang; this budget only needs to exceed the
+# longest honest gap between two writes.
+set_stall parse 5400
 
 # Pass 2 overwrites quality-report.json, and replayed rows report duration 0.0 — so the parse timing,
 # VRAM and drift evidence exists ONLY in the pass-1 report. Copy it out before pass 2 can destroy it.
@@ -318,6 +347,7 @@ say() { printf '[%s] %s\n' "$(now)" "$*"; }
 # with it — orphans would leave the retry contending with the process it replaced.
 run_with_watchdog() {
   local name="$1" cmd="$2" log="$STAGE_DIR/$1.log"
+  local stall="${S_STALL[$name]:-$STALL_SECS}"
   setsid bash -c "$cmd" >> "$log" 2>&1 < /dev/null &
   local pid=$! pgid
   pgid=$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' ') || pgid=""
@@ -329,8 +359,8 @@ run_with_watchdog() {
     if [ "$metric" != "$last_metric" ]; then
       last_metric="$metric"; last_change=$SECONDS
       say "  $name: progress=$metric"
-    elif [ $(( SECONDS - last_change )) -ge "$STALL_SECS" ]; then
-      say "  $name: STALLED at progress=$metric for ${STALL_SECS}s — killing"
+    elif [ $(( SECONDS - last_change )) -ge "$stall" ]; then
+      say "  $name: STALLED at progress=$metric for ${stall}s — killing"
       [ -n "$pgid" ] && kill -TERM -"$pgid" 2>/dev/null
       sleep 10
       [ -n "$pgid" ] && kill -KILL -"$pgid" 2>/dev/null

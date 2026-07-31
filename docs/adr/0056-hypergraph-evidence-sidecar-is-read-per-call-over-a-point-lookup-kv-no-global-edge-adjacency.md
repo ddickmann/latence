@@ -94,8 +94,12 @@ KV is a derived read-path artifact rebuildable from it.
 - Two artifacts instead of one (parquet + derived KV) mean the delta/Retraction/Purge machinery
   (ADR-0029) must cover both; the KV is rebuildable, so Purge may rebuild rather than edit in place.
   Detail belongs to the deltas ticket, not this ADR.
-- **Untested:** per-call KV open under concurrent query load. The measurements are single-process
-  with a warm page cache. Tracked as its own ticket; if contention proves real, the fix is a
-  cheaper open (mmap reuse within a request scope), not a resident store.
+- **Concurrency: measured after the fact and fine as-is** (ticket 19, 2026-07-31, real
+  `HyperedgeStoreReader` over real records at 50k/500k hyperedges): per-call open+mmap costs
+  0.039–0.062 ms p50 — ~1–2% of a query — flat from 1 to 16 concurrent processes and across a
+  10× corpus-size step; total p50 ≈ 2–2.9 ms at c≤4. Degradation at c=16 lands in the reads
+  (CPU saturation on a 10-logical-CPU host), so the contingency fix named here (a cheaper open)
+  would save nothing and stays unbuilt. Cold-cache remains unmeasured (needs sudo on the dev
+  host) — stated, not hidden.
 - Absolute latencies come from a Python prototype on synthetic data and are not product SLAs. The
   *comparisons* hold — all strategies shared the same compute code — but the numbers will move.
