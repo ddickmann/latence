@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 56 records numbered 0001–0057.
+    the sequence simply skipped it), so the log holds 57 records numbered 0001–0058.
 
 ## Foundations & scope
 
@@ -107,3 +107,4 @@ see [Retrieval-quality tooling](../retrieval-tooling.md)).
 | [0053](0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md) | SPLADE sparse is a structured composition (model ⊕ confidence-gated NER ⊕ metadata), redacted by default |
 | [0056](0056-hypergraph-evidence-sidecar-is-read-per-call-over-a-point-lookup-kv-no-global-edge-adjacency.md) | Hypergraph Evidence sidecar is read per call over a point-lookup KV; no global edge-adjacency matrix |
 | [0057](0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md) | A Hyperedge is a third GraphScope emitted by Graph Assembly; `tau_text` follows the corpus redaction variant |
+| [0058](0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md) | `token_cost` is an approximate index-time weight; the budget guarantee is an exact query-time verification pass |

@@ -13,7 +13,9 @@ Implement the sidecar per **[ADR-0056](../../../docs/adr/0056-hypergraph-evidenc
 - `eu.kv` — derived point-lookup read path: `edge_id → {entity_ids, token_cost, gamma, support,
   has_relations}`, `entity_id → {edge_ids[], gammas[]}` (postings γ-sorted, **γ inline**),
   `edge_id → tau_text`. Rebuildable from the parquet.
-- `token_cost` precomputed per ticket 05's ruling.
+- `token_cost` precomputed per **[ADR-0058](../../../docs/adr/0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md)**:
+  optional operator-named tokenizer (heuristic default, nothing pinned), and the **tokenizer identity
+  stored beside the value** so a later mismatch is detectable rather than silent.
 - Two ID-payload vector collections (`entity_vecs`, `eu_vecs`) behind the existing engine seam.
 
 **Explicitly NOT built** (ADR-0056, measured in [ticket 18](18-prototype-residency-simulation.md)):
