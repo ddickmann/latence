@@ -11,5 +11,6 @@ Implement the eval per 08's design and run it for real: MuSiQue/HotpotQA support
 Also carries two A/Bs deferred here rather than guessed:
 1. **Heuristic vs exact selection weights** — how much packing quality degrades when selection runs
    on approximate `token_cost` ([ADR-0058](../../../docs/adr/0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md)).
-2. **Weak Hyperedges on vs off** — they are expected to outnumber relation-bearing units several to
+2. **Entry tier 0 / 1 / 2** ([ADR-0059](../../../docs/adr/0059-query-side-entry-is-tiered-zero-model-default-with-gliner2-strictly-opt-in.md)) — report the curve **per tier**; a single headline number silently assumes tier 2 and misrepresents the default install. Also settles whether tier 1's alias-only linking approaches tier 2's anchor precision.
+3. **Weak Hyperedges on vs off** — they are expected to outnumber relation-bearing units several to
    one ([ADR-0057](../../../docs/adr/0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md)); the eval decides the default.

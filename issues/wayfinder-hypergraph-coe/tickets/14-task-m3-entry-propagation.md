@@ -8,8 +8,14 @@ Blocked by: 06, 13
 
 Implement spec Part 2 per ticket 06's model policy, on the **ADR-0056** read path:
 
-- Entry entities: linked branch (query NER + linking) ∪ ANN branch; restart vector anchored on the
-  linked branch only.
+- Entry entities **tiered per [ADR-0059](../../../docs/adr/0059-query-side-entry-is-tiered-zero-model-default-with-gliner2-strictly-opt-in.md)**:
+  tier 0 = ANN over `entity_vecs` with the caller's own query embedding (no new model, the default);
+  tier 1 = alias point-lookups against the KV (zero models); tier 2 = GLiNER2 query NER + `w_relq`
+  from one load, opt-in behind an extra, no default checkpoint. The extra wraps the upstream library
+  directly — **never** depend on `latence-extract-gliner2`/`latence-core`.
+- Restart vector anchored on the linked branch (`V_llm`) only; when tiers 1–2 are off it degrades to
+  ANN-recalled anchors, and `w_relq`'s weight must **redistribute cleanly** rather than assume the
+  signal exists.
 - Candidate universe from the KV postings (γ inline → top-k truncation with no row fetch), cap
   |E_c| ≤ 2000.
 - **`B_q` is built from the fetched entity lists** — there is no global incidence CSR to slice
