@@ -25,6 +25,14 @@ its own scoping ticket decides. Zero LLM calls in indexing or the online path.
   /tdd + codebase-design.
 - Non-negotiables from the spec: engine-agnostic (vector engine = ANN entry only, IDs in payloads);
   no LLM in offline construction or online retrieval; the index is built *for the solver*.
+- **STANDING RULE (Dennis, 2026-07-31): a capability is only dropped or weakened when DATA says so.**
+  Parking a frontier feature out of caution is counter-innovative. Two consequences: (1) every
+  sacrifice in an ADR must cite a measurement, and one that cannot is re-opened; (2) the shipped
+  **default** should be the strong configuration with a documented cheap mode, not the reverse.
+  The budget this is traded against is **20–50 ms** for the structural query path — established from
+  the adopter's own first-stage ANN (10–50 ms) and the cross-encoder rerank this repo already ships
+  (50–200 ms), against a measured 2.3 ms structural path (ADR-0056). Roughly an order of magnitude
+  of unspent headroom; spend it.
 - Standing prefs: no fake green — real models, real datasets, real deps for any eval claim;
   diagnose tight (max 2 live validation runs per fix cycle); research tickets carry licence/IP/
   regulation verification per the research-diligence directive.
@@ -34,6 +42,8 @@ its own scoping ticket decides. Zero LLM calls in indexing or the online path.
 ## Decisions so far
 
 <!-- one line per closed ticket: gist + link -->
+
+- [Prototype: frontier headroom](tickets/20-prototype-frontier-headroom.md) — **NEGATIVE RESULT: no configuration beat the 1-hop baseline** (best 0.487 vs 0.500). Expansion lifts the bridge into `E_c` (cand_recall 0.50→0.95) and selection then **drowns** it (0.50→0.15); `rho` does not rank bridging evidence above corpus noise. **But the harness is the wrong instrument** — a Zipf-random hypergraph has no community structure, which is precisely what diffusion exploits — so this neither validates nor refutes the design. Firmly established regardless: 1-hop is a **hard structural ceiling** (2-hop is load-bearing, not optional); **γ-ordered global truncation silently reverts multi-hop to 1-hop** (must be hop-priority); the **dense `|E_c|²` overlap matrix** is what caps the candidate universe (incremental sparse removes it, ~4× faster — belongs in M4); **PPR sketches are bounded** (82 MiB @200k entities — the `A_E` blowup does NOT apply, my earlier conflation); weighted incidence costs ~12%, not 0. **Recommends reordering the plan: validate on a real multi-hop benchmark via a thin M1→M4 slice BEFORE hardening.**
 
 - [Grilling: query-time model + entity_kb policy](tickets/06-grilling-query-time-model-policy.md) — **tiered entry, zero-model default** → [ADR-0059](../../docs/adr/0059-query-side-entry-is-tiered-zero-model-default-with-gliner2-strictly-opt-in.md). Tier 0 = ANN on `entity_vecs` with the caller's own query embedding; tier 1 = alias point-lookups in the KV (still zero models); tier 2 = GLiNER2 NER + `w_relq` from **one load**, strictly opt-in. Binding constraint: `latence-retrieval` is pydantic-only, so query models come as an **extra wrapping the upstream library**, never a dep on `latence-extract-gliner2`. **Multi-hop survives tier 0** (reach comes from propagation, not entry) — what degrades is anchor precision. Tier 2 costs tens of ms CPU vs the 2.3 ms structural path; eval must report **per tier**.
 
