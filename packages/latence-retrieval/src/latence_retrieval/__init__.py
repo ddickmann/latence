@@ -117,6 +117,15 @@ from __future__ import annotations
 
 from latence_retrieval.backend import RetrievalBackend
 from latence_retrieval.bm25 import Bm25Rescorer
+from latence_retrieval.coe import (
+    CoeConfig,
+    CoeSelection,
+    EdgeFeatures,
+    HeuristicUtility,
+    SelectionState,
+    UtilityModel,
+    select,
+)
 from latence_retrieval.contracts import Candidate, Capability, RetrievalQuery
 from latence_retrieval.errors import (
     BackendCapabilityError,
@@ -215,10 +224,13 @@ __all__ = [
     "CandidateProcessor",
     "CandidateProcessorError",
     "Capability",
+    "CoeConfig",
+    "CoeSelection",
     "CompositeBackend",
     "CrossEncoderModel",
     "DuckDBGraphDocumentSource",
     "DuckDBGraphSource",
+    "EdgeFeatures",
     "Expander",
     "HyperedgeKV",
     "HypergraphConfig",
@@ -234,6 +246,7 @@ __all__ = [
     "GraphSourceError",
     "HashingMultiVectorQueryEncoder",
     "HeuristicTokenCounter",
+    "HeuristicUtility",
     "IdentityProcessor",
     "MaxSimError",
     "MaxSimReranker",
@@ -259,11 +272,13 @@ __all__ = [
     "RetrievalRegistry",
     "RetrievalResult",
     "RrfFuser",
+    "SelectionState",
     "SentenceTransformersCrossEncoder",
     "SparseQueryEncoder",
     "SpladeQueryEncoder",
     "TiktokenCounter",
     "TokenCounter",
+    "UtilityModel",
     "WeightSweep",
     "WeightSweepRow",
     "WeightedFuser",
@@ -278,5 +293,6 @@ __all__ = [
     "resolve_processor",
     "resolve_sparse_encoder",
     "retrieve",
+    "select",
     "sweep_fusion_weights",
 ]
