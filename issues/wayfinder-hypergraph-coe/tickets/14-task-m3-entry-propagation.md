@@ -20,7 +20,11 @@ Implement spec Part 2 per ticket 06's model policy, on the **ADR-0056** read pat
   |E_c| ≤ 2000.
 - **`B_q` is built from the fetched entity lists** — there is no global incidence CSR to slice
   (ADR-0056). Edge overlap, where the selector needs it, is recomputed on the candidate set.
-- RWR propagation behind a `Propagator` seam (RWR default; heat-kernel per spec 6.2 stays fog).
+- **Paper-faithful order (ticket 20 addendum — verified 2× recall, 2.7× faster):**
+  expand (hop-priority truncation, hub cap) → score `s_hyp = β·s_entry + (1−β)·s_rel` →
+  **prune to TopK_h BEFORE propagating** (K_h ~ 200) → RWR on the small query-aware hypergraph
+  behind a `Propagator` seam (heat-kernel per spec 6.2 stays fog) → **vertex gate `c* ≥ θ_v` +
+  coverage over retained entities** (paper Eq 30–33). Never propagate over the raw expansion.
 
 Tests per spec M3: `S` column-stochastic; convergence within K≤10 at λ=0.2; a synthetic 2-hop
 corpus ranks the bridging hyperedge above a lexically-similar distractor. Plus: the online path

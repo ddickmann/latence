@@ -112,3 +112,46 @@ assumption it works.
 benchmark before hardening any of it.** If the claim does not survive a real corpus, that must be
 discovered at slice stage, not after five milestones of work. Latency absolutes above are
 Python-bound and not product SLAs; only the comparisons carry.
+
+## Addendum — paper verification (Dennis: "double check this paper why your approach fails")
+
+Read the actual HyCE-RAG method section (arXiv 2607.22597 §3.3, Eq 15–40) and rebuilt the
+comparison in [`frontier2.py`](../prototypes/residency/frontier2.py). **My prototype deviated from
+the paper in two structural gates, and my harness denied a third assumption the mechanism needs:**
+
+- **D1 — I propagated in the wrong order.** The paper scores every candidate
+  `s_hyp = β·s_entry + (1−β)·s_rel` (entry-entity overlap + textual relevance, Eq 16–17) and
+  **prunes to a small TopK_h query-aware hypergraph BEFORE propagating** (Eq 19). I propagated over
+  the raw 20k expansion, so ρ was computed on a noise-dominated graph and was corrupted from the
+  start. My sweep-6 "ρ-pruning" pruned *after* propagating on the polluted graph — exactly backwards.
+- **D2 — I had no post-propagation gate.** The paper thresholds **vertices** (`c* ≥ θ_v`, Eq 30),
+  admits only hyperedges covering a retained entity (Eq 31), and scores coverage over retained
+  entities (Eq 33). I scored all candidates directly.
+- **D3 — my harness was unfair to every bounded method.** The paper's `s_rel` term assumes bridging
+  evidence carries *some* textual relevance to the question — true in real MHQA, where the question
+  names the chain's endpoints. I gave bridges sim≈0.1 and distractors sim=1.0, so the bridge was
+  distinguishable only by structure in a structureless random graph.
+
+**Verified at 200k EUs, 40 chains (`frontier2-results.json`):**
+
+| scenario | my pipeline | paper-faithful (D1+D2) |
+|---|---|---|
+| adversarial (old harness) | 0.150 / 625 ms | **0.388** / 232 ms |
+| realistic bridge sims | 0.263 / 617 ms | **0.500 = candidate ceiling** / 233 ms |
+
+The paper-faithful order **more than doubles selection recall and cuts latency 2.7×**; in the
+realistic scenario it selects *every* bridge that reaches the candidate set. The earlier finding
+"expansion lifts the bridge into E_c and selection drowns it" is thereby **explained and fixed**:
+selection drowned it because propagation ran pre-prune.
+
+**Dennis's correction stands and is confirmed by this:** the repo's existing KG multi-hop is
+already validated on real multi-hop cases; the earlier negative result was a defect in MY pipeline
+order plus an information-theoretically unfair harness — not evidence against the design. The
+remaining ceiling in the table (cand_recall 0.500 at 200k) is expansion reach in a structureless
+random graph; real corpora have the community structure and bridge-text signal that lift it.
+
+**Fix propagated to the build tickets:** M3/M4's online order is now
+`expand (hop-priority) → s_hyp prune to K_h → propagate on the small graph → vertex gate θ_v +
+coverage → utility/knapsack`. The reorder-the-plan recommendation above softens accordingly: the
+eval is still wanted early, but the multi-hop thesis is no longer "unvalidated" — the deviation was
+mine, not the design's.

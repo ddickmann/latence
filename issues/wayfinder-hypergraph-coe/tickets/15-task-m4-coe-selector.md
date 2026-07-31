@@ -6,7 +6,7 @@ Blocked by: 14
 
 ## Question
 
-Implement spec 3.1–3.3: UtilityModel protocol + HeuristicUtility, lazy-greedy marginal loop over v(e|A) with A_E-backed redundancy/connectivity, theta_min stop, and knapsack_refine reusing the existing Packer unchanged on frozen values. Also implement **[ADR-0058](../../../docs/adr/0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md)**'s
+Implement spec 3.1–3.3 **on the gated candidate set from M3** (post `s_hyp`-prune + vertex/coverage gate — ticket 20 addendum; selection over the raw expansion is the measured failure mode). Use the **incremental sparse overlap** (running max, one sparse product per acceptance) — the dense `|E_c|²` matrix is the measured latency cap. Then: UtilityModel protocol + HeuristicUtility, lazy-greedy marginal loop over v(e|A) with A_E-backed redundancy/connectivity, theta_min stop, and knapsack_refine reusing the existing Packer unchanged on frozen values. Also implement **[ADR-0058](../../../docs/adr/0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md)**'s
 **exact query-time verification pass**: after selection, re-count the 15–40 chosen Hyperedges with
 the *generation* tokenizer and trim the tail if the true total overflows. Mandatory (not optional)
 when the stored tokenizer identity differs from the configured query tokenizer. Never apply a

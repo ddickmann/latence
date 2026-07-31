@@ -1,0 +1,22 @@
+{
+  "adversarial (old harness: bridge sim 0.1) | mine (no gates)": {
+    "recall": 0.15,
+    "cand_recall": 0.5,
+    "p50_ms": 624.7
+  },
+  "adversarial (old harness: bridge sim 0.1) | paper (D1+D2 gates)": {
+    "recall": 0.3875,
+    "cand_recall": 0.5,
+    "p50_ms": 231.52
+  },
+  "realistic (bridge shares question terms) | mine (no gates)": {
+    "recall": 0.2625,
+    "cand_recall": 0.5,
+    "p50_ms": 616.72
+  },
+  "realistic (bridge shares question terms) | paper (D1+D2 gates)": {
+    "recall": 0.5,
+    "cand_recall": 0.5,
+    "p50_ms": 232.69
+  }
+}
