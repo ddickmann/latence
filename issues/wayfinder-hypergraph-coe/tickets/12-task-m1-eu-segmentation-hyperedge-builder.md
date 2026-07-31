@@ -1,7 +1,7 @@
 # 12 — Task: M1 — Hyperedge segmentation + builder
 
 Type: task
-Status: open
+Status: resolved
 Blocked by: 03, 04
 
 **CHECK IN with Dennis before starting — first long-running implementation on this map.**
@@ -41,3 +41,48 @@ Tests (spec M1 + the ADR-0057 additions): every relation's arguments fall inside
 no Hyperedge exceeds 180 tokens; merge is idempotent; **`tau_text` never contains a span the exported
 corpus masked** (the PII-bypass regression test); deterministic ids are stable across runs.
 Repo DoD bar applies.
+
+## Answer
+
+**BUILT + green on branch `hypergraph-m1`.** Full-suite regression proof: baseline before the
+change was **4644 passed / 1 failed** (the failure was ADR-count drift on front-door pages from the
+wayfinder ADR commits — repaired); after: **4661 passed / 36 skipped / 0 failed**, `ruff` clean,
+`mypy --strict` clean over all 147 typed sources. 16 new tests.
+
+What landed (all additive; a stack that never configures hyperedges is byte-identical to v19 apart
+from the schema_version number — proven by fixture diff and the runner e2e off-test):
+
+1. **Contracts v20**: `GraphHyperedge` + `HyperedgeRelation` + `HyperedgeSourceRef`,
+   `GraphScope.HYPEREDGE`, three-way scope/payload validator,
+   `CanonicalEntity.member_link_confidences`. Token-counter identity stored beside `token_cost`
+   (ADR-0058).
+2. **Link confidence persisted** end-to-end: glinker `MentionRecord.link_confidence` ←
+   `LinkedEntity.score` (previously dropped at `_apply_linking_results`) → `CanonicalEntityRecord`
+   → core `ResolvedCluster` → `CanonicalEntity`. Missing = unknown, never 0.0.
+3. **`latence_core.sentences`**: zero-dep abbreviation-safe DE/EN `RuleSentenceSplitter` behind a
+   `SentenceSplitter` protocol (12 trap cases pinned: `z. B. am 3. Mai`, `ca. 7 Mrd. Euro`,
+   `Acme Inc. acquired Beta Ltd.`, decimals, initials, ellipsis, markdown breaks).
+4. **`latence_core.hyperedge`**: segmentation (relation-seeded windows ≤3 sentences, overlap
+   merge, weak units behind toggle), size targets (merge <25 / split >180 at min-cut-relations
+   boundary), arity cap 12 via relation-group union-find split, corpus-wide dedup on entity-set +
+   relation-signature with `support` + `merged_sources`, γ renormalised over available signals
+   with the 0.5 weak discount, **`tau_text` in the corpus redaction variant enforced at the
+   writer** (PIISpan substitution; TAG intact), content-addressed ids over entity set + signature
+   (NOT span position).
+5. **Wiring**: `CanonicalGraphAssembler` config `hyperedges:` (true or policy overrides) + the
+   `wants_document_streams` opt-in gate; the Runner feeds chunk/mention/relation streams only to
+   an opted-in Provider — no `GraphAssembler` protocol change, no fake edits.
+6. **Export**: `graph-hyperedges.parquet` (solver columns first-class) only when the projection
+   ran. **Quality Report**: `graph.hyperedges` section (counts, weak fraction, arity histogram,
+   token-cost distribution) — `None` otherwise.
+7. **Tests** ([test_hyperedge.py](../../../packages/latence-core/tests/test_hyperedge.py)):
+   relation-args-in-span, token ceiling, dedup idempotency + support, **PII-bypass regression**
+   (masked span never in `tau_text`; raw corpus ⇒ raw `tau_text`), determinism, weak toggle,
+   arity split, splitter traps, byte-identity off-path, and TWO e2e runs through the REAL
+   LocalRunner (on: parquet + report section; off: no file, no section, NODE/EDGE-only stream).
+
+Deviations from ticket text, stated: sentence splitting is the in-core rule splitter behind a seam
+(pysbd/spaCy senter = a Provider-package adapter later — thin-core ADR-0016 keeps the dep out of
+core); relation argument offsets resolved via the head/tail mention join as planned (no schema
+change needed). Follow-ups already tracked: exact operator-named token counter injection lands with
+M2 (ticket 13); calibration stays ticket 09.

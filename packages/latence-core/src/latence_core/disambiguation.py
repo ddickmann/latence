@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 # Normalisation for the EXACT strategy and for token overlap: fold case, collapse
@@ -175,6 +175,9 @@ class ResolvedCluster:
     document_ids: list[str]
     merge_audits: list[MergeAudit]
     confidence: float
+    # v20 (ADR-0057): per-member LINK confidence (mention_id -> 0..1), populated only by
+    # linking Providers; the algorithmic cascade leaves it empty. Missing = unknown, not 0.
+    link_confidences: dict[str, float] = field(default_factory=dict)
 
 
 class _UnionFind:

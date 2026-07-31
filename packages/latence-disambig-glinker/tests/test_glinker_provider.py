@@ -359,3 +359,51 @@ def test_mention_context_uses_offset_map_inverse_resolution() -> None:
     # Coordinate-correct: the window opens at the full 'BAFA' surface (not the naive 'FA').
     assert ctx.startswith("BAFA")
     assert "export licence" in ctx
+
+
+# -- v20 (ADR-0057): link confidence is persisted, not dropped -------------------
+
+
+def test_apply_linking_results_carries_the_link_score() -> None:
+    """The linker has always computed a link score and then dropped it (the ticket-01
+    finding); v20 carries it onto the mention so Hyperedge gamma has a data source."""
+    from latence_disambig_glinker.backends import LinkedEntity
+    from latence_disambig_glinker.linker import _apply_linking_results
+    from latence_disambig_glinker.models import MentionRecord
+
+    mentions = [
+        MentionRecord(mention_id="m1", dataset_id="ds", document_id="d1",
+                      text="Acme", label="ORG"),
+        MentionRecord(mention_id="m2", dataset_id="ds", document_id="d1",
+                      text="Beta", label="ORG"),
+    ]
+    linked = [
+        LinkedEntity(entity_id="e1", label="Acme", description="", score=0.87,
+                     entity_type="ORG", aliases=[], source="glinker"),
+        None,
+    ]
+    updated = _apply_linking_results(mentions, linked)
+    assert updated[0].canonical_entity_id == "e1"
+    assert updated[0].link_confidence == 0.87
+    # unresolved mention: confidence stays None (unknown), never 0.0
+    assert updated[1].canonical_entity_id is None
+    assert updated[1].link_confidence is None
+
+
+def test_build_canonical_entities_collects_member_link_confidences() -> None:
+    from latence_disambig_glinker.linker import EntityLinker
+    from latence_disambig_glinker.models import MentionRecord
+
+    linker = EntityLinker.__new__(EntityLinker)  # engine method under test, no backend needed
+    mentions = [
+        MentionRecord(mention_id="m1", dataset_id="ds", document_id="d1", text="Acme",
+                      label="ORG", score=0.9, canonical_entity_id="e1", link_confidence=0.87),
+        MentionRecord(mention_id="m2", dataset_id="ds", document_id="d2", text="Acme",
+                      label="ORG", score=0.8, canonical_entity_id="e1", link_confidence=0.75),
+        MentionRecord(mention_id="m3", dataset_id="ds", document_id="d1", text="Gamma",
+                      label="ORG", score=0.7),  # unresolved: provisional entity, no link score
+    ]
+    entities = EntityLinker._build_canonical_entities(linker, mentions, "ds")
+    by_name = {e.canonical_name: e for e in entities}
+    assert by_name["Acme"].link_confidences == {"m1": 0.87, "m2": 0.75}
+    assert by_name["Gamma"].link_confidences == {}

@@ -11,6 +11,28 @@ workspace are versioned and released together under one version number.
 
 ### Added
 
+- **Hyperedges — the m-ary retrieval unit, an OPTIONAL third Graph-Assembly projection
+  (ADR-0056/0057/0058, hypergraph-m1; `latence_core.hyperedge`, `latence_core.sentences`,
+  contracts v20).** Where an edge connects two nodes, a `GraphHyperedge` carries the FULL set of
+  canonical entities co-occurring in one minimal sentence window plus the directed relations
+  extracted from it — the atomic item a chain-of-evidence selector packs into a token budget, with
+  its selection inputs precomputed on the record: `token_cost` (+ the counter identity beside the
+  value, ADR-0058, so an index/query tokenizer mismatch is detectable), `gamma` (link ⊕ relation ⊕
+  weakest-mention confidence, renormalised over signals actually present), `support` (corpus-wide
+  dedup on identical entity-set + relation-signature), and `has_relations` (weak, entities-only
+  units behind a config toggle). Segmentation runs on a new zero-dep, abbreviation-safe DE/EN
+  `RuleSentenceSplitter` (`z. B.`, `Dr.`, `am 3. Mai`, decimals, initials — never boundaries), not
+  the chunker's budget regex. **`tau_text` follows the corpus redaction variant, enforced at the
+  writer** (ADR-0057): a Hyperedge can never carry text the exported corpus masked — the PII-bypass
+  regression test pins it. Strictly opt-in: `graph_assembly` config gains `hyperedges:` (absent =
+  everything byte-identical to v19 apart from the version number; the Runner feeds the extra
+  chunk/mention/relation streams only to a Provider that opts in via `wants_document_streams` — no
+  Capability-protocol change). Opted-in stacks additionally get `graph-hyperedges.parquet` in the
+  KG Export and a `graph.hyperedges` Quality-Report section (counts, arity histogram, and the
+  token-cost distribution that predicts packing behaviour). Disambiguation now PERSISTS the
+  per-mention link confidence the linker always computed and dropped
+  (`CanonicalEntity.member_link_confidences`, glinker `link_confidence`) — γ's data source.
+
 - **T7 — efficient per-chunk extraction: label-set bucketing + gliner2's native batched forward
   (`fused_entity_relation.gliner2`, `redaction.gliner2`, `latence_core.providers.perf`).** Per-chunk
   induction (T1/T2) gives every chunk its own small label set, but gliner2's batched entry points

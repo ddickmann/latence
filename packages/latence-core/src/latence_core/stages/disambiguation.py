@@ -283,6 +283,7 @@ class CascadeDisambiguator:
             source_document_ids=list(cluster.document_ids),
             kb_id=link.kb_id if link.linked else None,
             merge_decisions=[_merge_decision(a, cluster) for a in cluster.merge_audits],
+            member_link_confidences=dict(cluster.link_confidences),
             evidence=evidence,
             provenance=provenance,
             classification=classification,

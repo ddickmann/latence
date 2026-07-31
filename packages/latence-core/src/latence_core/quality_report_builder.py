@@ -97,6 +97,7 @@ from latence_core.quality import (
     EntityQuality,
     GoldSetEvaluation,
     GraphQuality,
+    HyperedgeQuality,
     LabelScore,
     ParseQuality,
     ProfilingQuality,
@@ -1348,6 +1349,14 @@ class _GraphAggregator:
         self._edges = 0
         self._node_confidence = 0.0
         self._edge_confidence = 0.0
+        # ADR-0057: Hyperedge roll-up inputs; empty for every run without the projection.
+        self._hyperedge_token_costs: list[int] = []
+        self._hyperedge_weak = 0
+        self._hyperedge_relations = 0
+        self._hyperedge_gamma = 0.0
+        self._hyperedge_arity = 0
+        self._hyperedge_arities: dict[str, int] = {}
+        self._hyperedge_support_max = 0
 
     @classmethod
     def for_run(cls, context: QualityRunContext) -> _GraphAggregator | None:
@@ -1384,6 +1393,17 @@ class _GraphAggregator:
             if edge.evidence.mention_ids:
                 quality.edges_with_evidence += 1
             self._edge_confidence += edge.confidence
+        elif record.scope is GraphScope.HYPEREDGE and record.hyperedge is not None:
+            hyperedge = record.hyperedge
+            self._hyperedge_token_costs.append(hyperedge.token_cost)
+            if hyperedge.weak:
+                self._hyperedge_weak += 1
+            self._hyperedge_relations += len(hyperedge.relations)
+            self._hyperedge_gamma += hyperedge.gamma
+            self._hyperedge_arity += hyperedge.arity
+            key = str(hyperedge.arity)
+            self._hyperedge_arities[key] = self._hyperedge_arities.get(key, 0) + 1
+            self._hyperedge_support_max = max(self._hyperedge_support_max, hyperedge.support)
 
     def finish(self) -> GraphQuality | None:
         quality = self._quality
@@ -1397,6 +1417,24 @@ class _GraphAggregator:
         quality.nodes_by_type = dict(sorted(quality.nodes_by_type.items()))
         quality.edges_by_label = dict(sorted(quality.edges_by_label.items()))
         quality.inferred_edges_by_scorer = dict(sorted(quality.inferred_edges_by_scorer.items()))
+        # ADR-0057: the section exists only when the projection ran (None otherwise, so a stack
+        # without hyperedges reports byte-identically apart from nothing at all).
+        if self._hyperedge_token_costs:
+            costs = sorted(self._hyperedge_token_costs)
+            n = len(costs)
+            quality.hyperedges = HyperedgeQuality(
+                hyperedges_total=n,
+                weak_count=self._hyperedge_weak,
+                relations_total=self._hyperedge_relations,
+                avg_gamma=round(self._hyperedge_gamma / n, 6),
+                avg_arity=round(self._hyperedge_arity / n, 6),
+                arity_histogram=dict(sorted(self._hyperedge_arities.items())),
+                token_cost_min=costs[0],
+                token_cost_median=costs[n // 2],
+                token_cost_max=costs[-1],
+                token_cost_total=sum(costs),
+                support_max=self._hyperedge_support_max,
+            )
         return quality
 
 

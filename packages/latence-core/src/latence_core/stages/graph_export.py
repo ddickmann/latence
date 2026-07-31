@@ -45,7 +45,7 @@ from latence_core.providers.profile import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from latence_core.contracts import GraphEdge, GraphNode, Record
+    from latence_core.contracts import GraphEdge, GraphHyperedge, GraphNode, Record
     from latence_core.storage import Storage
 
 # The base IRI the TTL/GraphML node and predicate identifiers hang off. A non-dereferenceable
@@ -132,6 +132,16 @@ class KnowledgeGraphExport:
             for r in record_list
             if isinstance(r, GraphRecord) and r.scope is GraphScope.EDGE and r.edge is not None
         ]
+        # ADR-0057: the OPTIONAL Hyperedge stream. Present only when Graph Assembly was
+        # configured for hyperedges; an unconfigured stack collects an empty list and the
+        # export output — files, names, bytes — is identical to today.
+        hyperedges: list[GraphHyperedge] = [
+            r.hyperedge
+            for r in record_list
+            if isinstance(r, GraphRecord)
+            and r.scope is GraphScope.HYPEREDGE
+            and r.hyperedge is not None
+        ]
         base = out_dir.rstrip("/")
         stem = self._basename
         # Parquet is written through storage.open (a raw handle that does not create parent
@@ -148,7 +158,12 @@ class KnowledgeGraphExport:
         storage.write_atomic(ttl_uri, self._render_ttl(nodes, edges).encode("utf-8"))
         storage.write_atomic(graphml_uri, self._render_graphml(nodes, edges).encode("utf-8"))
 
-        return [nodes_uri, edges_uri, ttl_uri, graphml_uri]
+        uris = [nodes_uri, edges_uri, ttl_uri, graphml_uri]
+        if hyperedges:
+            hyperedges_uri = f"{base}/{stem}-hyperedges.parquet"
+            self._write_hyperedges_parquet(hyperedges, storage, hyperedges_uri)
+            uris.append(hyperedges_uri)
+        return uris
 
     # -- Parquet ------------------------------------------------------------
 
@@ -229,6 +244,58 @@ class KnowledgeGraphExport:
                 ("target_node_id", pa.string()),
                 ("label", pa.string()),
                 ("confidence", pa.float64()),
+                ("properties", pa.string()),
+                ("evidence", pa.string()),
+            ]
+        )
+        table = pa.Table.from_pylist(flat, schema=schema)
+        with storage.open(uri, "wb") as fh:
+            pq.write_table(table, fh)  # type: ignore[no-untyped-call]
+
+    @staticmethod
+    def _write_hyperedges_parquet(
+        hyperedges: list[GraphHyperedge], storage: Storage, uri: str
+    ) -> None:
+        # ADR-0057/0056: the solver-facing columns are FIRST-CLASS (token_cost, gamma, support,
+        # has_relations, token_counter — everything the chain-of-evidence selector reads),
+        # entity/relation sets ride as JSON like every other list column in this export.
+        flat = [
+            {
+                "hyperedge_id": h.hyperedge_id,
+                "entity_node_ids": json.dumps(h.entity_node_ids, sort_keys=True),
+                "relations": json.dumps(
+                    [r.model_dump(mode="json") for r in h.relations], sort_keys=True
+                ),
+                "tau_text": h.tau_text,
+                "token_cost": h.token_cost,
+                "token_counter": h.token_counter,
+                "gamma": h.gamma,
+                "support": h.support,
+                "has_relations": h.has_relations,
+                "arity": h.arity,
+                "member_mention_ids": json.dumps(h.member_mention_ids, sort_keys=True),
+                "merged_sources": json.dumps(
+                    [m.model_dump(mode="json") for m in h.merged_sources], sort_keys=True
+                ),
+                "properties": json.dumps(h.properties, sort_keys=True),
+                "evidence": json.dumps(h.evidence.model_dump(mode="json"), sort_keys=True),
+            }
+            for h in hyperedges
+        ]
+        schema = pa.schema(
+            [
+                ("hyperedge_id", pa.string()),
+                ("entity_node_ids", pa.string()),
+                ("relations", pa.string()),
+                ("tau_text", pa.string()),
+                ("token_cost", pa.int64()),
+                ("token_counter", pa.string()),
+                ("gamma", pa.float64()),
+                ("support", pa.int64()),
+                ("has_relations", pa.bool_()),
+                ("arity", pa.int64()),
+                ("member_mention_ids", pa.string()),
+                ("merged_sources", pa.string()),
                 ("properties", pa.string()),
                 ("evidence", pa.string()),
             ]

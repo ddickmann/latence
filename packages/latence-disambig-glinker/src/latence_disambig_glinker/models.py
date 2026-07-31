@@ -39,6 +39,9 @@ class MentionRecord(BaseModel):
 
     # Resolved after entity linking.
     canonical_entity_id: str | None = None
+    # v20 (ADR-0057): the linker's confidence for THAT link, previously computed and dropped.
+    # None = unlinked / no score, never 0.0 (missing is unknown, not zero confidence).
+    link_confidence: float | None = None
 
 
 class CanonicalEntityRecord(BaseModel):
@@ -62,6 +65,8 @@ class CanonicalEntityRecord(BaseModel):
 
     # --- Confidence ---
     confidence: float = 0.0
+    # v20 (ADR-0057): per-member link confidence, mention_id -> 0..1, linked members only.
+    link_confidences: dict[str, float] = Field(default_factory=dict)
     source: str = "resolved"
 
     # --- Metadata ---

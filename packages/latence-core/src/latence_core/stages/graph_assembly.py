@@ -31,16 +31,20 @@ from latence_core.capability import (
     ProviderRegistry,
 )
 from latence_core.contracts import (
+    ChunkRecord,
     DisambiguationRecord,
     DisambiguationScope,
+    EntityMention,
     Evidence,
     GraphEdge,
     GraphNode,
     GraphRecord,
     GraphScope,
+    RelationMention,
 )
-from latence_core.errors import ContractError
+from latence_core.errors import ConfigError, ContractError
 from latence_core.graph import BuiltEdge, BuiltNode, GraphBuilder, make_graph_id
+from latence_core.hyperedge import HyperedgeBuilder, HyperedgeConfig
 from latence_core.pipeline import CapabilityKind
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
@@ -85,6 +89,44 @@ def _resolve_feature_computer(
         registry=registry,
         owner=_OWNER,
     )
+
+
+def _resolve_hyperedge_config(spec: Any) -> HyperedgeConfig | None:
+    """Resolve the OPTIONAL ``hyperedges`` block (ADR-0057): None = projection off.
+
+    ``spec`` is ``None`` (off — the emitted stream is byte-identical to today and the Runner
+    never streams document-level records to this Stage), ``{}``/``True`` (on, spec-default
+    policy), or a mapping overriding :class:`~latence_core.hyperedge.HyperedgeConfig` fields
+    (``weak_hyperedges``, ``max_arity``, ``min_tokens``, ``max_tokens``,
+    ``max_window_sentences``). A malformed shape is a loud wiring-time ConfigError, never a
+    silent default.
+    """
+    if spec is None:
+        return None
+    if spec is True:
+        return HyperedgeConfig()
+    if not isinstance(spec, dict):
+        msg = (
+            "graph_assembly config 'hyperedges' must be true or a mapping of "
+            f"HyperedgeConfig overrides, got {type(spec).__name__}."
+        )
+        raise ConfigError(msg)
+    allowed = {"weak_hyperedges", "max_arity", "min_tokens", "max_tokens", "max_window_sentences"}
+    unknown = set(spec) - allowed
+    if unknown:
+        msg = f"graph_assembly config 'hyperedges' has unknown key(s): {sorted(unknown)}."
+        raise ConfigError(msg)
+    try:
+        return HyperedgeConfig(
+            weak_hyperedges=bool(spec.get("weak_hyperedges", True)),
+            max_arity=int(spec.get("max_arity", 12)),
+            min_tokens=int(spec.get("min_tokens", 25)),
+            max_tokens=int(spec.get("max_tokens", 180)),
+            max_window_sentences=int(spec.get("max_window_sentences", 3)),
+        )
+    except (TypeError, ValueError) as exc:
+        msg = f"graph_assembly config 'hyperedges' is malformed: {exc}"
+        raise ConfigError(msg) from exc
 
 
 def _stamp_features(
@@ -179,13 +221,45 @@ class CanonicalGraphAssembler:
         self._feature_computer = _resolve_feature_computer(
             config.get("graph_features"), registry
         )
+        # ADR-0057: the OPTIONAL Hyperedge projection, following the graph_features pattern
+        # exactly — absent ⇒ no builder ⇒ the emitted stream is byte-identical to today AND the
+        # Runner never streams the document-level records this projection alone needs (the
+        # ``wants_document_streams`` gate below).
+        self._hyperedge_config = _resolve_hyperedge_config(config.get("hyperedges"))
+
+    @property
+    def wants_document_streams(self) -> bool:
+        """True when the Runner should feed chunks/mentions/relations (hyperedges on).
+
+        The Runner checks this attribute (default absent/False on every other Provider) before
+        choosing :meth:`assemble_with_documents` over :meth:`assemble`, so a stack that never
+        configures hyperedges never pays the extra stream reads — additive at the seam, no
+        Capability-protocol change.
+        """
+        return self._hyperedge_config is not None
 
     def assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]:
-        entities, entity_src, relations, relation_src = _partition(records)
+        yield from self.assemble_with_documents(records, chunks=(), mentions=(), relations=())
+
+    def assemble_with_documents(
+        self,
+        records: Iterable[DisambiguationRecord],
+        *,
+        chunks: Iterable[ChunkRecord] = (),
+        mentions: Iterable[EntityMention] = (),
+        relations: Iterable[RelationMention] = (),
+    ) -> Iterator[GraphRecord]:
+        """Assemble nodes + edges, then (when configured, ADR-0057) the Hyperedge stream.
+
+        The document-level streams are consumed only when ``hyperedges`` is configured; with
+        the projection off this is exactly :meth:`assemble` — same records, same order, same
+        bytes.
+        """
+        entities, entity_src, relation_list, relation_src = _partition(records)
         builder = GraphBuilder(
             corpus_id=self._corpus_id, max_evidence_per_node=self._max_evidence_per_node
         )
-        nodes, edges = builder.build(entities, relations)
+        nodes, edges = builder.build(entities, relation_list)
 
         node_records = [self._node_record(node, entity_src[node.entity_id]) for node in nodes]
         edge_records = [self._edge_record(edge, relation_src[edge.relation_id]) for edge in edges]
@@ -194,6 +268,24 @@ class CanonicalGraphAssembler:
         node_records = _stamp_features(node_records, edge_records, self._feature_computer)
         yield from node_records
         yield from edge_records
+
+        if self._hyperedge_config is None:
+            return
+        # ADR-0057: the m-ary projection of the SAME inputs, emitted after nodes + edges in
+        # hyperedge-id order. Only canonicalised entities can join (node_id_for is the same
+        # deterministic mapping the NODE stream used), so Hyperedges never reference a node
+        # the graph does not carry.
+        hyperedge_builder = HyperedgeBuilder(self._corpus_id, self._hyperedge_config)
+        for hyperedge in hyperedge_builder.build(
+            chunks, mentions, relations, entities, builder.node_id_for
+        ):
+            yield GraphRecord(
+                record_id=f"{hyperedge.record_id}#graph",
+                scope=GraphScope.HYPEREDGE,
+                hyperedge=hyperedge,
+                provenance=hyperedge.provenance,
+                classification=hyperedge.classification,
+            )
 
     @staticmethod
     def _node_record(node: BuiltNode, source: DisambiguationRecord) -> GraphRecord:

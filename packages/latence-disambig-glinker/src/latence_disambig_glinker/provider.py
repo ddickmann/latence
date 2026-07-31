@@ -389,6 +389,9 @@ class GLinkerDisambiguator(CascadeDisambiguator, AdapterBase):
                     document_ids=sorted(e.document_ids),
                     merge_audits=audits,
                     confidence=_clamp01(e.confidence),
+                    link_confidences={
+                        m: _clamp01(v) for m, v in sorted(e.link_confidences.items())
+                    },
                 )
             )
         clusters.sort(key=lambda c: (c.canonical_text, normalize_text(c.canonical_text)))

@@ -1516,6 +1516,31 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
                 pipeline=pipeline,
                 run_id=run_id,
             )
+            # ADR-0057: a Provider that OPTS IN (``wants_document_streams``, absent/False on
+            # every other Provider) additionally receives the run's chunks + mentions +
+            # relations for the Hyperedge projection — gathered from the WHOLE pipeline with
+            # the same #69 lazy-streaming discipline (and the same rationale) as the
+            # Disambiguation chunk gather above. A Provider that never opts in takes the
+            # unchanged single-stream path: no extra reads, byte-identical behavior.
+            if getattr(graph_assembler, "wants_document_streams", False):
+                assembly_chunks = self._stream_all_records_of_type(
+                    outputs, ChunkRecord, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+                assembly_mentions = self._stream_all_records_of_type(
+                    outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+                assembly_relations = self._stream_all_records_of_type(
+                    outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
+                )
+                assemble_with_documents = getattr(graph_assembler, "assemble_with_documents")  # noqa: B009 - the opt-in gate above proves presence; getattr keeps the Protocol narrow
+                return iter(
+                    assemble_with_documents(
+                        graph_records,
+                        chunks=assembly_chunks,
+                        mentions=assembly_mentions,
+                        relations=assembly_relations,
+                    )
+                )
             return iter(graph_assembler.assemble(graph_records))
 
         if stage.capability is CapabilityKind.GRAPH_COMPLETION:

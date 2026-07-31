@@ -219,6 +219,11 @@ class EntityLinker:
             aliases = sorted({m.text for m in cluster} - {canonical_name})
             mention_ids = [m.mention_id for m in cluster]
             document_ids = sorted({m.document_id for m in cluster})
+            link_confidences = {
+                m.mention_id: m.link_confidence
+                for m in cluster
+                if m.link_confidence is not None
+            }
             confidence = sum(m.score for m in cluster) / len(cluster)
             entities.append(
                 CanonicalEntityRecord(
@@ -231,6 +236,7 @@ class EntityLinker:
                     document_ids=document_ids,
                     evidence_count=len(cluster),
                     confidence=round(confidence, 4),
+                    link_confidences=link_confidences,
                     source="resolved" if len(cluster) > 1 else "single_mention",
                 )
             )
@@ -250,7 +256,16 @@ def _apply_linking_results(
     linked_count = 0
     for mention, result in zip(mentions, linked, strict=True):
         if result is not None:
-            updated.append(mention.model_copy(update={"canonical_entity_id": result.entity_id}))
+            updated.append(
+                mention.model_copy(
+                    update={
+                        "canonical_entity_id": result.entity_id,
+                        # v20 (ADR-0057): persist the link score the linker always computed —
+                        # the data source for Hyperedge gamma and weighted incidence.
+                        "link_confidence": min(1.0, max(0.0, float(result.score))),
+                    }
+                )
+            )
             linked_count += 1
         else:
             updated.append(mention.model_copy())

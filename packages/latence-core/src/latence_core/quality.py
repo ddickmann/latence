@@ -619,6 +619,36 @@ class GraphQuality(BaseModel):
     # proposed them. A run with no Graph Completion Stage has ``inferred_edge_count == 0``.
     inferred_edge_count: int = 0
     inferred_edges_by_scorer: dict[str, int] = Field(default_factory=dict)
+    # ADR-0057: the OPTIONAL Hyperedge projection's roll-up, ``None`` for every run that never
+    # configured hyperedges (the genuinely-optional guarantee: the section appears only when the
+    # projection ran). The token-cost distribution is the number that predicts whether budgeted
+    # selection will behave (spec 1.2: a tight, roughly unimodal distribution packs well) — it is
+    # reported from the first run, not discovered after one.
+    hyperedges: HyperedgeQuality | None = None
+
+
+class HyperedgeQuality(BaseModel):
+    """Hyperedge-projection roll-up (ADR-0057): counts + the token-cost distribution.
+
+    Counts only (never ``tau_text``), so it is safe to persist. ``weak_count`` are the
+    entities-only Hyperedges (``has_relations=False``, spec 1.2 rule 4); ``arity_histogram``
+    maps arity (as a string key, JSON-stable) to count; the ``token_cost_*`` fields summarise
+    the knapsack-weight distribution; ``support_max`` witnesses dedup-merge actually firing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hyperedges_total: int = 0
+    weak_count: int = 0
+    relations_total: int = 0
+    avg_gamma: float = 0.0
+    avg_arity: float = 0.0
+    arity_histogram: dict[str, int] = Field(default_factory=dict)
+    token_cost_min: int = 0
+    token_cost_median: int = 0
+    token_cost_max: int = 0
+    token_cost_total: int = 0
+    support_max: int = 0
 
 
 class ContextEnrichmentQuality(BaseModel):

@@ -458,7 +458,7 @@
     "passed": 6,
     "findings": [
       {
-        "schema_version": 19,
+        "schema_version": 20,
         "checkpoint": "intake",
         "verdict": "pass",
         "document_id": "sha256:982edd69b14d130a8d6293294bfb9084293f62b215b7ceed84c9f6e89ac2d342",
@@ -468,7 +468,7 @@
         "marker": null
       },
       {
-        "schema_version": 19,
+        "schema_version": 20,
         "checkpoint": "intake",
         "verdict": "pass",
         "document_id": "sha256:74c0a16859f1ea6b52a60f02def29cfc5d49d27cb57f136fafc87fb6571ebe8e",
@@ -478,7 +478,7 @@
         "marker": null
       },
       {
-        "schema_version": 19,
+        "schema_version": 20,
         "checkpoint": "intake",
         "verdict": "pass",
         "document_id": "sha256:477d4c5e4721e7d548e533dc7965c55ee8a5219c8814bbde9b58dfecfb02c34f",
@@ -488,7 +488,7 @@
         "marker": null
       },
       {
-        "schema_version": 19,
+        "schema_version": 20,
         "checkpoint": "content",
         "verdict": "pass",
         "document_id": "sha256:982edd69b14d130a8d6293294bfb9084293f62b215b7ceed84c9f6e89ac2d342",
@@ -498,7 +498,7 @@
         "marker": null
       },
       {
-        "schema_version": 19,
+        "schema_version": 20,
         "checkpoint": "content",
         "verdict": "pass",
         "document_id": "sha256:74c0a16859f1ea6b52a60f02def29cfc5d49d27cb57f136fafc87fb6571ebe8e",
@@ -508,7 +508,7 @@
         "marker": null
       },
       {
-        "schema_version": 19,
+        "schema_version": 20,
         "checkpoint": "content",
         "verdict": "pass",
         "document_id": "sha256:477d4c5e4721e7d548e533dc7965c55ee8a5219c8814bbde9b58dfecfb02c34f",
@@ -670,7 +670,8 @@
     "inferred_edge_count": 1,
     "inferred_edges_by_scorer": {
       "reference.adjacency": 1
-    }
+    },
+    "hyperedges": null
   },
   "context_enrichment": {
     "chunks_enriched": 3,

@@ -13,7 +13,7 @@ import bisect
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Bump on any breaking change to a contract below. Serialized with every record
 # so downstream consumers can detect and reject an incompatible schema.
@@ -239,7 +239,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # which ``ChunkRecord`` (``extra="forbid"``) now rejects. Chunk checkpoints are run-scoped
 # artifacts and a run is re-chunked from its Parse checkpoint, so there is no migration path to
 # provide — the number bump is the notice.
-SCHEMA_VERSION = 19
+#
+# v20 (ADR-0057, hypergraph-m1): ADDITIVE — Graph Assembly gains a third scope. ``GraphScope``
+# grows ``HYPEREDGE``; ``GraphRecord`` gains the optional ``hyperedge`` payload holding the new
+# :class:`GraphHyperedge` (the m-ary Hyperedge unit — CONTEXT ``Hyperedge``); ``CanonicalEntity``
+# gains ``member_link_confidences`` (per-mention link confidence, previously computed by the
+# linker and dropped). A v19 record deserialises unchanged (all new fields default), and a stack
+# that never configures hyperedges emits streams byte-identical to v19 apart from the version
+# number itself.
+SCHEMA_VERSION = 20
 
 
 class Provenance(BaseModel):
@@ -1933,7 +1941,29 @@ class CanonicalEntity(Record):
     merge_decisions: list[MergeDecision] = Field(
         default_factory=list, description="The audited merges that built this cluster."
     )
+    # v20 (ADR-0057): per-mention LINK confidence, keyed by member mention record_id. The
+    # linker has always computed this score and then dropped it before any durable record —
+    # leaving the Hyperedge's gamma (spec 1.5) and weighted incidence (spec 6.1) with no data
+    # source. Additive and defaulted: the algorithmic resolver cascade leaves it empty (its
+    # merge confidence already lives on Evidence/MergeDecision), a linking Provider fills it
+    # for the mentions it actually linked. Absent key = "no link score for that mention",
+    # never 0.0 — consumers must treat missing as unknown, not as zero confidence.
+    member_link_confidences: dict[str, float] = Field(
+        default_factory=dict,
+        description="mention record_id -> linker confidence 0..1, for linked members only.",
+    )
     evidence: Evidence
+
+    @field_validator("member_link_confidences")
+    @classmethod
+    def _link_confidences_in_range(cls, value: dict[str, float]) -> dict[str, float]:
+        for mention_id, score in value.items():
+            if not (0.0 <= score <= 1.0):
+                msg = (
+                    f"member_link_confidences[{mention_id!r}] must be in [0, 1], got {score!r}."
+                )
+                raise ValueError(msg)
+        return value
 
     @property
     def mention_count(self) -> int:
@@ -2143,19 +2173,163 @@ class GraphEdge(Record):
         return self
 
 
+class HyperedgeRelation(BaseModel):
+    """One directed relation carried inside a :class:`GraphHyperedge` (CONTEXT ``Hyperedge``).
+
+    The Hyperedge's relation signature is the set of these triples — ``(head_node_id, label,
+    tail_node_id)`` — and two Hyperedges are dedup-equivalent only when BOTH their entity sets
+    AND their relation signatures match (ADR-0057: identical entity sets with differing
+    signatures are *distinct facts about the same group* and are never merged).
+    ``relation_id`` back-references the source relation record for audit; ``confidence`` is the
+    extractor's score, one input of the Hyperedge's ``gamma``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    relation_id: str = Field(..., min_length=1, description="Source relation record_id (audit).")
+    head_node_id: str = Field(..., min_length=1, description="Head GraphNode node_id.")
+    label: str = Field(..., min_length=1, description="The relation label.")
+    tail_node_id: str = Field(..., min_length=1, description="Tail GraphNode node_id.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Extractor confidence 0..1.")
+
+    @property
+    def signature(self) -> tuple[str, str, str]:
+        """The dedup signature triple: (head_node_id, label, tail_node_id)."""
+        return (self.head_node_id, self.label, self.tail_node_id)
+
+
+class HyperedgeSourceRef(BaseModel):
+    """A non-primary source span folded into a Hyperedge on dedup-merge (CONTEXT ``Hyperedge``).
+
+    On merge the highest-γ instance's ``tau_text`` and Provenance stay primary and every other
+    instance is appended here (ADR-0057 / spec 1.4), so a corpus-repeated fact keeps its full
+    audit trail while ``support`` counts the repetitions. Offsets are in the parent document's
+    original coordinates, like every Provenance span.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    document_record_id: str = Field(..., min_length=1, description="Parent DocumentRecord id.")
+    chunk_record_id: str = Field(..., min_length=1, description="Parent ChunkRecord id.")
+    char_start: int = Field(..., ge=0, description="Span start, original document coordinates.")
+    char_end: int = Field(..., ge=0, description="Span end (half-open), original coordinates.")
+
+
+class GraphHyperedge(Record):
+    """One Hyperedge: the m-ary unit of retrieval (CONTEXT ``Hyperedge``, ADR-0057).
+
+    Where a :class:`GraphEdge` connects exactly two nodes, a Hyperedge connects the FULL set of
+    canonical entities co-occurring in one minimal text span, together with the directed
+    relations extracted from that span — so a joint fact stays one selectable unit instead of
+    fragmenting into disconnected pairs. It is the atomic item the chain-of-evidence selector
+    packs into a token budget, which is why its selection inputs are precomputed on the record
+    (ADR-0056: the index is built for the solver):
+
+    * ``tau_text`` — the verbatim span text, **in the corpus redaction variant** (ADR-0057):
+      it never contains text the exported corpus would not contain. The span's Provenance
+      stays in original coordinates for audit and Purge.
+    * ``token_cost`` — the knapsack weight, computed at build time by the named
+      ``token_counter`` and treated downstream as an approximate ranking weight whose budget
+      guarantee comes from an exact query-time verification pass (ADR-0058). The counter
+      identity is stored beside the value so a later mismatch is detectable, never silent.
+    * ``gamma`` — extraction confidence composed from link/relation/mention confidences
+      (spec 1.5; uncalibrated until the calibration decision lands).
+    * ``support`` — how many distinct source spans asserted this same fact (dedup-merge
+      counter); a frequency prior for scoring.
+    * ``has_relations`` — ``False`` marks a *weak* Hyperedge (entities only), emitted behind a
+      config toggle and utility-discounted downstream.
+
+    ``hyperedge_id`` is deterministic and content-addressed over the corpus id, the sorted
+    entity-node set, and the sorted relation signature — NOT over the span position — so the
+    same fact found twice hashes to the same id and dedup-merge is the identity operation the
+    S11 affected-set machinery can key off. Like every carrier it is a :class:`Record`
+    (Provenance = the primary span, original coordinates; Classification inherited), and it
+    carries :class:`Evidence` linking back to the member mentions.
+    """
+
+    hyperedge_id: str = Field(..., min_length=1, description="Deterministic content-addressed id.")
+    entity_node_ids: list[str] = Field(
+        ..., min_length=1, description="Sorted unique GraphNode node_ids this Hyperedge connects."
+    )
+    member_mention_ids: list[str] = Field(
+        default_factory=list, description="record_ids of the mentions inside the span."
+    )
+    relations: list[HyperedgeRelation] = Field(
+        default_factory=list, description="Directed relations extracted from the span."
+    )
+    tau_text: str = Field(
+        ..., min_length=1, description="Verbatim span text, corpus redaction variant (ADR-0057)."
+    )
+    token_cost: int = Field(..., ge=1, description="Knapsack weight: token count of tau_text.")
+    token_counter: str = Field(
+        ...,
+        min_length=1,
+        description="Identity of the counter that produced token_cost (ADR-0058).",
+    )
+    gamma: float = Field(..., ge=0.0, le=1.0, description="Extraction confidence (spec 1.5).")
+    support: int = Field(default=1, ge=1, description="Distinct source spans asserting this fact.")
+    has_relations: bool = Field(..., description="False = weak Hyperedge (entities only).")
+    merged_sources: list[HyperedgeSourceRef] = Field(
+        default_factory=list, description="Non-primary source spans folded in on dedup-merge."
+    )
+    properties: dict[str, Any] = Field(
+        default_factory=dict, description="Open attribute bag (JSON-serialisable)."
+    )
+    evidence: Evidence
+
+    @property
+    def arity(self) -> int:
+        """The number of entities this Hyperedge connects (m)."""
+        return len(self.entity_node_ids)
+
+    @property
+    def weak(self) -> bool:
+        """True for an entities-only Hyperedge (no extracted relation)."""
+        return not self.has_relations
+
+    @model_validator(mode="after")
+    def _consistent(self) -> GraphHyperedge:
+        if self.entity_node_ids != sorted(set(self.entity_node_ids)):
+            msg = "A GraphHyperedge's entity_node_ids must be sorted and unique."
+            raise ValueError(msg)
+        if self.has_relations != bool(self.relations):
+            msg = (
+                "A GraphHyperedge's has_relations flag must match its relations: "
+                f"has_relations={self.has_relations} with {len(self.relations)} relation(s)."
+            )
+            raise ValueError(msg)
+        if self.has_relations and len(self.entity_node_ids) < 2:
+            msg = "A relation-bearing GraphHyperedge must connect at least 2 entities."
+            raise ValueError(msg)
+        node_set = set(self.entity_node_ids)
+        for rel in self.relations:
+            if rel.head_node_id not in node_set or rel.tail_node_id not in node_set:
+                msg = (
+                    f"Hyperedge relation {rel.signature!r} references a node outside "
+                    "entity_node_ids — every relation argument must be a member entity."
+                )
+                raise ValueError(msg)
+        return self
+
+
 class GraphScope(StrEnum):
     """The scope a :class:`GraphRecord` describes (CONTEXT ``Graph Assembly``).
 
     Graph Assembly is a *corpus-level* Stage, so — like Disambiguation (ADR-0026) and
     Profiling (ADR-0025) — it emits a single scoped carrier rather than two contracts.
     ``NODE`` records carry one :class:`GraphNode` each (the graph's entity half); ``EDGE``
-    records carry one :class:`GraphEdge` each (the graph's relation half). A consumer reads
-    one exported stream and filters by ``scope``; the DAG, the checkpoint, and the KG Export
-    all treat one carrier.
+    records carry one :class:`GraphEdge` each (the graph's relation half); ``HYPEREDGE``
+    records carry one :class:`GraphHyperedge` each (the m-ary retrieval unit, ADR-0057 —
+    emitted only when the Stage is configured for hyperedges, so a stack that never opts in
+    never sees the scope). A consumer reads one exported stream and filters by ``scope``; the
+    DAG, the checkpoint, and the KG Export all treat one carrier.
     """
 
     NODE = "node"
     EDGE = "edge"
+    HYPEREDGE = "hyperedge"
 
 
 class GraphRecord(Record):
@@ -2165,36 +2339,40 @@ class GraphRecord(Record):
     :class:`DisambiguationRecord`'s scope split (ADR-0026). Exactly one of ``node``/``edge``
     is populated, selected by ``scope``:
 
-    * ``scope == NODE``: ``node`` holds the :class:`GraphNode`; ``edge`` is ``None``. Its
-      Provenance/Classification are the source canonical entity's (page-accurate).
-    * ``scope == EDGE``: ``edge`` holds the :class:`GraphEdge`; ``node`` is ``None``. Its
-      Provenance/Classification are the source normalized relation's.
+    * ``scope == NODE``: ``node`` holds the :class:`GraphNode`; ``edge``/``hyperedge`` are
+      ``None``. Its Provenance/Classification are the source canonical entity's (page-accurate).
+    * ``scope == EDGE``: ``edge`` holds the :class:`GraphEdge`; ``node``/``hyperedge`` are
+      ``None``. Its Provenance/Classification are the source normalized relation's.
+    * ``scope == HYPEREDGE``: ``hyperedge`` holds the :class:`GraphHyperedge` (ADR-0057);
+      ``node``/``edge`` are ``None``. Its Provenance is the primary span's, in original
+      coordinates.
 
     The scope/payload consistency is contract-enforced, so a Provider cannot emit a node-scope
     record with an edge payload (or leave both empty). Records are emitted deterministically
-    (all NODE records in node-id order, then all EDGE records in edge-id order), so a seeded
-    run is byte-identical (Baseline bar).
+    (all NODE records in node-id order, then all EDGE records in edge-id order, then any
+    HYPEREDGE records in hyperedge-id order), so a seeded run is byte-identical (Baseline bar).
     """
 
     scope: GraphScope
     node: GraphNode | None = Field(default=None)
     edge: GraphEdge | None = Field(default=None)
+    hyperedge: GraphHyperedge | None = Field(default=None)
 
     @model_validator(mode="after")
     def _scope_payload_consistent(self) -> GraphRecord:
-        if self.scope is GraphScope.NODE:
-            if self.node is None:
-                msg = "A NODE-scope GraphRecord must carry a 'node'."
+        expected = {
+            GraphScope.NODE: "node",
+            GraphScope.EDGE: "edge",
+            GraphScope.HYPEREDGE: "hyperedge",
+        }[self.scope]
+        for field in ("node", "edge", "hyperedge"):
+            value = getattr(self, field)
+            article = "an" if field == "edge" else "a"
+            if field == expected and value is None:
+                msg = f"A {self.scope.name}-scope GraphRecord must carry {article} {field!r}."
                 raise ValueError(msg)
-            if self.edge is not None:
-                msg = "A NODE-scope GraphRecord must not carry an 'edge'."
-                raise ValueError(msg)
-        else:  # EDGE
-            if self.edge is None:
-                msg = "An EDGE-scope GraphRecord must carry an 'edge'."
-                raise ValueError(msg)
-            if self.node is not None:
-                msg = "An EDGE-scope GraphRecord must not carry a 'node'."
+            if field != expected and value is not None:
+                msg = f"A {self.scope.name}-scope GraphRecord must not carry {article} {field!r}."
                 raise ValueError(msg)
         return self
 
