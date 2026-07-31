@@ -11,6 +11,20 @@ workspace are versioned and released together under one version number.
 
 ### Added
 
+- **Hyperedge sidecar KV + entity descriptions (ADR-0056/0058/0059, hypergraph-m2;
+  `latence_core.hyperedge_store`).** The opted-in hyperedge path now ships its query-time face:
+  `graph-hyperedges.kv`, a dependency-free, byte-reproducible single-file point-lookup store
+  (sorted keys, mmap binary search, opened per call and closed — statelessness structural), always
+  rebuildable from the parquet. Keyspaces: solver fields (no text), postings γ-sorted descending
+  with γ inline (top-k candidate truncation without a row fetch), `tau_text` (corpus redaction
+  variant), and an NFKC/casefold alias table — ADR-0059's tier-1 zero-model query entry works
+  against it today. Nodes additionally carry a deterministic spec-1.4 `description`
+  (name — type — top-3 relation contexts) and `hyperedge_degree` in properties: the zero-LLM
+  embedding input for entity ANN. The ADR-0058 index side completes with
+  `hyperedges.token_counter: "tiktoken:<encoding>"` (lazy, loud ConfigError when missing — never a
+  silent fallback; identity stored on every record). Stacks without `hyperedges:` are untouched —
+  no KV, no new node properties, byte-identical output.
+
 - **Hyperedges — the m-ary retrieval unit, an OPTIONAL third Graph-Assembly projection
   (ADR-0056/0057/0058, hypergraph-m1; `latence_core.hyperedge`, `latence_core.sentences`,
   contracts v20).** Where an edge connects two nodes, a `GraphHyperedge` carries the FULL set of

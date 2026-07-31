@@ -24,6 +24,8 @@ corpus produce the same graph (S9 "deterministic IDs" + Baseline bar).
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import (
@@ -37,6 +39,7 @@ from latence_core.contracts import (
     EntityMention,
     Evidence,
     GraphEdge,
+    GraphHyperedge,
     GraphNode,
     GraphRecord,
     GraphScope,
@@ -54,7 +57,7 @@ from latence_core.providers.profile import (
 from latence_core.subprovider import owner_label, resolve_sub_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from latence_core.contracts import CanonicalEntity, NormalizedRelation
 
@@ -111,13 +114,17 @@ def _resolve_hyperedge_config(spec: Any) -> HyperedgeConfig | None:
             f"HyperedgeConfig overrides, got {type(spec).__name__}."
         )
         raise ConfigError(msg)
-    allowed = {"weak_hyperedges", "max_arity", "min_tokens", "max_tokens", "max_window_sentences"}
+    allowed = {
+        "weak_hyperedges", "max_arity", "min_tokens", "max_tokens", "max_window_sentences",
+        "token_counter",
+    }
     unknown = set(spec) - allowed
     if unknown:
         msg = f"graph_assembly config 'hyperedges' has unknown key(s): {sorted(unknown)}."
         raise ConfigError(msg)
+    counter, counter_id = _resolve_token_counter(spec.get("token_counter"))
     try:
-        return HyperedgeConfig(
+        config = HyperedgeConfig(
             weak_hyperedges=bool(spec.get("weak_hyperedges", True)),
             max_arity=int(spec.get("max_arity", 12)),
             min_tokens=int(spec.get("min_tokens", 25)),
@@ -127,6 +134,104 @@ def _resolve_hyperedge_config(spec: Any) -> HyperedgeConfig | None:
     except (TypeError, ValueError) as exc:
         msg = f"graph_assembly config 'hyperedges' is malformed: {exc}"
         raise ConfigError(msg) from exc
+    if counter is not None and counter_id is not None:
+        config = replace(config, token_counter=counter, token_counter_id=counter_id)
+    return config
+
+
+def _resolve_token_counter(
+    spec: Any,
+) -> tuple[Callable[[str], int] | None, str | None]:
+    """Resolve the OPTIONAL operator-named exact token counter (ADR-0058, index side).
+
+    ``None`` (the default) keeps the deterministic in-core heuristic — nothing is pinned and
+    nothing downloads. ``"tiktoken:<encoding>"`` names a license-verified encoding the
+    operator cleared separately (the same discipline as the retrieval Packer's
+    ``TiktokenCounter``): ``tiktoken`` is imported lazily and ONLY here, a missing dep or an
+    unknown encoding is a loud wiring-time ConfigError, and the full spec string becomes the
+    stored counter identity so a query-time mismatch stays detectable (ADR-0058).
+    """
+    if spec is None:
+        return (None, None)
+    if not isinstance(spec, str) or not spec.startswith("tiktoken:") or spec == "tiktoken:":
+        msg = (
+            "graph_assembly config 'hyperedges.token_counter' must be "
+            f"'tiktoken:<encoding>', got {spec!r}."
+        )
+        raise ConfigError(msg)
+    encoding_name = spec.split(":", 1)[1]
+    try:
+        import tiktoken
+    except ImportError as exc:
+        msg = (
+            f"hyperedges.token_counter {spec!r} needs the 'tiktoken' package, which is not "
+            "installed (it is never a core dependency — install it explicitly)."
+        )
+        raise ConfigError(msg) from exc
+    try:
+        encoding = tiktoken.get_encoding(encoding_name)
+    except (KeyError, ValueError) as exc:
+        msg = f"hyperedges.token_counter names unknown tiktoken encoding {encoding_name!r}."
+        raise ConfigError(msg) from exc
+
+    def count(text: str) -> int:
+        return len(encoding.encode(text))
+
+    return (count, spec)
+
+
+def _stamp_hyperedge_descriptions(
+    node_records: list[GraphRecord],
+    hyperedges: list[GraphHyperedge],
+) -> list[GraphRecord]:
+    """Stamp ``description`` + ``hyperedge_degree`` onto each node's properties (spec 1.4).
+
+    The description is composed DETERMINISTICALLY — canonical name, entity type, and the
+    top-3 most frequent relation contexts drawn from the node's Hyperedges (head side
+    ``label: other``, tail side ``label by: other``; ties broken lexicographically) — so the
+    entity index is query-matchable without any LLM summarisation (ADR-0057/0059's tier-0
+    embedding input). Runs ONLY on the hyperedge-configured path, so an unconfigured stack's
+    node stream stays byte-identical. Nodes untouched by any Hyperedge get degree 0 and the
+    name+type description — never a missing key on one node and not another.
+    """
+    name_of = {
+        r.node.node_id: r.node.canonical_name for r in node_records if r.node is not None
+    }
+    degree: dict[str, int] = {}
+    contexts: dict[str, Counter[str]] = {}
+    for h in hyperedges:
+        for node_id in h.entity_node_ids:
+            degree[node_id] = degree.get(node_id, 0) + 1
+        for rel in h.relations:
+            head_name = name_of.get(rel.head_node_id, rel.head_node_id)
+            tail_name = name_of.get(rel.tail_node_id, rel.tail_node_id)
+            contexts.setdefault(rel.head_node_id, Counter())[
+                f"{rel.label}: {tail_name}"
+            ] += 1
+            contexts.setdefault(rel.tail_node_id, Counter())[
+                f"{rel.label} by: {head_name}"
+            ] += 1
+
+    stamped: list[GraphRecord] = []
+    for record in node_records:
+        node = record.node
+        if node is None:  # pragma: no cover - node_records are all NODE-scope by construction
+            stamped.append(record)
+            continue
+        top = sorted(
+            contexts.get(node.node_id, Counter()).items(), key=lambda kv: (-kv[1], kv[0])
+        )[:3]
+        description = f"{node.canonical_name} — {node.label}"
+        if top:
+            description += " — " + ", ".join(text for text, _ in top)
+        properties = {
+            **node.properties,
+            "description": description,
+            "hyperedge_degree": degree.get(node.node_id, 0),
+        }
+        new_node = node.model_copy(update={"properties": properties})
+        stamped.append(record.model_copy(update={"node": new_node}))
+    return stamped
 
 
 def _stamp_features(
@@ -266,19 +371,27 @@ class CanonicalGraphAssembler:
         # ADR-0051: stamp centrality + community onto each node (a no-op when unconfigured, so the
         # emitted stream — nodes then edges, in id order — is byte-identical to today).
         node_records = _stamp_features(node_records, edge_records, self._feature_computer)
-        yield from node_records
-        yield from edge_records
 
         if self._hyperedge_config is None:
+            yield from node_records
+            yield from edge_records
             return
-        # ADR-0057: the m-ary projection of the SAME inputs, emitted after nodes + edges in
-        # hyperedge-id order. Only canonicalised entities can join (node_id_for is the same
-        # deterministic mapping the NODE stream used), so Hyperedges never reference a node
-        # the graph does not carry.
+
+        # ADR-0057: the m-ary projection of the SAME inputs. Built BEFORE the nodes are
+        # yielded so each node can carry its Hyperedge-derived ``description`` (spec 1.4 —
+        # the deterministic embedding input that makes the entity index query-matchable
+        # without any LLM summarisation) and ``hyperedge_degree``. Emission order is
+        # unchanged: nodes, edges, then Hyperedges in hyperedge-id order. Only canonicalised
+        # entities can join (node_id_for is the same deterministic mapping the NODE stream
+        # used), so Hyperedges never reference a node the graph does not carry.
         hyperedge_builder = HyperedgeBuilder(self._corpus_id, self._hyperedge_config)
-        for hyperedge in hyperedge_builder.build(
+        hyperedges = hyperedge_builder.build(
             chunks, mentions, relations, entities, builder.node_id_for
-        ):
+        )
+        node_records = _stamp_hyperedge_descriptions(node_records, hyperedges)
+        yield from node_records
+        yield from edge_records
+        for hyperedge in hyperedges:
             yield GraphRecord(
                 record_id=f"{hyperedge.record_id}#graph",
                 scope=GraphScope.HYPEREDGE,

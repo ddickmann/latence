@@ -513,3 +513,146 @@ def test_unconfigured_run_is_byte_identical_and_exports_no_hyperedges(tmp_path: 
     ]
     assert graph_records
     assert all(r.scope in (GraphScope.NODE, GraphScope.EDGE) for r in graph_records)
+
+
+# -- M2 (ticket 13): the sidecar KV ---------------------------------------------
+
+
+def _kv_fixture_records() -> tuple[list, list]:
+    """Hyperedges + nodes straight from the real builder over the standard fixture."""
+    chunks, mentions, relations, entities = _fixture()
+    builder = HyperedgeBuilder("corpus-test")
+    hyperedges = builder.build(chunks, mentions, relations, entities, lambda e: _NODE_OF[e])
+    from latence_core.contracts import GraphNode
+
+    nodes = [
+        GraphNode(
+            record_id=f"node:{nid}", node_id=nid, entity_id=eid, label="ORG",
+            canonical_name=name, confidence=0.9,
+            evidence=Evidence(mention_ids=["m1"], document_ids=["doc-1"], confidence=0.9),
+            provenance=_prov("doc-1", 0, 9), classification=_CLS,
+        )
+        for eid, nid, name in (
+            ("e:acme", "nA", "Acme Corp"), ("e:beta", "nB", "Beta Ltd"),
+            ("e:eu", "nE", "EU Commission"), ("e:john", "nJ", "John Doe"),
+        )
+    ]
+    return hyperedges, nodes
+
+
+def test_kv_is_byte_reproducible_from_the_records() -> None:
+    from latence_core.hyperedge_store import build_store_bytes, store_entries
+
+    hyperedges, nodes = _kv_fixture_records()
+    raw = build_store_bytes(store_entries(hyperedges, nodes))
+    again = build_store_bytes(store_entries(list(reversed(hyperedges)), list(reversed(nodes))))
+    assert raw == again  # rebuild equals original, independent of input order
+
+
+def test_kv_incremental_append_equals_full_rebuild() -> None:
+    from latence_core.hyperedge_store import build_store_bytes, store_entries
+
+    hyperedges, nodes = _kv_fixture_records()
+    split = max(1, len(hyperedges) // 2)
+    # "appending" = rebuilding over the union of old + new records (the KV is derived,
+    # ADR-0056); the criterion is that the result equals a from-scratch build.
+    incremental = build_store_bytes(
+        store_entries([*hyperedges[:split], *hyperedges[split:]], nodes)
+    )
+    full = build_store_bytes(store_entries(hyperedges, nodes))
+    assert incremental == full
+
+
+def test_kv_postings_are_gamma_sorted_with_gamma_inline() -> None:
+    from latence_core.hyperedge_store import HyperedgeStoreReader, build_store_bytes, store_entries
+
+    hyperedges, nodes = _kv_fixture_records()
+    raw = build_store_bytes(store_entries(hyperedges, nodes))
+    with HyperedgeStoreReader.from_bytes(raw) as store:
+        for node_id in ("nA", "nB"):
+            ids, gammas = store.postings(node_id)
+            assert len(ids) == len(gammas) > 0
+            assert gammas == sorted(gammas, reverse=True)
+        # solver fields carry no text; tau lives in its own keyspace
+        h = hyperedges[0]
+        fields = store.solver_fields(h.hyperedge_id)
+        assert fields is not None and "tau_text" not in fields
+        assert fields["token_counter"] == h.token_counter
+        assert store.tau_text(h.hyperedge_id) == h.tau_text
+        # alias table: tier-1 zero-model entry (ADR-0059), NFKC + casefold
+        assert store.alias("ACME  Corp") == ["nA"]
+
+
+def test_kv_reader_holds_nothing_between_calls(tmp_path: Path) -> None:
+    from latence_core.hyperedge_store import HyperedgeStoreReader, build_store_bytes, store_entries
+
+    hyperedges, nodes = _kv_fixture_records()
+    path = tmp_path / "graph-hyperedges.kv"
+    path.write_bytes(build_store_bytes(store_entries(hyperedges, nodes)))
+    # open -> read -> close per call; after close the reader is inert (structural statelessness)
+    reader = HyperedgeStoreReader.open(str(path))
+    ids, _ = reader.postings("nA")
+    reader.close()
+    assert ids
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        reader.get(b"e|anything")  # a closed reader must not silently serve stale data
+
+
+def test_exact_token_counter_config_is_loud_when_missing() -> None:
+    import pytest as _pytest
+    from latence_core.errors import ConfigError
+    from latence_core.stages.graph_assembly import _resolve_hyperedge_config
+
+    with _pytest.raises(ConfigError, match="tiktoken:<encoding>"):
+        _resolve_hyperedge_config({"token_counter": "spacy:foo"})
+    with _pytest.raises(ConfigError, match="tiktoken"):
+        # tiktoken is deliberately NOT a dev dependency: naming it must fail loudly, never
+        # silently fall back to the heuristic (ADR-0058: no silent counter substitution).
+        _resolve_hyperedge_config({"token_counter": "tiktoken:cl100k_base"})
+
+
+def test_e2e_export_ships_the_kv_beside_the_parquet(tmp_path: Path) -> None:
+    from latence_core.hyperedge_store import HyperedgeStoreReader
+
+    docs = _e2e_docs(tmp_path)
+    store_uri = f"file://{tmp_path}/store"
+    LocalRunner().run(_e2e_pipeline(store_uri, docs, hyperedges=True), run_id="he-kv")
+    s = Storage.for_uri(store_uri)
+    base = f"{store_uri}/_latence/runs/he-kv"
+    kv_uri = f"{base}/export/graph-hyperedges.kv"
+    assert s.exists(kv_uri), "the KV must ship beside the parquet on the opted-in path"
+
+    with s.open(kv_uri, "rb") as fh:
+        raw = fh.read()
+    with s.open(f"{base}/export/graph-hyperedges.parquet", "rb") as fh:
+        rows = pq.read_table(fh).to_pylist()  # type: ignore[no-untyped-call]
+    with HyperedgeStoreReader.from_bytes(raw) as reader:
+        for row in rows:  # KV agrees with the durable parquet, record for record
+            fields = reader.solver_fields(row["hyperedge_id"])
+            assert fields is not None
+            assert fields["token_cost"] == row["token_cost"]
+            assert fields["gamma"] == row["gamma"]
+            assert reader.tau_text(row["hyperedge_id"]) == row["tau_text"]
+        # description + degree stamped onto the nodes (spec 1.4), embedding-input ready
+        with s.open(f"{base}/export/graph-nodes.parquet", "rb") as fh:
+            node_rows = pq.read_table(fh).to_pylist()  # type: ignore[no-untyped-call]
+        for nrow in node_rows:
+            props = json.loads(nrow["properties"])
+            assert "description" in props and "hyperedge_degree" in props
+            assert props["description"].startswith(nrow["canonical_name"])
+
+
+def test_e2e_off_path_writes_no_kv_and_plain_node_properties(tmp_path: Path) -> None:
+    docs = _e2e_docs(tmp_path)
+    store_uri = f"file://{tmp_path}/store"
+    LocalRunner().run(_e2e_pipeline(store_uri, docs, hyperedges=False), run_id="he-kv-off")
+    s = Storage.for_uri(store_uri)
+    base = f"{store_uri}/_latence/runs/he-kv-off"
+    assert not s.exists(f"{base}/export/graph-hyperedges.kv")
+    with s.open(f"{base}/export/graph-nodes.parquet", "rb") as fh:
+        node_rows = pq.read_table(fh).to_pylist()  # type: ignore[no-untyped-call]
+    for nrow in node_rows:  # the default node stream carries no hyperedge-derived keys
+        props = json.loads(nrow["properties"])
+        assert "description" not in props and "hyperedge_degree" not in props

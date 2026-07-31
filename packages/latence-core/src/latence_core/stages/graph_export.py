@@ -36,6 +36,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from latence_core.contracts import GraphRecord, GraphScope
+from latence_core.hyperedge_store import build_store_bytes, store_entries
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
@@ -119,6 +120,9 @@ class KnowledgeGraphExport:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
         self._basename = str(config.get("basename", "graph"))
+        # ADR-0056: within the (already opt-in) hyperedge path, the KV ships by default —
+        # the strong configuration is the default, the cheap mode is the documented opt-out.
+        self._hyperedge_kv = bool(config.get("hyperedge_kv", True))
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         record_list = list(records)
@@ -163,6 +167,15 @@ class KnowledgeGraphExport:
             hyperedges_uri = f"{base}/{stem}-hyperedges.parquet"
             self._write_hyperedges_parquet(hyperedges, storage, hyperedges_uri)
             uris.append(hyperedges_uri)
+            # ADR-0056: the derived point-lookup KV the online path reads per call —
+            # rebuildable from the parquet above (the durable form), written beside it so
+            # the sidecar ships complete. Disable with ``hyperedge_kv: false`` to rebuild
+            # downstream instead; either way an unconfigured stack (no HYPEREDGE records)
+            # writes nothing and is byte-identical to before the feature existed.
+            if self._hyperedge_kv:
+                kv_uri = f"{base}/{stem}-hyperedges.kv"
+                storage.write_atomic(kv_uri, build_store_bytes(store_entries(hyperedges, nodes)))
+                uris.append(kv_uri)
         return uris
 
     # -- Parquet ------------------------------------------------------------
