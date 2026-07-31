@@ -43,6 +43,8 @@ its own scoping ticket decides. Zero LLM calls in indexing or the online path.
 
 <!-- one line per closed ticket: gist + link -->
 
+- [Grilling: eval design + enterprise gold set](tickets/08-grilling-eval-design.md) — MuSiQue + HotpotQA supporting-fact **recall@budget curves (1k–16k)** + recall@5 for HippoRAG-2 comparability, vs our own dense+Packer chunk-topk baseline; **gate = AUC + endpoint dominance on both datasets, no point >2% worse** (Dennis); **enterprise eval = MANUAL ~100-question gold set** over the real messy corpus (Dennis labels; harness must make it efficient → ticket 21, now blocking 17); **compute = subset-first, one full pod run at gate time**; per-tier / heuristic-vs-exact / weak-on-off A/Bs all reported.
+
 - [Task: M2 — sidecar store + precomputation](tickets/13-task-m2-sidecar-store-precompute.md) — **BUILT + green**: the ADR-0056 KV as a **zero-dep byte-reproducible single-file format** (mmap binary search, per-call open/close; format-is-the-contract, LMDB stays an optional adapter), shipped by the KG Export beside the parquet; postings γ-sorted with γ inline; **alias keyspace live** (ADR-0059 tier-1 works today, canonical names; glinker's richer aliases still fog); spec-1.4 entity descriptions + degree stamped on nodes (the zero-LLM embedding input); **ADR-0058 index side complete** (`token_counter: "tiktoken:<enc>"`, lazy, loud on missing, identity stored). No `A_E`, no CSR. Suite 4661→**4668P/0F**. Default path byte-identical, e2e-proven.
 
 - [Task: M1 — Hyperedge segmentation + builder](tickets/12-task-m1-eu-segmentation-hyperedge-builder.md) — **BUILT + green** on `hypergraph-m1`: contracts v20 (`GraphHyperedge`, third `GraphScope`, link-confidence persistence), zero-dep DE/EN sentence splitter, the full builder (segmentation, size targets, arity split, dedup+support, γ, **redaction-variant `tau_text` enforced at the writer**), opt-in Runner wiring (`wants_document_streams`, byte-identical when off), `graph-hyperedges.parquet` export + Quality-Report section. Suite: baseline 4644P/1F → **4661P/0F**, ruff + strict mypy clean, 16 new tests incl. the PII-bypass regression and two real-Runner e2e paths. **The hypergraph now exists.**
@@ -70,8 +72,6 @@ its own scoping ticket decides. Zero LLM calls in indexing or the online path.
   accumulate from real use; the UtilityModel seam ships in M4.
 - Contents of the data-gen SOTA sweep — until its scoping ticket (11) resolves; may spin off its
   own map.
-- Enterprise-shaped gold-set construction mechanics (which corpus, labeling method) — until eval
-  design (08) resolves.
 - Retrieval MCP surface for chains — exposing CoE output via the Retrieval MCP tools; after M5.
 - Operational policy for incremental sidecar appends vs weekly compaction — after the deltas/purge
   ticket (10).

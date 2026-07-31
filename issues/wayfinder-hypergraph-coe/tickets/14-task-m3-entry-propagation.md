@@ -1,7 +1,7 @@
 # 14 — Task: M3 — entry + confidence propagation
 
 Type: task
-Status: open
+Status: claimed
 Blocked by: 06, 13
 
 ## Question
