@@ -656,3 +656,25 @@ def test_e2e_off_path_writes_no_kv_and_plain_node_properties(tmp_path: Path) -> 
     for nrow in node_rows:  # the default node stream carries no hyperedge-derived keys
         props = json.loads(nrow["properties"])
         assert "description" not in props and "hyperedge_degree" not in props
+
+
+def test_kv_format_interop_with_the_retrieval_reader() -> None:
+    """The format is the contract (ADR-0056): the store latence-core WRITES must be read
+    byte-compatibly by latence-retrieval's independent reader implementation — including
+    postings order, alias normalisation, and solver fields. Two implementations, one
+    format; drift in either direction fails here."""
+    from latence_core.hyperedge_store import build_store_bytes, store_entries
+    from latence_retrieval.hypergraph import HyperedgeKV
+
+    hyperedges, nodes = _kv_fixture_records()
+    raw = build_store_bytes(store_entries(hyperedges, nodes))
+    with HyperedgeKV.from_bytes(raw) as kv:
+        for h in hyperedges:
+            fields = kv.solver_fields(h.hyperedge_id)
+            assert fields is not None
+            assert fields["entity_node_ids"] == h.entity_node_ids
+            assert fields["gamma"] == h.gamma
+            assert kv.tau_text(h.hyperedge_id) == h.tau_text
+        ids, gammas = kv.postings("nA")
+        assert gammas == sorted(gammas, reverse=True) and len(ids) == len(gammas)
+        assert kv.alias("acme  CORP") == ["nA"]

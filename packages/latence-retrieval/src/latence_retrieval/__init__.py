@@ -142,6 +142,14 @@ from latence_retrieval.graph_retrieval import (
     GraphRetriever,
     build_graph_document_source,
 )
+from latence_retrieval.hypergraph import (
+    HyperedgeKV,
+    HypergraphConfig,
+    HypergraphSignals,
+    Propagator,
+    RWRPropagator,
+    hypergraph_signals,
+)
 from latence_retrieval.maxsim import (
     HashingMultiVectorQueryEncoder,
     MaxSimReranker,
@@ -212,6 +220,9 @@ __all__ = [
     "DuckDBGraphDocumentSource",
     "DuckDBGraphSource",
     "Expander",
+    "HyperedgeKV",
+    "HypergraphConfig",
+    "HypergraphSignals",
     "Fuser",
     "FuserComparisonRow",
     "FusionRun",
@@ -234,6 +245,9 @@ __all__ = [
     "OrchestrationPipeline",
     "PackTokenizerError",
     "Packer",
+    "Propagator",
+    "RWRPropagator",
+    "hypergraph_signals",
     "QdrantBackend",
     "QueryBundle",
     "QuerySignalError",
