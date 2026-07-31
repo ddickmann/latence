@@ -54,7 +54,7 @@ The corpus-level Stage that links entity mentions to canonical entities and merg
 _Avoid_: Entity linking / entity resolution as stage names (they name the two internal steps, not the Stage)
 
 **Graph Assembly**:
-The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations.
+The corpus-level Stage that builds the canonical knowledge graph — nodes, edges, and per-edge Evidence — from disambiguated entities and relations, and re-projects the same input m-ary as Hyperedges (ADR-0057).
 
 **Export**:
 The Stage that materializes AI-ready outputs (Parquet, JSONL, TTL, GraphML).
@@ -75,7 +75,11 @@ _Avoid_: Delete, drop, filter (unqualified)
 
 **Evidence**:
 The record linking a knowledge-graph edge (or a Disambiguation merge decision) back to the specific source mentions and offsets that justify it, with a confidence value.
-_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference)
+_Avoid_: Provenance (Provenance is source lineage; Evidence is justification for an inference), Hyperedge (a Hyperedge *carries* raw text for retrieval; Evidence never does)
+
+**Hyperedge**:
+The m-ary unit of retrieval: a minimal verbatim text span, the full set of canonical entities occurring in it, the directed relations extracted from it, and its token cost — emitted by Graph Assembly as a third `GraphScope` alongside nodes and edges (ADR-0057). Where an edge is binary, a Hyperedge connects m ≥ 2 entities at once, so a joint fact ("A acquired B in 2019 pending approval by C") stays one selectable unit instead of fragmenting into disconnected pairs. It is the atomic thing the chain-of-evidence selector packs into a token budget. Its `tau_text` never holds content the exported corpus would not hold.
+_Avoid_: Evidence Unit, EU (collides with Evidence), fact, claim (both assert truth; a Hyperedge asserts only that the text says so)
 
 **Quality Report**:
 A first-class artifact emitted per run: per-Stage metrics, corpus-level KG statistics, contract-completeness checks, and optional gold-set precision/recall. For a delta run it also reports what changed — documents added/retracted, entities created/merged/split, edges added/retracted, and drift since the last reconciliation. The substantiation of the "AI-ready" claim.
