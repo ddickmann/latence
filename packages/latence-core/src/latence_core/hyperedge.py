@@ -151,9 +151,28 @@ class HyperedgeBuilder:
         assembler's :meth:`~latence_core.graph.GraphBuilder.node_id_for`), so Hyperedges
         reference the same deterministic node ids the NODE stream carries.
         """
-        chunk_list = sorted(chunks, key=lambda c: c.record_id)
-        mention_list = sorted(mentions, key=lambda m: m.record_id)
-        relation_list = sorted(relations, key=lambda r: r.record_id)
+        # The Runner gathers document-level records from the WHOLE pipeline, and several
+        # Stages legitimately RE-EMIT the same record: chunk-level Redaction yields its
+        # input chunks with masked_content/pii_spans added (ADR-0042), and an Export sink
+        # passes records through verbatim — so the same record_id can arrive 2-3 times.
+        # Without dedup that inflated `support` by the copy count AND risked the
+        # PRE-redaction copy becoming the primary tau_text on a gamma tie — the ADR-0057
+        # PII-bypass class, found live by the enterprise-gold corpus run (ticket 21).
+        # Dedup by record_id, preferring the MOST-PROCESSED chunk variant: a copy carrying
+        # redaction output (masked_content/pii_spans) wins over one without; otherwise the
+        # last copy in stream order (the furthest-downstream Stage's view).
+        chunks_by_id: dict[str, ChunkRecord] = {}
+        for c in chunks:
+            held = chunks_by_id.get(c.record_id)
+            if held is None or c.masked_content is not None or c.pii_spans:
+                chunks_by_id[c.record_id] = c
+        chunk_list = sorted(chunks_by_id.values(), key=lambda c: c.record_id)
+        mention_list = sorted(
+            {m.record_id: m for m in mentions}.values(), key=lambda m: m.record_id
+        )
+        relation_list = sorted(
+            {r.record_id: r for r in relations}.values(), key=lambda r: r.record_id
+        )
         self._relation_index = {r.record_id: r for r in relation_list}
 
         # mention record_id -> (canonical entity record_id, link confidence | None)
@@ -556,7 +575,14 @@ class HyperedgeBuilder:
         entity_of: dict[str, str],
         node_id_for: Callable[[str], str],
     ) -> list[HyperedgeRelation]:
-        out: list[HyperedgeRelation] = []
+        # One HyperedgeRelation per DISTINCT triple: the same fact asserted twice inside one
+        # window (found live by the enterprise-gold calibration pass, ticket 21: 2/2
+        # multi-sentence relation-bearing spans emitted duplicates under two relation_ids)
+        # collapses to a single relation carrying the HIGHEST extractor confidence and the
+        # smallest source relation_id (deterministic audit anchor). Duplicated triples also
+        # doubled the id-bearing signature, so this dedup is id-affecting — a fact stated
+        # twice in one span must hash like a fact stated once.
+        best: dict[tuple[str, str, str], HyperedgeRelation] = {}
         for rid in sorted(span.relation_ids):
             rel = self._relation_index.get(rid)
             if rel is None:
@@ -568,16 +594,17 @@ class HyperedgeBuilder:
             head_node, tail_node = node_id_for(head_entity), node_id_for(tail_entity)
             if head_node == tail_node:
                 continue  # both arguments collapsed onto one entity: not a relation
-            out.append(
-                HyperedgeRelation(
-                    relation_id=rid,
-                    head_node_id=head_node,
-                    label=rel.label,
-                    tail_node_id=tail_node,
-                    confidence=rel.confidence,
-                )
+            candidate = HyperedgeRelation(
+                relation_id=rid,
+                head_node_id=head_node,
+                label=rel.label,
+                tail_node_id=tail_node,
+                confidence=rel.confidence,
             )
-        return sorted(out, key=lambda r: (r.signature, r.relation_id))
+            held = best.get(candidate.signature)
+            if held is None or candidate.confidence > held.confidence:
+                best[candidate.signature] = candidate
+        return sorted(best.values(), key=lambda r: (r.signature, r.relation_id))
 
     def _arity_groups(
         self,

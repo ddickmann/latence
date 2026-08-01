@@ -790,3 +790,57 @@ stages:
     provider: export.knowledge_graph
     depends_on: [graph]
 """
+
+
+# -- ticket 21 finding: duplicate stream copies must not inflate support ---------
+
+
+def test_duplicate_stream_copies_dedupe_and_redacted_variant_stays_primary() -> None:
+    """The enterprise-gold run (ticket 21) found the Runner's whole-pipeline gather feeds
+    the builder each chunk up to 3x (chunk + Redaction re-emit + Export pass-through),
+    inflating `support` by the copy count — and, on a gamma tie, risking the PRE-redaction
+    copy as primary tau_text (the ADR-0057 PII-bypass class). Pinned: copies dedupe by
+    record_id, support counts DISTINCT sources only, and the redacted variant wins even
+    when the raw copy arrives first in stream order."""
+    chunks, mentions, relations, entities = _fixture()
+    raw_copy = _chunk(redacted=False)      # the chunk Stage's view (no pii_spans yet)
+    redacted_copy = _chunk(redacted=True)  # Redaction's re-emit (masked_content + spans)
+    export_copy = _chunk(redacted=True)    # an Export sink's verbatim pass-through
+    builder = HyperedgeBuilder("corpus-test")
+    hyperedges = builder.build(
+        [raw_copy, redacted_copy, export_copy],       # raw FIRST — the adversarial order
+        [*mentions, *mentions],                        # duplicated mention stream
+        [*relations, *relations],                      # duplicated relation stream
+        entities,
+        lambda e: _NODE_OF[e],
+    )
+    assert hyperedges
+    for h in hyperedges:
+        assert h.support == 1, f"support must count sources, not stream copies: {h.support}"
+        assert h.merged_sources == []
+    joined = " ".join(h.tau_text for h in hyperedges)
+    assert "John Doe" not in joined and "john@acme.com" not in joined
+    assert "[PERSON]" in joined or "[EMAIL]" in joined
+
+
+def test_same_fact_asserted_twice_in_one_span_yields_one_relation() -> None:
+    """Ticket-21 calibration finding: a fact stated twice inside one window emitted the
+    same triple under two relation_ids, inflating relations_total and doubling the
+    id-bearing signature. Pinned: distinct triples only — highest confidence wins, the
+    smallest relation_id anchors the audit, and the hyperedge id equals the stated-once id."""
+    chunks, mentions, _relations, entities = _fixture()
+    twice = [
+        _relation("r:1", "m:acme", "m:beta", conf=0.7),
+        _relation("r:2", "m:acme", "m:beta", conf=0.9),  # same fact, second assertion
+    ]
+    builder = HyperedgeBuilder("corpus-test")
+    doubled = builder.build(chunks, mentions, twice, entities, lambda e: _NODE_OF[e])
+    strong = [h for h in doubled if h.has_relations]
+    assert len(strong) == 1
+    assert len(strong[0].relations) == 1
+    assert strong[0].relations[0].confidence == 0.9  # highest assertion wins
+    once = builder.build(
+        chunks, mentions, [_relation("r:9", "m:acme", "m:beta", conf=0.9)], entities,
+        lambda e: _NODE_OF[e],
+    )
+    assert strong[0].hyperedge_id == next(h for h in once if h.has_relations).hyperedge_id
