@@ -610,6 +610,35 @@ def test_ssn_nodash_plausible_guard_rejects_invalid_ranges() -> None:
         ), f"{digits} wrongly masked as SSN: {rec.pii_spans}"
 
 
+def test_ssn_nodash_letter_glue_guard_spares_stripped_table_rows() -> None:
+    """Precision: a digit run fused to a letter is a stripped table cell, not an SSN.
+
+    Enterprise-gold T21 finding 2: the markdown chunker strips table pipes, so
+    ``| Industrial drives | 410 | 455 | 470 |`` reaches the detector as
+    ``Industrial drives410455470`` and was masked as ``[SSN]`` — destroying innocent
+    numeric cells in every table-bearing chunk. The letter-glue guard rejects a run
+    glued to a unicode letter on EITHER side; the sole letter-glued form that is a
+    genuine presentation — the literal ``SSN`` label fused to the digits — survives
+    via the guard's fixed-width exception (covered by the gold-set case).
+    """
+    glued = (
+        "Industrial drives410455470 headcount by division.",  # the T21 chunk, verbatim shape
+        "Shared services120126131 headcount by division.",
+        "Menü410455470 der Kantine, je Woche.",  # non-ASCII letter glue (German label)
+        "Lot 410455470A moved to the north warehouse.",  # trailing letter glue
+    )
+    for i, text in enumerate(glued):
+        rec = _redact_all([_chunk(text, f"ssn-glued-{i}")])[0]
+        assert not any(
+            s.pii_type == "ssn" for s in rec.pii_spans
+        ), f"table-glued digits wrongly masked as SSN in {text!r}: {rec.pii_spans}"
+    # The guard must not cost recall on an unglued run: same digits, ordinary context.
+    rec = _redact_all([_chunk("Employee SSN 410455470 on file.", "ssn-unglued")])[0]
+    assert any(
+        s.pii_type == "ssn" for s in rec.pii_spans
+    ), f"plain digits-only SSN lost by the glue guard: {rec.pii_spans}"
+
+
 # -- H-C1 §1 per-family ReDoS probes ------------------------------------------
 
 

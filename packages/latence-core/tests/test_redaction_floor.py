@@ -296,3 +296,29 @@ def test_floor_patterns_match_hybrid_rule_builtins() -> None:
 def test_floor_candidates_empty_on_clean_text() -> None:
     """A chunk with no financial PII yields no floor spans (the byte-identical common case)."""
     assert floor_candidates("The quarterly report is attached for Bob to review.") == []
+
+
+def test_floor_ssn_spares_letter_glued_table_digits_but_keeps_real_ssns() -> None:
+    """The floor's ``ssn_nodash`` carries the same letter-glue guard as the built-in.
+
+    Enterprise-gold T21 finding 2: stripped markdown table rows reach detection as
+    letter-glued digit runs (``Industrial drives410455470``) and the floor — which runs
+    on EVERY Provider's chunks, not just hybrid_rule's — masked them as ``[SSN]``. The
+    guard must spare those without weakening the ADR-0044 guarantee: unglued no-dash
+    SSNs and the label-glued ``SSN123456789`` form still floor.
+    """
+    for glued in (
+        "Industrial drives410455470 headcount by division.",
+        "Menü410455470 der Kantine, je Woche.",
+        "Lot 410455470A moved to the north warehouse.",
+    ):
+        assert not any(
+            c[2] == "ssn" for c in floor_candidates(glued)
+        ), f"floor masked table-glued digits as SSN in {glued!r}"
+    for real in (
+        "Employee SSN 410455470 on file.",
+        "Messy row had SSN123456789 with no separator.",
+    ):
+        assert any(
+            c[2] == "ssn" for c in floor_candidates(real)
+        ), f"floor lost a genuine no-dash SSN in {real!r}"

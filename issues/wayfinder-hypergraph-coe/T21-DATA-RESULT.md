@@ -125,10 +125,18 @@ questions labeled: 100
    `test_hyperedge.py` cannot see this: it wires neither redaction nor a corpus export.
    Worth a ticket against ADR-0057 / the Runner gather (dedupe the corpus-wide gather by
    `record_id`, or gather from the chunk *source* stage only).
-2. **Redaction false-positive on table rows.** The markdown chunker strips table pipes, so
-   `| Industrial drives | 410 | 455 | 470 |` becomes `Industrial drives410455470`, which the
-   hybrid-rule detector masks as `[SSN]`. Harmless here (no fact sentence touched, and
-   arguably realistic), but it is a real precision leak on numeric tables.
+2. **Redaction false-positive on table rows — RESOLVED.** The markdown chunker strips
+   table pipes, so `| Industrial drives | 410 | 455 | 470 |` becomes
+   `Industrial drives410455470`, which the hybrid-rule detector masked as `[SSN]` — a
+   real precision leak on numeric tables. Fixed by a letter-glue guard on the
+   `ssn_nodash` recogniser (a 9-digit run fused to a unicode letter on either side is
+   rejected; the literal label-glued `SSN123456789` form is kept via a fixed-width
+   exception), applied byte-identically to the hybrid_rule built-in and the ADR-0044
+   financial floor. A fresh `--fresh` run now exports zero `[SSN]` placeholders on this
+   corpus with all 14 `[EMAIL]` / 15 `[PHONE]` chunks unchanged, and
+   `latence-label validate` stays exit 0. Regression tests: the #61 recall benchmark
+   (glued-row negatives incl. a German umlaut label, `SSN123456789` positive) and the
+   floor suite pin both halves.
 3. **Hyperedge yield is driven by chunk size, not corpus size.** With `max_tokens: 220` the
    same corpus produced 40 hyperedges; at 90 it produced 226. Below `min_tokens` a span
    merges into its neighbour, so a coarse chunker collapses a whole chunk into one
