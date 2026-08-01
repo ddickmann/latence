@@ -338,7 +338,17 @@ def build_chunk_span(
 FINANCIAL_FLOOR_PATTERNS: dict[str, tuple[str, str]] = {
     # detector_name: (reported pii_type, regex) — byte-identical to the hybrid_rule built-ins.
     "ssn": ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
-    "ssn_nodash": ("ssn", r"(?<!\d)(?!000|666|9\d\d)\d{3} ?(?!00)\d{2} ?(?!0000)\d{4}(?!\d)"),
+    # The no-dash form carries the plausible-SSN guard (SSA-invalid ranges) AND the
+    # letter-glue guard (a run fused to a unicode letter on either side is a stripped
+    # table cell, not an SSN — enterprise-gold T21 finding 2), with the literal
+    # ``SSN123456789`` label-glued presentation kept via the ``(?<=[sS][sS][nN])``
+    # exception. Rationale lives on the hybrid_rule built-in this must stay equal to.
+    "ssn_nodash": (
+        "ssn",
+        r"(?:(?<=[sS][sS][nN])|(?<![^\W\d_]))(?<!\d)"
+        r"(?!000|666|9\d\d)\d{3} ?(?!00)\d{2} ?(?!0000)\d{4}"
+        r"(?!\d)(?![^\W\d_])",
+    ),
     "credit_card": ("credit_card", r"\b\d(?:[ -]?\d){12,15}\b"),
     "iban": ("iban", r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b"),
 }

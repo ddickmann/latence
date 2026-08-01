@@ -1,0 +1,4 @@
+# Derived, reproducible from corpus/ + pipeline.yaml in ~30 s:
+#   PYTHONHASHSEED=0 uv run python benchmark/enterprise-gold/run_pipeline.py --fresh
+store/
+__pycache__/

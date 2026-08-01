@@ -130,15 +130,24 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     # with a **plausible-SSN guard** fixes both the coverage and the label: a leading
     # negative lookahead rejects the SSA-invalid area/group/serial ranges (area
     # ``000``/``666``/``9xx``, group ``00``, serial ``0000``) to cut the false positives
-    # a bare 9-digit run would otherwise cause. Linear-time: the guard is a bounded
-    # fixed-width lookahead and the body is a fixed count of digit classes with an
-    # optional single space between groups (no unbounded quantifier over an overlapping
-    # class). Emitted with ``pii_type='ssn'`` (see ``_DETECTOR_TYPE``) so the label is
-    # correct and ``types:["ssn"]`` genuinely covers it.
+    # a bare 9-digit run would otherwise cause. A **letter-glue guard** rejects a run
+    # fused to a letter on either side (enterprise-gold T21 finding 2: the markdown
+    # chunker strips table pipes, so ``| Industrial drives | 410 | 455 | 470 |`` reaches
+    # the detector as ``Industrial drives410455470`` — an innocent numeric row, not an
+    # SSN). ``[^\W\d_]`` is "any unicode letter" (word char minus digit minus ``_``), so
+    # a German cell label ending in ``ä``/``ü`` is rejected too; the one letter-glued
+    # form that IS a real SSN presentation — the literal label fused to the digits,
+    # ``SSN123456789`` — is kept by the fixed-width ``(?<=[sS][sS][nN])`` exception
+    # (case-classes, so it holds under ``case_sensitive: true`` as well). Linear-time:
+    # every guard is a bounded fixed-width lookaround and the body is a fixed count of
+    # digit classes with an optional single space between groups (no unbounded
+    # quantifier over an overlapping class). Emitted with ``pii_type='ssn'`` (see
+    # ``_DETECTOR_TYPE``) so the label is correct and ``types:["ssn"]`` genuinely
+    # covers it.
     "ssn_nodash": (
-        r"(?<!\d)"
+        r"(?:(?<=[sS][sS][nN])|(?<![^\W\d_]))(?<!\d)"
         r"(?!000|666|9\d\d)\d{3} ?(?!00)\d{2} ?(?!0000)\d{4}"
-        r"(?!\d)"
+        r"(?!\d)(?![^\W\d_])"
     ),
     # 13–16 digit card number, optional single space/dash between digits.
     "credit_card": r"\b\d(?:[ -]?\d){12,15}\b",

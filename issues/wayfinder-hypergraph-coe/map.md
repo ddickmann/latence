@@ -45,6 +45,8 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 
 <!-- one line per closed ticket: gist + link -->
 
+- [Task: enterprise gold set + calibration data](tickets/21-task-enterprise-gold-set.md) — **complete + validated** (harness verified; data LLM-generated at Dennis's direction with provenance recorded, pending his spot-check): 40-doc corpus with 80 planted cross-doc chains, byte-deterministic export (226 hyperedges), **100 gold questions (validate exit 0)**, **226 calibration judgments (224/1/1)**. The generation runs **found two real builder defects** (stream-copy support ×3 with PII-primary risk; duplicate relation triples) — fixed at source with regression tests, suite 4730→**4732P/0F**, before the data was accepted.
+
 - [Task: M5 — chain assembly + traces](tickets/16-task-m5-chains-traces.md) — **BUILT + green** (subagent, verified after its suite-gate stall): sparse chain components, BFS-from-anchor ordering, spec-6.3 directed preference behind a `relations_lookup` seam, peripheral evidence last, byte-deterministic emission, redaction-safe τ by construction; selection **trace hook** (ids/counts only — no raw text) seeding the future learned utility. Suite 4694→**4730P/0F** (incl. the labeling harness's 22).
 
 - [Task: M4 — chain-of-evidence selector](tickets/15-task-m4-coe-selector.md) — **BUILT + green** (subagent, verified): UtilityModel/HeuristicUtility + lazy greedy with theta_min, **incremental sparse redundancy** (the measured requirement), **ADR-0058 exact verification pass live** (mandatory on counter mismatch, trim not scale); **the M3-deferred ranking claim now pinned — the 2-hop chain beats the maximally-advantaged lexical distractor AT SELECTION**; `knapsack_refine` **dropped with recorded rationale** (same greedy family = no-op; frozen-value DP optimises the wrong objective); dedup invariant makes the hard-redundancy case unrepresentable. Suite 4679→**4694P/0F**. [M4-RESULT.md](M4-RESULT.md).
@@ -75,6 +77,17 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 - [Research: external landscape, datasets, dependency licences](tickets/02-research-external-landscape-and-licences.md) — HyCE-RAG paper is real but its LLM-judge eval is incomparable (anchor on canonical metrics + HippoRAG-2 recall@5); no zero-LLM hypergraph-RAG line published → genuinely differentiated; MuSiQue CC BY 4.0 / HotpotQA CC BY-SA 4.0 (share-alike on derived artifacts); deps all green — the GLiREL licence blocker is **MOOT** (repo uses GLiNER2 fused extraction, Apache-2.0 weights+code, which covers every spec role GLiREL had; see ticket 02 addendum + spec.md adaptation note); GDPR delta none, but Purge must extend to the sidecar (parquet purge = rewrite/compaction).
 
 ## Not yet specified
+
+- **The calibration A/B needs a noisier corpus** (ticket-21 calibration finding): γ takes only
+  two values on the pattern-extractor/planted corpus (0.79 and 0.45), so isotonic calibration has
+  nothing to bend — the M6 calibrated-vs-uncalibrated A/B must run on the MuSiQue/HotpotQA side
+  (GLiNER2 extraction, continuous confidences), not the enterprise corpus.
+
+- **Hyperedge yield is a chunker knob** (ticket-21 finding 3: the same corpus gave 40 hyperedges
+  at chunk `max_tokens: 220` vs 226 at 90 — sentence windows rarely cross chunk boundaries, so
+  chunk size gates segmentation). The M6 eval should sweep chunk size as a reported dimension;
+  if the coupling is confirmed harmful, the fix is windowing across chunk boundaries inside the
+  builder — a measured-need change, not built on suspicion.
 
 - Weighted incidence B + pluggable Propagator kernel A/B (spec Part 6.1–6.2) — graduates after M3
   (ticket 14) and the eval harness exist to arbitrate. Note ADR-0056: weighting applies to the

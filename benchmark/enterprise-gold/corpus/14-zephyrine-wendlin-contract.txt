@@ -1,0 +1,46 @@
+SUPPLY AGREEMENT - EXCERPT
+
+Agreement ref.: ZL-WP-2023-002
+Excerpt prepared: 30 November 2023
+Prepared for: internal contract file only. Not the executed original.
+
+SECTION 2 - SUBJECT OF THE AGREEMENT
+
+2.1  Zephyrine Labs GmbH supplies Wendlin Pharma AG with coating material under this
+     agreement. The parties agree that the specification in Annex 1 governs.
+
+2.2  Quantities are called off quarterly. A call-off becomes binding fourteen days
+     after receipt.
+
+SECTION 3 - TERM
+
+3.1  The agreement runs for three years from the effective date and renews for one
+     year at a time unless terminated with six months' notice.
+
+SECTION 7 - CONTACTS
+
+7.1  Miriam Straub works at Wendlin Pharma AG and is the contact for all technical
+     questions arising under this agreement.
+
+7.2  Notices are effective only in writing to the addresses in Annex 3.
+
+     m.straub@wendlin-pharma.example
+     +49 6221 908 4471
+
+[Excerpt ends. Annexes not reproduced.]
+
+SECTION 8 - BACKGROUND (not part of the operative text)
+
+Wendlin Pharma AG is based in Heidelberg.
+
+Wendlin Pharma AG manufactures the Ambrel dosing kit.
+
+## Cross-references
+
+The list below is maintained by the records office and is reproduced here for completeness only. It has no bearing on the content of the sections above, is refreshed once a quarter on a fixed calendar, and is never amended in response to a revision of this document. Corrections go to the records office in writing.
+
+The distribution list for this document also covers Wendlin Pharma AG, Oakhurst Capital Partners and Cendria Software Ltd.
+
+Copies were filed with the offices of Oakhurst Capital Partners and Cendria Software Ltd.
+
+Hannah Loewe was named in the circulation list on behalf of Dalgren Maritime AS.

@@ -139,6 +139,9 @@ _GOLD: tuple[tuple[str, str, str], ...] = (
     # ``phone`` mislabel. A ``types:["ssn"]`` policy must genuinely cover these.
     ("ssn", "SSN digits-only on file: 123456789 (verify).", "123456789"),
     ("ssn", "Space-grouped SSN 123 45 6789 in the export.", "123 45 6789"),
+    # The one letter-glued form that IS a real SSN presentation: the literal label fused
+    # to the digits. The table-glue guard must keep this via its ``SSN`` exception.
+    ("ssn", "Messy row had SSN123456789 with no separator.", "123456789"),
 )
 
 # Clean control documents: NO PII of any type. A recogniser that fires here is a false
@@ -147,6 +150,13 @@ _CLEAN_CONTROLS: tuple[str, ...] = (
     "The quarterly report summarises revenue growth across three regions.",
     "Version 1.4 shipped on schedule with no regressions in the suite.",
     "Meeting notes: agenda, action items, and the follow-up date next week.",
+    # Stripped markdown table rows (enterprise-gold T21 finding 2): the chunker fuses
+    # ``| Industrial drives | 410 | 455 | 470 |`` into a label-glued digit run. An
+    # innocent numeric row must not be masked as an SSN (or anything else).
+    "Industrial drives410455470 headcount by division, rounded.",
+    # A German cell label ending in a NON-ASCII letter: the glue guard is unicode-aware
+    # (``[^\W\d_]``), so ``ü``-glued digits are rejected exactly like ``s``-glued ones.
+    "Menü410455470 der Kantine, Auswahl je Woche.",
 )
 
 

@@ -38,3 +38,4 @@ secrets.*
 # Maintainer-local competitive review (issue #189): candid competitor/gap notes that
 # were never intended to ship on a public repo or docs site. Kept on disk, out of git.
 docs/COMPETITIVE-GAP-ANALYSIS.md
+benchmark/enterprise-gold/store/

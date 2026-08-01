@@ -1,0 +1,223 @@
+# enterprise-gold — the hypergraph supporting-fact eval stack (tickets 08 / 17 / 21).
+#
+# Shape: the e2e template from packages/latence-core/tests/test_hyperedge.py
+# (source -> parse -> chunk -> redact -> entities -> relations -> disambiguate ->
+# graph_assembly[hyperedges] -> export) plus the ticket-17 corpus export wired the way
+# packages/latence-core/tests/test_e2e_graph.py wires `export.jsonl_parquet`.
+#
+# `${REPO_ROOT}` is substituted with the repository root by run_pipeline.py before the
+# text reaches `Pipeline.from_yaml_text` (core has no env expansion of its own), so this
+# file stays machine-independent. Run it with:
+#
+#     PYTHONHASHSEED=0 uv run python benchmark/enterprise-gold/run_pipeline.py
+#
+# The corpus export basename MUST stay `records`: `latence-label` looks for
+# records.jsonl / records.parquet inside an export dir (labeling/goldset._find_export_file).
+name: enterprise-gold
+storage_uri: file://${REPO_ROOT}/benchmark/enterprise-gold/store
+stages:
+  - name: source
+    capability: source
+    provider: source.local_folder
+    config:
+      path: 'file://${REPO_ROOT}/benchmark/enterprise-gold/corpus'
+      sensitivity: internal
+      extensions: [txt, md]
+
+  - name: parse
+    capability: parse
+    provider: parser.plaintext
+    depends_on: [source]
+
+  # No chunk overlap: a supporting-fact span must have exactly one home chunk, so the
+  # gold offsets are unambiguous (a fact never crosses a chunk boundary by design).
+  - name: chunk
+    capability: chunk
+    provider: chunk.markdown
+    depends_on: [parse]
+    config:
+      max_tokens: 90
+      overlap_tokens: 0
+      min_tokens: 8
+
+  # W16/ADR-0042: Redaction is a chunk->chunk transform. The corpus Export downstream of
+  # it materializes `masked_content`, which IS the corpus text the gold offsets index
+  # (labeling/goldset._row_to_chunk) — so the planted invented emails/phones are masked
+  # before anyone labels or evaluates against them.
+  - name: redact
+    capability: redaction
+    provider: redaction.hybrid_rule
+    depends_on: [chunk]
+
+  - name: entities
+    capability: entity_extraction
+    provider: entity.gazetteer
+    depends_on: [redact]
+    config:
+      labels:
+        ORG:
+          terms:
+            - Meridian Systems AG
+            - Norvik Tools GmbH
+            - Kalthoff AG
+            - Brekker Antriebstechnik GmbH
+            - Ardent Vale Ltd
+            - Brightmoor Analytics Ltd
+            - Solvex Chemie GmbH
+            - Tessaro Logistik AG
+            - Halcyon Verpackung GmbH
+            - Pelmar Robotics SA
+            - Quintara Energy plc
+            - Vantor Stahlwerke AG
+            - Ferrix Automation BV
+            - Wendlin Pharma AG
+            - Oakhurst Capital Partners
+            - Cendria Software Ltd
+            - Lorquin Metals SpA
+            - Aurenta Insurance Group
+            - Dalgren Maritime AS
+            - Zephyrine Labs GmbH
+            - Tolmach Bergbau AG
+            - Nyquist Sensors Oy
+            - Ravenport Terminals Ltd
+            - Ellsworth Diagnostics Inc
+            - Marnix Textil BV
+        PERSON:
+          terms:
+            - Ilse Brandtner
+            - Henrik Vosskamp
+            - Marta Cendrillo
+            - Tobias Reinhard
+            - Adaeze Okonkwo
+            - Sven Lidbergh
+            - Renata Falkner
+            - Jonas Petric
+            - Camille Aubertin
+            - Miriam Straub
+            - Yusuf Kandemir
+            - Elena Marchetti
+            - Piotr Zawadzki
+            - Hannah Loewe
+            - Gregor Malin
+            - Sofia Andrade
+            - Nils Ekstrand
+            - Beatrix Homann
+            - Dario Vespucci
+            - Fatima Zerhouni
+        PRODUCT:
+          terms:
+            - Tarnex-Getriebe
+            - Tarnex gearbox
+            - Vortan 400 Servoantrieb
+            - Vortan 400 servo drive
+            - Halox membrane
+            - Corvid X2 controller
+            - Selenta-Beschichtung
+            - Marlin 7 telemetry unit
+            - Braxis hydraulic pump
+            - Nadir 12 sensor array
+            - Pyrand-Dämmplatte
+            - Larent handling arm
+            - Ambrel dosing kit
+            - Kestrel-Profil
+            - Vaskal-Konzentrat
+        LOCATION:
+          terms:
+            - Düsseldorf
+            - Bratislava
+            - Trondheim
+            - Porto
+            - Lyon
+            - Kattowitz
+            - Tampere
+            - Genoa
+            - Rotterdam
+            - Leipzig
+            - Leeds
+            - Coventry
+            - Mannheim
+            - Jena
+            - Heidelberg
+            - Aberdeen
+            - Hamburg
+            - Duisburg
+            - Bielefeld
+            - Utrecht
+            - London
+            - Bremen
+            - Eindhoven
+            - Boston
+            - Zürich
+
+  # Trigger phrases are the corpus's own phrasing (EN + DE). relation.pattern requires the
+  # trigger to sit BETWEEN a head-typed and a later tail-typed mention within window_chars.
+  - name: relations
+    capability: relation_extraction
+    provider: relation.pattern
+    depends_on: [redact, entities]
+    config:
+      window_chars: 200
+      relations:
+        acquired:
+          head: ORG
+          tail: ORG
+          triggers: [acquired, übernahm, hat übernommen]
+        supplies:
+          head: ORG
+          tail: ORG
+          triggers: [supplies, beliefert, liefert an]
+        merged_with:
+          head: ORG
+          tail: ORG
+          symmetric: true
+          triggers: [merged with, fusionierte mit]
+        invested_in:
+          head: ORG
+          tail: ORG
+          triggers: [invested in, beteiligte sich an]
+        partner_of:
+          head: ORG
+          tail: ORG
+          symmetric: true
+          triggers: [partnered with, partner of, kooperiert mit]
+        works_for:
+          head: PERSON
+          tail: ORG
+          triggers: [works at, joined, employed by, arbeitet bei, wechselte zu, leitet]
+        manufactures:
+          head: ORG
+          tail: PRODUCT
+          triggers: [manufactures, produces, fertigt, produziert]
+        located_in:
+          head: ORG
+          tail: LOCATION
+          triggers: [is headquartered in, is based in, hat ihren Sitz in, mit Sitz in]
+
+  - name: disambiguate
+    capability: disambiguation
+    provider: disambiguation.cascade
+    depends_on: [entities, relations]
+
+  - name: graph
+    capability: graph_assembly
+    provider: graph.canonical
+    depends_on: [disambiguate]
+    config:
+      corpus_id: enterprise-gold
+      hyperedges:
+        min_tokens: 12
+        max_window_sentences: 2
+
+  - name: export_kg
+    capability: export
+    provider: export.knowledge_graph
+    depends_on: [graph]
+    config:
+      basename: graph
+
+  - name: export_corpus
+    capability: export
+    provider: export.jsonl_parquet
+    depends_on: [redact]
+    config:
+      basename: records
