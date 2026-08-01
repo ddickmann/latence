@@ -45,6 +45,8 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 
 <!-- one line per closed ticket: gist + link -->
 
+- [Task: M5 — chain assembly + traces](tickets/16-task-m5-chains-traces.md) — **BUILT + green** (subagent, verified after its suite-gate stall): sparse chain components, BFS-from-anchor ordering, spec-6.3 directed preference behind a `relations_lookup` seam, peripheral evidence last, byte-deterministic emission, redaction-safe τ by construction; selection **trace hook** (ids/counts only — no raw text) seeding the future learned utility. Suite 4694→**4730P/0F** (incl. the labeling harness's 22).
+
 - [Task: M4 — chain-of-evidence selector](tickets/15-task-m4-coe-selector.md) — **BUILT + green** (subagent, verified): UtilityModel/HeuristicUtility + lazy greedy with theta_min, **incremental sparse redundancy** (the measured requirement), **ADR-0058 exact verification pass live** (mandatory on counter mismatch, trim not scale); **the M3-deferred ranking claim now pinned — the 2-hop chain beats the maximally-advantaged lexical distractor AT SELECTION**; `knapsack_refine` **dropped with recorded rationale** (same greedy family = no-op; frozen-value DP optimises the wrong objective); dedup invariant makes the hard-redundancy case unrepresentable. Suite 4679→**4694P/0F**. [M4-RESULT.md](M4-RESULT.md).
 
 - [Task: KV under concurrent load](tickets/19-task-kv-concurrency-validation.md) — **measured, fine as-is**: per-call open = 0.04–0.06 ms p50, flat c=1→16 and 50k→500k HEs; c=16 tail is CPU saturation in reads, not open contention — ADR-0056's contingency fix would save nothing and stays unbuilt. Cold-cache honestly unmeasured (needs sudo). ADR-0056's consequences updated.

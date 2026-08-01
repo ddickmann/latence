@@ -1,7 +1,7 @@
 # 21 — Task (HITL): the manual enterprise gold set
 
 Type: task
-Status: open
+Status: claimed
 Blocked by: —
 
 ## Question

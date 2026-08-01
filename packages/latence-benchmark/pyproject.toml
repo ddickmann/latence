@@ -44,6 +44,9 @@ hub = [
 [project.scripts]
 # The ONE command an outsider runs (AC-1). See README.md.
 latence-benchmark = "latence_benchmark.cli:main"
+# The ticket-21 labeling harness (gold set + Hyperedge γ calibration). Local-only stdlib
+# HTTP UI on 127.0.0.1 — no new dependency.
+latence-label = "latence_benchmark.labeling.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"
