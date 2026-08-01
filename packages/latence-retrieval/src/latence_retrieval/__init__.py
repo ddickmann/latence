@@ -117,6 +117,12 @@ from __future__ import annotations
 
 from latence_retrieval.backend import RetrievalBackend
 from latence_retrieval.bm25 import Bm25Rescorer
+from latence_retrieval.chains import (
+    Chain,
+    ChainAssembly,
+    ChainStep,
+    assemble_chains,
+)
 from latence_retrieval.coe import (
     CoeConfig,
     CoeSelection,
@@ -224,6 +230,9 @@ __all__ = [
     "CandidateProcessor",
     "CandidateProcessorError",
     "Capability",
+    "Chain",
+    "ChainAssembly",
+    "ChainStep",
     "CoeConfig",
     "CoeSelection",
     "CompositeBackend",
@@ -282,6 +291,7 @@ __all__ = [
     "WeightSweep",
     "WeightSweepRow",
     "WeightedFuser",
+    "assemble_chains",
     "build_graph_document_source",
     "build_graph_source",
     "compare_fusers",

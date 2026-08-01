@@ -69,6 +69,16 @@ and a repair phase that back-fills the boundary with sub-threshold filler contra
 ADR-0058 verification pass may trim the tail anyway, re-breaking any repaired boundary. The
 measured levers on selection quality were pipeline order and candidate reach (ticket 20), never
 boundary packing.
+
+**The selection trace** (spec 3.5, M5). With an optional ``trace_sink`` supplied, :func:`select`
+emits ONE JSON-serialisable dict per query — anchors, expansion/prune counts, a per-candidate
+record (v0, marginal, accepted/rejected, trimmed), the final selection and the verification
+outcome — the weak-supervision seed for the future learned utility classifier. A rejected
+candidate's marginal is evaluated against the FINAL selected set (the counterfactual a learned
+utility wants to score); an accepted one's is its value at acceptance, exactly what drove the
+decision. Traces carry **ids, counts and scores only — never raw ``tau_text``**: a deliberate
+privacy choice, because a trace may travel further than the corpus it describes. The default
+``trace_sink=None`` path is byte-identical to the pre-hook selector.
 """
 
 from __future__ import annotations
@@ -76,7 +86,7 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -265,6 +275,7 @@ def select(
     tau_lookup: Callable[[str], str | None] | None = None,
     token_counter: TokenCounter | None = None,
     counter_identity: str | None = None,
+    trace_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> CoeSelection:
     """Select the budgeted chain-of-evidence subset of ``signals``' gated candidates.
 
@@ -286,6 +297,11 @@ def select(
     (under-packing is safe, overflow is not — ADR-0058); a selected id whose ``tau_text`` cannot
     be fetched fails loudly rather than shipping unverified.
 
+    ``trace_sink`` (spec 3.5, M5) receives ONE JSON-serialisable dict for this query — anchors,
+    expansion/prune counts, one accepted/rejected record per candidate with its v0 and marginal,
+    the final selection ids and the verification outcome. Ids/counts/scores only, never raw
+    ``tau_text`` (the module docstring records why); ``None`` (the default) changes nothing.
+
     Deterministic by construction: no randomness, ties broken by ascending Hyperedge id.
     """
     cfg = config or CoeConfig()
@@ -305,6 +321,22 @@ def select(
 
     ids = sorted(signals.rho)
     if not ids:
+        if trace_sink is not None:
+            trace_sink(
+                {
+                    "stage": "select",
+                    "anchors": {node: signals.anchors[node] for node in sorted(signals.anchors)},
+                    "expanded_candidates": signals.expanded_candidates,
+                    "pruned_candidates": signals.pruned_candidates,
+                    "candidate_count": 0,
+                    "budget": budget,
+                    "steps": [],
+                    "selected": [],
+                    "trimmed": [],
+                    "verified": False,
+                    "total_cost": 0,
+                }
+            )
         return CoeSelection(
             selected=[], marginals={}, total_cost=0, budget=budget, verified=False, trimmed=[]
         )
@@ -443,6 +475,49 @@ def select(
                 trimmed.append(victim)
                 total -= exact[victim]
             verified = True
+
+    if trace_sink is not None:
+        # spec 3.5: one trace per query — the weak-supervision record for the learned utility.
+        # Accepted steps first, in acceptance order, with the marginal that drove the accept;
+        # then every never-accepted candidate exactly once as rejected, its marginal evaluated
+        # against the FINAL selected state. Ids/counts/scores only — never raw tau_text.
+        accepted_set = set(accepted)
+        steps: list[dict[str, Any]] = [
+            {
+                "hyperedge_id": hid,
+                "v0": model.base(features[index_of[hid]]),
+                "marginal": marginals[hid],
+                "decision": "accepted",
+                "trimmed": hid in trimmed,
+            }
+            for hid in accepted
+        ]
+        steps.extend(
+            {
+                "hyperedge_id": hid,
+                "v0": model.base(features[index_of[hid]]),
+                "marginal": true_marginal(index_of[hid]),
+                "decision": "rejected",
+                "trimmed": False,
+            }
+            for hid in ids
+            if hid not in accepted_set
+        )
+        trace_sink(
+            {
+                "stage": "select",
+                "anchors": {node: signals.anchors[node] for node in sorted(signals.anchors)},
+                "expanded_candidates": signals.expanded_candidates,
+                "pruned_candidates": signals.pruned_candidates,
+                "candidate_count": len(ids),
+                "budget": budget,
+                "steps": steps,
+                "selected": list(selected),
+                "trimmed": list(trimmed),
+                "verified": verified,
+                "total_cost": total,
+            }
+        )
 
     return CoeSelection(
         selected=selected,
