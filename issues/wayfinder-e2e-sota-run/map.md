@@ -65,8 +65,20 @@ Runner's stage checkpoints or two separate runs.
 
 ## Decisions so far
 
-*(none — S0 investigations in flight; first decisions due: corpus composition, OCR model
-commit, wizard placement/naming)*
+**S0 gate (Dennis, 2026-08-02)** — all four recommendations accepted:
+
+1. **Corpus = the full 6+2**: MuSiQue + HotpotQA (incumbents, local) + 2WikiMultiHopQA +
+   MultiHop-RAG + OHR-Bench + ViDoSeek + UDA (FinHybrid/PaperTab). License lanes per
+   [dataset-landscape.md](s0-investigations/dataset-landscape.md); share-alike/research-only
+   material local + gitignored, never redistributed.
+2. **OCR = LightOnOCR-2-1B served** via the existing `parser.lighton_vllm` provider
+   (already its default model) + vLLM on the 16GB pod.
+3. **Wizard = new `latence-campaign` CLI** in the latence-benchmark package, mirroring
+   `latence setup` house style; productizes supervise.sh's stage-table/probe/STATE.json
+   shape in Python.
+4. **Schema induction = LLM via OpenRouter** (`label_inducer.llm`) in the S3 full-feature
+   profile — offline indexing cost only, online path stays zero-LLM; exact budget estimate
+   presented before the S3 run is approved.
 
 ## Fog
 
