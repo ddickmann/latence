@@ -79,6 +79,12 @@ Runner's stage checkpoints or two separate runs.
 4. **Schema induction = LLM via OpenRouter** (`label_inducer.llm`) in the S3 full-feature
    profile — offline indexing cost only, online path stays zero-LLM; exact budget estimate
    presented before the S3 run is approved.
+5. **Processing host = the existing RunPod pod** (Dennis, 2026-08-02):
+   `ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519` — RTX 2000 Ada 16GB, verified
+   alive with `/workspace/latence-framework` + `podcheck.sh` already in place from the M6
+   campaign. Heavy stages (S2 vLLM OCR serving, S3 GLiNER2 extraction/graph build) run
+   there under a pod-side supervisor with progress-freeze detection; the campaign wizard's
+   `pod_ssh` config key carries this target.
 
 ## Fog
 
