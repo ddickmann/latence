@@ -116,6 +116,9 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
   dissolved the premise: Hyperedges re-project the same extracted records, so upstream
   improvements flow in by construction. Generic pipeline-quality work becomes a spin-off map
   charted after the M6 gate, from the eval's measured weak spots.
+  **CHARTED 2026-08-02**: [issues/wayfinder-datagen-quality/map.md](../wayfinder-datagen-quality/map.md)
+  — 11 tickets, one per measured error pattern / carried finding, opening evidence =
+  [M6-CALIBRATION-OFFICIAL.md](M6-CALIBRATION-OFFICIAL.md).
 
 - Groundedness / contradiction handling — explicitly excluded by the spec for this iteration.
 - True iterative retrieve-resolve-retrieve multi-hop (reasoning step in the loop) — spec 6.3:
