@@ -45,6 +45,8 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 
 <!-- one line per closed ticket: gist + link -->
 
+- **[OFFICIAL GATE PASSED — both full corpora](tickets/17-task-m6-eval-gate.md)** (2026-08-02): MuSiQue-full test **AUC +15.1%** (+10.4 pts @16k), HotpotQA-full test **AUC +6.6%** (+9.7 pts @16k), endpoints hold, worst 0.0%, single pre-registered test scorings. **Tier 2 wins both datasets**; exact≈heuristic costs (ADR-0058 confirmed at scale); weak = tail recall; **calibration recall-neutral** (per-regime isotonic — the judged sample's real yield is the upstream extraction-quality evidence file). THE MAP'S DESTINATION IS REACHED IN FULL.
+
 - [Task: M6 — the eval gate](tickets/17-task-m6-eval-gate.md) — **SUBSET GATE PASSED on both datasets** (2026-08-02): dev-tuned budget-conditional policy (baseline@1k, CoE@≥2k), test + enterprise scored unchanged — MuSiQue AUC **0.508 vs 0.478** (+11.2 pts @16k), enterprise AUC **0.820 vs 0.707** (+15.6 pts @4k+), endpoints hold, worst point 0.0%. Both scorings disclosed (flat share FAILED the 1k endpoint and is on the record). Remaining for the official numbers: the full-corpus pod run with per-tier curves + the four A/Bs + recall@5.
 
 - [Task: enterprise gold set + calibration data](tickets/21-task-enterprise-gold-set.md) — **complete + validated** (harness verified; data LLM-generated at Dennis's direction with provenance recorded, pending his spot-check): 40-doc corpus with 80 planted cross-doc chains, byte-deterministic export (226 hyperedges), **100 gold questions (validate exit 0)**, **226 calibration judgments (224/1/1)**. The generation runs **found two real builder defects** (stream-copy support ×3 with PII-primary risk; duplicate relation triples) — fixed at source with regression tests, suite 4730→**4732P/0F**, before the data was accepted.
@@ -79,6 +81,14 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 - [Research: external landscape, datasets, dependency licences](tickets/02-research-external-landscape-and-licences.md) — HyCE-RAG paper is real but its LLM-judge eval is incomparable (anchor on canonical metrics + HippoRAG-2 recall@5); no zero-LLM hypergraph-RAG line published → genuinely differentiated; MuSiQue CC BY 4.0 / HotpotQA CC BY-SA 4.0 (share-alike on derived artifacts); deps all green — the GLiREL licence blocker is **MOOT** (repo uses GLiNER2 fused extraction, Apache-2.0 weights+code, which covers every spec role GLiREL had; see ticket 02 addendum + spec.md adaptation note); GDPR delta none, but Purge must extend to the sidecar (parquet purge = rewrite/compaction).
 
 ## Not yet specified
+
+- **Extraction quality is the next frontier, now measured** (official calibration sample,
+  M6-CALIBRATION-OFFICIAL.md): GLiNER2@0.5 on wiki text fabricates relations at scale — 58% of
+  relation-bearing Hyperedges carry ≥1 unasserted triple (`capital of` 1/11 genuine), the γ high
+  tail is the LEAST reliable, and γ≤0.5 ⟺ weak by construction (calibration must be per-regime —
+  staged as `calibration-map-per-regime.json`). This is the opening evidence file for the
+  post-M6 data-gen spin-off map (ticket 11's designed destination) — the retrieval gates pass
+  DESPITE extraction noise, so extraction gains compound on top.
 
 - **The calibration A/B needs a noisier corpus** (ticket-21 calibration finding): γ takes only
   two values on the pattern-extractor/planted corpus (0.79 and 0.45), so isotonic calibration has

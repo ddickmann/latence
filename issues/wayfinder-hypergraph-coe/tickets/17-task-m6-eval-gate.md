@@ -68,3 +68,30 @@ A/B (γ is continuous here: 8,572 distinct values — unblocked), and recall@5 f
 comparability. Ops notes for that run: the 11h harness wall (pack-pool + Jaccard cache fixes,
 result-identical, are in the harness now) and the linear exact-surface disambiguator that
 replaced both shipped resolvers past ~10⁴ unique surfaces (a productization ticket candidate).
+
+## OFFICIAL GATE: PASSED — both FULL corpora (2026-08-02)
+
+The ticket-08 design executed in full: MuSiQue complete validation (2,417 q; 60,054
+hyperedges) + HotpotQA dev distractor (7,405 q; **214,769 hyperedges**, 349k nodes), GLiNER2
+indexing on the pod (one quota crash, checkpoint-resumed — the transactional Storage held),
+dev-tuned per dataset, ONE test scoring each, gates:
+
+| | MuSiQue-full test | HotpotQA-full test |
+|---|---|---|
+| AUC | **0.4428 vs 0.3846 (+15.1%)** | **0.6926 vs 0.6496 (+6.6%)** |
+| @16k | 0.4894 vs 0.385 (**+10.4 pts**) | 0.7465 vs 0.6496 (**+9.7 pts**) |
+| endpoints / worst | hold / 0.0% | hold / 0.0% |
+
+**Per-tier (dev)**: tier2 (GLiNER2 query NER) wins BOTH datasets (MQ 0.4464, HP 0.6427 AUC)
+— the ADR-0059 opt-in tier earns its place; tier1 n-grams close on MQ, weak at tight
+budgets on HP; tier0 lexical-floor trails on MQ (0.373) but is a strong 1k performer on HP.
+**A/Bs**: exact-vs-heuristic token costs ≈ equal (ADR-0058's bet confirmed at 375k-hyperedge
+scale); weak Hyperedges = tail recall at big budgets, a 1k liability (the piecewise policy
+absorbs this); **calibration = recall-neutral** (per-regime isotonic, dev A/B 0.4452 vs
+0.4464 — γ carries 15% of utility; ships as adopter tooling, no recall claim). The judged
+sample's real finding is upstream: GLiNER2@0.5 fabricates relations on wiki text (58% of
+relation-bearing samples ≥1 unasserted triple; γ's high tail LEAST reliable; γ≤0.5 ⟺ weak
+by construction → calibration must be per-regime) — the opening evidence for the post-M6
+data-gen map. recall@5 comparability + Dennis's spot-check of LLM-generated judgments remain
+open notes, not gate conditions. Harness honesty: profile-driven speedups only (pack-once/
+prefix-truncate disclosed and uniform across arms; indexed BM25 with identical scoring math).

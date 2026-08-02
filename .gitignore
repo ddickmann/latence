@@ -39,3 +39,11 @@ secrets.*
 # were never intended to ship on a public repo or docs site. Kept on disk, out of git.
 docs/COMPETITIVE-GAP-ANALYSIS.md
 benchmark/enterprise-gold/store/
+# official eval data: dataset-derived artifacts stay local (HotpotQA CC BY-SA share-alike,
+# ticket 02); judgments/maps/results are committed, corpora+exports+gold regenerate via
+# benchmark scripts + the pod runbooks.
+benchmark/official-data/*/export/
+benchmark/official-data/*/*-dev.jsonl
+benchmark/official-data/*/*-test.jsonl
+benchmark/official-data/*/query-surfaces.jsonl
+benchmark/official-data/*/calibration-sample.jsonl

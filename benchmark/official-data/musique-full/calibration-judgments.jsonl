@@ -1,0 +1,250 @@
+{"hyperedge_id": "0edef61a916c07fc", "judgment": "incorrect", "note": "sole member 'study plans' is a mid-prose common noun promoted to a product; the span's actual subject (the university) is unnamed"}
+{"hyperedge_id": "6caf5e91bb6cb9b5", "judgment": "correct"}
+{"hyperedge_id": "f535f77cbb27ecdd", "judgment": "correct"}
+{"hyperedge_id": "ba5f88f6fa80effc", "judgment": "partial", "note": "'election campaigns' is a common-noun event; the four named members (Red Shirts, Democratic, Confederates, 1872) are right"}
+{"hyperedge_id": "cf6f52475bfd1086", "judgment": "correct"}
+{"hyperedge_id": "5fcbef247c252e65", "judgment": "partial", "note": "'Samson &' is a title truncated at the span boundary, and most song titles the span lists (Morning Dew, Mama Tried, El Paso, The Red Rooster) are extracted nowhere"}
+{"hyperedge_id": "6b04a0e54f050970", "judgment": "incorrect", "note": "the span's four languages (Greek, late Latin, French, English) are all extracted as LOCATIONS — systematic language->location mis-type; only 'asphalt' survives"}
+{"hyperedge_id": "70d02cac25acc93b", "judgment": "partial", "note": "'primary campaign' is a common-noun event; Hillary Clinton and 2008 are right"}
+{"hyperedge_id": "c1ab0f8c57ced516", "judgment": "partial", "note": "'census' is a common-noun event; the three places and the date are right"}
+{"hyperedge_id": "49a5ce037ede57ac", "judgment": "correct"}
+{"hyperedge_id": "bf298c49dab64ceb", "judgment": "correct"}
+{"hyperedge_id": "1dac30b32074f9b0", "judgment": "incorrect", "note": "sole member 'fossil-fuel burning' is a process phrase, not an entity"}
+{"hyperedge_id": "a9bc0c4e8fcd1aee", "judgment": "partial", "note": "'Dokyo' (a monk) is typed LOCATION and 'Buddhist institutions' is a common noun; Nara and the event are right"}
+{"hyperedge_id": "91cebe3c418099a8", "judgment": "partial", "note": "'poetic adventure' and \"life's work\" are lifted out of the Nobel citation quote as creative works"}
+{"hyperedge_id": "408346e55f7f7143", "judgment": "correct"}
+{"hyperedge_id": "d8a79508ea31c662", "judgment": "partial", "note": "demonym 'American' typed LOCATION and 'private business jets' is a common noun; the four company/date members are right"}
+{"hyperedge_id": "e91c4d041f0631ac", "judgment": "correct"}
+{"hyperedge_id": "4e978768a82ae4d3", "judgment": "partial", "note": "the pronoun 'He' is promoted to a PERSON node — a node that will conflate every unresolved male referent it merges with"}
+{"hyperedge_id": "17c56b790a7f8c01", "judgment": "incorrect", "note": "'Sandra' is a name fragment off the table's 'Bullock, Sandra' and becomes its own person node beside the sibling 'Sandra Bullock' — coreference failure"}
+{"hyperedge_id": "79d0a423a0d1a04a", "judgment": "correct"}
+{"hyperedge_id": "a5dec18a612e01d0", "judgment": "incorrect", "note": "sole member 'carnivals' is a common noun"}
+{"hyperedge_id": "0d558d6c467b11e2", "judgment": "incorrect", "note": "the title 'Breakfast at Tiffany's (film)' yields 'film' (common noun) + \"Tiffany's\" (title fragment); the actual work is never extracted"}
+{"hyperedge_id": "b2a74b22be1d5bc5", "judgment": "incorrect", "note": "'Madaris' (the plural of madrasa — schools) is typed PERSON"}
+{"hyperedge_id": "e9cbf1632e89e339", "judgment": "correct"}
+{"hyperedge_id": "6f8b308871d2ed7f", "judgment": "partial", "note": "the span's subject 'Pittsburgh Pipers' is extracted nowhere in the chunk, and 'league title' is a common-noun event"}
+{"hyperedge_id": "1cc9e4cea8af12db", "judgment": "partial", "note": "'June' here is June Carter (a person, per 'I was June, and you were my Johnny Cash') but is typed DATE; Johnny Cash is not extracted"}
+{"hyperedge_id": "ae5451158268061e", "judgment": "partial", "note": "media formats 'CD', 'LP' and 'digital download' promoted to product entities off a discography table; the albums, label and dates are right"}
+{"hyperedge_id": "bca01cbdb4a76caa", "judgment": "partial", "note": "'ten-year-old person' is a generic noun phrase typed PERSON; Whitehead is right"}
+{"hyperedge_id": "7322e632b60943a3", "judgment": "partial", "note": "'Lord North' (a person) is typed ORGANIZATION; British Empire and Benjamin Labaree are right"}
+{"hyperedge_id": "14ae4ef3bb1caece", "judgment": "correct"}
+{"hyperedge_id": "6d9f51a27369f8b9", "judgment": "partial", "note": "'invading' (a gerund) is promoted to an event entity; the two dukes and the two states are right"}
+{"hyperedge_id": "1771dd8b444e4b9d", "judgment": "correct"}
+{"hyperedge_id": "e7ace04c3068b5c7", "judgment": "partial", "note": "'British expansion' is a descriptive phrase, not a named event"}
+{"hyperedge_id": "ff8fea3e6de8e752", "judgment": "partial", "note": "the album 'After the Rain' is typed PRODUCT rather than creative work, and the band/song the span names are not extracted here"}
+{"hyperedge_id": "3d25b4972c5ad02e", "judgment": "correct"}
+{"hyperedge_id": "c4ee94fe9ec9d907", "judgment": "correct"}
+{"hyperedge_id": "3765a1d66265fcbd", "judgment": "partial", "note": "'FDEs' (forensic document examiners — a profession) is typed ORGANIZATION; ASTM is right"}
+{"hyperedge_id": "6604cd374d401d85", "judgment": "partial", "note": "'muzzle-loading smoothbore guns' is a generic weapon description; 'Armstrong breech-loading guns' is a defensible product line"}
+{"hyperedge_id": "53fc50cc5aab1bc2", "judgment": "correct"}
+{"hyperedge_id": "589bcb91bfb68564", "judgment": "correct"}
+{"hyperedge_id": "6ed480c982d80bdf", "judgment": "incorrect", "note": "the title 'Adams-Onis Treaty' is split at the en-dash into 'Adams'(person) + 'Onis Treaty'(event) — two malformed entities, and the treaty itself is never extracted"}
+{"hyperedge_id": "ac74805c556ace92", "judgment": "correct"}
+{"hyperedge_id": "6aac320fdab78f01", "judgment": "partial", "note": "demonym 'South Korean' typed LOCATION alongside the correct 'Korea'"}
+{"hyperedge_id": "1a35d658681ba5ef", "judgment": "correct"}
+{"hyperedge_id": "ab727ac7af455190", "judgment": "incorrect", "note": "both members (\"Earth's surface\", 'bodies of water') are generic descriptions typed LOCATION; the span's subject (sedimentary rocks) is elsewhere"}
+{"hyperedge_id": "e599546111b12088", "judgment": "correct"}
+{"hyperedge_id": "78985d2053ef9b7c", "judgment": "partial", "note": "'Saturday night' is part of the periodical title 'Saturday Night' but is typed DATE"}
+{"hyperedge_id": "d6d5a39aa08a15e3", "judgment": "partial", "note": "'forthcoming year' is a relative time phrase promoted to a date entity"}
+{"hyperedge_id": "ef919f57f102b575", "judgment": "partial", "note": "the span's subject star 'Kappa Fornacis' is extracted nowhere in the chunk; the two constellations are right"}
+{"hyperedge_id": "9e775f9c9656e44d", "judgment": "partial", "note": "the same date is emitted twice as two nodes ('October 27, 1986' and the infobox form '1986 - 10 - 27'), and the org name swallows the infobox word 'Agency'"}
+{"hyperedge_id": "1dce0d95f9c57603", "judgment": "correct"}
+{"hyperedge_id": "6d76e9c9e5ae406e", "judgment": "correct"}
+{"hyperedge_id": "d38262fd0606275c", "judgment": "partial", "note": "'public lecture' and 'his or her work' are anaphoric descriptions, not entities"}
+{"hyperedge_id": "d0b452cfa71449f2", "judgment": "correct"}
+{"hyperedge_id": "07509e76c98c412a", "judgment": "partial", "note": "'Douglas County School District RE-1' is typed LOCATION and duplicates the org node 'Douglas County School District'; the span's subject Legend High School is missing from the chunk"}
+{"hyperedge_id": "5f5bbcef704f8a3e", "judgment": "correct"}
+{"hyperedge_id": "8dddce6ab95e9272", "judgment": "partial", "note": "'Yuk Keep Smile' (a TV show) is typed EVENT; the four films are right"}
+{"hyperedge_id": "f9592322dc519809", "judgment": "incorrect", "note": "'forested land' and 'steppelands' are generic descriptions typed LOCATION; the span's real entity (the Vyatichi) is not extracted"}
+{"hyperedge_id": "cd435c05d11df1f1", "judgment": "correct"}
+{"hyperedge_id": "9ed29344165402f5", "judgment": "correct"}
+{"hyperedge_id": "6a4f62ca94d87589", "judgment": "correct"}
+{"hyperedge_id": "8a085549e5681163", "judgment": "partial", "note": "'order' is an anaphoric definite description ('the order') promoted to an organization node that identifies nothing"}
+{"hyperedge_id": "c209a308576c30a8", "judgment": "partial", "note": "'cities' is a common noun typed LOCATION; the three Europe members are right"}
+{"hyperedge_id": "d657bc53c506a460", "judgment": "partial", "note": "'Game of Thrones' is typed ORGANIZATION rather than creative work"}
+{"hyperedge_id": "d67cfe1e9b809021", "judgment": "partial", "note": "the play 'Intimate Apparel' is typed PRODUCT, and the two films the span names (Midnight in Paris, Black Mass) are not extracted"}
+{"hyperedge_id": "06f6104cd251c3e5", "judgment": "correct"}
+{"hyperedge_id": "e11ab788ae6c1b0d", "judgment": "correct"}
+{"hyperedge_id": "94d8a87a012a1db8", "judgment": "correct"}
+{"hyperedge_id": "22a9933390094bea", "judgment": "incorrect", "note": "the member's canonical name is literally 'Pub\\n\\nThe London Gazette' — the mention runs across a title/body boundary and produces a garbage node"}
+{"hyperedge_id": "c0853e9d7733140d", "judgment": "incorrect", "note": "'Sino-Tibetan' (a relation adjective off the title 'Sino-Tibetan relations during the Ming dynasty') is the sole member, typed LOCATION; support=22 means this node was reinforced 22x corpus-wide"}
+{"hyperedge_id": "39285963a93375dd", "judgment": "partial", "note": "'Rover Triumph' is a division (org) typed PRODUCT and bare 'Rover' duplicates it; Austin Rover and the dates are right"}
+{"hyperedge_id": "d6d204572c12ad4c", "judgment": "partial", "note": "'central business district' is a common noun typed LOCATION, and the span's subject (General Artigas Central Station) is not extracted"}
+{"hyperedge_id": "6e381eed2d421de0", "judgment": "partial", "note": "'Monday openers' is a common-noun event"}
+{"hyperedge_id": "6823fa4f5e869501", "judgment": "correct"}
+{"hyperedge_id": "3e3b88c7dcd7a74b", "judgment": "correct"}
+{"hyperedge_id": "a259fdcf81a76c95", "judgment": "partial", "note": "'Chamorro' (a language/people) is typed LOCATION; Guam is right"}
+{"hyperedge_id": "a1ae6d7811270404", "judgment": "partial", "note": "the date is lifted out of a table with its footnote asterisk attached — the node is named '2002 *'"}
+{"hyperedge_id": "2f47355ee2d60c6f", "judgment": "correct"}
+{"hyperedge_id": "978e140d0c9eb7f1", "judgment": "partial", "note": "the demonym adjectives 'Tasmanian' and 'South Australian' are typed LOCATION; Victoria and 2010 are right"}
+{"hyperedge_id": "51e5de0b431cac33", "judgment": "correct"}
+{"hyperedge_id": "1ceb18fdb0735f60", "judgment": "correct"}
+{"hyperedge_id": "508fc5d971a975ba", "judgment": "correct"}
+{"hyperedge_id": "ecf12c73e4978d04", "judgment": "partial", "note": "'double A-side physical single' is a common-noun description typed PRODUCT; the two years are right"}
+{"hyperedge_id": "e8ea1c1bed5641ed", "judgment": "correct"}
+{"hyperedge_id": "e16b2a78eea16571", "judgment": "correct"}
+{"hyperedge_id": "f6d566b5c755f889", "judgment": "correct"}
+{"hyperedge_id": "c7190201c2da5922", "judgment": "correct"}
+{"hyperedge_id": "a78c4b73b8652ec4", "judgment": "correct"}
+{"hyperedge_id": "89a7eeec0675d279", "judgment": "correct"}
+{"hyperedge_id": "3bc2a07a79a51595", "judgment": "partial", "note": "'within one months' is a relative duration (with the source's typo) promoted to a date entity"}
+{"hyperedge_id": "0c79e0f820db6f9c", "judgment": "correct"}
+{"hyperedge_id": "5d61bc82facaa287", "judgment": "correct"}
+{"hyperedge_id": "d132c0e6ae9358e5", "judgment": "partial", "note": "'album' is an anaphoric description ('the album') promoted to a product node"}
+{"hyperedge_id": "3e05663bd5b07f37", "judgment": "correct"}
+{"hyperedge_id": "2311dcd79462d6f1", "judgment": "partial", "note": "'Rudimental' (a band) is typed PERSON; the arity split itself is correct — the siblings carry the rest of the span"}
+{"hyperedge_id": "37572ca6ba0d6092", "judgment": "partial", "note": "'ordained priest' is a verb phrase promoted to an event entity; Galicia and the date are right"}
+{"hyperedge_id": "f13fb4f877310e88", "judgment": "correct"}
+{"hyperedge_id": "11f6f89fd84de836", "judgment": "correct"}
+{"hyperedge_id": "dc9df59d829565ec", "judgment": "correct"}
+{"hyperedge_id": "db922695502fd990", "judgment": "correct"}
+{"hyperedge_id": "7cccae6a4835bee1", "judgment": "correct"}
+{"hyperedge_id": "8e1afa4655323485", "judgment": "correct"}
+{"hyperedge_id": "28125f6c03cfc4f1", "judgment": "correct"}
+{"hyperedge_id": "7fa251792feffcee", "judgment": "correct"}
+{"hyperedge_id": "422f4aa868ecc640", "judgment": "partial", "note": "the span's subject — the song 'The Lonely' — is extracted nowhere; the band is right"}
+{"hyperedge_id": "e21f1b3c98be4d5c", "judgment": "partial", "note": "the span's subject 'Yankee Stadium' is extracted nowhere in the chunk; the street, the year and the championships are right"}
+{"hyperedge_id": "bdedfdfcd2d80211", "judgment": "correct"}
+{"hyperedge_id": "1454352f88f16cbc", "judgment": "correct"}
+{"hyperedge_id": "b851a9c1f5f11ea9", "judgment": "incorrect", "note": "sole member 'south-west' is a compass direction typed LOCATION"}
+{"hyperedge_id": "32ca88e4d5e7b8bb", "judgment": "correct"}
+{"hyperedge_id": "0774355b9cb1a757", "judgment": "incorrect", "note": "'Butler Detroit' welds two adjacent table cells (the schools 'Butler' and 'Detroit') into one organization node"}
+{"hyperedge_id": "1c12610ba19d1762", "judgment": "correct"}
+{"hyperedge_id": "6b8ce62e10263e91", "judgment": "correct"}
+{"hyperedge_id": "970aa1c25b9001a4", "judgment": "correct"}
+{"hyperedge_id": "a24c98ed3449d994", "judgment": "correct"}
+{"hyperedge_id": "df4d14d6ca83e599", "judgment": "correct"}
+{"hyperedge_id": "7f261c90a0638f9e", "judgment": "correct"}
+{"hyperedge_id": "4beb2060024bd025", "judgment": "correct"}
+{"hyperedge_id": "6ad499651390f4b7", "judgment": "correct"}
+{"hyperedge_id": "beba453b98a4f9cd", "judgment": "correct"}
+{"hyperedge_id": "d062856a2da59204", "judgment": "correct"}
+{"hyperedge_id": "2c0a0d5f88bebbd7", "judgment": "partial", "note": "the span's subject 'Southside Speedway' is extracted nowhere in the chunk; 1959 and Chesterfield County are right"}
+{"hyperedge_id": "79b3215824c5c65b", "judgment": "correct"}
+{"hyperedge_id": "248b14b6d0de6a27", "judgment": "correct"}
+{"hyperedge_id": "8d9c4fd8219a33d6", "judgment": "correct"}
+{"hyperedge_id": "ab6dc9c3eb7fb3c0", "judgment": "correct"}
+{"hyperedge_id": "96cfd448c178a8e8", "judgment": "incorrect", "note": "'DJay Heath Ledger' welds the role 'DJay' to the next actor 'Heath Ledger' across a table row boundary — a person node for someone who does not exist"}
+{"hyperedge_id": "374d2e5651187272", "judgment": "correct"}
+{"hyperedge_id": "8c46287e6ff397cd", "judgment": "correct"}
+{"hyperedge_id": "1ac28ffa888269c9", "judgment": "correct"}
+{"hyperedge_id": "79a592665d3d222f", "judgment": "correct"}
+{"hyperedge_id": "781fbff2f9b25d0f", "judgment": "correct"}
+{"hyperedge_id": "8ab8859cb56e1f1f", "judgment": "correct"}
+{"hyperedge_id": "5693329da58500f3", "judgment": "correct"}
+{"hyperedge_id": "2998d2141bc12900", "judgment": "correct"}
+{"hyperedge_id": "bcf9f3ea0bc78e6e", "judgment": "correct"}
+{"hyperedge_id": "7d2f4f64923a5cb9", "judgment": "correct"}
+{"hyperedge_id": "d2c94625c8722736", "judgment": "correct"}
+{"hyperedge_id": "3886d75b502dad96", "judgment": "correct"}
+{"hyperedge_id": "885e66f9bb2b1630", "judgment": "correct"}
+{"hyperedge_id": "c5af0197a993fc79", "judgment": "correct"}
+{"hyperedge_id": "e11e913b860eb68a", "judgment": "correct"}
+{"hyperedge_id": "ef8fc504b100f27b", "judgment": "correct"}
+{"hyperedge_id": "cc9e1e710cc457e8", "judgment": "correct"}
+{"hyperedge_id": "aad9630e5d7382ff", "judgment": "partial", "note": "'Barcelona' here denotes the football club but is typed LOCATION and mis-linked onto the city node; Neymar and Dani Alves are right"}
+{"hyperedge_id": "767117973fcf62f7", "judgment": "correct"}
+{"hyperedge_id": "26e956fc3b9b3a1e", "judgment": "correct"}
+{"hyperedge_id": "e4032d578d01c053", "judgment": "correct"}
+{"hyperedge_id": "8117bf427f967689", "judgment": "partial", "note": "the span's subject — the song 'Ningyo'/'人魚' — is not extracted; Avex Trax is right"}
+{"hyperedge_id": "241ef2ddbe5ac787", "judgment": "correct"}
+{"hyperedge_id": "b562b8d78aea0bb9", "judgment": "correct"}
+{"hyperedge_id": "3905ccba78be8fa8", "judgment": "correct"}
+{"hyperedge_id": "b1fd16a536df9735", "judgment": "correct"}
+{"hyperedge_id": "1e218f27145a2469", "judgment": "correct"}
+{"hyperedge_id": "73dbe1448f32fa16", "judgment": "correct"}
+{"hyperedge_id": "c2c18ce3079298b4", "judgment": "correct"}
+{"hyperedge_id": "167c5df6d7f58177", "judgment": "correct"}
+{"hyperedge_id": "499faa211fdfa7ce", "judgment": "correct"}
+{"hyperedge_id": "8cb382db927a3ff4", "judgment": "correct"}
+{"hyperedge_id": "c9dec9b048b59880", "judgment": "correct"}
+{"hyperedge_id": "02e7a4c3ff85fca4", "judgment": "correct"}
+{"hyperedge_id": "26436f0103f7959b", "judgment": "correct"}
+{"hyperedge_id": "4d3b1e981ff97721", "judgment": "correct"}
+{"hyperedge_id": "7071a8fe651662bb", "judgment": "correct"}
+{"hyperedge_id": "94d19db7c87c4153", "judgment": "correct"}
+{"hyperedge_id": "b60ac21b0899a864", "judgment": "correct"}
+{"hyperedge_id": "d9e70990e9216f34", "judgment": "correct"}
+{"hyperedge_id": "fed9c23f60b8296d", "judgment": "correct"}
+{"hyperedge_id": "4fe6c5174f51b056", "judgment": "correct"}
+{"hyperedge_id": "ad834201ac700e8e", "judgment": "correct"}
+{"hyperedge_id": "17b134630cc11605", "judgment": "partial", "note": "the spouse_of triple is genuinely asserted ('her husband Mike Kanellis'), but 'WWE debut appearance' is a common-noun event member"}
+{"hyperedge_id": "fe31987ef4c54166", "judgment": "partial", "note": "'The Bold and the Beautiful -[directed by]-> CBS' is unasserted — CBS is the broadcaster, not a director; the Brooke Logan role triple is fine"}
+{"hyperedge_id": "22d43cd8f3588b57", "judgment": "partial", "note": "'Spain -[spouse of]-> France' is unasserted nonsense; 'Catalonia located_in Spain' is right, and 'French' is a demonym typed LOCATION"}
+{"hyperedge_id": "7a7351a494c6ab1c", "judgment": "correct"}
+{"hyperedge_id": "fb0cec50a2962506", "judgment": "correct"}
+{"hyperedge_id": "ebc02d3ead9a4c7b", "judgment": "partial", "note": "she WON the Rapallo Carige Prize; the extraction inverts it into 'Prize -[directed by]-> Ballestra' and 'Prize -[founded by]-> Ballestra'. The birthplace triple is right"}
+{"hyperedge_id": "722ee5c0ad9be44f", "judgment": "partial", "note": "'Labour government -[founded by]-> Clement Attlee' is unasserted (he led it); the directed_by triple matches 'led by'"}
+{"hyperedge_id": "54aeeefb8b13c1e9", "judgment": "correct"}
+{"hyperedge_id": "0c87832447f2c839", "judgment": "correct"}
+{"hyperedge_id": "a3fcc24382580dcb", "judgment": "incorrect", "note": "'Billy Hill (band)' is a disambiguated title: the parenthetical 'band' becomes an organization node and the band's own name becomes a PERSON that is then made a 'member of' it — a relation manufactured out of a disambiguation suffix"}
+{"hyperedge_id": "8356e7f0294e2e00", "judgment": "partial", "note": "'Adham ar n-athair uile -[created by]-> Adhamh Cuisin' mis-assigns the poem to the scribe who penned it into the manuscript; the commissioning triples are loose but asserted"}
+{"hyperedge_id": "3b44bc69891f7602", "judgment": "partial", "note": "the employer triple is right, but the title form 'Fadel Brahami' and the body form 'Mohamed Fadel Brahami' become two person nodes for one man"}
+{"hyperedge_id": "cbd93569ced80552", "judgment": "incorrect", "note": "the Hyperedge's only relation is 'Gulf of Mexico -[capital of]-> United States' — unasserted and false"}
+{"hyperedge_id": "d83532fe50e15154", "judgment": "incorrect", "note": "the only relation, 'Severus -[employer]-> Emperor Pertinax', is unasserted — the span says Severus seized power AFTER Pertinax died"}
+{"hyperedge_id": "85a3cc8c03ec555e", "judgment": "incorrect", "note": "both relations ('Union of the Crowns directed_by / founded_by James IV') are unasserted: the span says the 1503 marriage led to the Union a century later"}
+{"hyperedge_id": "67060febdc9f57cb", "judgment": "partial", "note": "'Let It Be -[directed by]-> George Harrison' is unasserted (it is a Beatles album); 'Harrison member_of the Beatles' is right"}
+{"hyperedge_id": "b5ab29c5ef556d71", "judgment": "correct"}
+{"hyperedge_id": "9b353d64bb026059", "judgment": "partial", "note": "only 'Lodge member_of Republican Party' is asserted; 'Republican Party employer US Senate' (the span says controlled), 'Republican Party founded_by Woodrow Wilson' (he was a Democrat) and 'Wilson author_of Versailles conference' are all fabricated"}
+{"hyperedge_id": "6cf374978e0f5fae", "judgment": "partial", "note": "'Lord Lytton member_of Viceroy's Council' is an inference the span does not make (he proposed the act, the Council passed it); the located_in triple is loose but supportable"}
+{"hyperedge_id": "f8fc3f60c01fb376", "judgment": "partial", "note": "the author_of triple is right, but 'Symphony No.' is a truncated duplicate of 'Symphony No. 1 in C major' and 'Swedish song'/'lieder' are common nouns"}
+{"hyperedge_id": "1967bb1f0e1233b0", "judgment": "partial", "note": "'San Francisco -[capital of]-> California' is false and unasserted; the located_in triple is supportable"}
+{"hyperedge_id": "6acc8d189e45a2cb", "judgment": "incorrect", "note": "the title 'Walker, Texas Ranger' yields four fabricated triples at once — Walker capital_of / country_of / located_in / member_of Texas — none of them asserted by anything but the comma in a show title"}
+{"hyperedge_id": "255a84dc145896cb", "judgment": "partial", "note": "'Theo van den Boogaard -[country of]-> Dutch' points a country relation at a demonym node; the Castricum birthplace triple is right"}
+{"hyperedge_id": "7a60b0a90393c30c", "judgment": "partial", "note": "'Reflections on the Revolution in France -[directed by]-> Edmund Burke' uses a film label for authorship; the underlying link is asserted"}
+{"hyperedge_id": "cd056b9e21ecb3c9", "judgment": "partial", "note": "'Emancipation Proclamation -[founded by]-> President Lincoln' is a category error; the author_of triple is right"}
+{"hyperedge_id": "263b1835610b59ab", "judgment": "partial", "note": "'Ottoman sultanate created_by / founded_by Murad I' is unasserted — the span says his conquests TRANSFORMED an existing sultanate; the 'conquests directed_by Murad I' triple is right"}
+{"hyperedge_id": "cb3e104a3bee8be7", "judgment": "incorrect", "note": "both relations put William Childress INSIDE the Korean War ('member of', 'part of'); the span says he is regarded as a poet OF that war"}
+{"hyperedge_id": "2b402b430e0be4c6", "judgment": "partial", "note": "'U-751 -[employer]-> Kriegsmarine' is a category error (a boat cannot employ); the member_of triple carries the asserted 'built for' link"}
+{"hyperedge_id": "1d77ee09b923d1e4", "judgment": "incorrect", "note": "'France -[country of]-> Japan' and 'France -[located in]-> Japan' invert a tour itinerary title into geography that is simply false"}
+{"hyperedge_id": "b7dfa90e38a1e8a9", "judgment": "incorrect", "note": "both relations make Merlin Network part of YouTube; the span says the two reached a deal"}
+{"hyperedge_id": "23ebefc7164c67a6", "judgment": "partial", "note": "the landslide/Nainital triple is right, but 'north end of the town' is a descriptive phrase promoted to a location node"}
+{"hyperedge_id": "b000cebfb63a7834", "judgment": "partial", "note": "'Ferraro -[capital of]-> United States' is nonsense and the title/body name variants become two person nodes; the House employer and Democratic Party member triples are right"}
+{"hyperedge_id": "656e759f4ea2835d", "judgment": "partial", "note": "'Martin -[directed by]-> Peter Dinklage' is a category error, and the performed_by link itself is an infobox artifact — 'Martin' here is the author George R. R. Martin, not the character Dinklage plays"}
+{"hyperedge_id": "a1a89316fddf2e60", "judgment": "correct"}
+{"hyperedge_id": "bbcf5a14b65c265f", "judgment": "partial", "note": "'Bessie Higgenbottom -[spouse of]-> Hilary' turns her MOTHER into a spouse; the San Francisco triple is right"}
+{"hyperedge_id": "54a319255a84f7ab", "judgment": "partial", "note": "the Maya Lin authorship and the Washington location are right, but both memorials are typed EVENT and the anaphoric 'monument' becomes a creative-work node"}
+{"hyperedge_id": "b4a3a3efee63ee1f", "judgment": "partial", "note": "the NRHP listing triples are right, but 'John W. Ferguson House' (a building) is typed PERSON, and 'demolished'/'added to the National Register of Historic Places' are verb phrases promoted to events"}
+{"hyperedge_id": "a78ebdca90811c40", "judgment": "partial", "note": "the three containment triples are right, but 'Jimma Arjo' (a woreda) is typed PERSON"}
+{"hyperedge_id": "edc0d41fdef80222", "judgment": "correct"}
+{"hyperedge_id": "1524b3f9b4b90003", "judgment": "partial", "note": "'Musafir -[located in]-> Vidhan Parishad' uses a geographic label for sitting in a legislative chamber, which is also typed LOCATION"}
+{"hyperedge_id": "05b3b58f90d8e016", "judgment": "partial", "note": "'MLB -[founded by]-> Felipe Alou' is nonsense (he was promoted to manager); the employer triple is supportable and 'Dominican' is a demonym typed LOCATION"}
+{"hyperedge_id": "38440354d76c2265", "judgment": "correct"}
+{"hyperedge_id": "3dcedc800db58aab", "judgment": "incorrect", "note": "the only relation, 'Tommy -[spouse of]-> Marty', reads loyalty between a boxer and his manager as a marriage"}
+{"hyperedge_id": "4076bdc67588d3f0", "judgment": "incorrect", "note": "the only relation, 'Defiance Campaign -[directed by]-> Mandela', is not asserted — the span names 'Mandela's Youth League' and the Campaign side by side"}
+{"hyperedge_id": "66924ad77736fd96", "judgment": "incorrect", "note": "'Southon -[author of]-> the Book of Exodus' is manufactured out of the comma list 'Southon, and the Book of Exodus.'; the Book is also duplicated as an EVENT node 'Exodus'"}
+{"hyperedge_id": "36b5f9fe2b54a383", "judgment": "partial", "note": "the residence and List-society triples are right; 'Guido von List -[employer]-> Eberhard von Brockhusen' is unasserted (List was travelling to his house)"}
+{"hyperedge_id": "b65a95f656b0ce2f", "judgment": "partial", "note": "'Division of Labor -[part of]-> Ministry of Employment and Labor' mis-models a PREDECESSOR agency as a component; the country/location and direction triples are right"}
+{"hyperedge_id": "ff210200fe2c26f5", "judgment": "correct"}
+{"hyperedge_id": "45b2f6df84405279", "judgment": "partial", "note": "'Milan -[capital of]-> Italy' is false and 'Real Madrid -[country of]-> Italy' assigns a Spanish club to the venue's country; the San Siro/Milan triple is right"}
+{"hyperedge_id": "60f5d932c6ca8964", "judgment": "correct"}
+{"hyperedge_id": "6c508302da303753", "judgment": "incorrect", "note": "the only relation, 'Superior Drilling Company -[employer]-> farming implements', makes a product into an employer; the span asserts manufacture"}
+{"hyperedge_id": "f1eb40683fd02144", "judgment": "incorrect", "note": "the only relation, 'Bob Lemon -[member of]-> Major League Baseball', is not asserted — MLB appears in the span only as the holder of a record"}
+{"hyperedge_id": "1b0379fd11f3e870", "judgment": "partial", "note": "'Golden Bauhinia Square -[capital of]-> Wan Chai' is nonsense and 'Tin Hau -[employer]-> Marine Department' inverts 'managed by' (Tin Hau, a vessel, is also typed LOCATION)"}
+{"hyperedge_id": "f4488e61ace3a426", "judgment": "partial", "note": "'Lambeau Field -[capital of]-> United States' is nonsense; the located_in triple is supportable"}
+{"hyperedge_id": "e3f859ed878f9be9", "judgment": "correct"}
+{"hyperedge_id": "5a038e431238ddfd", "judgment": "partial", "note": "the Palermo/Sicily triple is right, but 'Phoenicians' (a people) is typed PERSON"}
+{"hyperedge_id": "6fd0d29f01620dd3", "judgment": "correct"}
+{"hyperedge_id": "a0a68df69cb3b723", "judgment": "incorrect", "note": "the only relation, 'Labelle -[member of]-> Billboard Hot 100', reads 'held the number-one spot on the chart' as membership"}
+{"hyperedge_id": "2749e83cd3ccddb7", "judgment": "correct"}
+{"hyperedge_id": "b0f4122b8e7985df", "judgment": "incorrect", "note": "all three relations are fabricated: 'Israel founded_by Chileab', 'Chileab capital_of Israel', 'Chileab located_in Israel' — the span is about succession to a throne"}
+{"hyperedge_id": "b3258f642cbc1567", "judgment": "correct"}
+{"hyperedge_id": "66ef4329d429939a", "judgment": "partial", "note": "'Azarbaijan Shahid Madani University -[founded by]-> 1987' puts a DATE in the founder slot — a type-violating triple; the Tabriz location triple is right"}
+{"hyperedge_id": "6fe7a463c0de3eac", "judgment": "correct"}
+{"hyperedge_id": "737aea11f1cbe5c4", "judgment": "correct"}
+{"hyperedge_id": "fcd4bf93e08dd79d", "judgment": "partial", "note": "eight of the nine triples are right (creators, cast, setting); 'Will & Grace -[directed by]-> David Kohan' is unasserted — he created it"}
+{"hyperedge_id": "08199770229503cd", "judgment": "correct"}
+{"hyperedge_id": "d2dddd41d0826166", "judgment": "correct"}
+{"hyperedge_id": "e6c998a23cd6ab1d", "judgment": "incorrect", "note": "the only relation, 'Newcastle -[capital of]-> New South Wales', is false and unasserted — the span says Hannell was the first Mayor of Newcastle"}
+{"hyperedge_id": "646fee4ca8f6db09", "judgment": "incorrect", "note": "all three relations tie an ENGLISH singer to the United States (capital_of, country_of, located_in) off the phrase 'especially in the United States'; 'Meat Loaf' is also typed ORGANIZATION"}
+{"hyperedge_id": "d40151706b21b99b", "judgment": "correct"}
+{"hyperedge_id": "ef0a5433e97a423d", "judgment": "correct"}
+{"hyperedge_id": "4633a12209f04248", "judgment": "correct"}
+{"hyperedge_id": "7019d532a038523d", "judgment": "correct"}
+{"hyperedge_id": "cb3483d29f629c91", "judgment": "incorrect", "note": "both relations claim the Polish government created/founded Dell; the span says subsidies KEPT Dell — and gamma is 0.84"}
+{"hyperedge_id": "00bd9d4d20b6f6f7", "judgment": "incorrect", "note": "'Christmas Club -[founded by]-> Arthur' is unasserted — Arthur withdrew the club's money and faked a burglary; gamma 0.86"}
+{"hyperedge_id": "8598f5e2e80db065", "judgment": "correct"}
+{"hyperedge_id": "08c98704c81f79f2", "judgment": "correct"}
+{"hyperedge_id": "01ed4db81e02bf72", "judgment": "correct"}
+{"hyperedge_id": "ebd2b5bffb2a3ec7", "judgment": "correct"}
+{"hyperedge_id": "c62de469cd995e13", "judgment": "incorrect", "note": "'Mr. Deeds -[directed by]-> Adam Sandler' misreads 'the 2002 Adam Sandler motion picture' — he starred, he did not direct. This is the HIGHEST-gamma Hyperedge in the sample (0.9325)"}
