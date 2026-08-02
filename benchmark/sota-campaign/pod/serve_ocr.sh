@@ -28,6 +28,13 @@ mkdir -p "$ROOT"
 
 ready() { curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; }
 
+# Idempotent: adopt an already-ready server (e.g. from a manual test-serve) instead of
+# refusing on the busy GPU it itself occupies.
+if ready; then
+  echo "vllm already ready on :$PORT — adopting it."
+  exit 0
+fi
+
 # Already running and answering? Nothing to do.
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null && ready; then
   echo "vllm already serving $MODEL on :$PORT (pid $(cat "$PID_FILE"))"
@@ -48,7 +55,7 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 if ! "$VENV/bin/python" -c 'import vllm' 2>/dev/null; then
   "$VENV/bin/pip" install --upgrade pip
-  "$VENV/bin/pip" install "vllm>=0.11.1" pypdfium2 pillow openai
+  "$VENV/bin/pip" install "vllm==0.11.1" pypdfium2 pillow openai
 fi
 
 # The card flags (ocr-diligence.md / s2 ticket item 2) + Dennis's serving spec
