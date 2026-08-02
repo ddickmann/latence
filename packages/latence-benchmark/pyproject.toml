@@ -47,6 +47,9 @@ latence-benchmark = "latence_benchmark.cli:main"
 # The ticket-21 labeling harness (gold set + Hyperedge γ calibration). Local-only stdlib
 # HTTP UI on 127.0.0.1 — no new dependency.
 latence-label = "latence_benchmark.labeling.cli:main"
+# The e2e-sota-run staged campaign runner (S1): gated stages, filesystem done-probes,
+# atomic STATE.json. Stdlib-only base; remote corpus acquisition rides the [hub] extra.
+latence-campaign = "latence_benchmark.campaign.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"

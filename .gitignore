@@ -47,3 +47,8 @@ benchmark/official-data/*/*-dev.jsonl
 benchmark/official-data/*/*-test.jsonl
 benchmark/official-data/*/query-surfaces.jsonl
 benchmark/official-data/*/calibration-sample.jsonl
+# e2e-sota-run campaign corpus (S1): raw acquisitions + downloaded archives stay local —
+# every dataset lane except MuSiQue's attribution lane forbids redistribution
+# (see latence_benchmark/campaign/corpus_stage.py CORPUS_PLAN).
+benchmark/sota-corpus/*/raw/
+benchmark/sota-corpus/**/*.zip
