@@ -51,13 +51,16 @@ if ! "$VENV/bin/python" -c 'import vllm' 2>/dev/null; then
   "$VENV/bin/pip" install "vllm>=0.11.1" pypdfium2 pillow openai
 fi
 
-# The card flags, verbatim (ocr-diligence.md / s2 ticket item 2).
+# The card flags (ocr-diligence.md / s2 ticket item 2) + Dennis's serving spec
+# (2026-08-02): 0.8 GPU util, CUDA graphs on (no --enforce-eager), full optimization
+# (-O3 = torch.compile + piecewise CUDA graphs).
 nohup "$VENV/bin/vllm" serve "$MODEL" \
   --limit-mm-per-prompt '{"image": 1}' \
   --mm-processor-cache-gb 0 \
   --no-enable-prefix-caching \
-  --gpu-memory-utilization 0.85 \
+  --gpu-memory-utilization 0.8 \
   --max-model-len 8192 \
+  -O3 \
   --port "$PORT" \
   >>"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
