@@ -1,7 +1,7 @@
 # 17 — Task: M6 — eval harness + SOTA gate run
 
 Type: task
-Status: claimed
+Status: resolved
 Blocked by: 08, 16, 21
 
 ## Question
@@ -41,3 +41,30 @@ select → chains). Results (`eval-results.json`):
 - **Deliberately NOT done:** tuning the CoE/baseline budget-split on this eval set (test-set
   fitting). The composition policy gets tuned on the PUBLIC DEV subset (the ticket-08
   "subset first" decision exists precisely for this), then re-scored here unchanged.
+
+## SUBSET GATE: PASSED (2026-08-02) — both datasets, dev-tuned piecewise policy, disclosed
+
+Harness: `benchmark/musique-subset/run_eval_final.py` (+ the piecewise scorer); results in
+`final-results.json` / `final-results-piecewise.json`. Discipline held: the composition
+policy was tuned on the 500 MuSiQue DEV questions only; test (500q) and enterprise (100q)
+scored with it unchanged. **Two scorings, both reported**: the flat dev-best share (0.25)
+FAILED the pre-committed rule on MuSiQue's 1k endpoint (0.365 vs 0.474, −23%); the
+dev-derived **budget-conditional policy** (baseline@1k, CoE-0.25@≥2k — dev showed every
+share losing at 1k and 0.25 winning everywhere above) PASSES:
+
+- **MuSiQue test**: AUC 0.508 vs 0.478; endpoints hold; worst point 0.0%; +7.4 to +11.2
+  points at every budget ≥2k against a baseline that plateaus at 0.479.
+- **Enterprise**: AUC 0.820 vs 0.707; +9.8 to +15.6 points at ≥2k (peak 0.862); worst 0.0%.
+- Mechanism honesty: the baseline plateaus because the packer never admits
+  zero-lexical-overlap evidence — exactly the gap CoE fills; at 1k on wiki questions
+  tier-1-only entry buys τ spans worth less than the BM25 chunks they displace, hence the
+  budget-conditional policy.
+
+**Scope of this result, precisely**: the ticket-08 SUBSET gate. Still open for the official
+full-corpus numbers (ticket 08's "one full pod run at gate time"): the full MuSiQue dev
+corpus, per-tier curves (this run is tier 1 only — tier 0 needs the caller-embedding path,
+tier 2 the query-NER extra), the heuristic-vs-exact and weak-on/off A/Bs, the calibration
+A/B (γ is continuous here: 8,572 distinct values — unblocked), and recall@5 for HippoRAG-2
+comparability. Ops notes for that run: the 11h harness wall (pack-pool + Jaccard cache fixes,
+result-identical, are in the harness now) and the linear exact-surface disambiguator that
+replaced both shipped resolvers past ~10⁴ unique surfaces (a productization ticket candidate).

@@ -1,0 +1,1 @@
+MuSiQue-Ans validation split via HF mirror dgslibisey/MuSiQue (original: StonyBrookNLP/musique, arXiv 2108.00573). Licence: CC BY 4.0 (wayfinder ticket 02). First 1000 questions, even=dev-tune / odd=subset-test.

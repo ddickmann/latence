@@ -1,0 +1,51 @@
+{
+  "policy": "piecewise: baseline@1k, coe-share-0.25@>=2k (dev-derived)",
+  "test_baseline": [
+    0.474,
+    0.479,
+    0.479,
+    0.479,
+    0.479
+  ],
+  "test_piecewise": [
+    0.474,
+    0.499,
+    0.553,
+    0.572,
+    0.591
+  ],
+  "gate_musique_test": {
+    "auc_baseline": 0.478,
+    "auc_candidate": 0.5378,
+    "auc_dominates": true,
+    "endpoints_dominate": true,
+    "worst_point_relative": 0.0,
+    "no_point_worse_than_2pct": true,
+    "PASS": true
+  },
+  "ent_baseline": [
+    0.7067,
+    0.7067,
+    0.7067,
+    0.7067,
+    0.7067
+  ],
+  "ent_piecewise": [
+    0.7067,
+    0.8044,
+    0.8622,
+    0.8622,
+    0.8622
+  ],
+  "gate_enterprise": {
+    "auc_baseline": 0.7067,
+    "auc_candidate": 0.8195,
+    "auc_dominates": true,
+    "endpoints_dominate": true,
+    "worst_point_relative": 0.0,
+    "no_point_worse_than_2pct": true,
+    "PASS": true
+  },
+  "overall_pass": true,
+  "disclosure": "second scoring on test/enterprise; policy family fixed before scoring, selected on dev only; first scoring (flat share) FAILED and is reported."
+}
