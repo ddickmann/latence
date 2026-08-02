@@ -52,7 +52,9 @@ FAILED the pre-committed rule on MuSiQue's 1k endpoint (0.365 vs 0.474, −23%);
 dev-derived **budget-conditional policy** (baseline@1k, CoE-0.25@≥2k — dev showed every
 share losing at 1k and 0.25 winning everywhere above) PASSES:
 
-- **MuSiQue test**: AUC 0.508 vs 0.478; endpoints hold; worst point 0.0%; +7.4 to +11.2
+- **MuSiQue test**: AUC 0.5378 vs 0.478 (0.508 was a transcription error vs the stored
+  `final-results-piecewise.json` gate — corrected by the 2026-08-02 close-out audit);
+  endpoints hold; worst point 0.0%; +7.4 to +11.2
   points at every budget ≥2k against a baseline that plateaus at 0.479.
 - **Enterprise**: AUC 0.820 vs 0.707; +9.8 to +15.6 points at ≥2k (peak 0.862); worst 0.0%.
 - Mechanism honesty: the baseline plateaus because the packer never admits

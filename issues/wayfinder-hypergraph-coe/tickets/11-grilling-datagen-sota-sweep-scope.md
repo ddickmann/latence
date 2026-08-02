@@ -1,7 +1,7 @@
 # 11 — Grilling: scope the data-gen SOTA sweep
 
 Type: grilling
-Status: open
+Status: resolved
 Blocked by: —
 
 ## Question
