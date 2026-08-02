@@ -186,7 +186,13 @@ class SubprocessTransport:
         self._rsync(f"{self._endpoint.target}:{remote}", str(local))
 
     def _rsync(self, source: str, dest: str) -> None:
-        cmd = ["rsync", "-az", "--partial", "-e", self._endpoint.rsh, source, dest]
+        # -a minus owner/group: RunPod's /workspace network FS refuses chown (rc=23) —
+        # the exact failure the M6 campaign hit; -rlptz is -a without -og, plus
+        # --no-owner/--no-group defensively for any -a-implying default.
+        cmd = [
+            "rsync", "-rlptz", "--no-owner", "--no-group", "--partial",
+            "-e", self._endpoint.rsh, source, dest,
+        ]
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             tail = proc.stderr.strip().splitlines()[-3:]
