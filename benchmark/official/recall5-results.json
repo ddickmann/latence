@@ -1,0 +1,16 @@
+{
+  "musique-full": {
+    "n_questions": 1208,
+    "n_supporting": 3200,
+    "baseline_recall@5": 0.4053,
+    "coe_tier1_recall@5": 0.1297,
+    "coe_tier2_recall@5": 0.2094
+  },
+  "hotpot-full": {
+    "n_questions": 3702,
+    "n_supporting": 7404,
+    "baseline_recall@5": 0.696,
+    "coe_tier1_recall@5": 0.2191,
+    "coe_tier2_recall@5": 0.3506
+  }
+}

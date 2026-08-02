@@ -97,3 +97,14 @@ by construction → calibration must be per-regime) — the opening evidence for
 data-gen map. recall@5 comparability + Dennis's spot-check of LLM-generated judgments remain
 open notes, not gate conditions. Harness honesty: profile-driven speedups only (pack-once/
 prefix-truncate disclosed and uniform across arms; indexed BM25 with identical scoring math).
+
+## Close-out audit addendum (2026-08-02)
+
+recall@5 — left above as an "open note" — is now DELIVERED (`benchmark/official/run_recall5.py`
+→ `recall5-results.json`, one scoring on the pre-registered test files): baseline BM25
+0.4053/0.6960 (MuSiQue/Hotpot) vs pure-ρ CoE tier2 0.2094/0.3506. Standalone structural
+ranking is far below BM25 — ρ feeds budgeted composition, and the hybrid is what the gates
+measured; the number quantifies the missing dense signal (see CLOSEOUT-AUDIT.md F-VEC).
+Also on the record there: the metric-granularity asymmetry (F-METRIC), the BM25-not-dense
+baseline deviation from this ticket's pre-registration (F-BASE), and the corrected subset
+AUC transcription.

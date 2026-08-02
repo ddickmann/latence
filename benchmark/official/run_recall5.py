@@ -23,11 +23,10 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "musique-subset"))
 
+from latence_retrieval.hypergraph import HyperedgeKV  # noqa: E402
 from official_eval import chunk_file_map, entry_signals, hyperedge_file_map  # noqa: E402
 from run_eval_final import load_chunks  # noqa: E402
 from run_official_eval import BM25Index  # noqa: E402
-
-from latence_retrieval.hypergraph import HyperedgeKV  # noqa: E402
 
 DATA = HERE.parent / "official-data"
 TIERS = ["tier1", "tier2"]
@@ -44,8 +43,8 @@ def _init(base: str) -> None:
         str(base_p / "export" / "graph-hyperedges.parquet"), _W["chunk_files"]
     )
     _W["surfaces"] = {
-        json.loads(l)["id"]: json.loads(l)["surfaces"]
-        for l in (base_p / "query-surfaces.jsonl").open()
+        json.loads(line)["id"]: json.loads(line)["surfaces"]
+        for line in (base_p / "query-surfaces.jsonl").open()
     }
     _W["kv_path"] = str(base_p / "export" / "graph-hyperedges.kv")
 
@@ -78,7 +77,9 @@ def _eval_q(q: dict) -> dict:
 def run(name: str, workers: int, limit: int | None) -> dict:
     base = DATA / name
     stem = name.replace("-full", "")
-    questions = [json.loads(l) for l in (base / f"{stem}-full-test.jsonl").open()]
+    questions = [
+        json.loads(line) for line in (base / f"{stem}-full-test.jsonl").open()
+    ]
     if limit:
         questions = questions[:limit]
     agg = {"total": 0, "base": 0, **{t: 0 for t in TIERS}}

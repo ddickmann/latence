@@ -86,3 +86,11 @@ Deviations from ticket text, stated: sentence splitting is the in-core rule spli
 core); relation argument offsets resolved via the head/tail mention join as planned (no schema
 change needed). Follow-ups already tracked: exact operator-named token counter injection lands with
 M2 (ticket 13); calibration stays ticket 09.
+
+## Close-out audit addendum (2026-08-02)
+
+Two findings against this milestone, see [CLOSEOUT-AUDIT.md](../CLOSEOUT-AUDIT.md): the
+undersized-merge could re-breach the token ceiling (FIXED — merge now declines over-ceiling
+absorbs; regression test added), and the merge targets the previous same-chunk span rather
+than spec 1.2.5's most-shared-entities neighbour (now DECLARED; unmeasured, folds into the
+datagen map's segmentation work if implicated).

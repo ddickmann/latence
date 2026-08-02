@@ -41,6 +41,16 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 - Research subagents resolve their ticket file only; their Decisions-so-far pointers are synced by
   the next map session (concurrency safety).
 
+## Close-out
+
+**[CLOSEOUT-AUDIT.md](CLOSEOUT-AUDIT.md)** (2026-08-02): two adversarial audit passes
+(spec/paper fidelity + briefing compliance) after the official gate. Core verified (gate
+arithmetic reproduces, verified pipeline order genuinely shipped, sacrifices measured);
+three code fixes landed (spec-3.2 deviation correctly declared + pinned, undersized-merge
+ceiling breach, exact-arm verification triple); recall@5 delivered; the open measurement
+residuals (dense baseline + eu_vecs producer, tier-2 latency, EM/F1, 6.1/6.2 arbitration)
+are queued there for the production direction.
+
 ## Decisions so far
 
 <!-- one line per closed ticket: gist + link -->

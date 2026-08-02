@@ -319,16 +319,17 @@ def test_identical_inputs_yield_identical_selection_twice() -> None:
     assert first.selected[0] == "e_a", "exact ties must break by ascending hyperedge id"
 
 
-# -- the dedup invariant: hard redundancy is unrepresentable ----------------------
+# -- the dedup invariant and its true limits (corrected by the close-out audit) ---
 
 
 def test_dedup_invariant_makes_the_hard_redundancy_case_unrepresentable() -> None:
-    """Spec 3.2's 'identical relation signature ⇒ red = 1.0 hard skip' never fires because its
-    input cannot exist: M1 content-addresses the Hyperedge id over (corpus, entity-node set,
-    sorted relation signature) — NOT the span position (ADR-0057, latence_core.hyperedge
-    ``make_graph_id``) — so a would-be duplicate extraction produces the SAME id and merges
-    into the one existing record with ``support += 1``. Two candidates with identical
-    signatures cannot coexist in any store this selector reads."""
+    """The IDENTICAL case only: M1 content-addresses the Hyperedge id over (corpus,
+    entity-node set, sorted relation signature) — NOT the span position (ADR-0057,
+    latence_core.hyperedge ``make_graph_id``) — so a duplicate extraction of the SAME
+    (entity set, signature) pair produces the SAME id and merges into one record with
+    ``support += 1``. This does NOT cover subset signatures or identical signatures over
+    different entity sets — see the companion test below, which pins that those coexist
+    and are handled by the entity-overlap discount (the declared spec-3.2 deviation)."""
 
     def content_id(nodes: list[str], signature: list[str]) -> str:
         payload = json.dumps([sorted(nodes), sorted(signature)], separators=(",", ":"))
@@ -352,6 +353,40 @@ def test_dedup_invariant_makes_the_hard_redundancy_case_unrepresentable() -> Non
     assert signals.fields[first_extraction]["support"] == 2
     result = select(signals, budget=1000)
     assert result.selected == [first_extraction]  # one candidate — nothing to hard-skip
+
+
+def test_subset_signature_records_coexist_and_get_the_overlap_discount() -> None:
+    """The DECLARED spec-3.2 deviation, pinned (close-out audit, 2026-08-02): a record whose
+    relation signature is a strict subset of another's has a DIFFERENT content id (the id is
+    addressed over entity set + signature jointly), so both coexist in any store — the earlier
+    'unrepresentable by construction' claim was false. The KV solver fields carry no
+    signatures (ADR-0056), so the selector cannot hard-skip on the subset condition; the
+    shipped handling is the entity-overlap discount: with all of the subset record's entities
+    inside the selected record, red = 1.0 and its marginal collapses to exactly the
+    connectivity bonus ``w_conn`` — which CAN still admit it (deliberate: full entity
+    containment does not imply fact redundancy; a distinct predicate over the same pair must
+    stay selectable, and skipping without data would violate the standing rule)."""
+
+    def content_id(nodes: list[str], signature: list[str]) -> str:
+        payload = json.dumps([sorted(nodes), sorted(signature)], separators=(",", ":"))
+        return "h_" + hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+    big_id = content_id(["n_a", "n_b", "n_c"], ["n_a:acq:n_b", "n_b:appr:n_c"])
+    sub_id = content_id(["n_a", "n_b"], ["n_a:acq:n_b"])
+    assert big_id != sub_id, "subset signature ⇒ different content id ⇒ both records exist"
+
+    edges = {
+        big_id: {"nodes": ["n_a", "n_b", "n_c"], "rho": 0.9, "cost": 50},
+        sub_id: {"nodes": ["n_a", "n_b"], "rho": 0.5, "cost": 50},
+    }
+    signals = _signals(edges, {"n_a": 1.0})
+    cfg = CoeConfig()
+    result = select(signals, budget=1000, config=cfg)
+    assert result.selected[0] == big_id
+    # red(sub | {big}) = |{a,b} ∩ {a,b,c}| / 2 = 1.0 → marginal = w_conn exactly; theta_min
+    # = theta_ratio·max(v0) < w_conn here, so the subset record IS admitted — the pinned
+    # residual of the declared deviation, visible rather than hidden.
+    assert sub_id in result.selected
 
 
 # -- end-to-end: the 2-hop chain beats the lexical distractor in SELECTION --------

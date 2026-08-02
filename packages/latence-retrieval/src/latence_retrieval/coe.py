@@ -38,14 +38,22 @@ only against the true value; ties break by ascending Hyperedge id (like
 :class:`~latence_retrieval.pack.Packer`), so identical inputs always yield the identical
 selection.
 
-**Hard redundancy is unrepresentable, not handled.** Spec 3.2 asks for a red=1.0 hard skip when a
-candidate's relation signature already sits in the selected set. That case is **guaranteed by
-construction** to never occur: M1's corpus-wide dedup (ADR-0057, ``latence_core.hyperedge``)
-content-addresses the Hyperedge id over the entity-node set and the sorted relation signature —
-NOT the span position — and merges every re-extraction of the same fact into ONE record with
-``support += 1``. Two candidates with identical signatures therefore cannot coexist in any store
-this selector reads (same content ⇒ same id ⇒ same record), and this module carries no dead code
-for the impossible branch; the invariant is pinned by test instead.
+**Spec 3.2's relation-signature hard skip is a DECLARED DEVIATION, approximated by the entity
+overlap discount** (corrected 2026-08-02 by the close-out audit — the earlier claim that the
+case was "unrepresentable by construction" was wrong). What dedup does guarantee: identical
+(entity-set, signature) pairs collapse into one record (same content ⇒ same id, ``support += 1``).
+What it does NOT prevent: a record whose signature is a strict SUBSET of another's, or an
+identical signature over a different entity set — both trivially coexist because the id is
+addressed over entity set + signature jointly, and both are pinned by test as representable.
+The selector cannot evaluate the signature-subset condition at all: the KV solver fields
+(ADR-0056's deliberate minimum) carry no relation signatures. The shipped handling is the
+entity-overlap redundancy discount — for a subset-signature candidate the shared entities drive
+``red`` toward 1.0, collapsing its marginal to the connectivity bonus alone. No entity-level
+red=1.0 hard skip is added on top: full entity containment does not imply fact redundancy (the
+same entity pair can carry a distinct predicate), so skipping there would sacrifice recall
+without data — the standing rule forbids it. If judged data ever shows subset-signature
+redundancy materially spending budget, the measured fix is signatures in the solver fields (a
+KV format rev), not a guess here.
 
 **The budget guarantee is ADR-0058's exact verification pass, not the stored weights.** Stored
 ``token_cost`` is an approximate index-time weight carrying its counter's identity; selection

@@ -338,8 +338,13 @@ class HyperedgeBuilder:
             # neighbour choice: previous vs next is unknowable in a single pass; the
             # previous same-chunk span is the deterministic choice (spec: "the neighbor
             # sharing the most entities" — adjacent spans in one chunk share context).
+            # The merge must not re-breach the ceiling the split just enforced: an
+            # undersized standalone span is the lesser deviation, so absorb only when
+            # the combined range stays within max_tokens.
             prev = result[-1]
-            if prev.chunk.record_id == span.chunk.record_id:
+            if prev.chunk.record_id == span.chunk.record_id and self._count(
+                span.chunk.content[prev.start : span.end]
+            ) <= cfg.max_tokens:
                 prev.absorb(span)
             else:
                 result.append(span)

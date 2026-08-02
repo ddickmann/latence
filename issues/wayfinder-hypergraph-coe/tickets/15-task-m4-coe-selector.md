@@ -49,3 +49,12 @@ run). Full detail in [M4-RESULT.md](../M4-RESULT.md); the load-bearing points:
 Suite: **4694 passed / 36 skipped / 0 failed** (M3 baseline 4679 + 14 new + 1 from the
 ticket-10 purge test), `ruff` + `mypy --strict` clean. Default behavior unchanged (new
 module only). M5 (chains + traces) is the last build step before the eval.
+
+## Close-out audit addendum (2026-08-02)
+
+Answer #5's claim that spec 3.2's hard-redundancy case is "unrepresentable by construction"
+was WRONG — dedup collapses only identical (entity set, signature) pairs; strict-subset
+signatures and same-signature/different-entity-set records coexist. Corrected disposition
+(declared deviation, entity-overlap discount as the approximation, no unmeasured hard skip)
+in [CLOSEOUT-AUDIT.md](../CLOSEOUT-AUDIT.md) (F-COE); coexistence + residual pinned in
+`test_coe.py::test_subset_signature_records_coexist_and_get_the_overlap_discount`.

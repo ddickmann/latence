@@ -64,3 +64,12 @@ absence. **Residuals, stated:** glinker's richer alias set still dies inside the
 (alias table currently canonical names only — tracked in map fog); `entity_vecs`/`eu_vecs`
 as live ANN collections are the adopter's engine-loading step per the input-spec pattern —
 the embedding *inputs* (description, tau_text) are now both in the export.
+
+## Close-out audit addendum (2026-08-02)
+
+This ticket's Question listed spec 1.6's two ID-payload vector collections
+(`entity_vecs`/`eu_vecs`); the Answer shipped without them and without declaring the drop —
+now declared in [CLOSEOUT-AUDIT.md](../CLOSEOUT-AUDIT.md) (F-VEC). Consequence measured in
+the official eval: `eu_sims` never existed, so the s_hyp prune ran entry-overlap-only (β=1)
+in every configuration. The opt-in embedding producer is the top production-direction
+measurement, paired with the dense-baseline re-run (F-BASE).

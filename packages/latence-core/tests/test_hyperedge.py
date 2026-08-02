@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
 from latence_core.chunking import estimate_tokens
 from latence_core.contracts import (
     CanonicalEntity,
@@ -240,6 +241,74 @@ def test_no_hyperedge_exceeds_the_token_ceiling() -> None:
     for h in hyperedges:
         assert estimate_tokens(h.tau_text) <= 60 or h.tau_text.count(".") <= 1, (
             f"over-ceiling Hyperedge that was splittable: {h.token_cost} tokens"
+        )
+
+
+def test_undersized_merge_never_rebreaches_the_ceiling() -> None:
+    """Close-out audit regression (2026-08-02): the undersized-merge pass ran AFTER the
+    oversized split without re-checking ``max_tokens``, so a small trailing span absorbed
+    into a near-ceiling neighbour could recreate an over-ceiling Hyperedge. The merge now
+    keeps the undersized span standalone when absorbing would breach the ceiling — the
+    ceiling is the declared invariant; an undersized span is the lesser deviation."""
+    long_sent = (
+        "Alphaco finalized the acquisition of Betaco after months of intense regulatory "
+        "review across several jurisdictions, with advisors describing the negotiation "
+        "process as one of the longest in the sector's recent history. "
+    )
+    short_sent = "Gammaco praised Alphaco warmly."
+    text = long_sent + short_sent
+    t_long = estimate_tokens(long_sent)
+    t_short = estimate_tokens(short_sent)
+    assert estimate_tokens(text) > t_long, "fixture must overflow when merged"
+    chunk = ChunkRecord(
+        record_id="chunk:merge",
+        document_record_id="doc-3",
+        index=0,
+        token_count=estimate_tokens(text),
+        content=text,
+        provenance=Provenance(
+            source_uri="file:///merge.txt", file_name="merge.txt", file_type="txt",
+            file_size=2000, document_id="doc-3", char_start=0, char_end=len(text),
+            page_start=1, page_end=1,
+        ),
+        classification=_CLS,
+    )
+    mentions, entities, node_of = [], [], {}
+    for name, label in (
+        ("Alphaco", "ORG"), ("Betaco", "ORG"), ("Gammaco", "ORG"),
+    ):
+        start = text.index(name)
+        mentions.append(
+            EntityMention(
+                record_id=f"m:{name}", document_record_id="doc-3",
+                chunk_record_id="chunk:merge", index=0, label=label, text=name,
+                confidence=0.9,
+                provenance=Provenance(
+                    source_uri="file:///merge.txt", file_name="merge.txt", file_type="txt",
+                    file_size=2000, document_id="doc-3", char_start=start,
+                    char_end=start + len(name), page_start=1, page_end=1,
+                ),
+                classification=_CLS,
+            )
+        )
+        entities.append(_entity(f"e:{name}", name, [f"m:{name}"], {}))
+        node_of[f"e:{name}"] = f"n:{name}"
+    relations = [
+        _relation("r:acq", "m:Alphaco", "m:Betaco", "acquired"),
+        _relation("r:praise", "m:Gammaco", "m:Alphaco", "praised"),
+    ]
+    # ceiling admits the long sentence alone but NOT long+short; the short sentence is
+    # under the floor, so the merge pass is exercised and must decline.
+    builder = HyperedgeBuilder(
+        "corpus-merge",
+        HyperedgeConfig(max_tokens=t_long + 2, min_tokens=t_short + 2),
+    )
+    hyperedges = builder.build([chunk], mentions, relations, entities, lambda e: node_of[e])
+    assert hyperedges
+    for h in hyperedges:
+        assert estimate_tokens(h.tau_text) <= t_long + 2, (
+            f"merge re-breached the ceiling: {estimate_tokens(h.tau_text)} tokens in "
+            f"{h.tau_text!r}"
         )
 
 
@@ -600,16 +669,24 @@ def test_kv_reader_holds_nothing_between_calls(tmp_path: Path) -> None:
         reader.get(b"e|anything")  # a closed reader must not silently serve stale data
 
 
-def test_exact_token_counter_config_is_loud_when_missing() -> None:
+def test_exact_token_counter_config_is_loud_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
     import pytest as _pytest
     from latence_core.errors import ConfigError
     from latence_core.stages.graph_assembly import _resolve_hyperedge_config
 
     with _pytest.raises(ConfigError, match="tiktoken:<encoding>"):
         _resolve_hyperedge_config({"token_counter": "spacy:foo"})
+    # Simulate an environment without tiktoken (the lazy import is the only import site,
+    # so a None sys.modules entry makes it raise ImportError). Previously this test relied
+    # on tiktoken genuinely being absent from the dev env — it broke the moment benchmark
+    # work installed tiktoken into the venv. The claim under test is unchanged: naming it
+    # must fail loudly, never silently fall back (ADR-0058: no silent counter substitution).
+    monkeypatch.setitem(sys.modules, "tiktoken", None)
     with _pytest.raises(ConfigError, match="tiktoken"):
-        # tiktoken is deliberately NOT a dev dependency: naming it must fail loudly, never
-        # silently fall back to the heuristic (ADR-0058: no silent counter substitution).
         _resolve_hyperedge_config({"token_counter": "tiktoken:cl100k_base"})
 
 

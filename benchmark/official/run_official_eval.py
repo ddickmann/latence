@@ -28,23 +28,20 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "musique-subset"))
 
-from official_eval import (  # noqa: E402
-    Tier0Index,
-    apply_calibration,
-    build_exact_kv,
-    chunk_file_map,
-    entry_signals,
-    filter_weak,
-    hyperedge_file_map,
-)
-from run_eval_final import Arm, _norm, _recalled, gate  # noqa: E402
-
 from latence_core.chunking import estimate_tokens  # noqa: E402
 from latence_retrieval.chains import assemble_chains  # noqa: E402
 from latence_retrieval.coe import select  # noqa: E402
 from latence_retrieval.contracts import Candidate  # noqa: E402
 from latence_retrieval.hypergraph import HyperedgeKV  # noqa: E402
 from latence_retrieval.pack import Packer  # noqa: E402
+from official_eval import (  # noqa: E402
+    Tier0Index,
+    apply_calibration,
+    build_exact_kv,
+    entry_signals,
+    filter_weak,
+)
+from run_eval_final import Arm, _norm, _recalled, gate  # noqa: E402
 
 BUDGETS = [1000, 2000, 4000, 8000, 16000]
 K1, B = 1.5, 0.75
@@ -188,16 +185,29 @@ def _eval_q(payload: tuple) -> dict:
                     if share <= 0 or not sig.rho:
                         sels[budget] = ""
                         continue
+                    # ADR-0058 discipline: the verification counter must BE the identity it
+                    # claims. The exact-KV arm stores tiktoken counts, so its verification
+                    # triple is tiktoken too (close-out audit fix — the earlier code passed
+                    # estimate_tokens labeled as tiktoken; inert because matching identities
+                    # skip the optional pass, but wrong if verify_on_match were enabled).
+                    if cfg["costs"] == "heuristic":
+                        v_counter, v_identity = (
+                            estimate_tokens, "latence:estimate_tokens:v1",
+                        )
+                    else:
+                        import tiktoken
+
+                        _enc = tiktoken.get_encoding("cl100k_base")
+                        v_counter, v_identity = (
+                            lambda t, _e=_enc: len(_e.encode(t)),
+                            "tiktoken:cl100k_base",
+                        )
                     sel = select(
                         sig,
                         budget=max(1, int(budget * share)),
                         tau_lookup=kv.tau_text,
-                        token_counter=estimate_tokens,
-                        counter_identity=(
-                            "latence:estimate_tokens:v1"
-                            if cfg["costs"] == "heuristic"
-                            else "tiktoken:cl100k_base"
-                        ),
+                        token_counter=v_counter,
+                        counter_identity=v_identity,
                     )
                     sels[budget] = assemble_chains(sel, sig, tau_lookup=kv.tau_text).text
                 sig_cache[skey] = sels
