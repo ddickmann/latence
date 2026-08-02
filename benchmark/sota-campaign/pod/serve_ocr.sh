@@ -61,6 +61,7 @@ nohup "$VENV/bin/vllm" serve "$MODEL" \
   --gpu-memory-utilization 0.8 \
   --max-model-len 8192 \
   -O3 \
+  --max-num-seqs 16 \
   --port "$PORT" \
   >>"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
