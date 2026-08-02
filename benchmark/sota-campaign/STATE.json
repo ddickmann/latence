@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "stages": [
+    {
+      "approved_at": "",
+      "ended": "2026-08-02T19:53:46Z",
+      "name": "s1-corpus",
+      "reason": "",
+      "started": "2026-08-02T19:53:46Z",
+      "status": "done"
+    }
+  ],
+  "updated": "2026-08-02T19:53:46Z"
+}

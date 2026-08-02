@@ -1,0 +1,232 @@
+{
+  "diversity": {
+    "distinct_extensions": 12,
+    "office_legacy_ole": 0,
+    "office_ooxml": 0,
+    "ooxml_share_of_office": 0.0,
+    "top_extensions": [
+      {
+        "count": 21,
+        "ext": "lock",
+        "share": 0.19811320754716982
+      },
+      {
+        "count": 21,
+        "ext": "metadata",
+        "share": 0.19811320754716982
+      },
+      {
+        "count": 15,
+        "ext": "parquet",
+        "share": 0.14150943396226415
+      },
+      {
+        "count": 12,
+        "ext": "json",
+        "share": 0.11320754716981132
+      },
+      {
+        "count": 10,
+        "ext": "jsonl",
+        "share": 0.09433962264150944
+      },
+      {
+        "count": 5,
+        "ext": "(none)",
+        "share": 0.04716981132075472
+      },
+      {
+        "count": 5,
+        "ext": "md",
+        "share": 0.04716981132075472
+      },
+      {
+        "count": 5,
+        "ext": "tag",
+        "share": 0.04716981132075472
+      },
+      {
+        "count": 4,
+        "ext": "kv",
+        "share": 0.03773584905660377
+      },
+      {
+        "count": 4,
+        "ext": "zip",
+        "share": 0.03773584905660377
+      },
+      {
+        "count": 2,
+        "ext": "graphml",
+        "share": 0.018867924528301886
+      },
+      {
+        "count": 2,
+        "ext": "ttl",
+        "share": 0.018867924528301886
+      }
+    ]
+  },
+  "limits": [
+    "Modern OOXML is UNTESTED AT VOLUME for: docx (0), xlsx (0), pptx (0) \u2014 against 0 legacy OLE (doc/xls/ppt) from the 2009 GovDocs1 harvest. OOXML is a zipped-XML container parsed by a different code path than OLE, so legacy coverage says nothing about it. Do not let 'many file types' imply modern-format coverage for any format listed here.",
+    "Not publishable, fair-use/access-only posture: hotpotqa, wiki2multihop, multihop_rag, ohr_bench, vidoseek, uda. Nothing derived from these may appear in a shareable artifact."
+  ],
+  "schema": 1,
+  "sources": [
+    {
+      "by_extension": {
+        "graphml": 1,
+        "json": 2,
+        "jsonl": 6,
+        "kv": 2,
+        "parquet": 4,
+        "ttl": 1
+      },
+      "file_count": 16,
+      "licence": "CC-BY-4.0",
+      "name": "musique",
+      "notes": [
+        "lane: attribution",
+        "provenance: local:benchmark/official-data/musique-full",
+        "Referenced in place \u2014 verified present, NOT re-downloaded."
+      ],
+      "publishable": true,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/official-data/musique-full",
+      "total_bytes": 373813561
+    },
+    {
+      "by_extension": {
+        "graphml": 1,
+        "jsonl": 4,
+        "kv": 2,
+        "parquet": 4,
+        "ttl": 1
+      },
+      "file_count": 12,
+      "licence": "CC-BY-SA-4.0",
+      "name": "hotpotqa",
+      "notes": [
+        "lane: share-alike-local",
+        "provenance: local:benchmark/official-data/hotpot-full",
+        "Referenced in place \u2014 verified present, NOT re-downloaded."
+      ],
+      "publishable": false,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/official-data/hotpot-full",
+      "total_bytes": 1254079217
+    },
+    {
+      "by_extension": {
+        "(none)": 1,
+        "json": 1,
+        "lock": 4,
+        "md": 1,
+        "metadata": 4,
+        "parquet": 3,
+        "tag": 1
+      },
+      "file_count": 15,
+      "licence": "Apache-2.0 (dataset card); paragraph text CC-BY-SA Wikipedia-derived",
+      "name": "wiki2multihop",
+      "notes": [
+        "lane: share-alike-local",
+        "provenance: hf:xanhho/2WikiMultihopQA@612bc5039a457880d9e7d84c3b0a4cf154b70e4f",
+        "Gold evidence triples double as extraction gold (S3 synergy)."
+      ],
+      "publishable": false,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/wiki2multihop/raw",
+      "total_bytes": 401929536
+    },
+    {
+      "by_extension": {
+        "(none)": 1,
+        "json": 3,
+        "lock": 3,
+        "md": 1,
+        "metadata": 3,
+        "tag": 1
+      },
+      "file_count": 12,
+      "licence": "ODC-BY-1.0 (annotations); news article text under publisher copyright",
+      "name": "multihop_rag",
+      "notes": [
+        "lane: strictly-local",
+        "provenance: hf:yixuantt/MultiHopRAG@71ac0d0bd1f951d2d6b70311f7d2ae404e1ffa82"
+      ],
+      "publishable": false,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/multihop_rag/raw",
+      "total_bytes": 11959126
+    },
+    {
+      "by_extension": {
+        "(none)": 1,
+        "json": 1,
+        "lock": 4,
+        "md": 1,
+        "metadata": 4,
+        "parquet": 2,
+        "tag": 1,
+        "zip": 1
+      },
+      "file_count": 15,
+      "licence": "research-only (non-commercial)",
+      "name": "ohr_bench",
+      "notes": [
+        "lane: research-only-local",
+        "provenance: hf:opendatalab/OHR-Bench@7f833e3eda9a571a9ea545a8f6d476fa1685033d",
+        "The OCR anchor: per-OCR-pipeline retrieval numbers to compare S2 against."
+      ],
+      "publishable": false,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/ohr_bench/raw",
+      "total_bytes": 1712835072
+    },
+    {
+      "by_extension": {
+        "(none)": 1,
+        "json": 2,
+        "lock": 3,
+        "md": 1,
+        "metadata": 3,
+        "tag": 1,
+        "zip": 1
+      },
+      "file_count": 12,
+      "licence": "Apache-2.0 (annotations); source-PDF copyright retained upstream",
+      "name": "vidoseek",
+      "notes": [
+        "lane: strictly-local",
+        "provenance: hf:Qiuchen-Wang/ViDoSeek@e91a92ba5f38690696c7e66be5c5474b54c6e791",
+        "ViDoSeek split only; the repo's SlideVQA files are not part of the S1 spec."
+      ],
+      "publishable": false,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/vidoseek/raw",
+      "total_bytes": 759371502
+    },
+    {
+      "by_extension": {
+        "(none)": 1,
+        "json": 3,
+        "lock": 7,
+        "md": 1,
+        "metadata": 7,
+        "parquet": 2,
+        "tag": 1,
+        "zip": 2
+      },
+      "file_count": 24,
+      "licence": "CC-BY-SA-4.0",
+      "name": "uda",
+      "notes": [
+        "lane: share-alike-local",
+        "provenance: hf:qinchuanhui/UDA-QA@d4367103fe8fe86b3bb76c66be8eafc4fb4117b2",
+        "uda: HTML subsets EXCLUDED (NqText -> wiki_nq, FetaTab -> wiki_feta) \u2014 no parser in the framework supports HTML input (S0 inventory), so acquiring them would gate the campaign on bytes nothing can consume. FinHybrid + PaperTab only; TAT/paper_text also skipped (not in the S1 spec)."
+      ],
+      "publishable": false,
+      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/uda/raw",
+      "total_bytes": 3321610686
+    }
+  ],
+  "totals": {
+    "file_count": 106,
+    "total_bytes": 7835598700
+  }
+}
