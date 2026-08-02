@@ -91,14 +91,15 @@ def stage_dir(campaign_root: Path, name: str) -> Path:
 
 
 def registry() -> tuple[StageSpec, ...]:
-    """The campaign's stages, in run order. S1 registers one; later tickets append.
+    """The campaign's stages, in run order. Later tickets append.
 
-    Imported lazily so :mod:`~latence_benchmark.campaign.corpus_stage` can itself import
-    this module's types without a cycle.
+    Imported lazily so the stage modules can themselves import this module's types
+    without a cycle. Order IS the gate chain: s2-ocr refuses until s1-corpus is approved.
     """
     from latence_benchmark.campaign.corpus_stage import CORPUS_STAGE
+    from latence_benchmark.campaign.ocr_stage import OCR_STAGE
 
-    return (CORPUS_STAGE,)
+    return (CORPUS_STAGE, OCR_STAGE)
 
 
 def find_stage(specs: Sequence[StageSpec], name: str) -> tuple[int, StageSpec]:

@@ -165,6 +165,16 @@ class TestStatusAndFlow:
         state = CampaignState(tmp_path / "camp" / STATE_FILENAME, ["s1-corpus"])
         assert state.status_of("s1-corpus") == "approved"
 
+        # resume now advances into s2-ocr; a text-only selection completes it as a
+        # recorded no-op (nothing to OCR), still requiring its own sign-off.
+        rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
+        assert rc == 0
+        assert "s2-ocr: done" in capsys.readouterr().out
+
+        rc = cli.main(["approve", "s2-ocr", "-c", str(config)])
+        assert rc == 0
+        capsys.readouterr()
+
         rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
         assert rc == 0
         assert "complete" in capsys.readouterr().out

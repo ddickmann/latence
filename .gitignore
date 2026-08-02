@@ -52,3 +52,11 @@ benchmark/official-data/*/calibration-sample.jsonl
 # (see latence_benchmark/campaign/corpus_stage.py CORPUS_PLAN).
 benchmark/sota-corpus/*/raw/
 benchmark/sota-corpus/**/*.zip
+# S2: extracted PDFs + OCR'd markdown inherit each dataset's lane — derived data stays
+# local, never committed (s2-ocr ticket constraint).
+benchmark/sota-corpus/*/pdfs/
+benchmark/sota-corpus/*/markdown/
+# S2 gate artifacts under the campaign root hold corpus-derived page images/markdown.
+benchmark/sota-campaign/stages/s2-ocr/spot-check/
+benchmark/sota-campaign/stages/s2-ocr/pod-metrics.json
+benchmark/sota-campaign/stages/s2-ocr/failures.jsonl

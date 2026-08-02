@@ -15,7 +15,7 @@ import json
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -172,7 +172,9 @@ def hyperedges_parquet(tmp_path: Path) -> Path:
     ]
     path = tmp_path / "graph-hyperedges.parquet"
     table = pa.Table.from_pylist(rows, schema=HYPEREDGE_SCHEMA)
-    pq.write_table(table, path)
+    # cast, not type-ignore: pyarrow is dynamically typed in this repo's mypy config, and
+    # an ignore would flip to "unused" in environments where pyarrow is absent.
+    cast("Any", pq).write_table(table, path)
     return path
 
 
@@ -201,7 +203,7 @@ def test_corpus_loads_from_parquet_rows(tmp_path: Path) -> None:
         }
     ]
     path = tmp_path / "records.parquet"
-    pq.write_table(pa.Table.from_pylist(rows), path)
+    cast("Any", pq).write_table(pa.Table.from_pylist(rows), path)
     corpus = load_corpus(tmp_path)
     assert corpus.chunk("chunk-p1").text == "Parquet chunk text."
     assert corpus.documents == {"doc-p": ["chunk-p1"]}
