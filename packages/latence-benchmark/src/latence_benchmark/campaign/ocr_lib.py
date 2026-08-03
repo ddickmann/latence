@@ -289,19 +289,6 @@ def normalize_html_tables(text: str) -> TableNormalization:
 # -- file-manifest planning ------------------------------------------------------------------
 
 
-def chunked(items: Sequence[T], size: int) -> list[tuple[T, ...]]:
-    """``items`` split into order-preserving chunks of at most ``size``.
-
-    The worker feeds render batches through this so each disposable child process gets a
-    bounded amount of work (pdfium leaks die with the child, not with the run). Pure and
-    total: an empty sequence yields no chunks; a non-positive size is a caller bug.
-    """
-    if size < 1:
-        msg = f"chunk size must be >= 1, got {size}."
-        raise ValueError(msg)
-    return [tuple(items[i : i + size]) for i in range(0, len(items), size)]
-
-
 def page_filename(page: int) -> str:
     """``0001.md``-style page artifact name (1-based, 4 digits — the manifest key)."""
     return f"{page:04d}.md"
@@ -341,21 +328,27 @@ def assemble_document(
 
 
 # -- spot-check sampling ---------------------------------------------------------------------
+#
+# Two-stage and doc-first BY NECESSITY: the streaming worker deletes a doc's page images
+# the moment its markdown is assembled (the /workspace quota bound), so the sample must be
+# decidable per doc AT CLEANUP TIME — docs are sampled from the upfront doc list, and the
+# page within each sampled doc from a per-doc-keyed generator once its page count is known.
+# Both stages are fixed-seed deterministic, so relaunches retain the same evidence.
 
 
-def sample_spot_checks(
-    doc_pages: Mapping[str, int], *, count: int = 12, seed: int = 0
-) -> tuple[tuple[str, int], ...]:
-    """``count`` deterministic ``(doc, page)`` samples for the operator's visual gate.
-
-    The population is built in sorted doc order and sampled with a fixed-seed generator,
-    so the same run always presents the same 12 pages — a re-render of the gate artifact
-    never silently swaps the evidence.
-    """
-    population = [
-        (doc, page) for doc in sorted(doc_pages) for page in range(1, doc_pages[doc] + 1)
-    ]
-    if len(population) <= count:
-        return tuple(population)
+def sample_spot_docs(
+    doc_keys: Sequence[str], *, count: int = 12, seed: int = 0
+) -> tuple[str, ...]:
+    """``count`` deterministic docs (sorted) whose one spot page the worker retains."""
+    keys = sorted(doc_keys)
+    if len(keys) <= count:
+        return tuple(keys)
     rng = random.Random(seed)
-    return tuple(sorted(rng.sample(population, count)))
+    return tuple(sorted(rng.sample(keys, count)))
+
+
+def spot_page_for(doc_key: str, page_count: int, *, seed: int = 0) -> int:
+    """The one page (1-based) retained for ``doc_key`` — stable given key and count."""
+    if page_count < 2:
+        return 1
+    return random.Random(f"{seed}:{doc_key}").randint(1, page_count)

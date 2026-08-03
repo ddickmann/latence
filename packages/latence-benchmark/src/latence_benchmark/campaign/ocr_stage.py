@@ -17,8 +17,10 @@ The stage runs CLIENT-side and treats the pod as a file server plus one long-liv
    injected clock/sleep so the loop is offline-testable. A pod job found alive on entry is
    **re-entered, not relaunched** (that is what makes ``resume`` safe mid-flight).
 4. On ``done``: pull ``markdown/`` per dataset, the worker's metrics and failures log,
-   stop the vLLM daemon (the pod is shared — S3 needs the VRAM), pull the 12 deterministic
-   spot-check pages, and write the stage's own metrics atomically.
+   stop the vLLM daemon (the pod is shared — S3 needs the VRAM), pull the spot-check
+   pages the worker retained (the streaming worker frees each doc's page images once its
+   markdown is assembled — the /workspace quota bound — keeping only the deterministic
+   12-doc sample under ``spot-img/``), and write the stage's own metrics atomically.
 
 Any pod failure — refused launch, ``phase: failed``, a stalled counter — surfaces as
 :class:`~latence_benchmark.campaign.stages.StageBlockedError` with the reason, and the
@@ -78,7 +80,6 @@ WORKER_PYTHON = "/workspace/venvs/ocr/bin/python"
 STALL_BUDGET_S = 1800.0
 POLL_INTERVAL_S = 30.0
 
-SPOT_CHECK_COUNT = 12
 
 #: The launch: vLLM up (readiness-gated), then the SUPERVISOR (run_worker.sh) under
 #: nohup with a pid file. The supervisor relaunches the worker (with ``python -u``, so
@@ -515,18 +516,31 @@ def _pull_results(
 
 
 def _pull_spot_checks(
-    transport: PodTransport, doc_pages: Mapping[str, int], out_dir: Path
+    transport: PodTransport, pod_metrics: Mapping[str, Any], out_dir: Path
 ) -> list[dict[str, Any]]:
-    """Pull the 12 deterministic sample pages (image + raw page markdown) for the gate."""
-    samples = ocr_lib.sample_spot_checks(doc_pages, count=SPOT_CHECK_COUNT)
+    """Pull the worker-RETAINED spot pages (image + raw page markdown) for the gate.
+
+    The streaming worker deletes each doc's page images the moment its markdown is
+    assembled (the /workspace quota bound), retaining only the deterministically sampled
+    spot pages under ``spot-img/`` and recording them in its metrics ``spot_check`` list
+    — so the client pulls exactly what the worker kept, never a page that is gone.
+    """
+    raw = pod_metrics.get("spot_check")
+    entries = raw if isinstance(raw, list) else []
     spot_dir = out_dir / "spot-check"
     spot_dir.mkdir(parents=True, exist_ok=True)
     recorded: list[dict[str, Any]] = []
-    for doc, page in samples:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        doc = str(entry.get("doc", ""))
+        page = int(entry.get("page", 0))
+        if not doc or page < 1:
+            continue
         stem = f"{doc.replace('/', '__')}__{page:04d}"
         image_local = spot_dir / f"{stem}.jpg"
         markdown_local = spot_dir / f"{stem}.md"
-        transport.pull(f"{REMOTE_ROOT}/pages-img/{doc}/{page:04d}.jpg", image_local)
+        transport.pull(f"{REMOTE_ROOT}/spot-img/{doc}/{page:04d}.jpg", image_local)
         transport.pull(f"{REMOTE_ROOT}/pages/{doc}/{page:04d}.md", markdown_local)
         recorded.append(
             {
@@ -623,12 +637,8 @@ def run_ocr_stage(
     pod_metrics = _pull_results(ctx, transport, active, out_dir)
     stop_rc, _stop_out = transport.run(f"bash {REMOTE_ROOT}/pod/stop_ocr.sh")
 
-    # 7. Spot-check samples (deterministic 12) for the operator's visual gate.
-    raw_docs = pod_metrics.get("docs")
-    doc_pages: dict[str, int] = (
-        {str(k): int(v) for k, v in raw_docs.items()} if isinstance(raw_docs, dict) else {}
-    )
-    spot_check = _pull_spot_checks(transport, doc_pages, out_dir)
+    # 7. Spot-check samples — the pages the worker retained before freeing images.
+    spot_check = _pull_spot_checks(transport, pod_metrics, out_dir)
 
     # 8. Stage metrics: the worker's numbers PLUS what measurably landed locally.
     datasets_metrics: dict[str, Any] = {}

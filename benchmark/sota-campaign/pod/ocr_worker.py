@@ -1,45 +1,54 @@
 #!/usr/bin/env python3
-"""ocr_worker.py — the pod-side S2 job: render -> OCR -> normalize -> assemble.
+"""ocr_worker.py — the pod-side S2 job, streaming PER DOC: render -> OCR -> assemble -> free.
 
 Runs on the pod under ``/workspace/venvs/ocr/bin/python -u`` (serve_ocr.sh installs the
 deps: pypdfium2, pillow, openai; everything else is stdlib), supervised by
-``run_worker.sh`` (up to 5 relaunches — every pass below is skip-if-exists, so a relaunch
+``run_worker.sh`` (up to 5 relaunches — every step below is skip-if-exists, so a relaunch
 continues instead of redoing). The pure logic — HTML-table normalization, repetition
-detection, manifest planning, provenance format — is imported from ``ocr_lib.py``, which
-the campaign stage pushes NEXT TO this file from the unit-tested
+detection, manifest planning, spot sampling, provenance format — is imported from
+``ocr_lib.py``, which the campaign stage pushes NEXT TO this file from the unit-tested
 ``latence_benchmark.campaign.ocr_lib`` module: the pod executes the exact bytes the
 offline suite proved.
 
 Layout under ``--root`` (default /workspace/latence-sota/s2)::
 
     input/<dataset>/pdfs/**.pdf     # pushed by the stage
-    pages-img/<dataset>/<doc_id>/<page:04d>.jpg   # render pass (skip-if-exists)
-    pages-img/<dataset>/<doc_id>/.pages           # sidecar: doc fully rendered, N pages
-    pages/<dataset>/<doc_id>/<page:04d>.md        # OCR pass (skip-if-exists)
+    pages-img/<dataset>/<doc_id>/<page:04d>.jpg   # TRANSIENT: deleted per doc (below)
+    pages/<dataset>/<doc_id>/<page:04d>.md        # OCR pass (skip-if-exists, tiny, kept)
+    pages/<dataset>/<doc_id>/.pages               # sidecar: doc fully rendered, N pages
+    pages/<dataset>/<doc_id>/.stats               # sidecar: assembly stats (metrics truth)
     markdown/<dataset>/<doc_id>.md  # normalized + assembled, provenance header
+    spot-img/<dataset>/<doc_id>/<page:04d>.jpg    # the retained spot-check evidence
     state.json                      # atomic (temp+rename), rewritten every 30s
     metrics.json                    # written at the end of the run
     failures.jsonl                  # append-only failure log
 
-**Render is crash-isolated** (the 2026-08-02 field lesson: pypdfium2 leaks RSS on some
-malformed/huge PDFs until the container cap OOM-kills the process — silently, because
-nothing flushed). Rendering therefore runs in CHILD subprocesses of at most
-``RENDER_DOCS_PER_CHILD`` docs each, so a leak dies with the child and its memory comes
-back; a batch whose child dies is retried doc-by-doc to isolate the poisonous PDF, which
-is then logged to failures.jsonl and skipped — the run continues. The parent process
-never imports pdfium at all.
+**Streaming is a QUOTA constraint, not a style choice** (second field lesson, 2026-08-03:
+/workspace has a ~70GB quota; render-all-then-OCR-all held 15GB of page images at 36,430
+pages and would have breached mid-run). The pipeline is per doc: render the doc's pages
+-> OCR them -> assemble ``markdown/<doc>.md`` -> DELETE the doc's page images. The disk
+high-water mark above the input PDFs is therefore ~two docs' images (the doc in flight
+plus one render-prefetched doc — ~100MB worst case at 260 pages/doc), while the 15GB
+backlog of already-rendered docs only SHRINKS: each is OCR'd, assembled, and freed in
+turn. Before deletion, the deterministically sampled spot-check page (12 docs, one page
+each — ``ocr_lib.sample_spot_docs``/``spot_page_for``) is moved to ``spot-img/``.
 
-**Evidence on death**: faulthandler is enabled, ``run_worker.sh`` launches with ``-u``
-(no buffered, never-flushed logs), SIGTERM is turned into an orderly shutdown, and an
-atexit deathbed handler stamps ``state.json`` ``phase: failed`` on any exit that did not
-reach ``done``. SIGKILL/OOM of the parent itself cannot be caught — that is covered by
-the supervisor's relaunch loop and, last, by the campaign client's stall budget.
+**Render stays crash-isolated** (first field lesson: pypdfium2 leaks RSS on some
+malformed/huge PDFs until the container cap OOM-kills the process — silently). Each doc
+renders in a disposable child subprocess (``--render-batch``); a leak dies with the
+child, a dead child logs the doc to failures.jsonl and the run continues. The parent
+never imports pdfium. One doc's render is prefetched on a side thread while the previous
+doc's pages stream through OCR, so the GPU stays fed without unbounding the disk.
 
-Resumability is the FILE MANIFEST, nothing else. ``state.json`` carries a single
-``progress`` counter that is a CUMULATIVE function of the filesystem (pages rendered +
-pages OCR'd + docs assembled, counting pre-existing work), so it is monotone ACROSS
-worker relaunches — a supervisor restart never dips below the campaign client's
-high-water mark and therefore never manufactures a false stall.
+**Evidence on death**: faulthandler, ``-u`` logging, SIGTERM -> orderly shutdown, an
+atexit deathbed stamping ``state.json`` ``phase: failed`` on any exit short of done;
+parent OOM is covered by the supervisor relaunch loop and, last, the client's stall
+budget.
+
+``state.json``'s ``progress`` counter is a CUMULATIVE function of the filesystem (pages
+rendered + pages OCR'd + docs assembled, counting pre-existing work exactly once per
+launch), so it is monotone ACROSS relaunches — a supervisor restart never dips below the
+campaign client's high-water mark and therefore never manufactures a false stall.
 """
 
 from __future__ import annotations
@@ -51,6 +60,7 @@ import contextlib
 import faulthandler
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -76,11 +86,14 @@ MAX_MEGAPIXELS = 25.0
 JPEG_QUALITY = 90
 STATE_INTERVAL_S = 30.0
 REQUEST_TIMEOUT_S = 300.0
-#: Render children are recycled after this many docs, so leaked pdfium RSS dies with the
-#: child instead of accumulating toward the container's memory cap.
-RENDER_DOCS_PER_CHILD = 25
-#: Sidecar marking a doc as FULLY rendered (written atomically after its last page).
+#: Render-complete sidecar. Lives under pages/ (NOT pages-img/) so it SURVIVES the
+#: per-doc image deletion — it is the durable "this doc needs no re-render" marker.
 PAGES_SIDECAR = ".pages"
+#: Assembly-stats sidecar (tables normalized/kept-raw, pages missing): keeps relaunch
+#: metrics truthful for docs whose images are long gone.
+STATS_SIDECAR = ".stats"
+
+_FAILLOG_LOCK = threading.Lock()
 
 
 @dataclass
@@ -144,7 +157,7 @@ def _deathbed(state: State) -> None:
 
 def log_failure(root: Path, entry: dict[str, object]) -> None:
     entry = {**entry, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    with (root / "failures.jsonl").open("a", encoding="utf-8") as out:
+    with _FAILLOG_LOCK, (root / "failures.jsonl").open("a", encoding="utf-8") as out:
         out.write(json.dumps(entry) + "\n")
 
 
@@ -174,7 +187,7 @@ def discover_docs(root: Path) -> list[Doc]:
     return docs
 
 
-# -- render pass (CHILD process; pypdfium2, 200 DPI, longest edge 1540, JPEG) ----------------
+# -- render step (CHILD process; pypdfium2, 200 DPI, longest edge 1540, JPEG) ----------------
 
 
 def render_doc(root: Path, doc: Doc) -> int:
@@ -216,9 +229,11 @@ def render_doc(root: Path, doc: Doc) -> int:
             tmp = target.with_name(target.name + ".part")
             image.save(tmp, format="JPEG", quality=JPEG_QUALITY)
             os.replace(tmp, target)
-        sidecar_tmp = out_dir / (PAGES_SIDECAR + ".tmp")
+        sidecar = _sidecar_path(root, doc)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_tmp = sidecar.with_name(sidecar.name + ".tmp")
         sidecar_tmp.write_text(f"{page_count}\n", encoding="utf-8")
-        os.replace(sidecar_tmp, out_dir / PAGES_SIDECAR)
+        os.replace(sidecar_tmp, sidecar)
     finally:
         with contextlib.suppress(Exception):
             pdf.close()
@@ -234,15 +249,32 @@ def render_batch(root: Path, manifest_path: Path) -> int:
     return 0
 
 
+def _sidecar_path(root: Path, doc: Doc) -> Path:
+    return root / "pages" / doc.key / PAGES_SIDECAR
+
+
 def read_render_sidecar(root: Path, doc: Doc) -> int | None:
-    """The doc's page count if (and only if) its render pass completed; else ``None``."""
-    path = root / "pages-img" / doc.key / PAGES_SIDECAR
-    if not path.is_file():
-        return None
-    try:
-        return int(path.read_text(encoding="utf-8").strip())
-    except ValueError:
-        return None
+    """The doc's page count if (and only if) its render step completed; else ``None``.
+
+    Honors the legacy location too (``pages-img/<doc>/.pages``, written by the previous
+    worker generation) — a legacy sidecar's doc re-renders nothing, and the durable copy
+    (under ``pages/``, which survives image cleanup) is written on collection.
+    """
+    for path in (_sidecar_path(root, doc), root / "pages-img" / doc.key / PAGES_SIDECAR):
+        if not path.is_file():
+            continue
+        try:
+            count = int(path.read_text(encoding="utf-8").strip())
+        except ValueError:
+            continue
+        durable = _sidecar_path(root, doc)
+        if path != durable:  # migrate: the durable copy must survive image cleanup
+            durable.parent.mkdir(parents=True, exist_ok=True)
+            tmp = durable.with_name(durable.name + ".tmp")
+            tmp.write_text(f"{count}\n", encoding="utf-8")
+            os.replace(tmp, durable)
+        return count
+    return None
 
 
 def _spawn_render_child(root: Path, docs: list[Doc]) -> bool:
@@ -279,54 +311,36 @@ def _spawn_render_child(root: Path, docs: list[Doc]) -> bool:
         manifest_path.unlink(missing_ok=True)
 
 
-def render_all(root: Path, docs: list[Doc], state: State) -> dict[str, int]:
-    """The parent render loop: recycled children, per-doc isolation of poisonous PDFs.
+def ensure_rendered(root: Path, doc: Doc, state: State) -> int | None:
+    """Sidecar-or-render: the doc's page count, or ``None`` if its render child died.
 
-    Returns ``{doc.key: page_count}`` for every SUCCESSFULLY rendered doc. A doc whose
-    dedicated child also dies is logged to failures.jsonl and excluded — the run
-    continues; one bad PDF must never cost the other 56k pages. Progress counts EVERY
-    completed doc's pages (including pre-existing ones), keeping the counter cumulative
-    and monotone across worker relaunches.
+    The 15GB backlog case lands here naturally: a backlog doc has no sidecar, so its
+    child opens the PDF, finds every page image already present (skip-if-exists), writes
+    the sidecar and exits — a cheap verification pass, not redone work.
     """
-    page_counts: dict[str, int] = {}
-
-    def collect(doc: Doc) -> bool:
-        count = read_render_sidecar(root, doc)
-        if count is None:
-            return False
-        page_counts[doc.key] = count
-        state.bump(pages_rendered=count)
-        return True
-
-    pending = [doc for doc in docs if not collect(doc)]
-    state.write()  # the resume sweep is visible immediately, not 30s later
-
-    for batch in ocr_lib.chunked(pending, RENDER_DOCS_PER_CHILD):
-        batch_docs = list(batch)
-        if not _spawn_render_child(root, batch_docs):
-            # The child died (leak/OOM/bad PDF): isolate doc-by-doc so exactly the
-            # poisonous document is skipped, not its 24 neighbours.
-            for doc in batch_docs:
-                if read_render_sidecar(root, doc) is not None:
-                    continue  # rendered before the child died
-                if not _spawn_render_child(root, [doc]):
-                    log_failure(
-                        root,
-                        {
-                            "doc": doc.key,
-                            "kind": "render",
-                            "error": "render child died for this doc alone; doc skipped",
-                        },
-                    )
-                    state.bump(failures=1)
-        for doc in batch_docs:
-            if doc.key not in page_counts:
-                collect(doc)
-        state.write()
-    return page_counts
+    count = read_render_sidecar(root, doc)
+    if count is not None:
+        return count
+    if not _spawn_render_child(root, [doc]):
+        log_failure(
+            root,
+            {"doc": doc.key, "kind": "render",
+             "error": "render child died for this doc; doc skipped"},
+        )
+        state.bump(failures=1)
+        return None
+    count = read_render_sidecar(root, doc)
+    if count is None:
+        log_failure(
+            root,
+            {"doc": doc.key, "kind": "render",
+             "error": "render child exited cleanly but left no completion sidecar"},
+        )
+        state.bump(failures=1)
+    return count
 
 
-# -- OCR pass (per-page OpenAI-compatible requests against the local vLLM) -------------------
+# -- OCR step (per-page OpenAI-compatible requests against the local vLLM) -------------------
 
 
 def _page_image_message(image_path: Path) -> list[dict[str, object]]:
@@ -384,17 +398,14 @@ def ocr_page(client: object, root: Path, doc: Doc, page: int, state: State) -> N
     state.bump(pages_done=1)
 
 
-# -- normalize + assemble --------------------------------------------------------------------
+# -- normalize + assemble + free -------------------------------------------------------------
 
 
-def assemble_doc(
-    root: Path, doc: Doc, page_count: int, state: State
-) -> tuple[int, int, int]:
-    """Normalize tables per page and write ``markdown/<ds>/<doc_id>.md``.
+def normalize_pages(root: Path, doc: Doc, page_count: int) -> tuple[list[str], int, int, int]:
+    """Per-page table normalization; returns ``(pages_md, converted, kept_raw, missing)``.
 
-    Returns ``(tables_converted, tables_kept_raw, missing_pages)``. A page whose OCR
-    permanently failed is represented by an explicit placeholder comment — visible, never
-    silently absent.
+    A page whose OCR permanently failed is represented by an explicit placeholder
+    comment — visible, never silently absent.
     """
     pages_dir = root / "pages" / doc.key
     converted = 0
@@ -411,6 +422,26 @@ def assemble_doc(
         converted += result.converted
         kept_raw += result.kept_raw
         pages_md.append(result.text)
+    return pages_md, converted, kept_raw, missing
+
+
+def read_assembly_stats(root: Path, doc: Doc) -> dict[str, int] | None:
+    path = root / "pages" / doc.key / STATS_SIDECAR
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            k: int(raw[k])
+            for k in ("tables_normalized", "tables_kept_raw", "pages_missing")
+        }
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def assemble_doc(root: Path, doc: Doc, page_count: int, state: State) -> dict[str, int]:
+    """Normalize + write ``markdown/<ds>/<doc_id>.md`` + persist the stats sidecar."""
+    pages_md, converted, kept_raw, missing = normalize_pages(root, doc, page_count)
     target = root / "markdown" / doc.dataset / f"{doc.doc_id}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".part")
@@ -424,9 +455,73 @@ def assemble_doc(
         ),
         encoding="utf-8",
     )
+    stats = {"tables_normalized": converted, "tables_kept_raw": kept_raw,
+             "pages_missing": missing}
+    stats_path = root / "pages" / doc.key / STATS_SIDECAR
+    stats_tmp = stats_path.with_name(stats_path.name + ".tmp")
+    stats_tmp.write_text(json.dumps(stats) + "\n", encoding="utf-8")
+    # Markdown first, stats second: a crash between the two re-derives on relaunch.
     os.replace(tmp, target)
+    os.replace(stats_tmp, stats_path)
     state.bump(docs_assembled=1)  # progress tick per assembled doc (monotone counter)
-    return converted, kept_raw, missing
+    return stats
+
+
+def cleanup_doc_images(root: Path, doc: Doc, spot_page: int | None) -> bool:
+    """Free the doc's page images — THE quota bound — retaining the one spot page.
+
+    Called only after ``markdown/<doc>.md`` exists. Returns True when the spot page is
+    retained under ``spot-img/`` (now, or already by an earlier pass).
+    """
+    img_dir = root / "pages-img" / doc.key
+    retained = False
+    if spot_page is not None:
+        kept = root / "spot-img" / doc.key / f"{spot_page:04d}.jpg"
+        source = img_dir / f"{spot_page:04d}.jpg"
+        if kept.is_file():
+            retained = True
+        elif source.is_file():
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, kept)
+            retained = True
+    shutil.rmtree(img_dir, ignore_errors=True)
+    return retained
+
+
+def process_doc(
+    root: Path,
+    doc: Doc,
+    page_count: int,
+    ocr_pool: ThreadPoolExecutor,
+    client: object,
+    state: State,
+) -> dict[str, int]:
+    """OCR the doc's pending pages and assemble its markdown; returns the stats dict.
+
+    A doc whose markdown already exists is a prior full pass: its cumulative progress is
+    re-counted (never re-OCR'd — its images may already be deleted) and its persisted
+    stats are reused, falling back to re-deriving them from the kept page markdown.
+    """
+    pages_dir = root / "pages" / doc.key
+    existing = {p.name for p in pages_dir.iterdir()} if pages_dir.is_dir() else set()
+    markdown = root / "markdown" / doc.dataset / f"{doc.doc_id}.md"
+    if markdown.is_file():
+        done_pages = page_count - len(ocr_lib.missing_pages(page_count, existing))
+        state.bump(pages_done=done_pages, docs_assembled=1)
+        stats = read_assembly_stats(root, doc)
+        if stats is None:
+            _, converted, kept_raw, missing = normalize_pages(root, doc, page_count)
+            stats = {"tables_normalized": converted, "tables_kept_raw": kept_raw,
+                     "pages_missing": missing}
+        return stats
+    pending = ocr_lib.missing_pages(page_count, existing)
+    state.bump(pages_done=page_count - len(pending))  # cumulative across relaunches
+    futures = [
+        ocr_pool.submit(ocr_page, client, root, doc, page, state) for page in pending
+    ]
+    for future in as_completed(futures):
+        future.result()  # surface OCR-thread exceptions loudly
+    return assemble_doc(root, doc, page_count, state)
 
 
 # -- main ------------------------------------------------------------------------------------
@@ -441,6 +536,8 @@ def run(root: Path) -> None:
     writer = threading.Thread(target=_state_writer_loop, args=(state, stop), daemon=True)
     writer.start()
     started = time.monotonic()
+    render_pool = ThreadPoolExecutor(max_workers=1)  # ONE prefetch slot: disk stays bounded
+    ocr_pool = ThreadPoolExecutor(max_workers=CONCURRENCY)
     try:
         from openai import OpenAI
 
@@ -449,61 +546,42 @@ def run(root: Path) -> None:
         docs = discover_docs(root)
         if not docs:
             raise RuntimeError(f"no PDFs under {root}/input/*/pdfs — nothing to do")
+        spot_docs = set(ocr_lib.sample_spot_docs([doc.key for doc in docs]))
 
-        # Pass 1: render in disposable child processes (crash-isolated, resumable).
-        state.phase = "render"
+        state.phase = "stream"
         state.write()
-        page_counts = render_all(root, docs, state)
-        rendered_docs = [doc for doc in docs if doc.key in page_counts]
-        with state.lock:
-            state.pages_total = sum(page_counts.values())
-        state.write()
+        per_dataset: dict[str, dict[str, int]] = {}
+        page_counts: dict[str, int] = {}
+        spot_records: list[dict[str, object]] = []
 
-        # Pass 2: OCR — independent per-page requests, concurrency 12, skip-if-exists.
-        state.phase = "ocr"
-        state.write()
-        pending: list[tuple[Doc, int]] = []
-        for doc in rendered_docs:
-            pages_dir = root / "pages" / doc.key
-            existing = (
-                {p.name for p in pages_dir.iterdir()} if pages_dir.is_dir() else set()
-            )
-            pending.extend(
-                (doc, page)
-                for page in ocr_lib.missing_pages(page_counts[doc.key], existing)
-            )
-        # Count already-OCR'd pages THROUGH bump so progress stays cumulative across
-        # relaunches (a plain assignment would dip below the client's high-water mark).
-        state.bump(pages_done=state.pages_total - len(pending))
-        with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-            futures = [
-                pool.submit(ocr_page, client, root, doc, page, state)
-                for doc, page in pending
-            ]
-            for future in as_completed(futures):
-                future.result()  # surface worker exceptions loudly
-
-        # Pass 3: normalize HTML tables + assemble per-doc markdown with provenance.
-        state.phase = "assemble"
-        state.write()
-        per_dataset: dict[str, dict[str, float]] = {}
-        for doc in docs:
+        prefetch = render_pool.submit(ensure_rendered, root, docs[0], state)
+        for index, doc in enumerate(docs):
+            count = prefetch.result()
+            if index + 1 < len(docs):  # render the NEXT doc while this one OCRs
+                prefetch = render_pool.submit(ensure_rendered, root, docs[index + 1], state)
             entry = per_dataset.setdefault(
                 doc.dataset,
                 {"docs": 0, "docs_render_failed": 0, "pages": 0, "tables_normalized": 0,
                  "tables_kept_raw": 0, "pages_missing": 0},
             )
-            if doc.key not in page_counts:
+            if count is None:
                 entry["docs_render_failed"] += 1
-                continue
-            converted, kept_raw, missing = assemble_doc(
-                root, doc, page_counts[doc.key], state
+                continue  # already logged + bumped by ensure_rendered
+            state.bump(pages_rendered=count)
+            with state.lock:
+                state.pages_total += count
+            stats = process_doc(root, doc, count, ocr_pool, client, state)
+            spot_page = (
+                ocr_lib.spot_page_for(doc.key, count) if doc.key in spot_docs else None
             )
+            if cleanup_doc_images(root, doc, spot_page) and spot_page is not None:
+                spot_records.append({"doc": doc.key, "page": spot_page})
             entry["docs"] += 1
-            entry["pages"] += page_counts[doc.key]
-            entry["tables_normalized"] += converted
-            entry["tables_kept_raw"] += kept_raw
-            entry["pages_missing"] += missing
+            entry["pages"] += count
+            for key, value in stats.items():
+                entry[key] += value
+            page_counts[doc.key] = count
+            state.write()  # per-doc checkpoint: progress is visible doc by doc
 
         wall = time.monotonic() - started
         with state.lock:
@@ -515,7 +593,7 @@ def run(root: Path) -> None:
             "model_revision": MODEL_REVISION,
             "datasets": {
                 ds: {
-                    **{k: int(v) for k, v in entry.items()},
+                    **entry,
                     "failures": sum(
                         1 for line in _failure_lines(root)
                         if json.loads(line).get("doc", "").startswith(f"{ds}/")
@@ -523,7 +601,8 @@ def run(root: Path) -> None:
                 }
                 for ds, entry in per_dataset.items()
             },
-            "docs": {doc.key: page_counts[doc.key] for doc in rendered_docs},
+            "docs": page_counts,
+            "spot_check": spot_records,
             "pages_total": sum(page_counts.values()),
             "pages_done": pages_done,
             "failures": failures,
@@ -546,6 +625,8 @@ def run(root: Path) -> None:
         state.write()
         raise
     finally:
+        render_pool.shutdown(wait=False, cancel_futures=True)
+        ocr_pool.shutdown(wait=False, cancel_futures=True)
         stop.set()
         writer.join(timeout=2)
 

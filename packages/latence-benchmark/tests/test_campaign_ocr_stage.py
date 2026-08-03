@@ -139,7 +139,9 @@ class FakePod:
             local.mkdir(parents=True, exist_ok=True)
             for doc_id in self._markdown.get(dataset, []):
                 (local / f"{doc_id}.md").write_text(f"# {doc_id}\n", encoding="utf-8")
-        elif "/pages-img/" in remote:
+        elif "/spot-img/" in remote:
+            # Only worker-retained spot pages exist remotely; pages-img is deleted
+            # per doc by the streaming worker, so the client must never pull it.
             local.write_bytes(b"\xff\xd8fixture-jpeg")
         elif "/pages/" in remote:
             local.write_text("raw page markdown", encoding="utf-8")
@@ -160,6 +162,10 @@ def vidoseek_pod(*, states: Sequence[str | None]) -> FakePod:
                              "tables_kept_raw": 1, "pages_missing": 0, "failures": 0},
             },
             "docs": docs,
+            "spot_check": [
+                {"doc": "vidoseek/pdf__a", "page": 2},
+                {"doc": "vidoseek/pdf__b", "page": 1},
+            ],
             "pages_total": 3,
             "pages_done": 3,
             "wall_clock_s": 60.0,
@@ -391,11 +397,18 @@ class TestStageRun:
         assert metrics["pod"]["resumed"] is False
         assert metrics["pod"]["vllm_stopped"] is True
 
-        # Spot check: 3 pages total <= 12 -> all sampled, image+md pulled for each.
-        assert len(metrics["spot_check"]) == 3
+        # Spot check: exactly the pages the worker RETAINED under spot-img (its
+        # metrics' spot_check list) — the streamed-away page images are never pulled.
+        assert len(metrics["spot_check"]) == 2
         for sample in metrics["spot_check"]:
             assert Path(sample["image"]).is_file()
             assert Path(sample["markdown"]).is_file()
+        spot_pulls = [remote for remote, _ in pod.pulls if "/spot-img/" in remote]
+        assert spot_pulls == [
+            f"{REMOTE_ROOT}/spot-img/vidoseek/pdf__a/0002.jpg",
+            f"{REMOTE_ROOT}/spot-img/vidoseek/pdf__b/0001.jpg",
+        ]
+        assert not any("/pages-img/" in remote for remote, _ in pod.pulls)
 
         assert ocr_done_probe(ctx) is True
 
@@ -447,6 +460,8 @@ class TestStageRun:
         assert fin["selected"] == ["D1", "D2", "D3"]  # 5,3,3 QA; ties by name
         assert (fin["qa_covered"], fin["qa_total"]) == (11, 11)
         assert fin["docs_total"] == 3
+        # A worker metrics without a spot_check list (nothing retained) records empty.
+        assert metrics["spot_check"] == []
 
     def test_stalled_pod_blocks_the_stage_with_the_reason(self, tmp_path: Path) -> None:
         repo = make_repo(tmp_path)

@@ -9,10 +9,8 @@ both sides rely on.
 
 from __future__ import annotations
 
-import pytest
 from latence_benchmark.campaign.ocr_lib import (
     assemble_document,
-    chunked,
     has_repetition,
     missing_pages,
     normalize_html_tables,
@@ -20,8 +18,9 @@ from latence_benchmark.campaign.ocr_lib import (
     provenance_header,
     qa_coverage,
     safe_zip_entry,
-    sample_spot_checks,
+    sample_spot_docs,
     select_capped_docs,
+    spot_page_for,
 )
 
 
@@ -162,24 +161,6 @@ class TestTableNormalization:
         )
 
 
-class TestChunking:
-    def test_order_preserving_chunks_of_at_most_size(self) -> None:
-        assert chunked([1, 2, 3, 4, 5], 2) == [(1, 2), (3, 4), (5,)]
-
-    def test_exact_multiple_has_no_short_tail(self) -> None:
-        assert chunked(["a", "b", "c", "d"], 2) == [("a", "b"), ("c", "d")]
-
-    def test_size_one_isolates_every_item(self) -> None:
-        assert chunked([1, 2], 1) == [(1,), (2,)]
-
-    def test_empty_sequence_yields_no_chunks(self) -> None:
-        assert chunked([], 25) == []
-
-    def test_non_positive_size_is_a_caller_bug(self) -> None:
-        with pytest.raises(ValueError, match=">= 1"):
-            chunked([1], 0)
-
-
 class TestManifestPlanning:
     def test_page_filename_is_four_digit_markdown(self) -> None:
         assert page_filename(1) == "0001.md"
@@ -220,16 +201,32 @@ class TestAssembly:
 
 
 class TestSpotCheckSampling:
-    def test_small_population_returns_every_page(self) -> None:
-        assert sample_spot_checks({"a": 2, "b": 1}) == (("a", 1), ("a", 2), ("b", 1))
+    # Doc-first by necessity: the streaming worker deletes a doc's images at cleanup,
+    # so the sample must be decidable per doc — 12 docs upfront, one stable page each.
 
-    def test_large_population_yields_exactly_twelve_sorted_samples(self) -> None:
-        docs = {f"doc{i:02d}": 40 for i in range(20)}
-        samples = sample_spot_checks(docs)
-        assert len(samples) == 12
-        assert list(samples) == sorted(samples)
-        assert len(set(samples)) == 12
+    def test_small_doc_population_selects_every_doc(self) -> None:
+        assert sample_spot_docs(["b", "a", "c"]) == ("a", "b", "c")
 
-    def test_sampling_is_deterministic(self) -> None:
-        docs = {f"doc{i:02d}": 17 for i in range(30)}
-        assert sample_spot_checks(docs) == sample_spot_checks(docs)
+    def test_large_population_yields_twelve_sorted_unique_docs(self) -> None:
+        keys = [f"ds/doc{i:03d}" for i in range(200)]
+        docs = sample_spot_docs(keys)
+        assert len(docs) == 12
+        assert list(docs) == sorted(docs)
+        assert len(set(docs)) == 12
+
+    def test_doc_sampling_ignores_input_order(self) -> None:
+        keys = [f"ds/doc{i:03d}" for i in range(50)]
+        assert sample_spot_docs(keys) == sample_spot_docs(list(reversed(keys)))
+
+    def test_spot_page_is_within_the_doc_and_stable(self) -> None:
+        page = spot_page_for("ds/x", 17)
+        assert 1 <= page <= 17
+        assert page == spot_page_for("ds/x", 17)  # relaunches retain the same evidence
+
+    def test_spot_page_varies_across_docs(self) -> None:
+        pages = {spot_page_for(f"ds/doc{i}", 1000) for i in range(20)}
+        assert len(pages) > 1  # keyed per doc, not one global page number
+
+    def test_tiny_docs_pin_page_one(self) -> None:
+        assert spot_page_for("ds/one-pager", 1) == 1
+        assert spot_page_for("ds/empty", 0) == 1
