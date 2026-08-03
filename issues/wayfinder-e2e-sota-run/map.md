@@ -79,6 +79,14 @@ Runner's stage checkpoints or two separate runs.
 4. **Schema induction = LLM via OpenRouter** (`label_inducer.llm`) in the S3 full-feature
    profile — offline indexing cost only, online path stays zero-LLM; exact budget estimate
    presented before the S3 run is approved.
+5a. **OCR host = a dedicated big pod, FULL corpus** (Dennis, 2026-08-03, supersedes the
+   fin-cap half of decision 1): OCR is the only heavy-lifting stage, so it runs UNCAPPED
+   (~150k pages, all 788 fin docs) on a dedicated RTX PRO 6000 Blackwell 96GB pod
+   (`ssh root@198.13.252.15 -p 11791`, driver 580/CUDA-13, stock vLLM 0.26 works natively);
+   markdown results transfer back as input for the subsequent stages. Same pod scripts,
+   scaled (max-num-seqs 64, worker concurrency 48). Full corpus = more reliable and
+   comparable benchmark numbers. The small pod (paused at 4,862 pages/441 docs, work
+   preserved) hosts everything downstream.
 5. **Processing host = the existing RunPod pod** (Dennis, 2026-08-02):
    `ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519` — RTX 2000 Ada 16GB, verified
    alive with `/workspace/latence-framework` + `podcheck.sh` already in place from the M6
