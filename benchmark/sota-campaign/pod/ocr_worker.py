@@ -26,19 +26,28 @@ Layout under ``--root`` (default /workspace/latence-sota/s2)::
 **Streaming is a QUOTA constraint, not a style choice** (second field lesson, 2026-08-03:
 /workspace has a ~70GB quota; render-all-then-OCR-all held 15GB of page images at 36,430
 pages and would have breached mid-run). The pipeline is per doc: render the doc's pages
--> OCR them -> assemble ``markdown/<doc>.md`` -> DELETE the doc's page images. The disk
-high-water mark above the input PDFs is therefore ~two docs' images (the doc in flight
-plus one render-prefetched doc — ~100MB worst case at 260 pages/doc), while the 15GB
+-> OCR them -> assemble ``markdown/<doc>.md`` -> DELETE the doc's page images. The 15GB
 backlog of already-rendered docs only SHRINKS: each is OCR'd, assembled, and freed in
 turn. Before deletion, the deterministically sampled spot-check page (12 docs, one page
 each — ``ocr_lib.sample_spot_docs``/``spot_page_for``) is moved to ``spot-img/``.
+
+**Docs are pipelined ACROSS each other** (third field lesson: strictly per-doc streaming
+starved the server — docs average 7-20 pages, so within-doc concurrency never filled the
+vLLM batch and render/assemble gaps added dead air; observed 1.18 pages/s with the queue
+at "Running: 1-14"). ``N_DOCS_IN_FLIGHT`` doc lifecycles run concurrently, all sharing
+ONE bounded OCR request pool of ``GLOBAL_CONCURRENCY`` — the global cap the server
+actually sees — while ``RENDER_WORKERS`` render children keep the window fed. Each
+knob is env-overridable (``S2_DOCS_IN_FLIGHT`` / ``S2_GLOBAL_CONCURRENCY`` /
+``S2_RENDER_WORKERS``; the 16GB pod runs 2/12, the 96GB pod the 8/64 defaults). The disk
+high-water above the input PDFs stays bounded: images exist only for in-flight plus
+render-ahead docs — at most ``N_DOCS_IN_FLIGHT + RENDER_WORKERS + 1`` docs (~13 docs
+~= ~650MB worst case at 260 pages/doc).
 
 **Render stays crash-isolated** (first field lesson: pypdfium2 leaks RSS on some
 malformed/huge PDFs until the container cap OOM-kills the process — silently). Each doc
 renders in a disposable child subprocess (``--render-batch``); a leak dies with the
 child, a dead child logs the doc to failures.jsonl and the run continues. The parent
-never imports pdfium. One doc's render is prefetched on a side thread while the previous
-doc's pages stream through OCR, so the GPU stays fed without unbounding the disk.
+never imports pdfium.
 
 **Evidence on death**: faulthandler, ``-u`` logging, SIGTERM -> orderly shutdown, an
 atexit deathbed stamping ``state.json`` ``phase: failed`` on any exit short of done;
@@ -47,8 +56,10 @@ budget.
 
 ``state.json``'s ``progress`` counter is a CUMULATIVE function of the filesystem (pages
 rendered + pages OCR'd + docs assembled, counting pre-existing work exactly once per
-launch), so it is monotone ACROSS relaunches — a supervisor restart never dips below the
-campaign client's high-water mark and therefore never manufactures a false stall.
+launch — and ONLY filesystem-backed quantities: failure/retry counters deliberately do
+not feed it, because they do not re-accumulate), so it is monotone ACROSS relaunches — a
+supervisor restart never dips below the campaign client's high-water mark and therefore
+never manufactures a false stall.
 """
 
 from __future__ import annotations
@@ -66,17 +77,34 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ocr_lib  # noqa: E402  (the stage pushes it next to this file)
 
+
+def _env_int(name: str, default: int) -> int:
+    """An env-overridable positive integer knob; junk or absence yields the default."""
+    try:
+        return max(int(os.environ[name]), 1)
+    except (KeyError, ValueError):
+        return default
+
+
 MODEL = "lightonai/LightOnOCR-2-1B"
 MODEL_REVISION = "main"
 PORT = 8044
-CONCURRENCY = 12
+#: Doc lifecycles running concurrently (render-wait -> OCR -> assemble -> free each).
+#: 16GB pod: S2_DOCS_IN_FLIGHT=2; 96GB pod: the default 8.
+N_DOCS_IN_FLIGHT = _env_int("S2_DOCS_IN_FLIGHT", 8)
+#: THE global cap on in-flight OCR requests, shared by every doc lifecycle — this is
+#: the number the vLLM server actually sees. 16GB pod: S2_GLOBAL_CONCURRENCY=12.
+GLOBAL_CONCURRENCY = _env_int("S2_GLOBAL_CONCURRENCY", 64)
+#: Parallel render child processes keeping the in-flight window fed (CPU-bound).
+RENDER_WORKERS = _env_int("S2_RENDER_WORKERS", 4)
 TEMPERATURE = 0.2
 TOP_P = 0.9
 MAX_TOKENS = 4096
@@ -94,6 +122,12 @@ PAGES_SIDECAR = ".pages"
 STATS_SIDECAR = ".stats"
 
 _FAILLOG_LOCK = threading.Lock()
+
+#: The ONLY fields that feed ``progress``: each is filesystem-backed, so it re-counts to
+#: the identical value on a relaunch. Failure/retry counters deliberately do NOT feed it
+#: (they are not re-derivable from disk — including them would make a relaunch's progress
+#: dip below the campaign client's high-water mark and risk a false stall).
+_PROGRESS_FIELDS = frozenset({"pages_rendered", "pages_done", "docs_assembled"})
 
 
 @dataclass
@@ -117,7 +151,8 @@ class State:
         with self.lock:
             for key, delta in deltas.items():
                 setattr(self, key, getattr(self, key) + delta)
-            self.progress += sum(deltas.values())
+                if key in _PROGRESS_FIELDS:
+                    self.progress += delta
 
     def write(self) -> None:
         with self.lock:
@@ -173,6 +208,11 @@ class Doc:
     @property
     def key(self) -> str:
         return f"{self.dataset}/{self.doc_id}"
+
+
+#: What one finished doc lifecycle hands back to the harvester:
+#: (doc, page_count | None on render failure, stats deltas, spot record | None).
+DocResult = tuple[Doc, "int | None", "dict[str, int]", "dict[str, object] | None"]
 
 
 def discover_docs(root: Path) -> list[Doc]:
@@ -536,8 +576,12 @@ def run(root: Path) -> None:
     writer = threading.Thread(target=_state_writer_loop, args=(state, stop), daemon=True)
     writer.start()
     started = time.monotonic()
-    render_pool = ThreadPoolExecutor(max_workers=1)  # ONE prefetch slot: disk stays bounded
-    ocr_pool = ThreadPoolExecutor(max_workers=CONCURRENCY)
+    # Three bounded pools, one per pipeline concern. The ocr_pool IS the global request
+    # semaphore: every doc lifecycle submits its page requests here, so the vLLM server
+    # sees at most GLOBAL_CONCURRENCY in flight no matter how many docs overlap.
+    render_pool = ThreadPoolExecutor(max_workers=RENDER_WORKERS)
+    ocr_pool = ThreadPoolExecutor(max_workers=GLOBAL_CONCURRENCY)
+    doc_pool = ThreadPoolExecutor(max_workers=N_DOCS_IN_FLIGHT)
     try:
         from openai import OpenAI
 
@@ -553,20 +597,20 @@ def run(root: Path) -> None:
         per_dataset: dict[str, dict[str, int]] = {}
         page_counts: dict[str, int] = {}
         spot_records: list[dict[str, object]] = []
+        render_futures: list[Future[int | None] | None] = [None] * len(docs)
 
-        prefetch = render_pool.submit(ensure_rendered, root, docs[0], state)
-        for index, doc in enumerate(docs):
-            count = prefetch.result()
-            if index + 1 < len(docs):  # render the NEXT doc while this one OCRs
-                prefetch = render_pool.submit(ensure_rendered, root, docs[index + 1], state)
-            entry = per_dataset.setdefault(
-                doc.dataset,
-                {"docs": 0, "docs_render_failed": 0, "pages": 0, "tables_normalized": 0,
-                 "tables_kept_raw": 0, "pages_missing": 0},
-            )
+        def doc_lifecycle(index: int, doc: Doc) -> DocResult:
+            """One doc, start to finish: render-wait -> OCR -> assemble -> free.
+
+            Runs on a doc_pool thread; N_DOCS_IN_FLIGHT of these overlap, all feeding
+            the shared ocr_pool. The per-doc ORDER is unchanged from the sequential
+            design — cleanup still strictly follows assembly.
+            """
+            future = render_futures[index]
+            assert future is not None  # submission order guarantees render-before-doc
+            count = future.result()
             if count is None:
-                entry["docs_render_failed"] += 1
-                continue  # already logged + bumped by ensure_rendered
+                return doc, None, {}, None  # render failure: logged by ensure_rendered
             state.bump(pages_rendered=count)
             with state.lock:
                 state.pages_total += count
@@ -574,14 +618,49 @@ def run(root: Path) -> None:
             spot_page = (
                 ocr_lib.spot_page_for(doc.key, count) if doc.key in spot_docs else None
             )
+            record: dict[str, object] | None = None
             if cleanup_doc_images(root, doc, spot_page) and spot_page is not None:
-                spot_records.append({"doc": doc.key, "page": spot_page})
+                record = {"doc": doc.key, "page": spot_page}
+            return doc, count, stats, record
+
+        def harvest(future: Future[DocResult]) -> None:
+            """Fold one finished lifecycle into the metrics (main thread only)."""
+            doc, count, stats, record = future.result()
+            entry = per_dataset.setdefault(
+                doc.dataset,
+                {"docs": 0, "docs_render_failed": 0, "pages": 0, "tables_normalized": 0,
+                 "tables_kept_raw": 0, "pages_missing": 0},
+            )
+            if count is None:
+                entry["docs_render_failed"] += 1
+                return
+            if record is not None:
+                spot_records.append(record)
             entry["docs"] += 1
             entry["pages"] += count
             for key, value in stats.items():
                 entry[key] += value
             page_counts[doc.key] = count
             state.write()  # per-doc checkpoint: progress is visible doc by doc
+
+        # The sliding window: renders run RENDER_WORKERS docs ahead of doc submission,
+        # doc submission runs N_DOCS_IN_FLIGHT ahead of harvest — so page images exist
+        # for at most N_DOCS_IN_FLIGHT + RENDER_WORKERS + 1 docs at any instant (the
+        # defensible disk bound), while the GPU sees a continuously full request queue.
+        next_render = 0
+        in_flight: deque[Future[DocResult]] = deque()
+        for index, doc in enumerate(docs):
+            while next_render < len(docs) and next_render <= index + RENDER_WORKERS:
+                staged = docs[next_render]
+                render_futures[next_render] = render_pool.submit(
+                    ensure_rendered, root, staged, state
+                )
+                next_render += 1
+            in_flight.append(doc_pool.submit(doc_lifecycle, index, doc))
+            while len(in_flight) >= N_DOCS_IN_FLIGHT:
+                harvest(in_flight.popleft())
+        while in_flight:
+            harvest(in_flight.popleft())
 
         wall = time.monotonic() - started
         with state.lock:
@@ -625,8 +704,8 @@ def run(root: Path) -> None:
         state.write()
         raise
     finally:
-        render_pool.shutdown(wait=False, cancel_futures=True)
-        ocr_pool.shutdown(wait=False, cancel_futures=True)
+        for pool in (doc_pool, render_pool, ocr_pool):
+            pool.shutdown(wait=False, cancel_futures=True)
         stop.set()
         writer.join(timeout=2)
 

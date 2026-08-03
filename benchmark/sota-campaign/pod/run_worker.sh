@@ -10,6 +10,12 @@
 #
 # Launched by the s2-ocr stage as:  nohup bash pod/run_worker.sh <ROOT> & echo $! > worker.pid
 # Python runs with -u so worker.log always flushes (a silent death leaves its traceback).
+#
+# Throughput knobs pass straight through this shell into the worker's environment:
+#   S2_DOCS_IN_FLIGHT     (default 8)  — doc lifecycles overlapped
+#   S2_GLOBAL_CONCURRENCY (default 64) — the ONE OCR request cap the vLLM server sees
+#   S2_RENDER_WORKERS     (default 4)  — parallel render child processes
+# 96GB pod: run the defaults. 16GB pod: S2_DOCS_IN_FLIGHT=2 S2_GLOBAL_CONCURRENCY=12.
 set -uo pipefail
 
 ROOT="${1:-/workspace/latence-sota/s2}"
