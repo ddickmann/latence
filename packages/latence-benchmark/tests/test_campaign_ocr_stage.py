@@ -66,7 +66,8 @@ def make_repo(tmp_path: Path, *, datasets: Sequence[str] = ("vidoseek",)) -> Pat
     repo = tmp_path / "repo"
     pod = repo / "benchmark" / "sota-campaign" / "pod"
     pod.mkdir(parents=True)
-    for script in ("serve_ocr.sh", "ocr_worker.py", "stop_ocr.sh", "podcheck_s2.sh"):
+    scripts = ("serve_ocr.sh", "run_worker.sh", "ocr_worker.py", "stop_ocr.sh", "podcheck_s2.sh")
+    for script in scripts:
         (pod / script).write_text("# fixture stand-in\n")
     corpus = repo / "benchmark" / "sota-corpus"
     if "vidoseek" in datasets:
@@ -359,10 +360,12 @@ class TestStageRun:
         note = run_ocr_stage(ctx, pod, clock=clock, sleep=clock.sleep)
         assert "2 markdown doc(s)" in note
 
-        # Launched exactly once, with the nohup+pid-file shape.
+        # Launched exactly once, with the nohup+pid-file shape, THROUGH the supervisor
+        # (run_worker.sh relaunches the -u worker; the OOM field-lesson hardening).
         launches = [c for c in pod.commands if "nohup" in c]
         assert len(launches) == 1
         assert "serve_ocr.sh" in launches[0]
+        assert "run_worker.sh" in launches[0]
         assert "worker.pid" in launches[0]
 
         # Pushed: the pod scripts, the unit-tested ocr_lib, and the extracted PDFs.

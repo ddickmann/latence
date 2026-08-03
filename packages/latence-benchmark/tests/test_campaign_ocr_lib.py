@@ -9,8 +9,10 @@ both sides rely on.
 
 from __future__ import annotations
 
+import pytest
 from latence_benchmark.campaign.ocr_lib import (
     assemble_document,
+    chunked,
     has_repetition,
     missing_pages,
     normalize_html_tables,
@@ -158,6 +160,24 @@ class TestTableNormalization:
         assert normalize_html_tables(page).text == (
             "| a | b |\n| --- | --- |\n| c | d |"
         )
+
+
+class TestChunking:
+    def test_order_preserving_chunks_of_at_most_size(self) -> None:
+        assert chunked([1, 2, 3, 4, 5], 2) == [(1, 2), (3, 4), (5,)]
+
+    def test_exact_multiple_has_no_short_tail(self) -> None:
+        assert chunked(["a", "b", "c", "d"], 2) == [("a", "b"), ("c", "d")]
+
+    def test_size_one_isolates_every_item(self) -> None:
+        assert chunked([1, 2], 1) == [(1,), (2,)]
+
+    def test_empty_sequence_yields_no_chunks(self) -> None:
+        assert chunked([], 25) == []
+
+    def test_non_positive_size_is_a_caller_bug(self) -> None:
+        with pytest.raises(ValueError, match=">= 1"):
+            chunked([1], 0)
 
 
 class TestManifestPlanning:

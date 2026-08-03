@@ -8,7 +8,15 @@
       "reason": "",
       "started": "2026-08-02T19:53:46Z",
       "status": "approved"
+    },
+    {
+      "approved_at": "",
+      "ended": "2026-08-03T00:46:56Z",
+      "name": "s2-ocr",
+      "reason": "pod job stalled: no progress beyond 36430 for more than 1800s (see `bash pod/podcheck_s2.sh` on the pod). Fix the cause, then `latence-campaign resume` re-enters the poll.",
+      "started": "2026-08-02T23:15:26Z",
+      "status": "blocked"
     }
   ],
-  "updated": "2026-08-02T21:11:48Z"
+  "updated": "2026-08-03T00:46:56Z"
 }

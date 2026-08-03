@@ -10,7 +10,9 @@ The stage runs CLIENT-side and treats the pod as a file server plus one long-liv
 2. **Zip extraction** into ``benchmark/sota-corpus/<ds>/pdfs/`` — skip-if-exists per file,
    zip-slip guarded (:func:`latence_benchmark.campaign.ocr_lib.safe_zip_entry`).
 3. **Remote orchestration behind ONE seam** (:class:`PodTransport`): push PDFs + the pod
-   scripts, launch the worker under ``nohup`` with a pid file, then POLL its atomically
+   scripts, launch the SUPERVISED worker (``run_worker.sh``: up to 5 ``python -u``
+   relaunches of the skip-if-exists worker, which itself crash-isolates rendering into
+   disposable child processes) under ``nohup`` with a pid file, then POLL its atomically
    written ``state.json`` from here — monotone progress counter, 1800 s stall budget, an
    injected clock/sleep so the loop is offline-testable. A pod job found alive on entry is
    **re-entered, not relaunched** (that is what makes ``resume`` safe mid-flight).
@@ -78,10 +80,15 @@ POLL_INTERVAL_S = 30.0
 
 SPOT_CHECK_COUNT = 12
 
+#: The launch: vLLM up (readiness-gated), then the SUPERVISOR (run_worker.sh) under
+#: nohup with a pid file. The supervisor relaunches the worker (with ``python -u``, so
+#: logs always flush) up to 5 times — the worker is skip-if-exists throughout, so a
+#: relaunch continues; a single silent child death never costs the operator a manual
+#: restart (the 2026-08-02 OOM field lesson).
 _LAUNCH_CMD = (
     f"cd {REMOTE_ROOT} && bash pod/serve_ocr.sh && "
-    f"(nohup {WORKER_PYTHON} pod/ocr_worker.py --root {REMOTE_ROOT} "
-    f">> worker.log 2>&1 & echo $! > worker.pid)"
+    f"(S2_PYTHON={WORKER_PYTHON} nohup bash pod/run_worker.sh {REMOTE_ROOT} "
+    f">> supervisor.log 2>&1 & echo $! > worker.pid)"
 )
 
 

@@ -30,10 +30,12 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
+
+T = TypeVar("T")
 
 #: 8-gram repeated more than this many times flags a page as a repetition loop.
 REPETITION_NGRAM = 8
@@ -285,6 +287,19 @@ def normalize_html_tables(text: str) -> TableNormalization:
 
 
 # -- file-manifest planning ------------------------------------------------------------------
+
+
+def chunked(items: Sequence[T], size: int) -> list[tuple[T, ...]]:
+    """``items`` split into order-preserving chunks of at most ``size``.
+
+    The worker feeds render batches through this so each disposable child process gets a
+    bounded amount of work (pdfium leaks die with the child, not with the run). Pure and
+    total: an empty sequence yields no chunks; a non-positive size is a caller bug.
+    """
+    if size < 1:
+        msg = f"chunk size must be >= 1, got {size}."
+        raise ValueError(msg)
+    return [tuple(items[i : i + size]) for i in range(0, len(items), size)]
 
 
 def page_filename(page: int) -> str:

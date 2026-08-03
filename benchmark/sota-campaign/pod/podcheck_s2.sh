@@ -15,6 +15,10 @@ else
 fi
 
 echo
+echo "== supervisor.log (last 8 lines) =="
+tail -n 8 "$ROOT/supervisor.log" 2>/dev/null || echo "(no supervisor.log)"
+
+echo
 echo "== worker.log (last 15 lines) =="
 tail -n 15 "$ROOT/worker.log" 2>/dev/null || echo "(no worker.log)"
 
