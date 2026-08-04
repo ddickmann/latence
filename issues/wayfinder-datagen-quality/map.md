@@ -68,6 +68,7 @@ ADR-0057 tau_text redaction discipline, ADR-0044 PII masking, the pydantic-only 
 | 09 | task | Per-regime γ calibration as a shipped workflow | 01 |
 | 10 | grilling | Chunk-size ↔ hyperedge-yield coupling | 01 |
 | 11 | task | Alias + description enrichment at export | 01 |
+| 12 | task | ANN-blocked disambiguation as correlation clustering (tabu local search) | 01 |
 
 ## Fog (not yet specified)
 
@@ -91,6 +92,8 @@ ADR-0057 tau_text redaction discipline, ADR-0044 PII masking, the pydantic-only 
   [parent map](../wayfinder-hypergraph-coe/map.md) "Not yet specified" list.
 - Productization of the eval-harness pieces (exact-surface disambiguator as a shipped
   provider, tier-2 query-NER packaging) — production-direction work, tracked outside this
-  map's data-gen destination.
+  map's data-gen destination. (Ticket 12 is NOT this: it is a new provider with a measured
+  gate, charted 2026-08-04 from the e2e-sota-run scale wall + Dennis's
+  disambiguation-as-combinatorial-optimization framing.)
 - Groundedness / contradiction handling; any LLM call in indexing or online retrieval —
   excluded exactly as on the parent map.
