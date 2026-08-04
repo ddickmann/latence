@@ -94,6 +94,14 @@ Runner's stage checkpoints or two separate runs.
    there under a pod-side supervisor with progress-freeze detection; the campaign wizard's
    `pod_ssh` config key carries this target.
 
+6. **S3 spec** (Dennis, 2026-08-04): chunk.markdown 640/80/8; split label strategy
+   (per-chunk LLM induction on OCR'd sets ~$90-120, hand-authored schemas for text sets);
+   REUSE M6 v20 exports for musique+hotpot (comparability), newly process 2wiki +
+   multihop_rag + OCR'd; redaction.gliner2 with guardrails ON. All wizard-applicable via a
+   new `s3:` campaign.yaml block. Ticket: tickets/s3-pipeline-datagen.md. S2 gate closed
+   (3,470 docs; OHR+ViDoSeek zero failed pages; UDA 74-doc residual accepted); OCR pod
+   closed after hash-verified transfer (142,779 files) to benchmark/sota-corpus/s2-output.
+
 ## Fog
 
 - Whether tier-2 query NER and the (unbuilt) eu_vecs/dense leg are in scope for S5 or the
