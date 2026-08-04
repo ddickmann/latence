@@ -105,15 +105,19 @@ def status_cmd(dataset: str) -> str:
     ``done`` = the run's quality-report.json exists (the byte-backed completion signal —
     the runner writes it last); ``running`` = the pid-file process is alive; ``absent`` =
     neither, i.e. nothing launched yet OR the process died before finishing. The byte
-    counter (``du -sk`` over the dataset store) is the monotone progress observable the
-    stall budget watches — checkpoints and the WAL grow continuously during a live run.
+    counter (``du -sk`` over the dataset store PLUS the run log) is the monotone progress
+    observable the stall budget watches. The log MUST be part of it: a network-bound phase
+    (LLM schema induction — UDA's 242k calls run for many hours) streams progress into the
+    log while writing NOTHING to the store, and a store-only probe false-trips the stall
+    budget mid-induction (observed live on ohr_bench, 2026-08-04).
     """
     return (
         f"sh -c 'if [ -f {_remote_run_dir(dataset)}/quality-report.json ]; then p=done; "
         f"elif kill -0 \"$(cat {_remote_pid(dataset)} 2>/dev/null)\" 2>/dev/null; "
         f"then p=running; else p=absent; fi; "
         f"b=$(du -sk {_remote_store(dataset)} 2>/dev/null | cut -f1); "
-        f'echo "$p ${{b:-0}}"\''
+        f"lb=$(du -sk {_remote_log(dataset)} 2>/dev/null | cut -f1); "
+        f'echo "$p $(( ${{b:-0}} + ${{lb:-0}} ))"\''
     )
 
 
