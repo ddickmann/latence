@@ -55,5 +55,28 @@
     "small_pod_16gb": "0.23 p/s",
     "big_pod_baseline": "1.18 p/s",
     "big_pod_pipelined_final": "2.2-2.5 p/s"
-  }
+  },
+  "datasets": {
+    "vidoseek": {
+      "docs": 292,
+      "docs_with_failed_pages": 0,
+      "failed_pages": 0
+    },
+    "ohr_bench": {
+      "docs": 1261,
+      "docs_with_failed_pages": 0,
+      "failed_pages": 0
+    },
+    "uda": {
+      "docs": 1917,
+      "docs_with_failed_pages": 74,
+      "failed_pages": 10240
+    }
+  },
+  "skipped_native": [
+    "musique",
+    "hotpotqa",
+    "wiki2multihop",
+    "multihop_rag"
+  ]
 }
