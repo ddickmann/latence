@@ -383,6 +383,19 @@ class HyperedgeBuilder:
             # a relation follows its arguments; a cut relation lands where its head sits
             (left if self._relation_side(rid, cut_at, by_id, mention_local) else right
              ).relation_ids.add(rid)
+        # A CUT relation keeps BOTH its arguments (production S3 root cause, 2026-08-04):
+        # the relation lands on its head's side above, but its far argument mention was
+        # partitioned to the OTHER side by position — emission would then build a
+        # HyperedgeRelation whose endpoint node is outside the span's member set, violating
+        # the GraphHyperedge invariant ("every relation argument must be a member entity").
+        # The argument legitimately belongs to this chunk (relation seeds only ever name
+        # same-chunk mentions), so the invariant is satisfied by MEMBERSHIP INCLUSION —
+        # each side folds in the argument mentions of every relation it carries — never by
+        # dropping the relation (operator ruling) and never by relaxing the validator.
+        # Applied per split level, so recursive re-splits re-enforce it on their own cuts.
+        for side in (left, right):
+            for rid in sorted(side.relation_ids):
+                side.mention_ids.update(self._relation_arg_ids(rid, by_id))
         return self._split_oversized(left, sentences, by_id, mention_local) + \
             self._split_oversized(right, sentences, by_id, mention_local)
 

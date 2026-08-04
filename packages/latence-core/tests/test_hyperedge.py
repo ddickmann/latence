@@ -312,6 +312,76 @@ def test_undersized_merge_never_rebreaches_the_ceiling() -> None:
         )
 
 
+def test_token_split_cut_relation_keeps_both_argument_entities() -> None:
+    """Production S3 regression (2026-08-04, OCR financial corpus): a relation whose
+    arguments sit in different sentences of one window survives the ``max_tokens`` split
+    on its HEAD's side, while its tail MENTION is partitioned to the other side by
+    position — the emitted Hyperedge then carried a relation endpoint outside
+    ``entity_node_ids`` and the GraphHyperedge invariant blew up at build time
+    (``Hyperedge relation (...) references a node outside entity_node_ids``).
+
+    The fix folds a cut relation's argument mentions into the side that carries the
+    relation, so the invariant holds structurally: every relation argument is a member."""
+    s1 = "Riverton Bank and Custodian Trust signed the master service agreement in March. "
+    s2 = "The agreement covers settlement and reporting duties across regulated markets. "
+    s3 = "Riverton Bank is located in Zurich according to the annual filing."
+    text = s1 + s2 + s3
+    chunk = ChunkRecord(
+        record_id="chunk:cut",
+        document_record_id="doc-4",
+        index=0,
+        token_count=estimate_tokens(text),
+        content=text,
+        provenance=Provenance(
+            source_uri="file:///cut.txt", file_name="cut.txt", file_type="txt",
+            file_size=2000, document_id="doc-4", char_start=0, char_end=len(text),
+            page_start=1, page_end=1,
+        ),
+        classification=_CLS,
+    )
+    mentions, entities, node_of = [], [], {}
+    for name, label, start in (
+        ("Riverton Bank", "ORG", text.index("Riverton Bank")),
+        ("Custodian Trust", "ORG", text.index("Custodian Trust")),
+        ("Zurich", "LOC", text.index("Zurich")),
+    ):
+        mentions.append(
+            EntityMention(
+                record_id=f"m:{name}", document_record_id="doc-4",
+                chunk_record_id="chunk:cut", index=0, label=label, text=name,
+                confidence=0.9,
+                provenance=Provenance(
+                    source_uri="file:///cut.txt", file_name="cut.txt", file_type="txt",
+                    file_size=2000, document_id="doc-4", char_start=start,
+                    char_end=start + len(name), page_start=1, page_end=1,
+                ),
+                classification=_CLS,
+            )
+        )
+        entities.append(_entity(f"e:{name}", name, [f"m:{name}"], {}))
+        node_of[f"e:{name}"] = f"n:{name}"
+    # head in sentence 1, tail in sentence 3: EVERY sentence boundary cuts this relation,
+    # and the whole window overflows the ceiling, so the split is forced to cut it.
+    relations = [_relation("r:loc", "m:Riverton Bank", "m:Zurich", "located in")]
+    builder = HyperedgeBuilder(
+        "corpus-cut",
+        HyperedgeConfig(max_tokens=estimate_tokens(text) - 1, min_tokens=1),
+    )
+    hyperedges = builder.build([chunk], mentions, relations, entities, lambda e: node_of[e])
+    strong = [h for h in hyperedges if h.has_relations]
+    assert strong, "the cut relation must survive the split (operator ruling: keep it)"
+    (h,) = strong
+    assert h.relations[0].signature == ("n:Riverton Bank", "located in", "n:Zurich")
+    # the invariant, held structurally: both endpoints are member entities
+    assert "n:Riverton Bank" in h.entity_node_ids
+    assert "n:Zurich" in h.entity_node_ids
+    assert "m:Zurich" in h.member_mention_ids
+    for he in hyperedges:
+        node_set = set(he.entity_node_ids)
+        for rel in he.relations:
+            assert rel.head_node_id in node_set and rel.tail_node_id in node_set
+
+
 # -- spec M1: dedup-merge idempotency -------------------------------------------
 
 

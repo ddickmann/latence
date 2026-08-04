@@ -482,6 +482,56 @@ class TestStageRun:
         with pytest.raises(StageBlockedError, match="EMPTY"):
             run_s3_stage(ctx, pod, clock=FakeClock(), sleep=lambda _s: None)
 
+    def test_a_zero_node_graph_report_blocks_pointing_at_the_pod_log(
+        self, tmp_path: Path
+    ) -> None:
+        # The crashed-graph hole (production S3, 2026-08-04): the run crashed inside
+        # Graph Assembly but still left a quality-report.json, so the probe read `done`.
+        # Every campaign pipeline configures graph.canonical + hyperedges, so a report
+        # with zero graph nodes is a crash, never data — block, naming the pod log.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        report = fixture_report()
+        report["graph"] = {"nodes_total": 0, "edges_total": 0, "hyperedges": None}
+        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
+        clock = FakeClock()
+        with pytest.raises(
+            StageBlockedError,
+            match=r"ohr_bench.*CRASHED/TRUNCATED graph.*logs/ohr_bench\.log",
+        ):
+            run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
+        assert s3_done_probe(ctx) is False  # the stage stays open
+
+    def test_a_null_hyperedges_section_blocks_even_with_nodes(
+        self, tmp_path: Path
+    ) -> None:
+        # A crash BETWEEN node emission and hyperedge emission leaves nodes_total > 0 but
+        # no hyperedges section; on a hyperedge-configured pipeline that is truncation.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        report = fixture_report()
+        report["graph"] = {"nodes_total": 80, "edges_total": 25, "hyperedges": None}
+        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
+        clock = FakeClock()
+        with pytest.raises(StageBlockedError, match="hyperedges section null"):
+            run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
+
+    def test_a_crashed_graph_report_blocks_on_resume_too(self, tmp_path: Path) -> None:
+        # Both completion paths again: a previously pulled crashed-graph report must not
+        # slide through the local-resume branch either.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        report = fixture_report()
+        report["graph"] = {"nodes_total": 0, "edges_total": 0, "hyperedges": None}
+        report_dir = stage_dir(ctx.campaign_root, STAGE_NAME) / "reports" / "ohr_bench"
+        report_dir.mkdir(parents=True)
+        (report_dir / "quality-report.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+        pod = FakePod(states={"ohr_bench": [("absent", 0)]})
+        with pytest.raises(StageBlockedError, match="CRASHED/TRUNCATED graph"):
+            run_s3_stage(ctx, pod, clock=FakeClock(), sleep=lambda _s: None)
+
     def test_a_nonzero_report_passes_the_floor(self, tmp_path: Path) -> None:
         # The floor is a floor, not a gate on healthy runs: the standard fixture report
         # (3 docs / 42 chunks) completes untouched.
