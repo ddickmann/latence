@@ -102,6 +102,18 @@ Runner's stage checkpoints or two separate runs.
    (3,470 docs; OHR+ViDoSeek zero failed pages; UDA 74-doc residual accepted); OCR pod
    closed after hash-verified transfer (142,779 files) to benchmark/sota-corpus/s2-output.
 
+7. **S3 first-launch incident + gate rework (2026-08-04)**: the first S3 launch silently
+   processed ZERO documents for the OCR'd datasets — `SubprocessTransport.push` copied the
+   `markdown` SYMLINKS (not their s2-output targets) to the pod, and a zero-doc run still
+   wrote a quality report and passed as `done` (fake green). Both fixed + tested (64eac68):
+   push now `--copy-links`, zero-doc/zero-chunk runs BLOCK. multihop_rag's partial real run
+   (gliner2 had started) was stopped per Dennis's gate instruction — checkpoints kept for
+   same-run_id resume. New gate flow per Dennis: chunk-quality validation (done locally,
+   chunk-validation/REPORT.md — 297,548 chunks; UDA alone 220k, so induction-eligible
+   chunks = 236,472 vs ~176k estimated) + an induction-model A/B
+   (deepseek/deepseek-v4-flash-0731 vs gpt-4.1-mini, 10 real chunks, cost+quality) BEFORE
+   any GLiNER2/induction processing runs. Zollklar OpenRouter key authorized by Dennis.
+
 ## Fog
 
 - Whether tier-2 query NER and the (unbuilt) eu_vecs/dense leg are in scope for S5 or the
