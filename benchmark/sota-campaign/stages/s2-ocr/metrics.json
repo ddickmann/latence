@@ -1,0 +1,59 @@
+{
+  "assembled_from": "big-pod transfer (RTX PRO 6000 Blackwell, decision 5a); hash-verified 142,779 files",
+  "ocr_model": "lightonai/LightOnOCR-2-1B",
+  "serving": "vllm==0.24.0 locked env (served-ocr-server), VLLM_USE_FLASHINFER_SAMPLER=0, max-num-seqs 64, gpu-util 0.85",
+  "worker": "per-doc streaming, 24 docs in flight, 64-slot global OCR semaphore, 8 render workers",
+  "final_state": {
+    "phase": "done",
+    "progress": 278414,
+    "pages_total": 142593,
+    "pages_rendered": 142593,
+    "pages_done": 132351,
+    "docs_assembled": 3470,
+    "failures": 10240,
+    "repetition_retries": 0,
+    "error": "",
+    "failed_phase": "",
+    "updated": "2026-08-04T07:06:09Z"
+  },
+  "corpus": {
+    "total_docs": 3470,
+    "per_dataset": {
+      "vidoseek": {
+        "docs": 292,
+        "docs_with_failed_pages": 0,
+        "failed_pages": 0
+      },
+      "ohr_bench": {
+        "docs": 1261,
+        "docs_with_failed_pages": 0,
+        "failed_pages": 0
+      },
+      "uda": {
+        "docs": 1917,
+        "docs_with_failed_pages": 74,
+        "failed_pages": 10240
+      }
+    }
+  },
+  "residual_note": "74 docs carry 10,240 marked failed pages (7% of pages, placeholder comments, re-derivable) \u2014 Dennis's 'enough data' ruling 2026-08-04; skipped-docs.txt + failures.jsonl in s2-output/",
+  "spot_check": [
+    "spot-img/ohr_bench/administration__DUDE_6a6374f8b53363c758c48a1be04e2643/0002.jpg",
+    "spot-img/ohr_bench/textbook__jiaocai_needrop_en_569/0001.jpg",
+    "spot-img/ohr_bench/textbook__omnidocbench_notes_f7f010b78016aeebd76e56d9283eb67f_94/0001.jpg",
+    "spot-img/uda/fin_docs__GPN_2008/0017.jpg",
+    "spot-img/uda/fin_docs__IPG_2012/0080.jpg",
+    "spot-img/uda/fin_docs__LLY_2008/0059.jpg",
+    "spot-img/uda/fin_docs__UNP_2017/0013.jpg",
+    "spot-img/uda/paper_docs__1606.04631/0005.jpg",
+    "spot-img/uda/paper_docs__2002.12328/0008.jpg",
+    "spot-img/vidoseek/pdf__008363273c77bfd99cc0bbe473189616006e7c72/0001.jpg",
+    "spot-img/vidoseek/pdf__048f6cdef44c4bcef8467b703f37c3cb02e65e35/0010.jpg",
+    "spot-img/vidoseek/pdf__05b5634edde537fcd2a63b09ef4fe62cfe0440dd/0019.jpg"
+  ],
+  "throughput_measured": {
+    "small_pod_16gb": "0.23 p/s",
+    "big_pod_baseline": "1.18 p/s",
+    "big_pod_pipelined_final": "2.2-2.5 p/s"
+  }
+}
