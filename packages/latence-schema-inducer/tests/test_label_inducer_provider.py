@@ -112,6 +112,45 @@ def test_structured_output_requested_temperature_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The OpenRouter-dialect reasoning knob (default-omit; explicit True/False).
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_unset_omits_extra_body_entirely() -> None:
+    # Default None: the request is byte-identical to the pre-knob build — no extra_body
+    # kwarg at all (a strict vLLM that rejects unknown body fields must never see it).
+    provider = _provider()
+    with fake.install([fake.reply(_good_reply())]) as script:
+        list(provider.induce([_chunk()]))
+    assert "extra_body" not in script.calls[0]
+
+
+def test_reasoning_false_sends_the_openrouter_disable_body() -> None:
+    provider = _provider(reasoning=False)
+    with fake.install([fake.reply(_good_reply())]) as script:
+        list(provider.induce([_chunk()]))
+    assert script.calls[0]["extra_body"] == {"reasoning": {"enabled": False}}
+
+
+def test_reasoning_true_sends_enabled_true() -> None:
+    provider = _provider(reasoning=True)
+    with fake.install([fake.reply(_good_reply())]) as script:
+        list(provider.induce([_chunk()]))
+    assert script.calls[0]["extra_body"] == {"reasoning": {"enabled": True}}
+
+
+def test_reasoning_rides_every_call_including_the_repair_retry() -> None:
+    # The knob lives in _chat's do_call, so the repair (and empty-recovery) re-prompts carry
+    # it too — a corrective retry must not silently re-enable reasoning.
+    provider = _provider(reasoning=False)
+    with fake.install([fake.reply("{nope"), fake.reply(_good_reply())]) as script:
+        list(provider.induce([_chunk()]))
+    assert len(script.calls) == 2
+    for call in script.calls:
+        assert call["extra_body"] == {"reasoning": {"enabled": False}}
+
+
+# ---------------------------------------------------------------------------
 # Safety net #3 — parse-and-repair.
 # ---------------------------------------------------------------------------
 

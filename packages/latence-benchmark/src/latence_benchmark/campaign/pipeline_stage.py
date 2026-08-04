@@ -303,8 +303,8 @@ def generate_pipelines(ctx: CampaignContext, processed: Sequence[str]) -> dict[s
     pins the same validation, so environments without core lose only the redundant check.
     """
     induced = _induced_active(ctx, processed)
-    per_dataset_calls = s3_lib.induction_call_budget(
-        ctx.answers.s3.induction_budget_usd_cap, len(induced)
+    call_budgets = s3_lib.induction_call_budgets(
+        ctx.answers.s3.induction_budget_usd_cap, ctx.answers.s3.induction_model, induced
     )
     rendered: dict[str, str] = {}
     for dataset in processed:
@@ -312,7 +312,7 @@ def generate_pipelines(ctx: CampaignContext, processed: Sequence[str]) -> dict[s
             dataset,
             ctx.answers.s3,
             induce=dataset in induced,
-            max_induction_calls=per_dataset_calls if dataset in induced else 0,
+            max_induction_calls=call_budgets.get(dataset, 0),
         )
         try:
             from latence_core.pipeline import Pipeline
@@ -485,9 +485,12 @@ def run_s3_stage(
     if "wiki2multihop" in processed:
         preps["wiki2multihop"] = prepare_wiki2multihop(ctx.repo_root)
 
-    # 3. Generate every pipeline.yaml (committed-able gate artifacts) + the budget split.
+    # 3. Generate every pipeline.yaml (committed-able gate artifacts) + the budget split
+    # (proportional to the measured chunk counts, scaled to the cap — see s3_lib).
     induced = _induced_active(ctx, processed)
-    per_dataset_calls = s3_lib.induction_call_budget(s3.induction_budget_usd_cap, len(induced))
+    call_budgets = s3_lib.induction_call_budgets(
+        s3.induction_budget_usd_cap, s3.induction_model, induced
+    )
     generate_pipelines(ctx, processed)
 
     # 4. The transport, built late: a reused-only selection never needs ssh at all.
@@ -523,7 +526,9 @@ def run_s3_stage(
                 # never redoes finished work, and never needs the pod for it).
                 resumed = True
                 report = json.loads(local_report.read_text(encoding="utf-8"))
-            report_metrics = s3_lib.dataset_metrics_from_report(report)
+            report_metrics = s3_lib.dataset_metrics_from_report(
+                report, induction_model=s3.induction_model
+            )
             # Sanity floor on BOTH paths (fresh pull and local resume): empty blocks.
             _require_nonempty_run(dataset, report_metrics)
             dataset_metrics[dataset] = {
@@ -564,10 +569,11 @@ def run_s3_stage(
         "induction_budget": {
             "mode": s3.induction_mode,
             "model": s3.induction_model,
+            "reasoning": s3.induction_reasoning,
             "usd_cap": s3.induction_budget_usd_cap,
             "induced_datasets": induced,
-            "max_calls_per_dataset": per_dataset_calls,
-            "est_usd_per_call": s3_lib.EST_USD_PER_CALL,
+            "max_calls_by_dataset": call_budgets,
+            "est_usd_per_call": s3_lib.est_usd_per_call(s3.induction_model),
             "usd_actual_total": usd_actual_total,
         },
         "preps": preps,

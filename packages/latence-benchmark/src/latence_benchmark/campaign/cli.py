@@ -114,12 +114,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ("--s3-chunk-min-tokens", "chunk.markdown min_tokens (default 8)."),
         ("--s3-extraction-model", "GLiNER2 checkpoint (default fastino/gliner2-multi-v1)."),
         ("--s3-extraction-threshold", "extraction score threshold (default 0.5)."),
-        ("--s3-induction-model", "inducer model id (default openai/gpt-4.1-mini)."),
+        ("--s3-induction-model", "inducer model id (default deepseek/deepseek-v4-flash-0731)."),
         ("--s3-induction-base-url", "inducer endpoint (default https://openrouter.ai/api/v1)."),
         ("--s3-entity-labels", "comma-separated hand-authored entity label set."),
         ("--s3-relation-labels", "comma-separated hand-authored relation label set."),
     ):
         init.add_argument(flag, default=None, help=help_text)
+    init.add_argument(
+        "--s3-induction-reasoning",
+        default=None,
+        choices=["true", "false"],
+        help="OpenRouter reasoning knob for the inducer model (default false: the live A/B "
+        "showed reasoning-on burns the completion budget on reasoning tokens).",
+    )
     init.add_argument(
         "--s3-no-guardrails",
         action="store_true",
@@ -256,6 +263,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
             ),
             induction_mode=induction_mode.strip(),
             induction_model=args.s3_induction_model or defaults.induction_model,
+            induction_reasoning=(
+                defaults.induction_reasoning
+                if args.s3_induction_reasoning is None
+                else args.s3_induction_reasoning == "true"
+            ),
             induction_base_url=args.s3_induction_base_url or defaults.induction_base_url,
             induction_budget_usd_cap=float(budget_raw),
             entity_labels=(

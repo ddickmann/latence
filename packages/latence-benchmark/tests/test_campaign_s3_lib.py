@@ -13,10 +13,13 @@ import pytest
 from latence_benchmark.campaign import s3_lib
 from latence_benchmark.campaign.pipeline_stage import PROCESS_ORDER
 from latence_benchmark.campaign.s3_lib import (
-    EST_USD_PER_CALL,
+    CHUNK_ESTIMATES,
+    CHUNK_HEADROOM,
+    EST_USD_PER_CALL_UNKNOWN,
     PrepFile,
+    est_usd_per_call,
     generate_pipeline_yaml,
-    induction_call_budget,
+    induction_call_budgets,
     induction_usd_actual,
     multihop_rag_articles,
     slugify,
@@ -110,18 +113,67 @@ class TestSlug:
 # -- the budget model ------------------------------------------------------------------------
 
 
+DEEPSEEK = "deepseek/deepseek-v4-flash-0731"
+GPT41MINI = "openai/gpt-4.1-mini"
+
+
 class TestBudget:
-    def test_even_split_floor_never_exceeds_the_cap(self) -> None:
-        per_dataset = induction_call_budget(150.0, 3)
-        assert per_dataset == int(150.0 / 3 / EST_USD_PER_CALL)
-        assert per_dataset * 3 * EST_USD_PER_CALL <= 150.0
+    def test_per_model_call_estimates_are_measured_plus_headroom(self) -> None:
+        assert est_usd_per_call(DEEPSEEK) == 0.00015  # measured 0.000118 + headroom
+        assert est_usd_per_call(GPT41MINI) == 0.00050  # measured 0.00042 + headroom
+        # An unknown model falls back to the old conservative scaffold estimate.
+        assert est_usd_per_call("acme/mystery-model") == EST_USD_PER_CALL_UNKNOWN
+        assert est_usd_per_call("acme/mystery-model") == pytest.approx(0.000992)
 
-    def test_no_induced_datasets_means_zero_calls(self) -> None:
-        assert induction_call_budget(150.0, 0) == 0
+    def test_allocation_is_proportional_to_the_measured_chunk_counts(self) -> None:
+        # Under a roomy cap every known dataset gets its full chunk estimate × headroom —
+        # uda (220k chunks) is no longer starved down to an even third of the cap.
+        budgets = induction_call_budgets(150.0, DEEPSEEK, ["ohr_bench", "vidoseek", "uda"])
+        assert budgets == {
+            ds: int(CHUNK_ESTIMATES[ds] * CHUNK_HEADROOM)
+            for ds in ("ohr_bench", "vidoseek", "uda")
+        }
+        assert budgets["uda"] > budgets["ohr_bench"] > budgets["vidoseek"]
 
-    def test_usd_actuals_price_both_token_sides(self) -> None:
-        # 100k prompt @ $0.40/M + 20k completion @ $1.60/M = $0.072
+    def test_allocations_scale_down_proportionally_to_the_cap(self) -> None:
+        # A cap far below the full-corpus estimate: every allocation shrinks by the same
+        # factor and the summed spend estimate never exceeds the cap (the hard bound).
+        cap = 1.0
+        budgets = induction_call_budgets(cap, DEEPSEEK, ["ohr_bench", "vidoseek", "uda"])
+        per_call = est_usd_per_call(DEEPSEEK)
+        assert sum(budgets.values()) * per_call <= cap
+        full = {ds: int(CHUNK_ESTIMATES[ds] * CHUNK_HEADROOM) for ds in budgets}
+        assert all(budgets[ds] < full[ds] for ds in budgets)  # every dataset scaled
+        # Proportionality survives the scaling (within integer flooring).
+        assert budgets["uda"] > budgets["ohr_bench"] > budgets["vidoseek"] > 0
+
+    def test_unknown_dataset_gets_an_even_share_of_the_remainder(self) -> None:
+        budgets = induction_call_budgets(150.0, DEEPSEEK, ["ohr_bench", "musique"])
+        per_call = est_usd_per_call(DEEPSEEK)
+        known = int(CHUNK_ESTIMATES["ohr_bench"] * CHUNK_HEADROOM)
+        assert budgets["ohr_bench"] == known
+        remaining = 150.0 - known * per_call
+        assert budgets["musique"] == int(remaining / 1 / per_call)
+        assert sum(budgets.values()) * per_call <= 150.0
+
+    def test_no_induced_datasets_means_no_allocations(self) -> None:
+        assert induction_call_budgets(150.0, DEEPSEEK, []) == {}
+
+    def test_generation_is_never_blocked_by_a_tiny_cap(self) -> None:
+        # The cap is a hard bound, not a gate: even a near-zero cap yields allocations
+        # (possibly 0 calls), never an exception.
+        budgets = induction_call_budgets(0.001, DEEPSEEK, ["ohr_bench", "uda"])
+        assert set(budgets) == {"ohr_bench", "uda"}
+        assert sum(budgets.values()) * est_usd_per_call(DEEPSEEK) <= 0.001
+
+    def test_usd_actuals_price_by_the_model_card(self) -> None:
+        # deepseek: 100k prompt @ $0.09/M + 20k completion @ $0.18/M = $0.0126
+        assert induction_usd_actual(100_000, 20_000, DEEPSEEK) == pytest.approx(0.0126)
+        # gpt-4.1-mini: 100k @ $0.40/M + 20k @ $1.60/M = $0.072
+        assert induction_usd_actual(100_000, 20_000, GPT41MINI) == pytest.approx(0.072)
+        # Unknown/empty model prices at the conservative gpt-4.1-mini card, never zero.
         assert induction_usd_actual(100_000, 20_000) == pytest.approx(0.072)
+        assert induction_usd_actual(100_000, 20_000, "acme/x") == pytest.approx(0.072)
 
 
 # -- the generated pipelines -----------------------------------------------------------------
@@ -164,12 +216,39 @@ class TestGeneratedPipelines:
         assert induce.config["granularity"] == "chunk"
         assert induce.config["max_induction_calls"] == 1234
         assert induce.config["base_url"] == "https://openrouter.ai/api/v1"
+        # The default ruling: deepseek with the OpenRouter reasoning knob pinned OFF.
+        assert induce.config["model"] == "deepseek/deepseek-v4-flash-0731"
+        assert induce.config["reasoning"] is False
 
         # Extraction + redaction ride the induced chunk stream (induced ∪ floor labels).
         assert by_name["extract"].depends_on == ["induce"]
         assert by_name["redact"].depends_on == ["induce"]
         # Lean floor under induction — the induced schema does the heavy lifting.
         assert by_name["extract"].config["labels"] == ["person", "organization"]
+
+    def test_reasoning_none_omits_the_knob_entirely(self) -> None:
+        # None must not emit `reasoning: null` — the inducer then sends no extra_body at
+        # all, the safe shape for a strict vLLM endpoint that rejects unknown body fields.
+        text = generate_pipeline_yaml(
+            "ohr_bench",
+            S3Answers(induction_reasoning=None),
+            induce=True,
+            max_induction_calls=10,
+        )
+        pipeline = Pipeline.from_yaml_text(text)
+        induce = next(s for s in pipeline.stages if s.name == "induce")
+        assert "reasoning" not in induce.config
+
+    def test_reasoning_true_flows_through(self) -> None:
+        text = generate_pipeline_yaml(
+            "ohr_bench",
+            S3Answers(induction_reasoning=True),
+            induce=True,
+            max_induction_calls=10,
+        )
+        pipeline = Pipeline.from_yaml_text(text)
+        induce = next(s for s in pipeline.stages if s.name == "induce")
+        assert induce.config["reasoning"] is True
 
     def test_doc_mode_maps_to_doc_granularity(self) -> None:
         text = generate_pipeline_yaml(
@@ -289,7 +368,16 @@ class TestReportReader:
         assert induction is not None
         assert induction["calls"] == 100
         assert induction["cache_hits"] == 40
+        # No model passed: the conservative fallback card (gpt-4.1-mini prices).
         assert induction["usd_actual"] == pytest.approx(0.072)
+
+    def test_the_usd_actuals_use_the_campaign_models_price_card(self) -> None:
+        metrics = s3_lib.dataset_metrics_from_report(
+            fixture_report(), induction_model="deepseek/deepseek-v4-flash-0731"
+        )
+        induction = metrics["induction"]
+        assert induction is not None
+        assert induction["usd_actual"] == pytest.approx(0.0126)
 
     def test_a_run_without_induction_reports_none(self) -> None:
         metrics = s3_lib.dataset_metrics_from_report(fixture_report(with_induction=False))

@@ -323,13 +323,16 @@ class TestStageRun:
         ohr = metrics["datasets"]["ohr_bench"]
         assert (ohr["chunks"], ohr["mentions"], ohr["relations"]) == (42, 120, 30)
         assert (ohr["entities"], ohr["hyperedges"], ohr["pii_total"]) == (80, 12, 5)
-        assert ohr["induction"]["usd_actual"] == pytest.approx(0.072)
+        # Priced at the default deepseek card: 100k @ $0.09/M + 20k @ $0.18/M.
+        assert ohr["induction"]["usd_actual"] == pytest.approx(0.0126)
         assert ohr["run_id"] == "s3-ohr_bench-v1"
         assert metrics["datasets"]["musique"]["reused_from_m6"] is True
         budget = metrics["induction_budget"]
         assert budget["induced_datasets"] == ["ohr_bench"]
-        assert budget["max_calls_per_dataset"] > 0
-        assert budget["usd_actual_total"] == pytest.approx(0.072)
+        # Proportional allocation: ohr_bench's measured 13909 chunks × 1.10 headroom.
+        assert budget["max_calls_by_dataset"] == {"ohr_bench": 15299}
+        assert budget["reasoning"] is False
+        assert budget["usd_actual_total"] == pytest.approx(0.0126)
 
         assert s3_done_probe(ctx) is True
 

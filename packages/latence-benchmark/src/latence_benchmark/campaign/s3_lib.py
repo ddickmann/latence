@@ -14,8 +14,10 @@ network — so the offline suite proves the exact bytes the stage will write:
 * **The budget model** converts the operator's USD cap into the schema-inducer's
   ``max_induction_calls`` (the provider enforces a CALL budget, not a token budget — that is
   what keeps a budgeted run byte-reproducible), and converts the Quality Report's token
-  actuals back into USD for the gate metrics. Prices are the OpenRouter gpt-4.1-mini card
-  (verified 2026-08-04); they are an ESTIMATE model and are recorded as such in metrics.
+  actuals back into USD for the gate metrics. Per-call estimates are per MODEL (measured on
+  live probes + headroom) and the allocation is PROPORTIONAL to the measured chunk counts,
+  scaled down to the cap when the estimate would exceed it. Token prices are the OpenRouter
+  cards (verified 2026-08-04); estimates are recorded as such in metrics.
 * **The generator** renders one dataset's full-feature pipeline.yaml from the campaign's
   :class:`~latence_benchmark.campaign.wizard.S3Answers` — the gpu-sota spine + per-chunk
   schema induction + hyperedges + graph features + context enrichment + the retrieval-signal
@@ -35,7 +37,7 @@ import yaml
 from latence_benchmark.campaign.stages import StageBlockedError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
     from latence_benchmark.campaign.wizard import S3Answers
 
@@ -64,39 +66,97 @@ EMBEDDER_MODEL = "ibm-granite/granite-embedding-311m-multilingual-r2"
 
 # -- the induction budget model --------------------------------------------------------------
 
-#: OpenRouter gpt-4.1-mini pricing (USD per token; card read 2026-08-04). Estimates for the
-#: call-budget conversion — the HARD bound is the derived max_induction_calls, and the gate
-#: metrics report token ACTUALS from the Quality Report priced with these same numbers.
-USD_PER_PROMPT_TOKEN = 0.40 / 1_000_000
-USD_PER_COMPLETION_TOKEN = 1.60 / 1_000_000
-#: Per-call estimates: instruction scaffold + one 640-chunker-token chunk (≈770 model
-#: tokens) prompt-side; a structured label JSON completion-side.
-EST_PROMPT_TOKENS_PER_CALL = 1600
-EST_COMPLETION_TOKENS_PER_CALL = 220
-EST_USD_PER_CALL = (
-    EST_PROMPT_TOKENS_PER_CALL * USD_PER_PROMPT_TOKEN
-    + EST_COMPLETION_TOKENS_PER_CALL * USD_PER_COMPLETION_TOKEN
-)
+#: OpenRouter token pricing per induction model, USD per token, ``(prompt, completion)``
+#: (cards read 2026-08-04). Used to price the Quality Report's token ACTUALS in the gate
+#: metrics; a model not listed prices at the conservative gpt-4.1-mini card (the old
+#: single-model behaviour, never a silent zero).
+TOKEN_PRICES_USD: dict[str, tuple[float, float]] = {
+    "deepseek/deepseek-v4-flash-0731": (0.09 / 1_000_000, 0.18 / 1_000_000),
+    "openai/gpt-4.1-mini": (0.40 / 1_000_000, 1.60 / 1_000_000),
+}
+_FALLBACK_PRICES = TOKEN_PRICES_USD["openai/gpt-4.1-mini"]
+
+#: Per-call USD ESTIMATES per induction model, for the USD-cap → max_induction_calls
+#: conversion. MEASURED on live 10-call ohr_bench probes (2026-08 A/B) plus headroom:
+#: deepseek-v4-flash with reasoning disabled measured ~$0.000118/call; gpt-4.1-mini measured
+#: ~$0.00042/call. A model not listed falls back to the old conservative scaffold estimate
+#: (1600 prompt + 220 completion tokens at the gpt-4.1-mini card = $0.000992/call).
+EST_USD_PER_CALL_BY_MODEL: dict[str, float] = {
+    "deepseek/deepseek-v4-flash-0731": 0.00015,
+    "openai/gpt-4.1-mini": 0.00050,
+}
+EST_USD_PER_CALL_UNKNOWN = 0.000992
+
+#: Measured chunk counts per induced dataset — the source is the operator's chunk validation
+#: over the s2-ocr markdown (chunk.markdown at the blessed {640,80,8} operating point,
+#: 2026-08). These drive the PROPORTIONAL call allocation below; a dataset missing here
+#: falls back to an even share of whatever budget the known datasets leave.
+CHUNK_ESTIMATES: dict[str, int] = {
+    "ohr_bench": 13909,
+    "vidoseek": 2434,
+    "uda": 220129,
+}
+#: Headroom over the measured chunk count (repair/recovery re-prompts are extra calls, and
+#: a re-chunked corpus can drift a few percent).
+CHUNK_HEADROOM = 1.10
 
 
-def induction_call_budget(budget_usd_cap: float, induced_datasets: int) -> int:
-    """The per-dataset ``max_induction_calls`` under an even split of the USD cap.
+def est_usd_per_call(model: str) -> float:
+    """The per-call USD estimate for ``model`` (measured + headroom; unknown = conservative)."""
+    return EST_USD_PER_CALL_BY_MODEL.get(model, EST_USD_PER_CALL_UNKNOWN)
 
-    Each dataset is its own ``latence process`` run with its own pipeline.yaml, so the cap
-    is divided evenly across the induction-driven datasets of THIS campaign selection —
-    generated before any chunk count is known, which is why the split is even rather than
-    proportional. Floor division: the sum of shares never exceeds the cap.
+
+def induction_call_budgets(
+    budget_usd_cap: float, model: str, datasets: Sequence[str]
+) -> dict[str, int]:
+    """Per-dataset ``max_induction_calls``: proportional to known chunk counts, cap-bounded.
+
+    Each dataset is its own ``latence process`` run with its own pipeline.yaml, and the
+    provider enforces a CALL budget (that is what keeps a budgeted run byte-reproducible), so
+    the USD cap must be converted into one integer per dataset here at generation time:
+
+    1. A dataset with a :data:`CHUNK_ESTIMATES` entry is allocated its measured chunk count
+       × :data:`CHUNK_HEADROOM` calls — per-chunk induction makes at most one call per
+       distinct chunk, so that allocation means "the whole dataset, with headroom".
+    2. A dataset NOT in the estimates falls back to an even share of the budget the known
+       datasets leave over (never a share of the whole cap, which would double-spend it).
+    3. If the estimated total spend (allocated calls × the model's per-call estimate)
+       exceeds ``budget_usd_cap``, EVERY allocation is scaled down proportionally — the cap
+       is the hard bound; generation is never blocked and the cap is never exceeded.
+
+    Floor division throughout, so the summed spend estimate never exceeds the cap.
     """
-    if induced_datasets <= 0:
-        return 0
-    return int(budget_usd_cap / induced_datasets / EST_USD_PER_CALL)
+    if not datasets:
+        return {}
+    per_call = est_usd_per_call(model)
+    allocations: dict[str, int] = {
+        ds: int(CHUNK_ESTIMATES[ds] * CHUNK_HEADROOM)
+        for ds in datasets
+        if ds in CHUNK_ESTIMATES
+    }
+    unknown = [ds for ds in datasets if ds not in CHUNK_ESTIMATES]
+    if unknown:
+        remaining_usd = max(0.0, budget_usd_cap - sum(allocations.values()) * per_call)
+        share = int(remaining_usd / len(unknown) / per_call)
+        for ds in unknown:
+            allocations[ds] = share
+    total_usd = sum(allocations.values()) * per_call
+    if total_usd > budget_usd_cap:
+        scale = budget_usd_cap / total_usd
+        allocations = {ds: int(calls * scale) for ds, calls in allocations.items()}
+    return {ds: allocations[ds] for ds in datasets}
 
 
-def induction_usd_actual(prompt_tokens: int, completion_tokens: int) -> float:
-    """Token actuals (from the Quality Report's induction fields) priced in USD."""
-    return (
-        prompt_tokens * USD_PER_PROMPT_TOKEN + completion_tokens * USD_PER_COMPLETION_TOKEN
-    )
+def induction_usd_actual(
+    prompt_tokens: int, completion_tokens: int, model: str = ""
+) -> float:
+    """Token actuals (from the Quality Report's induction fields) priced by the model's card.
+
+    ``model`` selects the :data:`TOKEN_PRICES_USD` row; an unknown/empty model prices at the
+    conservative gpt-4.1-mini card, so an actuals figure is never silently zero.
+    """
+    prompt_price, completion_price = TOKEN_PRICES_USD.get(model, _FALLBACK_PRICES)
+    return prompt_tokens * prompt_price + completion_tokens * completion_price
 
 
 # -- corpus preps ----------------------------------------------------------------------------
@@ -297,22 +357,27 @@ def generate_pipeline_yaml(
         ),
     ]
     if induce:
+        induce_config: dict[str, Any] = {
+            "model": s3.induction_model,
+            "base_url": s3.induction_base_url,
+            "granularity": "chunk" if s3.induction_mode == "per_chunk" else "doc",
+            "max_tokens": 2048,
+            "max_labels": 40,
+            "temperature": 0.0,
+            "max_induction_calls": max_induction_calls,
+            "device": "cuda",
+        }
+        # The OpenRouter reasoning knob only when the campaign SET it: None emits nothing,
+        # so the inducer sends no extra_body at all (a strict vLLM rejects unknown fields).
+        if s3.induction_reasoning is not None:
+            induce_config["reasoning"] = s3.induction_reasoning
         stages.append(
             _stage(
                 "induce",
                 "schema_induction",
                 "label_inducer.llm",
                 depends_on=["content_screen"],
-                config={
-                    "model": s3.induction_model,
-                    "base_url": s3.induction_base_url,
-                    "granularity": "chunk" if s3.induction_mode == "per_chunk" else "doc",
-                    "max_tokens": 2048,
-                    "max_labels": 40,
-                    "temperature": 0.0,
-                    "max_induction_calls": max_induction_calls,
-                    "device": "cuda",
-                },
+                config=induce_config,
             )
         )
     stages += [
@@ -418,8 +483,13 @@ def generate_pipeline_yaml(
         "stages": stages,
     }
     body: str = yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+    reasoning_note = (
+        ""
+        if s3.induction_reasoning is None
+        else f", reasoning {'on' if s3.induction_reasoning else 'off'}"
+    )
     induction_line = (
-        f"induction {s3.induction_mode} ({s3.induction_model}, "
+        f"induction {s3.induction_mode} ({s3.induction_model}{reasoning_note}, "
         f"max {max_induction_calls} calls)"
         if induce
         else "induction none (hand-authored labels are the whole schema)"
@@ -446,13 +516,17 @@ def _section(report: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def dataset_metrics_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
+def dataset_metrics_from_report(
+    report: Mapping[str, Any], *, induction_model: str = ""
+) -> dict[str, Any]:
     """The gate numbers of one dataset run, read from its ``quality-report.json``.
 
     Chunks / mentions / relations / entities / hyperedges / PII come from the report's typed
     sections; guardrail RiskMarkers are not rolled up by the Quality Report (they live on
     the exported chunk rows), so the honest byte-backed neighbour — flagged chunks after
     screening — is recorded alongside an explicit pointer instead of a fabricated count.
+    ``induction_model`` selects the token-price card for the USD actuals (the report itself
+    does not carry the model id); unknown/empty prices at the conservative fallback card.
     """
     graph = _section(report, "graph")
     hyper = graph.get("hyperedges")
@@ -467,7 +541,9 @@ def dataset_metrics_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
                 "prompt_tokens": prompt,
                 "completion_tokens": completion,
                 "budget_exhausted": bool(stage.get("induction_budget_exhausted", False)),
-                "usd_actual": round(induction_usd_actual(prompt, completion), 4),
+                "usd_actual": round(
+                    induction_usd_actual(prompt, completion, induction_model), 4
+                ),
             }
     return {
         "documents": int(report.get("document_count", 0)),

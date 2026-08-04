@@ -223,6 +223,14 @@ class LLMLabelInducer:
             depends on completion order, which would make the run's OUTPUT non-deterministic.
             Tokens are reported, not enforced.)
         temperature: float  — sampling temperature (default 0.0 for determinism).
+        reasoning: bool | None  — an OpenRouter-dialect knob: when set (True/False) every chat
+            call carries ``extra_body={"reasoning": {"enabled": <value>}}`` so a hybrid
+            reasoning model (e.g. ``deepseek/deepseek-v4-flash-0731``) can be pinned OFF — with
+            reasoning left on such a model burns its whole completion budget on reasoning
+            tokens and returns truncated/empty JSON. A harmless passthrough for other
+            OpenAI-compatible endpoints (unknown body fields are ignored by OpenAI/OpenRouter),
+            BUT a vLLM server may reject unknown fields — hence the default ``None`` omits the
+            field entirely (byte-identical request to a build without the knob).
         system_prompt / user_prompt_template: str  — override the default prompts (the template
             carries ``{text}`` / ``{max_labels}`` placeholders).
         domain: str  — an OPTIONAL free-text description of the corpus's subject matter (what
@@ -329,6 +337,12 @@ class LLMLabelInducer:
         # all-empty response triggers recovery; an operator can raise it to demand a richer schema.
         self._min_labels = max(1, int(config.get("min_labels", _DEFAULT_MIN_LABELS)))
         self._temperature = float(config.get("temperature", 0.0))
+        # The OpenRouter-dialect reasoning knob (see the class docstring): None ⇒ the field is
+        # never sent (byte-identical to pre-knob behaviour, and safe for a strict vLLM that
+        # rejects unknown body fields); True/False ⇒ every chat call (first attempt, repair,
+        # empty-recovery) passes extra_body={"reasoning": {"enabled": <value>}}.
+        reasoning = config.get("reasoning")
+        self._reasoning = None if reasoning is None else bool(reasoning)
         self._system_prompt = str(config.get("system_prompt", DEFAULT_SYSTEM_PROMPT))
         self._user_prompt_template = str(
             config.get("user_prompt_template", DEFAULT_USER_PROMPT_TEMPLATE)
@@ -895,14 +909,20 @@ class LLMLabelInducer:
         self.induction_calls += 1
 
         async def do_call() -> tuple[str, str | None]:
+            request: dict[str, Any] = {
+                "model": self._model,
+                "temperature": self._temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                "messages": messages,
+            }
+            # The OpenRouter reasoning knob: sent on EVERY call (this do_call covers the first
+            # attempt, the repair retry and the empty-recovery re-prompt alike); None ⇒ the
+            # extra_body kwarg is omitted entirely, never sent as null.
+            if self._reasoning is not None:
+                request["extra_body"] = {"reasoning": {"enabled": self._reasoning}}
             try:
-                response = await client.chat.completions.create(
-                    model=self._model,
-                    temperature=self._temperature,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"},
-                    messages=messages,
-                )
+                response = await client.chat.completions.create(**request)
             except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError
                 raise _classify_exception(exc) from exc
             self._count_usage(response)

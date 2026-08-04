@@ -26,7 +26,11 @@ class TestS3Defaults:
         assert s3.extraction_model == "fastino/gliner2-multi-v1"
         assert s3.extraction_threshold == 0.5
         assert s3.induction_mode == "per_chunk"
-        assert s3.induction_model == "openai/gpt-4.1-mini"
+        # Dennis's 2026-08 ruling off the live A/B: deepseek-v4-flash with reasoning
+        # DISABLED (9/10 valid schemas at ~$0.000118/call; reasoning-on burned the whole
+        # completion budget on reasoning tokens — 7/10 invalid).
+        assert s3.induction_model == "deepseek/deepseek-v4-flash-0731"
+        assert s3.induction_reasoning is False
         assert s3.induction_base_url == "https://openrouter.ai/api/v1"
         assert s3.induction_budget_usd_cap == 150.0
         assert s3.redaction_provider == "redaction.gliner2"
@@ -105,6 +109,23 @@ class TestGeneratorAndParser:
         assert "per_chunk" in header
         assert "$150.00" in header
         assert "guardrails on" in header
+
+    def test_reasoning_round_trips_in_all_three_states(self) -> None:
+        for reasoning in (True, False, None):
+            answers = CampaignAnswers(
+                campaign_root="/c", s3=S3Answers(induction_reasoning=reasoning)
+            )
+            parsed = parse_campaign_config(build_campaign_config(answers))
+            assert parsed.s3.induction_reasoning is reasoning
+
+    def test_a_non_bool_reasoning_value_is_rejected(self) -> None:
+        text = (
+            "campaign:\n  root: /c\n  pod_ssh: ''\n"
+            "corpus:\n  datasets: [musique]\n"
+            "s3:\n  induction:\n    reasoning: 'false'\n"
+        )
+        with pytest.raises(CampaignConfigError, match="reasoning"):
+            parse_campaign_config(text)
 
     def test_an_s1_era_config_without_s3_parses_to_the_defaults(self) -> None:
         # Backward compat: the operator's existing campaign.yaml predates the s3 block.
