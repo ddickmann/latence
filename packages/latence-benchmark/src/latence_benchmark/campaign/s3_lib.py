@@ -365,6 +365,7 @@ def generate_pipeline_yaml(
             "max_labels": 40,
             "temperature": 0.0,
             "max_induction_calls": max_induction_calls,
+            "max_concurrency": s3.induction_max_concurrency,
             "device": "cuda",
         }
         # The OpenRouter reasoning knob only when the campaign SET it: None emits nothing,

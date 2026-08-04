@@ -116,6 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("--s3-extraction-threshold", "extraction score threshold (default 0.5)."),
         ("--s3-induction-model", "inducer model id (default deepseek/deepseek-v4-flash-0731)."),
         ("--s3-induction-base-url", "inducer endpoint (default https://openrouter.ai/api/v1)."),
+        ("--s3-induction-max-concurrency", "in-flight inducer LLM calls (default 32)."),
         ("--s3-entity-labels", "comma-separated hand-authored entity label set."),
         ("--s3-relation-labels", "comma-separated hand-authored relation label set."),
     ):
@@ -270,6 +271,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
             ),
             induction_base_url=args.s3_induction_base_url or defaults.induction_base_url,
             induction_budget_usd_cap=float(budget_raw),
+            induction_max_concurrency=int(
+                args.s3_induction_max_concurrency or defaults.induction_max_concurrency
+            ),
             entity_labels=(
                 tuple(x.strip() for x in args.s3_entity_labels.split(",") if x.strip())
                 if args.s3_entity_labels

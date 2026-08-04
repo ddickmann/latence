@@ -90,6 +90,7 @@ class TestGeneratorAndParser:
             s3=S3Answers(
                 induction_mode="doc",
                 induction_budget_usd_cap=42.5,
+                induction_max_concurrency=16,
                 entity_labels=("PERSON",),
                 relation_labels=("works_for",),
                 redaction_guardrails=False,

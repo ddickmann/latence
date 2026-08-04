@@ -219,6 +219,8 @@ class TestGeneratedPipelines:
         # The default ruling: deepseek with the OpenRouter reasoning knob pinned OFF.
         assert induce.config["model"] == "deepseek/deepseek-v4-flash-0731"
         assert induce.config["reasoning"] is False
+        # The campaign-scale fan-out (provider default is 8; 32 keeps UDA's 242k calls ~5h).
+        assert induce.config["max_concurrency"] == 32
 
         # Extraction + redaction ride the induced chunk stream (induced ∪ floor labels).
         assert by_name["extract"].depends_on == ["induce"]

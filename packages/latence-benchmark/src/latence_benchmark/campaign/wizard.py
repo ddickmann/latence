@@ -99,6 +99,11 @@ class S3Answers:
     # entirely (the provider then sends no extra_body — required for a strict vLLM endpoint).
     induction_model: str = "deepseek/deepseek-v4-flash-0731"
     induction_reasoning: bool | None = False
+    # In-flight LLM-call fan-out for the inducer (its asyncio.Semaphore). The provider default
+    # is a conservative 8; at the S3 corpus scale (UDA alone is 242k calls) 8 means ~21h of
+    # induction wall-time, so the campaign default is 32 (~4x). OpenRouter absorbs it; a 429
+    # burst is classed + retried by the provider's endpoint-error path.
+    induction_max_concurrency: int = 32
     induction_base_url: str = "https://openrouter.ai/api/v1"
     induction_budget_usd_cap: float = 150.0
     entity_labels: tuple[str, ...] = field(default=S3_ENTITY_LABELS)
@@ -138,6 +143,12 @@ class S3Answers:
             msg = (
                 "s3.induction.budget_usd_cap must be >= 0 "
                 f"(got {self.induction_budget_usd_cap})."
+            )
+            raise CampaignConfigError(msg)
+        if self.induction_max_concurrency < 1:
+            msg = (
+                "s3.induction.max_concurrency must be >= 1 "
+                f"(got {self.induction_max_concurrency})."
             )
             raise CampaignConfigError(msg)
         if self.induction_mode != "none" and self.induction_budget_usd_cap == 0:
@@ -248,6 +259,7 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
                     "reasoning": s3.induction_reasoning,
                     "base_url": s3.induction_base_url,
                     "budget_usd_cap": s3.induction_budget_usd_cap,
+                    "max_concurrency": s3.induction_max_concurrency,
                 },
                 "labels": {
                     "entity": list(s3.entity_labels),
@@ -406,7 +418,9 @@ def _parse_s3_block(raw: object) -> S3Answers:
     chunk = _sub_block(raw, "chunk", ("max_tokens", "overlap_tokens", "min_tokens"))
     extraction = _sub_block(raw, "extraction", ("provider", "model", "threshold"))
     induction = _sub_block(
-        raw, "induction", ("mode", "model", "reasoning", "base_url", "budget_usd_cap")
+        raw,
+        "induction",
+        ("mode", "model", "reasoning", "base_url", "budget_usd_cap", "max_concurrency"),
     )
     labels = _sub_block(raw, "labels", ("entity", "relation"))
     redaction = _sub_block(raw, "redaction", ("provider", "guardrails"))
@@ -432,6 +446,9 @@ def _parse_s3_block(raw: object) -> S3Answers:
         ),
         induction_budget_usd_cap=float(
             _typed(induction, "budget_usd_cap", float, defaults.induction_budget_usd_cap)
+        ),
+        induction_max_concurrency=int(
+            _typed(induction, "max_concurrency", int, defaults.induction_max_concurrency)
         ),
         entity_labels=_label_list(labels, "entity", defaults.entity_labels),
         relation_labels=_label_list(labels, "relation", defaults.relation_labels),
