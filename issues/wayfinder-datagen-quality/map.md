@@ -69,6 +69,7 @@ ADR-0057 tau_text redaction discipline, ADR-0044 PII masking, the pydantic-only 
 | 10 | grilling | Chunk-size ↔ hyperedge-yield coupling | 01 |
 | 11 | task | Alias + description enrichment at export | 01 |
 | 12 | task | ANN-blocked disambiguation as correlation clustering (tabu local search) | 01 |
+| 13 | task | Min-support floor on the induced type vocabulary | 01 |
 
 ## Fog (not yet specified)
 
