@@ -11,6 +11,8 @@ it: gating, determinism, resumability, stall handling, and the metrics contract.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -18,10 +20,12 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from latence_benchmark.campaign import ocr_stage
 from latence_benchmark.campaign.ocr_stage import (
     FIN_CAP,
     REMOTE_ROOT,
     STAGE_NAME,
+    SubprocessTransport,
     extract_zip,
     fin_cap_selection,
     ocr_done_probe,
@@ -291,6 +295,71 @@ class TestPodSshParsing:
     def test_an_option_missing_its_value_is_refused(self) -> None:
         with pytest.raises(StageBlockedError, match="missing its value"):
             parse_pod_ssh("ssh root@pod -p")
+
+
+# -- the real transport's rsync flags --------------------------------------------------------
+
+
+class TestSubprocessTransportFlags:
+    """The flag CONTRACT of the real transport, with subprocess.run captured (no ssh).
+
+    Push must DEREFERENCE symlinks (``--copy-links``): campaign corpus dirs may be
+    symlinks into shared output trees (s3's ``markdown`` -> ``../s2-output/markdown/<ds>``)
+    and plain ``-l`` ships the link itself — a dangling link on the pod and a silent
+    0-document run. Pull keeps ``-l``: what the pod wrote comes back unchanged.
+    """
+
+    @staticmethod
+    def _capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(ocr_stage.subprocess, "run", fake_run)
+        return calls
+
+    def test_push_dereferences_symlinks(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        calls = self._capture(monkeypatch)
+        transport = SubprocessTransport("ssh root@pod -p 22")
+        transport.push(tmp_path / "markdown", "/workspace/x/")
+        (cmd,) = calls
+        assert cmd[:6] == [
+            "rsync", "-rlptz", "--no-owner", "--no-group", "--partial", "--copy-links"
+        ]
+        assert cmd[-2:] == [str(tmp_path / "markdown"), "root@pod:/workspace/x/"]
+
+    def test_pull_keeps_links_as_links(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        calls = self._capture(monkeypatch)
+        transport = SubprocessTransport("ssh root@pod -p 22")
+        transport.pull("/workspace/x/metrics.json", tmp_path / "metrics.json")
+        (cmd,) = calls
+        assert "--copy-links" not in cmd
+        assert cmd[:5] == ["rsync", "-rlptz", "--no-owner", "--no-group", "--partial"]
+        assert cmd[-2:] == ["root@pod:/workspace/x/metrics.json", str(tmp_path / "metrics.json")]
+
+    @pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync not installed")
+    def test_push_flagset_materialises_a_symlinked_dir(self, tmp_path: Path) -> None:
+        """Real rsync, local-to-local: the push flag set copies THROUGH the symlink."""
+        real = tmp_path / "s2-output" / "markdown" / "ds"
+        real.mkdir(parents=True)
+        (real / "a.md").write_text("# A\n", encoding="utf-8")
+        corpus = tmp_path / "corpus" / "ds"
+        corpus.mkdir(parents=True)
+        link = corpus / "markdown"
+        link.symlink_to(Path("..") / ".." / "s2-output" / "markdown" / "ds")
+        dest = tmp_path / "pod"
+        dest.mkdir()
+        transport = SubprocessTransport("ssh root@pod")
+        transport._rsync(str(link), str(dest), dereference=True)  # the push flag set
+        landed = dest / "markdown"
+        assert landed.is_dir() and not landed.is_symlink()  # real dir, not a dangling link
+        assert (landed / "a.md").read_text(encoding="utf-8") == "# A\n"
 
 
 # -- the poll loop ---------------------------------------------------------------------------

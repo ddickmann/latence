@@ -396,6 +396,27 @@ class TestStageRun:
         # The prep'd markdown (not the raw json) is what went to the pod.
         assert any(src.endswith("multihop_rag/markdown") for src, _ in pod.pushes)
 
+    def test_symlinked_markdown_dir_pushes_and_completes(self, tmp_path: Path) -> None:
+        # The production layout for OCR'd datasets: `markdown` is a SYMLINK into the shared
+        # s2 output tree. The stage must treat it as the real dir (the transport
+        # dereferences on push — proven in the s2 transport suite).
+        repo = tmp_path / "repo"
+        real = repo / "benchmark" / "sota-corpus" / "s2-output" / "markdown" / "ohr_bench"
+        real.mkdir(parents=True)
+        (real / "doc1.md").write_text("# Doc\n\nText.\n", encoding="utf-8")
+        ds_dir = repo / "benchmark" / "sota-corpus" / "ohr_bench"
+        ds_dir.mkdir(parents=True)
+        (ds_dir / "markdown").symlink_to(
+            Path("..") / "s2-output" / "markdown" / "ohr_bench"
+        )
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]})
+        clock = FakeClock()
+        note = run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
+        assert "1 dataset(s) processed" in note
+        assert any(src.endswith("ohr_bench/markdown") for src, _ in pod.pushes)
+        assert s3_done_probe(ctx) is True
+
     def test_missing_s2_markdown_blocks_pointing_at_s2(self, tmp_path: Path) -> None:
         repo = make_repo(tmp_path, datasets=())
         ctx = make_ctx(tmp_path, ("vidoseek",), repo)
@@ -414,6 +435,59 @@ class TestStageRun:
         ctx = make_ctx(tmp_path, ("musique", "hotpotqa"), repo)
         note = run_s3_stage(ctx)  # no transport at all: nothing to process
         assert "0 dataset(s) processed" in note
+        assert s3_done_probe(ctx) is True
+
+    def test_a_zero_document_report_blocks_the_stage(self, tmp_path: Path) -> None:
+        # No-fake-green: a run over zero documents still writes quality-report.json and
+        # reads as `done` to the status probe (the dangling-symlink field failure). The
+        # floor must block, naming the dataset and the counts, never advance.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        report = fixture_report()
+        report["document_count"] = 0
+        report["chunk"] = {"chunks_total": 0, "chunks_flagged": 0}
+        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
+        clock = FakeClock()
+        with pytest.raises(StageBlockedError, match="ohr_bench.*EMPTY.*0 document"):
+            run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
+        assert s3_done_probe(ctx) is False  # no metrics were written: the stage stays open
+
+    def test_a_zero_chunk_report_blocks_too(self, tmp_path: Path) -> None:
+        # Documents landed but chunking produced nothing — equally an empty run.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        report = fixture_report()
+        report["chunk"] = {"chunks_total": 0, "chunks_flagged": 0}
+        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]}, report=report)
+        clock = FakeClock()
+        with pytest.raises(StageBlockedError, match="0 chunk"):
+            run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
+
+    def test_an_empty_locally_pulled_report_blocks_on_resume(self, tmp_path: Path) -> None:
+        # The floor guards BOTH completion paths: a previously pulled empty report must
+        # not slide through on resume either.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        report = fixture_report()
+        report["document_count"] = 0
+        report_dir = stage_dir(ctx.campaign_root, STAGE_NAME) / "reports" / "ohr_bench"
+        report_dir.mkdir(parents=True)
+        (report_dir / "quality-report.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+        pod = FakePod(states={"ohr_bench": [("absent", 0)]})
+        with pytest.raises(StageBlockedError, match="EMPTY"):
+            run_s3_stage(ctx, pod, clock=FakeClock(), sleep=lambda _s: None)
+
+    def test_a_nonzero_report_passes_the_floor(self, tmp_path: Path) -> None:
+        # The floor is a floor, not a gate on healthy runs: the standard fixture report
+        # (3 docs / 42 chunks) completes untouched.
+        repo = make_repo(tmp_path, datasets=("ohr_bench",))
+        ctx = make_ctx(tmp_path, ("ohr_bench",), repo)
+        pod = FakePod(states={"ohr_bench": [("absent", 0), ("done", 9)]})
+        clock = FakeClock()
+        note = run_s3_stage(ctx, pod, clock=clock, sleep=clock.sleep)
+        assert "1 dataset(s) processed" in note
         assert s3_done_probe(ctx) is True
 
     def test_done_probe_tracks_the_selection(self, tmp_path: Path) -> None:

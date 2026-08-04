@@ -188,17 +188,23 @@ class SubprocessTransport:
         return proc.returncode, proc.stdout + proc.stderr
 
     def push(self, local: Path, remote: str) -> None:
-        self._rsync(str(local), f"{self._endpoint.target}:{remote}")
+        # --copy-links on PUSH only: campaign corpus dirs may be symlinks into shared
+        # output trees (s3's `markdown` -> ../s2-output/markdown/<ds>); plain -l ships the
+        # link itself, which dangles on the pod and silently yields a 0-document run (the
+        # 2026-08 s3 field failure). Pull keeps -l as-is: what the pod wrote comes back
+        # unchanged.
+        self._rsync(str(local), f"{self._endpoint.target}:{remote}", dereference=True)
 
     def pull(self, remote: str, local: Path) -> None:
         self._rsync(f"{self._endpoint.target}:{remote}", str(local))
 
-    def _rsync(self, source: str, dest: str) -> None:
+    def _rsync(self, source: str, dest: str, *, dereference: bool = False) -> None:
         # -a minus owner/group: RunPod's /workspace network FS refuses chown (rc=23) —
         # the exact failure the M6 campaign hit; -rlptz is -a without -og, plus
         # --no-owner/--no-group defensively for any -a-implying default.
         cmd = [
             "rsync", "-rlptz", "--no-owner", "--no-group", "--partial",
+            *(("--copy-links",) if dereference else ()),
             "-e", self._endpoint.rsh, source, dest,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)

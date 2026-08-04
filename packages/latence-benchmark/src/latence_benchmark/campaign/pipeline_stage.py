@@ -430,6 +430,30 @@ def _pull_dataset_results(
     return report
 
 
+def _require_nonempty_run(dataset: str, report_metrics: Mapping[str, Any]) -> None:
+    """The no-fake-green floor: a quality report over an EMPTY corpus blocks, never passes.
+
+    A ``latence process`` run over zero documents still writes its quality-report.json, so
+    the status probe reads ``done``, the report is pulled, and — without this floor — the
+    stage would advance an empty dataset toward S4/S5 as if it were data. That is exactly
+    what happened in the field when the markdown push landed as a dangling symlink on the
+    pod. Zero documents OR zero chunks means the input push (or the corpus behind it)
+    likely failed; the block names the dataset and the counts so the operator looks at the
+    pod's input dir, not the pipeline.
+    """
+    documents = int(report_metrics.get("documents", 0))
+    chunks = int(report_metrics.get("chunks", 0))
+    if documents <= 0 or chunks <= 0:
+        msg = (
+            f"{dataset}: quality report records an EMPTY run — {documents} document(s), "
+            f"{chunks} chunk(s). The input push likely failed (e.g. markdown arrived as a "
+            f"dangling symlink); verify {REMOTE_ROOT}/input/{dataset}/markdown on the pod, "
+            f"remove the empty run store {_remote_store(dataset)}, then "
+            "`latence-campaign resume`."
+        )
+        raise StageBlockedError(msg)
+
+
 def run_s3_stage(
     ctx: CampaignContext,
     transport: PodTransport | None = None,
@@ -499,8 +523,11 @@ def run_s3_stage(
                 # never redoes finished work, and never needs the pod for it).
                 resumed = True
                 report = json.loads(local_report.read_text(encoding="utf-8"))
+            report_metrics = s3_lib.dataset_metrics_from_report(report)
+            # Sanity floor on BOTH paths (fresh pull and local resume): empty blocks.
+            _require_nonempty_run(dataset, report_metrics)
             dataset_metrics[dataset] = {
-                **s3_lib.dataset_metrics_from_report(report),
+                **report_metrics,
                 "run_id": run_id_for(dataset),
                 "induction_mode": (s3.induction_mode if dataset in induced else "none"),
                 "pipeline_yaml": f"pipelines/{dataset}.yaml",
