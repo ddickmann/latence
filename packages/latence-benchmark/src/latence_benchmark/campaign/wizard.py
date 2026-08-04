@@ -18,8 +18,11 @@ unknown blocks untouched — so an S2-era config file still round-trips through 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 import yaml
+
+_T = TypeVar("_T")
 
 #: The 6+2 corpus datasets S0 recommended (dataset-landscape.md), in campaign order:
 #: the incumbents first, then the multi-hop triad's third leg, then the new acquisition.
@@ -38,6 +41,123 @@ class CampaignConfigError(ValueError):
     """A campaign config (answers or YAML text) that cannot be used."""
 
 
+#: The hand-authored wiki/news entity schema for the text-native datasets (S3 spec §2) — and
+#: the config FLOOR everywhere induction is off. Kept exactly as ruled in the S3 ticket.
+S3_ENTITY_LABELS: tuple[str, ...] = (
+    "PERSON",
+    "ORGANIZATION",
+    "LOCATION",
+    "WORK",
+    "EVENT",
+    "DATE",
+    "PRODUCT",
+)
+
+#: The matching hand-authored relation schema (S3 spec §2).
+S3_RELATION_LABELS: tuple[str, ...] = (
+    "located_in",
+    "part_of",
+    "member_of",
+    "created_by",
+    "founded_by",
+    "spouse_of",
+    "directed_by",
+    "works_for",
+    "released_in",
+)
+
+#: The three legal induction modes for the OCR'd dataset group. ``per_chunk`` is the blessed
+#: default (label_inducer.llm, granularity chunk); ``doc`` induces once per document;
+#: ``none`` turns induction off entirely — every dataset then extracts with the hand-authored
+#: label sets above.
+S3_INDUCTION_MODES: tuple[str, ...] = ("per_chunk", "doc", "none")
+
+
+@dataclass(frozen=True)
+class S3Answers:
+    """The ``s3:`` block of campaign.yaml — everything the S3 pipeline generator reads.
+
+    All defaults are the S3 spec's rulings (chunk {640,80,8} = the blessed gpu-sota operating
+    point under the GLiNER2 768 mdeberta window; extraction fused_entity_relation.gliner2 @
+    0.5; induction per_chunk on gpt-4.1-mini via OpenRouter under a hard USD cap; learned
+    redaction with guardrails ON). Contradictions are rejected here, not discovered on the
+    pod.
+    """
+
+    chunk_max_tokens: int = 640
+    chunk_overlap_tokens: int = 80
+    chunk_min_tokens: int = 8
+    extraction_provider: str = "fused_entity_relation.gliner2"
+    extraction_model: str = "fastino/gliner2-multi-v1"
+    extraction_threshold: float = 0.5
+    induction_mode: str = "per_chunk"
+    induction_model: str = "openai/gpt-4.1-mini"
+    induction_base_url: str = "https://openrouter.ai/api/v1"
+    induction_budget_usd_cap: float = 150.0
+    entity_labels: tuple[str, ...] = field(default=S3_ENTITY_LABELS)
+    relation_labels: tuple[str, ...] = field(default=S3_RELATION_LABELS)
+    redaction_provider: str = "redaction.gliner2"
+    redaction_guardrails: bool = True
+
+    def __post_init__(self) -> None:
+        if self.chunk_max_tokens <= 0:
+            msg = f"s3.chunk.max_tokens must be positive (got {self.chunk_max_tokens})."
+            raise CampaignConfigError(msg)
+        if not 0 <= self.chunk_overlap_tokens < self.chunk_max_tokens:
+            msg = (
+                f"s3.chunk.overlap_tokens ({self.chunk_overlap_tokens}) must be >= 0 and "
+                f"smaller than max_tokens ({self.chunk_max_tokens}) — an overlap that swallows "
+                "the whole chunk never advances."
+            )
+            raise CampaignConfigError(msg)
+        if not 0 < self.chunk_min_tokens <= self.chunk_max_tokens:
+            msg = (
+                f"s3.chunk.min_tokens ({self.chunk_min_tokens}) must be positive and "
+                f"<= max_tokens ({self.chunk_max_tokens})."
+            )
+            raise CampaignConfigError(msg)
+        if not 0.0 < self.extraction_threshold <= 1.0:
+            msg = (
+                f"s3.extraction.threshold must be in (0, 1] (got {self.extraction_threshold})."
+            )
+            raise CampaignConfigError(msg)
+        if self.induction_mode not in S3_INDUCTION_MODES:
+            msg = (
+                f"s3.induction.mode must be one of {', '.join(S3_INDUCTION_MODES)} "
+                f"(got {self.induction_mode!r})."
+            )
+            raise CampaignConfigError(msg)
+        if self.induction_budget_usd_cap < 0:
+            msg = (
+                "s3.induction.budget_usd_cap must be >= 0 "
+                f"(got {self.induction_budget_usd_cap})."
+            )
+            raise CampaignConfigError(msg)
+        if self.induction_mode != "none" and self.induction_budget_usd_cap == 0:
+            msg = (
+                f"s3: induction mode {self.induction_mode!r} with budget_usd_cap 0 is a "
+                "contradiction — zero budget means zero calls. Set a positive cap or "
+                "mode 'none'."
+            )
+            raise CampaignConfigError(msg)
+        if not self.entity_labels or not all(s.strip() for s in self.entity_labels):
+            msg = "s3.labels.entity must be a non-empty list of non-blank labels."
+            raise CampaignConfigError(msg)
+        if not self.relation_labels or not all(s.strip() for s in self.relation_labels):
+            msg = "s3.labels.relation must be a non-empty list of non-blank labels."
+            raise CampaignConfigError(msg)
+        for name, value in (
+            ("extraction.provider", self.extraction_provider),
+            ("extraction.model", self.extraction_model),
+            ("induction.model", self.induction_model),
+            ("induction.base_url", self.induction_base_url),
+            ("redaction.provider", self.redaction_provider),
+        ):
+            if not value.strip():
+                msg = f"s3.{name} must be a non-empty string."
+                raise CampaignConfigError(msg)
+
+
 @dataclass(frozen=True)
 class CampaignAnswers:
     """The fully-resolved wizard answers — the SAME struct from prompts and from flags.
@@ -49,11 +169,15 @@ class CampaignAnswers:
     :param pod_ssh: SSH target of the GPU pod later stages run on (``user@host[:port]`` or an
         ssh-config alias), or ``""`` for the local-only stages. S1 only records it; the first
         consumer is the S2 OCR stage.
+    :param s3: The S3 pipeline-generation block (chunking, extraction, induction, labels,
+        redaction). Older configs without an ``s3:`` block parse to these defaults, so an
+        S1/S2-era campaign.yaml keeps loading unchanged.
     """
 
     campaign_root: str
     datasets: tuple[str, ...] = field(default=KNOWN_DATASETS)
     pod_ssh: str = ""
+    s3: S3Answers = field(default_factory=S3Answers)
 
     def __post_init__(self) -> None:
         if not self.campaign_root.strip():
@@ -90,6 +214,7 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
     carries the why (what the file is, how gates work, the one next command), the body stays
     machine-clean YAML.
     """
+    s3 = answers.s3
     body: str = yaml.safe_dump(
         {
             "campaign": {
@@ -99,11 +224,42 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
             "corpus": {
                 "datasets": list(answers.datasets),
             },
+            "s3": {
+                "chunk": {
+                    "max_tokens": s3.chunk_max_tokens,
+                    "overlap_tokens": s3.chunk_overlap_tokens,
+                    "min_tokens": s3.chunk_min_tokens,
+                },
+                "extraction": {
+                    "provider": s3.extraction_provider,
+                    "model": s3.extraction_model,
+                    "threshold": s3.extraction_threshold,
+                },
+                "induction": {
+                    "mode": s3.induction_mode,
+                    "model": s3.induction_model,
+                    "base_url": s3.induction_base_url,
+                    "budget_usd_cap": s3.induction_budget_usd_cap,
+                },
+                "labels": {
+                    "entity": list(s3.entity_labels),
+                    "relation": list(s3.relation_labels),
+                },
+                "redaction": {
+                    "provider": s3.redaction_provider,
+                    "guardrails": s3.redaction_guardrails,
+                },
+            },
         },
         sort_keys=True,
         default_flow_style=False,
     )
     pod = answers.pod_ssh if answers.pod_ssh else "none (local-only stages until one is set)"
+    induction = (
+        "none (hand-authored labels everywhere)"
+        if s3.induction_mode == "none"
+        else f"{s3.induction_mode} ({s3.induction_model}, cap ${s3.induction_budget_usd_cap:.2f})"
+    )
     header_lines = [
         "# latence-campaign configuration — generated by `latence-campaign init`.",
         "# Deterministic: identical answers produce a byte-identical file, so re-running init",
@@ -116,6 +272,10 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
         "#                 (license lanes are classified and recorded by the s1-corpus stage",
         "#                 gate before any byte is fetched; see stages/s1-corpus/metrics.json)",
         f"# pod ssh       : {pod}",
+        f"# s3 pipeline   : chunk {s3.chunk_max_tokens}/{s3.chunk_overlap_tokens}/"
+        f"{s3.chunk_min_tokens}; {s3.extraction_provider} @ {s3.extraction_threshold}",
+        f"#                 induction {induction}; redaction "
+        f"{'guardrails on' if s3.redaction_guardrails else 'guardrails OFF'}",
         "#",
         "# Stages are gated: `run <stage>` refuses until the PREVIOUS stage was `approve`d.",
         "# Later campaign stages append their own config blocks below; unknown blocks are",
@@ -164,5 +324,91 @@ def parse_campaign_config(text: str) -> CampaignAnswers:
         raise CampaignConfigError(msg)
 
     return CampaignAnswers(
-        campaign_root=root, datasets=tuple(datasets), pod_ssh=pod_ssh
+        campaign_root=root,
+        datasets=tuple(datasets),
+        pod_ssh=pod_ssh,
+        s3=_parse_s3_block(raw.get("s3")),
+    )
+
+
+def _sub_block(s3: dict[str, object], name: str, known: tuple[str, ...]) -> dict[str, object]:
+    """One ``s3.<name>`` sub-mapping, absent = ``{}``, unknown keys LOUD (a typo'd knob that
+    silently falls back to its default would run a 2-pod-day campaign on the wrong setting)."""
+    raw = s3.get(name, {})
+    if not isinstance(raw, dict):
+        msg = f"`s3.{name}` must be a mapping."
+        raise CampaignConfigError(msg)
+    unknown = sorted(set(raw) - set(known))
+    if unknown:
+        msg = f"`s3.{name}` has unknown key(s): {', '.join(unknown)}. Known: {', '.join(known)}."
+        raise CampaignConfigError(msg)
+    return dict(raw)
+
+
+def _typed(block: dict[str, object], key: str, kind: type[_T], default: _T) -> _T:
+    value = block.get(key, default)
+    if kind is float and isinstance(value, int) and not isinstance(value, bool):
+        value = float(value)  # YAML `150` for a cap is not a typo; accept the int spelling.
+    if not isinstance(value, kind) or (kind is not bool and isinstance(value, bool)):
+        msg = f"`s3` key {key!r} must be a {kind.__name__} (got {value!r})."
+        raise CampaignConfigError(msg)
+    return value
+
+
+def _label_list(block: dict[str, object], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = block.get(key)
+    if raw is None:
+        return default
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        msg = f"`s3.labels.{key}` must be a list of strings."
+        raise CampaignConfigError(msg)
+    return tuple(raw)
+
+
+def _parse_s3_block(raw: object) -> S3Answers:
+    """The optional ``s3:`` block → :class:`S3Answers`; absent = all defaults (older configs)."""
+    if raw is None:
+        return S3Answers()
+    if not isinstance(raw, dict):
+        msg = "`s3` must be a mapping (chunk, extraction, induction, labels, redaction)."
+        raise CampaignConfigError(msg)
+    unknown = sorted(set(raw) - {"chunk", "extraction", "induction", "labels", "redaction"})
+    if unknown:
+        msg = f"`s3` has unknown key(s): {', '.join(unknown)}."
+        raise CampaignConfigError(msg)
+    chunk = _sub_block(raw, "chunk", ("max_tokens", "overlap_tokens", "min_tokens"))
+    extraction = _sub_block(raw, "extraction", ("provider", "model", "threshold"))
+    induction = _sub_block(raw, "induction", ("mode", "model", "base_url", "budget_usd_cap"))
+    labels = _sub_block(raw, "labels", ("entity", "relation"))
+    redaction = _sub_block(raw, "redaction", ("provider", "guardrails"))
+    defaults = S3Answers()
+    return S3Answers(
+        chunk_max_tokens=int(_typed(chunk, "max_tokens", int, defaults.chunk_max_tokens)),
+        chunk_overlap_tokens=int(
+            _typed(chunk, "overlap_tokens", int, defaults.chunk_overlap_tokens)
+        ),
+        chunk_min_tokens=int(_typed(chunk, "min_tokens", int, defaults.chunk_min_tokens)),
+        extraction_provider=str(
+            _typed(extraction, "provider", str, defaults.extraction_provider)
+        ),
+        extraction_model=str(_typed(extraction, "model", str, defaults.extraction_model)),
+        extraction_threshold=float(
+            _typed(extraction, "threshold", float, defaults.extraction_threshold)
+        ),
+        induction_mode=str(_typed(induction, "mode", str, defaults.induction_mode)),
+        induction_model=str(_typed(induction, "model", str, defaults.induction_model)),
+        induction_base_url=str(
+            _typed(induction, "base_url", str, defaults.induction_base_url)
+        ),
+        induction_budget_usd_cap=float(
+            _typed(induction, "budget_usd_cap", float, defaults.induction_budget_usd_cap)
+        ),
+        entity_labels=_label_list(labels, "entity", defaults.entity_labels),
+        relation_labels=_label_list(labels, "relation", defaults.relation_labels),
+        redaction_provider=str(
+            _typed(redaction, "provider", str, defaults.redaction_provider)
+        ),
+        redaction_guardrails=bool(
+            _typed(redaction, "guardrails", bool, defaults.redaction_guardrails)
+        ),
     )

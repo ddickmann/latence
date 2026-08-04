@@ -44,8 +44,10 @@ from latence_benchmark.campaign.state import (
 )
 from latence_benchmark.campaign.wizard import (
     KNOWN_DATASETS,
+    S3_INDUCTION_MODES,
     CampaignAnswers,
     CampaignConfigError,
+    S3Answers,
     build_campaign_config,
     parse_campaign_config,
 )
@@ -91,6 +93,37 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_CONFIG,
         help="Where to save the generated campaign.yaml.",
+    )
+    # S3 headline choices (prompted interactively; everything else below is flag-only per
+    # the `latence setup` house style — sensible defaults, hand-editable, never interrogated).
+    init.add_argument(
+        "--s3-induction-mode",
+        default=None,
+        choices=[*S3_INDUCTION_MODES],
+        help="Label induction for the OCR'd datasets: per_chunk (default), doc, or none "
+        "(hand-authored labels everywhere).",
+    )
+    init.add_argument(
+        "--s3-budget-usd-cap",
+        default=None,
+        help="Hard USD cap for LLM label induction across the whole S3 run (default 150).",
+    )
+    for flag, help_text in (
+        ("--s3-chunk-max-tokens", "chunk.markdown max_tokens (default 640)."),
+        ("--s3-chunk-overlap-tokens", "chunk.markdown overlap_tokens (default 80)."),
+        ("--s3-chunk-min-tokens", "chunk.markdown min_tokens (default 8)."),
+        ("--s3-extraction-model", "GLiNER2 checkpoint (default fastino/gliner2-multi-v1)."),
+        ("--s3-extraction-threshold", "extraction score threshold (default 0.5)."),
+        ("--s3-induction-model", "inducer model id (default openai/gpt-4.1-mini)."),
+        ("--s3-induction-base-url", "inducer endpoint (default https://openrouter.ai/api/v1)."),
+        ("--s3-entity-labels", "comma-separated hand-authored entity label set."),
+        ("--s3-relation-labels", "comma-separated hand-authored relation label set."),
+    ):
+        init.add_argument(flag, default=None, help=help_text)
+    init.add_argument(
+        "--s3-no-guardrails",
+        action="store_true",
+        help="Turn the learned redaction guardrail screen OFF (default: on).",
     )
     init.add_argument(
         "--non-interactive",
@@ -189,12 +222,58 @@ def _cmd_init(args: argparse.Namespace) -> int:
         interactive=interactive,
     )
 
+    # S3 headline choices: prompted; the remaining s3 knobs resolve flag > default only.
+    induction_mode = _ask(
+        args.s3_induction_mode,
+        f"S3 label induction mode ({'/'.join(S3_INDUCTION_MODES)})",
+        "per_chunk = LLM-induced labels on the OCR'd sets (the blessed default); "
+        "none = hand-authored labels everywhere, zero LLM spend",
+        "per_chunk",
+        interactive=interactive,
+    )
+    budget_raw = _ask(
+        args.s3_budget_usd_cap,
+        "S3 induction budget cap (USD)",
+        "a HARD cap: the run blocks at the cap, it never silently overruns",
+        "150",
+        interactive=interactive,
+    )
+
     datasets = tuple(d.strip() for d in datasets_raw.split(",") if d.strip())
+    defaults = S3Answers()
     try:
-        answers = CampaignAnswers(
-            campaign_root=root, datasets=datasets, pod_ssh=pod_ssh.strip()
+        s3 = S3Answers(
+            chunk_max_tokens=int(args.s3_chunk_max_tokens or defaults.chunk_max_tokens),
+            chunk_overlap_tokens=int(
+                args.s3_chunk_overlap_tokens
+                if args.s3_chunk_overlap_tokens is not None
+                else defaults.chunk_overlap_tokens
+            ),
+            chunk_min_tokens=int(args.s3_chunk_min_tokens or defaults.chunk_min_tokens),
+            extraction_model=args.s3_extraction_model or defaults.extraction_model,
+            extraction_threshold=float(
+                args.s3_extraction_threshold or defaults.extraction_threshold
+            ),
+            induction_mode=induction_mode.strip(),
+            induction_model=args.s3_induction_model or defaults.induction_model,
+            induction_base_url=args.s3_induction_base_url or defaults.induction_base_url,
+            induction_budget_usd_cap=float(budget_raw),
+            entity_labels=(
+                tuple(x.strip() for x in args.s3_entity_labels.split(",") if x.strip())
+                if args.s3_entity_labels
+                else defaults.entity_labels
+            ),
+            relation_labels=(
+                tuple(x.strip() for x in args.s3_relation_labels.split(",") if x.strip())
+                if args.s3_relation_labels
+                else defaults.relation_labels
+            ),
+            redaction_guardrails=not args.s3_no_guardrails,
         )
-    except CampaignConfigError as exc:
+        answers = CampaignAnswers(
+            campaign_root=root, datasets=datasets, pod_ssh=pod_ssh.strip(), s3=s3
+        )
+    except (CampaignConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -214,6 +293,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
     print(f"  campaign root: {answers.campaign_root}")
     print(f"  corpus ({len(answers.datasets)}): {', '.join(answers.datasets)}")
     print(f"  pod ssh: {answers.pod_ssh or '(none — local-only stages)'}")
+    print(
+        f"  s3: induction {answers.s3.induction_mode}, "
+        f"cap ${answers.s3.induction_budget_usd_cap:.2f}, "
+        f"guardrails {'on' if answers.s3.redaction_guardrails else 'off'}"
+    )
     print("")
     print(f"Run `latence-campaign status -c {output}` to see the stage table.")
     return 0

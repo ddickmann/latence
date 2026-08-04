@@ -341,7 +341,7 @@ class TestPollLoop:
 
 class TestGating:
     def test_s2_is_registered_directly_after_s1(self) -> None:
-        assert [spec.name for spec in registry()] == ["s1-corpus", STAGE_NAME]
+        assert [spec.name for spec in registry()][:2] == ["s1-corpus", STAGE_NAME]
 
     def test_run_refuses_until_s1_is_approved(self, tmp_path: Path) -> None:
         specs = registry()

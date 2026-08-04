@@ -98,8 +98,9 @@ def registry() -> tuple[StageSpec, ...]:
     """
     from latence_benchmark.campaign.corpus_stage import CORPUS_STAGE
     from latence_benchmark.campaign.ocr_stage import OCR_STAGE
+    from latence_benchmark.campaign.pipeline_stage import S3_PIPELINE_STAGE
 
-    return (CORPUS_STAGE, OCR_STAGE)
+    return (CORPUS_STAGE, OCR_STAGE, S3_PIPELINE_STAGE)
 
 
 def find_stage(specs: Sequence[StageSpec], name: str) -> tuple[int, StageSpec]:
