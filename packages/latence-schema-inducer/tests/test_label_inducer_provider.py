@@ -293,6 +293,40 @@ def test_injection_label_is_data_not_executed() -> None:
     assert labels == [injection]  # short enough to survive intact, but it is inert data
 
 
+def test_value_shaped_labels_rejected_on_the_induced_path() -> None:
+    # The S3 value-shape guard rides the Provider's sanitize step: the exact junk shapes the live
+    # ohr_bench run stamped as types (values, dates, addresses, artifact fragments) are rejected,
+    # while legitimate types — including digit-containing keepers — survive. Config-authored label
+    # sets never pass through this path (the guard is opt-in and only the induced path opts in).
+    provider = _provider()
+    reply = _good_reply(
+        entity=["person", "1q22", "10.3", ".net", "1024 fulton street", "2008 farm bill"],
+        relation=["works_for", "15 to 24 years"],
+        pii=["email", "october 27, 1986"],
+    )
+    with fake.install([fake.reply(reply)]):
+        out = list(provider.induce([_chunk()]))
+    induced = out[0].induced_labels
+    assert induced is not None
+    assert induced.entity_types == ["person", "2008 farm bill"]
+    assert induced.relation_types == ["works for"]
+    assert induced.pii_types == ["email"]
+    assert provider.induction_fallbacks == 0  # keepers remain — no degrade to config labels
+
+
+def test_all_value_shaped_reply_falls_back_loudly() -> None:
+    # A reply that is NOTHING BUT value shapes sanitizes empty → the existing empty-recovery
+    # machinery fires (one re-prompt, then the LOUD fall-back) — the guard adds no new silent path.
+    provider = _provider()
+    junk = _good_reply(entity=["10.3", "1q22"], relation=["15 to 24 years"], pii=[".net"])
+    with fake.install([fake.reply(junk), fake.reply(junk)]) as script:
+        out = list(provider.induce([_chunk()]))
+    assert out[0].induced_labels is None
+    assert provider.induction_fallbacks == 1
+    assert provider.induction_empty_after_sanitization == 1  # the loud signal
+    assert len(script.calls) == 2  # first attempt + one bounded recovery re-prompt
+
+
 # ---------------------------------------------------------------------------
 # Empty result → fall back.
 # ---------------------------------------------------------------------------
@@ -411,13 +445,13 @@ def test_below_min_labels_triggers_recovery() -> None:
     provider = _provider(min_labels=3)
     with fake.install(
         [
-            fake.reply(_good_reply(entity=["a"], relation=[], pii=[])),  # only 1 label < 3
-            fake.reply(_good_reply(entity=["a", "b"], relation=["r"], pii=[])),  # 3 labels
+            fake.reply(_good_reply(entity=["actor"], relation=[], pii=[])),  # only 1 label < 3
+            fake.reply(_good_reply(entity=["actor", "venue"], relation=["hosts"], pii=[])),  # 3
         ]
     ) as script:
         out = list(provider.induce([_chunk()]))
     assert out[0].induced_labels is not None
-    assert out[0].induced_labels.entity_types == ["a", "b"]
+    assert out[0].induced_labels.entity_types == ["actor", "venue"]
     assert provider.induction_fallbacks == 0
     assert len(script.calls) == 2
 
@@ -802,7 +836,9 @@ def test_label_ceiling_is_configurable_and_absolutely_bounded() -> None:
     assert schema.entity_types == many[:5]
     # ... and clamped UP at the hard anti-bloat ceiling: a degenerate 400-label reply is bounded
     # even when the operator asked for an unbounded one.
-    degenerate = [f"t{i:03d}" for i in range(400)]
+    # "label 000".."label 399": digit ratio 3/8 stays under the value-shape guard's 0.4, so all
+    # 400 survive sanitization and only the hard ceiling bounds them.
+    degenerate = [f"label {i:03d}" for i in range(400)]
     with fake.install([fake.reply(_good_reply(entity=degenerate, relation=[], pii=[]))]):
         out = list(_provider(granularity="chunk", label_ceiling=10_000).induce([_chunk()]))
     schema = out[0].induced_labels
@@ -867,15 +903,16 @@ def test_dedup_can_be_turned_off_for_a_nondeterministic_endpoint() -> None:
     provider = _provider(granularity="chunk", dedup=False)
     with fake.install(
         [
-            fake.reply(_good_reply(entity=["a"], relation=[], pii=[])),
-            fake.reply(_good_reply(entity=["b"], relation=[], pii=[])),
-            fake.reply(_good_reply(entity=["c"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["alpha"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["beta"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["gamma"], relation=[], pii=[])),
         ]
     ) as script:
         out = list(provider.induce(chunks))
     assert len(script.calls) == 3
     assert provider.induction_cache_hits == 0
-    assert [c.induced_labels.entity_types for c in out] == [["a"], ["b"], ["c"]]  # type: ignore[union-attr]
+    labels = [c.induced_labels.entity_types for c in out]  # type: ignore[union-attr]
+    assert labels == [["alpha"], ["beta"], ["gamma"]]
 
 
 def test_dedup_is_deterministic_across_two_runs() -> None:
@@ -909,15 +946,15 @@ def test_call_budget_bounds_the_run_loudly_and_deterministically() -> None:
     provider = _provider(granularity="chunk", max_induction_calls=2)
     with fake.install(
         [
-            fake.reply(_good_reply(entity=["a"], relation=[], pii=[])),
-            fake.reply(_good_reply(entity=["b"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["alpha"], relation=[], pii=[])),
+            fake.reply(_good_reply(entity=["beta"], relation=[], pii=[])),
         ]
     ) as script:
         out = list(provider.induce(chunks))
     assert len(script.calls) == 2  # the budget really bound the network, not just the report
     assert [c.induced_labels for c in out][2:] == [None, None, None]  # fail-open, never a crash
-    assert out[0].induced_labels.entity_types == ["a"]  # type: ignore[union-attr]
-    assert out[1].induced_labels.entity_types == ["b"]  # type: ignore[union-attr]
+    assert out[0].induced_labels.entity_types == ["alpha"]  # type: ignore[union-attr]
+    assert out[1].induced_labels.entity_types == ["beta"]  # type: ignore[union-attr]
     assert provider.induction_budget_exhausted is True
     assert provider.induction_fallbacks == 3
     assert provider.induction_documents == 5

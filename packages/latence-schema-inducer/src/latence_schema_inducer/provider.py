@@ -54,7 +54,11 @@ The LLM is UNTRUSTED output — every safety net is mandatory (the run NEVER cra
      ``label_ceiling`` — a SAFETY ceiling (64 on the per-chunk path), not a salience cap (dropped
      items logged).
      Unicode/German label text (e.g. ``Rechnungsnummer``) is preserved — only control/format chars
-     are stripped, so a valid non-ASCII schema is never dropped to empty.
+     are stripped, so a valid non-ASCII schema is never dropped to empty. The induced path ALSO
+     runs the S3 **value-shape guard** (``reject_value_shapes=True``): value-shaped candidates the
+     live ohr_bench run showed leaking in as type names ("1q22", "10.3", "1024 fulton street",
+     "october 27, 1986") are rejected + tallied — instances never become types. Config-authored
+     label sets are NOT shape-guarded (the guard is opt-in, and only this path opts in).
   6. **Empty-induction recovery (the robustness net)**: a reply that parses + validates but
      sanitizes to an EMPTY / below-``min_labels`` label set is NOT silently accepted — that quiet
      degrade to the bare config floor is the quality cliff induce exists to prevent. The Provider
@@ -980,9 +984,21 @@ class LLMLabelInducer:
         (``max_labels``) — see the class docstring. On the per-chunk path they differ deliberately:
         the salience cap belongs to the corpus merge, and applying it to one chunk's own reply is
         the silent recall loss T1 removes.
+
+        This is the ONE place the S3 value-shape guard runs (``reject_value_shapes=True``): the
+        labels here are UNTRUSTED induced output, where the live ohr_bench run showed value-shaped
+        strings ("1q22", "10.3", "1024 fulton street", "october 27, 1986") leaking in as TYPE
+        names. Hand-authored config label sets (the lexicon candidate space) call the sanitizer
+        WITHOUT the flag — an operator's deliberate type name is never shape-rejected. Shape
+        rejections ride the same auditable drop accounting as the ceiling (logged below, never a
+        silent path).
         """
         results = {
-            slot: sanitize_labels(validated.get(slot, []), max_labels=self._label_ceiling)
+            slot: sanitize_labels(
+                validated.get(slot, []),
+                max_labels=self._label_ceiling,
+                reject_value_shapes=True,
+            )
             for slot in _SLOTS
         }
         total_dropped = sum(r.dropped_for_count for r in results.values())
@@ -991,6 +1007,15 @@ class LLMLabelInducer:
                 "schema_induction capped %d label(s) at the per-type safety ceiling (%d)",
                 total_dropped,
                 self._label_ceiling,
+            )
+        shape_dropped = sum(r.dropped_for_shape for r in results.values())
+        if shape_dropped:
+            # The S3 value-shape guard's audit line — the same no-silent-drop channel the ceiling
+            # uses. Counts only, never label content (the no-PII log discipline).
+            _LOG.info(
+                "schema_induction rejected %d value-shaped label(s) "
+                "(numeric/fiscal/date/address/artifact instance shapes, S3 guard)",
+                shape_dropped,
             )
         entity = results["entity_types"].labels
         relation = results["relation_types"].labels
