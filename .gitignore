@@ -60,3 +60,4 @@ benchmark/sota-corpus/*/markdown/
 benchmark/sota-campaign/stages/s2-ocr/spot-check/
 benchmark/sota-campaign/stages/s2-ocr/pod-metrics.json
 benchmark/sota-campaign/stages/s2-ocr/failures.jsonl
+benchmark/sota-corpus/s2-output/
