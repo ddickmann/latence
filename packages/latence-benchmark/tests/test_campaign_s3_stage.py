@@ -554,6 +554,24 @@ class TestStageRun:
         wider = make_ctx(tmp_path, ("ohr_bench", "vidoseek"), repo)
         assert s3_done_probe(wider) is False
 
+    def test_status_probe_counts_store_log_and_cpu(self) -> None:
+        """The three observables, and no quoted whitespace (production quoting bug).
+
+        Store bytes alone false-tripped the stall budget during the network-bound induction
+        phase; store+log alone false-tripped it again during the compute-bound consolidation
+        phase (UDA, 2.6M mentions in memory, nothing logged or written for an hour). CPU
+        seconds close that gap. The probe also has to SURVIVE: it rides inside a
+        single-quoted ``sh -c '...'``, so any nested single quote truncates it.
+        """
+        cmd = pipeline_stage.status_cmd("uda")
+        assert "du -sk /workspace/latence-sota/s3/uda " in cmd  # store bytes
+        assert "du -sk /workspace/latence-sota/s3/logs/uda.log " in cmd  # log bytes
+        assert "ps -o times= -p" in cmd  # CPU seconds (integer form, not HH:MM:SS)
+        assert "${b:-0} + ${lb:-0} + ${c:-0}" in cmd  # all three summed
+        # Quote safety: the body between the outer single quotes must contain none itself.
+        body = cmd[cmd.index("'") + 1 : cmd.rindex("'")]
+        assert "'" not in body
+
     def test_progress_probe_counts_pulled_reports(self, tmp_path: Path) -> None:
         repo = make_repo(tmp_path, datasets=("ohr_bench",))
         ctx = make_ctx(tmp_path, ("ohr_bench",), repo)

@@ -104,12 +104,22 @@ def status_cmd(dataset: str) -> str:
 
     ``done`` = the run's quality-report.json exists (the byte-backed completion signal —
     the runner writes it last); ``running`` = the pid-file process is alive; ``absent`` =
-    neither, i.e. nothing launched yet OR the process died before finishing. The byte
-    counter (``du -sk`` over the dataset store PLUS the run log) is the monotone progress
-    observable the stall budget watches. The log MUST be part of it: a network-bound phase
-    (LLM schema induction — UDA's 242k calls run for many hours) streams progress into the
-    log while writing NOTHING to the store, and a store-only probe false-trips the stall
-    budget mid-induction (observed live on ohr_bench, 2026-08-04).
+    neither, i.e. nothing launched yet OR the process died before finishing.
+
+    The progress counter sums THREE observables, because no single one covers every stage
+    shape this pipeline runs (both gaps were found the hard way, in production, 2026-08-04/05):
+
+    * **store kbytes** — checkpoints + WAL; the natural signal for streaming GPU stages.
+    * **run-log kbytes** — a network-bound phase (LLM schema induction; UDA's 230k calls ran
+      seven hours) streams progress into the log while writing NOTHING to the store.
+    * **process CPU-seconds** — a compute-bound phase (type consolidation and disambiguation
+      over UDA's 2.6M mentions) holds its records in memory, logs nothing, and writes its
+      checkpoint only on completion: store AND log are both flat for hours while one core
+      runs at 100%. CPU time is the only monotone evidence of work in that window.
+
+    A stall is therefore "the process is alive but has consumed no CPU and written no bytes
+    for the whole budget" — which is what a genuinely wedged run looks like, and what a
+    slow-but-working one never does.
     """
     return (
         f"sh -c 'if [ -f {_remote_run_dir(dataset)}/quality-report.json ]; then p=done; "
@@ -117,7 +127,13 @@ def status_cmd(dataset: str) -> str:
         f"then p=running; else p=absent; fi; "
         f"b=$(du -sk {_remote_store(dataset)} 2>/dev/null | cut -f1); "
         f"lb=$(du -sk {_remote_log(dataset)} 2>/dev/null | cut -f1); "
-        f'echo "$p $(( ${{b:-0}} + ${{lb:-0}} ))"\''
+        # ``times`` (not ``time``) prints cumulative CPU SECONDS as a bare integer — no
+        # HH:MM:SS parsing, so the probe stays a single quote-safe shell line.
+        # No quoted whitespace anywhere in here: the whole probe rides inside a single-quoted
+        # ``sh -c '...'``, so a nested ``tr -d ' '`` would terminate that quote (it did).
+        # ``$(( ))`` strips the leading padding ps emits, so no trimming is needed.
+        f"c=$(ps -o times= -p \"$(cat {_remote_pid(dataset)} 2>/dev/null)\" 2>/dev/null); "
+        f'echo "$p $(( ${{b:-0}} + ${{lb:-0}} + ${{c:-0}} ))"\''
     )
 
 
