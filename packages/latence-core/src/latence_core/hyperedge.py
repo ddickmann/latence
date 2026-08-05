@@ -42,6 +42,28 @@ Determinism: every collection is sorted before use; the output is sorted by
 ``hyperedge_id``; the id is content-addressed over the corpus id + entity set + relation
 signature (NOT span position), so the same fact always hashes to the same id and a re-run
 over the same corpus is byte-identical (the S9 bar, extended).
+
+**Memory shape.** A Hyperedge is CHUNK-LOCAL: its sentence window, its member mentions and
+its relations all live inside one chunk, and only the mention→entity / mention→link-confidence
+maps (and the dedup table, which *is* the output) are genuinely corpus-wide. The builder is
+structured around that fact — the S3 UDA run (220 129 chunks / 2 603 887 mentions /
+586 415 disambiguation records) was OOM-killed inside a 29 GB container because the earlier
+shape held the whole run as **pydantic records**: a measured 3.5 kB per
+:class:`~latence_core.contracts.EntityMention` (each with its own ``Provenance`` +
+``Classification`` submodel) is 8.5 GB of mentions alone, before the chunks. So:
+
+* every input record is projected ON ARRIVAL to the handful of fields this module actually
+  reads (:class:`_MentionMeta`, :class:`_RelationMeta`, :class:`_ChunkView`) — ~100 B instead
+  of ~3.5 kB per mention — and the pydantic record is dropped;
+* the whole-run mention index exists only long enough to group mentions per chunk, resolve
+  the cross-chunk maps, and drop the relations whose arguments straddle two chunks;
+* chunk-scoped state (the chunk's text, its mention/relation group, its sentence split,
+  offset index and spans) is POPPED as that chunk is processed, so it is released the moment
+  its Hyperedges are emitted rather than being retained for the whole run.
+
+What deliberately stays whole-run is the ``built`` dedup table: dedup is corpus-wide *and*
+gamma-driven (a later chunk can promote itself to primary), and the caller needs the full set
+before it can stamp node descriptions — that table is the output, not held input.
 """
 
 from __future__ import annotations
@@ -70,7 +92,10 @@ if TYPE_CHECKING:
     from latence_core.contracts import (
         CanonicalEntity,
         ChunkRecord,
+        Classification,
         EntityMention,
+        OffsetMap,
+        PIISpan,
         RelationMention,
     )
 
@@ -104,10 +129,206 @@ class HyperedgeConfig:
 
 
 @dataclass
+class _MentionMeta:
+    """The ONLY fields this module reads off an :class:`EntityMention`.
+
+    Projected on arrival so the run's mention set costs ~100 B per mention instead of the
+    measured ~3.5 kB of a pydantic ``EntityMention`` (which drags its own ``Provenance`` and
+    ``Classification`` submodels behind it). ``char_start``/``char_end`` are the mention's
+    DOCUMENT offsets with the contract's ``or 0`` normalisation already applied — exactly what
+    :meth:`HyperedgeBuilder._spans_for_chunk` used to compute per call.
+
+    ``__slots__`` is spelled out (rather than ``@dataclass(slots=True)``) so ``__weakref__``
+    survives: the memory-shape regression test counts live instances of this class.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "char_end",
+        "char_start",
+        "chunk_record_id",
+        "confidence",
+        "document_record_id",
+        "record_id",
+    )
+
+    record_id: str
+    chunk_record_id: str
+    document_record_id: str
+    confidence: float
+    char_start: int
+    char_end: int
+
+
+@dataclass
+class _RelationMeta:
+    """The ONLY fields read off a :class:`RelationMention` (rationale: :class:`_MentionMeta`)."""
+
+    __slots__ = (
+        "__weakref__",
+        "confidence",
+        "head_mention_id",
+        "label",
+        "record_id",
+        "tail_mention_id",
+    )
+
+    record_id: str
+    head_mention_id: str
+    tail_mention_id: str
+    label: str
+    confidence: float
+
+
+@dataclass
+class _ChunkView:
+    """The ONLY fields this module reads off a :class:`ChunkRecord`.
+
+    Dropping the rest matters twice over: the pydantic record's own overhead (measured ~3.4 kB
+    beyond the text itself), and ``masked_content`` — a FULL second copy of the chunk text that
+    this module never reads, only tests for presence (``redacted``). ``pii_spans`` keeps only
+    the non-``TAG`` spans, the only ones :meth:`HyperedgeBuilder._redacted_text` can act on
+    (a ``TAG`` span leaves text intact by definition, so an all-``TAG`` chunk returns the raw
+    slice either way).
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "classification",
+        "content",
+        "offset_map",
+        "pii_spans",
+        "provenance",
+        "record_id",
+        "redacted",
+    )
+
+    record_id: str
+    content: str
+    offset_map: OffsetMap | None
+    pii_spans: tuple[PIISpan, ...]
+    redacted: bool
+    provenance: Provenance
+    classification: Classification
+
+
+def _mention_meta(mention: EntityMention) -> _MentionMeta:
+    return _MentionMeta(
+        record_id=mention.record_id,
+        chunk_record_id=mention.chunk_record_id,
+        document_record_id=mention.document_record_id,
+        confidence=mention.confidence,
+        char_start=mention.provenance.char_start or 0,
+        char_end=mention.provenance.char_end or 0,
+    )
+
+
+def _relation_meta(relation: RelationMention) -> _RelationMeta:
+    return _RelationMeta(
+        record_id=relation.record_id,
+        head_mention_id=relation.head_mention_id,
+        tail_mention_id=relation.tail_mention_id,
+        label=relation.label,
+        confidence=relation.confidence,
+    )
+
+
+def _chunk_view(chunk: ChunkRecord) -> _ChunkView:
+    return _ChunkView(
+        record_id=chunk.record_id,
+        content=chunk.content,
+        offset_map=chunk.offset_map,
+        pii_spans=tuple(s for s in chunk.pii_spans if s.action is not RedactionAction.TAG),
+        redacted=chunk.masked_content is not None,
+        provenance=chunk.provenance,
+        classification=chunk.classification,
+    )
+
+
+def _project_chunks(chunks: Iterable[ChunkRecord]) -> dict[str, _ChunkView]:
+    """Stream the chunk records into deduped, compact per-chunk views.
+
+    The Runner gathers document-level records from the WHOLE pipeline, and several Stages
+    legitimately RE-EMIT the same record: chunk-level Redaction yields its input chunks with
+    masked_content/pii_spans added (ADR-0042), and an Export sink passes records through
+    verbatim — so the same record_id can arrive 2-3 times. Without dedup that inflated
+    ``support`` by the copy count AND risked the PRE-redaction copy becoming the primary
+    tau_text on a gamma tie — the ADR-0057 PII-bypass class, found live by the enterprise-gold
+    corpus run (ticket 21). Dedup by record_id, preferring the MOST-PROCESSED chunk variant: a
+    copy carrying redaction output (masked_content/pii_spans) wins over one without; otherwise
+    the last copy in stream order (the furthest-downstream Stage's view).
+
+    Each record is projected and dropped inside this function, so no ``ChunkRecord`` outlives
+    the call — including the loop variable, which dies with the frame.
+    """
+    views: dict[str, _ChunkView] = {}
+    for chunk in chunks:
+        if (
+            chunk.record_id not in views
+            or chunk.masked_content is not None
+            or chunk.pii_spans
+        ):
+            views[chunk.record_id] = _chunk_view(chunk)
+    return views
+
+
+def _group_mentions(by_id: dict[str, _MentionMeta]) -> dict[str, list[_MentionMeta]]:
+    """Per-chunk mention groups, each in record_id order (the whole-run determinism anchor)."""
+    groups: dict[str, list[_MentionMeta]] = defaultdict(list)
+    for meta in sorted(by_id.values(), key=lambda m: m.record_id):
+        groups[meta.chunk_record_id].append(meta)
+    return groups
+
+
+def _group_relations(
+    rel_by_id: dict[str, _RelationMeta], by_id: dict[str, _MentionMeta]
+) -> dict[str, list[_RelationMeta]]:
+    """Per-chunk relation groups, in record_id order; cross-chunk relations are dropped here.
+
+    A relation spanning two chunks has no single-chunk sentence window; it is a binary EDGE
+    already — the m-ary unit is within-window by definition (spec 1.2). Dropping those at
+    grouping time is also what makes the per-chunk relation index sufficient later: every
+    relation a span can ever name is one of its own chunk's.
+    """
+    groups: dict[str, list[_RelationMeta]] = defaultdict(list)
+    for rel in sorted(rel_by_id.values(), key=lambda r: r.record_id):
+        head = by_id.get(rel.head_mention_id)
+        tail = by_id.get(rel.tail_mention_id)
+        if head is not None and tail is not None and head.chunk_record_id == tail.chunk_record_id:
+            groups[head.chunk_record_id].append(rel)
+    return groups
+
+
+def _entity_maps(
+    entities: Iterable[CanonicalEntity], by_id: dict[str, _MentionMeta]
+) -> tuple[dict[str, str], dict[str, float]]:
+    """The two genuinely CROSS-CHUNK maps: mention → canonical entity, mention → link confidence.
+
+    Restricted to mentions the run actually carries, which is not a narrowing: every read of
+    either map is guarded by membership in the mention index (``_emit`` filters ``member_ids``
+    through it; ``_span_relations`` only ever sees relations whose arguments passed the same
+    filter). Keying on the *resident* ``meta.record_id`` rather than the id string that came off
+    the CanonicalEntity keeps one string per mention instead of two.
+    """
+    entity_of: dict[str, str] = {}
+    link_conf: dict[str, float] = {}
+    for entity in sorted(entities, key=lambda e: e.record_id):
+        for mid in entity.member_mention_ids:
+            meta = by_id.get(mid)
+            if meta is not None:
+                entity_of.setdefault(meta.record_id, entity.record_id)
+        for mid, score in entity.member_link_confidences.items():
+            meta = by_id.get(mid)
+            if meta is not None:
+                link_conf.setdefault(meta.record_id, score)
+    return entity_of, link_conf
+
+
+@dataclass
 class _Span:
     """A Hyperedge under construction: a sentence window inside one chunk."""
 
-    chunk: ChunkRecord
+    chunk: _ChunkView
     start: int  # chunk-content-local, half-open
     end: int
     mention_ids: set[str] = field(default_factory=set)
@@ -150,75 +371,60 @@ class HyperedgeBuilder:
         ``node_id_for`` maps a CanonicalEntity record_id to its GraphNode node_id (the
         assembler's :meth:`~latence_core.graph.GraphBuilder.node_id_for`), so Hyperedges
         reference the same deterministic node ids the NODE stream carries.
+
+        Each of ``chunks``/``mentions``/``relations`` is consumed EXACTLY ONCE (the Runner
+        hands out one-shot generators reading checkpoints) and projected on arrival; see the
+        module docstring for the memory shape and the S3 OOM this is built against.
         """
-        # The Runner gathers document-level records from the WHOLE pipeline, and several
-        # Stages legitimately RE-EMIT the same record: chunk-level Redaction yields its
-        # input chunks with masked_content/pii_spans added (ADR-0042), and an Export sink
-        # passes records through verbatim — so the same record_id can arrive 2-3 times.
-        # Without dedup that inflated `support` by the copy count AND risked the
-        # PRE-redaction copy becoming the primary tau_text on a gamma tie — the ADR-0057
-        # PII-bypass class, found live by the enterprise-gold corpus run (ticket 21).
-        # Dedup by record_id, preferring the MOST-PROCESSED chunk variant: a copy carrying
-        # redaction output (masked_content/pii_spans) wins over one without; otherwise the
-        # last copy in stream order (the furthest-downstream Stage's view).
-        chunks_by_id: dict[str, ChunkRecord] = {}
-        for c in chunks:
-            held = chunks_by_id.get(c.record_id)
-            if held is None or c.masked_content is not None or c.pii_spans:
-                chunks_by_id[c.record_id] = c
-        chunk_list = sorted(chunks_by_id.values(), key=lambda c: c.record_id)
-        mention_list = sorted(
-            {m.record_id: m for m in mentions}.values(), key=lambda m: m.record_id
-        )
-        relation_list = sorted(
-            {r.record_id: r for r in relations}.values(), key=lambda r: r.record_id
-        )
-        self._relation_index = {r.record_id: r for r in relation_list}
+        # Project each stream on arrival, in the order the Runner supplies them. Each
+        # comprehension/helper owns its loop variable, so no pydantic input record survives
+        # the prologue. Mention/relation dedup is by record_id, LAST copy wins.
+        chunks_by_id = _project_chunks(chunks)
+        by_id: dict[str, _MentionMeta] = {m.record_id: _mention_meta(m) for m in mentions}
+        rel_by_id: dict[str, _RelationMeta] = {
+            r.record_id: _relation_meta(r) for r in relations
+        }
 
-        # mention record_id -> (canonical entity record_id, link confidence | None)
-        entity_of: dict[str, str] = {}
-        link_conf: dict[str, float] = {}
-        for entity in sorted(entities, key=lambda e: e.record_id):
-            for mid in entity.member_mention_ids:
-                entity_of.setdefault(mid, entity.record_id)
-            for mid, score in entity.member_link_confidences.items():
-                link_conf.setdefault(mid, score)
-
-        by_id = {m.record_id: m for m in mention_list}
-        mentions_of_chunk: dict[str, list[EntityMention]] = defaultdict(list)
-        for m in mention_list:
-            mentions_of_chunk[m.chunk_record_id].append(m)
-        relations_of_chunk: dict[str, list[RelationMention]] = defaultdict(list)
-        for r in relation_list:
-            head = by_id.get(r.head_mention_id)
-            tail = by_id.get(r.tail_mention_id)
-            # A relation spanning two chunks has no single-chunk sentence window; it is a
-            # binary EDGE already — the m-ary unit is within-window by definition (spec 1.2).
-            if head is not None and tail is not None and (
-                head.chunk_record_id == tail.chunk_record_id
-            ):
-                relations_of_chunk[head.chunk_record_id].append(r)
+        # Fold the whole-run indexes down to what has to outlive a single chunk: the two
+        # cross-chunk maps, plus the per-chunk groups (each in record_id order) that the loop
+        # below pops one at a time. `by_id`/`rel_by_id` themselves are then dead weight — the
+        # groups hold the same metas, and every later lookup is chunk-local.
+        entity_of, link_conf = _entity_maps(entities, by_id)
+        relations_of_chunk = _group_relations(rel_by_id, by_id)
+        mentions_of_chunk = _group_mentions(by_id)
+        del by_id, rel_by_id
 
         built: dict[tuple[tuple[str, ...], tuple[tuple[str, str, str], ...]], GraphHyperedge]
         built = {}
-        for chunk in chunk_list:
-            for span in self._spans_for_chunk(
-                chunk,
-                mentions_of_chunk.get(chunk.record_id, []),
-                relations_of_chunk.get(chunk.record_id, []),
-                by_id,
-            ):
-                self._emit(span, by_id, entity_of, link_conf, node_id_for, built)
+        # Chunk order is record_id order (NOT stream order): corpus-wide dedup keeps the
+        # first-seen instance primary until a strictly higher gamma displaces it, and appends
+        # every other source to `merged_sources`, so the traversal order is part of the output.
+        for chunk_id in sorted(chunks_by_id):
+            chunk = chunks_by_id.pop(chunk_id)
+            chunk_mentions = mentions_of_chunk.pop(chunk_id, [])
+            chunk_relations = relations_of_chunk.pop(chunk_id, [])
+            # Chunk-local indexes: a span can only ever name mentions and relations of its own
+            # chunk (`_group_relations` dropped the cross-chunk ones), so these are complete.
+            chunk_by_id = {m.record_id: m for m in chunk_mentions}
+            self._relation_index = {r.record_id: r for r in chunk_relations}
+            spans = self._spans_for_chunk(
+                chunk, chunk_mentions, chunk_relations, chunk_by_id
+            )
+            for span in spans:
+                self._emit(span, chunk_by_id, entity_of, link_conf, node_id_for, built)
+            # Everything named above is rebound on the next iteration; nothing else holds the
+            # chunk's text, metas, sentence split or spans, so the chunk's footprint is
+            # released here rather than accumulating over the run.
         return sorted(built.values(), key=lambda h: h.hyperedge_id)
 
     # -- segmentation (spec 1.2) -------------------------------------------
 
     def _spans_for_chunk(
         self,
-        chunk: ChunkRecord,
-        mentions: list[EntityMention],
-        relations: list[RelationMention],
-        by_id: dict[str, EntityMention],
+        chunk: _ChunkView,
+        mentions: list[_MentionMeta],
+        relations: list[_RelationMeta],
+        by_id: dict[str, _MentionMeta],
     ) -> list[_Span]:
         sentences = self._splitter.split(chunk.content)
         if not sentences:
@@ -239,8 +445,8 @@ class HyperedgeBuilder:
         mention_sentence: dict[str, int] = {}
         mention_local: dict[str, tuple[int, int]] = {}
         for m in mentions:
-            m_start = local(m.provenance.char_start or 0)
-            m_end = local(m.provenance.char_end or 0)
+            m_start = local(m.char_start)
+            m_end = local(m.char_end)
             if m_start < 0 or m_start >= len(chunk.content):
                 continue  # unresolvable offset: never guess a sentence for it
             mention_sentence[m.record_id] = sentence_of(m_start)
@@ -313,7 +519,7 @@ class HyperedgeBuilder:
         self,
         spans: list[_Span],
         sentences: list[tuple[int, int]],
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         mention_local: dict[str, tuple[int, int]],
     ) -> list[_Span]:
         """Merge undersized spans into their best neighbour; split oversized ones."""
@@ -354,7 +560,7 @@ class HyperedgeBuilder:
         self,
         span: _Span,
         sentences: list[tuple[int, int]],
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         mention_local: dict[str, tuple[int, int]],
     ) -> list[_Span]:
         text = span.chunk.content[span.start : span.end]
@@ -403,7 +609,7 @@ class HyperedgeBuilder:
         self,
         span: _Span,
         cut_at: int,
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         mention_local: dict[str, tuple[int, int]],
     ) -> int:
         cut = 0
@@ -421,7 +627,7 @@ class HyperedgeBuilder:
         self,
         relation_id: str,
         cut_at: int,
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         mention_local: dict[str, tuple[int, int]],
     ) -> bool:
         """True = left of the cut. A relation follows its head argument."""
@@ -433,7 +639,7 @@ class HyperedgeBuilder:
         return True
 
     def _relation_arg_ids(
-        self, relation_id: str, by_id: dict[str, EntityMention]
+        self, relation_id: str, by_id: dict[str, _MentionMeta]
     ) -> list[str]:
         rel = self._relation_index.get(relation_id)
         return [rel.head_mention_id, rel.tail_mention_id] if rel is not None else []
@@ -443,7 +649,7 @@ class HyperedgeBuilder:
     def _emit(
         self,
         span: _Span,
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         entity_of: dict[str, str],
         link_conf: dict[str, float],
         node_id_for: Callable[[str], str],
@@ -482,7 +688,7 @@ class HyperedgeBuilder:
         node_ids: list[str],
         relations: list[HyperedgeRelation],
         member_ids: list[str],
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         link_conf: dict[str, float],
         built: dict[
             tuple[tuple[str, ...], tuple[tuple[str, str, str], ...]], GraphHyperedge
@@ -584,12 +790,12 @@ class HyperedgeBuilder:
 
     # -- helpers -----------------------------------------------------------
 
-    _relation_index: dict[str, RelationMention]
+    _relation_index: dict[str, _RelationMeta]
 
     def _span_relations(
         self,
         span: _Span,
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         entity_of: dict[str, str],
         node_id_for: Callable[[str], str],
     ) -> list[HyperedgeRelation]:
@@ -684,7 +890,7 @@ class HyperedgeBuilder:
         self,
         member_ids: list[str],
         relations: list[HyperedgeRelation],
-        by_id: dict[str, EntityMention],
+        by_id: dict[str, _MentionMeta],
         link_conf: dict[str, float],
         *,
         weak: bool,
@@ -710,22 +916,22 @@ class HyperedgeBuilder:
         return max(0.0, min(1.0, round(gamma, 6)))
 
     @staticmethod
-    def _redacted_text(chunk: ChunkRecord, start: int, end: int) -> str:
+    def _redacted_text(chunk: _ChunkView, start: int, end: int) -> str:
         """The span text in the corpus redaction variant (ADR-0057, enforced at the writer).
 
         Applies every non-``TAG`` :class:`PIISpan` overlapping the span to the raw content
         slice, substituting the span's placeholder (or a typed mask when the placeholder is
-        empty). When no redaction ran (``masked_content is None``) the corpus itself is raw,
-        so the raw slice IS the corpus variant.
+        empty). When no redaction ran (``redacted`` is False) the corpus itself is raw, so the
+        raw slice IS the corpus variant. ``TAG`` spans were already dropped by
+        :func:`_chunk_view`, which is why they are not re-filtered here.
         """
         raw = chunk.content[start:end]
-        if chunk.masked_content is None or not chunk.pii_spans:
+        if not chunk.redacted or not chunk.pii_spans:
             return raw
         overlapping = sorted(
             (
                 s for s in chunk.pii_spans
-                if s.action is not RedactionAction.TAG
-                and s.char_start < end and start < s.char_end
+                if s.char_start < end and start < s.char_end
             ),
             key=lambda s: (s.char_start, s.char_end),
         )
@@ -744,14 +950,14 @@ class HyperedgeBuilder:
         return "".join(out)
 
     @staticmethod
-    def _span_provenance(chunk: ChunkRecord, doc_start: int, doc_end: int) -> Provenance:
+    def _span_provenance(chunk: _ChunkView, doc_start: int, doc_end: int) -> Provenance:
         return chunk.provenance.model_copy(
             update={"char_start": doc_start, "char_end": doc_end}
         )
 
     @staticmethod
     def _doc_id(
-        chunk: ChunkRecord, by_id: dict[str, EntityMention], member_ids: list[str]
+        chunk: _ChunkView, by_id: dict[str, _MentionMeta], member_ids: list[str]
     ) -> str:
         for mid in member_ids:
             m = by_id.get(mid)
