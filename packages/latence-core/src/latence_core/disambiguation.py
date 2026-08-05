@@ -353,8 +353,25 @@ class EntityResolver:
 
         audits: list[MergeAudit] = []
         # Compare every ordered pair once (i < j), source=j folded into target=i.
-        for i, target in enumerate(surfaces):
-            for source in surfaces[i + 1 :]:
+        #
+        # PAIR-SPACE RESTRICTION under ``exact_only`` (production S3, UDA, 2026-08-05): the
+        # exact rung is a NO-OP on a distinct pair by construction — equal normalized forms
+        # are the SAME ``by_norm`` key, so the hash grouping above already resolved them —
+        # which leaves ALIAS as the only rung that can fire. A surface named by no alias can
+        # therefore never produce a decision, at any position, against any partner. Scanning
+        # it is provably pure waste: UDA's ~1M distinct surfaces are ~5e11 pair evaluations
+        # that each return None (measured: 5.8h of 100%-CPU producing nothing, ETA days).
+        # Restricting the scan to alias-named surfaces keeps the enumeration ORDER (the same
+        # sorted-``surfaces`` i<j walk, just filtered), so the audits list, the Union-Find
+        # merges and the resulting clusters are BYTE-IDENTICAL — this is a dead-iteration
+        # elimination, not a behaviour change. The fuzzy cascade (CascadeDisambiguator) is
+        # untouched: its rungs CAN fire on any pair, so it still scans the full space.
+        scan = surfaces
+        if self._exact_only:
+            named = {*self._aliases, *self._aliases.values()}
+            scan = [s for s in surfaces if s in named]
+        for i, target in enumerate(scan):
+            for source in scan[i + 1 :]:
                 decision = self._propose(
                     source, target, display, labels_by_norm, docs_by_norm
                 )
