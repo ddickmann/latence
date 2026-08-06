@@ -61,3 +61,11 @@ benchmark/sota-campaign/stages/s2-ocr/spot-check/
 benchmark/sota-campaign/stages/s2-ocr/pod-metrics.json
 benchmark/sota-campaign/stages/s2-ocr/failures.jsonl
 benchmark/sota-corpus/s2-output/
+benchmark/sota-corpus/s3-exports/
+# S3 gate artifacts derived from research-only / share-alike datasets (OHR-Bench,
+# ViDoSeek, UDA, 2Wiki, MultiHop-RAG): the Quality Reports carry induced type names
+# lifted from the source text and the chunk samples carry raw passages. Aggregate
+# metrics (stages/s3-pipeline/metrics.json) and the pipeline configs ARE committed.
+benchmark/sota-campaign/stages/s3-pipeline/reports/
+benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/samples/
+benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/induction-sample.jsonl

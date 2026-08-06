@@ -125,27 +125,31 @@ class KnowledgeGraphExport:
         self._hyperedge_kv = bool(config.get("hyperedge_kv", True))
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
-        record_list = list(records)
-        nodes: list[GraphNode] = [
-            r.node
-            for r in record_list
-            if isinstance(r, GraphRecord) and r.scope is GraphScope.NODE and r.node is not None
-        ]
-        edges: list[GraphEdge] = [
-            r.edge
-            for r in record_list
-            if isinstance(r, GraphRecord) and r.scope is GraphScope.EDGE and r.edge is not None
-        ]
+        # ONE pass, wrappers dropped as we go (production S3, UDA, 2026-08-06): the previous
+        # form did ``list(records)`` and then three filtering passes over it, so every
+        # ``GraphRecord`` envelope stayed alive alongside the inner record it carries for the
+        # whole export. At UDA scale that is 1 263 672 envelopes on top of the 516 512 nodes /
+        # ~90 k edges / hyperedges actually needed — the envelopes alone OOM-killed the run
+        # inside a 29 GB container. Partitioning in a single pass keeps ONLY the inner records
+        # (the envelope becomes garbage immediately), and consuming ``records`` exactly once is
+        # what lets the Runner hand this Stage a lazy stream instead of a gathered corpus list
+        # (:data:`~latence_core.runner._STREAMED_INPUT_KINDS`). Output is unchanged: the three
+        # lists hold the same objects, in the same input order, as the three comprehensions did.
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
         # ADR-0057: the OPTIONAL Hyperedge stream. Present only when Graph Assembly was
         # configured for hyperedges; an unconfigured stack collects an empty list and the
         # export output — files, names, bytes — is identical to today.
-        hyperedges: list[GraphHyperedge] = [
-            r.hyperedge
-            for r in record_list
-            if isinstance(r, GraphRecord)
-            and r.scope is GraphScope.HYPEREDGE
-            and r.hyperedge is not None
-        ]
+        hyperedges: list[GraphHyperedge] = []
+        for r in records:
+            if not isinstance(r, GraphRecord):
+                continue
+            if r.scope is GraphScope.NODE and r.node is not None:
+                nodes.append(r.node)
+            elif r.scope is GraphScope.EDGE and r.edge is not None:
+                edges.append(r.edge)
+            elif r.scope is GraphScope.HYPEREDGE and r.hyperedge is not None:
+                hyperedges.append(r.hyperedge)
         base = out_dir.rstrip("/")
         stem = self._basename
         # Parquet is written through storage.open (a raw handle that does not create parent

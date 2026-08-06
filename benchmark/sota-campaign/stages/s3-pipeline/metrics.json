@@ -1,0 +1,72 @@
+{
+  "stage": "s3-pipeline",
+  "completed": "2026-08-06",
+  "spec": {
+    "chunking": "chunk.markdown 640/80/8",
+    "extraction": "fused_entity_relation.gliner2 (fastino/gliner2-multi-v1) @ 0.5",
+    "induction": "label_inducer.llm per-chunk, deepseek/deepseek-v4-flash-0731 via OpenRouter, reasoning disabled",
+    "redaction": "redaction.gliner2, guardrails ON, extract_on unmasked",
+    "graph": "graph.canonical + weak_hyperedges + graph_features.degree",
+    "enrichment": "context.kg_header",
+    "exports": "knowledge_graph (hyperedge_kv) + jsonl_parquet (granite-311m embeddings, bm25, context_columns)"
+  },
+  "datasets": {
+    "ohr_bench": {
+      "documents": 1261, "chunks": 13909, "mentions": 154545, "relations": 4414,
+      "entities": 76057, "graph_nodes": 76057, "graph_edges": 4411,
+      "hyperedges": 53109, "avg_arity": 2.55, "pii_findings": 39287,
+      "chunks_enriched": 12026, "runtime_hours": 1.29, "induced": true
+    },
+    "vidoseek": {
+      "documents": 292, "chunks": 2434, "mentions": 36289, "relations": 816,
+      "entities": 22974, "graph_nodes": 22974, "graph_edges": 816,
+      "hyperedges": 13345, "avg_arity": 2.47, "pii_findings": 6725,
+      "chunks_enriched": 2299, "runtime_hours": 0.31, "induced": true
+    },
+    "uda": {
+      "documents": 1917, "chunks": 220129, "mentions": 2673837, "relations": null,
+      "entities": 586415, "graph_records": 1263672,
+      "chunks_enriched": 220129, "corpus_rows": 220129, "induced": true,
+      "note": "Final three stages (graph, enrich, exports) were driven by a standalone runner script after four scaling fixes; the pipeline's own quality-report.json was therefore not written. Counts are from the run WAL (authoritative per-stage commits). relations/hyperedge totals are recoverable from graph-edges.parquet and graph-hyperedges.parquet."
+    },
+    "multihop_rag": {
+      "documents": 609, "chunks": 3264, "mentions": 57668, "relations": 2801,
+      "entities": 23258, "graph_nodes": 23258, "graph_edges": 2799,
+      "hyperedges": 18937, "avg_arity": 2.79, "pii_findings": 19194,
+      "chunks_enriched": 3262, "runtime_hours": 0.19, "induced": false
+    },
+    "wiki2multihop": {
+      "documents": 56687, "chunks": 57812, "mentions": 578806, "relations": 90076,
+      "entities": 271275, "graph_nodes": 271275, "graph_edges": 90072,
+      "hyperedges": 137986, "avg_arity": 3.93, "pii_findings": 214666,
+      "chunks_enriched": 56519, "runtime_hours": 1.24, "induced": false
+    },
+    "musique": { "reused_from_m6": true, "export": "benchmark/official-data/musique-full/export" },
+    "hotpotqa": { "reused_from_m6": true, "export": "benchmark/official-data/hotpot-full/export" }
+  },
+  "totals": {
+    "documents_processed": 60766,
+    "chunks": 297548,
+    "mentions": 3501145,
+    "entities": 979979,
+    "hyperedges_excluding_uda": 223377,
+    "pii_findings_excluding_uda": 279872
+  },
+  "induction_cost": {
+    "model": "deepseek/deepseek-v4-flash-0731",
+    "calls": { "ohr_bench": 14989, "vidoseek": 2677, "uda": 230278, "total": 247944 },
+    "measured_usd_per_call": 0.000118,
+    "estimated_actual_usd": 29.26,
+    "budget_cap_usd": 150.0,
+    "note": "Per-call cost measured in a live 10-example A/B against gpt-4.1-mini (which cost $0.00042/call for comparable schema quality). Text-native datasets (multihop_rag, wiki2multihop) use hand-authored schemas and make zero LLM calls."
+  },
+  "scaling_fixes_landed": [
+    "64eac68 symlink markdown push (--copy-links) + zero-doc runs block",
+    "fe04885 stall probe counts run-log bytes (network-bound induction)",
+    "97dc76a stall probe counts CPU seconds (compute-bound stages)",
+    "3b4bad3 exact_only disambiguation skips the provably dead O(N^2) pair loop",
+    "59f8a04 hyperedge builder streams chunk-local state (bounded memory)",
+    "ebd056c context enrichment projects mentions/nodes to compact views",
+    "graph_export single-pass partition, GraphRecord envelopes dropped"
+  ]
+}
