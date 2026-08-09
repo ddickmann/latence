@@ -1,0 +1,29 @@
+{
+  "control": true,
+  "dataset": "vidoseek",
+  "leg": "hyperedges",
+  "limit": 50,
+  "metrics": {
+    "chain_coverage@10": null,
+    "chain_queries": 0,
+    "full_chain_hit@10": null,
+    "latency_ms_median": 172.57,
+    "latency_ms_p95": 247.98,
+    "ndcg@10": 0.7659,
+    "queries": 50,
+    "recall@1": 0.47,
+    "recall@10": 0.97,
+    "recall@5": 0.82,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "vidoseek",
+    "queries_total": 50,
+    "queries_usable": 50,
+    "refs_resolved": 50,
+    "refs_total": 50,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok"
+}

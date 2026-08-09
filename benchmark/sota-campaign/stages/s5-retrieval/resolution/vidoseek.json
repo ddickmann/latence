@@ -1,0 +1,9 @@
+{
+  "dataset": "vidoseek",
+  "queries_total": 50,
+  "queries_usable": 50,
+  "refs_total": 50,
+  "refs_resolved": 50,
+  "resolution_rate": 1.0,
+  "trustworthy": true
+}

@@ -1,0 +1,358 @@
+{
+  "multihop_rag": {
+    "bm25": {
+      "control": false,
+      "dataset": "multihop_rag",
+      "leg": "bm25",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": 0.75,
+        "chain_queries": 46,
+        "full_chain_hit@10": 0.4783,
+        "latency_ms_median": 269.62,
+        "latency_ms_p95": 361.03,
+        "ndcg@10": 0.508,
+        "queries": 46,
+        "recall@1": 0.0659,
+        "recall@10": 0.362,
+        "recall@5": 0.223,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "multihop_rag",
+        "queries_total": 50,
+        "queries_usable": 46,
+        "refs_resolved": 117,
+        "refs_total": 117,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "coe": {
+      "control": false,
+      "dataset": "multihop_rag",
+      "leg": "coe",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": 0.6793,
+        "chain_queries": 46,
+        "full_chain_hit@10": 0.3913,
+        "latency_ms_median": 321.8,
+        "latency_ms_p95": 445.86,
+        "ndcg@10": 0.3332,
+        "queries": 46,
+        "recall@1": 0.0273,
+        "recall@10": 0.2383,
+        "recall@5": 0.1406,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "multihop_rag",
+        "queries_total": 50,
+        "queries_usable": 46,
+        "refs_resolved": 117,
+        "refs_total": 117,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "dense": {
+      "control": false,
+      "dataset": "multihop_rag",
+      "leg": "dense",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": 0.6322,
+        "chain_queries": 46,
+        "full_chain_hit@10": 0.2609,
+        "latency_ms_median": 0.48,
+        "latency_ms_p95": 0.75,
+        "ndcg@10": 0.4604,
+        "queries": 46,
+        "recall@1": 0.0607,
+        "recall@10": 0.303,
+        "recall@5": 0.213,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "multihop_rag",
+        "queries_total": 50,
+        "queries_usable": 46,
+        "refs_resolved": 117,
+        "refs_total": 117,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "hyperedges": {
+      "control": false,
+      "dataset": "multihop_rag",
+      "leg": "hyperedges",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": 0.6793,
+        "chain_queries": 46,
+        "full_chain_hit@10": 0.3696,
+        "latency_ms_median": 320.94,
+        "latency_ms_p95": 429.43,
+        "ndcg@10": 0.3661,
+        "queries": 46,
+        "recall@1": 0.0332,
+        "recall@10": 0.2622,
+        "recall@5": 0.1624,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "multihop_rag",
+        "queries_total": 50,
+        "queries_usable": 46,
+        "refs_resolved": 117,
+        "refs_total": 117,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "kg": {
+      "control": false,
+      "dataset": "multihop_rag",
+      "leg": "kg",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": 0.6304,
+        "chain_queries": 46,
+        "full_chain_hit@10": 0.3043,
+        "latency_ms_median": 272.95,
+        "latency_ms_p95": 361.82,
+        "ndcg@10": 0.4144,
+        "queries": 46,
+        "recall@1": 0.0419,
+        "recall@10": 0.2966,
+        "recall@5": 0.1955,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "multihop_rag",
+        "queries_total": 50,
+        "queries_usable": 46,
+        "refs_resolved": 117,
+        "refs_total": 117,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "packer": {
+      "control": false,
+      "dataset": "multihop_rag",
+      "leg": "packer",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": 0.6377,
+        "chain_queries": 46,
+        "full_chain_hit@10": 0.3478,
+        "latency_ms_median": 872.64,
+        "latency_ms_p95": 1009.68,
+        "ndcg@10": 0.2741,
+        "queries": 46,
+        "recall@1": 0.0273,
+        "recall@10": 0.1777,
+        "recall@5": 0.1346,
+        "token_budget": 4000,
+        "tokens_packed_max": 3995,
+        "tokens_packed_mean": 3872.1
+      },
+      "resolution": {
+        "dataset": "multihop_rag",
+        "queries_total": 50,
+        "queries_usable": 46,
+        "refs_resolved": 117,
+        "refs_total": 117,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    }
+  },
+  "vidoseek": {
+    "bm25": {
+      "control": true,
+      "dataset": "vidoseek",
+      "leg": "bm25",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": null,
+        "chain_queries": 0,
+        "full_chain_hit@10": null,
+        "latency_ms_median": 168.22,
+        "latency_ms_p95": 254.01,
+        "ndcg@10": 0.8644,
+        "queries": 50,
+        "recall@1": 0.6067,
+        "recall@10": 0.99,
+        "recall@5": 0.94,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "vidoseek",
+        "queries_total": 50,
+        "queries_usable": 50,
+        "refs_resolved": 50,
+        "refs_total": 50,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "coe": {
+      "control": true,
+      "dataset": "vidoseek",
+      "leg": "coe",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": null,
+        "chain_queries": 0,
+        "full_chain_hit@10": null,
+        "latency_ms_median": 171.27,
+        "latency_ms_p95": 252.12,
+        "ndcg@10": 0.6803,
+        "queries": 50,
+        "recall@1": 0.3567,
+        "recall@10": 0.9033,
+        "recall@5": 0.78,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "vidoseek",
+        "queries_total": 50,
+        "queries_usable": 50,
+        "refs_resolved": 50,
+        "refs_total": 50,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "dense": {
+      "control": true,
+      "dataset": "vidoseek",
+      "leg": "dense",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": null,
+        "chain_queries": 0,
+        "full_chain_hit@10": null,
+        "latency_ms_median": 0.43,
+        "latency_ms_p95": 0.57,
+        "ndcg@10": 0.8059,
+        "queries": 50,
+        "recall@1": 0.5567,
+        "recall@10": 0.96,
+        "recall@5": 0.9067,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "vidoseek",
+        "queries_total": 50,
+        "queries_usable": 50,
+        "refs_resolved": 50,
+        "refs_total": 50,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "hyperedges": {
+      "control": true,
+      "dataset": "vidoseek",
+      "leg": "hyperedges",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": null,
+        "chain_queries": 0,
+        "full_chain_hit@10": null,
+        "latency_ms_median": 172.57,
+        "latency_ms_p95": 247.98,
+        "ndcg@10": 0.7659,
+        "queries": 50,
+        "recall@1": 0.47,
+        "recall@10": 0.97,
+        "recall@5": 0.82,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "vidoseek",
+        "queries_total": 50,
+        "queries_usable": 50,
+        "refs_resolved": 50,
+        "refs_total": 50,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "kg": {
+      "control": true,
+      "dataset": "vidoseek",
+      "leg": "kg",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": null,
+        "chain_queries": 0,
+        "full_chain_hit@10": null,
+        "latency_ms_median": 162.98,
+        "latency_ms_p95": 244.39,
+        "ndcg@10": 0.8381,
+        "queries": 50,
+        "recall@1": 0.5867,
+        "recall@10": 0.99,
+        "recall@5": 0.93,
+        "token_budget": null
+      },
+      "resolution": {
+        "dataset": "vidoseek",
+        "queries_total": 50,
+        "queries_usable": 50,
+        "refs_resolved": 50,
+        "refs_total": 50,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    },
+    "packer": {
+      "control": true,
+      "dataset": "vidoseek",
+      "leg": "packer",
+      "limit": 50,
+      "metrics": {
+        "chain_coverage@10": null,
+        "chain_queries": 0,
+        "full_chain_hit@10": null,
+        "latency_ms_median": 736.79,
+        "latency_ms_p95": 932.79,
+        "ndcg@10": 0.6479,
+        "queries": 50,
+        "recall@1": 0.3567,
+        "recall@10": 0.8067,
+        "recall@5": 0.75,
+        "token_budget": 4000,
+        "tokens_packed_max": 4000,
+        "tokens_packed_mean": 3892.2
+      },
+      "resolution": {
+        "dataset": "vidoseek",
+        "queries_total": 50,
+        "queries_usable": 50,
+        "refs_resolved": 50,
+        "refs_total": 50,
+        "resolution_rate": 1.0,
+        "trustworthy": true
+      },
+      "status": "ok"
+    }
+  }
+}

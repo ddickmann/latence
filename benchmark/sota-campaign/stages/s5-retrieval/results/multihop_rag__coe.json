@@ -1,0 +1,29 @@
+{
+  "control": false,
+  "dataset": "multihop_rag",
+  "leg": "coe",
+  "limit": 50,
+  "metrics": {
+    "chain_coverage@10": 0.6793,
+    "chain_queries": 46,
+    "full_chain_hit@10": 0.3913,
+    "latency_ms_median": 321.8,
+    "latency_ms_p95": 445.86,
+    "ndcg@10": 0.3332,
+    "queries": 46,
+    "recall@1": 0.0273,
+    "recall@10": 0.2383,
+    "recall@5": 0.1406,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "multihop_rag",
+    "queries_total": 50,
+    "queries_usable": 46,
+    "refs_resolved": 117,
+    "refs_total": 117,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok"
+}

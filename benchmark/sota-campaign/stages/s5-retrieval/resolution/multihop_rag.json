@@ -1,0 +1,9 @@
+{
+  "dataset": "multihop_rag",
+  "queries_total": 50,
+  "queries_usable": 46,
+  "refs_total": 117,
+  "refs_resolved": 117,
+  "resolution_rate": 1.0,
+  "trustworthy": true
+}
