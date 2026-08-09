@@ -31,11 +31,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-def normalize_ws(text: str) -> str:
-    """Whitespace-collapsed lowercase form — the comparison unit for TEXT gold references."""
-    return " ".join(text.lower().split())
-
-
 @dataclass(frozen=True)
 class ChunkRow:
     """One exported chunk: the id retrieval ranks, its text, and where it came from."""
@@ -60,7 +55,6 @@ class Export:
     _by_file: dict[str, list[int]] = field(default_factory=dict)
     _by_id: dict[str, int] = field(default_factory=dict)
     _by_node: dict[str, list[int]] = field(default_factory=dict)
-    _norm_cache: dict[int, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for index, row in enumerate(self.rows):
@@ -96,20 +90,16 @@ class Export:
             if self.rows[i].char_start < end and self.rows[i].char_end > start
         ]
 
-    def chunks_containing(self, file_name: str, text: str) -> Sequence[str]:
-        """Chunk ids in ``file_name`` whose whitespace-normalised text contains ``text``."""
-        needle = normalize_ws(text)
-        if not needle:
-            return []
-        out: list[str] = []
-        for i in self._by_file.get(file_name, ()):
-            cached = self._norm_cache.get(i)
-            if cached is None:
-                cached = normalize_ws(self.rows[i].content)
-                self._norm_cache[i] = cached
-            if needle in cached:
-                out.append(self.rows[i].record_id)
-        return out
+    def has_page_map(self, file_name: str) -> bool:
+        """Whether ``file_name``'s page char spans were reconstructed for this run.
+
+        ``False`` covers both "this dataset has no S2 ``pages/`` artifacts" and "this document's
+        reconstruction did not reproduce the assembled markdown, so :mod:`benchmark.s5.pagemap`
+        omitted it". Either way page-level gold is *unavailable* here rather than *wrong*, which
+        is the distinction :func:`benchmark.s5.goldmap.resolve_ref` needs to decide between a
+        coarser document-level reference and an honest miss.
+        """
+        return Path(file_name).stem in self.pages
 
     # -- retrieval-side views -----------------------------------------------------------------
 
@@ -244,5 +234,4 @@ __all__ = [
     "hyperedge_chunk_map",
     "load_export",
     "node_alias_map",
-    "normalize_ws",
 ]

@@ -86,7 +86,9 @@ def write_report(
     lines: list[str] = [
         "# S5 — Retrieval feature matrix (dense → +bm25 → +KG → +hyperedges → +CoE → +packer)",
         "",
-        f"Query cap per dataset: **{limit if limit is not None else 'none (full set)'}**. "
+        f"Query cap for this invocation: **{limit if limit is not None else 'none (full set)'}**"
+        " — each dataset section states the cap its own cells were run with, since cells are "
+        "written once and resumed. Gold resolution is always measured over the FULL query set. "
         "Legs are CUMULATIVE — leg *n* runs signals 1..*n* and fuses them with RRF, so every "
         "`Δ R@10` is the increment that one signal bought.",
         "",
@@ -114,25 +116,35 @@ def write_report(
         "",
         "## Gold resolution",
         "",
-        "| dataset | refs resolved | rate | queries usable | verdict |",
-        "|---|---|---|---|---|",
+        "`granularity` is the mix the gold **actually** resolved at, not the mix the dataset "
+        "advertises: a page reference whose document has no reconstructable S2 page map keeps "
+        "coarser *document*-level gold rather than being dropped, so the two counts are stated "
+        "separately instead of implying uniform page precision. `excluded` counts queries whose "
+        "evidence is absent from this corpus entirely — they are removed from the denominator "
+        "with their reason, because scoring them as misses would report a corpus-coverage fact "
+        "as a retrieval failure.",
+        "",
+        "| dataset | refs resolved | rate | granularity (page / doc) | queries usable | "
+        "excluded | verdict |",
+        "|---|---|---|---|---|---|---|",
     ]
     for dataset in sorted(matrix):
-        resolution = _first_resolution(matrix[dataset])
+        resolution = _resolution_for(out_dir, dataset, matrix[dataset])
         if resolution is None:
-            lines.append(f"| {dataset} | — | — | — | not run |")
+            lines.append(f"| {dataset} | — | — | — | — | — | not run |")
             continue
         rate = float(resolution["resolution_rate"])
         verdict = "ok" if rate >= TRUST_THRESHOLD else "**FLAGGED — mapping, not recall**"
         lines.append(
             f"| {dataset} | {resolution['refs_resolved']}/{resolution['refs_total']} | "
-            f"{rate:.1%} | {resolution['queries_usable']}/{resolution['queries_total']} | "
-            f"{verdict} |"
+            f"{rate:.1%} | {_granularity(resolution)} | "
+            f"{resolution['queries_usable']}/{resolution['queries_total']} | "
+            f"{_exclusions(resolution)} | {verdict} |"
         )
 
     for dataset in sorted(matrix):
         control = " (single-hop CONTROL)" if dataset in CONTROL_DATASETS else ""
-        lines += ["", f"## {dataset}{control}", ""]
+        lines += ["", f"## {dataset}{control}", "", _cap_note(matrix[dataset]), ""]
         lines += _dataset_table(matrix[dataset], legs)
 
     lines += [
@@ -179,13 +191,54 @@ def write_report(
     (out_dir / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _first_resolution(cells: Mapping[str, Any]) -> Mapping[str, Any] | None:
+def _resolution_for(
+    out_dir: Path, dataset: str, cells: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """``resolution/<dataset>.json`` if it exists, else the resolution a result cell embedded.
+
+    The standalone file is authoritative because it is written over the dataset's FULL query set
+    by ``--resolution-only``, whereas a cell's copy only covers that run's ``--limit`` sample.
+    """
+    path = out_dir / "resolution" / f"{dataset}.json"
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            return loaded
     for cell in cells.values():
         if isinstance(cell, dict) and cell.get("status") == "ok":
             resolution = cell.get("resolution")
             if isinstance(resolution, dict):
                 return resolution
     return None
+
+
+def _cap_note(cells: Mapping[str, Any]) -> str:
+    """What the cells below were actually run over — never inherited from the current CLI flags."""
+    for cell in cells.values():
+        if isinstance(cell, dict) and cell.get("status") == "ok":
+            cap = cell.get("limit")
+            return f"Legs run over **{cap if cap is not None else 'the full query set'}** queries."
+    return "*No leg has been run for this dataset yet — gold resolution only.*"
+
+
+def _granularity(resolution: Mapping[str, Any]) -> str:
+    mix = resolution.get("granularity")
+    if not isinstance(mix, dict):
+        return "—"
+    return f"{mix.get('page', 0)} / {mix.get('document', 0)}"
+
+
+def _exclusions(resolution: Mapping[str, Any]) -> str:
+    total = resolution.get("queries_excluded") or 0
+    reasons = resolution.get("exclusions")
+    if not total:
+        return "0"
+    detail = (
+        ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items()))
+        if isinstance(reasons, dict)
+        else ""
+    )
+    return f"{total} ({detail})" if detail else str(total)
 
 
 def _delta(cells: Mapping[str, Any], lower: str, upper: str) -> float | None:

@@ -17,7 +17,10 @@ translation is invisible downstream:
 ``ohr_bench``
     ``doc_name`` is ``<domain>/<doc>`` and became ``<domain>__<doc>.md``. ``page_idx`` is
     **0-based** — same measurement: the row's own ``gt_text`` opens page ``page_idx + 1``
-    308/396 times versus 67/396 for the as-is reading.
+    308/396 times versus 67/396 for the as-is reading. Two upstream naming facts are handled by
+    explicit, verified aliases rather than by matching (:data:`OHR_DOMAIN_ALIASES`,
+    :data:`OHR_DOCUMENT_ALIASES`), and one whole QA domain was never acquired into this corpus,
+    so its queries are EXCLUDED with a stated reason (:data:`OHR_UNACQUIRED_DOMAINS`).
 
 ``multihop_rag``
     ``evidence_list[].title`` names an article in ``corpus.json``, which S1 wrote out as
@@ -36,10 +39,13 @@ translation is invisible downstream:
     ``(subject, relation, object)`` triple order projected onto those paragraphs.
 
 ``uda``
-    ``evidence`` is a literal sentence (or table row) from a known document
-    (``fin_docs__<key>.md`` / ``paper_docs__<key>.md``), so it resolves by
-    whitespace-normalised containment inside that document's chunks — the most precise mapping
-    of the seven, and the only one that does not depend on an index at all.
+    the query sets are the ``fin`` / ``paper_tab`` **parquets**, whose ``doc_name`` column is
+    already the corpus key (``ADI_2009`` → ``fin_docs__ADI_2009.md``, ``1912.01214`` →
+    ``paper_docs__1912.01214.md``): a direct, total mapping, verified 8,190/8,190 and 393/393.
+    The ``extended_qa_info/*.json`` samples that an earlier revision matched by evidence
+    *sentence* are not the query set (``paper_tab_qa.json`` holds a single record) and their
+    ``raw_evidence`` is FinQA/QASPER-preprocessed text that does not survive OCR verbatim — that
+    approach is abandoned, not tuned.
 
 ``musique`` / ``hotpotqa``
     ``paragraphs[].file`` is already the export's ``provenance.file_name``; the supporting ones
@@ -52,12 +58,14 @@ import hashlib
 import json
 import re
 import sys
-from collections.abc import Callable, Iterator
+import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
-from benchmark.s5.goldmap import GoldQuery, GoldRef, RefKind
+from benchmark.s5.goldmap import ExclusionReason, GoldQuery, GoldRef, RefKind
 
 _BENCH_SRC = Path(__file__).resolve().parents[2] / "packages" / "latence-benchmark" / "src"
 if str(_BENCH_SRC) not in sys.path:  # pragma: no cover - import wiring
@@ -221,27 +229,97 @@ def load_wiki2multihop() -> list[GoldQuery]:
 # -- ohr_bench --------------------------------------------------------------------------------
 
 
+#: OHR-Bench QA domain → the domain prefix S1 actually wrote into the corpus. The QA parquet
+#: calls the arXiv subset ``paper/`` while the acquired PDFs live under ``academic/``; the alias
+#: is exact (all 10 ``paper/`` documents have an ``academic__<doc>.md`` in the export, verified
+#: 2026-08-09), so it is a key rename, not a match.
+OHR_DOMAIN_ALIASES: dict[str, str] = {"paper": "academic"}
+
+#: Individual documents whose name in ``OHR-Bench.parquet`` differs from the name in the source
+#: ``pdfs.zip`` the corpus was built from — an upstream inconsistency, one document at the time
+#: of writing. The pairing is not inferred: the zip entry is literally
+#: ``textbook/Triangulated.pdf_145.pdf`` (the long title was truncated when the archive was
+#: built) and the OCR'd markdown reproduces this row's ``gt_text`` verbatim. Keys are NFC —
+#: :func:`ohr_bench_file_name` normalises before lookup because the QA parquet stores this
+#: particular name decomposed (``Frédéric``).
+OHR_DOCUMENT_ALIASES: dict[str, str] = {
+    unicodedata.normalize(
+        "NFC",
+        "textbook/Triangulated_Categories_of_Mixed_Motives_"
+        "(Denis-Charles_Cisinski_,_Frédéric_Déglise)_(Z-Library).pdf_145",
+    ): "textbook__Triangulated.pdf_145.md",
+}
+
+#: OHR-Bench QA domains that were never acquired or OCR'd into this corpus. ``notes/`` is the
+#: GNHK handwriting set — 288 documents, 498 questions — and the S3 export contains not one of
+#: them (corpus domains: textbook 504, news 279, administration 146, law 95, manual 87,
+#: academic 85, finance 65). Those queries are unanswerable here for a coverage reason, so they
+#: are excluded WITH that reason rather than counted as retrieval misses.
+OHR_UNACQUIRED_DOMAINS = frozenset({"notes"})
+
+
+def ohr_bench_file_name(doc_name: str) -> str:
+    """``<domain>/<doc>`` → the export's ``provenance.file_name``, aliases applied.
+
+    A pure key derivation — no matching of any kind: an exact document alias first (compared in
+    NFC, since Unicode composition is a storage detail of the parquet, not a difference in the
+    name), else the domain segment is renamed through :data:`OHR_DOMAIN_ALIASES` and the
+    separator becomes ``__``.
+    """
+    aliased = OHR_DOCUMENT_ALIASES.get(unicodedata.normalize("NFC", doc_name))
+    if aliased is not None:
+        return aliased
+    domain, separator, rest = doc_name.partition("/")
+    if not separator:
+        return f"{doc_name}.md"
+    return f"{OHR_DOMAIN_ALIASES.get(domain, domain)}__{rest.replace('/', '__')}.md"
+
+
+def ohr_bench_exclusion(doc_name: str) -> ExclusionReason | None:
+    """The reason ``doc_name`` cannot be answered against this corpus, or ``None``."""
+    domain, _, _ = doc_name.partition("/")
+    if domain in OHR_UNACQUIRED_DOMAINS:
+        return ExclusionReason.CORPUS_MISSING_DOMAIN
+    return None
+
+
 def load_ohr_bench() -> list[GoldQuery]:
-    """OHR-Bench QAs; gold is ``(<domain>__<doc>.md, page_idx + 1)`` — page_idx is 0-based."""
+    """OHR-Bench QAs; gold is ``(<domain>__<doc>.md, page_idx + 1)`` — page_idx is 0-based.
+
+    The page is a refinement of a document reference that is itself certain, so the reference
+    allows the document-level fallback: the handful of documents whose S2 page reconstruction
+    does not reproduce the assembled markdown keep *coarser* gold (labelled ``document`` in the
+    granularity mix) instead of being dropped from the denominator.
+    """
     table = pq.read_table(  # type: ignore[no-untyped-call]
         SOTA_CORPUS / "ohr_bench" / "raw" / "OHR-Bench.parquet",
         columns=["doc_name", "page_idx", "qas"],
     )
     out: list[GoldQuery] = []
     for row in table.to_pylist():
-        file_name = f"{str(row['doc_name']).replace('/', '__')}.md"
+        doc_name = str(row["doc_name"])
+        file_name = ohr_bench_file_name(doc_name)
+        exclusion = ohr_bench_exclusion(doc_name)
         page = int(row["page_idx"]) + 1
         qas = row["qas"] or {}
         questions = list(qas.get("questions") or [])
         ids = list(qas.get("ID") or [])
+        ref = GoldRef(
+            kind=RefKind.PAGE,
+            file_name=file_name,
+            page=page,
+            slot=0,
+            allow_document_fallback=True,
+        )
         for position, question in enumerate(questions):
             query_id = str(ids[position]) if position < len(ids) else f"{file_name}#{position}"
             out.append(
                 GoldQuery(
                     query_id=query_id,
                     question=str(question),
-                    refs=(GoldRef(kind=RefKind.PAGE, file_name=file_name, page=page, slot=0),),
+                    refs=(ref,),
                     question_type="single_hop",
+                    exclusion=exclusion,
                 )
             )
     return out
@@ -252,71 +330,88 @@ def load_ohr_bench() -> list[GoldQuery]:
 
 _UDA_PAGE = re.compile(r"/page_(\d+)\.pdf")
 
+#: UDA query set → the corpus filename prefix S1 wrote for that half's source documents.
+UDA_SPLIT_PREFIXES: dict[str, str] = {"fin": "fin_docs__", "paper_tab": "paper_docs__"}
 
-def _uda_paper_evidence(item: dict[str, object]) -> Iterator[str]:
-    """The ``raw_evidence`` sentences of a UDA paper_tab QA record."""
-    evidence = item.get("evidence")
-    if not isinstance(evidence, list):
-        return
-    for entry in evidence:
-        if not isinstance(entry, dict):
-            continue
-        for value in entry.get("raw_evidence") or []:
-            if isinstance(value, str) and value.strip():
-                yield value
+
+def uda_file_name(split: str, doc_name: str) -> str:
+    """``(split, doc_name)`` → the export's ``provenance.file_name``.
+
+    The parquet's ``doc_name`` **is** the corpus key: ``ADI_2009`` → ``fin_docs__ADI_2009.md``,
+    ``1912.01214`` → ``paper_docs__1912.01214.md``. Total on both halves (8,190/8,190 fin rows,
+    393/393 paper_tab rows resolve to a file the export contains, verified 2026-08-09).
+    """
+    return f"{UDA_SPLIT_PREFIXES[split]}{doc_name}.md"
+
+
+def uda_page_from_q_uid(q_uid: str) -> int | None:
+    """The 1-based source-PDF page a UDA **fin** ``q_uid`` names, or ``None``.
+
+    ``ADI/2009/page_49.pdf-1`` → 49. Every one of the 8,190 fin rows carries such a page; the
+    paper_tab ``q_uid`` is a bare sha1 and yields ``None``, which is why that half is
+    document-level gold rather than a page reference that could never resolve.
+    """
+    match = _UDA_PAGE.search(q_uid)
+    return int(match.group(1)) if match else None
+
+
+def _uda_rows(split: str) -> list[dict[str, Any]]:
+    """The ``(doc_name, q_uid, question)`` rows of a UDA split, in shard-name order."""
+    shards = sorted((SOTA_CORPUS / "uda" / "raw" / split).glob("test_*.parquet"))
+    rows: list[dict[str, Any]] = []
+    for shard in shards:
+        table = pq.read_table(shard, columns=["doc_name", "q_uid", "question"])  # type: ignore[no-untyped-call]
+        rows.extend(table.to_pylist())
+    return rows
 
 
 def load_uda() -> list[GoldQuery]:
-    """UDA fin + paper_tab QAs — two different gold idioms, mapped two different ways.
+    """UDA fin + paper_tab QAs, keyed on the parquets' own ``doc_name``.
 
-    **fin** gold is a PAGE, taken from the question's own ``q_uid``
-    (``ADI/2009/page_49.pdf-1`` → page 49 of ``fin_docs__ADI_2009.md``, 1-based, verified
-    against the reconstructed page artifacts). The record's ``evidence`` text is *not* usable
-    for mapping: it is FinQA's preprocessed form (lowercased, spaced punctuation,
-    ``$ 3.8 million``) and matches the OCR'd markdown essentially never — a measured 0%
-    resolution, which is exactly the silent-zero failure this harness reports instead of hiding.
+    **fin** keeps the finer PAGE gold wherever it is genuinely available: the page comes from
+    the question's own ``q_uid`` (:func:`uda_page_from_q_uid`) and the reference allows the
+    document-level fallback, so the 74 financial reports whose S2 page reconstruction does not
+    reproduce the assembled markdown resolve at *document* granularity instead of vanishing from
+    the denominator. The report states the mix; it never implies uniform page precision.
 
-    **paper_tab** gold is the ``raw_evidence`` sentences, which are verbatim paper text and so
-    resolve by containment inside ``paper_docs__<arxiv id>.md``.
+    **paper_tab** is document-level: its ``q_uid`` carries no page, and the ``raw_evidence``
+    sentence matching an earlier revision used resolved 10% because that text is QASPER's
+    preprocessed form, not the OCR'd markdown.
     """
     out: list[GoldQuery] = []
-    fin_path = SOTA_CORPUS / "uda" / "raw" / "extended_qa_info" / "fin_qa.json"
-    if fin_path.is_file():
-        for doc_key, items in json.loads(fin_path.read_text()).items():
-            file_name = f"fin_docs__{doc_key}.md"
-            for position, item in enumerate(items):
-                q_uid = str(item.get("q_uid") or f"{doc_key}#{position}")
-                match = _UDA_PAGE.search(q_uid)
-                refs: tuple[GoldRef, ...] = (
-                    (GoldRef(kind=RefKind.PAGE, file_name=file_name, page=int(match.group(1))),)
-                    if match
-                    else ()
-                )
-                out.append(
-                    GoldQuery(
-                        query_id=q_uid,
-                        question=str(item.get("question", "")),
-                        refs=refs,
-                        question_type="fin",
-                    )
-                )
-    paper_path = SOTA_CORPUS / "uda" / "raw" / "extended_qa_info" / "paper_tab_qa.json"
-    if paper_path.is_file():
-        for doc_key, items in json.loads(paper_path.read_text()).items():
-            file_name = f"paper_docs__{doc_key}.md"
-            for position, item in enumerate(items):
-                refs = tuple(
-                    GoldRef(kind=RefKind.TEXT, file_name=file_name, text=text)
-                    for text in _uda_paper_evidence(item)
-                )
-                out.append(
-                    GoldQuery(
-                        query_id=str(item.get("q_uid") or f"{doc_key}#{position}"),
-                        question=str(item.get("question", "")),
-                        refs=refs,
-                        question_type="paper_tab",
-                    )
-                )
+    for row in _uda_rows("fin"):
+        q_uid = str(row["q_uid"])
+        out.append(
+            GoldQuery(
+                query_id=q_uid,
+                question=str(row["question"]),
+                refs=(
+                    GoldRef(
+                        kind=RefKind.PAGE,
+                        file_name=uda_file_name("fin", str(row["doc_name"])),
+                        page=uda_page_from_q_uid(q_uid),
+                        slot=0,
+                        allow_document_fallback=True,
+                    ),
+                ),
+                question_type="fin",
+            )
+        )
+    for row in _uda_rows("paper_tab"):
+        out.append(
+            GoldQuery(
+                query_id=str(row["q_uid"]),
+                question=str(row["question"]),
+                refs=(
+                    GoldRef(
+                        kind=RefKind.FILE,
+                        file_name=uda_file_name("paper_tab", str(row["doc_name"])),
+                        slot=0,
+                    ),
+                ),
+                question_type="paper_tab",
+            )
+        )
     return out
 
 
@@ -411,9 +506,17 @@ __all__ = [
     "CONTROL_DATASETS",
     "DATASETS",
     "OFFICIAL_DATA",
+    "OHR_DOCUMENT_ALIASES",
+    "OHR_DOMAIN_ALIASES",
+    "OHR_UNACQUIRED_DOMAINS",
     "S2_OUTPUT",
     "S3_EXPORTS",
     "SOTA_CORPUS",
+    "UDA_SPLIT_PREFIXES",
     "DatasetSpec",
+    "ohr_bench_exclusion",
+    "ohr_bench_file_name",
     "prep_filename",
+    "uda_file_name",
+    "uda_page_from_q_uid",
 ]

@@ -1,0 +1,17 @@
+{
+  "dataset": "uda",
+  "queries_total": 8583,
+  "queries_usable": 8583,
+  "queries_excluded": 0,
+  "refs_total": 8583,
+  "refs_resolved": 8583,
+  "refs_excluded": 0,
+  "resolution_rate": 1.0,
+  "granularity": {
+    "page": 7310,
+    "document": 1273
+  },
+  "page_share_of_resolved": 0.8517,
+  "exclusions": {},
+  "trustworthy": true
+}

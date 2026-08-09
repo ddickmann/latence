@@ -38,7 +38,7 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import wiring
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmark.s5 import goldmap  # noqa: E402
-from benchmark.s5.corpus import load_export  # noqa: E402
+from benchmark.s5.corpus import Export, load_export  # noqa: E402
 from benchmark.s5.datasets import CONTROL_DATASETS, DATASETS  # noqa: E402
 from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
 from benchmark.s5.legs import LEG_NAMES, build_runner, has_embeddings, missing_inputs  # noqa: E402
@@ -61,6 +61,7 @@ class Plan:
     limit: int | None
     out: Path
     force: bool
+    resolution_only: bool = False
 
 
 def parse_args(argv: Sequence[str] | None = None) -> Plan:
@@ -76,6 +77,15 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument(
         "--force", action="store_true", help="re-run cells that already have results"
+    )
+    parser.add_argument(
+        "--resolution-only",
+        action="store_true",
+        help=(
+            "measure and write resolution/<dataset>.json only — no query embedding, no legs. "
+            "This is the gold-mapping health check on its own, cheap enough to run over every "
+            "dataset's FULL query set."
+        ),
     )
     args = parser.parse_args(argv)
     datasets = tuple(DATASETS) if args.datasets == "all" else tuple(
@@ -96,6 +106,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
         limit=args.limit,
         out=args.out,
         force=bool(args.force),
+        resolution_only=bool(args.resolution_only),
     )
 
 
@@ -107,11 +118,57 @@ def sample(items: list[goldmap.GoldQuery], limit: int | None) -> list[goldmap.Go
     return sorted(rng.sample(items, limit), key=lambda q: q.query_id)
 
 
+def measure_resolution(
+    name: str, plan: Plan, *, with_embeddings: bool
+) -> tuple[goldmap.ResolutionReport, list[goldmap.ResolvedGold], Export]:
+    """Resolve one dataset's full (or sampled) gold onto its export and write its resolution JSON.
+
+    The page-span reconstruction is limited to the documents a PAGE reference actually names —
+    UDA's 393 paper_tab queries are document-level gold, and reassembling their 307 papers to
+    answer a question no reference asks would dominate the measurement.
+    """
+    spec = DATASETS[name]
+    queries = sample(spec.queries(), plan.limit)
+    page_docs = frozenset(
+        Path(ref.file_name).stem
+        for query in queries
+        for ref in query.refs
+        if ref.kind is goldmap.RefKind.PAGE
+    )
+    print(f"[{name}] loading export ({len(queries)} queries) …", flush=True)
+    export = load_export(
+        spec.export_dir,
+        name,
+        s2_root=spec.s2_root,
+        with_embeddings=with_embeddings,
+        page_docs=page_docs,
+    )
+    resolved = [goldmap.resolve(q, export) for q in queries]
+    resolution = goldmap.report(name, resolved)
+    print(
+        f"[{name}] gold resolution {resolution.rate:.1%} "
+        f"({resolution.refs_resolved}/{resolution.refs_total} refs; "
+        f"{resolution.refs_page} page / {resolution.refs_document} document; "
+        f"{resolution.queries_excluded} queries excluded {dict(resolution.exclusions)}; "
+        f"{resolution.queries_usable}/{resolution.queries_total} queries usable)",
+        flush=True,
+    )
+    (plan.out / "resolution").mkdir(parents=True, exist_ok=True)
+    (plan.out / "resolution" / f"{name}.json").write_text(
+        json.dumps(resolution.to_dict(), indent=2) + "\n", encoding="utf-8"
+    )
+    return resolution, resolved, export
+
+
 def run_dataset(name: str, plan: Plan) -> dict[str, object]:
     """Run every requested leg for one dataset; write each cell as it completes."""
     spec = DATASETS[name]
     results_dir = plan.out / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
+
+    if plan.resolution_only:
+        measure_resolution(name, plan, with_embeddings=False)
+        return _collect(results_dir, name, plan.legs)
 
     pending = [
         leg
@@ -148,26 +205,8 @@ def run_dataset(name: str, plan: Plan) -> dict[str, object]:
     if not runnable:
         return _collect(results_dir, name, plan.legs)
 
-    queries = sample(spec.queries(), plan.limit)
-    # Reconstruct page spans only for the documents this run's gold actually references.
-    page_docs = frozenset(
-        Path(ref.file_name).stem for query in queries for ref in query.refs
-    )
-    print(f"[{name}] loading export ({len(queries)} queries) …", flush=True)
-    export = load_export(spec.export_dir, name, s2_root=spec.s2_root, page_docs=page_docs)
-    resolved = [goldmap.resolve(q, export) for q in queries]
-    resolution = goldmap.report(name, resolved)
+    resolution, resolved, export = measure_resolution(name, plan, with_embeddings=True)
     usable = [r for r in resolved if r.is_usable]
-    print(
-        f"[{name}] gold resolution {resolution.rate:.1%} "
-        f"({resolution.refs_resolved}/{resolution.refs_total} refs, "
-        f"{resolution.queries_usable}/{resolution.queries_total} queries usable)",
-        flush=True,
-    )
-    (plan.out / "resolution").mkdir(parents=True, exist_ok=True)
-    (plan.out / "resolution" / f"{name}.json").write_text(
-        json.dumps(resolution.to_dict(), indent=2) + "\n", encoding="utf-8"
-    )
     if not usable:
         return _collect(results_dir, name, plan.legs)
 

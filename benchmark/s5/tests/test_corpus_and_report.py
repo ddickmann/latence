@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from benchmark.s5.corpus import ChunkRow, Export, normalize_ws
+from benchmark.s5.corpus import ChunkRow, Export
 from benchmark.s5.pagemap import DocumentPages
 from benchmark.s5.report import write_report
 
@@ -33,11 +33,11 @@ def test_chunks_on_page_returns_nothing_when_no_page_map_exists() -> None:
     assert list(export.chunks_on_page("e.md", 1)) == []
 
 
-def test_chunks_containing_is_whitespace_and_case_insensitive() -> None:
+def test_has_page_map_separates_unavailable_from_wrong() -> None:
+    """The predicate the document-level fallback turns on — per document, not per dataset."""
     export = _export()
-    assert list(export.chunks_containing("d.md", "gamma delta")) == ["c1"]
-    assert list(export.chunks_containing("d.md", "")) == []
-    assert normalize_ws("  A\n B ") == "a b"
+    assert export.has_page_map("d.md") is True
+    assert export.has_page_map("e.md") is False
 
 
 def test_rows_for_nodes_deduplicates_and_sorts() -> None:
@@ -86,6 +86,31 @@ def test_report_renders_cumulative_deltas_and_flags_control_leakage(tmp_path) ->
     assert "possible leakage" in report  # a +0.20 control jump from the hypergraph leg
     assert "CONTROL" in report
     assert json.loads((tmp_path / "metrics.json").read_text())["vidoseek"]["dense"]
+
+
+def test_report_states_the_granularity_mix_and_the_exclusion_reasons(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The full-set resolution file wins over a cell's ``--limit`` copy, and both are surfaced."""
+    (tmp_path / "resolution").mkdir()
+    (tmp_path / "resolution" / "ohr_bench.json").write_text(
+        json.dumps(
+            {
+                "dataset": "ohr_bench",
+                "queries_total": 5039,
+                "queries_usable": 4541,
+                "queries_excluded": 498,
+                "refs_total": 4541,
+                "refs_resolved": 4541,
+                "resolution_rate": 1.0,
+                "granularity": {"page": 4535, "document": 6},
+                "exclusions": {"corpus-missing-domain": 498},
+            }
+        )
+    )
+    write_report(tmp_path, {"ohr_bench": {"dense": _cell("dense", 0.4)}}, legs=("dense",), limit=50)
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "4541/4541" in report  # the full set, not the cell's 10/10
+    assert "4535 / 6" in report
+    assert "498 (corpus-missing-domain 498)" in report
 
 
 def test_report_renders_a_missing_input_cell_as_a_refusal(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -1,4 +1,5 @@
 {
+  "hotpotqa": {},
   "multihop_rag": {
     "bm25": {
       "control": false,
@@ -177,6 +178,9 @@
       "status": "ok"
     }
   },
+  "musique": {},
+  "ohr_bench": {},
+  "uda": {},
   "vidoseek": {
     "bm25": {
       "control": true,
@@ -354,5 +358,6 @@
       },
       "status": "ok"
     }
-  }
+  },
+  "wiki2multihop": {}
 }
