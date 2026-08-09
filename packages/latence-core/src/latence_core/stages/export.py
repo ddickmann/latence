@@ -16,12 +16,24 @@ text** — the ``masked_content`` of a RedactionRecord (the PII-handled variant)
 seam exercisable end to end offline; a served model is the pluggable
 ``embedding.endpoint`` package, swapped by one config line (the framework names the
 seam, not the model).
+
+**The PII-masking guarantee and its one explicit opt-out.** By default the corpus text this
+Provider materializes (the ``content`` cell, the embedder/BM25/sparse input) is the PII-handled
+``masked_content`` whenever the Redaction Stage produced one — the raw text never reaches the RAG
+corpus. That default is unconditional and unchanged. The single, self-incriminating way out is the
+``unsafe_unmasked_corpus`` config key (default ``False``): when set, the corpus carries the RAW
+``content`` while ``pii_spans`` / ``masked_content`` are still written as metadata (the detection
+evidence is kept, only the substitution is skipped), and the Export logs a WARNING naming the risk.
+It exists for retrieval BENCHMARKING, where placeholder-substituted text destroys the measurement
+(measured on the S3 campaign: 82% of 2WikiMultiHopQA / MultiHop-RAG rows carried placeholders,
+including article titles) — never for a production corpus.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -76,6 +88,16 @@ _EXPORT_BATCH_ROWS = 1024
 # from the one slot declaration so it cannot drift from what the offline checker reports.
 _OWNER = owner_label(CapabilityKind.EXPORT)
 
+_LOG = logging.getLogger(__name__)
+
+# The one-per-export WARNING the ``unsafe_unmasked_corpus`` opt-out emits (never at import or
+# wiring time — it names what THIS export is about to write). Kept as a constant so the operator
+# banner, the docstrings and the regression test all read the same words.
+_UNMASKED_CORPUS_WARNING = (
+    "Export config 'unsafe_unmasked_corpus' is ON: exporting UNMASKED corpus text; PII detections "
+    "are recorded in pii_spans but NOT substituted — benchmark/offline use only."
+)
+
 
 def _context_header_text(header: dict[str, Any]) -> str:
     """Render a chunk's :class:`~latence_core.contracts.ContextHeader` into a compact embedding
@@ -105,7 +127,7 @@ def _context_header_text(header: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
-def _corpus_content(row: dict[str, Any]) -> str:
+def _corpus_content(row: dict[str, Any], *, unmasked: bool = False) -> str:
     """The PII-safe corpus text materialized for a row (``content`` column + JSONL).
 
     A redacted :class:`~latence_core.contracts.ChunkRecord` (W16, ADR-0042) carries the un-redacted
@@ -116,19 +138,35 @@ def _corpus_content(row: dict[str, Any]) -> str:
     stack-validate rag-scan reads every exported cell). A row with no ``masked_content`` (no
     Redaction Stage, or a non-chunk carrier) exports its own ``content`` unchanged — byte-identical
     to a run without Redaction (the additive-field guarantee).
+
+    **The one opt-out (``unmasked=True``).** Bound at the call site from the Export's
+    ``unsafe_unmasked_corpus`` config key (default ``False`` ⇒ everything above holds verbatim).
+    When ``True`` this returns the row's RAW ``content`` (falling back to ``masked_content`` only
+    when the carrier has no ``content`` at all, e.g. a deprecated RedactionRecord), so the corpus
+    text is the un-substituted original. The row still carries ``masked_content`` and ``pii_spans``
+    as metadata — the detection evidence is never discarded, only the substitution is skipped — and
+    the Export logs a WARNING once per export. Retrieval BENCHMARKING only: placeholders destroy the
+    measurement (82% of the S3 2WikiMultiHopQA / MultiHop-RAG rows carried them, titles included).
     """
+    if unmasked:
+        content = row.get("content")
+        if content is not None:
+            return str(content)
     masked = row.get("masked_content")
     if masked is not None:
         return str(masked)
     return str(row.get("content") or "")
 
 
-def _corpus_text(row: dict[str, Any]) -> str:
+def _corpus_text(row: dict[str, Any], *, unmasked: bool = False) -> str:
     """The corpus text an Embedder embeds for a row (the PII-safe text + optional W13 header).
 
     The base is the PII-safe :func:`_corpus_content` (``masked_content`` when present, else
     ``content``), so the vector is consistent with the exported PII-handled text (never the raw,
-    un-redacted text).
+    un-redacted text). ``unmasked=True`` — the Export's ``unsafe_unmasked_corpus`` opt-out, default
+    ``False`` — is threaded straight through to :func:`_corpus_content`, so the vector stays
+    consistent with whatever corpus text this export actually materializes: benchmark exports embed
+    the RAW text, and every other export embeds the masked text exactly as before.
 
     W13 (ADR-0039): when the row carries a :class:`~latence_core.contracts.ContextHeader`
     (``context_enrichment`` Stage upstream), its compact rendering is PREPENDED to the embedding
@@ -136,7 +174,7 @@ def _corpus_text(row: dict[str, Any]) -> str:
     stored corpus text stays byte-unchanged (the LLM window never grows). A row with no header (or
     an empty one) embeds exactly its own corpus text, byte-identical to today.
     """
-    base = _corpus_content(row)
+    base = _corpus_content(row, unmasked=unmasked)
     header = row.get("context_header")
     if isinstance(header, dict):
         header_text = _context_header_text(header)
@@ -387,8 +425,28 @@ def _sparse_signals_for_row(row: dict[str, Any]) -> SparseSignals:
 class JsonlParquetExport:
     """Export Provider writing ``records.jsonl`` and ``records.parquet``.
 
+    **PII-safety guarantee (default) + its one explicit opt-out.** Whenever the Redaction Stage
+    produced a ``masked_content``, THAT is the corpus text this Provider materializes — the
+    ``content`` cell, the Embedder input, the sparse/multi-vector input and the BM25 postings — so
+    the RAG corpus never materializes the raw, un-redacted text (:func:`_corpus_content`). The one
+    documented way out is ``unsafe_unmasked_corpus`` below; with it absent/False every byte of the
+    output is exactly what it was before the flag existed.
+
     Config:
         basename: str  — output file stem (default 'records').
+        unsafe_unmasked_corpus: bool  — OPT-OUT of the PII-masking guarantee above (default
+            **False**; benchmark/offline use only). Named to be self-incriminating: it is meant to
+            be impossible to read ``unsafe_unmasked_corpus: true`` in a stack YAML, a diff or a
+            grep and not know what was traded away. When True, every corpus-text surface carries
+            the row's RAW ``content`` instead of ``masked_content``, and the Export logs a WARNING
+            once per export naming the risk. ``pii_spans`` and ``masked_content`` are STILL written
+            to every exported row — the detection evidence is preserved, only the substitution is
+            skipped — so the export remains auditable and a consumer can re-apply masking. It
+            exists because placeholder-substituted text invalidates retrieval benchmarking: the S3
+            campaign measured 82% of the exported 2WikiMultiHopQA / MultiHop-RAG rows carrying
+            placeholders, article titles included, which makes both the retrieval scores and any
+            cross-dataset comparison meaningless. Absent/False ⇒ behaviour is byte-identical to a
+            build without this key.
         embedder: dict | None  — OPTIONAL opt-in Embedder augmentation (ADR-0017). A
             ``{"provider": "<entry-point name>", "config": {...}}`` block naming an
             :class:`~latence_core.capability.Embedder` Provider (e.g. the in-core
@@ -507,6 +565,10 @@ class JsonlParquetExport:
     ) -> None:
         config = config or {}
         self._basename = str(config.get("basename", "records"))
+        # The one opt-out of the PII-masking guarantee (default False ⇒ masked, byte-identical to
+        # a build without this key). Read once here; threaded to every corpus-text call site as an
+        # explicit argument, never module/global state, so the posture of each call is greppable.
+        self._unsafe_unmasked_corpus = bool(config.get("unsafe_unmasked_corpus", False))
         # One shared registry for every opt-in signal generator this Export resolves, so the same
         # roster (and cache) backs the embedder + the retrieval-signal generators.
         registry = registry or ProviderRegistry()
@@ -593,7 +655,13 @@ class JsonlParquetExport:
         temp file, once per failed attempt. The bytes are identical to the buffered path: same
         per-row Pydantic JSON dumps, same sorted-key JSONL line order + trailing-newline rule,
         same flat Parquet schema + values.
+
+        When ``unsafe_unmasked_corpus`` is configured, the corpus text written here is the RAW
+        ``content`` (``pii_spans`` / ``masked_content`` still ride along as metadata) and a single
+        WARNING is emitted per export call — once, before the first byte, never per row.
         """
+        if self._unsafe_unmasked_corpus:
+            _LOG.warning(_UNMASKED_CORPUS_WARNING)
         embed = self._embedder is not None
         sparse = self._sparse is not None
         fde = self._fde is not None
@@ -660,7 +728,9 @@ class JsonlParquetExport:
                 postings_writer = pq.ParquetWriter(streams[next_stream], postings_schema)  # type: ignore[no-untyped-call]
                 stack.callback(postings_writer.close)
 
-            for batch_rows in self._batched(records, _EXPORT_BATCH_ROWS):
+            for batch_rows in self._batched(
+                records, _EXPORT_BATCH_ROWS, unmasked=self._unsafe_unmasked_corpus
+            ):
                 record_versions.update(int(row["schema_version"]) for row in batch_rows)
                 multivectors = self._attach_signals(batch_rows)
                 # ADR-0053: the dense-vector + SPLADE signals have now consumed the RAW header (the
@@ -682,7 +752,10 @@ class JsonlParquetExport:
                     sidecar_writer.write_table(writer_table)  # type: ignore[no-untyped-call]
                 if postings_writer is not None and postings_schema is not None and bm25_acc:
                     postings_batch = self._bm25_postings_batch(
-                        batch_rows, bm25_acc, postings_schema
+                        batch_rows,
+                        bm25_acc,
+                        postings_schema,
+                        unmasked=self._unsafe_unmasked_corpus,
                     )
                     postings_writer.write_table(  # type: ignore[no-untyped-call]
                         pa.Table.from_batches([postings_batch], postings_schema)
@@ -751,15 +824,21 @@ class JsonlParquetExport:
         multi-vector generator is wired. Rows are mutated in place with the additive keys; a row
         NEVER carries the raw multi-vectors (they ride the sidecar only). With no generator wired
         the rows are untouched (byte-identical export — ADR-0017/0049).
+
+        Both text views honour the Export's ``unsafe_unmasked_corpus`` opt-out (default False ⇒
+        exactly the redacted behaviour described above): when it is on, every signal is generated
+        over the RAW corpus text, matching what this export materializes.
         """
         if self._embedder is None and self._sparse is None and self._multivector is None:
             return None
         # Two text views: the DENSE embedder sees the W13 header (vector-only, ADR-0039); every
         # INSPECTABLE index-time signal (sparse, multi-vector) sees the redacted content only,
         # matching what a store indexes — so the artifact never re-leaks the header PII.
-        content_texts = [_corpus_content(row) for row in rows]
+        content_texts = [
+            _corpus_content(row, unmasked=self._unsafe_unmasked_corpus) for row in rows
+        ]
         if self._embedder is not None:
-            embed_texts = [_corpus_text(row) for row in rows]
+            embed_texts = [_corpus_text(row, unmasked=self._unsafe_unmasked_corpus) for row in rows]
             vectors = list(self._embedder.embed(embed_texts))
             self._require_one_per_row(vectors, rows, "Embedder")
             for row, vector in zip(rows, vectors, strict=True):
@@ -796,6 +875,12 @@ class JsonlParquetExport:
         row removed nothing, so its header is left byte-identical to today (the additive /
         byte-identical-when-unwired guarantee). A header-less row is untouched
         (:func:`_redacted_context_header`).
+
+        This gate deliberately does NOT follow the ``unsafe_unmasked_corpus`` opt-out: the haystack
+        stays the MASKED text, so a benchmark export that materializes raw corpus text still emits
+        the conservatively-gated header. The opt-out buys back benchmark-valid corpus text; it is
+        not a licence to widen every other redaction surface, and gating against the masked text is
+        the strictly safer direction (it can only drop names, never add them).
         """
         for row in rows:
             header = row.get("context_header")
@@ -986,28 +1071,41 @@ class JsonlParquetExport:
         rows: list[dict[str, Any]],
         accumulator: Bm25Accumulator,
         schema: pa.Schema,
+        *,
+        unmasked: bool = False,
     ) -> pa.RecordBatch:
         """Fold a batch into the BM25 accumulator; return its postings as one Arrow RecordBatch.
 
-        The BM25 statistics are generated over each row's **stored** redacted corpus text
+        The BM25 statistics are generated over each row's **stored** corpus text
         (:func:`_corpus_content` — ``masked_content`` when present, so the artifact never re-leaks
         PII the corpus removed, and NOT the embedding-only W13 header, so the postings match exactly
         what a store indexes). The accumulator updates the corpus df/avgdl fold (O(vocab)) and
         returns one canonical :class:`~latence_core.bm25.Bm25Posting` per row, streamed here as a
         row group so the per-document postings stay O(batch).
+
+        ``unmasked`` is the Export's ``unsafe_unmasked_corpus`` opt-out (default False ⇒ the
+        redacted text, exactly as before); when on, the postings describe the RAW text this export
+        actually wrote, so the artifact keeps matching the corpus a store indexes.
         """
         postings = accumulator.add_batch(
-            (row["record_id"], _corpus_content(row)) for row in rows
+            (row["record_id"], _corpus_content(row, unmasked=unmasked)) for row in rows
         )
         return pa.RecordBatch.from_pylist([p.as_row() for p in postings], schema=schema)
 
     @staticmethod
-    def _batched(records: Iterable[Record], size: int) -> Iterator[list[dict[str, Any]]]:
+    def _batched(
+        records: Iterable[Record], size: int, *, unmasked: bool = False
+    ) -> Iterator[list[dict[str, Any]]]:
         """Yield the records dumped to JSON-able rows in bounded batches of ``size``.
 
         The single place the corpus is pulled through: each record is ``model_dump``ed and
         buffered only until the batch fills, so at most ``size`` rows are live at once — the
         O(batch) bound that replaces the old whole-corpus list.
+
+        ``unmasked`` is the Export's ``unsafe_unmasked_corpus`` opt-out (default False ⇒ the
+        PII-safe substitution below runs exactly as before): when on, it is SKIPPED so the row
+        keeps its raw ``content``, while ``masked_content`` and ``pii_spans`` still ride the dumped
+        row as metadata — the detection evidence survives, only the substitution does not.
         """
         batch: list[dict[str, Any]] = []
         for record in records:
@@ -1017,7 +1115,7 @@ class JsonlParquetExport:
             # Parquet ``content`` column — the rag-scan reads every exported cell). Only substitutes
             # when the Redaction Stage set ``masked_content``; a chunk with no Redaction Stage
             # (``masked_content`` None) exports its ``content`` unchanged (byte-identical to today).
-            if "content" in row and row.get("masked_content") is not None:
+            if not unmasked and "content" in row and row.get("masked_content") is not None:
                 row["content"] = row["masked_content"]
             batch.append(row)
             if len(batch) >= size:
