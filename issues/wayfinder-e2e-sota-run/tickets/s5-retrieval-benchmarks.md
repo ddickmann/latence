@@ -25,6 +25,15 @@ not published ones. The report states plainly that 5–7 hops are untested.
 Cumulative ladder (each row adds to the previous) so every increment is attributable, plus
 each leg standalone where meaningful — the ablation is the point, not one blended number.
 
+**Ablation leg (added 2026-08-09, NOT part of the cumulative ladder):** `dense_content_only`.
+Measured cause: the S3 corpora embed content + the W13 ContextHeader (KG entities + neighbour
+triples; 200/200 sampled multihop_rag rows carry one) while the reused M6 exports carry
+`context_header: null` on every row — so a single "dense" leg would have compared KG-enriched
+vectors against plain ones ACROSS datasets and silently favoured the S3 sets. Building both
+variants turns that confound into a measurable feature: every dataset gets a true content-only
+baseline, and header enrichment is reported as its own delta in a separate report section.
+Vectors ride a `corpus-vectors-content-only.parquet` sidecar so the enriched column survives.
+
 ## Query inventory (verified 2026-08-09)
 
 | dataset | queries | hops | gold evidence | explicit CoE |
