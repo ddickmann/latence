@@ -16,10 +16,17 @@ Refuses rather than fakes: a leg whose export artifacts are absent (the reused M
 MuSiQue/HotpotQA exports carry no ``embedding`` column and no BM25 artifacts) is recorded as
 ``status: "missing-inputs"`` with the file list, never as a zero.
 
+Ablation legs sit beside the ladder rather than on it: ``dense_content_only`` re-runs the dense
+rung against ``corpus-vectors-content-only.parquet`` (see
+:func:`benchmark.s5.build_vectors.write_vector_sidecar`) so the report can state what the W13
+context header bought, instead of leaving it folded invisibly into every dense number.
+
 Usage::
 
     PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
         --datasets vidoseek,multihop_rag --legs all --limit 50
+    PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
+        --datasets multihop_rag --legs dense,dense_content_only --limit 200
 """
 
 from __future__ import annotations
@@ -38,10 +45,22 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import wiring
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmark.s5 import goldmap  # noqa: E402
-from benchmark.s5.corpus import Export, load_export  # noqa: E402
+from benchmark.s5.corpus import (  # noqa: E402
+    CONTENT_ONLY_VECTORS,
+    Export,
+    load_export,
+    read_vector_sidecar,
+)
 from benchmark.s5.datasets import CONTROL_DATASETS, DATASETS  # noqa: E402
 from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
-from benchmark.s5.legs import LEG_NAMES, build_runner, has_embeddings, missing_inputs  # noqa: E402
+from benchmark.s5.legs import (  # noqa: E402
+    ABLATION_LEG_NAMES,
+    ALL_LEG_NAMES,
+    build_runner,
+    has_embeddings,
+    missing_inputs,
+    vector_source,
+)
 from benchmark.s5.metrics import CellAccumulator  # noqa: E402
 from benchmark.s5.report import write_report  # noqa: E402
 
@@ -69,7 +88,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
     parser = argparse.ArgumentParser(description="S5 retrieval feature-matrix harness")
     parser.add_argument("--datasets", default="all", help="comma list, or 'all'")
     parser.add_argument(
-        "--legs", default="all", help=f"comma list of {','.join(LEG_NAMES)}, or 'all'"
+        "--legs",
+        default="all",
+        help=f"comma list of {','.join(ALL_LEG_NAMES)}, or 'all' (which includes the "
+        "ablation legs — a leg whose inputs are absent is recorded as missing-inputs, not run)",
     )
     parser.add_argument(
         "--limit", type=int, default=None, help="query cap per dataset (smoke runs)"
@@ -94,15 +116,15 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
     unknown = [d for d in datasets if d not in DATASETS]
     if unknown:
         parser.error(f"unknown dataset(s) {unknown}; known: {sorted(DATASETS)}")
-    legs = LEG_NAMES if args.legs == "all" else tuple(
+    legs = ALL_LEG_NAMES if args.legs == "all" else tuple(
         leg.strip() for leg in args.legs.split(",") if leg.strip()
     )
-    bad = [leg for leg in legs if leg not in LEG_NAMES]
+    bad = [leg for leg in legs if leg not in ALL_LEG_NAMES]
     if bad:
-        parser.error(f"unknown leg(s) {bad}; known: {list(LEG_NAMES)}")
+        parser.error(f"unknown leg(s) {bad}; known: {list(ALL_LEG_NAMES)}")
     return Plan(
         datasets=datasets,
-        legs=tuple(leg for leg in LEG_NAMES if leg in legs),
+        legs=tuple(leg for leg in ALL_LEG_NAMES if leg in legs),
         limit=args.limit,
         out=args.out,
         force=bool(args.force),
@@ -187,8 +209,11 @@ def run_dataset(name: str, plan: Plan) -> dict[str, object]:
                 {"status": "missing-inputs", "missing": missing, "dataset": name, "leg": leg},
             )
     runnable = [leg for leg in pending if not blocked[leg]]
-    if runnable and not has_embeddings(spec.export_dir):
-        for leg in runnable:
+    # The embedding COLUMN is a per-leg input, not a per-dataset one: an ablation leg reads its
+    # vectors from the sidecar and can run on an export whose corpus table has no column at all.
+    from_corpus = [leg for leg in runnable if vector_source(leg) == "corpus"]
+    if from_corpus and not has_embeddings(spec.export_dir):
+        for leg in from_corpus:
             _write_cell(
                 results_dir,
                 name,
@@ -200,19 +225,32 @@ def run_dataset(name: str, plan: Plan) -> dict[str, object]:
                     "leg": leg,
                 },
             )
-        runnable = []
+        runnable = [leg for leg in runnable if vector_source(leg) != "corpus"]
+        from_corpus = []
 
     if not runnable:
         return _collect(results_dir, name, plan.legs)
 
-    resolution, resolved, export = measure_resolution(name, plan, with_embeddings=True)
+    resolution, resolved, export = measure_resolution(
+        name, plan, with_embeddings=bool(from_corpus)
+    )
     usable = [r for r in resolved if r.is_usable]
     if not usable:
         return _collect(results_dir, name, plan.legs)
 
+    # Loaded here rather than inside `build_runner`, because this is where the corpus row ids the
+    # sidecar must line up with are known; `read_vector_sidecar` raises if it does not.
+    content_only = None
+    if any(leg in ABLATION_LEG_NAMES for leg in runnable):
+        print(f"[{name}] loading {CONTENT_ONLY_VECTORS} …", flush=True)
+        content_only = read_vector_sidecar(
+            spec.export_dir / CONTENT_ONLY_VECTORS,
+            expected_ids=[row.record_id for row in export.rows],
+        )[1]
+
     print(f"[{name}] embedding {len(usable)} queries …", flush=True)
     vectors = GraniteQueryEmbedder().encode([r.question for r in usable])
-    runner = build_runner(export, runnable)
+    runner = build_runner(export, runnable, content_only_vectors=content_only)
 
     for leg in runnable:
         cell = CellAccumulator()
@@ -230,6 +268,7 @@ def run_dataset(name: str, plan: Plan) -> dict[str, object]:
             "status": "ok",
             "dataset": name,
             "leg": leg,
+            "vector_source": vector_source(leg),
             "control": name in CONTROL_DATASETS,
             "limit": plan.limit,
             "resolution": resolution.to_dict(),

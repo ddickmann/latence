@@ -10,6 +10,10 @@ Two things the report does that a plain table does not, both because the ablatio
 * **The control section.** ViDoSeek, OHR-Bench and UDA are single-hop; a hypergraph or CoE leg
   *should* be flat there. The report states the observed control deltas next to that expectation
   so a large control gain reads as the leakage warning it is, not as a headline.
+* **The ablation section.** Ablation legs (``dense_content_only``) are kept OUT of the ladder
+  table: they are not increments, they are the same rung on a different input, and putting them
+  in the Δ column would turn the cumulative chain into nonsense. They get their own table, which
+  subtracts each against the ladder rung it is the counterfactual of.
 
 Gold-resolution rates are printed per dataset and a dataset below
 :data:`~benchmark.s5.goldmap.TRUST_THRESHOLD` is marked ``FLAGGED`` in place of an implied
@@ -23,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from benchmark.s5.datasets import CONTROL_DATASETS
 from benchmark.s5.goldmap import TRUST_THRESHOLD
+from benchmark.s5.legs import ABLATION_BASELINE, ABLATION_LEG_NAMES, LEG_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -142,10 +147,13 @@ def write_report(
             f"{_exclusions(resolution)} | {verdict} |"
         )
 
+    ladder = [leg for leg in legs if leg in LEG_NAMES]
     for dataset in sorted(matrix):
         control = " (single-hop CONTROL)" if dataset in CONTROL_DATASETS else ""
         lines += ["", f"## {dataset}{control}", "", _cap_note(matrix[dataset]), ""]
-        lines += _dataset_table(matrix[dataset], legs)
+        lines += _dataset_table(matrix[dataset], ladder)
+
+    lines += _ablation_section(matrix, legs)
 
     lines += [
         "",
@@ -189,6 +197,65 @@ def write_report(
         "",
     ]
     (out_dir / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _ablation_section(
+    matrix: Mapping[str, Mapping[str, Any]], legs: Sequence[str]
+) -> list[str]:
+    """The ``dense (+context-header)`` vs ``dense (content-only)`` table, per dataset.
+
+    Emitted only when an ablation leg was actually requested, so a plain ladder run's report does
+    not carry an empty promise. Rows the ablation could not run (no sidecar built yet) are shown
+    as the refusal they are, because an absent content-only number must not read as "no
+    difference".
+    """
+    wanted = [leg for leg in legs if leg in ABLATION_LEG_NAMES]
+    if not wanted:
+        return []
+    lines = [
+        "",
+        "## Ablation — what the W13 context header bought the dense leg",
+        "",
+        "The `dense` rung ranks the vectors the S3 Export wrote, which embed each chunk's "
+        "content **plus** its rendered ContextHeader (the chunk's KG entities and neighbour "
+        "triples). `dense (content-only)` re-runs that same rung against vectors built from the "
+        "content alone. Only the CORPUS side differs — queries carry no header, so both legs "
+        "rank identical query vectors. A positive Δ is what the enrichment is worth; it also "
+        "says how much of every leg above `dense` is header, not retrieval. This matters "
+        "unevenly: the S3 corpora carry populated headers while the reused M6 exports carry "
+        "`context_header: null` on every row, so without this table a single `dense` label "
+        "would silently mean two different things across datasets.",
+        "",
+        "| dataset | leg | baseline R@10 | ablated R@10 | Δ (header − content-only) |",
+        "|---|---|---|---|---|",
+    ]
+    for dataset in sorted(matrix):
+        cells = matrix[dataset]
+        for leg in wanted:
+            baseline_name = ABLATION_BASELINE.get(leg, "dense")
+            cell = cells.get(leg)
+            if not isinstance(cell, dict):
+                continue
+            if cell.get("status") != "ok":
+                missing = ", ".join(cell.get("missing", []))
+                lines.append(
+                    f"| {dataset} | {leg} | — | *missing inputs: {missing}* | — |"
+                )
+                continue
+            ablated = cell["metrics"].get("recall@10")
+            base_cell = cells.get(baseline_name)
+            baseline = (
+                base_cell["metrics"].get("recall@10")
+                if isinstance(base_cell, dict) and base_cell.get("status") == "ok"
+                else None
+            )
+            delta = (
+                None if baseline is None or ablated is None else float(baseline) - float(ablated)
+            )
+            lines.append(
+                f"| {dataset} | {leg} | {_fmt(baseline)} | {_fmt(ablated)} | {_signed(delta)} |"
+            )
+    return lines
 
 
 def _resolution_for(

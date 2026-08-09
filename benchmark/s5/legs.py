@@ -55,7 +55,12 @@ _RETRIEVAL_SRC = Path(__file__).resolve().parents[2] / "packages" / "latence-ret
 if str(_RETRIEVAL_SRC) not in sys.path:  # pragma: no cover - import wiring
     sys.path.insert(0, str(_RETRIEVAL_SRC))
 
-from benchmark.s5.corpus import Export, hyperedge_chunk_map, node_alias_map  # noqa: E402
+from benchmark.s5.corpus import (  # noqa: E402
+    CONTENT_ONLY_VECTORS,
+    Export,
+    hyperedge_chunk_map,
+    node_alias_map,
+)
 from latence_retrieval.bm25 import Bm25Rescorer  # noqa: E402
 from latence_retrieval.coe import select as coe_select  # noqa: E402
 from latence_retrieval.contracts import Candidate, Capability, RetrievalQuery  # noqa: E402
@@ -76,6 +81,36 @@ if TYPE_CHECKING:
 
 #: The legs, in ladder order. Each name is the *increment*; leg N runs signals 1..N.
 LEG_NAMES = ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
+
+#: Ablation legs — deliberately NOT rungs of the ladder above. Each re-runs ONE rung against a
+#: different *input* so the report can attribute that input, and each is reported in its own
+#: section so the ladder's cumulative Δ chain stays a chain of single-signal increments.
+#:
+#: ``dense_content_only`` is the ``dense`` rung ranked with vectors built from each chunk's
+#: CONTENT ONLY, against the ``dense`` rung's vectors which embed content **plus** the W13
+#: ContextHeader (the chunk's KG entities and neighbour triples) — because that is what the S3
+#: Export wrote into ``corpus.parquet``. Without this leg the header would be an invisible
+#: advantage folded into every dense number, and worse, an *uneven* one: the S3 corpora carry
+#: populated headers while the reused M6 exports carry ``context_header: null`` on every row, so
+#: the same "dense" label would mean different things per dataset. Only the CORPUS side changes —
+#: queries have no context header, so both legs rank the identical query vectors.
+ABLATION_LEG_NAMES = ("dense_content_only",)
+
+#: Every leg name the matrix accepts, ladder first.
+ALL_LEG_NAMES = (*LEG_NAMES, *ABLATION_LEG_NAMES)
+
+#: Which ladder leg each ablation leg is the counterfactual of — the pair the report subtracts.
+ABLATION_BASELINE = {"dense_content_only": "dense"}
+
+
+def vector_source(leg: str) -> str:
+    """Where ``leg``'s dense vectors come from: ``"corpus"`` or ``"sidecar"``.
+
+    ``corpus`` is ``corpus.parquet``'s ``embedding`` column (content + ContextHeader, as
+    exported); ``sidecar`` is :data:`~benchmark.s5.corpus.CONTENT_ONLY_VECTORS` next to it. One
+    function, so no call site has to re-derive the mapping from a leg name.
+    """
+    return "sidecar" if leg in ABLATION_LEG_NAMES else "corpus"
 
 #: Candidates each first-stage leg returns before fusion. Wide enough that recall@10 is a
 #: property of the legs rather than of the truncation.
@@ -109,14 +144,40 @@ def query_ngrams(question: str, max_n: int = 4) -> list[str]:
 
 
 class DenseBackend:
-    """Exact brute-force cosine over the export's L2-normalised vectors (a ``RetrievalBackend``)."""
+    """Exact brute-force cosine over the export's L2-normalised vectors (a ``RetrievalBackend``).
 
-    def __init__(self, export: Export) -> None:
-        if export.embeddings is None:
+    ``matrix`` overrides the export's own vectors with an alternative source (the content-only
+    sidecar) while every other view of the corpus — rows, ids, text — stays the one loaded export.
+    Whichever matrix it is given, the row count must equal the corpus's: a matrix off by one row
+    still ranks, and every id it returns would be the wrong chunk's, so the mismatch is refused at
+    construction rather than discovered in a recall number.
+    """
+
+    def __init__(
+        self,
+        export: Export,
+        *,
+        matrix: Any | None = None,
+        source: str = "corpus.parquet:embedding",
+    ) -> None:
+        vectors = export.embeddings if matrix is None else matrix
+        if vectors is None:
             msg = f"{export.dataset}: corpus.parquet carries no 'embedding' column."
             raise ValueError(msg)
+        if int(vectors.shape[0]) != len(export.rows):
+            msg = (
+                f"{export.dataset}: {source} has {int(vectors.shape[0])} vectors for "
+                f"{len(export.rows)} corpus rows; refusing to rank a misaligned matrix."
+            )
+            raise ValueError(msg)
         self._export = export
-        self._matrix = export.embeddings
+        self._matrix = vectors
+        self._source = source
+
+    @property
+    def source(self) -> str:
+        """A human-readable name for where this backend's vectors came from."""
+        return self._source
 
     @property
     def capabilities(self) -> frozenset[Capability]:
@@ -262,6 +323,8 @@ class Runner:
     bm25: Bm25Backend | None
     graph: GraphRetriever | None
     kv_path: Path | None
+    #: The ablation's second dense engine — the content-only sidecar over the same corpus rows.
+    dense_content_only: DenseBackend | None = None
     hyperedge_chunks: dict[str, str] = field(default_factory=dict)
     fuser: RrfFuser = field(default_factory=RrfFuser)
     packer: Packer = field(default_factory=lambda: Packer({"budget": PACK_BUDGET}))
@@ -284,8 +347,10 @@ class Runner:
         return out
 
     def run(self, question: str, vector: Any, leg: str) -> LegOutcome:
-        """Run the ladder up to and including ``leg`` for one query."""
+        """Run the ladder up to and including ``leg`` for one query (or one ablation leg)."""
         started = time.perf_counter()
+        if leg in ABLATION_LEG_NAMES:
+            return self._ablation(vector, leg, started)
         rankings: list[list[Candidate]] = []
 
         if self.dense is not None:
@@ -326,6 +391,27 @@ class Runner:
             tokens_packed=tokens,
             budget=budget,
         )
+
+    def _ablation(self, vector: Any, leg: str, started: float) -> LegOutcome:
+        """One ablation leg: a SINGLE-signal run against the alternative vector source.
+
+        It fuses nothing, exactly like the ``dense`` rung it is the counterfactual of — which is
+        what makes the two numbers subtractable. An absent backend yields an empty ranking rather
+        than falling back to the enriched vectors: a leg with no content-only sidecar must report
+        nothing, never the very number it exists to contrast with.
+        """
+        backend = {"dense_content_only": self.dense_content_only}[leg]
+        ranked: list[str] = []
+        if backend is not None:
+            hits = backend.search(
+                RetrievalQuery(
+                    mode=Capability.DENSE,
+                    vector=tuple(float(x) for x in vector),
+                    top_k=POOL_K,
+                )
+            )
+            ranked = [c.id for c in hits]
+        return LegOutcome(ranked=ranked, latency_ms=(time.perf_counter() - started) * 1000.0)
 
     def _graph_leg(self, question: str) -> list[Candidate]:
         if self.graph is None or self.seeder is None:
@@ -382,13 +468,30 @@ def _heuristic_tokens(text: str) -> int:
     return HeuristicTokenCounter().count(text)
 
 
-def build_runner(export: Export, legs: Sequence[str]) -> Runner:
-    """Assemble only the components the requested ``legs`` actually need."""
+def build_runner(
+    export: Export,
+    legs: Sequence[str],
+    *,
+    content_only_vectors: Any | None = None,
+) -> Runner:
+    """Assemble only the components the requested ``legs`` actually need.
+
+    ``content_only_vectors`` is the matrix :func:`~benchmark.s5.corpus.read_vector_sidecar`
+    returned for this export — supplied by the caller rather than loaded here, because the caller
+    is the one that already knows the corpus row ids the sidecar has to align with.
+    """
     root = export.root
     wanted = set(legs)
     dense = DenseBackend(export) if export.embeddings is not None else None
+    dense_content_only = None
+    if content_only_vectors is not None and wanted & set(ABLATION_LEG_NAMES):
+        dense_content_only = DenseBackend(
+            export, matrix=content_only_vectors, source=CONTENT_ONLY_VECTORS
+        )
     bm25 = None
-    if wanted - {"dense"} and (root / "bm25-stats.json").is_file():
+    if wanted & {"bm25", "kg", "hyperedges", "coe", "packer"} and (
+        root / "bm25-stats.json"
+    ).is_file():
         bm25 = Bm25Backend(export)
     graph = None
     seeder = None
@@ -409,6 +512,7 @@ def build_runner(export: Export, legs: Sequence[str]) -> Runner:
         bm25=bm25,
         graph=graph,
         kv_path=kv_path,
+        dense_content_only=dense_content_only,
         hyperedge_chunks=hyperedges,
         seeder=seeder,
     )
@@ -416,6 +520,14 @@ def build_runner(export: Export, legs: Sequence[str]) -> Runner:
 
 def missing_inputs(export_dir: Path, leg: str) -> list[str]:
     """Artifacts ``leg`` needs that ``export_dir`` does not have — a refusal, never a fake run."""
+    if leg in ABLATION_LEG_NAMES:
+        # Not cumulative: an ablation leg is one rung re-run against one other input, so it needs
+        # the corpus table (rows and ids) and its own vector file, nothing from the rungs above.
+        return [
+            f
+            for f in ("corpus.parquet", CONTENT_ONLY_VECTORS)
+            if not (export_dir / f).is_file()
+        ]
     needs: dict[str, tuple[str, ...]] = {
         "dense": ("corpus.parquet",),
         "bm25": ("bm25-stats.json", "bm25-postings.parquet"),
@@ -438,6 +550,9 @@ def has_embeddings(export_dir: Path) -> bool:
 
 
 __all__ = [
+    "ABLATION_BASELINE",
+    "ABLATION_LEG_NAMES",
+    "ALL_LEG_NAMES",
     "COE_BUDGET",
     "LEG_NAMES",
     "PACK_BUDGET",
@@ -452,4 +567,5 @@ __all__ = [
     "has_embeddings",
     "missing_inputs",
     "query_ngrams",
+    "vector_source",
 ]

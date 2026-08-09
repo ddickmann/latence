@@ -42,15 +42,34 @@ afterwards — a mismatch aborts before the new file is published.
 grow the two files from 324 MB to roughly 4 GB for no reader. So the default leaves ``corpus.jsonl``
 byte-identical, and the (S3-shaped) JSONL ``embedding`` key is an explicit ``--jsonl`` opt-in.
 
+**Two text variants, two destinations.** ``--no-context-header`` embeds each row's CONTENT ONLY
+(the plain dense baseline) instead of the default content + W13 ContextHeader prepend. That second
+variant has nowhere to go in ``corpus.parquet``: the five S3 exports already carry header-enriched
+vectors in the ``embedding`` column and :func:`write_corpus_parquet` refuses to double-add. So it is
+written to a **sidecar** table with ``--vectors-out PATH`` — ``record_id`` + a fixed-width
+``float32`` ``embedding``, in ``corpus.jsonl`` order, and nothing else (~0.9 GB for all 297k S3
+rows; duplicating the content would multiply that for no reader). ``corpus.parquet``,
+``corpus.jsonl`` and the BM25 artifacts are then left completely untouched — BM25 is folded over
+``_corpus_content`` and is *the same index for both variants*, so there is nothing to rebuild.
+:func:`benchmark.s5.corpus.read_vector_sidecar` loads it back, refusing any sidecar whose ids are
+not the corpus's ids in the corpus's order.
+
 **Resumable + idempotent.** Vectors are checkpointed as fixed-size shards under
-``<export>/.build-vectors/``; each shard records the sha256 of the record ids it covers, so a re-run
-re-embeds only the shards that are missing or whose ids moved, and a completed export re-runs as a
-no-op unless ``--force`` is given.
+``<export>/.build-vectors/`` (``.build-vectors-content-only/`` for the other variant — the two
+embed *different text for the same ids*, so one directory would let a content-only run silently
+inherit header-enriched vectors); each shard records the sha256 of the record ids it covers, so a
+re-run re-embeds only the shards that are missing or whose ids moved, and a completed export
+re-runs as a no-op unless ``--force`` is given.
 
 Usage::
 
     PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.build_vectors \\
         --export benchmark/official-data/musique-full/export --device auto
+    PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.build_vectors \\
+        --export benchmark/sota-corpus/s3-exports/multihop_rag --device auto \\
+        --no-context-header \\
+        --vectors-out benchmark/sota-corpus/s3-exports/multihop_rag/\\
+corpus-vectors-content-only.parquet
     PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.build_vectors \\
         --export benchmark/official-data/musique-full/export --verify-only
 """
@@ -76,6 +95,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import wiring
     sys.path.insert(0, str(REPO_ROOT))
 
+from benchmark.s5.corpus import CONTENT_ONLY_VECTORS, read_vector_sidecar  # noqa: E402
 from benchmark.s5.embed import _MAX_TOKENS as MAX_TOKENS  # noqa: E402
 from benchmark.s5.embed import GRANITE_MODEL  # noqa: E402
 from latence_core.bm25 import Bm25Accumulator  # noqa: E402
@@ -102,6 +122,9 @@ EMBED_DIM = 768
 #: Checkpoint directory, inside the export (already covered by the ``official-data/*/export/``
 #: gitignore rule, so no vectors can leak into the repo).
 WORK_DIRNAME = ".build-vectors"
+#: The two text variants, recorded in each checkpoint manifest and in the sidecar's metadata.
+HEADER_VARIANT = "context-header"
+CONTENT_VARIANT = "content-only"
 #: The untouched original, kept next to the rewritten table so the additive claim stays checkable.
 BACKUP_SUFFIX = ".pre-vectors.bak"
 #: Rows per checkpoint shard (the resume granularity) and per emitted Parquet row group.
@@ -253,12 +276,21 @@ class ShardStore:
     re-runs as a pure verification pass. A shard whose ids moved (a re-chunked or reordered corpus)
     fails its digest and is recomputed rather than silently reused, which is the property that makes
     the checkpoint safe to keep next to the data.
+
+    The digest covers the *ids*, which are identical for both text variants, so the manifest also
+    records its ``variant``: without that, a content-only run pointed at a header run's directory
+    would find every digest matching and reuse the wrong vectors. Variants additionally get
+    separate directories (:func:`work_dirname`); the manifest field is the belt to that braces, and
+    a pre-variant manifest is read as the header variant because that is the only one that existed.
     """
 
-    def __init__(self, work_dir: Path, *, model_id: str, dim: int) -> None:
+    def __init__(
+        self, work_dir: Path, *, model_id: str, dim: int, variant: str = HEADER_VARIANT
+    ) -> None:
         self._dir = work_dir
         self._model_id = model_id
         self._dim = dim
+        self._variant = variant
         self._manifest_path = work_dir / "manifest.json"
         self._shards: dict[str, dict[str, Any]] = {}
         self._load_manifest()
@@ -267,15 +299,25 @@ class ShardStore:
         if not self._manifest_path.is_file():
             return
         data = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-        if data.get("model") != self._model_id or int(data.get("dim", 0)) != self._dim:
-            # A different model/width was checkpointed here: its vectors are not ours to reuse.
+        stored_variant = str(data.get("variant") or HEADER_VARIANT)
+        if (
+            data.get("model") != self._model_id
+            or int(data.get("dim", 0)) != self._dim
+            or stored_variant != self._variant
+        ):
+            # A different model/width/text variant was checkpointed here: not ours to reuse.
             self._shards = {}
             return
         self._shards = dict(data.get("shards") or {})
 
     def _save_manifest(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        payload = {"model": self._model_id, "dim": self._dim, "shards": self._shards}
+        payload = {
+            "model": self._model_id,
+            "dim": self._dim,
+            "variant": self._variant,
+            "shards": self._shards,
+        }
         tmp = self._manifest_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self._manifest_path)
@@ -354,6 +396,74 @@ def embedding_array(vectors: Any) -> pa.Array:  # noqa: ANN401 - numpy
     offsets = pa.array(np.arange(rows + 1, dtype=np.int32) * dim, type=pa.int32())
     values = pa.array(np.ascontiguousarray(vectors, dtype=np.float64).reshape(-1))
     return pa.ListArray.from_arrays(offsets, values)
+
+
+def sidecar_schema(*, model_id: str, dim: int, variant: str) -> pa.Schema:
+    """The two-column sidecar schema, stamped with what produced the vectors.
+
+    ``float32`` and **fixed width**, unlike ``corpus.parquet``'s ``list<double>``: the Export's
+    column type exists to match the S3 tables byte for byte, which a sidecar has no reason to do,
+    and halving 297k × 768 values saves ~0.9 GB while losing nothing (the model emits float32, so
+    the Export's widening to double is padding, not precision). The fixed size puts "every row is
+    ``dim`` wide" in the schema instead of in a checker. The key-value metadata records the model,
+    width and text variant so a loaded matrix can always say what it is.
+    """
+    return pa.schema(
+        [
+            pa.field("record_id", pa.string(), nullable=False),
+            pa.field("embedding", pa.list_(pa.float32(), dim), nullable=False),
+        ],
+        metadata={
+            b"latence.vectors.model": model_id.encode("utf-8"),
+            b"latence.vectors.dim": str(dim).encode("utf-8"),
+            b"latence.vectors.variant": variant.encode("utf-8"),
+        },
+    )
+
+
+def fixed_embedding_array(vectors: Any) -> pa.Array:  # noqa: ANN401 - numpy
+    """``(n, dim)`` float32 vectors as a ``fixed_size_list<float>`` Arrow array."""
+    rows, dim = vectors.shape
+    values = pa.array(np.ascontiguousarray(vectors, dtype=np.float32).reshape(-1))
+    return pa.FixedSizeListArray.from_arrays(values, dim)
+
+
+def write_vector_sidecar(
+    export_dir: Path,
+    out_path: Path,
+    store: ShardStore,
+    shard_count: int,
+    *,
+    variant: str,
+) -> int:
+    """Write ``record_id`` + ``embedding`` for every corpus row; return the row count.
+
+    The alternative to :func:`write_corpus_parquet` and the reason a second variant can exist at
+    all: it ADDS a file rather than rewriting the corpus table, so the header-enriched vectors the
+    S3 exports already carry survive untouched. Ids and order come from ``corpus.jsonl`` — the same
+    stream the vectors were computed from and checkpointed against — so the sidecar is aligned with
+    the corpus by construction, and :func:`~benchmark.s5.corpus.read_vector_sidecar` re-checks that
+    on every load anyway. Written to a temp sibling and renamed, so an interrupted write cannot
+    leave a half-length sidecar in place of a good one.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    schema = sidecar_schema(model_id=GRANITE_MODEL, dim=EMBED_DIM, variant=variant)
+    feed = VectorFeed(store, shard_count)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    written = 0
+    writer = pq.ParquetWriter(tmp, schema)  # type: ignore[no-untyped-call]
+    try:
+        for batch in batched(iter_rows(export_dir / "corpus.jsonl"), DEFAULT_SHARD_ROWS):
+            vectors = feed.take(len(batch))
+            ids = pa.array([str(row["record_id"]) for row in batch], type=pa.string())
+            writer.write_table(  # type: ignore[no-untyped-call]
+                pa.Table.from_arrays([ids, fixed_embedding_array(vectors)], schema=schema)
+            )
+            written += len(batch)
+    finally:
+        writer.close()  # type: ignore[no-untyped-call]
+    os.replace(tmp, out_path)
+    return written
 
 
 def corpus_schema(existing: pa.Schema) -> pa.Schema:
@@ -518,6 +628,23 @@ class BuildPlan:
     spot_checks: int
     #: Embed content+ContextHeader (the S3 rule) or content only (dense baseline).
     with_context_header: bool = True
+    #: Write a two-column vector sidecar here instead of rewriting ``corpus.parquet``.
+    vectors_out: Path | None = None
+
+    @property
+    def variant(self) -> str:
+        """``context-header`` or ``content-only`` — which text this plan embeds."""
+        return HEADER_VARIANT if self.with_context_header else CONTENT_VARIANT
+
+
+def work_dirname(variant: str) -> str:
+    """The checkpoint directory name for one text variant, relative to the export.
+
+    The header variant keeps the original ``.build-vectors`` so checkpoints written before the
+    variant split remain resumable; the content-only variant gets its own, because the two embed
+    different text under identical ids and a shared directory would silently cross-feed them.
+    """
+    return WORK_DIRNAME if variant == HEADER_VARIANT else f"{WORK_DIRNAME}-{variant}"
 
 
 def is_complete(export_dir: Path) -> bool:
@@ -589,56 +716,66 @@ def build(
             msg = f"{export_dir} has no {required}; this augments an export, it cannot make one."
             raise FileNotFoundError(msg)
 
-    if plan.verify_only:
+    def _verify() -> dict[str, Any]:
         return verify(
             export_dir,
             spot_checks=plan.spot_checks,
             device=plan.device,
             log=log,
             embedder_factory=embedder_factory,
+            with_context_header=plan.with_context_header,
+            vectors=plan.vectors_out,
         )
 
-    store = ShardStore(export_dir / WORK_DIRNAME, model_id=GRANITE_MODEL, dim=EMBED_DIM)
+    if plan.verify_only:
+        return _verify()
+
+    store = ShardStore(
+        export_dir / work_dirname(plan.variant),
+        model_id=GRANITE_MODEL,
+        dim=EMBED_DIM,
+        variant=plan.variant,
+    )
+    already = (
+        plan.vectors_out.is_file() if plan.vectors_out is not None else is_complete(export_dir)
+    )
     if plan.force:
         store.clear()
-    elif is_complete(export_dir):
+    elif already:
         log(f"{export_dir}: artifacts already present; nothing to do (--force rebuilds)")
-        return verify(
-            export_dir,
-            spot_checks=plan.spot_checks,
-            device=plan.device,
-            log=log,
-            embedder_factory=embedder_factory,
-        )
+        return _verify()
 
     factory = embedder_factory or (
         lambda: GraniteCorpusEmbedder(device=plan.device, batch_size=plan.batch_size)
     )
     started = time.monotonic()
-    log(f"{export_dir}: embedding (device={resolve_device(plan.device)})")
+    log(f"{export_dir}: embedding {plan.variant} (device={resolve_device(plan.device)})")
     shard_count = embed_corpus(plan, store, factory, log=log)
     log(f"  vectors checkpointed: {store.count()} rows in {shard_count} shards")
 
-    if "embedding" not in pq.read_schema(export_dir / "corpus.parquet").names:  # type: ignore[no-untyped-call]
-        rows = write_corpus_parquet(export_dir, store, shard_count)
-        log(f"  corpus.parquet rewritten with the embedding column ({rows} rows)")
+    if plan.vectors_out is not None:
+        # Sidecar mode writes ONE file. corpus.parquet keeps the vectors it already has,
+        # corpus.jsonl is untouched, and the BM25 artifacts are folded over `_corpus_content`
+        # — identical for both variants — so there is nothing about them to rebuild.
+        rows = write_vector_sidecar(
+            export_dir, plan.vectors_out, store, shard_count, variant=plan.variant
+        )
+        log(f"  vector sidecar written: {plan.vectors_out} ({rows} rows, {plan.variant})")
     else:
-        log("  corpus.parquet already carries the embedding column")
+        if "embedding" not in pq.read_schema(export_dir / "corpus.parquet").names:  # type: ignore[no-untyped-call]
+            rows = write_corpus_parquet(export_dir, store, shard_count)
+            log(f"  corpus.parquet rewritten with the embedding column ({rows} rows)")
+        else:
+            log("  corpus.parquet already carries the embedding column")
 
-    artifact = write_bm25(export_dir)
-    log(f"  bm25 artifacts written (vocab {len(artifact['terms'])}, avgdl {artifact['avgdl']})")
+        artifact = write_bm25(export_dir)
+        log(f"  bm25 artifacts written (vocab {len(artifact['terms'])}, avgdl {artifact['avgdl']})")
 
-    if plan.write_jsonl:
-        rows = write_jsonl_embeddings(export_dir, store, shard_count)
-        log(f"  corpus.jsonl rewritten with the embedding key ({rows} rows)")
+        if plan.write_jsonl:
+            rows = write_jsonl_embeddings(export_dir, store, shard_count)
+            log(f"  corpus.jsonl rewritten with the embedding key ({rows} rows)")
 
-    report = verify(
-        export_dir,
-        spot_checks=plan.spot_checks,
-        device=plan.device,
-        log=log,
-        embedder_factory=embedder_factory,
-    )
+    report = _verify()
     report["wall_seconds"] = round(time.monotonic() - started, 1)
     report["device"] = resolve_device(plan.device)
     return report
@@ -705,6 +842,7 @@ def verify(
     log: Callable[[str], None] = lambda message: print(message, file=sys.stderr, flush=True),
     embedder_factory: Callable[[], Any] | None = None,
     with_context_header: bool = True,
+    vectors: Path | None = None,
 ) -> dict[str, Any]:
     """Check the produced artifacts and return the numbers, never a bare "ok".
 
@@ -714,13 +852,26 @@ def verify(
     :mod:`benchmark.s5.embed` uses on the S3 exports: a sampled chunk's own text, re-embedded, must
     retrieve that chunk at rank 1 by cosine over the whole matrix. ``spot_checks=0`` skips only that
     last step (it is the one that loads the model).
+
+    ``vectors`` verifies a **sidecar** instead of ``corpus.parquet``'s column, and the sidecar's
+    ids are checked against ``corpus.jsonl`` on the way in. ``with_context_header`` must be the
+    variant those vectors were built from: the spot check re-embeds the row's text and would
+    otherwise compare header-enriched probes against content-only vectors and report a real build
+    as broken (or, worse, the reverse).
     """
     parquet = export_dir / "corpus.parquet"
     backup = parquet.with_suffix(parquet.suffix + BACKUP_SUFFIX)
-    record_ids, matrix, widths = read_matrix(parquet)
+    if vectors is not None:
+        expected = [str(row["record_id"]) for row in iter_rows(export_dir / "corpus.jsonl")]
+        record_ids, matrix = read_vector_sidecar(vectors, expected_ids=expected)
+        widths = {int(matrix.shape[1])} if record_ids else set()
+    else:
+        record_ids, matrix, widths = read_matrix(parquet)
     norms = np.linalg.norm(matrix, axis=1)
     report: dict[str, Any] = {
         "export": str(export_dir),
+        "vectors": str(vectors) if vectors is not None else f"{parquet}:embedding",
+        "variant": HEADER_VARIANT if with_context_header else CONTENT_VARIANT,
         "rows": len(record_ids),
         "embedding_dim": int(matrix.shape[1]),
         "all_rows_768": bool(widths == {EMBED_DIM} and matrix.shape[0] == len(record_ids)),
@@ -732,19 +883,24 @@ def verify(
         report["rows_before"] = int(pq.ParquetFile(backup).metadata.num_rows)  # type: ignore[no-untyped-call]
         report["rows_unchanged"] = bool(report["rows_before"] == report["rows"])
 
-    stats = json.loads((export_dir / "bm25-stats.json").read_text(encoding="utf-8"))
-    postings = pq.read_table(export_dir / "bm25-postings.parquet", columns=["record_id"])  # type: ignore[no-untyped-call]
-    report["bm25"] = {
-        "artifact": stats["artifact"],
-        "tokenizer": stats["tokenizer"],
-        "doc_count": stats["doc_count"],
-        "vocab_size": len(stats["terms"]),
-        "avgdl": stats["avgdl"],
-        "total_tokens": stats["total_tokens"],
-        "postings_rows": postings.num_rows,
-        "postings_cover_corpus": bool(postings.num_rows == len(record_ids)),
-        "doc_count_matches": bool(stats["doc_count"] == len(record_ids)),
-    }
+    # Reported only when they exist: a sidecar build deliberately does not produce them, and
+    # claiming a BM25 verdict from another run's files would be the fake green this refuses.
+    stats_path = export_dir / "bm25-stats.json"
+    postings_path = export_dir / "bm25-postings.parquet"
+    if stats_path.is_file() and postings_path.is_file():
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        postings = pq.read_table(postings_path, columns=["record_id"])  # type: ignore[no-untyped-call]
+        report["bm25"] = {
+            "artifact": stats["artifact"],
+            "tokenizer": stats["tokenizer"],
+            "doc_count": stats["doc_count"],
+            "vocab_size": len(stats["terms"]),
+            "avgdl": stats["avgdl"],
+            "total_tokens": stats["total_tokens"],
+            "postings_rows": postings.num_rows,
+            "postings_cover_corpus": bool(postings.num_rows == len(record_ids)),
+            "doc_count_matches": bool(stats["doc_count"] == len(record_ids)),
+        }
 
     if spot_checks > 0 and record_ids:
         report["self_retrieval"] = _self_retrieval(
@@ -820,7 +976,19 @@ def parse_args(argv: Sequence[str] | None = None) -> BuildPlan:
         help="embed CONTENT ONLY (the dense baseline). Default embeds the W13 "
         "ContextHeader prepend, matching how the S3 corpora were exported.",
     )
+    parser.add_argument(
+        "--vectors-out",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="write a record_id+embedding sidecar parquet HERE instead of rewriting "
+        f"corpus.parquet (leaving it, corpus.jsonl and the BM25 artifacts untouched). "
+        f"The name the harness looks for is <export>/{CONTENT_ONLY_VECTORS}. This is how the "
+        "content-only variant is built for an export that already carries vectors.",
+    )
     args = parser.parse_args(argv)
+    if args.vectors_out is not None and args.jsonl:
+        parser.error("--jsonl rewrites corpus.jsonl, which --vectors-out exists to avoid")
     return BuildPlan(
         export_dir=args.export.resolve(),
         device=str(args.device),
@@ -831,6 +999,7 @@ def parse_args(argv: Sequence[str] | None = None) -> BuildPlan:
         verify_only=bool(args.verify_only),
         spot_checks=int(args.spot_checks),
         with_context_header=not bool(args.no_context_header),
+        vectors_out=args.vectors_out.resolve() if args.vectors_out is not None else None,
     )
 
 
@@ -848,17 +1017,23 @@ if __name__ == "__main__":  # pragma: no cover - CLI
 
 __all__ = [
     "BM25_TOKENIZER",
+    "CONTENT_VARIANT",
     "EMBED_DIM",
+    "HEADER_VARIANT",
     "BuildPlan",
     "GraniteCorpusEmbedder",
     "ShardStore",
     "build",
     "corpus_schema",
+    "corpus_text_for",
     "embed_corpus",
     "read_matrix",
     "resolve_device",
+    "sidecar_schema",
     "verify",
+    "work_dirname",
     "write_bm25",
     "write_corpus_parquet",
     "write_jsonl_embeddings",
+    "write_vector_sidecar",
 ]

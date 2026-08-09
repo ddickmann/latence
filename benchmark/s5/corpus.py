@@ -14,6 +14,15 @@ beyond the indices the S3 stage did not persist:
 
 It implements ``ChunkIndex`` structurally, so :func:`benchmark.s5.goldmap.resolve` stays a pure
 function over a five-chunk hand-written index in tests and over 220,129 real rows here.
+
+**Two vector sources, never mixed silently.** ``corpus.parquet``'s ``embedding`` column holds the
+vectors the S3 Export wrote, which embed *content + the W13 ContextHeader prepend* (the row's KG
+entities and neighbour triples). The content-only baseline cannot go in that column — the Export's
+writer refuses to double-add it and the enriched vectors are the ones already on disk — so it lives
+in a **sidecar** table (:data:`CONTENT_ONLY_VECTORS`, written by ``build_vectors --vectors-out``)
+holding nothing but ``record_id`` + ``embedding``. :func:`read_vector_sidecar` is the only way in,
+and it RAISES unless the sidecar's ids are the corpus's ids in the corpus's order: a vector matrix
+that is off by one row does not fail, it returns confident nonsense.
 """
 
 from __future__ import annotations
@@ -121,6 +130,86 @@ class Export:
 
 
 _EMBEDDING_COLUMN = "embedding"
+_RECORD_ID_COLUMN = "record_id"
+
+#: The conventional file name for the CONTENT-ONLY vector sidecar inside an export directory.
+#: ``build_vectors --vectors-out <export>/corpus-vectors-content-only.parquet`` writes it and the
+#: ``dense_content_only`` ablation leg reads it; naming it here (rather than at each call site)
+#: is what lets :func:`benchmark.s5.legs.missing_inputs` refuse the leg by file name.
+CONTENT_ONLY_VECTORS = "corpus-vectors-content-only.parquet"
+
+#: Rows per read batch — the sidecar is up to 297k × 768 float32 (~0.9 GB), so it is streamed
+#: into one pre-sized matrix rather than materialised as Python lists first.
+_SIDECAR_BATCH_ROWS = 8192
+
+
+def read_vector_sidecar(
+    path: Path, *, expected_ids: Sequence[str] | None = None
+) -> tuple[list[str], Any]:
+    """``(record_ids, float32 (rows, dim) matrix)`` from a ``--vectors-out`` sidecar table.
+
+    The sidecar carries exactly two columns — ``record_id`` and a fixed-width ``float32``
+    ``embedding`` — in the corpus's row order, and no content: it is an *alternative value* for
+    one column of ``corpus.parquet``, not a second copy of the corpus.
+
+    ``expected_ids`` is the alignment contract and it is checked, not assumed. A sidecar built
+    from a different (re-chunked, re-ordered, or simply other) corpus would still load as a
+    perfectly shaped matrix and every rank it produced would be wrong-but-plausible, so a
+    disagreement RAISES here, naming the first position that differs. Callers that genuinely have
+    no corpus to check against pass ``None`` and own that decision explicitly.
+    """
+    source = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
+    names = set(source.schema_arrow.names)
+    missing = [c for c in (_RECORD_ID_COLUMN, _EMBEDDING_COLUMN) if c not in names]
+    if missing:
+        msg = f"{path}: not a vector sidecar — missing column(s) {missing}."
+        raise ValueError(msg)
+
+    total = int(source.metadata.num_rows)
+    record_ids: list[str] = []
+    matrix: Any = None
+    filled = 0
+    for batch in source.iter_batches(  # type: ignore[no-untyped-call]
+        batch_size=_SIDECAR_BATCH_ROWS, columns=[_RECORD_ID_COLUMN, _EMBEDDING_COLUMN]
+    ):
+        rows = int(batch.num_rows)
+        if not rows:
+            continue
+        values = batch.column(_EMBEDDING_COLUMN).flatten().to_numpy(zero_copy_only=False)
+        if values.size % rows:
+            msg = f"{path}: ragged embedding rows ({values.size} values over {rows} rows)."
+            raise ValueError(msg)
+        width = values.size // rows
+        if matrix is None:
+            matrix = np.zeros((total, width), dtype=np.float32)
+        elif width != matrix.shape[1]:
+            msg = f"{path}: embedding width changes mid-file ({matrix.shape[1]} -> {width})."
+            raise ValueError(msg)
+        matrix[filled : filled + rows] = values.reshape(rows, width)
+        record_ids.extend(str(value) for value in batch.column(_RECORD_ID_COLUMN).to_pylist())
+        filled += rows
+    if matrix is None:
+        matrix = np.zeros((0, 0), dtype=np.float32)
+    if expected_ids is not None:
+        _assert_ids_aligned(path, record_ids, list(expected_ids))
+    return record_ids, matrix
+
+
+def _assert_ids_aligned(path: Path, found: Sequence[str], expected: Sequence[str]) -> None:
+    """Raise unless ``found`` is ``expected``, same ids in the same order — never a warning."""
+    if len(found) != len(expected):
+        msg = (
+            f"{path}: vector sidecar covers {len(found)} rows but the corpus has "
+            f"{len(expected)}; refusing to use a misaligned vector matrix."
+        )
+        raise ValueError(msg)
+    for position, (got, want) in enumerate(zip(found, expected, strict=True)):
+        if got != want:
+            msg = (
+                f"{path}: vector sidecar row {position} is {got!r} but the corpus row there is "
+                f"{want!r}; refusing to use a misaligned vector matrix."
+            )
+            raise ValueError(msg)
 
 
 def load_export(
@@ -130,6 +219,7 @@ def load_export(
     s2_root: Path | None = None,
     with_embeddings: bool = True,
     page_docs: frozenset[str] | None = None,
+    vectors: Path | None = None,
 ) -> Export:
     """Read ``root``'s ``corpus.parquet`` into an :class:`Export` (+ the page maps when present).
 
@@ -139,13 +229,19 @@ def load_export(
     the cast is exact and halves the resident matrix. ``page_docs`` limits the page-span
     reconstruction to the documents this run's queries actually reference — a 50-query UDA smoke
     touches a handful of 1,917 documents, and reassembling all of them would dominate the run.
+
+    ``vectors`` REPLACES the dense matrix with a :func:`read_vector_sidecar` table (the
+    content-only ablation variant), leaving every other column read from ``corpus.parquet``
+    exactly as before. The embedding column is then not read at all — there is no path where both
+    sources end up in one :class:`Export`, because a leg must be able to say which vectors
+    produced its number.
     """
     # The reused M6 exports (musique/hotpot) predate the context/embedding columns, so the
     # optional ones are selected only when the schema actually has them — a leg that needs a
     # missing column is refused upstream by `legs.missing_inputs`, never silently zero-filled.
     available = set(pq.read_schema(root / "corpus.parquet").names)  # type: ignore[no-untyped-call]
     optional = [c for c in ("kg_node_ids", _EMBEDDING_COLUMN) if c in available]
-    if not with_embeddings and _EMBEDDING_COLUMN in optional:
+    if (not with_embeddings or vectors is not None) and _EMBEDDING_COLUMN in optional:
         optional.remove(_EMBEDDING_COLUMN)
     table = pq.read_table(  # type: ignore[no-untyped-call]
         root / "corpus.parquet", columns=["record_id", "content", "provenance", *optional]
@@ -174,7 +270,11 @@ def load_export(
             )
         )
     embeddings = None
-    if _EMBEDDING_COLUMN in table.column_names:
+    if vectors is not None:
+        embeddings = read_vector_sidecar(
+            vectors, expected_ids=[row.record_id for row in rows]
+        )[1]
+    elif _EMBEDDING_COLUMN in table.column_names:
         embeddings = np.asarray(
             table.column(_EMBEDDING_COLUMN).to_numpy(zero_copy_only=False).tolist(),
             dtype=np.float32,
@@ -229,9 +329,11 @@ def node_alias_map(nodes_parquet: Path) -> dict[str, str]:
 
 
 __all__ = [
+    "CONTENT_ONLY_VECTORS",
     "ChunkRow",
     "Export",
     "hyperedge_chunk_map",
     "load_export",
     "node_alias_map",
+    "read_vector_sidecar",
 ]

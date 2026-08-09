@@ -113,6 +113,48 @@ def test_report_states_the_granularity_mix_and_the_exclusion_reasons(tmp_path) -
     assert "498 (corpus-missing-domain 498)" in report
 
 
+def test_report_puts_the_ablation_in_its_own_table_not_in_the_ladder(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The Δ column must stay a chain of increments; the ablation is a separate subtraction."""
+    matrix = {
+        "multihop_rag": {
+            "dense": _cell("dense", 0.60),
+            "bm25": _cell("bm25", 0.70),
+            "dense_content_only": _cell("dense_content_only", 0.55),
+        }
+    }
+    write_report(
+        tmp_path, matrix, legs=("dense", "bm25", "dense_content_only"), limit=None
+    )
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "context header bought" in report
+    assert "| multihop_rag | dense_content_only | 0.6000 | 0.5500 | +0.0500 |" in report
+    # …and the ladder table below the dataset heading only carries the two ladder rungs.
+    ladder = report.split("## multihop_rag")[1].split("## Ablation")[0]
+    assert "dense_content_only" not in ladder
+    assert "| bm25 |" in ladder
+
+
+def test_report_omits_the_ablation_section_when_no_ablation_leg_ran(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    write_report(tmp_path, {"uda": {"dense": _cell("dense", 0.4)}}, legs=("dense",), limit=None)
+    assert "## Ablation" not in (tmp_path / "REPORT.md").read_text()
+
+
+def test_report_shows_an_unbuilt_sidecar_as_a_refusal_not_as_no_difference(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    matrix = {
+        "musique": {
+            "dense": _cell("dense", 0.5),
+            "dense_content_only": {
+                "status": "missing-inputs",
+                "missing": ["corpus-vectors-content-only.parquet"],
+            },
+        }
+    }
+    write_report(tmp_path, matrix, legs=("dense", "dense_content_only"), limit=None)
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "missing inputs: corpus-vectors-content-only.parquet" in report
+    assert "| musique | dense_content_only | — |" in report
+
+
 def test_report_renders_a_missing_input_cell_as_a_refusal(tmp_path) -> None:  # type: ignore[no-untyped-def]
     matrix = {
         "musique": {

@@ -10,17 +10,24 @@ against the real thing on the real export rather than against a fixture.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pytest
-from benchmark.s5.corpus import Export, load_export
+from benchmark.s5.corpus import CONTENT_ONLY_VECTORS, ChunkRow, Export, load_export
 from benchmark.s5.datasets import DATASETS
 from benchmark.s5.legs import (
+    ABLATION_LEG_NAMES,
+    ALL_LEG_NAMES,
     LEG_NAMES,
     Bm25Backend,
     ChunkGraphDocumentSource,
     DenseBackend,
     EdgeGraphSource,
+    build_runner,
     missing_inputs,
     query_ngrams,
+    vector_source,
 )
 from latence_retrieval.contracts import Capability, RetrievalQuery
 
@@ -50,6 +57,73 @@ def test_missing_inputs_is_cumulative_and_refuses_rather_than_zero_scores(tmp_pa
     assert later[0] == "corpus.parquet"
     assert "graph-hyperedges.kv" in later
     assert set(LEG_NAMES) == {"dense", "bm25", "kg", "hyperedges", "coe", "packer"}
+
+
+# -- the context-header ablation leg -----------------------------------------------------------
+
+#: Two deliberately DIFFERENT vector sources over the same three chunks: the query ``[1, 0, 0]``
+#: ranks ``c0`` first under the corpus matrix and ``c2`` first under the sidecar one, so a leg
+#: that read the wrong source could not accidentally produce the right answer.
+_CORPUS_MATRIX = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+_SIDECAR_MATRIX = _CORPUS_MATRIX[::-1].copy()
+_QUERY = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+
+def _tiny_export(root: Path) -> Export:
+    rows = [ChunkRow(f"c{i}", f"chunk {i}", "d.md", i * 10, i * 10 + 9, ()) for i in range(3)]
+    return Export(dataset="t", root=root, rows=rows, embeddings=_CORPUS_MATRIX, pages={})
+
+
+def test_the_ablation_leg_is_beside_the_ladder_not_on_it() -> None:
+    """The six specced legs stay exactly the six specced legs; the ablation is appended."""
+    assert LEG_NAMES == ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
+    assert ABLATION_LEG_NAMES == ("dense_content_only",)
+    assert ALL_LEG_NAMES == LEG_NAMES + ABLATION_LEG_NAMES
+    assert not set(LEG_NAMES) & set(ABLATION_LEG_NAMES)
+    assert [vector_source(leg) for leg in LEG_NAMES] == ["corpus"] * len(LEG_NAMES)
+    assert vector_source("dense_content_only") == "sidecar"
+
+
+def test_each_leg_ranks_with_its_own_vector_source(tmp_path: Path) -> None:
+    """`dense` reads the export's enriched vectors; `dense_content_only` reads the sidecar's."""
+    export = _tiny_export(tmp_path)
+    runner = build_runner(
+        export, ("dense", "dense_content_only"), content_only_vectors=_SIDECAR_MATRIX
+    )
+    assert runner.dense is not None
+    assert runner.dense_content_only is not None
+    assert runner.dense_content_only.source == CONTENT_ONLY_VECTORS
+    assert runner.run("q", _QUERY, "dense").ranked[0] == "c0"
+    assert runner.run("q", _QUERY, "dense_content_only").ranked[0] == "c2"
+
+
+def test_the_ablation_leg_returns_nothing_rather_than_the_vectors_it_contrasts_with(
+    tmp_path: Path,
+) -> None:
+    """No sidecar means no number — never a silent fallback to the enriched matrix."""
+    runner = build_runner(_tiny_export(tmp_path), ("dense", "dense_content_only"))
+    assert runner.dense_content_only is None
+    assert runner.run("q", _QUERY, "dense_content_only").ranked == []
+    assert runner.run("q", _QUERY, "dense").ranked[0] == "c0"
+
+
+def test_dense_backend_refuses_a_matrix_that_does_not_cover_the_corpus(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="refusing to rank a misaligned matrix"):
+        DenseBackend(_tiny_export(tmp_path), matrix=_SIDECAR_MATRIX[:2], source="sidecar")
+
+
+def test_missing_inputs_refuses_the_ablation_leg_by_its_own_file(tmp_path: Path) -> None:
+    """Not cumulative: the ablation needs the corpus table and its sidecar, nothing above."""
+    assert missing_inputs(tmp_path, "dense_content_only") == [
+        "corpus.parquet",
+        CONTENT_ONLY_VECTORS,
+    ]
+    (tmp_path / "corpus.parquet").touch()
+    assert missing_inputs(tmp_path, "dense_content_only") == [CONTENT_ONLY_VECTORS]
+    (tmp_path / CONTENT_ONLY_VECTORS).touch()
+    assert missing_inputs(tmp_path, "dense_content_only") == []
+    # …and it never demands the BM25/graph artifacts the ladder legs need.
+    assert "bm25-stats.json" in missing_inputs(tmp_path, "bm25")
 
 
 @requires_export
