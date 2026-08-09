@@ -12,49 +12,112 @@
   },
   "datasets": {
     "ohr_bench": {
-      "documents": 1261, "chunks": 13909, "mentions": 154545, "relations": 4414,
-      "entities": 76057, "graph_nodes": 76057, "graph_edges": 4411,
-      "hyperedges": 53109, "avg_arity": 2.55, "pii_findings": 39287,
-      "chunks_enriched": 12026, "runtime_hours": 1.29, "induced": true
+      "documents": 1261,
+      "chunks": 13909,
+      "mentions": 153414,
+      "relations": 4339,
+      "entities": 75793,
+      "graph_nodes": 75793,
+      "graph_edges": 4335,
+      "hyperedges": 53097,
+      "avg_arity": 2.53,
+      "pii_findings": 39318,
+      "chunks_enriched": 11985,
+      "runtime_hours": 1.29,
+      "induced": true,
+      "corpus_rows": 13909,
+      "note": "Re-run 2026-08-09 after the pod store wipe; re-induction produced a marginally different schema (LLM nondeterminism), so counts differ ~0.3% from the 2026-08-04 run (nodes 76057->75793). The text-native datasets, which use hand-authored schemas, reproduced bit-for-bit."
     },
     "vidoseek": {
-      "documents": 292, "chunks": 2434, "mentions": 36289, "relations": 816,
-      "entities": 22974, "graph_nodes": 22974, "graph_edges": 816,
-      "hyperedges": 13345, "avg_arity": 2.47, "pii_findings": 6725,
-      "chunks_enriched": 2299, "runtime_hours": 0.31, "induced": true
+      "documents": 292,
+      "chunks": 2434,
+      "mentions": 36159,
+      "relations": 809,
+      "entities": 22925,
+      "graph_nodes": 22925,
+      "graph_edges": 809,
+      "hyperedges": 13306,
+      "avg_arity": 2.48,
+      "pii_findings": 6639,
+      "chunks_enriched": 2297,
+      "runtime_hours": 0.31,
+      "induced": true,
+      "corpus_rows": 2434
     },
     "uda": {
-      "documents": 1917, "chunks": 220129, "mentions": 2673837, "relations": null,
-      "entities": 586415, "graph_records": 1263672,
-      "chunks_enriched": 220129, "corpus_rows": 220129, "induced": true,
-      "note": "Final three stages (graph, enrich, exports) were driven by a standalone runner script after four scaling fixes; the pipeline's own quality-report.json was therefore not written. Counts are from the run WAL (authoritative per-stage commits). relations/hyperedge totals are recoverable from graph-edges.parquet and graph-hyperedges.parquet."
+      "documents": 1917,
+      "chunks": 220129,
+      "mentions": 2603887,
+      "relations": 69950,
+      "entities": 516512,
+      "graph_records": 1263672,
+      "chunks_enriched": 203735,
+      "corpus_rows": 220129,
+      "induced": true,
+      "graph_nodes": 516512,
+      "graph_edges": 69903,
+      "hyperedges": 677257,
+      "avg_arity": 2.89,
+      "pii_findings": 451449
     },
     "multihop_rag": {
-      "documents": 609, "chunks": 3264, "mentions": 57668, "relations": 2801,
-      "entities": 23258, "graph_nodes": 23258, "graph_edges": 2799,
-      "hyperedges": 18937, "avg_arity": 2.79, "pii_findings": 19194,
-      "chunks_enriched": 3262, "runtime_hours": 0.19, "induced": false
+      "documents": 609,
+      "chunks": 3264,
+      "mentions": 57668,
+      "relations": 2801,
+      "entities": 23258,
+      "graph_nodes": 23258,
+      "graph_edges": 2799,
+      "hyperedges": 18937,
+      "avg_arity": 2.79,
+      "pii_findings": 19194,
+      "chunks_enriched": 3262,
+      "runtime_hours": 0.19,
+      "induced": false,
+      "corpus_rows": 3264
     },
     "wiki2multihop": {
-      "documents": 56687, "chunks": 57812, "mentions": 578806, "relations": 90076,
-      "entities": 271275, "graph_nodes": 271275, "graph_edges": 90072,
-      "hyperedges": 137986, "avg_arity": 3.93, "pii_findings": 214666,
-      "chunks_enriched": 56519, "runtime_hours": 1.24, "induced": false
+      "documents": 56687,
+      "chunks": 57812,
+      "mentions": 578806,
+      "relations": 90076,
+      "entities": 271275,
+      "graph_nodes": 271275,
+      "graph_edges": 90072,
+      "hyperedges": 137986,
+      "avg_arity": 3.93,
+      "pii_findings": 214666,
+      "chunks_enriched": 56519,
+      "runtime_hours": 1.24,
+      "induced": false,
+      "corpus_rows": 57812
     },
-    "musique": { "reused_from_m6": true, "export": "benchmark/official-data/musique-full/export" },
-    "hotpotqa": { "reused_from_m6": true, "export": "benchmark/official-data/hotpot-full/export" }
+    "musique": {
+      "reused_from_m6": true,
+      "export": "benchmark/official-data/musique-full/export"
+    },
+    "hotpotqa": {
+      "reused_from_m6": true,
+      "export": "benchmark/official-data/hotpot-full/export"
+    }
   },
   "totals": {
     "documents_processed": 60766,
     "chunks": 297548,
-    "mentions": 3501145,
-    "entities": 979979,
-    "hyperedges_excluding_uda": 223377,
-    "pii_findings_excluding_uda": 279872
+    "corpus_rows": 297548,
+    "mentions": 3429934,
+    "entities": 909763,
+    "hyperedges": 900583,
+    "pii_findings": 731266
   },
   "induction_cost": {
     "model": "deepseek/deepseek-v4-flash-0731",
-    "calls": { "ohr_bench": 14989, "vidoseek": 2677, "uda": 230278, "total": 247944 },
+    "calls": {
+      "ohr_bench": 14989,
+      "vidoseek": 2677,
+      "uda": 230278,
+      "total": 247944
+    },
     "measured_usd_per_call": 0.000118,
     "estimated_actual_usd": 29.26,
     "budget_cap_usd": 150.0,
@@ -68,5 +131,11 @@
     "59f8a04 hyperedge builder streams chunk-local state (bounded memory)",
     "ebd056c context enrichment projects mentions/nodes to compact views",
     "graph_export single-pass partition, GraphRecord envelopes dropped"
-  ]
+  ],
+  "corpus_text": {
+    "mode": "unmasked (unsafe_unmasked_corpus: true)",
+    "rationale": "PII masking replaced entity names in the exported+embedded text \u2014 measured 82% of 2Wiki/MultiHop-RAG rows carried placeholders INCLUDING article titles the questions target, while the reused M6 musique/hotpot exports are unmasked. Benchmark validity and cross-dataset comparability both required raw text.",
+    "safety": "PII detection still runs; every finding is recorded in pii_spans and masked_content on each exported row. Only the substitution into the corpus text is skipped. Framework default remains masked (core commit b70ab29).",
+    "verified": "0 placeholders in all 5 datasets (500-row samples); pii_spans retained on 163-415 of 500 rows per dataset."
+  }
 }

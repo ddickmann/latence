@@ -145,6 +145,12 @@ stages:
   config:
     basename: corpus
     context_columns: true
+    # Benchmark corpus: PII spans stay recorded in pii_spans/masked_content, but the
+    # exported+embedded text is the RAW content. Measured 2026-08-07: with masking on,
+    # 82% of 2Wiki/MultiHop-RAG rows carried [PERSON]-style placeholders INCLUDING the
+    # article titles the questions target, and the reused M6 musique/hotpot exports are
+    # unmasked -- so retrieval numbers were neither valid nor cross-comparable.
+    unsafe_unmasked_corpus: true
     embedder:
       provider: embedding.sentence_transformers
       config:
