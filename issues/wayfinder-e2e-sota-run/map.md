@@ -114,6 +114,20 @@ Runner's stage checkpoints or two separate runs.
    (deepseek/deepseek-v4-flash-0731 vs gpt-4.1-mini, 10 real chunks, cost+quality) BEFORE
    any GLiNER2/induction processing runs. Zollklar OpenRouter key authorized by Dennis.
 
+8. **S3 CLOSED + S5 spec (Dennis, 2026-08-09)**: all 6 datasets through the full-feature
+   pipeline — 297,548 corpus rows / 3.43M mentions / 910k entities / **900,583 hyperedges**,
+   ~$29 induction against the $150 cap, every export verified and held on the Mac. Corpus text
+   is UNMASKED (`unsafe_unmasked_corpus`, core b70ab29): PII masking had replaced entity names
+   in the embedded text — 82% of 2Wiki/MultiHop-RAG rows carried placeholders INCLUDING the
+   article titles questions target, while the reused M6 exports were raw, so retrieval was
+   neither valid nor cross-comparable. Detection still runs; only the substitution is skipped.
+   S5 spec: **2–4 native hops only** (no dataset exceeds 4; synthesized deep hops rejected as
+   non-comparable) and the leg ladder **dense → +bm25 → +KG → +hyperedges → +CoE → +packer**
+   (SPLADE, MaxSim/MUVERA, rerank/fusion ablations OUT). Ticket: tickets/s5-retrieval-benchmarks.md.
+   Seven scaling bugs fixed en route (dead O(N²) disambiguation loop, three whole-corpus
+   materializations, three monitoring blind spots) — all with regression tests, all invisible
+   below ~200k chunks.
+
 ## Fog
 
 - Whether tier-2 query NER and the (unbuilt) eu_vecs/dense leg are in scope for S5 or the
