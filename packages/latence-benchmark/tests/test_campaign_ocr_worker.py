@@ -286,3 +286,76 @@ class TestPipelinedScheduler:
         assert second["phase"] == "done"
         assert second["progress"] == first["progress"]
         assert second["pages_done"] == first["pages_done"]
+
+
+class TestPageMapSidecar:
+    """S2 must hand the pipeline the page boundaries it is holding (ADR-0060).
+
+    The assembly used to destroy them — the join turned N pages into one blob — so the
+    re-ingested markdown resolved every offset to page 1 across the whole S3 corpus. The
+    worker now writes them beside the markdown, and back-fills them for documents an
+    earlier pass already assembled.
+    """
+
+    def _run_one_doc(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pages: int = 4
+    ) -> tuple[Any, Path]:
+        worker = load_worker(monkeypatch)
+        root = make_root(tmp_path, ["d0"])
+        install_fake_render(worker, monkeypatch, {"d0": pages})
+        install_fake_openai(monkeypatch, _FakeCompletions(Recorder(delay=0.0), "ocr text"))
+        worker.run(root)
+        return worker, root
+
+    def test_assembly_writes_the_page_map_beside_the_markdown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from latence_benchmark.campaign import ocr_lib
+
+        _, root = self._run_one_doc(tmp_path, monkeypatch, pages=4)
+        markdown = root / "markdown" / "ds" / "d0.md"
+        sidecar = markdown.with_name(markdown.name + ocr_lib.PAGE_MAP_SIDECAR_SUFFIX)
+
+        assert sidecar.is_file()
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert [page["page_number"] for page in payload["pages"]] == [1, 2, 3, 4]
+        # The map describes THIS file: the cross-check the consumer runs on ingest.
+        assert payload["total_chars"] == len(markdown.read_text(encoding="utf-8"))
+        assert payload["pages"][0]["char_start"] == 0
+        assert payload["pages"][-1]["char_end"] == payload["total_chars"]
+
+    def test_a_pre_adr_document_gets_its_page_map_back_filled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from latence_benchmark.campaign import ocr_lib
+
+        worker, root = self._run_one_doc(tmp_path, monkeypatch, pages=3)
+        markdown = root / "markdown" / "ds" / "d0.md"
+        sidecar = markdown.with_name(markdown.name + ocr_lib.PAGE_MAP_SIDECAR_SUFFIX)
+        before = markdown.read_bytes()
+        sidecar.unlink()  # exactly the state the already-produced S3 corpus is in
+
+        # A relaunch must not re-OCR (the booby trap) yet must restore the page map.
+        install_fake_openai(monkeypatch, _BoobyTrappedCompletions())
+        worker.run(root)
+
+        assert sidecar.is_file()
+        assert markdown.read_bytes() == before  # the artifact itself is never rewritten
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert len(payload["pages"]) == 3
+
+    def test_back_fill_refuses_when_the_pages_no_longer_match_the_markdown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wrong spans would be worse than none — stay honestly unpaginated instead."""
+        from latence_benchmark.campaign import ocr_lib
+
+        worker, root = self._run_one_doc(tmp_path, monkeypatch, pages=3)
+        markdown = root / "markdown" / "ds" / "d0.md"
+        sidecar = markdown.with_name(markdown.name + ocr_lib.PAGE_MAP_SIDECAR_SUFFIX)
+        sidecar.unlink()
+        markdown.write_text("hand-edited, no longer the assembly", encoding="utf-8")
+
+        doc = worker.Doc(dataset="ds", doc_id="d0", pdf=root / "input/ds/pdfs/d0.pdf")
+        assert worker.backfill_page_map(root, doc, 3) is False
+        assert not sidecar.exists()

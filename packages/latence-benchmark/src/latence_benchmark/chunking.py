@@ -22,6 +22,7 @@ from latence_core.contracts import (
     Classification,
     OffsetMap,
     OffsetSegment,
+    PageMapOrigin,
     PageSlice,
     PageSpan,
     Provenance,
@@ -70,11 +71,15 @@ def as_chunk(
             if text
             else None
         ),
-        # The whole benchmark document is one chunk on one page, so its slice is that page.
+        # The whole benchmark document is one chunk on one page, so its slice is that page —
+        # and ASSUMED_SINGLE_PAGE says why: a labelled benchmark corpus is page-less plain
+        # text, so "page 1" here is the convention, not a measurement (ADR-0060). Same page
+        # numbers as before; the slice just stops over-claiming them.
         page_slice=(
             PageSlice(
                 pages=[PageSpan(page_number=1, char_start=0, char_end=len(text))],
                 total_chars=len(text),
+                origin=PageMapOrigin.ASSUMED_SINGLE_PAGE,
             )
             if text
             else None

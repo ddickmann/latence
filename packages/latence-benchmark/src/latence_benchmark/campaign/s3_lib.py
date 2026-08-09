@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from latence_benchmark.campaign.ocr_stage import OCR_DATASETS
 from latence_benchmark.campaign.stages import StageBlockedError
 
 if TYPE_CHECKING:
@@ -297,7 +298,8 @@ def generate_pipeline_yaml(
     :param max_induction_calls: The dataset's call-budget share (ignored unless ``induce``).
 
     Wiring decisions carried from the blessed stacks + the S0 inventory, in DAG order:
-    intake → parse(plaintext: the corpus is markdown) → chunk {the campaign's knobs} →
+    intake → parse(plaintext: the corpus is markdown; page map REQUIRED for the OCR'd
+    datasets, which ship a .pagemap.json sidecar — ADR-0060) → chunk {the campaign's knobs} →
     content screening BEFORE induction (never spend LLM calls on quarantined text) →
     optional induce → ONE fused extract stage (ADR-0013; labels = floor, induced UNIONs on)
     → redact off the same chunk stream (extract_on: unmasked — extraction reads raw text,
@@ -337,7 +339,20 @@ def generate_pipeline_yaml(
             # default; the zip-ratio guard is irrelevant for .md but harmless.
             config={"max_bytes": 26214400, "max_zip_ratio": 100.0},
         ),
-        _stage("parse", "parse", "parser.plaintext", depends_on=["intake_screen"]),
+        _stage(
+            "parse",
+            "parse",
+            "parser.plaintext",
+            depends_on=["intake_screen"],
+            # An OCR'd dataset is DECLARED paginated: s2-ocr writes a .pagemap.json beside
+            # every assembled document, so a document arriving here without one means the
+            # page boundaries were lost between the two stages. Requiring it makes that a
+            # counted PARSE_ERROR instead of what it used to be — 236k chunks all citing
+            # page 1, indistinguishable from a correct answer (ADR-0060). The text-native
+            # datasets are content-addressed markdown with no pages at all, so they keep the
+            # honest ASSUMED_SINGLE_PAGE default.
+            config={"require_page_map": True} if dataset in OCR_DATASETS else None,
+        ),
         _stage(
             "chunk",
             "chunk",

@@ -6,6 +6,12 @@ naive-but-honest Classification (language auto-detect), and hands the *raw*
 bytes downstream as a :class:`ParserInput` — decoding and the turn into markdown
 belong to the Parser (ADR-0019). The entry point that makes siloed data
 addressable.
+
+It also pairs each document with its optional page-map sidecar
+(:data:`~latence_core.contracts.PAGE_MAP_SIDECAR_SUFFIX`), so markdown that was paginated
+somewhere else — OCR'd out of band and re-ingested — arrives at Parse with its page
+boundaries still attached instead of collapsing to "page 1" (ADR-0060). Finding the file is
+the Source's job because the Source is the side holding a Storage handle; reading it is not.
 """
 
 from __future__ import annotations
@@ -13,7 +19,12 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING, Any
 
-from latence_core.contracts import Classification, ParserInput, Provenance
+from latence_core.contracts import (
+    PAGE_MAP_SIDECAR_SUFFIX,
+    Classification,
+    ParserInput,
+    Provenance,
+)
 from latence_core.language import UNKNOWN_LANGUAGE, detect_language
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
@@ -132,6 +143,11 @@ class LocalFolderSource:
         seen_file_names: dict[str, str] = {}
         for uri in storage.walk_files(self._path, follow_symlinks=self._follow_symlinks):
             file_name = uri.rsplit("/", 1)[-1]
+            # A page-map sidecar belongs TO a document; it is not one. Skipped before the
+            # extension filter so widening ``extensions`` to include ``json`` cannot turn a
+            # document's own page boundaries into a second, contentless "document" (ADR-0060).
+            if file_name.endswith(PAGE_MAP_SIDECAR_SUFFIX):
+                continue
             ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
             if ext not in self._extensions:
                 continue
@@ -175,4 +191,24 @@ class LocalFolderSource:
                 provenance=provenance,
                 classification=classification,
                 content=data,
+                # Pair the document with its page-map sidecar if the producer left one. The
+                # Source is the only side of the Parse seam that holds a Storage handle, so
+                # FINDING the file is its job; INTERPRETING it stays the Parser's, exactly as
+                # for ``content`` (ADR-0019/0060). The bytes ride the same validated record —
+                # no second out-of-band channel for the Runner's checkpoint to lose.
+                page_map_sidecar=self._read_sidecar(storage, uri),
             )
+
+    @staticmethod
+    def _read_sidecar(storage: Storage, uri: str) -> bytes | None:
+        """The document's ``<file>.pagemap.json`` bytes, or None when there is none.
+
+        Keyed on the document's FULL uri, so ``report.md`` and ``report.txt`` in one folder
+        get their own sidecars. Absence is the overwhelmingly common case (a corpus of plain
+        text has no page boundaries to carry) and is not an error here — a Parser decides what
+        a missing page map means for the documents IT is being pointed at.
+        """
+        sidecar_uri = uri + PAGE_MAP_SIDECAR_SUFFIX
+        if not storage.exists(sidecar_uri):
+            return None
+        return storage.read_bytes(sidecar_uri)

@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 58 records numbered 0001–0059.
+    the sequence simply skipped it), so the log holds 59 records numbered 0001–0060.
 
 ## Foundations & scope
 
@@ -63,6 +63,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0031](0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md) | Entity Extraction emits TRUE original offsets via a carried strip offset map |
 | [0042](0042-chunk-level-redaction-fixes-the-document-truncation-leak.md) | Redaction is a chunk→chunk transform (fixes the document-truncation PII leak) |
 | [0044](0044-universal-redaction-floor-and-optional-mask-before-extract.md) | A universal financial-PII redaction floor, and an optional mask-before-extract mode |
+| [0060](0060-page-boundaries-cross-the-ocr-handoff-in-a-sidecar-and-an-absent-page-map-is-a-value-not-a-page-1.md) | Page boundaries cross the OCR handoff in a sidecar; an absent page map is a value, not a `page 1` |
 
 ## Optional Stages
 

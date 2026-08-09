@@ -21,10 +21,17 @@ The three OCR-specific rules live here because each was decided with evidence
   failure mode) — the worker retries such a page exactly once.
 * **The manifest is the filesystem**: one ``pages/<doc_id>/<page:04d>.md`` per page,
   skip-if-exists, so a crash loses at most in-flight pages and a rerun is a no-op.
+* **The assembly emits its page spans** alongside the markdown
+  (:func:`assemble_document_with_pages`) and the worker writes them beside the document as a
+  ``.pagemap.json`` sidecar. Joining the pages used to DESTROY the page boundaries the worker
+  was holding, so the re-ingested markdown resolved every offset to page 1 across the whole
+  S3 corpus; the boundaries now travel with the artifact (ADR-0060). ``assemble_document`` is
+  the same function's ``.text``, so the markdown is byte-identical to what S2 already wrote.
 """
 
 from __future__ import annotations
 
+import json
 import random
 import re
 from collections import Counter
@@ -313,10 +320,55 @@ def provenance_header(
     )
 
 
+#: Suffix of the page-map sidecar written beside each assembled document. Must equal
+#: :data:`latence_core.contracts.PAGE_MAP_SIDECAR_SUFFIX` — it is repeated here rather than
+#: imported because this module is pushed to the pod as a bare file and may not import
+#: ``latence_core``; ``test_campaign_ocr_lib`` asserts the two never drift.
+PAGE_MAP_SIDECAR_SUFFIX = ".pagemap.json"
+
+
+@dataclass(frozen=True)
+class AssembledDocument:
+    """The assembled markdown plus where each source page landed inside it.
+
+    ``page_spans`` is one ``(page_number, char_start, char_end)`` per input page, half-open
+    and **contiguous from 0 to len(text)** — the shape
+    :class:`latence_core.contracts.PageMap` validates. Contiguity means the two joins that are
+    not page content have to be attributed to a page rather than left as gaps: the provenance
+    header goes to page 1, and each ``\\n\\n`` separator (and the trailing newline) goes to the
+    page that PRECEDES it, exactly as
+    :meth:`latence_core.contracts.PageMap.from_page_texts` does it. Offsets that fall in real
+    page text are unaffected either way; this only decides who owns the seams.
+    """
+
+    text: str
+    page_spans: tuple[tuple[int, int, int], ...]
+
+
 def assemble_document(
     pages: Sequence[str], *, doc_id: str, dataset: str, model: str, revision: str
 ) -> str:
     """Provenance header + the pages joined with a blank line — the ``markdown/`` artifact."""
+    return assemble_document_with_pages(
+        pages, doc_id=doc_id, dataset=dataset, model=model, revision=revision
+    ).text
+
+
+def assemble_document_with_pages(
+    pages: Sequence[str], *, doc_id: str, dataset: str, model: str, revision: str
+) -> AssembledDocument:
+    """:func:`assemble_document`'s markdown **plus** the page char spans inside it.
+
+    The page boundaries were never unknown at this point — the worker is holding the pages —
+    they were simply thrown away by the join, which is how every chunk of 3,470 OCR'd
+    documents came to cite page 1 (ADR-0060). Computing them HERE, in the same function that
+    builds the string, is what keeps them exact: there is no second implementation of the join
+    to drift from, and :func:`assemble_document` is now literally this function's ``.text``,
+    so the artifact the S3 corpus was built from is byte-identical by construction.
+
+    A zero-page document is coerced to one page covering the (header-only) text, mirroring
+    ``PageMap.from_page_texts([])`` — a map must have at least one span.
+    """
     header = provenance_header(
         doc_id=doc_id,
         dataset=dataset,
@@ -324,7 +376,39 @@ def assemble_document(
         model=model,
         revision=revision,
     )
-    return header + "\n\n" + "\n\n".join(pages) + "\n"
+    text = header + "\n\n" + "\n\n".join(pages) + "\n"
+    if not pages:
+        return AssembledDocument(text=text, page_spans=((1, 0, len(text)),))
+    spans: list[tuple[int, int, int]] = []
+    # Page 1 absorbs the header; every page absorbs the separator that follows it, and the
+    # last absorbs the trailing newline — so the spans tile [0, len(text)) with no gap.
+    cursor = 0
+    content = len(header) + 2
+    last = len(pages) - 1
+    for i, page in enumerate(pages):
+        content += len(page)
+        content += 2 if i != last else 1
+        spans.append((i + 1, cursor, content))
+        cursor = content
+    return AssembledDocument(text=text, page_spans=tuple(spans))
+
+
+def page_map_sidecar_json(assembly: AssembledDocument) -> str:
+    """``assembly``'s page spans as the sidecar file's bytes — a serialized ``PageMap``.
+
+    Written beside the markdown as ``<doc>.md`` + :data:`PAGE_MAP_SIDECAR_SUFFIX`, where
+    ``source.local_folder`` finds it and ``parser.plaintext`` turns it back into a real
+    :class:`latence_core.contracts.PageMap` (ADR-0060). ``origin`` is deliberately NOT written:
+    a file cannot vouch for its own provenance, so the consumer stamps
+    :attr:`~latence_core.contracts.PageMapOrigin.SIDECAR` itself. Keys are emitted in a fixed
+    order with no whitespace variance, so the sidecar is byte-deterministic like every other
+    campaign artifact.
+    """
+    pages = [
+        {"page_number": number, "char_start": start, "char_end": end}
+        for number, start, end in assembly.page_spans
+    ]
+    return json.dumps({"pages": pages, "total_chars": len(assembly.text)}) + "\n"
 
 
 # -- spot-check sampling ---------------------------------------------------------------------

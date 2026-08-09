@@ -143,6 +143,27 @@ class PageSliceMissingError(ContractError):
         self.record_id = record_id
 
 
+class PageMapSidecarError(ContractError):
+    """A document's page-map sidecar could not be honoured — malformed, stale, or missing.
+
+    The out-of-band handoff (ADR-0060) has one failure that matters: the sidecar and the
+    markdown drift apart. Its spans then still *validate* — contiguous, ascending, plausibly
+    sized — and still resolve every offset to a page, just the wrong one. That is the same
+    silent-plausible-wrong failure :class:`PageSliceMissingError` exists to prevent, one Stage
+    earlier, so it gets the same posture: a typed error rather than a best-effort map. The
+    absent-but-REQUIRED case (a Parser configured for a corpus the operator declared
+    paginated, handed a document with no sidecar) raises the same error, because to a consumer
+    the two are the same thing — page boundaries this document was supposed to have and does
+    not.
+
+    A Parser catches this and emits a ``PARSE_ERROR``
+    :class:`~latence_core.contracts.DocumentRecord` — the document is counted in the Quality
+    Report with the reason attached, and the run continues (ADR-0020). It carries no document
+    content, only the shape mismatch (the same no-PII discipline as
+    :class:`ScreeningQuarantineError`).
+    """
+
+
 class ScreeningQuarantineError(LatenceError):
     """A Quarantine disposition surfaced as a typed error (an *opt-in* fatal Screening).
 

@@ -18,6 +18,9 @@ Layout under ``--root`` (default /workspace/latence-sota/s2)::
     pages/<dataset>/<doc_id>/.pages               # sidecar: doc fully rendered, N pages
     pages/<dataset>/<doc_id>/.stats               # sidecar: assembly stats (metrics truth)
     markdown/<dataset>/<doc_id>.md  # normalized + assembled, provenance header
+    markdown/<dataset>/<doc_id>.md.pagemap.json   # the page char spans INSIDE that markdown,
+                                                  # read by source.local_folder at re-ingest
+                                                  # so chunks cite real pages (ADR-0060)
     spot-img/<dataset>/<doc_id>/<page:04d>.jpg    # the retained spot-check evidence
     state.json                      # atomic (temp+rename), rewritten every 30s
     metrics.json                    # written at the end of the run
@@ -480,31 +483,69 @@ def read_assembly_stats(root: Path, doc: Doc) -> dict[str, int] | None:
 
 
 def assemble_doc(root: Path, doc: Doc, page_count: int, state: State) -> dict[str, int]:
-    """Normalize + write ``markdown/<ds>/<doc_id>.md`` + persist the stats sidecar."""
+    """Normalize + write ``markdown/<ds>/<doc_id>.md`` (+ its page map) + the stats sidecar."""
     pages_md, converted, kept_raw, missing = normalize_pages(root, doc, page_count)
     target = root / "markdown" / doc.dataset / f"{doc.doc_id}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".part")
-    tmp.write_text(
-        ocr_lib.assemble_document(
-            pages_md,
-            doc_id=doc.doc_id,
-            dataset=doc.dataset,
-            model=MODEL,
-            revision=MODEL_REVISION,
-        ),
-        encoding="utf-8",
+    # The assembly hands back the page char spans it just computed. Writing them next to the
+    # markdown is what makes page-accurate citation survive the handoff back into the pipeline:
+    # without it the downstream parser sees one opaque blob and reports page 1 for every chunk
+    # (ADR-0060). ``.text`` is byte-identical to the previous ``assemble_document`` call.
+    assembly = ocr_lib.assemble_document_with_pages(
+        pages_md,
+        doc_id=doc.doc_id,
+        dataset=doc.dataset,
+        model=MODEL,
+        revision=MODEL_REVISION,
     )
+    tmp.write_text(assembly.text, encoding="utf-8")
+    page_map_target = target.with_name(target.name + ocr_lib.PAGE_MAP_SIDECAR_SUFFIX)
+    page_map_tmp = page_map_target.with_name(page_map_target.name + ".part")
+    page_map_tmp.write_text(ocr_lib.page_map_sidecar_json(assembly), encoding="utf-8")
     stats = {"tables_normalized": converted, "tables_kept_raw": kept_raw,
              "pages_missing": missing}
     stats_path = root / "pages" / doc.key / STATS_SIDECAR
     stats_tmp = stats_path.with_name(stats_path.name + ".tmp")
     stats_tmp.write_text(json.dumps(stats) + "\n", encoding="utf-8")
-    # Markdown first, stats second: a crash between the two re-derives on relaunch.
+    # Page map first, markdown second, stats third. The markdown's existence is this stage's
+    # done-probe (``assemble_doc`` is skipped when it exists), so publishing the page map ahead
+    # of it means a doc that looks assembled always HAS its page map — a crash in between
+    # leaves an orphan sidecar, which the next relaunch simply overwrites.
+    os.replace(page_map_tmp, page_map_target)
     os.replace(tmp, target)
     os.replace(stats_tmp, stats_path)
     state.bump(docs_assembled=1)  # progress tick per assembled doc (monotone counter)
     return stats
+
+
+def backfill_page_map(root: Path, doc: Doc, page_count: int) -> bool:
+    """Write the page map for an already-assembled doc that has none. Returns whether it did.
+
+    Re-runs the assembly over the retained ``pages/`` artifacts and writes the sidecar ONLY if
+    the reconstruction reproduces the markdown on disk byte for byte. A mismatch means the page
+    artifacts no longer correspond to the assembled document (a different model revision, an
+    edited file), and spans derived from them would be subtly wrong — so nothing is written and
+    the document stays honestly unpaginated rather than confidently mis-paginated.
+    """
+    target = root / "markdown" / doc.dataset / f"{doc.doc_id}.md"
+    page_map_target = target.with_name(target.name + ocr_lib.PAGE_MAP_SIDECAR_SUFFIX)
+    if page_map_target.is_file() or not target.is_file():
+        return False
+    pages_md, _, _, _ = normalize_pages(root, doc, page_count)
+    assembly = ocr_lib.assemble_document_with_pages(
+        pages_md,
+        doc_id=doc.doc_id,
+        dataset=doc.dataset,
+        model=MODEL,
+        revision=MODEL_REVISION,
+    )
+    if assembly.text != target.read_text(encoding="utf-8"):
+        return False
+    tmp = page_map_target.with_name(page_map_target.name + ".part")
+    tmp.write_text(ocr_lib.page_map_sidecar_json(assembly), encoding="utf-8")
+    os.replace(tmp, page_map_target)
+    return True
 
 
 def cleanup_doc_images(root: Path, doc: Doc, spot_page: int | None) -> bool:
@@ -540,7 +581,10 @@ def process_doc(
 
     A doc whose markdown already exists is a prior full pass: its cumulative progress is
     re-counted (never re-OCR'd — its images may already be deleted) and its persisted
-    stats are reused, falling back to re-deriving them from the kept page markdown.
+    stats are reused, falling back to re-deriving them from the kept page markdown. A doc
+    assembled by a pre-ADR-0060 pass has markdown but NO page map, so the map is back-filled
+    from the retained page artifacts — otherwise the corpus this worker already produced would
+    keep losing its page provenance forever, which is the exact defect being fixed.
     """
     pages_dir = root / "pages" / doc.key
     existing = {p.name for p in pages_dir.iterdir()} if pages_dir.is_dir() else set()
@@ -548,6 +592,7 @@ def process_doc(
     if markdown.is_file():
         done_pages = page_count - len(ocr_lib.missing_pages(page_count, existing))
         state.bump(pages_done=done_pages, docs_assembled=1)
+        backfill_page_map(root, doc, page_count)
         stats = read_assembly_stats(root, doc)
         if stats is None:
             _, converted, kept_raw, missing = normalize_pages(root, doc, page_count)

@@ -9,6 +9,29 @@ workspace are versioned and released together under one version number.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Page provenance survives the OCR handoff (ADR-0060, contracts v21).** Page-accurate citation
+  silently died whenever OCR happened out of band and its markdown was re-ingested: the plaintext
+  Parser had no page structure to report, so it emitted a one-span map and every downstream record
+  claimed `page 1`. Measured on the S3 SOTA corpus: `provenance.page_start == page_end == 1` on all
+  236k chunks of 3,470 OCR'd documents, with `page_slice` reporting a 7-page paper as one page —
+  populated, plausible, and wrong. Pre-paginated markdown now carries its boundaries in a sidecar
+  file discovered beside it (`<file>.pagemap.json`, a serialized `PageMap`): `LocalFolderSource`
+  finds it and attaches the raw bytes as `ParserInput.page_map_sidecar` (never ingesting the
+  sidecar as a document of its own), and `parser.plaintext` turns it into a real map via
+  `PageMap.from_sidecar_json`, which **cross-checks `total_chars` against the decoded document** so
+  a stale sidecar is a counted `PARSE_ERROR` rather than confidently wrong pages. Where no page
+  information exists, the new `PageMapOrigin` on `PageMap`/`PageSlice` records
+  `ASSUMED_SINGLE_PAGE` — the assumption is now a value that propagates into the export instead of
+  hiding as `page 1` — and `parser.plaintext`'s `require_page_map` turns a corpus the operator
+  DECLARED paginated into a per-document refusal. The S2 campaign worker emits the sidecar from the
+  same function that builds the markdown (`ocr_lib.assemble_document_with_pages`, of which
+  `assemble_document` is now literally the `.text`, so the artifact is byte-identical) and
+  back-fills it for already-assembled documents when the reconstruction still matches byte for
+  byte. Every addition defaults: a pipeline with no sidecars resolves every offset to exactly the
+  page it did before.
+
 ### Added
 
 - **Hyperedge sidecar KV + entity descriptions (ADR-0056/0058/0059, hypergraph-m2;

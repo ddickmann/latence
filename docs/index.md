@@ -156,7 +156,7 @@ and you should not need to hunt for anything else.
   Contracts, protocols, Runner, Storage and errors, autodoc'd from source.
 
 - :material-scale-balance: **[Decision log](adr/index.md)**
-  The 58 architecture decisions behind the framework.
+  The 59 architecture decisions behind the framework.
 
 </div>
 
@@ -165,7 +165,7 @@ and you should not need to hunt for anything else.
 | | |
 | --- | --- |
 | **Packages** | 33 distributions under `packages/` — one thin core plus one package per Provider family ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)). |
-| **Decisions** | 58 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0059 (0040 was never issued). |
+| **Decisions** | 59 architecture decision records in [`docs/adr/`](adr/index.md), numbered 0001–0060 (0040 was never issued). |
 | **Runners** | Two shipped: the built-in local Runner and `latence-runner-airflow`. |
 | **Deliverables** | A RAG corpus and a knowledge graph, as files — Parquet, JSONL, TTL, GraphML ([ADR-0017](adr/0017-ai-ready-deliverable-is-rag-corpus-plus-kg-as-files.md)). |
 

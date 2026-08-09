@@ -112,7 +112,7 @@ to `main`. It has never deployed while the repo was private.
 3. **Check:** the site is live and its navigation reaches the pages an evaluator needs —
    [Continuity & security process](CONTINUITY.md), [Throughput envelopes
    (measured)](perf-results.md), [Public benchmark results](BENCHMARKS.md), the
-   [Decision Log](adr/index.md) (all 58 ADRs), [Deploy](deployment.md),
+   [Decision Log](adr/index.md) (all 59 ADRs), [Deploy](deployment.md),
    [Observability](observability.md) and [Secrets](secrets.md).
 4. If a custom domain is used, set it in **Settings → Pages** and add the `CNAME`; then
    re-run the workflow so the deployed artifact carries it.

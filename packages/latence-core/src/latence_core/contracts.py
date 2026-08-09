@@ -10,10 +10,13 @@ record can never silently lose its source or attributes at a Stage boundary.
 from __future__ import annotations
 
 import bisect
+import json
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from latence_core.errors import PageMapSidecarError
 
 # Bump on any breaking change to a contract below. Serialized with every record
 # so downstream consumers can detect and reject an incompatible schema.
@@ -247,7 +250,28 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # linker and dropped). A v19 record deserialises unchanged (all new fields default), and a stack
 # that never configures hyperedges emits streams byte-identical to v19 apart from the version
 # number itself.
-SCHEMA_VERSION = 20
+#
+# v21 (ADR-0060 — page provenance survives the OCR handoff): ADDITIVE. Page-accurate citation
+# died at ONE seam: a document OCR'd out-of-band and re-ingested as assembled markdown. A
+# plaintext Parser has no page structure to report, so it emitted a one-span map and every
+# downstream record claimed ``page 1`` — measured on the S3 SOTA corpus as
+# ``page_start == page_end == 1`` on all 236k chunks of 3,470 OCR'd documents. The number was
+# populated, plausible, and wrong, which is strictly worse than absent.
+#
+# Three additions close it. (1) :class:`PageMapOrigin` + ``PageMap.origin`` / ``PageSlice.origin``
+# make "these boundaries were MEASURED" and "there was no page structure, so page 1 is a
+# CONVENTION" different values instead of the same one span — the missing map becomes
+# representable and detectable, on the record, all the way into the export. (2) ``ParserInput``
+# gains ``page_map_sidecar``: the raw bytes of a ``<file>.pagemap.json`` sidecar the Source found
+# beside the document, which the Parser turns into a real :class:`PageMap` via
+# :meth:`PageMap.from_sidecar_json` (cross-checked against the decoded length, so a stale sidecar
+# is a ``PARSE_ERROR``, never a silently wrong map). (3) :data:`PAGE_MAP_SIDECAR_SUFFIX` names the
+# convention once so producer and consumer cannot drift.
+#
+# Every field defaults: a v20 record deserialises unchanged, and a pipeline with no sidecars
+# resolves every offset to exactly the page it resolved to before — the only difference is that
+# the map now SAYS it assumed one page.
+SCHEMA_VERSION = 21
 
 
 class Provenance(BaseModel):
@@ -301,6 +325,47 @@ class Record(BaseModel):
     classification: Classification
 
 
+#: File-name suffix of a document's page-map sidecar, appended to the document's FULL name
+#: (``report.md`` → ``report.md.pagemap.json``), so ``report.md`` and ``report.txt`` in one
+#: folder cannot claim the same sidecar. The file holds a serialized :class:`PageMap` —
+#: ``pages`` + ``total_chars`` — in the character coordinates of the document's DECODED text.
+#:
+#: This is the one place the convention is written down. A Source discovers the file, a Parser
+#: interprets it (:meth:`PageMap.from_sidecar_json`), and an out-of-band producer that already
+#: knows its page boundaries — an OCR worker that assembled the markdown from per-page artifacts
+#: — writes it beside the markdown instead of throwing the boundaries away (ADR-0060).
+PAGE_MAP_SIDECAR_SUFFIX = ".pagemap.json"
+
+
+class PageMapOrigin(StrEnum):
+    """Where a :class:`PageMap`'s boundaries came from — measurement or convention.
+
+    Before this existed, "this document really is one page" and "I have no idea how this
+    document is paginated" were the SAME value: a single span covering everything, page 1.
+    Anything downstream that cited a page therefore cited ``page 1`` with full confidence for
+    an entire OCR'd corpus (the ADR-0060 defect). Recording the origin does not recover the
+    boundaries — nothing can, from an assembled blob — it makes their ABSENCE a value a
+    consumer can see, filter on, and refuse.
+
+    ``PARSER`` — the Parser segmented the source itself (a PDF reader walking pages, an OCR
+    Provider that ran per page). The boundaries are measured.
+
+    ``SIDECAR`` — the boundaries were supplied out-of-band, in a
+    :data:`PAGE_MAP_SIDECAR_SUFFIX` file, by whoever produced the markdown. Measured by the
+    producer and cross-checked against the decoded text on the way in, so as trustworthy as
+    ``PARSER`` — but distinguishable, because the trust rests on a different artifact.
+
+    ``ASSUMED_SINGLE_PAGE`` — there was NO page structure available: a ``.txt`` note, or
+    markdown whose pagination was lost upstream. The single span is a convention so that
+    offset→page resolution has one code path, not a claim that the document has one page. A
+    consumer that needs real page citation must treat this as *unknown*, not as page 1.
+    """
+
+    PARSER = "parser"
+    SIDECAR = "sidecar"
+    ASSUMED_SINGLE_PAGE = "assumed_single_page"
+
+
 class PageSpan(BaseModel):
     """One page's half-open ``[char_start, char_end)`` span in the assembled text."""
 
@@ -334,6 +399,11 @@ class PageMap(BaseModel):
     always present after a successful Parse, never optional, so downstream
     offset→page resolution has one code path. The live resolver over this map is
     :class:`latence_core.pagemap.PageOffsetIndex`.
+
+    ``origin`` says whether those boundaries were MEASURED or ASSUMED (v21/ADR-0060). One
+    span with ``origin=PARSER`` is a one-page document; one span with
+    ``origin=ASSUMED_SINGLE_PAGE`` is a document whose pagination is unknown. They used to be
+    indistinguishable, which is how an entire OCR'd corpus came to cite page 1.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -341,6 +411,13 @@ class PageMap(BaseModel):
     schema_version: int = Field(default=SCHEMA_VERSION)
     pages: list[PageSpan] = Field(..., min_length=1)
     total_chars: int = Field(..., ge=0)
+    origin: PageMapOrigin = Field(
+        default=PageMapOrigin.PARSER,
+        description=(
+            "Whether the boundaries were measured by the Parser, supplied by a sidecar, or "
+            "assumed because the document carried no page structure."
+        ),
+    )
 
     @model_validator(mode="after")
     def _contiguous(self) -> PageMap:
@@ -363,7 +440,13 @@ class PageMap(BaseModel):
         return self
 
     @classmethod
-    def from_page_texts(cls, page_texts: list[str], separator: str = "\n\n") -> PageMapAssembly:
+    def from_page_texts(
+        cls,
+        page_texts: list[str],
+        separator: str = "\n\n",
+        *,
+        origin: PageMapOrigin = PageMapOrigin.PARSER,
+    ) -> PageMapAssembly:
         """Assemble per-page text into one markdown string plus its page map.
 
         The Parser-side constructor: hand it the per-page decoded text in page
@@ -372,7 +455,10 @@ class PageMap(BaseModel):
         together so the boundaries are exact by construction, not reverse-engineered.
 
         A single-page (or zero-page, coerced to one empty page) document is the
-        plain-text case: one span covering everything.
+        plain-text case: one span covering everything. A caller in that position —
+        a Parser handed a page-less blob — passes
+        ``origin=PageMapOrigin.ASSUMED_SINGLE_PAGE`` so the record says so; a Parser
+        that really walked the source's pages keeps the ``PARSER`` default.
         """
         if not page_texts:
             page_texts = [""]
@@ -392,8 +478,63 @@ class PageMap(BaseModel):
                 cursor += sep_len
             spans.append(PageSpan(page_number=i + 1, char_start=start, char_end=cursor))
         assembled = "".join(parts)
-        page_map = cls(pages=spans, total_chars=len(assembled))
+        page_map = cls(pages=spans, total_chars=len(assembled), origin=origin)
         return PageMapAssembly(text=assembled, page_map=page_map)
+
+    @classmethod
+    def from_sidecar_json(cls, data: bytes | str, *, text_length: int) -> PageMap:
+        """Read a :data:`PAGE_MAP_SIDECAR_SUFFIX` sidecar into a validated ``SIDECAR`` map.
+
+        The consumer half of the out-of-band handoff (ADR-0060). ``data`` is the sidecar file
+        exactly as it was read — its own ``origin``, if it carries one, is IGNORED and
+        overwritten with :attr:`PageMapOrigin.SIDECAR`, because a file cannot vouch for how the
+        boundaries in it were obtained; what a consumer can honestly record is that they arrived
+        out of band.
+
+        ``text_length`` is the length of the DECODED document text the map is supposed to
+        describe, and the check that makes the sidecar trustworthy: a sidecar whose
+        ``total_chars`` disagrees is stale (the markdown was regenerated, re-encoded, or
+        hand-edited), and its spans would resolve real offsets to confidently wrong pages. That
+        raises :class:`~latence_core.errors.PageMapSidecarError` — which a Parser turns into a
+        ``PARSE_ERROR`` record — rather than returning a map that looks fine.
+
+        Every other malformation (unreadable bytes, invalid JSON, a non-object payload, spans
+        that are not contiguous, a schema version from the future) raises the same error, so a
+        caller has exactly one failure to handle.
+        """
+        if isinstance(data, bytes):
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise PageMapSidecarError(f"sidecar is not valid UTF-8: {exc}") from exc
+        else:
+            text = data
+        try:
+            payload = json.loads(text)
+        except ValueError as exc:
+            raise PageMapSidecarError(f"sidecar is not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise PageMapSidecarError(
+                f"sidecar must be a JSON object, got {type(payload).__name__}"
+            )
+        fields = {key: value for key, value in payload.items() if key != "origin"}
+        declared = fields.get("schema_version")
+        if isinstance(declared, int) and declared > SCHEMA_VERSION:
+            raise PageMapSidecarError(
+                f"sidecar declares schema_version {declared}, newer than this build's "
+                f"{SCHEMA_VERSION} — refusing to guess what changed"
+            )
+        try:
+            page_map = cls.model_validate({**fields, "origin": PageMapOrigin.SIDECAR})
+        except ValidationError as exc:
+            raise PageMapSidecarError(f"sidecar is not a valid PageMap: {exc}") from exc
+        if page_map.total_chars != text_length:
+            raise PageMapSidecarError(
+                f"sidecar describes {page_map.total_chars} characters but the decoded document "
+                f"is {text_length} — the sidecar is stale, so its page spans would resolve "
+                f"offsets to the wrong pages"
+            )
+        return page_map
 
 
 class PageMapAssembly(BaseModel):
@@ -447,6 +588,14 @@ class PageSlice(BaseModel):
             "The PARENT DOCUMENT's assembled length — not the slice's. Keeping the document's "
             "own end here makes past-the-end offset recovery resolve identically to the full "
             "document map."
+        ),
+    )
+    origin: PageMapOrigin = Field(
+        default=PageMapOrigin.PARSER,
+        description=(
+            "The parent PageMap's origin, carried through so a chunk stays self-describing "
+            "about how much its page numbers are worth — a slice cut from an "
+            "ASSUMED_SINGLE_PAGE map says 'page 1 is a convention here', not 'page 1'."
         ),
     )
 
@@ -503,7 +652,14 @@ class PageSlice(BaseModel):
         last = len(page_map.pages) - 1
         lo = min(max(bisect.bisect_right(starts, char_start) - 1, 0), last)
         hi = min(max(bisect.bisect_right(starts, last_included) - 1, lo), last)
-        return cls(pages=page_map.pages[lo : hi + 1], total_chars=page_map.total_chars)
+        return cls(
+            pages=page_map.pages[lo : hi + 1],
+            total_chars=page_map.total_chars,
+            # The slice inherits the map's honesty, not just its numbers: a chunk cut from an
+            # assumed single-page map must not read, downstream, like a chunk cut from a real
+            # per-page OCR run.
+            origin=page_map.origin,
+        )
 
 
 class Disposition(StrEnum):
@@ -598,6 +754,16 @@ class ParserInput(BaseModel):
     )
     config: dict[str, Any] = Field(
         default_factory=dict, description="Per-input Parser hints (encoding, OCR lang, …)."
+    )
+    page_map_sidecar: bytes | None = Field(
+        default=None,
+        description=(
+            "Raw bytes of the document's PAGE_MAP_SIDECAR_SUFFIX file, if the Source found one "
+            "beside it. Undecoded and uninterpreted, exactly like 'content' — the Source knows "
+            "Storage and can find the file; the Parser owns turning it into a PageMap "
+            "(ADR-0019/0060). None means no sidecar was present, which is not an error here: "
+            "what a Parser does about it is the Parser's disposition to record."
+        ),
     )
 
 

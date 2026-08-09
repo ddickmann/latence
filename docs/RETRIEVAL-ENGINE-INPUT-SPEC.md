@@ -8,13 +8,15 @@ Schema-version constants, read from source at time of writing:
 
 | Constant | Value | Defined in |
 |---|---|---|
-| `SCHEMA_VERSION` (all record contracts) | **20** | `packages/latence-core/src/latence_core/contracts.py:242` |
+| `SCHEMA_VERSION` (all record contracts) | **21** | `packages/latence-core/src/latence_core/contracts.py:242` |
 | `QUALITY_SCHEMA_VERSION` (Quality Report) | **20** | `packages/latence-core/src/latence_core/quality.py:123` |
 | `PIPELINE_SCHEMA_VERSION` | **2** | `packages/latence-core/src/latence_core/pipeline.py:25` |
 
-Every record carries its `schema_version` field (serialized with the record), and every contract's field defaults to the SAME module-level `SCHEMA_VERSION` — so a record dumped today stamps **20** everywhere, whatever version first introduced the field it sits beside.
+Every record carries its `schema_version` field (serialized with the record), and every contract's field defaults to the SAME module-level `SCHEMA_VERSION` — so a record dumped today stamps **21** everywhere, whatever version first introduced the field it sits beside.
 
 Contracts are **usually additive**: a new field defaults to `None`/empty so an older consumer keeps validating (v11 `offset_map`, v14 `induced_labels`, v15 `context_header`, v16 `masked_content`/`pii_spans`, v17 `guard_types`/`raw_label` are all optional additive fields).
+
+**v21 is additive** (ADR-0060): `PageMap` and `PageSlice` gain `origin` — `"parser"` (the Parser segmented the source), `"sidecar"` (boundaries supplied out of band beside the document and cross-checked on ingest), or `"assumed_single_page"` (the document carried NO page structure, so `page_number: 1` is a convention, not a measurement). **A retrieval engine that cites pages must read this**: before v21 an assumed page 1 was indistinguishable from a measured one, which is how an entire OCR'd corpus shipped citing page 1. `ParserInput` also gains `page_map_sidecar`. `origin` defaults to `"parser"`, so a v20 record deserialises unchanged and page NUMBERS are unaffected.
 
 **v20 is additive** (ADR-0057): `GraphScope` gains `HYPEREDGE` with the optional `GraphHyperedge` payload on `GraphRecord`, `CanonicalEntity` gains `member_link_confidences`, and a Graph-Assembly stack that opts in additionally emits `graph-hyperedges.parquet` (see §KG export). A v19 record deserialises unchanged; a stack that never configures hyperedges emits streams identical to v19 apart from the version number.
 
@@ -65,7 +67,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 
 | Field | Type | Optional? | Meaning (source: `contracts.py` `ChunkRecord` / `Record`) |
 |---|---|---|---|
-| `schema_version` | int | no | Contract version (20). |
+| `schema_version` | int | no | Contract version (21). |
 | `record_id` | string | no | The chunk's stable id (content-addressed). **Primary key.** |
 | `provenance` | object | no | `Provenance` — source lineage + offsets (see 2.9). |
 | `classification` | object | no | `Classification` — language/category/sensitivity (see 2.10). |
@@ -74,7 +76,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 | `content` | string | no (default `""`) | Markup-stripped, PII-redacted retrieval text. **Byte-unchanged by W13.** |
 | `media_type` | string | no (default `text/markdown`) | How to interpret `content`. |
 | `token_count` | int | no | Budgeted token count for the chunk text. |
-| `page_slice` | object\|null | yes | THIS chunk's own page spans (`PageSlice`) — exactly the parent document's `PageSpan`s overlapping `[char_start, char_end)`, in document coordinates — so a sub-chunk offset resolves to its own page. **Renamed from `page_map` in schema v19**, which carried the parent document's WHOLE map (on every chunk, then on the document's first chunk only). |
+| `page_slice` | object\|null | yes | THIS chunk's own page spans (`PageSlice`) — exactly the parent document's `PageSpan`s overlapping `[char_start, char_end)`, in document coordinates — so a sub-chunk offset resolves to its own page. **Renamed from `page_map` in schema v19**, which carried the parent document's WHOLE map (on every chunk, then on the document's first chunk only). Since v21 it also carries `origin` — read it before citing a page: `assumed_single_page` means the document had no page structure and `page_number: 1` is a convention (ADR-0060). |
 | `offset_map` | object\|null | yes | `OffsetMap`: run-length map stripped-`content`→original-markdown offsets (v11). |
 | `risk_markers` | array<RiskMarker> | no (default `[]`) | Content-Screening flags that survive into the corpus (filterable — exclude flagged chunks). |
 | `induced_labels` | object\|null | yes | `InducedLabels` the `schema_induction` Stage attached (v14). |
@@ -84,7 +86,7 @@ Writer: `stages/export.py` `JsonlParquetExport.export` / `_batched`. One JSON ob
 **Example line** (abridged, chunk with a context header, no embedding):
 
 ```json
-{"classification":{"category":"contract","language":"en","schema_version":20,"sensitivity":"confidential"},"content":"Acme Corporation entered into a master services agreement with Beta LLC on 3 March 2024.","context_header":{"entities":["Acme Corporation","Beta LLC"],"entity_types":["Organization","Organization"],"kg_node_ids":["b1c2...","d3e4..."],"neighbor_node_ids":["f5a6..."],"neighbor_triples":["Acme Corporation —acquired→ Gamma Inc"],"situating_sentence":null,"model_id":null,"schema_version":20},"document_record_id":"sha256:9a…","index":4,"media_type":"text/markdown","offset_map":{"length":88,"segments":[{"doc_start":512,"local_start":0}],"schema_version":20},"page_slice":{"pages":[{"char_end":640,"char_start":420,"page_number":2,"schema_version":20}],"schema_version":20,"total_chars":1180},"provenance":{"char_end":600,"char_start":512,"document_id":"sha256:9a…","file_name":"msa.pdf","file_size":48210,"file_type":"pdf","page_end":2,"page_start":2,"schema_version":20,"source_system":null,"source_uri":"file:///corpus/msa.pdf"},"record_id":"sha256:1f…","risk_markers":[],"induced_labels":null,"schema_version":20,"token_count":21}
+{"classification":{"category":"contract","language":"en","schema_version":21,"sensitivity":"confidential"},"content":"Acme Corporation entered into a master services agreement with Beta LLC on 3 March 2024.","context_header":{"entities":["Acme Corporation","Beta LLC"],"entity_types":["Organization","Organization"],"kg_node_ids":["b1c2...","d3e4..."],"neighbor_node_ids":["f5a6..."],"neighbor_triples":["Acme Corporation —acquired→ Gamma Inc"],"situating_sentence":null,"model_id":null,"schema_version":21},"document_record_id":"sha256:9a…","index":4,"media_type":"text/markdown","offset_map":{"length":88,"segments":[{"doc_start":512,"local_start":0}],"schema_version":21},"page_slice":{"origin":"sidecar","pages":[{"char_end":640,"char_start":420,"page_number":2,"schema_version":21}],"schema_version":21,"total_chars":1180},"provenance":{"char_end":600,"char_start":512,"document_id":"sha256:9a…","file_name":"msa.pdf","file_size":48210,"file_type":"pdf","page_end":2,"page_start":2,"schema_version":21,"source_system":null,"source_uri":"file:///corpus/msa.pdf"},"record_id":"sha256:1f…","risk_markers":[],"induced_labels":null,"schema_version":21,"token_count":21}
 ```
 
 ### 2.2 `records.parquet` — RAG corpus (Parquet / Arrow)

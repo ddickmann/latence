@@ -26,6 +26,10 @@ _Avoid_: Connector (a Connector is one Provider of the Source Capability), inges
 The Stage that turns a source document (PDF, image, office file) into markdown plus a page map preserving original page boundaries.
 _Avoid_: Document intelligence, doc intel, OCR (OCR is one Provider technique, not the Stage)
 
+**Page map origin**:
+Whether a page map's boundaries were MEASURED (the Parser segmented the source, or a page-map sidecar supplied them alongside pre-paginated markdown) or ASSUMED (the document carried no page structure at all, so its single span is a convention and "page 1" is not a claim). Recording it is what makes a missing page map detectable instead of indistinguishable from a real one-page document (ADR-0060).
+_Avoid_: page source, page confidence (it is not a score — it is provenance of the boundaries)
+
 **Chunk**:
 The Stage that splits parsed documents into retrieval-sized pieces while preserving offsets, page alignment, Provenance, and Classification.
 _Avoid_: Enrichment (banned project-wide — it meant chunking in superpod and feature computation in dataset-intelligence)
