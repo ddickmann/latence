@@ -14,6 +14,16 @@ Two things the report does that a plain table does not, both because the ablatio
   table: they are not increments, they are the same rung on a different input, and putting them
   in the Δ column would turn the cumulative chain into nonsense. They get their own table, which
   subtracts each against the ladder rung it is the counterfactual of.
+* **The weighted-fusion section.** Every number in the ladder table is EQUAL-weight RRF. The
+  optional tuned variant (:mod:`benchmark.s5.tuning`) is rendered in its own section, against its
+  own equal-weight number recomputed on its own test split — never against the full-set ladder
+  cell, which is a different query set. The section states, in the report itself, that those
+  numbers are dev-tuned and therefore not comparable to published baselines that did no tuning.
+* **The chain-coverage divergence.** ``recall@10`` and ``chain_coverage@10`` measure different
+  things (chunks retrieved vs gold DOCUMENTS covered), and on the graph legs they move in
+  opposite directions. A step where they disagree in sign is called out explicitly, because that
+  divergence — not the headline recall drop — is what says the graph signals carry information
+  the equal-weight fusion is spending badly.
 
 Gold-resolution rates are printed per dataset and a dataset below
 :data:`~benchmark.s5.goldmap.TRUST_THRESHOLD` is marked ``FLAGGED`` in place of an implied
@@ -27,7 +37,12 @@ from typing import TYPE_CHECKING, Any
 
 from benchmark.s5.datasets import CONTROL_DATASETS
 from benchmark.s5.goldmap import TRUST_THRESHOLD
-from benchmark.s5.legs import ABLATION_BASELINE, ABLATION_LEG_NAMES, LEG_NAMES
+from benchmark.s5.legs import (
+    ABLATION_BASELINE,
+    ABLATION_LEG_NAMES,
+    LEG_NAMES,
+    leg_signals,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -81,12 +96,23 @@ def write_report(
     *,
     legs: Sequence[str],
     limit: int | None,
+    weighted: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
-    """Write ``REPORT.md`` and ``metrics.json`` for ``matrix`` into ``out_dir``."""
+    """Write ``REPORT.md`` and ``metrics.json`` for ``matrix`` into ``out_dir``.
+
+    ``matrix`` is always the EQUAL-weight baseline — the ladder table, the deltas and the control
+    check are all read off it. ``weighted`` is the optional dev-tuned variant; when it carries
+    cells they are written to ``metrics-weighted.json`` and rendered as an extra section, and when
+    it is empty the report is exactly the report the baseline alone produces.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "metrics.json").write_text(
         json.dumps(matrix, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    if weighted:
+        (out_dir / "metrics-weighted.json").write_text(
+            json.dumps(weighted, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
     lines: list[str] = [
         "# S5 — Retrieval feature matrix (dense → +bm25 → +KG → +hyperedges → +CoE → +packer)",
@@ -96,6 +122,14 @@ def write_report(
         "written once and resumed. Gold resolution is always measured over the FULL query set. "
         "Legs are CUMULATIVE — leg *n* runs signals 1..*n* and fuses them with RRF, so every "
         "`Δ R@10` is the increment that one signal bought.",
+        "",
+        "**Every number in the ladder tables below is EQUAL-weight RRF** — each leg's signals "
+        "enter the fusion with the same pull. That is the assumption-free baseline, and it is "
+        "also why a graph leg can lower `R@10`: RRF sums `w / (k + rank)`, so appending a noisier "
+        "list at equal weight to a strong `dense+bm25` pool necessarily drags the fused ranking "
+        "toward the noise. The dev-tuned variant (its own section, if it was run) is the "
+        "controlled answer to \"does the signal help when fused properly?\"; it is NOT a "
+        "replacement for these numbers.",
         "",
         "Dense retrieval is exact brute-force cosine over the exported 768-d Granite vectors "
         "(no ANN index exists — the S5 ticket's recorded choice); BM25 is the exported corpus "
@@ -154,6 +188,8 @@ def write_report(
         lines += _dataset_table(matrix[dataset], ladder)
 
     lines += _ablation_section(matrix, legs)
+    lines += _divergence_section(matrix, ladder)
+    lines += _weighted_section(weighted or {}, legs)
 
     lines += [
         "",
@@ -258,6 +294,180 @@ def _ablation_section(
     return lines
 
 
+def _divergence_section(
+    matrix: Mapping[str, Mapping[str, Any]], ladder: Sequence[str]
+) -> list[str]:
+    """Per ladder step, ``Δ R@10`` beside ``Δ chain coverage@10`` — and where they disagree.
+
+    The two columns are not the same measurement said twice. ``R@10`` is set recall over gold
+    CHUNKS; ``chain cov`` is the fraction of gold DOCUMENTS (chain slots) with at least one chunk
+    in the top 10. A step that lowers the first while raising the second has not lost information
+    — it has reached *more of the gold documents* while spending top-10 slots that used to hold
+    several chunks of one document. That is the single most informative pattern in this matrix,
+    so it gets a table rather than a sentence someone has to reconstruct from two other tables.
+
+    Only steps where BOTH deltas exist are rowed; a dataset with no chain (the single-hop
+    controls) contributes nothing here rather than a row of dashes.
+    """
+    rows: list[str] = []
+    for dataset in sorted(matrix):
+        cells = matrix[dataset]
+        for lower, upper in zip(ladder, ladder[1:], strict=False):
+            recall = _delta(cells, lower, upper)
+            chain = _delta(cells, lower, upper, metric="chain_coverage@10")
+            if recall is None or chain is None:
+                continue
+            diverges = (recall < 0 < chain) or (chain < 0 < recall)
+            reading = (
+                "**diverges — the signal reaches more gold documents while the fusion "
+                "loses chunks**"
+                if diverges
+                else "same direction"
+            )
+            rows.append(
+                f"| {dataset} | {lower} → {upper} | {_signed(recall)} | {_signed(chain)} | "
+                f"{reading} |"
+            )
+    if not rows:
+        return []
+    return [
+        "",
+        "## Chain coverage vs recall — where the two disagree",
+        "",
+        "`R@10` counts gold CHUNKS retrieved; `chain cov` counts gold DOCUMENTS covered. They "
+        "can move in opposite directions, and on the graph legs they do. Where they diverge, the "
+        "equal-weight recall drop is **not** evidence that the signal is worthless: the signal is "
+        "surfacing documents the dense+bm25 pool missed, while the equal-weight fusion pays for "
+        "them with top-10 slots. Whether that trade is worth making is exactly the question the "
+        "dev-tuned variant below is there to answer.",
+        "",
+        "| dataset | step | Δ R@10 | Δ chain cov@10 | reading |",
+        "|---|---|---|---|---|",
+        *rows,
+    ]
+
+
+def _weighted_section(
+    weighted: Mapping[str, Mapping[str, Any]], legs: Sequence[str]
+) -> list[str]:
+    """The dev-tuned fusion variant: both variants on the SAME test split, plus the fitted weights.
+
+    Emitted only when tuned cells exist. Every comparison inside it is equal-vs-tuned on the
+    identical held-out queries from the identical retrieved lists, because the alternative —
+    subtracting the tuned test number from the full-set ladder cell — would mix a fusion change
+    with a change of query set and report the sum as if it were the former.
+    """
+    if not weighted:
+        return []
+    lines = [
+        "",
+        "## Dev-tuned fusion weights (second variant — NOT the baseline)",
+        "",
+        "The ladder above fuses every leg's signals at **equal** RRF weight. This section fits a "
+        "per-signal weight vector per (dataset, leg) and reports it on held-out queries:",
+        "",
+        "* **Split.** Each dataset's usable queries are partitioned by a stable keyed hash of the "
+        "query id (`blake2b(salt:query_id) % 1000 < dev_permille`) — no RNG, no ordering "
+        "dependence, and independent of `--limit`, so a query is on the same side in every run. "
+        "Sizes are stated per row.",
+        "* **Fit.** Coordinate ascent over a fixed weight grid, from all-ones, maximising mean "
+        "**nDCG@10** (the same definition this report prints) on the DEV half only. The first "
+        "signal is pinned at 1.0 because RRF weights are scale-invariant. A value is adopted only "
+        "on a strict improvement, so the fit can never land below the equal-weight start.",
+        "* **Report.** Metrics are computed on the TEST half only, and the equal-weight column is "
+        "recomputed on those same test queries from the same retrieved lists — so `Δ` is a "
+        "difference in **fusion** and nothing else.",
+        "",
+        "**These tuned numbers are not comparable to published baselines.** Those baselines "
+        "report an untuned system; these were fitted on this corpus's own dev queries. The "
+        "comparable number remains the equal-weight ladder above. What this table answers is "
+        "narrower and internal: *given the same candidate lists, does weighting the graph signals "
+        "properly recover what equal-weight fusion loses?*",
+        "",
+        "| dataset | leg | dev n | test n | R@10 equal | R@10 tuned | Δ R@10 | nDCG@10 equal | "
+        "nDCG@10 tuned | Δ nDCG@10 | chain cov equal | chain cov tuned |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    weights_rows: list[str] = []
+    for dataset in sorted(weighted):
+        cells = weighted[dataset]
+        for leg in legs:
+            cell = cells.get(leg)
+            if not isinstance(cell, dict):
+                continue
+            if cell.get("status") != "ok":
+                lines.append(
+                    f"| {dataset} | {leg} | — | — | *{cell.get('status', 'not run')}* |"
+                    + " |" * 8
+                )
+                continue
+            tuned = cell.get("metrics", {})
+            equal = cell.get("metrics_equal_weight_on_test", {})
+            split = cell.get("split", {})
+            lines.append(
+                f"| {dataset} | {leg} | {split.get('dev_queries_tuned_on', '—')} | "
+                f"{split.get('test_queries', '—')} | "
+                f"{_fmt(equal.get('recall@10'))} | {_fmt(tuned.get('recall@10'))} | "
+                f"{_signed(_difference(tuned, equal, 'recall@10'))} | "
+                f"{_fmt(equal.get('ndcg@10'))} | {_fmt(tuned.get('ndcg@10'))} | "
+                f"{_signed(_difference(tuned, equal, 'ndcg@10'))} | "
+                f"{_fmt(equal.get('chain_coverage@10'))} | "
+                f"{_fmt(tuned.get('chain_coverage@10'))} |"
+            )
+            weights_rows.append(_weights_row(dataset, leg, cell))
+    if weights_rows:
+        lines += [
+            "",
+            "### Fitted weights (auditable — every one of them)",
+            "",
+            "A weight of `0.00` is the fit saying *drop this list*, which is a finding, not a "
+            "failure — it is an answer the equal-weight run cannot express. `dev nDCG@10` shows "
+            "what the fit bought **on the fitting set**; the honest number is the Δ in the table "
+            "above, on the test set.",
+            "",
+            "| dataset | leg | fitted weights | grid evals | search | "
+            "dev nDCG@10 equal → tuned |",
+            "|---|---|---|---|---|---|",
+            *weights_rows,
+        ]
+    return lines
+
+
+def _weights_row(dataset: str, leg: str, cell: Mapping[str, Any]) -> str:
+    """One fit, fully auditable: the weights, the cost, and whether the search actually settled."""
+    tuning = cell.get("tuning", {})
+    weights = tuning.get("weights", {})
+    # Ladder order, not the alphabetical order the cell was serialised in: a weight vector reads
+    # as "what each rung is worth relative to dense", which only makes sense in rung order.
+    order = [name for name in leg_signals(leg) if name in weights]
+    order += [name for name in weights if name not in order]
+    rendered = ", ".join(f"{name} {float(weights[name]):.2f}" for name in order)
+    if cell.get("tunable") is False:
+        rendered = "— (single signal: the RRF weight is a pure scale, so there is nothing to fit)"
+    objective = tuning.get("objective", "ndcg@10")
+    before = tuning.get(f"dev_{objective}_equal_weight")
+    after = tuning.get(f"dev_{objective}_tuned")
+    # "stopped improving" and "ran out of passes" are different claims about the same weights.
+    search = (
+        "converged"
+        if tuning.get("converged")
+        else f"**hit the {tuning.get('max_passes', '?')}-pass cap**"
+    )
+    return (
+        f"| {dataset} | {leg} | {rendered or '—'} | {tuning.get('grid_evaluations', '—')} | "
+        f"{search} | {_fmt(before)} → {_fmt(after)} |"
+    )
+
+
+def _difference(
+    tuned: Mapping[str, Any], equal: Mapping[str, Any], key: str
+) -> float | None:
+    a, b = tuned.get(key), equal.get(key)
+    if a is None or b is None:
+        return None
+    return float(a) - float(b)
+
+
 def _resolution_for(
     out_dir: Path, dataset: str, cells: Mapping[str, Any]
 ) -> Mapping[str, Any] | None:
@@ -308,13 +518,16 @@ def _exclusions(resolution: Mapping[str, Any]) -> str:
     return f"{total} ({detail})" if detail else str(total)
 
 
-def _delta(cells: Mapping[str, Any], lower: str, upper: str) -> float | None:
+def _delta(
+    cells: Mapping[str, Any], lower: str, upper: str, *, metric: str = "recall@10"
+) -> float | None:
+    """``upper − lower`` for one metric, or ``None`` unless both cells ran and both carry it."""
     low, high = cells.get(lower), cells.get(upper)
     if not isinstance(low, dict) or not isinstance(high, dict):
         return None
     if low.get("status") != "ok" or high.get("status") != "ok":
         return None
-    a, b = low["metrics"].get("recall@10"), high["metrics"].get("recall@10")
+    a, b = low["metrics"].get(metric), high["metrics"].get(metric)
     if a is None or b is None:
         return None
     return float(b) - float(a)

@@ -37,6 +37,16 @@ and :class:`~latence_retrieval.graph_retrieval.AliasQuerySeeder` for leg 3,
 :class:`~latence_retrieval.pack.Packer` for leg 6, and
 :class:`~latence_retrieval.fuser.RrfFuser` to merge the legs — rank fusion, because the legs'
 scores (cosine, Okapi, hop decay, ρ) are on flatly incomparable scales.
+
+**Fusion weights.** ``RrfFuser`` sums ``weight_i / (k + rank_i)`` over the lists a candidate
+appears in, so the *relative* weights of the fused lists are a real knob and not a formality:
+appending a noisier list at the same weight as a strong one necessarily drags the fused ranking
+towards the noise. The ladder's default is — and stays — **equal weights** (``weights=None``,
+passed straight through to the fuser), because that is the assumption-free baseline and the one
+the S5 matrix was run under. :mod:`benchmark.s5.tuning` supplies the second variant: per-signal
+weights fitted on a dev split and reported on a disjoint test split. Nothing here chooses between
+them; :func:`fuse_signals` just makes the weight vector reachable, aligned by signal *name* rather
+than by list position so a weight can never land on the wrong list.
 """
 
 from __future__ import annotations
@@ -77,7 +87,7 @@ from latence_retrieval.hypergraph import (  # noqa: E402
 from latence_retrieval.pack import Packer  # noqa: E402
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
 #: The legs, in ladder order. Each name is the *increment*; leg N runs signals 1..N.
 LEG_NAMES = ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
@@ -101,6 +111,45 @@ ALL_LEG_NAMES = (*LEG_NAMES, *ABLATION_LEG_NAMES)
 
 #: Which ladder leg each ablation leg is the counterfactual of — the pair the report subtracts.
 ABLATION_BASELINE = {"dense_content_only": "dense"}
+
+#: The ranked lists that can enter the fusion, in the order the ladder appends them. ``packer`` is
+#: deliberately absent: it is a post-fusion *selector* over the fused list, not a list to fuse.
+FUSION_SIGNALS = ("dense", "bm25", "kg", "hyperedges", "coe")
+
+#: The fusible signals each leg contributes. Cumulative along the ladder; ``packer`` fuses exactly
+#: what ``coe`` fuses and then packs the result, and each ablation leg is its own single signal
+#: (it fuses nothing, which is what makes it subtractable against the rung it mirrors).
+_LEG_SIGNALS: dict[str, tuple[str, ...]] = {
+    "dense": ("dense",),
+    "bm25": ("dense", "bm25"),
+    "kg": ("dense", "bm25", "kg"),
+    "hyperedges": ("dense", "bm25", "kg", "hyperedges"),
+    "coe": FUSION_SIGNALS,
+    "packer": FUSION_SIGNALS,
+    "dense_content_only": ("dense_content_only",),
+}
+
+
+def leg_signals(leg: str) -> tuple[str, ...]:
+    """The signal names ``leg`` may put into the fusion, in ladder order.
+
+    "May", not "does": a signal whose backend is absent, or that returned nothing for a query,
+    contributes no list at all — :meth:`Runner.signals` reports what a query *actually* produced.
+    """
+    return _LEG_SIGNALS[leg]
+
+
+def tunable_signals(leg: str) -> tuple[str, ...]:
+    """The signals whose weight is worth fitting for ``leg`` — every one except the first.
+
+    An RRF weight vector has one redundant degree of freedom: scaling *every* weight by the same
+    positive constant leaves ``weight_i / (k + rank_i)`` ordered identically. So the first signal
+    (always ``dense``, the rung the ladder starts from) is pinned at ``1.0`` and the rest are
+    fitted relative to it — the same search, one dimension smaller. A single-signal leg therefore
+    has nothing to tune at all, which is correct rather than a shortcut: with one list the weight
+    is a pure monotone scale and every value gives the identical ranking.
+    """
+    return _LEG_SIGNALS[leg][1:]
 
 
 def vector_source(leg: str) -> str:
@@ -314,6 +363,42 @@ class LegOutcome:
     budget: int | None = None
 
 
+@dataclass(frozen=True)
+class SignalRanking:
+    """One named ranked list on its way into the fusion.
+
+    Carrying the *name* alongside the candidates is the whole point: fusion weights are declared
+    per signal (``{"bm25": 0.5}``) but consumed by the fuser as a positional vector, and which
+    positions exist varies per query (a graph leg with no alias seed produces no list). Pairing
+    them here means the alignment is done once, next to the list, instead of at every call site.
+    """
+
+    name: str
+    candidates: list[Candidate]
+
+
+def fuse_signals(
+    fuser: RrfFuser,
+    rankings: Sequence[SignalRanking],
+    weights: Mapping[str, float] | None = None,
+) -> list[Candidate]:
+    """Fuse ``rankings`` into one list, aligning ``weights`` to them by signal name.
+
+    ``weights=None`` is passed through to the fuser untouched — the equal-weight default, which is
+    byte-for-byte the call the ladder made before weights were reachable. A named weight that
+    matches no list this query produced is simply unused, and a list with no named weight keeps
+    ``1.0``: a weight vector is a preference, never a filter, so a missing entry cannot silently
+    delete a signal.
+    """
+    lists = [signal.candidates for signal in rankings]
+    if not lists:
+        return []
+    vector = (
+        None if weights is None else [float(weights.get(s.name, 1.0)) for s in rankings]
+    )
+    return fuser.fuse(lists, vector)
+
+
 @dataclass
 class Runner:
     """Everything one dataset's ladder needs, built once and reused across legs and queries."""
@@ -329,6 +414,10 @@ class Runner:
     fuser: RrfFuser = field(default_factory=RrfFuser)
     packer: Packer = field(default_factory=lambda: Packer({"budget": PACK_BUDGET}))
     seeder: AliasQuerySeeder | None = None
+    #: Per-signal RRF weights, or ``None`` for the equal-weight default. ``None`` is not "all
+    #: ones supplied explicitly": it is the absence of a weight argument, so the default ladder
+    #: run makes exactly the call it always made.
+    weights: dict[str, float] | None = None
 
     def _candidates_by_id(self, ids: Sequence[str]) -> list[Candidate]:
         rows = self.export.rows
@@ -349,69 +438,109 @@ class Runner:
     def run(self, question: str, vector: Any, leg: str) -> LegOutcome:
         """Run the ladder up to and including ``leg`` for one query (or one ablation leg)."""
         started = time.perf_counter()
+        rankings = self.signals(question, vector, leg)
+        retrieval_ms = (time.perf_counter() - started) * 1000.0
+        return self.finish(
+            question, rankings, leg, weights=self.weights, retrieval_ms=retrieval_ms
+        )
+
+    def signals(self, question: str, vector: Any, leg: str) -> list[SignalRanking]:
+        """The named, NON-EMPTY ranked lists ``leg`` produced for this query, in ladder order.
+
+        Separated from the fusion so a caller can retrieve once and settle several fusion
+        variants against the identical candidate lists — the only way an equal-weight and a
+        weighted number can differ by the fusion and nothing else. Empty lists are dropped here
+        rather than passed on, matching what the ladder always did: a signal that found nothing
+        must not occupy a weight slot.
+        """
         if leg in ABLATION_LEG_NAMES:
-            return self._ablation(vector, leg, started)
-        rankings: list[list[Candidate]] = []
+            return self._ablation_signals(vector, leg)
+        out: list[SignalRanking] = []
 
         if self.dense is not None:
-            rankings.append(
-                self.dense.search(
-                    RetrievalQuery(
-                        mode=Capability.DENSE, vector=tuple(float(x) for x in vector),
-                        top_k=POOL_K,
-                    )
+            out.append(
+                SignalRanking(
+                    "dense",
+                    self.dense.search(
+                        RetrievalQuery(
+                            mode=Capability.DENSE,
+                            vector=tuple(float(x) for x in vector),
+                            top_k=POOL_K,
+                        )
+                    ),
                 )
             )
         if leg != "dense" and self.bm25 is not None:
-            rankings.append(
-                self.bm25.search(
-                    RetrievalQuery(mode=Capability.BM25, text=question, top_k=POOL_K)
+            out.append(
+                SignalRanking(
+                    "bm25",
+                    self.bm25.search(
+                        RetrievalQuery(mode=Capability.BM25, text=question, top_k=POOL_K)
+                    ),
                 )
             )
         if leg in ("kg", "hyperedges", "coe", "packer") and self.graph is not None:
-            rankings.append(self._graph_leg(question))
+            out.append(SignalRanking("kg", self._graph_leg(question)))
         if leg in ("hyperedges", "coe", "packer"):
             hyper, coe = self._hypergraph_legs(question, want_coe=leg in ("coe", "packer"))
-            if hyper:
-                rankings.append(hyper)
-            if coe:
-                rankings.append(coe)
+            out.append(SignalRanking("hyperedges", hyper))
+            out.append(SignalRanking("coe", coe))
+        return [signal for signal in out if signal.candidates]
 
-        fused = self.fuser.fuse([r for r in rankings if r]) if rankings else []
+    def finish(
+        self,
+        question: str,
+        rankings: Sequence[SignalRanking],
+        leg: str,
+        *,
+        weights: Mapping[str, float] | None = None,
+        retrieval_ms: float = 0.0,
+    ) -> LegOutcome:
+        """Fuse (and, for ``packer``, pack) already-retrieved ``rankings`` into a leg outcome.
+
+        ``retrieval_ms`` is what producing ``rankings`` cost; the returned latency adds this
+        variant's own fusion time to it, so two variants sharing one retrieval each report the
+        full per-query cost rather than one of them looking free.
+        """
+        started = time.perf_counter()
+        fused = fuse_signals(self.fuser, rankings, weights)
         tokens = budget = None
         if leg == "packer" and fused:
-            packed = self.packer.process(question, fused[:POOL_K])
-            tokens = sum(_heuristic_tokens(c.text) for c in packed)
+            fused, tokens = self.pack(question, fused)
             budget = PACK_BUDGET
-            fused = packed
-        elapsed = (time.perf_counter() - started) * 1000.0
         return LegOutcome(
             ranked=[c.id for c in fused],
-            latency_ms=elapsed,
+            latency_ms=retrieval_ms + (time.perf_counter() - started) * 1000.0,
             tokens_packed=tokens,
             budget=budget,
         )
 
-    def _ablation(self, vector: Any, leg: str, started: float) -> LegOutcome:
-        """One ablation leg: a SINGLE-signal run against the alternative vector source.
+    def pack(self, question: str, fused: Sequence[Candidate]) -> tuple[list[Candidate], int]:
+        """The ``packer`` rung: the token-budgeted subset of ``fused``, and its token count."""
+        packed = self.packer.process(question, list(fused[:POOL_K]))
+        return packed, sum(_heuristic_tokens(c.text) for c in packed)
 
-        It fuses nothing, exactly like the ``dense`` rung it is the counterfactual of — which is
-        what makes the two numbers subtractable. An absent backend yields an empty ranking rather
-        than falling back to the enriched vectors: a leg with no content-only sidecar must report
-        nothing, never the very number it exists to contrast with.
+    def _ablation_signals(self, vector: Any, leg: str) -> list[SignalRanking]:
+        """One ablation leg's SINGLE signal, ranked against the alternative vector source.
+
+        One list, so the fusion downstream is a no-op on the ordering (RRF over a single list is
+        ``w / (k + rank)`` — strictly decreasing in rank, whatever ``w`` is), exactly like the
+        ``dense`` rung it is the counterfactual of. That is what makes the two numbers
+        subtractable. An absent backend yields NO list rather than falling back to the enriched
+        vectors: a leg with no content-only sidecar must report nothing, never the very number it
+        exists to contrast with.
         """
         backend = {"dense_content_only": self.dense_content_only}[leg]
-        ranked: list[str] = []
-        if backend is not None:
-            hits = backend.search(
-                RetrievalQuery(
-                    mode=Capability.DENSE,
-                    vector=tuple(float(x) for x in vector),
-                    top_k=POOL_K,
-                )
+        if backend is None:
+            return []
+        hits = backend.search(
+            RetrievalQuery(
+                mode=Capability.DENSE,
+                vector=tuple(float(x) for x in vector),
+                top_k=POOL_K,
             )
-            ranked = [c.id for c in hits]
-        return LegOutcome(ranked=ranked, latency_ms=(time.perf_counter() - started) * 1000.0)
+        )
+        return [SignalRanking(leg, hits)] if hits else []
 
     def _graph_leg(self, question: str) -> list[Candidate]:
         if self.graph is None or self.seeder is None:
@@ -473,12 +602,18 @@ def build_runner(
     legs: Sequence[str],
     *,
     content_only_vectors: Any | None = None,
+    weights: dict[str, float] | None = None,
 ) -> Runner:
     """Assemble only the components the requested ``legs`` actually need.
 
     ``content_only_vectors`` is the matrix :func:`~benchmark.s5.corpus.read_vector_sidecar`
     returned for this export — supplied by the caller rather than loaded here, because the caller
     is the one that already knows the corpus row ids the sidecar has to align with.
+
+    ``weights`` are per-signal RRF weights for every leg this runner runs; the default ``None``
+    is the equal-weight ladder. A runner is built per (dataset, run), but weights are fitted per
+    (dataset, leg), so the tuned path leaves this ``None`` and passes its per-leg vector to
+    :meth:`Runner.finish` instead of rebuilding a runner per leg.
     """
     root = export.root
     wanted = set(legs)
@@ -515,6 +650,7 @@ def build_runner(
         dense_content_only=dense_content_only,
         hyperedge_chunks=hyperedges,
         seeder=seeder,
+        weights=weights,
     )
 
 
@@ -554,6 +690,7 @@ __all__ = [
     "ABLATION_LEG_NAMES",
     "ALL_LEG_NAMES",
     "COE_BUDGET",
+    "FUSION_SIGNALS",
     "LEG_NAMES",
     "PACK_BUDGET",
     "POOL_K",
@@ -563,9 +700,13 @@ __all__ = [
     "EdgeGraphSource",
     "LegOutcome",
     "Runner",
+    "SignalRanking",
     "build_runner",
+    "fuse_signals",
     "has_embeddings",
+    "leg_signals",
     "missing_inputs",
     "query_ngrams",
+    "tunable_signals",
     "vector_source",
 ]

@@ -21,12 +21,21 @@ rung against ``corpus-vectors-content-only.parquet`` (see
 :func:`benchmark.s5.build_vectors.write_vector_sidecar`) so the report can state what the W13
 context header bought, instead of leaving it folded invisibly into every dense number.
 
+Two fusion variants, in two namespaces that never touch. ``--fusion equal`` (the default, and the
+one the matrix baseline was run under) fuses every leg's signals at equal RRF weight and writes
+``results/``. ``--fusion tuned`` fits per-signal weights on a dev split and reports them on the
+disjoint test split (:mod:`benchmark.s5.tuning`), writing ``results-weighted/``. The default is
+untouched by the second variant's existence — same code path, same cells, same directory — and
+``REPORT.md`` shows both side by side whenever weighted cells exist.
+
 Usage::
 
     PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
         --datasets vidoseek,multihop_rag --legs all --limit 50
     PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
         --datasets multihop_rag --legs dense,dense_content_only --limit 200
+    PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
+        --datasets all --legs all --fusion tuned
 """
 
 from __future__ import annotations
@@ -56,6 +65,7 @@ from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
 from benchmark.s5.legs import (  # noqa: E402
     ABLATION_LEG_NAMES,
     ALL_LEG_NAMES,
+    Runner,
     build_runner,
     has_embeddings,
     missing_inputs,
@@ -63,12 +73,24 @@ from benchmark.s5.legs import (  # noqa: E402
 )
 from benchmark.s5.metrics import CellAccumulator  # noqa: E402
 from benchmark.s5.report import write_report  # noqa: E402
+from benchmark.s5.tuning import (  # noqa: E402
+    InsufficientSplit,
+    ScoredQuery,
+    is_tunable_leg,
+    run_tuned_leg,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_OUT = REPO_ROOT / "benchmark" / "sota-campaign" / "stages" / "s5-retrieval"
 SAMPLE_SEED = 20260809
+
+#: Where each fusion variant's cells live. Separate directories, never separate *keys* in one
+#: directory: the equal-weight matrix is a long-running job, and a variant must not be able to
+#: overwrite, reorder or shadow one of its cells even by accident.
+RESULTS_DIRS = {"equal": "results", "tuned": "results-weighted"}
+FUSIONS = tuple(RESULTS_DIRS)
 
 
 @dataclass(frozen=True)
@@ -81,6 +103,12 @@ class Plan:
     out: Path
     force: bool
     resolution_only: bool = False
+    fusion: str = "equal"
+
+    @property
+    def results_dir(self) -> Path:
+        """The cell directory this fusion variant owns."""
+        return self.out / RESULTS_DIRS[self.fusion]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> Plan:
@@ -99,6 +127,17 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument(
         "--force", action="store_true", help="re-run cells that already have results"
+    )
+    parser.add_argument(
+        "--fusion",
+        default="equal",
+        choices=FUSIONS,
+        help=(
+            "how a leg's signals are combined. 'equal' (default) is the untuned RRF baseline "
+            "and writes results/; 'tuned' fits per-signal weights on a dev split, reports them "
+            "on the disjoint test split, and writes results-weighted/ — a separate namespace, so "
+            "the baseline is never touched."
+        ),
     )
     parser.add_argument(
         "--resolution-only",
@@ -129,6 +168,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
         out=args.out,
         force=bool(args.force),
         resolution_only=bool(args.resolution_only),
+        fusion=str(args.fusion),
     )
 
 
@@ -182,15 +222,15 @@ def measure_resolution(
     return resolution, resolved, export
 
 
-def run_dataset(name: str, plan: Plan) -> dict[str, object]:
+def run_dataset(name: str, plan: Plan) -> None:
     """Run every requested leg for one dataset; write each cell as it completes."""
     spec = DATASETS[name]
-    results_dir = plan.out / "results"
+    results_dir = plan.results_dir
     results_dir.mkdir(parents=True, exist_ok=True)
 
     if plan.resolution_only:
         measure_resolution(name, plan, with_embeddings=False)
-        return _collect(results_dir, name, plan.legs)
+        return
 
     pending = [
         leg
@@ -229,14 +269,14 @@ def run_dataset(name: str, plan: Plan) -> dict[str, object]:
         from_corpus = []
 
     if not runnable:
-        return _collect(results_dir, name, plan.legs)
+        return
 
     resolution, resolved, export = measure_resolution(
         name, plan, with_embeddings=bool(from_corpus)
     )
     usable = [r for r in resolved if r.is_usable]
     if not usable:
-        return _collect(results_dir, name, plan.legs)
+        return
 
     # Loaded here rather than inside `build_runner`, because this is where the corpus row ids the
     # sidecar must line up with are known; `read_vector_sidecar` raises if it does not.
@@ -252,31 +292,75 @@ def run_dataset(name: str, plan: Plan) -> dict[str, object]:
     vectors = GraniteQueryEmbedder().encode([r.question for r in usable])
     runner = build_runner(export, runnable, content_only_vectors=content_only)
 
+    scored = [
+        ScoredQuery(
+            query_id=item.query_id,
+            question=item.question,
+            vector=vectors[position],
+            gold=item.chunk_ids,
+            chain=item.chain,
+        )
+        for position, item in enumerate(usable)
+    ]
     for leg in runnable:
-        cell = CellAccumulator()
-        for position, item in enumerate(usable):
-            outcome = runner.run(item.question, vectors[position], leg)
-            cell.add(
-                outcome.ranked,
-                item.chunk_ids,
-                item.chain,
-                outcome.latency_ms,
-                tokens_packed=outcome.tokens_packed,
-                budget=outcome.budget,
-            )
-        payload: dict[str, object] = {
+        header: dict[str, object] = {
             "status": "ok",
             "dataset": name,
             "leg": leg,
+            "fusion": plan.fusion,
             "vector_source": vector_source(leg),
             "control": name in CONTROL_DATASETS,
             "limit": plan.limit,
             "resolution": resolution.to_dict(),
-            "metrics": cell.summary(),
         }
+        body = (
+            _equal_cell(runner, leg, scored)
+            if plan.fusion == "equal"
+            else _tuned_cell(runner, leg, scored)
+        )
+        payload = {**header, **body}
         _write_cell(results_dir, name, leg, payload)
-        print(f"[{name}/{leg}] {json.dumps(cell.summary())}", flush=True)
-    return _collect(results_dir, name, plan.legs)
+        print(f"[{name}/{leg}] {json.dumps(payload.get('metrics'))}", flush=True)
+
+
+def _equal_cell(
+    runner: Runner, leg: str, scored: Sequence[ScoredQuery]
+) -> dict[str, object]:
+    """The baseline cell: every usable query, every signal at equal RRF weight."""
+    cell = CellAccumulator()
+    for query in scored:
+        outcome = runner.run(query.question, query.vector, leg)
+        cell.add(
+            outcome.ranked,
+            query.gold,
+            query.chain,
+            outcome.latency_ms,
+            tokens_packed=outcome.tokens_packed,
+            budget=outcome.budget,
+        )
+    return {"metrics": cell.summary()}
+
+
+def _tuned_cell(
+    runner: Runner, leg: str, scored: Sequence[ScoredQuery]
+) -> dict[str, object]:
+    """The weighted cell: weights fitted on dev, BOTH variants scored on the disjoint test half.
+
+    ``metrics`` is the tuned variant on test and ``metrics_equal_weight_on_test`` is the
+    equal-weight variant on the *same* test queries from the *same* retrieved lists — so the
+    report's delta is a difference in fusion, not in which queries were scored. The full-set
+    equal-weight cell in ``results/`` is a different query set and is never subtracted from these.
+    """
+    outcome = run_tuned_leg(runner, leg, scored)
+    if isinstance(outcome, InsufficientSplit):
+        return outcome.to_dict()
+    return {
+        "metrics": outcome.tuned,
+        "metrics_equal_weight_on_test": outcome.equal,
+        "tuning": outcome.tuning.to_dict(),
+        "split": outcome.split,
+        "tunable": is_tunable_leg(leg),
+    }
 
 
 def _write_cell(results_dir: Path, dataset: str, leg: str, payload: dict[str, object]) -> None:
@@ -303,12 +387,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     plan = parse_args(argv)
-    matrix: dict[str, dict[str, object]] = {}
     for name in plan.datasets:
-        matrix[name] = run_dataset(name, plan)
-    write_report(plan.out, matrix, legs=plan.legs, limit=plan.limit)
+        run_dataset(name, plan)
+    # Both namespaces are read back from disk regardless of which one this invocation wrote, so a
+    # plain `--fusion equal` run still renders any weighted cells a previous run left, and a
+    # `--fusion tuned` run still renders the baseline it must be compared against. Cells are the
+    # source of truth; the report is a view over them.
+    equal = _matrix(plan, "equal")
+    # Only datasets that actually have weighted cells: an empty weighted matrix must render as
+    # "the variant was not run", not as a table of blanks implying it found nothing.
+    weighted = {name: cells for name, cells in _matrix(plan, "tuned").items() if cells}
+    write_report(plan.out, equal, legs=plan.legs, limit=plan.limit, weighted=weighted)
     print(f"wrote {plan.out / 'REPORT.md'} and {plan.out / 'metrics.json'}")
     return 0
+
+
+def _matrix(plan: Plan, fusion: str) -> dict[str, dict[str, object]]:
+    """One fusion variant's cells for every requested dataset (a dataset with none maps to {})."""
+    directory = plan.out / RESULTS_DIRS[fusion]
+    return {name: _collect(directory, name, plan.legs) for name in plan.datasets}
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry

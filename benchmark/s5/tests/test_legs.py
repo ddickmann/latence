@@ -19,14 +19,17 @@ from benchmark.s5.datasets import DATASETS
 from benchmark.s5.legs import (
     ABLATION_LEG_NAMES,
     ALL_LEG_NAMES,
+    FUSION_SIGNALS,
     LEG_NAMES,
     Bm25Backend,
     ChunkGraphDocumentSource,
     DenseBackend,
     EdgeGraphSource,
     build_runner,
+    leg_signals,
     missing_inputs,
     query_ngrams,
+    tunable_signals,
     vector_source,
 )
 from latence_retrieval.contracts import Capability, RetrievalQuery
@@ -74,6 +77,22 @@ def _tiny_export(root: Path) -> Export:
     return Export(dataset="t", root=root, rows=rows, embeddings=_CORPUS_MATRIX, pages={})
 
 
+def test_every_leg_declares_the_signals_it_fuses_and_which_of_them_are_tunable() -> None:
+    """The weight vector's shape is a property of the leg, declared once, not rederived per call."""
+    assert leg_signals("dense") == ("dense",)
+    assert leg_signals("coe") == FUSION_SIGNALS
+    # The packer does not add a list — it selects over the fused one — so it fuses what coe fuses.
+    assert leg_signals("packer") == leg_signals("coe")
+    assert leg_signals("dense_content_only") == ("dense_content_only",)
+    # Cumulative along the ladder: each rung's signals are the rung below's plus exactly one.
+    for lower, upper in zip(LEG_NAMES, LEG_NAMES[1:], strict=False):
+        assert leg_signals(lower) == leg_signals(upper)[: len(leg_signals(lower))]
+    # `dense` is pinned (RRF weights are scale-invariant), so it is never in the search space.
+    for leg in ALL_LEG_NAMES:
+        assert tunable_signals(leg) == leg_signals(leg)[1:]
+        assert leg_signals(leg)[0] not in tunable_signals(leg)
+
+
 def test_the_ablation_leg_is_beside_the_ladder_not_on_it() -> None:
     """The six specced legs stay exactly the six specced legs; the ablation is appended."""
     assert LEG_NAMES == ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
@@ -95,6 +114,14 @@ def test_each_leg_ranks_with_its_own_vector_source(tmp_path: Path) -> None:
     assert runner.dense_content_only.source == CONTENT_ONLY_VECTORS
     assert runner.run("q", _QUERY, "dense").ranked[0] == "c0"
     assert runner.run("q", _QUERY, "dense_content_only").ranked[0] == "c2"
+    # The ablation's single list passes through the fusion unreordered — RRF over one list is
+    # `w / (k + rank)`, strictly decreasing in rank — so the leg stays subtractable against
+    # `dense` no matter what weight it is given.
+    assert runner.dense_content_only is not None
+    hits = runner.dense_content_only.search(
+        RetrievalQuery(mode=Capability.DENSE, vector=tuple(float(x) for x in _QUERY), top_k=100)
+    )
+    assert runner.run("q", _QUERY, "dense_content_only").ranked == [c.id for c in hits]
 
 
 def test_the_ablation_leg_returns_nothing_rather_than_the_vectors_it_contrasts_with(

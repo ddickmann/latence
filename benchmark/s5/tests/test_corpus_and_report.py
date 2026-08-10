@@ -47,7 +47,7 @@ def test_rows_for_nodes_deduplicates_and_sorts() -> None:
     assert export.index_of("nope") is None
 
 
-def _cell(leg: str, recall10: float) -> dict[str, object]:
+def _cell(leg: str, recall10: float, chain: float | None = None) -> dict[str, object]:
     return {
         "status": "ok",
         "leg": leg,
@@ -63,7 +63,7 @@ def _cell(leg: str, recall10: float) -> dict[str, object]:
             "recall@5": 0.2,
             "recall@10": recall10,
             "ndcg@10": 0.3,
-            "chain_coverage@10": None,
+            "chain_coverage@10": chain,
             "full_chain_hit@10": None,
             "latency_ms_median": 1.0,
             "latency_ms_p95": 2.0,
@@ -153,6 +153,96 @@ def test_report_shows_an_unbuilt_sidecar_as_a_refusal_not_as_no_difference(tmp_p
     report = (tmp_path / "REPORT.md").read_text()
     assert "missing inputs: corpus-vectors-content-only.parquet" in report
     assert "| musique | dense_content_only | — |" in report
+
+
+# -- the two fusion variants, side by side ------------------------------------------------------
+
+
+def _weighted_cell(leg: str, tuned: float, equal: float) -> dict[str, object]:
+    """A tuned cell: the tuned number, its equal-weight twin on the SAME test queries, the fit."""
+    return {
+        "status": "ok",
+        "leg": leg,
+        "fusion": "tuned",
+        "metrics": {"recall@10": tuned, "ndcg@10": tuned, "chain_coverage@10": 0.7},
+        "metrics_equal_weight_on_test": {
+            "recall@10": equal,
+            "ndcg@10": equal,
+            "chain_coverage@10": 0.6,
+        },
+        "split": {"dev_queries": 300, "dev_queries_tuned_on": 300, "test_queries": 700},
+        "tuning": {
+            "weights": {"dense": 1.0, "bm25": 0.75, "kg": 0.0},
+            "objective": "ndcg@10",
+            "grid_evaluations": 29,
+            "converged": True,
+            "max_passes": 3,
+            "dev_ndcg@10_equal_weight": 0.41,
+            "dev_ndcg@10_tuned": 0.47,
+        },
+    }
+
+
+def test_report_shows_both_fusion_variants_with_the_delta_on_the_same_split(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Equal-weight baseline and dev-tuned variant, each labelled as what it is."""
+    equal_matrix = {"multihop_rag": {"kg": _cell("kg", 0.42)}}
+    weighted = {"multihop_rag": {"kg": _weighted_cell("kg", tuned=0.50, equal=0.44)}}
+    write_report(tmp_path, equal_matrix, legs=("kg",), limit=None, weighted=weighted)
+    report = (tmp_path / "REPORT.md").read_text()
+
+    assert "EQUAL-weight RRF" in report  # the ladder table says what it is
+    assert "Dev-tuned fusion weights" in report
+    # Both variants and the delta between them, on the held-out split — not against the 0.42 cell.
+    assert "| multihop_rag | kg | 300 | 700 | 0.4400 | 0.5000 | +0.0600 |" in report
+    assert "0.42" not in report.split("## Dev-tuned")[1]
+    # The fitted weights are auditable from the report itself.
+    assert "dense 1.00, bm25 0.75, kg 0.00" in report
+    assert "converged" in report
+    # …and the non-comparability is stated, not left to the reader.
+    assert "not comparable to published baselines" in report
+    assert json.loads((tmp_path / "metrics-weighted.json").read_text())["multihop_rag"]["kg"]
+
+
+def test_a_single_signal_legs_weighted_row_says_there_was_nothing_to_fit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The `dense` row exists so the table has a same-split reference — not as a claimed fit."""
+    cell = _weighted_cell("dense", tuned=0.30, equal=0.30)
+    cell["tunable"] = False
+    cell["tuning"] = {**cell["tuning"], "weights": {"dense": 1.0}}  # type: ignore[dict-item]
+    write_report(
+        tmp_path, {"uda": {}}, legs=("dense",), limit=None, weighted={"uda": {"dense": cell}}
+    )
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "single signal: the RRF weight is a pure scale" in report
+
+
+def test_report_without_a_weighted_run_is_the_baseline_report_unchanged(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The second variant must be invisible until it exists — the in-flight baseline is untouched."""
+    matrix = {"multihop_rag": {"kg": _cell("kg", 0.42)}}
+    write_report(tmp_path, matrix, legs=("kg",), limit=None)
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "## Dev-tuned" not in report
+    assert not (tmp_path / "metrics-weighted.json").exists()
+
+
+def test_report_surfaces_where_chain_coverage_and_recall_disagree(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The signal in the data: +hyperedges loses chunks while covering MORE gold documents."""
+    matrix = {
+        "multihop_rag": {
+            "kg": _cell("kg", 0.42, chain=0.652),
+            "hyperedges": _cell("hyperedges", 0.39, chain=0.671),
+        }
+    }
+    write_report(tmp_path, matrix, legs=("kg", "hyperedges"), limit=None)
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "Chain coverage vs recall" in report
+    assert "| multihop_rag | kg → hyperedges | -0.0300 | +0.0190 | **diverges" in report
+
+
+def test_the_divergence_table_is_omitted_where_there_is_no_chain(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Single-hop controls have no chain, so they contribute no row rather than a row of dashes."""
+    matrix = {"vidoseek": {"dense": _cell("dense", 0.4), "bm25": _cell("bm25", 0.5)}}
+    write_report(tmp_path, matrix, legs=("dense", "bm25"), limit=None)
+    assert "Chain coverage vs recall" not in (tmp_path / "REPORT.md").read_text()
 
 
 def test_report_renders_a_missing_input_cell_as_a_refusal(tmp_path) -> None:  # type: ignore[no-untyped-def]
