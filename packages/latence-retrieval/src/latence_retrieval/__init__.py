@@ -111,6 +111,17 @@ already fetched. This foundation ticket ships the seam every query-time capabili
   through :meth:`~latence_retrieval.orchestrator.OrchestrationPipeline.from_config`; a planning
   failure (no runnable leg, or an unserveable filter) is a loud
   :class:`~latence_retrieval.errors.OrchestrationError`.
+* :class:`~latence_retrieval.rescue.GraphRescueRetrieval` — the **graph-as-rescue** production
+  composition (S5b): base dense+BM25 RRF (those two only, max-normalised), an
+  :class:`~latence_retrieval.expand.Expander` graph rescore of the base, the graph lanes
+  (:class:`~latence_retrieval.graph_retrieval.GraphRetriever` traversal +
+  :func:`~latence_retrieval.hypergraph.hypergraph_signals`) **appended** below the base and
+  deduplicated — never fused into it — and a token-budget selector
+  (:class:`~latence_retrieval.pack.Packer` knapsack or :func:`~latence_retrieval.coe.select`)
+  over the union, all behind a per-query policy gate (``graph_mode: off|auto|force``) whose
+  :class:`~latence_retrieval.rescue.GateDecision` rides every
+  :class:`~latence_retrieval.rescue.RescueResult`. Engines and signals are the caller's
+  (ADR-0048); every default is the measured S5b operating point; zero LLM calls on the path.
 """
 
 from __future__ import annotations
@@ -206,6 +217,12 @@ from latence_retrieval.rerank import (
     Reranker,
     SentenceTransformersCrossEncoder,
 )
+from latence_retrieval.rescue import (
+    GateDecision,
+    GraphRescueRetrieval,
+    HyperedgeDocumentSource,
+    RescueResult,
+)
 from latence_retrieval.sparse import SparseQueryEncoder, SpladeQueryEncoder
 from latence_retrieval.tuning import (
     FuserComparisonRow,
@@ -248,11 +265,14 @@ __all__ = [
     "FuserComparisonRow",
     "FusionRun",
     "FusionScore",
+    "GateDecision",
     "GraphDocument",
     "GraphDocumentSource",
+    "GraphRescueRetrieval",
     "GraphRetriever",
     "GraphSource",
     "GraphSourceError",
+    "HyperedgeDocumentSource",
     "HashingMultiVectorQueryEncoder",
     "HeuristicTokenCounter",
     "HeuristicUtility",
@@ -275,6 +295,7 @@ __all__ = [
     "QuerySignalError",
     "RerankModelError",
     "Reranker",
+    "RescueResult",
     "RetrievalBackend",
     "RetrievalError",
     "RetrievalQuery",
