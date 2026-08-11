@@ -40,6 +40,11 @@ framework? Start with [Getting Started](../getting-started/index.md) and
   The exact contract a downstream retrieval engine consumes from a Latence run — the shape
   of the RAG-ready corpus and knowledge graph.
 
+- :material-graph: **[Graph-rescue retrieval](graph-rescue-retrieval.md)**
+  The production graph-at-query-time architecture: base dense+BM25, a policy-gated graph
+  lane that appends (never fuses), and a token-budget selector — measured defaults, zero
+  LLM calls online.
+
 - :material-vector-combine: **[Embedders](../embedders.md)**
   The opt-in RAG-corpus vector augmentation and how it plugs into Export.
 

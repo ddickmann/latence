@@ -205,6 +205,7 @@ nav:
           - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
       - Feed a retrieval engine:
           - Retrieval-quality tooling (design): retrieval-tooling.md
+          - Graph-rescue retrieval: guides/graph-rescue-retrieval.md
           - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
           - Iceberg-table Export (optional): iceberg-export.md
       - Measure it:
