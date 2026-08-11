@@ -112,8 +112,20 @@ LEG_NAMES = ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
 #: queries have no context header, so both legs rank the identical query vectors.
 ABLATION_LEG_NAMES = ("dense_content_only",)
 
+#: The graph-as-RESCUE family (S5b) — a THIRD family, beside the ladder and beside the ablations.
+#:
+#: The ladder's graph rungs apply the graph lane as a co-equal fused list, which is the application
+#: the S5 matrix measured regressing (equal-weight RRF lets a weak alias hit outvote a strong dense
+#: hit). These legs apply the same shipped components the way the framework's own documented seams
+#: say to: ``dense+bm25`` is the base ranking, :class:`~latence_retrieval.expand.Expander` rescores
+#: it from the KG columns already denormalised onto each chunk, the graph lanes only **append**
+#: candidates the base missed, and a selector spends a token budget over the deduped union. They are
+#: NOT rungs — no ``Δ`` chain runs through them — so they live in their own tuple and their own
+#: report section, exactly like the ablation family. See :mod:`benchmark.s5.rescue`.
+RESCUE_LEG_NAMES = ("graph_rescue", "graph_rescue_packed", "graph_rescue_coe")
+
 #: Every leg name the matrix accepts, ladder first.
-ALL_LEG_NAMES = (*LEG_NAMES, *ABLATION_LEG_NAMES)
+ALL_LEG_NAMES = (*LEG_NAMES, *ABLATION_LEG_NAMES, *RESCUE_LEG_NAMES)
 
 #: Which ladder leg each ablation leg is the counterfactual of — the pair the report subtracts.
 ABLATION_BASELINE = {"dense_content_only": "dense"}
@@ -133,6 +145,10 @@ _LEG_SIGNALS: dict[str, tuple[str, ...]] = {
     "coe": FUSION_SIGNALS,
     "packer": FUSION_SIGNALS,
     "dense_content_only": ("dense_content_only",),
+    # The rescue family fuses `dense` and `bm25` and NOTHING else. Its graph lanes do not enter an
+    # RRF over the base — they append to it — so naming them here would advertise a weight slot
+    # that does not exist. This is the declaration that makes that architectural claim checkable.
+    **{leg: ("dense", "bm25") for leg in RESCUE_LEG_NAMES},
 }
 
 
@@ -662,6 +678,16 @@ class Runner:
         rather than passed on, matching what the ladder always did: a signal that found nothing
         must not occupy a weight slot.
         """
+        if leg in RESCUE_LEG_NAMES:
+            # The rescue family is NOT an RRF over a signal list — it is base-then-append-then-
+            # select (:mod:`benchmark.s5.rescue`). This path would happily return `[dense, bm25]`
+            # for it, i.e. the base stage alone wearing the rescue leg's name, and the cell would
+            # read as "graph rescue bought nothing". Refuse instead.
+            msg = (
+                f"{leg!r} is a graph-rescue leg: it does not fuse a signal list, so it cannot be "
+                "run through the ladder's fuse path. Use benchmark.s5.rescue.RescuePipeline."
+            )
+            raise ValueError(msg)
         if leg in ABLATION_LEG_NAMES:
             return self._ablation_signals(vector, leg)
         out: list[SignalRanking] = []
@@ -768,16 +794,16 @@ class Runner:
             return ([], [])
         with HyperedgeKV.open(str(self.kv_path)) as kv:
             signals = hypergraph_signals(kv, alias_surfaces=query_ngrams(question))
-            hyper = self._chunks_from_hyperedges(
+            hyper = self.chunks_from_hyperedges(
                 sorted(signals.rho, key=lambda h: (-signals.rho[h], h))
             )
             coe: list[Candidate] = []
             if want_coe and signals.rho:
                 selection = coe_select(signals, budget=COE_BUDGET)
-                coe = self._chunks_from_hyperedges(selection.selected)
+                coe = self.chunks_from_hyperedges(selection.selected)
         return (hyper, coe)
 
-    def _chunks_from_hyperedges(self, hyperedge_ids: Sequence[str]) -> list[Candidate]:
+    def chunks_from_hyperedges(self, hyperedge_ids: Sequence[str]) -> list[Candidate]:
         rows = self.export.rows
         seen: set[str] = set()
         out: list[Candidate] = []
@@ -826,6 +852,10 @@ def build_runner(
     """
     root = export.root
     wanted = set(legs)
+    # A rescue leg needs every component the ladder's graph rungs need — it applies them
+    # differently, it does not need fewer of them.
+    graph_legs = {"kg", "hyperedges", "coe", "packer", *RESCUE_LEG_NAMES}
+    hyper_legs = {"hyperedges", "coe", "packer", *RESCUE_LEG_NAMES}
     dense = DenseBackend(export) if export.embeddings is not None else None
     dense_content_only = None
     if content_only_vectors is not None and wanted & set(ABLATION_LEG_NAMES):
@@ -833,13 +863,11 @@ def build_runner(
             export, matrix=content_only_vectors, source=CONTENT_ONLY_VECTORS
         )
     bm25 = None
-    if wanted & {"bm25", "kg", "hyperedges", "coe", "packer"} and (
-        root / "bm25-stats.json"
-    ).is_file():
+    if wanted & ({"bm25"} | graph_legs) and (root / "bm25-stats.json").is_file():
         bm25 = Bm25Backend(export)
     graph = None
     seeder = None
-    if wanted & {"kg", "hyperedges", "coe", "packer"} and (root / "graph-edges.parquet").is_file():
+    if wanted & graph_legs and (root / "graph-edges.parquet").is_file():
         graph = GraphRetriever(
             graph_source=EdgeGraphSource(root / "graph-edges.parquet"),
             document_source=ChunkGraphDocumentSource(export),
@@ -847,7 +875,7 @@ def build_runner(
         seeder = AliasQuerySeeder(node_alias_map(root / "graph-nodes.parquet"))
     kv_path = None
     hyperedges: dict[str, str] = {}
-    if wanted & {"hyperedges", "coe", "packer"} and (root / "graph-hyperedges.kv").is_file():
+    if wanted & hyper_legs and (root / "graph-hyperedges.kv").is_file():
         kv_path = root / "graph-hyperedges.kv"
         hyperedges = hyperedge_chunk_map(root / "graph-hyperedges.parquet")
     return Runner(
@@ -871,6 +899,23 @@ def missing_inputs(export_dir: Path, leg: str) -> list[str]:
         return [
             f
             for f in ("corpus.parquet", CONTENT_ONLY_VECTORS)
+            if not (export_dir / f).is_file()
+        ]
+    if leg in RESCUE_LEG_NAMES:
+        # Also not cumulative, and deliberately ALL-OF: a rescue leg without the hypergraph store
+        # is not a weaker rescue leg, it is the base pipeline wearing the rescue leg's name — which
+        # would land in the report as "graph rescue bought nothing" when the graph never ran.
+        return [
+            f
+            for f in (
+                "corpus.parquet",
+                "bm25-stats.json",
+                "bm25-postings.parquet",
+                "graph-edges.parquet",
+                "graph-nodes.parquet",
+                "graph-hyperedges.kv",
+                "graph-hyperedges.parquet",
+            )
             if not (export_dir / f).is_file()
         ]
     needs: dict[str, tuple[str, ...]] = {
@@ -903,6 +948,7 @@ __all__ = [
     "LEG_NAMES",
     "PACK_BUDGET",
     "POOL_K",
+    "RESCUE_LEG_NAMES",
     "Bm25Backend",
     "ChunkGraphDocumentSource",
     "DenseBackend",

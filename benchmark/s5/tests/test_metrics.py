@@ -9,6 +9,7 @@ import math
 from benchmark.s5.metrics import (
     CellAccumulator,
     chain_metrics,
+    documents_of,
     ndcg_at_k,
     percentile,
     recall_at_k,
@@ -52,6 +53,46 @@ def test_full_chain_hit_needs_every_slot_inside_k() -> None:
     ranked = ["a", *[f"x{i}" for i in range(20)], "b"]
     coverage, full = chain_metrics(ranked, chain, k=10) or (None, None)
     assert (coverage, full) == (0.5, 0.0)
+
+
+def test_documents_of_dedupes_to_the_best_ranked_chunk_of_each_document() -> None:
+    """A document takes the position of its FIRST chunk in the ranking, never its last.
+
+    The list is on its way into ``recall@k``, so a document that placed a chunk at rank 1 and
+    another at rank 40 must count as retrieved at rank 1 — the alternative would report a system as
+    worse than it is, in a way no assertion downstream would catch.
+    """
+    ranked = ["a1", "b1", "a2", "c1", "b2"]
+    documents = {"a1": "A", "a2": "A", "b1": "B", "b2": "B", "c1": "C"}
+    assert documents_of(ranked, documents.get) == ["A", "B", "C"]
+    # A chunk with no known document is DROPPED, never mapped to a placeholder: a placeholder would
+    # merge every unknown chunk into one fake document and inflate recall invisibly.
+    assert documents_of(["a1", "ghost", "c1"], documents.get) == ["A", "C"]
+    assert documents_of([], documents.get) == []
+
+
+def test_document_recall_is_reported_only_where_it_was_measured() -> None:
+    """An absent document view must read as *not measured*, never as measured-and-zero."""
+    cell = CellAccumulator()
+    cell.add(["a1", "b1"], frozenset({"a1"}), (), 1.0)
+    summary = cell.summary()
+    assert "doc_recall@5" not in summary
+    assert "doc_recall@10" not in summary
+
+    measured = CellAccumulator()
+    # Two gold documents; the ranking surfaces both, but only one of them at chunk level.
+    measured.add(
+        ["a1", "b1"],
+        frozenset({"a1", "b2"}),
+        (),
+        1.0,
+        ranked_documents=["A", "B"],
+        gold_documents=frozenset({"A", "B"}),
+    )
+    out = measured.summary()
+    assert out["recall@5"] == 0.5
+    assert out["doc_recall@5"] == 1.0
+    assert out["doc_recall@10"] == 1.0
 
 
 def test_percentile_is_nearest_rank() -> None:

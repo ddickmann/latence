@@ -41,6 +41,7 @@ from benchmark.s5.legs import (
     ABLATION_BASELINE,
     ABLATION_LEG_NAMES,
     LEG_NAMES,
+    RESCUE_LEG_NAMES,
     leg_signals,
 )
 
@@ -52,6 +53,11 @@ _COLUMNS = (
     ("recall@1", "R@1"),
     ("recall@5", "R@5"),
     ("recall@10", "R@10"),
+    # Document-level, so the published comparison line (HippoRAG-2's passage recall@5) has a
+    # like-for-like column instead of being set against a chunk-level number. Cells written before
+    # this column existed simply render "—" — an absent measurement, not a zero.
+    ("doc_recall@5", "docR@5"),
+    ("doc_recall@10", "docR@10"),
     ("ndcg@10", "nDCG@10"),
     ("chain_coverage@10", "chain cov"),
     ("full_chain_hit@10", "full chain"),
@@ -188,6 +194,7 @@ def write_report(
         lines += _dataset_table(matrix[dataset], ladder)
 
     lines += _ablation_section(matrix, legs)
+    lines += _rescue_section(matrix, legs)
     lines += _divergence_section(matrix, ladder)
     lines += _weighted_section(weighted or {}, legs)
 
@@ -292,6 +299,123 @@ def _ablation_section(
                 f"| {dataset} | {leg} | {_fmt(baseline)} | {_fmt(ablated)} | {_signed(delta)} |"
             )
     return lines
+
+
+def _rescue_section(
+    matrix: Mapping[str, Mapping[str, Any]], legs: Sequence[str]
+) -> list[str]:
+    """The graph-as-rescue family, against the ladder's graph rungs — plus the gate and the curve.
+
+    Kept OUT of the ladder table for the same reason the ablations are: these legs are not
+    increments, so a ``Δ`` column through them would turn the cumulative chain into nonsense. What
+    they *are* is a second application of the same components, so the comparison that matters is
+    against the ladder's own graph rungs — ``kg``, ``hyperedges``, ``coe``, ``packer`` — and that is
+    the table below.
+    """
+    wanted = [leg for leg in legs if leg in RESCUE_LEG_NAMES]
+    if not wanted:
+        return []
+    lines = [
+        "",
+        "## Graph as RESCUE, not as a fused list (S5b)",
+        "",
+        "The ladder applies the graph lane as a co-equal RRF list, which is the application the "
+        "matrix above measures regressing. These legs apply the *same shipped components* the way "
+        "the framework's seams (and `colsearch`'s shipped graph sidecar) describe: `dense+bm25` is "
+        "the base ranking; `expand.Expander` rescores it from the KG columns already denormalised "
+        "onto every chunk; the graph lanes only **append** candidates the base missed, "
+        "deduplicated by id and never reordering the base; and a selector spends a token budget "
+        "over the union. Entity resolution is seeded from the query **and** the top first-stage "
+        "documents. Zero LLM calls.",
+        "",
+        "| dataset | leg | R@1 | R@5 | R@10 | docR@5 | docR@10 | chain cov | full chain | "
+        "gate hit rate | lat med ms |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for dataset in sorted(matrix):
+        cells = matrix[dataset]
+        for leg in ("kg", "hyperedges", "coe", "packer", *wanted):
+            cell = cells.get(leg)
+            if not isinstance(cell, dict):
+                continue
+            if cell.get("status") != "ok":
+                lines.append(
+                    f"| {dataset} | {leg} | *{cell.get('status', 'not run')}* |" + " |" * 9
+                )
+                continue
+            metrics = cell["metrics"]
+            gate = cell.get("gate")
+            rate = (
+                f"{float(gate['hit_rate']):.1%}"
+                if isinstance(gate, dict) and gate.get("hit_rate") is not None
+                else "— (ladder leg: no gate)"
+            )
+            lines.append(
+                f"| {dataset} | {leg} | "
+                + " | ".join(
+                    _fmt(metrics.get(key))
+                    for key in (
+                        "recall@1",
+                        "recall@5",
+                        "recall@10",
+                        "doc_recall@5",
+                        "doc_recall@10",
+                        "chain_coverage@10",
+                        "full_chain_hit@10",
+                    )
+                )
+                + f" | {rate} | {_fmt(metrics.get('latency_ms_median'))} |"
+            )
+    curve = _budget_curve_rows(matrix, wanted)
+    if curve:
+        lines += [
+            "",
+            "### Recall over the token budget (the selection legs' native protocol)",
+            "",
+            "A selector optimises *best context within a budget*, so a bare `recall@10` is the "
+            "wrong shape of number for it. The curve below settles every budget against the "
+            "**identical** candidate union — one retrieval per query, five selections — so what "
+            "varies is the budget and nothing else. The headline row above is the "
+            "`select_budget` point of this curve.",
+            "",
+            "| dataset | leg | budget | R@10 | docR@5 | docR@10 | chain cov | "
+            "tokens packed (mean) |",
+            "|---|---|---|---|---|---|---|---|",
+            *curve,
+        ]
+    return lines
+
+
+def _budget_curve_rows(
+    matrix: Mapping[str, Mapping[str, Any]], wanted: Sequence[str]
+) -> list[str]:
+    """One row per (dataset, leg, budget) — ascending budget, so the curve reads as a curve."""
+    rows: list[str] = []
+    for dataset in sorted(matrix):
+        for leg in wanted:
+            cell = matrix[dataset].get(leg)
+            if not isinstance(cell, dict) or cell.get("status") != "ok":
+                continue
+            curve = cell.get("budget_curve")
+            if not isinstance(curve, dict) or len(curve) < 2:
+                continue
+            for budget in sorted(curve, key=int):
+                point = curve[budget]
+                rows.append(
+                    f"| {dataset} | {leg} | {budget} | "
+                    + " | ".join(
+                        _fmt(point.get(key))
+                        for key in (
+                            "recall@10",
+                            "doc_recall@5",
+                            "doc_recall@10",
+                            "chain_coverage@10",
+                            "tokens_packed_mean",
+                        )
+                    )
+                    + " |"
+                )
+    return rows
 
 
 def _divergence_section(

@@ -14,6 +14,12 @@ question up to four articles. Two consequences the definitions make explicit rat
   switching to a hit-rate.
 * **nDCG@10** uses binary gains with the ideal ranking capped at ``min(|gold|, 10)``, so a query
   with 30 gold chunks cannot score below one with 2 purely for having more gold.
+* **doc_recall@k** is the same set recall after both sides have been deduplicated to their source
+  DOCUMENTS (:func:`documents_of`). It exists because the published comparison line is a document
+  quantity — HippoRAG-2 reports passage recall@5 — and ten retrieved chunks cover far fewer than
+  ten distinct documents, so a chunk-level ``recall@10`` set beside a passage ``recall@5`` is a
+  metric mismatch, not a gap. It is reported *alongside* the chunk-level number, never instead of
+  it, and only for cells whose caller supplied the document view.
 
 The chain metrics only apply where the dataset publishes an ordered/grouped chain (2Wiki's
 ``evidences``, MultiHop-RAG's multi-document ``evidence_list``): ``chain_coverage`` is the
@@ -29,12 +35,20 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
 #: The cut-offs every (dataset × leg) cell reports.
 RECALL_KS = (1, 5, 10)
 NDCG_K = 10
 CHAIN_K = 10
+
+#: The cut-offs the DOCUMENT-level recall reports. ``5`` is there because it is the cut-off the
+#: de-facto comparison line publishes: HippoRAG-2 (arXiv:2502.14802) reports **passage** recall@5
+#: (MuSiQue 74.7, HotpotQA 96.3). Our ``recall@k`` counts gold CHUNKS, and ten chunks cover far
+#: fewer than ten distinct documents, so comparing the two is a metric mismatch rather than a
+#: measurement of a gap. :func:`documents_of` deduplicates a ranked chunk list to its source
+#: documents so the like-for-like number exists beside the chunk-level one instead of in a footnote.
+DOCUMENT_RECALL_KS = (5, 10)
 
 
 def recall_at_k(ranked: Sequence[str], gold: frozenset[str], k: int) -> float:
@@ -42,6 +56,27 @@ def recall_at_k(ranked: Sequence[str], gold: frozenset[str], k: int) -> float:
     if not gold:
         return 0.0
     return len(gold & set(ranked[:k])) / len(gold)
+
+
+def documents_of(
+    chunk_ids: Iterable[str], document_of: Callable[[str], str | None]
+) -> list[str]:
+    """``chunk_ids`` mapped to their source documents, deduplicated, **first occurrence wins**.
+
+    Order matters: this is a *ranked* list on the way into ``recall@k``, so a document must take the
+    position of its best-ranked chunk, not its last. A chunk with no known document is dropped
+    rather than mapped to a placeholder — a placeholder would merge every unknown chunk into one
+    fake document and inflate the number in exactly the direction nobody would notice.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk_id in chunk_ids:
+        document = document_of(chunk_id)
+        if document is None or document in seen:
+            continue
+        seen.add(document)
+        out.append(document)
+    return out
 
 
 def ndcg_at_k(ranked: Sequence[str], gold: frozenset[str], k: int = NDCG_K) -> float:
@@ -84,6 +119,12 @@ class CellAccumulator:
     recall: dict[int, list[float]] = field(
         default_factory=lambda: {k: [] for k in RECALL_KS}
     )
+    #: Document-level recall, collected only for queries the caller supplied a document view of.
+    #: An empty dict therefore means "not measured", never "measured as zero" — which is why
+    #: :meth:`summary` omits the keys entirely rather than printing ``0.0``.
+    document_recall: dict[int, list[float]] = field(
+        default_factory=lambda: {k: [] for k in DOCUMENT_RECALL_KS}
+    )
     ndcg: list[float] = field(default_factory=list)
     chain_coverage: list[float] = field(default_factory=list)
     full_chain: list[float] = field(default_factory=list)
@@ -101,11 +142,21 @@ class CellAccumulator:
         *,
         tokens_packed: int | None = None,
         budget: int | None = None,
+        ranked_documents: Sequence[str] | None = None,
+        gold_documents: frozenset[str] | None = None,
     ) -> None:
-        """Score one query into the cell."""
+        """Score one query into the cell.
+
+        ``ranked_documents``/``gold_documents`` are the same query seen at DOCUMENT granularity
+        (:func:`documents_of`). Supply both or neither: one without the other would score a real
+        ranking against an empty gold set and report the result as a zero.
+        """
         self.queries += 1
         for k in RECALL_KS:
             self.recall[k].append(recall_at_k(ranked, gold, k))
+        if ranked_documents is not None and gold_documents is not None:
+            for k in DOCUMENT_RECALL_KS:
+                self.document_recall[k].append(recall_at_k(ranked_documents, gold_documents, k))
         self.ndcg.append(ndcg_at_k(ranked, gold))
         chained = chain_metrics(ranked, chain)
         if chained is not None:
@@ -123,6 +174,9 @@ class CellAccumulator:
         out: dict[str, float | int | None] = {"queries": self.queries}
         for k in RECALL_KS:
             out[f"recall@{k}"] = _mean(self.recall[k])
+        for k in DOCUMENT_RECALL_KS:
+            if self.document_recall[k]:
+                out[f"doc_recall@{k}"] = _mean(self.document_recall[k])
         out[f"ndcg@{NDCG_K}"] = _mean(self.ndcg)
         out["chain_coverage@10"] = _mean(self.chain_coverage) if self.chain_coverage else None
         out["full_chain_hit@10"] = _mean(self.full_chain) if self.full_chain else None
@@ -145,10 +199,12 @@ def _mean(values: Iterable[float]) -> float:
 
 __all__ = [
     "CHAIN_K",
+    "DOCUMENT_RECALL_KS",
     "NDCG_K",
     "RECALL_KS",
     "CellAccumulator",
     "chain_metrics",
+    "documents_of",
     "ndcg_at_k",
     "percentile",
     "recall_at_k",

@@ -42,7 +42,15 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ChunkRow:
-    """One exported chunk: the id retrieval ranks, its text, and where it came from."""
+    """One exported chunk: the id retrieval ranks, where it came from, and its KG projection.
+
+    The last three fields are the **denormalised 1-hop KG columns** ADR-0051 projects onto every
+    chunk — the node ids its triples reach, its entities' community ids, and their centralities.
+    They are what makes :class:`~latence_retrieval.expand.Expander` and the ``kg_node_centrality``
+    value signal of :class:`~latence_retrieval.pack.Packer` runnable with **no graph database**, and
+    they default to empty so every existing construction site (and every export whose corpus table
+    predates the columns) keeps working unchanged and simply earns nothing from those signals.
+    """
 
     record_id: str
     content: str
@@ -50,6 +58,9 @@ class ChunkRow:
     char_start: int
     char_end: int
     node_ids: tuple[str, ...]
+    neighbor_node_ids: tuple[str, ...] = ()
+    community_ids: tuple[str, ...] = ()
+    centralities: tuple[float, ...] = ()
 
 
 @dataclass
@@ -116,6 +127,18 @@ class Export:
         """Row position of ``record_id`` (``None`` when it is not in this export)."""
         return self._by_id.get(record_id)
 
+    def document_of(self, record_id: str) -> str | None:
+        """The source document ``record_id`` was chunked out of (``None`` when it is not here).
+
+        The unit **document-level** recall is measured in: a published passage/document recall
+        (HippoRAG-2's passage recall@5) counts distinct source documents, whereas this harness's
+        ``recall@k`` counts chunks, and one document routinely splits into several. Deduplicating a
+        ranked chunk list through this map is what makes the two comparable instead of
+        apples-to-oranges.
+        """
+        position = self._by_id.get(record_id)
+        return None if position is None else self.rows[position].file_name
+
     def rows_for_nodes(self, node_ids: Sequence[str]) -> list[int]:
         """Row positions of every chunk mentioning any of ``node_ids``, deduplicated + sorted."""
         hit: set[int] = set()
@@ -131,6 +154,9 @@ class Export:
 
 _EMBEDDING_COLUMN = "embedding"
 _RECORD_ID_COLUMN = "record_id"
+
+#: The denormalised 1-hop KG projection (ADR-0051) — read only on ``with_graph_features``.
+_GRAPH_FEATURE_COLUMNS = ("neighbor_node_ids", "kg_node_community", "kg_node_centrality")
 
 #: The conventional file name for the CONTENT-ONLY vector sidecar inside an export directory.
 #: ``build_vectors --vectors-out <export>/corpus-vectors-content-only.parquet`` writes it and the
@@ -220,6 +246,7 @@ def load_export(
     with_embeddings: bool = True,
     page_docs: frozenset[str] | None = None,
     vectors: Path | None = None,
+    with_graph_features: bool = False,
 ) -> Export:
     """Read ``root``'s ``corpus.parquet`` into an :class:`Export` (+ the page maps when present).
 
@@ -235,12 +262,22 @@ def load_export(
     exactly as before. The embedding column is then not read at all — there is no path where both
     sources end up in one :class:`Export`, because a leg must be able to say which vectors
     produced its number.
+
+    ``with_graph_features`` additionally reads the denormalised 1-hop KG columns
+    (``neighbor_node_ids``, ``kg_node_community``, ``kg_node_centrality``) onto every
+    :class:`ChunkRow`. It is **off by default** and requested only by the legs that consume them
+    (the graph-rescue family), because they are three more list columns per row on corpora of up to
+    220k chunks and the ladder legs have no use for them — an unread column must not become a
+    resident cost of every run.
     """
     # The reused M6 exports (musique/hotpot) predate the context/embedding columns, so the
     # optional ones are selected only when the schema actually has them — a leg that needs a
     # missing column is refused upstream by `legs.missing_inputs`, never silently zero-filled.
     available = set(pq.read_schema(root / "corpus.parquet").names)  # type: ignore[no-untyped-call]
-    optional = [c for c in ("kg_node_ids", _EMBEDDING_COLUMN) if c in available]
+    wanted = ["kg_node_ids", _EMBEDDING_COLUMN]
+    if with_graph_features:
+        wanted += list(_GRAPH_FEATURE_COLUMNS)
+    optional = [c for c in wanted if c in available]
     if (not with_embeddings or vectors is not None) and _EMBEDDING_COLUMN in optional:
         optional.remove(_EMBEDDING_COLUMN)
     table = pq.read_table(  # type: ignore[no-untyped-call]
@@ -249,14 +286,20 @@ def load_export(
     provenances = table.column("provenance").to_pylist()
     record_ids = table.column("record_id").to_pylist()
     contents = table.column("content").to_pylist()
-    node_lists = (
-        table.column("kg_node_ids").to_pylist()
-        if "kg_node_ids" in table.column_names
-        else [()] * len(record_ids)
-    )
+    node_lists = _column_or_blank(table, "kg_node_ids", len(record_ids))
+    neighbor_lists = _column_or_blank(table, "neighbor_node_ids", len(record_ids))
+    community_lists = _column_or_blank(table, "kg_node_community", len(record_ids))
+    centrality_lists = _column_or_blank(table, "kg_node_centrality", len(record_ids))
     rows: list[ChunkRow] = []
-    for record_id, content, raw_provenance, nodes in zip(
-        record_ids, contents, provenances, node_lists, strict=True
+    for record_id, content, raw_provenance, nodes, neighbors, communities, centralities in zip(
+        record_ids,
+        contents,
+        provenances,
+        node_lists,
+        neighbor_lists,
+        community_lists,
+        centrality_lists,
+        strict=True,
     ):
         provenance = json.loads(raw_provenance)
         rows.append(
@@ -266,7 +309,12 @@ def load_export(
                 file_name=str(provenance.get("file_name", "")),
                 char_start=int(provenance.get("char_start", 0)),
                 char_end=int(provenance.get("char_end", 0)),
-                node_ids=tuple(str(n) for n in (nodes or ())),
+                node_ids=_ids(nodes),
+                neighbor_node_ids=_ids(neighbors),
+                community_ids=_ids(communities),
+                centralities=tuple(
+                    float(v) for v in (centralities or ()) if isinstance(v, (int, float))
+                ),
             )
         )
     embeddings = None
@@ -283,6 +331,29 @@ def load_export(
     if s2_root is not None:
         pages = load_dataset_pages(s2_root, dataset, only=page_docs)
     return Export(dataset=dataset, root=root, rows=rows, embeddings=embeddings, pages=pages)
+
+
+def _column_or_blank(table: Any, name: str, rows: int) -> list[Any]:
+    """``table[name]`` as a Python list, or one empty entry per row when the column is absent.
+
+    An absent column is *no signal*, never a zero: the reused M6 exports predate the KG projection
+    entirely, and a leg that needs it is refused upstream by
+    :func:`benchmark.s5.legs.missing_inputs` rather than silently scored against blanks.
+    """
+    if name not in table.column_names:
+        return [()] * rows
+    return list(table.column(name).to_pylist())
+
+
+def _ids(values: Any) -> tuple[str, ...]:
+    """A parquet list column as a tuple of non-empty id strings (nulls and blanks dropped).
+
+    The query-time consumers of these columns
+    (:class:`~latence_retrieval.expand.Expander`) reject a ``None`` or an empty string inside a KG
+    column *loudly*, and rightly so — but a parquet null is an absent id, not a malformed one, so
+    it is dropped here at the load boundary instead of being handed on as a fake node id.
+    """
+    return tuple(str(v) for v in (values or ()) if v)
 
 
 def hyperedge_chunk_map(hyperedges_parquet: Path) -> dict[str, str]:

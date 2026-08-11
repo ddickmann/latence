@@ -65,14 +65,16 @@ from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
 from benchmark.s5.legs import (  # noqa: E402
     ABLATION_LEG_NAMES,
     ALL_LEG_NAMES,
+    RESCUE_LEG_NAMES,
     Runner,
     build_runner,
     has_embeddings,
     missing_inputs,
     vector_source,
 )
-from benchmark.s5.metrics import CellAccumulator  # noqa: E402
+from benchmark.s5.metrics import CellAccumulator, documents_of  # noqa: E402
 from benchmark.s5.report import write_report  # noqa: E402
+from benchmark.s5.rescue import BUDGET_CURVE, SELECT_BUDGET, GateStats, RescuePipeline  # noqa: E402
 from benchmark.s5.tuning import (  # noqa: E402
     InsufficientSplit,
     ScoredQuery,
@@ -181,7 +183,7 @@ def sample(items: list[goldmap.GoldQuery], limit: int | None) -> list[goldmap.Go
 
 
 def measure_resolution(
-    name: str, plan: Plan, *, with_embeddings: bool
+    name: str, plan: Plan, *, with_embeddings: bool, with_graph_features: bool = False
 ) -> tuple[goldmap.ResolutionReport, list[goldmap.ResolvedGold], Export]:
     """Resolve one dataset's full (or sampled) gold onto its export and write its resolution JSON.
 
@@ -204,6 +206,7 @@ def measure_resolution(
         s2_root=spec.s2_root,
         with_embeddings=with_embeddings,
         page_docs=page_docs,
+        with_graph_features=with_graph_features,
     )
     resolved = [goldmap.resolve(q, export) for q in queries]
     resolution = goldmap.report(name, resolved)
@@ -272,7 +275,12 @@ def run_dataset(name: str, plan: Plan) -> None:
         return
 
     resolution, resolved, export = measure_resolution(
-        name, plan, with_embeddings=bool(from_corpus)
+        name,
+        plan,
+        with_embeddings=bool(from_corpus),
+        # Only the rescue family reads the denormalised KG projection, and it is three more list
+        # columns per row over corpora of up to 220k chunks — so it is loaded when it is used.
+        with_graph_features=any(leg in RESCUE_LEG_NAMES for leg in runnable),
     )
     usable = [r for r in resolved if r.is_usable]
     if not usable:
@@ -313,32 +321,115 @@ def run_dataset(name: str, plan: Plan) -> None:
             "limit": plan.limit,
             "resolution": resolution.to_dict(),
         }
-        body = (
-            _equal_cell(runner, leg, scored)
-            if plan.fusion == "equal"
-            else _tuned_cell(runner, leg, scored)
-        )
+        if leg in RESCUE_LEG_NAMES:
+            body = _rescue_cell(runner, export, leg, scored, fusion=plan.fusion)
+        elif plan.fusion == "equal":
+            body = _equal_cell(runner, export, leg, scored)
+        else:
+            body = _tuned_cell(runner, leg, scored)
         payload = {**header, **body}
         _write_cell(results_dir, name, leg, payload)
         print(f"[{name}/{leg}] {json.dumps(payload.get('metrics'))}", flush=True)
 
 
 def _equal_cell(
-    runner: Runner, leg: str, scored: Sequence[ScoredQuery]
+    runner: Runner, export: Export, leg: str, scored: Sequence[ScoredQuery]
 ) -> dict[str, object]:
     """The baseline cell: every usable query, every signal at equal RRF weight."""
     cell = CellAccumulator()
     for query in scored:
         outcome = runner.run(query.question, query.vector, leg)
-        cell.add(
+        _score(
+            cell,
+            export,
+            query,
             outcome.ranked,
-            query.gold,
-            query.chain,
             outcome.latency_ms,
             tokens_packed=outcome.tokens_packed,
             budget=outcome.budget,
         )
     return {"metrics": cell.summary()}
+
+
+def _score(
+    cell: CellAccumulator,
+    export: Export,
+    query: ScoredQuery,
+    ranked: Sequence[str],
+    latency_ms: float,
+    *,
+    tokens_packed: int | None = None,
+    budget: int | None = None,
+) -> None:
+    """Score one query into ``cell`` at BOTH granularities — chunk-level and document-level.
+
+    The document view is derived here rather than by the legs, because it is a property of the
+    export (which document a chunk came from) and not of the retriever, so every leg's number is
+    deduplicated by exactly the same map.
+    """
+    cell.add(
+        ranked,
+        query.gold,
+        query.chain,
+        latency_ms,
+        tokens_packed=tokens_packed,
+        budget=budget,
+        ranked_documents=documents_of(ranked, export.document_of),
+        gold_documents=frozenset(documents_of(sorted(query.gold), export.document_of)),
+    )
+
+
+def _rescue_cell(
+    runner: Runner,
+    export: Export,
+    leg: str,
+    scored: Sequence[ScoredQuery],
+    *,
+    fusion: str,
+) -> dict[str, object]:
+    """A graph-rescue cell: the leg at :data:`SELECT_BUDGET`, plus its recall-over-budget curve.
+
+    Each query is retrieved **once** and then selected at every budget in
+    :data:`~benchmark.s5.rescue.BUDGET_CURVE`, so the curve varies the budget and nothing else.
+    ``graph_rescue`` has no selector, so its curve is a single entry: repeating one ranking under
+    five budget labels would imply a measurement that was not made.
+
+    The ``tuned`` fusion variant does not apply here and says so instead of producing a number: the
+    rescue family fuses only ``dense``+``bm25``, and its graph lanes are appended rather than
+    weighted, so there is no weight vector whose fitting could be reported.
+    """
+    if fusion != "equal":
+        return {
+            "status": "not-fusion-tunable",
+            "reason": (
+                "the graph-rescue family appends its graph lanes to the base list instead of "
+                "fusing them into it, so it has no per-signal RRF weight vector to fit"
+            ),
+        }
+    budgets = (SELECT_BUDGET,) if leg == "graph_rescue" else BUDGET_CURVE
+    cells = {budget: CellAccumulator() for budget in budgets}
+    gate = GateStats()
+    pipeline = RescuePipeline(runner=runner)
+    for query in scored:
+        retrieved = pipeline.retrieve(query.question, query.vector)
+        gate.add(retrieved.gate)
+        for budget, cell in cells.items():
+            outcome = pipeline.select(query.question, retrieved, leg, budget)
+            _score(
+                cell,
+                export,
+                query,
+                outcome.ranked,
+                outcome.latency_ms,
+                tokens_packed=outcome.tokens_packed,
+                budget=outcome.budget,
+            )
+    return {
+        "metrics": cells[SELECT_BUDGET].summary(),
+        "budget_curve": {str(budget): cell.summary() for budget, cell in cells.items()},
+        "gate": gate.summary(),
+        "select_budget": SELECT_BUDGET,
+    }
 
 
 def _tuned_cell(

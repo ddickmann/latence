@@ -25,6 +25,7 @@ from benchmark.s5.legs import (
     ALL_LEG_NAMES,
     FUSION_SIGNALS,
     LEG_NAMES,
+    RESCUE_LEG_NAMES,
     Bm25Backend,
     ChunkGraphDocumentSource,
     DenseBackend,
@@ -97,14 +98,25 @@ def test_every_leg_declares_the_signals_it_fuses_and_which_of_them_are_tunable()
         assert leg_signals(leg)[0] not in tunable_signals(leg)
 
 
-def test_the_ablation_leg_is_beside_the_ladder_not_on_it() -> None:
-    """The six specced legs stay exactly the six specced legs; the ablation is appended."""
+def test_the_other_families_are_beside_the_ladder_not_on_it() -> None:
+    """The six specced legs stay exactly the six specced legs; the other families are appended.
+
+    Three disjoint families, in ladder-first order: the cumulative ladder, the input ablations, and
+    the graph-as-rescue legs. Disjointness is the property that matters — a leg that appeared in two
+    families would be both an increment and not an increment, and the report's `Δ` chain (which
+    walks `LEG_NAMES` alone) would silently subtract it from something it is not a step above.
+    """
     assert LEG_NAMES == ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
     assert ABLATION_LEG_NAMES == ("dense_content_only",)
-    assert ALL_LEG_NAMES == LEG_NAMES + ABLATION_LEG_NAMES
-    assert not set(LEG_NAMES) & set(ABLATION_LEG_NAMES)
+    assert RESCUE_LEG_NAMES == ("graph_rescue", "graph_rescue_packed", "graph_rescue_coe")
+    assert ALL_LEG_NAMES == LEG_NAMES + ABLATION_LEG_NAMES + RESCUE_LEG_NAMES
+    families = (set(LEG_NAMES), set(ABLATION_LEG_NAMES), set(RESCUE_LEG_NAMES))
+    assert sum(len(family) for family in families) == len(set().union(*families))
     assert [vector_source(leg) for leg in LEG_NAMES] == ["corpus"] * len(LEG_NAMES)
     assert vector_source("dense_content_only") == "sidecar"
+    # The rescue family ranks the export's own vectors, like the ladder — only the *application*
+    # of the graph lane differs, never the corpus side it is measured on.
+    assert [vector_source(leg) for leg in RESCUE_LEG_NAMES] == ["corpus"] * 3
 
 
 def test_each_leg_ranks_with_its_own_vector_source(tmp_path: Path) -> None:

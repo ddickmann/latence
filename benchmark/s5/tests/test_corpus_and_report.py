@@ -47,6 +47,23 @@ def test_rows_for_nodes_deduplicates_and_sorts() -> None:
     assert export.index_of("nope") is None
 
 
+def test_document_of_maps_a_chunk_back_to_the_file_it_was_chunked_from() -> None:
+    """The map document-level recall is computed through — and an honest ``None`` for a stranger."""
+    export = _export()
+    assert export.document_of("c0") == "d.md"
+    assert export.document_of("c1") == "d.md"
+    assert export.document_of("c2") == "e.md"
+    assert export.document_of("nope") is None
+
+
+def test_the_kg_projection_defaults_to_empty_so_an_older_export_still_loads() -> None:
+    """The three new columns are optional signals, not new requirements."""
+    row = ChunkRow("c0", "text", "d.md", 0, 10, ("n1",))
+    assert row.neighbor_node_ids == ()
+    assert row.community_ids == ()
+    assert row.centralities == ()
+
+
 def _cell(leg: str, recall10: float, chain: float | None = None) -> dict[str, object]:
     return {
         "status": "ok",
@@ -132,6 +149,60 @@ def test_report_puts_the_ablation_in_its_own_table_not_in_the_ladder(tmp_path) -
     ladder = report.split("## multihop_rag")[1].split("## Ablation")[0]
     assert "dense_content_only" not in ladder
     assert "| bm25 |" in ladder
+
+
+def _rescue_cell(leg: str, recall10: float, chain: float, hit_rate: float) -> dict[str, object]:
+    cell = _cell(leg, recall10, chain)
+    metrics = cell["metrics"]
+    assert isinstance(metrics, dict)
+    metrics["doc_recall@5"] = 0.72
+    metrics["doc_recall@10"] = 0.84
+    cell["gate"] = {"mode": "auto", "queries": 89, "fired": 80, "hit_rate": hit_rate}
+    cell["budget_curve"] = {
+        "2000": {"recall@10": 0.20, "tokens_packed_mean": 1900.0},
+        "10000": {"recall@10": recall10, "tokens_packed_mean": 5500.0},
+    }
+    return cell
+
+
+def test_report_puts_the_rescue_family_in_its_own_table_against_the_graph_rungs(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The rescue legs are not increments, so they get their own section — never a Δ column.
+
+    The comparison that matters is against the ladder's own graph rungs (a second application of
+    the same components), so those rows are repeated inside the rescue table rather than left for
+    the reader to fetch from the ladder table above.
+    """
+    matrix = {
+        "multihop_rag": {
+            "dense": _cell("dense", 0.33, 0.64),
+            "kg": _cell("kg", 0.31, 0.64),
+            "packer": _cell("packer", 0.19, 0.66),
+            "graph_rescue": _rescue_cell("graph_rescue", 0.375, 0.74, 0.90),
+            "graph_rescue_packed": _rescue_cell("graph_rescue_packed", 0.31, 0.79, 0.90),
+        }
+    }
+    legs = ("dense", "kg", "packer", "graph_rescue", "graph_rescue_packed")
+    write_report(tmp_path, matrix, legs=legs, limit=100)
+    report = (tmp_path / "REPORT.md").read_text()
+    assert "Graph as RESCUE, not as a fused list" in report
+    assert "gate hit rate" in report
+    assert "90.0%" in report
+    # A ladder leg has no gate at all, and the table says so instead of printing a blank.
+    assert "ladder leg: no gate" in report
+    # The budget curve is rendered, ascending, with the packed-token witness.
+    assert "Recall over the token budget" in report
+    assert "| multihop_rag | graph_rescue_packed | 2000 |" in report
+    # …and the ladder table above is untouched: no rescue leg appears in its Δ chain.
+    ladder_table = report.split("## Graph as RESCUE")[0]
+    assert "graph_rescue" not in ladder_table
+    # The document-level column is in the ladder table too, so the comparability fix is global.
+    assert "docR@5" in ladder_table
+
+
+def test_the_rescue_section_is_omitted_when_no_rescue_leg_ran(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A plain ladder run's report must not carry an empty promise."""
+    write_report(tmp_path, {"vidoseek": {"dense": _cell("dense", 0.4)}}, legs=("dense",), limit=1)
+    assert "Graph as RESCUE" not in (tmp_path / "REPORT.md").read_text()
 
 
 def test_report_omits_the_ablation_section_when_no_ablation_leg_ran(tmp_path) -> None:  # type: ignore[no-untyped-def]
