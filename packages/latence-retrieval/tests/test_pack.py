@@ -146,6 +146,73 @@ def test_pack_without_redundancy_penalty_keeps_the_near_duplicate() -> None:
     assert _ids(packed) == {"dupA", "dupB"}
 
 
+def test_pack_backfill_spends_budget_the_greedy_left_stranded() -> None:
+    # dupB's marginal is negative once dupA is in (similarity 1.0, λ=0.5 → 0.95 − 0.5 < 0.5... the
+    # exact stall point is the solver's business); under "stop" the greedy therefore ends with
+    # budget left over. "backfill" converts that stranded budget into the remaining candidates —
+    # the recall operating point — while the budget cap still binds.
+    sims = {"dupA": {"dupB": 1.0}, "dupB": {"dupA": 1.0}}
+    candidates = [
+        Candidate(id="dupA", score=1.0, text="x", metadata={"tok": 10, "s": sims["dupA"]}),
+        Candidate(id="dupB", score=0.2, text="x", metadata={"tok": 10, "s": sims["dupB"]}),
+    ]
+    config = {"budget": 20, "token_key": "tok", "similarity_key": "s", "redundancy_weight": 1.0}
+    stopped = Packer(config).process("q", candidates)
+    filled = Packer({**config, "fill": "backfill"}).process("q", candidates)
+    assert _ids(stopped) == {"dupA"}
+    assert _ids(filled) == {"dupA", "dupB"}
+
+
+def test_pack_backfill_is_a_superset_of_the_greedy_selection() -> None:
+    # The backfill only ADDS: everything the greedy chose under "stop" is present under
+    # "backfill" — the fill mode never alters the QKP phase's decisions.
+    sims = {
+        "dupA": {"dupB": 1.0, "diverse": 0.0},
+        "dupB": {"dupA": 1.0, "diverse": 0.0},
+        "diverse": {"dupA": 0.0, "dupB": 0.0},
+    }
+    candidates = [
+        Candidate(id="dupA", score=1.0, text="x", metadata={"tok": 10, "s": sims["dupA"]}),
+        Candidate(id="dupB", score=0.95, text="x", metadata={"tok": 10, "s": sims["dupB"]}),
+        Candidate(id="diverse", score=0.6, text="y", metadata={"tok": 10, "s": sims["diverse"]}),
+    ]
+    config = {"budget": 30, "token_key": "tok", "similarity_key": "s", "redundancy_weight": 1.0}
+    stopped = Packer(config).process("q", candidates)
+    filled = Packer({**config, "fill": "backfill"}).process("q", candidates)
+    assert _ids(stopped) == {"dupA", "diverse"}  # dupB's marginal goes negative under λ=1.0
+    assert _ids(stopped) <= _ids(filled)
+    assert _ids(filled) == {"dupA", "dupB", "diverse"}
+
+
+def test_pack_backfill_still_respects_the_token_budget() -> None:
+    # Budget fits the greedy's pick plus exactly one more 10-token item; the 25-token candidate is
+    # skipped (does not fit) but the 10-token one behind it is still taken — a fill, not a prefix.
+    sims = {"dupA": {"dupB": 1.0}, "dupB": {"dupA": 1.0}}
+    candidates = [
+        Candidate(id="dupA", score=1.0, text="x", metadata={"tok": 10, "s": sims["dupA"]}),
+        Candidate(id="dupB", score=0.9, text="x", metadata={"tok": 25, "s": sims["dupB"]}),
+        # score 0 → zero marginal, so the GREEDY never takes it; only the backfill can.
+        Candidate(id="small", score=0.0, text="z", metadata={"tok": 10}),
+    ]
+    config = {"budget": 20, "token_key": "tok", "similarity_key": "s", "redundancy_weight": 1.0}
+    assert _ids(Packer(config).process("q", candidates)) == {"dupA"}
+    filled = Packer({**config, "fill": "backfill"}).process("q", candidates)
+    assert _ids(filled) == {"dupA", "small"}
+
+
+def test_pack_fill_defaults_to_stop_and_rejects_unknown_modes() -> None:
+    sims = {"dupA": {"dupB": 1.0}, "dupB": {"dupA": 1.0}}
+    candidates = [
+        Candidate(id="dupA", score=1.0, text="x", metadata={"tok": 10, "s": sims["dupA"]}),
+        Candidate(id="dupB", score=0.2, text="x", metadata={"tok": 10, "s": sims["dupB"]}),
+    ]
+    config = {"budget": 20, "token_key": "tok", "similarity_key": "s", "redundancy_weight": 1.0}
+    # Omitting `fill` behaves exactly like the pre-existing semantics: the greedy stops.
+    assert _ids(Packer(config).process("q", candidates)) == {"dupA"}
+    with pytest.raises(ValueError, match="fill"):
+        Packer({**config, "fill": "overflow"})
+
+
 def test_pack_default_redundancy_uses_lexical_overlap() -> None:
     # No similarity signal supplied: redundancy falls back to lexical token overlap over text.
     # "dupA"/"dupB" share every word; "diverse" shares none → dupB is the redundant one dropped.

@@ -663,6 +663,10 @@ def _packer(budget: int) -> Packer:
             "budget": budget,
             "value_signals": {"kg_node_centrality": PACK_CENTRALITY_WEIGHT},
             "similarity_key": "redundancy",
+            # Recall operating point: the pure greedy stall stranded ~45% of a 10k budget on the
+            # smoke (mean spend ~5,545), and for a retrieval bench unspent budget is unrecovered
+            # recall. Backfill spends it in value order without touching the QKP phase's picks.
+            "fill": "backfill",
         }
     )
 
