@@ -74,7 +74,13 @@ from benchmark.s5.legs import (  # noqa: E402
 )
 from benchmark.s5.metrics import CellAccumulator, documents_of  # noqa: E402
 from benchmark.s5.report import write_report  # noqa: E402
-from benchmark.s5.rescue import BUDGET_CURVE, SELECT_BUDGET, GateStats, RescuePipeline  # noqa: E402
+from benchmark.s5.rescue import (  # noqa: E402
+    BUDGET_CURVE,
+    COE_SELECT_BUDGET,
+    SELECT_BUDGET,
+    GateStats,
+    RescuePipeline,
+)
 from benchmark.s5.tuning import (  # noqa: E402
     InsufficientSplit,
     ScoredQuery,
@@ -406,7 +412,10 @@ def _rescue_cell(
                 "fusing them into it, so it has no per-signal RRF weight vector to fit"
             ),
         }
-    budgets = (SELECT_BUDGET,) if leg == "graph_rescue" else BUDGET_CURVE
+    # Each selector's headline sits at its own measured operating point: the knapsack saturates
+    # ~5.5k so 10k is generous, while CoE keeps buying recall through 16k (operator ruling).
+    headline = COE_SELECT_BUDGET if leg == "graph_rescue_coe" else SELECT_BUDGET
+    budgets = (headline,) if leg == "graph_rescue" else BUDGET_CURVE
     cells = {budget: CellAccumulator() for budget in budgets}
     gate = GateStats()
     pipeline = RescuePipeline(runner=runner)
@@ -425,10 +434,10 @@ def _rescue_cell(
                 budget=outcome.budget,
             )
     return {
-        "metrics": cells[SELECT_BUDGET].summary(),
+        "metrics": cells[headline].summary(),
         "budget_curve": {str(budget): cell.summary() for budget, cell in cells.items()},
         "gate": gate.summary(),
-        "select_budget": SELECT_BUDGET,
+        "select_budget": headline,
     }
 
 

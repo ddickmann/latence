@@ -78,12 +78,21 @@ if TYPE_CHECKING:
 #: *best context within a budget*, so a single ``recall@10`` is the wrong shape of number for it —
 #: the curve is the native protocol. :data:`SELECT_BUDGET` is the operating point the leg's headline
 #: ``metrics`` block is taken at, and it is a member of the curve so the two can never disagree.
-BUDGET_CURVE = (2000, 4000, 8000, 10000, 16000)
+BUDGET_CURVE = (2000, 4000, 8000, 10000, 16000, 24000, 32000)
 
-#: The headline budget (operator ruling, s5b). The ladder's 4,000 came from neither the HyCE-RAG
-#: paper (whose evidence budget is a COUNT cap of 6 segments) nor a measurement, and it measurably
-#: packed only ~1,895 tokens on wiki2multihop.
+#: The knapsack headline budget (operator ruling, s5b). The ladder's 4,000 came from neither the
+#: HyCE-RAG paper (whose evidence budget is a COUNT cap of 6 segments) nor a measurement, and it
+#: measurably packed only ~1,895 tokens on wiki2multihop. The knapsack saturates well below this
+#: (mean spend ~5,545 on the smoke; 10k and 16k produced identical selections), so raising it
+#: further changes nothing for ``graph_rescue_packed``.
 SELECT_BUDGET = 10000
+
+#: The CoE headline budget (operator ruling, 2026-08-11: "going up to 16k for a retrieval is not
+#: a problem at all" — modern LLMs' smart zone is ~80–100k tokens). Unlike the knapsack, CoE keeps
+#: spending productively as the budget grows (measured 9,944 at 10k → 15,942 at 16k with docR@10
+#: rising 0.8380 → 0.8455), so its operating point sits where the spend still buys recall. The
+#: 24k/32k curve points exist to locate its actual saturation, not to move the headline again.
+COE_SELECT_BUDGET = 16000
 
 #: How many first-stage documents seed the graph lane's entity resolution (colsearch step 3:
 #: ``resolve_entities(query, docs)``). Small on purpose — these are the *anchors*, and anchoring
@@ -736,6 +745,7 @@ def _tokens(text: str) -> int:
 __all__ = [
     "AGREEMENT_K",
     "BUDGET_CURVE",
+    "COE_SELECT_BUDGET",
     "ENTITY_HEAVY_SEEDS",
     "HIGH_AGREEMENT",
     "LOW_AGREEMENT",
