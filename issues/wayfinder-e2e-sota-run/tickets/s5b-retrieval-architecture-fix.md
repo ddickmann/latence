@@ -59,6 +59,24 @@ cover far fewer than 10 distinct documents.
   already showed even under the broken fusion (multihop_rag chain 0.626 → 0.671 with hyperedges
   while R@10 fell).
 
+## Amendments (Dennis, 2026-08-11, after the multihop_rag smoke)
+
+- **Per-selector headline budgets** (e9d66c2): the knapsack saturates ~5.5k tokens (10k and 16k
+  selections identical) so its headline stays 10k; CoE keeps buying recall through 16k (spend
+  9,944@10k → 15,942@16k, docR@10 0.8380 → 0.8455) so its headline moves to 16k. Ruling: "going
+  up to 16k for a retrieval is not a problem at all" — modern LLMs' smart zone is ~80–100k.
+  24k/32k curve points added to locate CoE's true saturation.
+- **Packer backfill** (6f3b379): the greedy QKP stops at the first non-positive marginal, which
+  stranded ~45% of the 10k budget — unspent budget is unrecovered recall on a retrieval bench.
+  Shipped `Packer` gains opt-in `fill: "backfill"` (spend the remainder in value order, greedy
+  phase untouched; default stays pure-QKP "stop"). The rescue leg opts in. This is the "prove
+  the packer does its job at SOTA level" fix.
+- **Full-blown run**: all 7 datasets, ALL queries (supersedes the earlier 1,000-query cap on
+  wiki2multihop/hotpotqa/uda). Vectorized BM25 (30f9a53) makes this affordable.
+- **Production lanes**: the architecture must be usable in production and configurable via the
+  campaign wizard — "not just for the benches and README flexing". Productization runs as its
+  own work item (latence-retrieval composition + wizard block + docs/guides entry).
+
 ## Non-negotiables
 
 - Zero LLM calls in the online path (the framework's differentiator; HyCE-RAG and HippoRAG-2
