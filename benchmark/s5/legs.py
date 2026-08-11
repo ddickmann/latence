@@ -16,12 +16,17 @@ caller's first-stage *engine*, and the caller's query-signal generation.
   all-chunks matrix.
 * :class:`Bm25Backend` — the export ships an inverted index (``bm25-postings.parquet``) and
   corpus statistics (``bm25-stats.json``), but the library's BM25 is a *rescorer* over a
-  candidate pool. So the backend uses the postings only to select the pool — the documents
-  containing at least one query term — and hands that pool to the real
+  candidate pool (ADR-0048: it never builds a first stage — that is the caller's job). So the
+  backend builds the first stage itself, as one :class:`_Bm25TermMatrix`: the export's postings
+  turned into a term-major sparse matrix of the **query-independent** per-document BM25 weights,
+  so a query is a single sparse mat-vec against the global IDF vector. The formula, the constants
+  and the corpus statistics are not re-derived — they are read off the shipped
   :class:`~latence_retrieval.bm25.Bm25Rescorer` built with
-  :meth:`~latence_retrieval.bm25.Bm25Rescorer.from_export`. Documents outside the pool score
-  exactly ``0`` under Okapi BM25, so the ranking is **identical** to a full-corpus first stage;
-  the prefilter changes cost, not results.
+  :meth:`~latence_retrieval.bm25.Bm25Rescorer.from_export`, which stays the definition of the
+  numbers and is the oracle ``tests/test_legs.py`` checks every score and every rank against on
+  the real export. Documents holding no query term score exactly ``0`` under Okapi BM25 and are
+  dropped, exactly as the pool-prefilter used to drop them — vectorising changes cost, not
+  results.
 * :class:`EdgeGraphSource` — the shipped ``NetworkxGraphSource`` re-reads and rebuilds the edge
   graph on *every* call, which would dominate a per-query latency measurement. This holds the
   same networkx graph across a run and answers with the same call; ``tests/test_legs.py``
@@ -59,6 +64,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 _RETRIEVAL_SRC = Path(__file__).resolve().parents[2] / "packages" / "latence-retrieval" / "src"
@@ -247,43 +253,246 @@ class DenseBackend:
         ]
 
 
+def _single_array(column: Any) -> Any:
+    """One contiguous arrow ``Array`` for a (possibly multi-chunk) table column."""
+    combined = column.combine_chunks()
+    return combined.chunk(0) if isinstance(combined, pa.ChunkedArray) else combined
+
+
+class _Bm25TermMatrix:
+    """The export's BM25 document-term weights as a term-major CSR — built once, one matmul/query.
+
+    **Why this exists.** The shipped rescorer is a candidate processor: it re-tokenises every
+    candidate it is handed and accumulates the Okapi sum in Python. Handing it "every document
+    holding at least one query term" is, on a real corpus, most of the corpus — on the 57,812-chunk
+    ``wiki2multihop`` export the median query selects 53,398 chunks (92%), which cost 1.78 s per
+    query and made BM25 the single dominant cost of the whole S5 sweep. That is a property of the
+    *engine*, not of the formula.
+
+    **The decomposition.** Split the Okapi score into its query-independent and query-dependent
+    halves::
+
+        score(d) = Σ_{t ∈ Q ∩ d} idf(t) · w(t, d)
+        w(t, d)  = tf(t,d) · (k1 + 1) / ( tf(t,d) + k1 · (1 − b + b · |d| / avgdl) )
+
+    ``w`` depends only on the corpus, so it is computed **once** for every ``(term, document)`` pair
+    ``bm25-postings.parquet`` records — that artifact carries ``doc_len`` and ``term_frequencies``
+    beside ``terms``, i.e. exactly ``|d|`` and ``tf`` — and stored term-major (CSR over
+    ``vocabulary × documents``). A query is then ``scores = W[Q].T @ idf(Q)``: one sparse mat-vec
+    over the few thousand-to-million stored entries of the query's own terms, with no Python loop
+    over documents and no re-tokenisation of anything but the query.
+
+    **Why the numbers are the same numbers.** Nothing here re-derives BM25. ``k1``, ``b``, ``avgdl``
+    and the per-term IDF are read off the *shipped* :class:`~latence_retrieval.bm25.Bm25Rescorer`
+    instance built by :meth:`~latence_retrieval.bm25.Bm25Rescorer.from_export` — including its
+    ``_CorpusStats.idf``, so the Lucene/Robertson IDF and the **global** ``bm25-stats.json``
+    statistics are literally the same code and the same numbers, and cannot drift. ``w`` is
+    evaluated in ``float64`` in the same operation order as
+    :meth:`~latence_retrieval.bm25.Bm25Rescorer._term_saturation`, so each ``(t, d)`` product is
+    bit-identical to the rescorer's. The one and only difference is the *order* the per-term
+    products are summed in (ascending term id here; Python ``set`` iteration order there), which is
+    a last-ulp effect: ``tests/test_legs.py`` pins agreement with the rescorer on a real export at
+    ``1e-9`` relative on every score and exact equality on the returned order.
+
+    **Not scipy.** The design is scipy's CSR mat-vec, but this repo's environment does not carry
+    scipy (it is in no ``pyproject`` dependency group, and adding one to a harness while a sweep is
+    running is the wrong trade). The three CSR arrays and the mat-vec are therefore plain ``numpy``
+    — the same linear algebra, one fewer dependency, and a summation order this module controls
+    (which is what makes the equivalence above assertable rather than hopeful).
+
+    **Footprint.** ``indices`` is ``int32`` and ``data`` ``float64``, so 12 bytes per stored pair
+    plus ``8·(|vocabulary| + 1)``. Measured on the largest export (``uda``: 220,129 chunks, 497,559
+    terms, 35,156,494 pairs) the arrays are 430 MB and the term lookup ~60 MB, built in ~20 s with
+    a ~3.1 GB transient peak (the doc-major→term-major permutation) — comfortably inside the
+    sweep's 29 GB / 4-process budget, and below what the ``{term: [row, ...]}`` Python postings
+    dict it replaces held resident for the same export.
+    """
+
+    __slots__ = ("_data", "_idf", "_indices", "_indptr", "_lookup", "n_docs")
+
+    def __init__(self, export: Export, rescorer: Bm25Rescorer) -> None:
+        stats = rescorer._supplied_stats  # noqa: SLF001 - the ONE source of truth
+        if stats is None:
+            # `from_export` always supplies them; a rescorer without them would silently switch to
+            # POOL-LOCAL IDF, which is a different ranking wearing the same name.
+            msg = (
+                f"{export.dataset}: the BM25 rescorer carries no corpus statistics; refusing to "
+                "build a first stage that would silently use pool-local IDF."
+            )
+            raise ValueError(msg)
+        k1, b, avgdl = rescorer._k1, rescorer._b, stats.avgdl  # noqa: SLF001
+
+        path = export.root / "bm25-postings.parquet"
+        record_ids = pq.read_table(path, columns=["record_id"]).column("record_id").to_pylist()  # type: ignore[no-untyped-call]
+        if record_ids != [row.record_id for row in export.rows]:
+            # The postings row order IS the corpus row order in every S3 export, and the scoring
+            # below addresses corpus rows by postings row. A mismatch would rank real scores under
+            # the wrong ids — confident nonsense — so it is refused here, not discovered in a recall
+            # number.
+            msg = (
+                f"{export.dataset}: bm25-postings.parquet holds {len(record_ids)} rows that are "
+                f"not corpus.parquet's {len(export.rows)} record ids in order; refusing to score a "
+                "misaligned index."
+            )
+            raise ValueError(msg)
+        n_docs = len(record_ids)
+        del record_ids
+
+        doc_len = (
+            pq.read_table(path, columns=["doc_len"])  # type: ignore[no-untyped-call]
+            .column("doc_len")
+            .to_numpy()
+            .astype(np.float64)
+        )
+        frequencies = _single_array(
+            pq.read_table(path, columns=["term_frequencies"]).column("term_frequencies")  # type: ignore[no-untyped-call]
+        )
+        # `data` starts life as tf and is turned into w(t, d) in place — one float64 array of the
+        # stored-pair length instead of three, which is what keeps the uda build inside its budget.
+        data = frequencies.flatten().to_numpy(zero_copy_only=False).astype(np.float64)
+        per_doc = np.diff(frequencies.offsets.to_numpy())
+        del frequencies
+
+        terms = _single_array(pq.read_table(path, columns=["terms"]).column("terms"))  # type: ignore[no-untyped-call]
+        flat = terms.flatten()
+        if flat.null_count:
+            msg = f"{export.dataset}: bm25-postings.parquet 'terms' holds nulls."
+            raise ValueError(msg)
+        encoded = flat.dictionary_encode()
+        codes = encoded.indices.to_numpy(zero_copy_only=False).astype(np.int32)
+        vocabulary: list[str] = encoded.dictionary.to_pylist()
+        del terms, flat, encoded
+        if codes.shape[0] != data.shape[0]:
+            msg = (
+                f"{export.dataset}: bm25-postings.parquet has {codes.shape[0]} terms against "
+                f"{data.shape[0]} term_frequencies."
+            )
+            raise ValueError(msg)
+
+        # w(t, d), in the rescorer's own operation order so every product is bit-identical to
+        # `Bm25Rescorer._term_saturation(tf, |d|, avgdl)`.
+        document_of = np.repeat(np.arange(n_docs, dtype=np.int32), per_doc)
+        denominator = (1.0 - b + b * (doc_len / avgdl))[document_of]
+        denominator *= k1
+        denominator += data
+        data *= k1 + 1.0
+        data /= denominator
+        del denominator, doc_len
+
+        # Doc-major (as the parquet stores it) → term-major, the orientation a query slices.
+        order = np.argsort(codes, kind="stable")
+        indptr = np.zeros(len(vocabulary) + 1, dtype=np.int64)
+        np.cumsum(np.bincount(codes, minlength=len(vocabulary)), out=indptr[1:])
+        del codes
+        self._indptr = indptr
+        self._indices = document_of[order]
+        del document_of
+        self._data = data[order]
+        del data, order
+
+        self.n_docs = n_docs
+        self._idf = np.fromiter(
+            (stats.idf(term) for term in vocabulary), dtype=np.float64, count=len(vocabulary)
+        )
+        self._lookup = {term: index for index, term in enumerate(vocabulary)}
+
+    @property
+    def nnz(self) -> int:
+        """Stored ``(term, document)`` pairs — the export's whole inverted index."""
+        return int(self._data.shape[0])
+
+    @property
+    def nbytes(self) -> int:
+        """Bytes the three CSR arrays plus the IDF vector occupy (the reportable footprint)."""
+        arrays = (self._indptr, self._indices, self._data, self._idf)
+        return int(sum(array.nbytes for array in arrays))
+
+    def scores(self, text: str) -> Any:
+        """Every document's exact global Okapi BM25 score for ``text`` — one sparse mat-vec.
+
+        Terms the corpus never emitted are skipped (they have no stored pairs, so they contribute
+        nothing to any document's score whatever their IDF). The query's term ids are visited in
+        ascending order, which is what makes the float accumulation deterministic across runs and
+        independent of ``PYTHONHASHSEED``.
+        """
+        term_ids = sorted(
+            {
+                term_id
+                for term in set(_tokenize(text))
+                if (term_id := self._lookup.get(term)) is not None
+            }
+        )
+        out = np.zeros(self.n_docs, dtype=np.float64)
+        for term_id in term_ids:
+            start, stop = int(self._indptr[term_id]), int(self._indptr[term_id + 1])
+            out[self._indices[start:stop]] += self._idf[term_id] * self._data[start:stop]
+        return out
+
+
 class Bm25Backend:
-    """Exact global Okapi BM25: postings pick the pool, the real ``Bm25Rescorer`` scores it."""
+    """Exact global Okapi BM25 over the whole corpus, as one sparse mat-vec per query.
+
+    The scores and the order are the shipped :class:`~latence_retrieval.bm25.Bm25Rescorer`'s —
+    see :class:`_Bm25TermMatrix` for how that is guaranteed rather than hoped. The rescorer
+    instance is kept because it *is* the definition: this backend's statistics, constants and IDF
+    are read off it.
+    """
 
     def __init__(self, export: Export) -> None:
         self._export = export
         self._rescorer = Bm25Rescorer.from_export(str(export.root))
-        table = pq.read_table(export.root / "bm25-postings.parquet", columns=["record_id", "terms"])  # type: ignore[no-untyped-call]
-        postings: dict[str, list[int]] = {}
-        for row, terms in enumerate(table.column("terms").to_pylist()):
-            for term in terms or ():
-                postings.setdefault(str(term), []).append(row)
-        self._postings = postings
-        self._row_of = {
-            str(record_id): index
-            for index, record_id in enumerate(table.column("record_id").to_pylist())
-        }
+        self._matrix = _Bm25TermMatrix(export, self._rescorer)
+        # Rank of each row's record id in ascending id order, so the rescorer's `(-score, id)`
+        # tiebreak becomes an integer lexsort key instead of a per-query string sort.
+        ids = [row.record_id for row in export.rows]
+        by_id = np.fromiter(
+            sorted(range(len(ids)), key=ids.__getitem__), dtype=np.int64, count=len(ids)
+        )
+        self._id_rank = np.empty(len(ids), dtype=np.int64)
+        self._id_rank[by_id] = np.arange(len(ids))
 
     @property
     def capabilities(self) -> frozenset[Capability]:
         """``{BM25}``."""
         return frozenset({Capability.BM25})
 
-    def _pool(self, text: str) -> list[Candidate]:
-        rows = self._export.rows
-        hit: set[int] = set()
-        for term in set(_tokenize(text)):
-            hit.update(self._postings.get(term, ()))
-        return [
-            Candidate(id=rows[i].record_id, score=0.0, text=rows[i].content) for i in sorted(hit)
-        ]
+    @property
+    def matrix(self) -> _Bm25TermMatrix:
+        """The first-stage weight matrix — exposed so a run can report its footprint."""
+        return self._matrix
 
     def search(self, query: RetrievalQuery) -> list[Candidate]:
-        """Score the term-matching pool with the shipped rescorer; truncate to ``top_k``."""
-        pool = self._pool(query.text or "")
-        if not pool:
-            return []
-        return self._rescorer.process(query.text or "", pool)[: query.top_k]
+        """Top-``top_k`` by exact global BM25, ties broken by ascending id (the rescorer's order).
+
+        Documents holding no query term score exactly ``0`` and are dropped rather than returned
+        as padding — the same set the postings prefilter used to hand the rescorer, and the same
+        length the rescorer's truncated output had.
+        """
+        scores = self._matrix.scores(query.text or "")
+        rows = self._export.rows
+        return [
+            Candidate(id=rows[i].record_id, score=float(scores[i]), text=rows[i].content)
+            for i in self._top(scores, query.top_k)
+        ]
+
+    def _top(self, scores: Any, top_k: int) -> Any:
+        """Row positions of the ``top_k`` highest scores, ordered by ``(-score, record_id)``.
+
+        Partition first, then sort only the ``top_k``-and-ties tail: an exact top-k over 220,129
+        scores without paying an O(N log N) sort per query. Taking every row whose score reaches
+        the partition's own threshold is what keeps the tail exact when scores tie across the
+        cut-off.
+        """
+        scoring = np.flatnonzero(scores > 0.0)
+        if top_k < 1 or scoring.shape[0] == 0:
+            return np.empty(0, dtype=np.int64)
+        keep = min(top_k, int(scoring.shape[0]))
+        if scoring.shape[0] > keep:
+            values = scores[scoring]
+            threshold = values[np.argpartition(-values, keep - 1)[:keep]].min()
+            scoring = scoring[values >= threshold]
+        order = np.lexsort((self._id_rank[scoring], -scores[scoring]))
+        return scoring[order][:keep]
 
 
 _BM25_TOKEN = re.compile(r"[^\W_]+")

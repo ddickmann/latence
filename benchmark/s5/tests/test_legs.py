@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """The harness-supplied engines — contract-checked, and equivalence-checked against the shipped ones.
 
-Two of the four adapters here exist only because a shipped adapter's *packaging* does not fit
-this environment (``duckdb`` absent) or its per-call re-read would dominate the latency the
-harness is measuring. Those two are the ones that could silently diverge, so they are tested
-against the real thing on the real export rather than against a fixture.
+Most of the adapters here exist only because a shipped adapter's *packaging* does not fit this
+environment (``duckdb`` absent), or because its per-call re-read / per-candidate Python loop
+would dominate the latency the harness is measuring. Those are the ones that could silently
+diverge, so each is tested against the real shipped component on the real export rather than
+against a fixture: :class:`EdgeGraphSource` against ``NetworkxGraphSource``, and the vectorised
+BM25 first stage against ``Bm25Rescorer``, score for score and rank for rank.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -167,23 +171,193 @@ def test_dense_backend_declares_only_dense_and_ranks_by_cosine(export: Export) -
     assert [h.score for h in hits] == sorted((h.score for h in hits), reverse=True)
 
 
-@requires_export
-def test_bm25_backend_prefilter_does_not_change_the_ranking(export: Export) -> None:
-    """The postings prefilter must be a cost optimisation only: excluded docs score exactly 0."""
+# -- the vectorised BM25 first stage: same numbers as the shipped rescorer, ~10^3 times faster --
+#
+# `Bm25Backend` no longer hands a candidate pool to `Bm25Rescorer.process` — it scores the whole
+# corpus with one sparse mat-vec over precomputed BM25 document-term weights. That is only
+# legitimate if it is EXACTLY the rescorer's answer, so the rescorer stays in the tests as the
+# oracle: `_assert_matches_the_rescorer` re-scores the full corpus with the shipped component and
+# demands the same ids, in the same order, with the same scores.
+#
+# **Tolerance.** The per-`(term, document)` products are bit-identical by construction (same
+# float64 formula, same operation order as `Bm25Rescorer._term_saturation`); only the order the
+# handful of per-term products are SUMMED in differs (ascending term id vs Python `set` iteration
+# order), which is a last-ulp effect. `1e-9` relative is therefore ~6 orders of magnitude looser
+# than what is measured — over 270 real benchmark questions across three real exports (vidoseek
+# 200/200, multihop_rag 50/50, wiki2multihop 20/20) the returned order was identical every time
+# and the worst relative score deviation was 6.1e-16, ~2 ulps — and would still catch any real
+# formula, statistics or tokenisation drift, all of which move scores by percent.
+_BM25_RTOL = 1e-9
+
+
+def _assert_matches_the_rescorer(
+    export: Export, backend: Bm25Backend, questions: Sequence[str], top_k: int
+) -> None:
     from latence_retrieval.bm25 import Bm25Rescorer
     from latence_retrieval.contracts import Candidate
 
+    oracle = Bm25Rescorer.from_export(str(export.root))
+    full_pool = [Candidate(id=row.record_id, score=0.0, text=row.content) for row in export.rows]
+    for question in questions:
+        mine = backend.search(RetrievalQuery(mode=Capability.BM25, text=question, top_k=top_k))
+        # The rescorer scores the WHOLE corpus here — no prefilter — so this is the exhaustive
+        # first stage the vectorised one claims to reproduce, not a cheaper approximation of it.
+        theirs = [c for c in oracle.process(question, full_pool) if c.score > 0.0][:top_k]
+        assert [c.id for c in mine] == [c.id for c in theirs], question
+        for a, b in zip(mine, theirs, strict=True):
+            assert a.score == pytest.approx(b.score, rel=_BM25_RTOL, abs=0.0), (question, a.id)
+            assert a.text == b.text
+
+
+def _write_export(root: Path, texts: dict[str, str]) -> Export:
+    """A minimal S3 export: the two BM25 artifacts, written the way the Export stage writes them.
+
+    The postings are derived by tokenising the very texts the rows carry (`doc_len` = token count,
+    `terms`/`term_frequencies` = the per-document term histogram) and the statistics are the true
+    global ones — which is exactly the agreement the real artifacts hold, verified over all 3,264
+    rows of the `multihop_rag` export. So this fixture exercises the real code path, and the
+    equivalence it asserts is not fixture-shaped.
+    """
+    import json
+    import math
+    import re
+    from collections import Counter
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    token = re.compile(r"[^\W_]+")
+    tokenised = {rid: token.findall(text.lower()) for rid, text in texts.items()}
+    histograms = {rid: Counter(tokens) for rid, tokens in tokenised.items()}
+    doc_freq: Counter[str] = Counter()
+    for histogram in histograms.values():
+        doc_freq.update(histogram.keys())
+    n = len(texts)
+    avgdl = sum(len(t) for t in tokenised.values()) / n
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "bm25-stats.json").write_text(
+        json.dumps(
+            {
+                "doc_count": n,
+                "avgdl": avgdl,
+                "terms": [
+                    {
+                        "term": term,
+                        "df": df,
+                        "idf": math.log(1.0 + (n - df + 0.5) / (df + 0.5)),
+                    }
+                    for term, df in sorted(doc_freq.items())
+                ],
+            }
+        )
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "record_id": list(texts),
+                "doc_len": [len(tokenised[rid]) for rid in texts],
+                "terms": [sorted(histograms[rid]) for rid in texts],
+                "term_frequencies": [
+                    [histograms[rid][term] for term in sorted(histograms[rid])] for rid in texts
+                ],
+            }
+        ),
+        root / "bm25-postings.parquet",
+    )  # type: ignore[no-untyped-call]
+    rows = [
+        ChunkRow(rid, text, "d.md", 0, len(text), ()) for rid, text in texts.items()
+    ]
+    return Export(dataset="fixture", root=root, rows=rows, embeddings=None, pages={})
+
+
+#: Deliberately adversarial for a top-k that must reproduce a `(-score, id)` sort exactly: `z-dup`
+#: and `a-dup` hold IDENTICAL text (an exact score tie whose order is decided purely by the id
+#: tiebreak, and whose ids sort against their row order), `long` repeats a query term but is
+#: length-penalised, `common` shares only the corpus-wide term, and `none` shares nothing at all.
+_FIXTURE_TEXTS = {
+    "z-dup": "the quantum compiler lowers the circuit",
+    "m-long": (
+        "the quantum compiler lowers the circuit and then the quantum compiler lowers the "
+        "circuit again while the quantum scheduler waits for the circuit to settle down"
+    ),
+    "a-dup": "the quantum compiler lowers the circuit",
+    "b-common": "the harvest festival ran late",
+    "c-none": "unrelated prose about gardening",
+}
+
+
+def test_bm25_first_stage_reproduces_the_shipped_rescorer_exactly(tmp_path: Path) -> None:
+    """The whole justification for vectorising: the same ids, the same order, the same scores."""
+    export = _write_export(tmp_path, _FIXTURE_TEXTS)
     backend = Bm25Backend(export)
     assert backend.capabilities == frozenset({Capability.BM25})
-    question = "energy management platform for multi-site estates"
-    prefiltered = backend.search(RetrievalQuery(mode=Capability.BM25, text=question, top_k=10))
-
-    full_pool = [
-        Candidate(id=row.record_id, score=0.0, text=row.content) for row in export.rows
+    questions = [
+        "quantum compiler circuit",
+        "the",  # the corpus-wide term: every document matches, so nothing is prefiltered away
+        "circuit",
+        "quantum tunnelling",  # one known term, one the corpus never emitted
+        "gardening prose",
     ]
-    exhaustive = Bm25Rescorer.from_export(str(export.root)).process(question, full_pool)[:10]
-    assert [c.id for c in prefiltered] == [c.id for c in exhaustive]
-    assert [round(c.score, 6) for c in prefiltered] == [round(c.score, 6) for c in exhaustive]
+    for top_k in (1, 2, 3, 100):
+        _assert_matches_the_rescorer(export, backend, questions, top_k)
+
+    # The exact tie is real, and it is broken by ascending id — not by row order (`z-dup` is row 0).
+    tied = backend.search(
+        RetrievalQuery(mode=Capability.BM25, text="quantum compiler lowers", top_k=2)
+    )
+    assert [c.id for c in tied] == ["a-dup", "z-dup"]
+    assert tied[0].score == tied[1].score
+
+    # A query the corpus shares no term with returns NOTHING — never zero-scored padding.
+    assert backend.search(RetrievalQuery(mode=Capability.BM25, text="zzz", top_k=10)) == []
+    assert backend.search(RetrievalQuery(mode=Capability.BM25, text="!?", top_k=10)) == []
+    # …and a query matching a single document returns that one document, not `top_k` of them.
+    assert [
+        c.id for c in backend.search(RetrievalQuery(mode=Capability.BM25, text="harvest", top_k=10))
+    ] == ["b-common"]
+
+
+def test_bm25_first_stage_uses_the_export_global_idf_not_a_pool_local_one(tmp_path: Path) -> None:
+    """The IDF must come from `bm25-stats.json` — the corpus's, not the matching subset's."""
+    export = _write_export(tmp_path, _FIXTURE_TEXTS)
+    backend = Bm25Backend(export)
+    matrix = backend.matrix
+    assert matrix.n_docs == len(_FIXTURE_TEXTS)
+    # `the` is in 4 of the 5 documents and `harvest` in 1: the global statistics separate them.
+    # A pool-local IDF (the rescorer's no-stats mode) would compute both over the matching subset.
+    n = len(_FIXTURE_TEXTS)
+    for term, df in (("the", 4), ("harvest", 1), ("quantum", 3)):
+        expected = np.log(1.0 + (n - df + 0.5) / (df + 0.5))
+        assert matrix._idf[matrix._lookup[term]] == pytest.approx(expected, rel=1e-15)  # noqa: SLF001
+    assert matrix.nnz == sum(len(set(re.findall(r"[^\W_]+", t.lower()))) for t in _FIXTURE_TEXTS.values())
+    assert matrix.nbytes > 0
+
+
+def test_bm25_first_stage_refuses_postings_that_are_not_the_corpus_rows(tmp_path: Path) -> None:
+    """Postings row N scores corpus row N, so a reordered index is refused, never silently ranked."""
+    export = _write_export(tmp_path, _FIXTURE_TEXTS)
+    shuffled = Export(
+        dataset="fixture",
+        root=tmp_path,
+        rows=list(reversed(export.rows)),
+        embeddings=None,
+        pages={},
+    )
+    with pytest.raises(ValueError, match="refusing to score a misaligned index"):
+        Bm25Backend(shuffled)
+
+
+@requires_export
+def test_bm25_backend_matches_the_rescorer_on_the_real_export(export: Export) -> None:
+    """The same equivalence, on 2,434 real chunks and real benchmark questions."""
+    backend = Bm25Backend(export)
+    assert backend.capabilities == frozenset({Capability.BM25})
+    questions = [q.question for q in DATASETS["vidoseek"].queries()[:12]]
+    # …plus queries lifted from the corpus itself: long, many-termed, and matching most of the
+    # corpus — the shape that made the old pool-then-rescore path cost 1.78 s per query.
+    questions += [" ".join(row.content.split()[:40]) for row in export.rows[:4]]
+    questions.append("energy management platform for multi-site estates")
+    _assert_matches_the_rescorer(export, backend, questions, 100)
 
 
 @requires_export
