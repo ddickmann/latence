@@ -72,6 +72,16 @@ S3_RELATION_LABELS: tuple[str, ...] = (
 #: label sets above.
 S3_INDUCTION_MODES: tuple[str, ...] = ("per_chunk", "doc", "none")
 
+#: The graph-rescue policy modes, mirroring ``latence_retrieval.rescue.GRAPH_MODES`` (this
+#: package deliberately does not import latence-retrieval — the wizard only *configures* the
+#: production component, it never runs it).
+RETRIEVAL_GRAPH_MODES: tuple[str, ...] = ("off", "auto", "force")
+
+#: The graph-rescue selectors, mirroring ``latence_retrieval.rescue.SELECTORS``: ``packed`` is
+#: the knapsack QKP (precision point — saturates ~5.5k tokens, backfills the rest), ``coe`` is
+#: chain-of-evidence (recall point — keeps buying recall through 16k), ``none`` skips selection.
+RETRIEVAL_SELECTORS: tuple[str, ...] = ("packed", "coe", "none")
+
 
 @dataclass(frozen=True)
 class S3Answers:
@@ -177,6 +187,70 @@ class S3Answers:
 
 
 @dataclass(frozen=True)
+class RetrievalAnswers:
+    """The ``retrieval:`` block of campaign.yaml — the graph-rescue architecture's knobs (S5b).
+
+    Every default is the MEASURED S5b operating point (commits 9b41d7d, e9d66c2, 6f3b379), not a
+    guess: the policy gate ``auto``, the knapsack selector at 10k with the CoE alternative at 16k
+    (the knapsack saturates ~5.5k and backfills; CoE keeps buying recall through 16k), the
+    expander's bonuses as fractions of the max-normalised base score, and the seed/rescue caps
+    the measured run shipped with. The block configures
+    ``latence_retrieval.rescue.GraphRescueRetrieval`` one-to-one — same names, same semantics —
+    so a campaign.yaml is a valid production config source, not a bench-only dialect.
+    Contradictions are rejected here, not discovered at query time.
+    """
+
+    graph_mode: str = "auto"
+    selector: str = "packed"
+    #: Per-selector headline budgets (operator ruling, s5b): the knapsack's 10k (it saturates
+    #: ~5.5k — raising it further changes nothing) and CoE's 16k (spend still buys recall there).
+    packed_budget: int = 10_000
+    coe_budget: int = 16_000
+    seed_top_k: int = 5
+    hop_weight: float = 0.05
+    community_weight: float = 0.01
+    centrality_weight: float = 0.05
+    seed_docs_k: int = 5
+    seed_node_cap: int = 32
+    rescue_cap: int = 50
+    pack_centrality_weight: float = 0.25
+
+    def __post_init__(self) -> None:
+        if self.graph_mode not in RETRIEVAL_GRAPH_MODES:
+            msg = (
+                f"retrieval.graph.mode must be one of {', '.join(RETRIEVAL_GRAPH_MODES)} "
+                f"(got {self.graph_mode!r})."
+            )
+            raise CampaignConfigError(msg)
+        if self.selector not in RETRIEVAL_SELECTORS:
+            msg = (
+                f"retrieval.select.selector must be one of {', '.join(RETRIEVAL_SELECTORS)} "
+                f"(got {self.selector!r})."
+            )
+            raise CampaignConfigError(msg)
+        for name, value in (
+            ("select.packed_budget", self.packed_budget),
+            ("select.coe_budget", self.coe_budget),
+            ("expand.seed_top_k", self.seed_top_k),
+            ("graph.seed_docs_k", self.seed_docs_k),
+            ("graph.seed_node_cap", self.seed_node_cap),
+            ("graph.rescue_cap", self.rescue_cap),
+        ):
+            if value < 1:
+                msg = f"retrieval.{name} must be a positive integer (got {value})."
+                raise CampaignConfigError(msg)
+        for name, weight in (
+            ("expand.hop_weight", self.hop_weight),
+            ("expand.community_weight", self.community_weight),
+            ("expand.centrality_weight", self.centrality_weight),
+            ("select.pack_centrality_weight", self.pack_centrality_weight),
+        ):
+            if weight < 0:
+                msg = f"retrieval.{name} must be >= 0 (got {weight})."
+                raise CampaignConfigError(msg)
+
+
+@dataclass(frozen=True)
 class CampaignAnswers:
     """The fully-resolved wizard answers — the SAME struct from prompts and from flags.
 
@@ -190,12 +264,16 @@ class CampaignAnswers:
     :param s3: The S3 pipeline-generation block (chunking, extraction, induction, labels,
         redaction). Older configs without an ``s3:`` block parse to these defaults, so an
         S1/S2-era campaign.yaml keeps loading unchanged.
+    :param retrieval: The graph-rescue retrieval block (policy gate, selector + budgets,
+        expander weights, seed caps) — the S5b production architecture's knobs. Older configs
+        without a ``retrieval:`` block parse to the measured defaults.
     """
 
     campaign_root: str
     datasets: tuple[str, ...] = field(default=KNOWN_DATASETS)
     pod_ssh: str = ""
     s3: S3Answers = field(default_factory=S3Answers)
+    retrieval: RetrievalAnswers = field(default_factory=RetrievalAnswers)
 
     def __post_init__(self) -> None:
         if not self.campaign_root.strip():
@@ -233,8 +311,29 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
     machine-clean YAML.
     """
     s3 = answers.s3
+    retrieval = answers.retrieval
     body: str = yaml.safe_dump(
         {
+            "retrieval": {
+                "graph": {
+                    "mode": retrieval.graph_mode,
+                    "seed_docs_k": retrieval.seed_docs_k,
+                    "seed_node_cap": retrieval.seed_node_cap,
+                    "rescue_cap": retrieval.rescue_cap,
+                },
+                "expand": {
+                    "seed_top_k": retrieval.seed_top_k,
+                    "hop_weight": retrieval.hop_weight,
+                    "community_weight": retrieval.community_weight,
+                    "centrality_weight": retrieval.centrality_weight,
+                },
+                "select": {
+                    "selector": retrieval.selector,
+                    "packed_budget": retrieval.packed_budget,
+                    "coe_budget": retrieval.coe_budget,
+                    "pack_centrality_weight": retrieval.pack_centrality_weight,
+                },
+            },
             "campaign": {
                 "root": answers.campaign_root,
                 "pod_ssh": answers.pod_ssh,
@@ -285,6 +384,12 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
         else f"{s3.induction_mode} ({s3.induction_model}{reasoning}, "
         f"cap ${s3.induction_budget_usd_cap:.2f})"
     )
+    if retrieval.selector == "packed":
+        select_line = f"packed @ {retrieval.packed_budget} tok"
+    elif retrieval.selector == "coe":
+        select_line = f"coe @ {retrieval.coe_budget} tok"
+    else:
+        select_line = "none (ranked union)"
     header_lines = [
         "# latence-campaign configuration — generated by `latence-campaign init`.",
         "# Deterministic: identical answers produce a byte-identical file, so re-running init",
@@ -301,6 +406,11 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
         f"{s3.chunk_min_tokens}; {s3.extraction_provider} @ {s3.extraction_threshold}",
         f"#                 induction {induction}; redaction "
         f"{'guardrails on' if s3.redaction_guardrails else 'guardrails OFF'}",
+        f"# retrieval     : graph {retrieval.graph_mode}; select {select_line}; expand "
+        f"{retrieval.seed_top_k}/{retrieval.hop_weight}/{retrieval.community_weight}/"
+        f"{retrieval.centrality_weight}",
+        "#                 (the S5b graph-as-rescue architecture — graph appends, never fuses;",
+        "#                 every default is the measured operating point)",
         "#",
         "# Stages are gated: `run <stage>` refuses until the PREVIOUS stage was `approve`d.",
         "# Later campaign stages append their own config blocks below; unknown blocks are",
@@ -353,29 +463,38 @@ def parse_campaign_config(text: str) -> CampaignAnswers:
         datasets=tuple(datasets),
         pod_ssh=pod_ssh,
         s3=_parse_s3_block(raw.get("s3")),
+        retrieval=_parse_retrieval_block(raw.get("retrieval")),
     )
 
 
-def _sub_block(s3: dict[str, object], name: str, known: tuple[str, ...]) -> dict[str, object]:
-    """One ``s3.<name>`` sub-mapping, absent = ``{}``, unknown keys LOUD (a typo'd knob that
-    silently falls back to its default would run a 2-pod-day campaign on the wrong setting)."""
-    raw = s3.get(name, {})
+def _sub_block(
+    parent: dict[str, object], name: str, known: tuple[str, ...], *, prefix: str = "s3"
+) -> dict[str, object]:
+    """One ``<prefix>.<name>`` sub-mapping, absent = ``{}``, unknown keys LOUD (a typo'd knob
+    that silently falls back to its default would run a 2-pod-day campaign on the wrong
+    setting)."""
+    raw = parent.get(name, {})
     if not isinstance(raw, dict):
-        msg = f"`s3.{name}` must be a mapping."
+        msg = f"`{prefix}.{name}` must be a mapping."
         raise CampaignConfigError(msg)
     unknown = sorted(set(raw) - set(known))
     if unknown:
-        msg = f"`s3.{name}` has unknown key(s): {', '.join(unknown)}. Known: {', '.join(known)}."
+        msg = (
+            f"`{prefix}.{name}` has unknown key(s): {', '.join(unknown)}. "
+            f"Known: {', '.join(known)}."
+        )
         raise CampaignConfigError(msg)
     return dict(raw)
 
 
-def _typed(block: dict[str, object], key: str, kind: type[_T], default: _T) -> _T:
+def _typed(
+    block: dict[str, object], key: str, kind: type[_T], default: _T, *, prefix: str = "s3"
+) -> _T:
     value = block.get(key, default)
     if kind is float and isinstance(value, int) and not isinstance(value, bool):
         value = float(value)  # YAML `150` for a cap is not a typo; accept the int spelling.
     if not isinstance(value, kind) or (kind is not bool and isinstance(value, bool)):
-        msg = f"`s3` key {key!r} must be a {kind.__name__} (got {value!r})."
+        msg = f"`{prefix}` key {key!r} must be a {kind.__name__} (got {value!r})."
         raise CampaignConfigError(msg)
     return value
 
@@ -402,6 +521,88 @@ def _label_list(block: dict[str, object], key: str, default: tuple[str, ...]) ->
         msg = f"`s3.labels.{key}` must be a list of strings."
         raise CampaignConfigError(msg)
     return tuple(raw)
+
+
+def _parse_retrieval_block(raw: object) -> RetrievalAnswers:
+    """The optional ``retrieval:`` block → :class:`RetrievalAnswers`; absent = measured defaults.
+
+    Same discipline as the ``s3:`` block: an older campaign.yaml without the block keeps loading
+    (it parses to the measured S5b defaults), a typo'd knob is LOUD, and a wrongly-typed value is
+    rejected at parse — never discovered at query time.
+    """
+    if raw is None:
+        return RetrievalAnswers()
+    if not isinstance(raw, dict):
+        msg = "`retrieval` must be a mapping (graph, expand, select)."
+        raise CampaignConfigError(msg)
+    unknown = sorted(set(raw) - {"graph", "expand", "select"})
+    if unknown:
+        msg = f"`retrieval` has unknown key(s): {', '.join(unknown)}."
+        raise CampaignConfigError(msg)
+    graph = _sub_block(
+        raw, "graph", ("mode", "seed_docs_k", "seed_node_cap", "rescue_cap"), prefix="retrieval"
+    )
+    expand = _sub_block(
+        raw,
+        "expand",
+        ("seed_top_k", "hop_weight", "community_weight", "centrality_weight"),
+        prefix="retrieval",
+    )
+    select = _sub_block(
+        raw,
+        "select",
+        ("selector", "packed_budget", "coe_budget", "pack_centrality_weight"),
+        prefix="retrieval",
+    )
+    defaults = RetrievalAnswers()
+    return RetrievalAnswers(
+        graph_mode=str(_typed(graph, "mode", str, defaults.graph_mode, prefix="retrieval")),
+        selector=str(_typed(select, "selector", str, defaults.selector, prefix="retrieval")),
+        packed_budget=int(
+            _typed(select, "packed_budget", int, defaults.packed_budget, prefix="retrieval")
+        ),
+        coe_budget=int(
+            _typed(select, "coe_budget", int, defaults.coe_budget, prefix="retrieval")
+        ),
+        seed_top_k=int(
+            _typed(expand, "seed_top_k", int, defaults.seed_top_k, prefix="retrieval")
+        ),
+        hop_weight=float(
+            _typed(expand, "hop_weight", float, defaults.hop_weight, prefix="retrieval")
+        ),
+        community_weight=float(
+            _typed(
+                expand, "community_weight", float, defaults.community_weight, prefix="retrieval"
+            )
+        ),
+        centrality_weight=float(
+            _typed(
+                expand,
+                "centrality_weight",
+                float,
+                defaults.centrality_weight,
+                prefix="retrieval",
+            )
+        ),
+        seed_docs_k=int(
+            _typed(graph, "seed_docs_k", int, defaults.seed_docs_k, prefix="retrieval")
+        ),
+        seed_node_cap=int(
+            _typed(graph, "seed_node_cap", int, defaults.seed_node_cap, prefix="retrieval")
+        ),
+        rescue_cap=int(
+            _typed(graph, "rescue_cap", int, defaults.rescue_cap, prefix="retrieval")
+        ),
+        pack_centrality_weight=float(
+            _typed(
+                select,
+                "pack_centrality_weight",
+                float,
+                defaults.pack_centrality_weight,
+                prefix="retrieval",
+            )
+        ),
+    )
 
 
 def _parse_s3_block(raw: object) -> S3Answers:

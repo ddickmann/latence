@@ -44,9 +44,12 @@ from latence_benchmark.campaign.state import (
 )
 from latence_benchmark.campaign.wizard import (
     KNOWN_DATASETS,
+    RETRIEVAL_GRAPH_MODES,
+    RETRIEVAL_SELECTORS,
     S3_INDUCTION_MODES,
     CampaignAnswers,
     CampaignConfigError,
+    RetrievalAnswers,
     S3Answers,
     build_campaign_config,
     parse_campaign_config,
@@ -133,6 +136,38 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Turn the learned redaction guardrail screen OFF (default: on).",
     )
+    # Graph-rescue retrieval headline choices (prompted interactively; the remaining knobs are
+    # flag-only, same house style as s3). Every default is the measured S5b operating point.
+    init.add_argument(
+        "--retrieval-graph-mode",
+        default=None,
+        choices=[*RETRIEVAL_GRAPH_MODES],
+        help="Graph-rescue policy gate: auto (default — pay for the graph lane only on "
+        "graph-shaped queries), off, or force.",
+    )
+    init.add_argument(
+        "--retrieval-selector",
+        default=None,
+        choices=[*RETRIEVAL_SELECTORS],
+        help="Token-budget selector: packed (knapsack @ 10k, the precision point — default), "
+        "coe (chain-of-evidence @ 16k, the recall point), or none (ranked union).",
+    )
+    for flag, help_text in (
+        ("--retrieval-packed-budget", "knapsack token budget (default 10000)."),
+        ("--retrieval-coe-budget", "chain-of-evidence token budget (default 16000)."),
+        ("--retrieval-seed-top-k", "expander anchor size (default 5)."),
+        ("--retrieval-hop-weight", "expander 1-hop bonus per linked seed (default 0.05)."),
+        ("--retrieval-community-weight", "expander shared-community bonus (default 0.01)."),
+        ("--retrieval-centrality-weight", "expander peak-centrality bonus (default 0.05)."),
+        ("--retrieval-seed-docs-k", "first-stage docs seeding entity resolution (default 5)."),
+        ("--retrieval-seed-node-cap", "max seed nodes handed to the traversal (default 32)."),
+        ("--retrieval-rescue-cap", "max rescue candidates appended per query (default 50)."),
+        (
+            "--retrieval-pack-centrality-weight",
+            "kg_node_centrality weight in the packer's value (default 0.25).",
+        ),
+    ):
+        init.add_argument(flag, default=None, help=help_text)
     init.add_argument(
         "--non-interactive",
         action="store_true",
@@ -247,8 +282,27 @@ def _cmd_init(args: argparse.Namespace) -> int:
         interactive=interactive,
     )
 
+    # Graph-rescue headline choices: prompted; the remaining knobs resolve flag > default only.
+    retrieval_mode = _ask(
+        args.retrieval_graph_mode,
+        f"Graph-rescue policy gate ({'/'.join(RETRIEVAL_GRAPH_MODES)})",
+        "auto = pay for the graph lane only on graph-shaped queries (the measured default); "
+        "off = base dense+BM25 only; force = every query",
+        "auto",
+        interactive=interactive,
+    )
+    retrieval_selector = _ask(
+        args.retrieval_selector,
+        f"Retrieval selector ({'/'.join(RETRIEVAL_SELECTORS)})",
+        "packed = knapsack @ 10k tokens (precision point); coe = chain-of-evidence @ 16k "
+        "(recall point); none = ranked union, no token budget",
+        "packed",
+        interactive=interactive,
+    )
+
     datasets = tuple(d.strip() for d in datasets_raw.split(",") if d.strip())
     defaults = S3Answers()
+    retrieval_defaults = RetrievalAnswers()
     try:
         s3 = S3Answers(
             chunk_max_tokens=int(args.s3_chunk_max_tokens or defaults.chunk_max_tokens),
@@ -286,8 +340,46 @@ def _cmd_init(args: argparse.Namespace) -> int:
             ),
             redaction_guardrails=not args.s3_no_guardrails,
         )
+        retrieval = RetrievalAnswers(
+            graph_mode=retrieval_mode.strip(),
+            selector=retrieval_selector.strip(),
+            packed_budget=int(
+                args.retrieval_packed_budget or retrieval_defaults.packed_budget
+            ),
+            coe_budget=int(args.retrieval_coe_budget or retrieval_defaults.coe_budget),
+            seed_top_k=int(args.retrieval_seed_top_k or retrieval_defaults.seed_top_k),
+            hop_weight=float(
+                args.retrieval_hop_weight
+                if args.retrieval_hop_weight is not None
+                else retrieval_defaults.hop_weight
+            ),
+            community_weight=float(
+                args.retrieval_community_weight
+                if args.retrieval_community_weight is not None
+                else retrieval_defaults.community_weight
+            ),
+            centrality_weight=float(
+                args.retrieval_centrality_weight
+                if args.retrieval_centrality_weight is not None
+                else retrieval_defaults.centrality_weight
+            ),
+            seed_docs_k=int(args.retrieval_seed_docs_k or retrieval_defaults.seed_docs_k),
+            seed_node_cap=int(
+                args.retrieval_seed_node_cap or retrieval_defaults.seed_node_cap
+            ),
+            rescue_cap=int(args.retrieval_rescue_cap or retrieval_defaults.rescue_cap),
+            pack_centrality_weight=float(
+                args.retrieval_pack_centrality_weight
+                if args.retrieval_pack_centrality_weight is not None
+                else retrieval_defaults.pack_centrality_weight
+            ),
+        )
         answers = CampaignAnswers(
-            campaign_root=root, datasets=datasets, pod_ssh=pod_ssh.strip(), s3=s3
+            campaign_root=root,
+            datasets=datasets,
+            pod_ssh=pod_ssh.strip(),
+            s3=s3,
+            retrieval=retrieval,
         )
     except (CampaignConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -313,6 +405,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
         f"  s3: induction {answers.s3.induction_mode}, "
         f"cap ${answers.s3.induction_budget_usd_cap:.2f}, "
         f"guardrails {'on' if answers.s3.redaction_guardrails else 'off'}"
+    )
+    budget = {
+        "packed": answers.retrieval.packed_budget,
+        "coe": answers.retrieval.coe_budget,
+    }.get(answers.retrieval.selector)
+    print(
+        f"  retrieval: graph {answers.retrieval.graph_mode}, "
+        f"selector {answers.retrieval.selector}"
+        + (f" @ {budget} tok" if budget is not None else "")
     )
     print("")
     print(f"Run `latence-campaign status -c {output}` to see the stage table.")

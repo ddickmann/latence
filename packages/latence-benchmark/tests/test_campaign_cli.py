@@ -88,9 +88,10 @@ class TestInit:
         )
         assert rc == 0
 
-        # The S3 headline prompts (induction mode, budget cap) answer with their defaults.
+        # The S3 headline prompts (induction mode, budget cap) and the graph-rescue headline
+        # prompts (policy gate, selector) answer with their defaults.
         answers: Iterator[str] = iter(
-            ["/camp", "musique,vidoseek", "root@pod", "per_chunk", "150"]
+            ["/camp", "musique,vidoseek", "root@pod", "per_chunk", "150", "auto", "packed"]
         )
         monkeypatch.setattr("builtins.input", lambda: next(answers))
         by_prompts = tmp_path / "prompts.yaml"
