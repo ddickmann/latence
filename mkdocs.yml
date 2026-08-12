@@ -194,6 +194,7 @@ nav:
       - guides/index.md
       - Operate a stack:
           - Run & validate a stack: running-a-stack.md
+          - Incremental ingest (churn without rebuild): guides/incremental-ingest.md
           - Tune a stack per device: tuning.md
           - Run a bake-off: running-a-bakeoff.md
           - Throughput envelopes (measured): perf-results.md
@@ -279,6 +280,7 @@ nav:
           - 0029 — Delta Runner affected-set: adr/0029-delta-runner-affected-set-via-blocking-keys-and-source-exclusion-deletion.md
           - 0041 — Guided setup + process CLI: adr/0041-guided-setup-and-process-cli-opinionated-quality-baked-config-and-one-toggle.md
           - 0043 — Incremental extraction + frozen schema: adr/0043-incremental-extraction-frozen-schema-and-doc-level-cross-run-reuse.md
+          - 0061 — Incremental ingest, order-preserving reuse union: adr/0061-incremental-ingest-exact-corpus-recompute-over-an-order-preserving-reuse-union.md
       - Empirical choices:
           - 0013 — Relation Extraction chosen empirically: adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md
           - 0046 — Enterprise GLinker entity-linking: adr/0046-enterprise-glinker-entity-linking-and-audited-resolver.md

@@ -91,6 +91,39 @@ def _doc_id(path: Path) -> str:
 # -- real end-to-end (the happy paths, exercising DeltaRunner + report printing) ---------------
 
 
+def test_cli_delta_dry_run_previews_without_running_or_committing(tmp_path: Path) -> None:
+    """``latence delta --dry-run`` classifies churn by content id and commits nothing (ADR-0061)."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    store = f"file://{tmp_path}/store"
+    (docs / "a.txt").write_text("Alice works at Acme.\n", encoding="utf-8")
+    (docs / "b.txt").write_text("Bob works at IBM.\n", encoding="utf-8")
+    pipeline = _delta_pipeline(store, docs)
+
+    # Bootstrap preview: everything is new, nothing is committed by the preview itself.
+    result = runner.invoke(app, ["delta", str(pipeline), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "bootstrap" in result.output
+    assert "new/changed (would extract):    2" in result.output
+    assert CorpusStore(Storage.for_uri(store), store).head_version() is None
+
+    # Commit v0, then churn the source: edit a (new id), delete b, add c.
+    assert runner.invoke(app, ["delta", str(pipeline), "--run-id", "d0"]).exit_code == 0
+    (docs / "a.txt").write_text("Alice joined IBM.\n", encoding="utf-8")
+    (docs / "b.txt").unlink()
+    (docs / "c.txt").write_text("Carol works at Acme.\n", encoding="utf-8")
+    result2 = runner.invoke(app, ["delta", str(pipeline), "--dry-run", "--verbose"])
+    assert result2.exit_code == 0, result2.output
+    assert "against Corpus Version v0" in result2.output
+    assert "unchanged (would reuse):        0" in result2.output
+    # The edited a (new content id) + the new c would extract; old a + b would be DELETED.
+    assert "new/changed (would extract):    2" in result2.output
+    assert "missing (would mark DELETED):   2" in result2.output
+    assert _doc_id(docs / "c.txt") in result2.output  # --verbose lists the ids
+    # The preview committed nothing and ran nothing (no new Version, no run dir).
+    assert CorpusStore(Storage.for_uri(store), store).head_version() == 0
+
+
 def test_cli_delta_adds_and_commits_a_version(tmp_path: Path) -> None:
     docs = tmp_path / "docs"
     docs.mkdir()

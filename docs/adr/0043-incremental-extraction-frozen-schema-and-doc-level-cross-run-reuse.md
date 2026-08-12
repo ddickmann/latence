@@ -19,6 +19,11 @@ schema to freeze, so the cross-run artifact on the default path is the canonical
 bump — one more additive Corpus-Version file (`type-vocabulary.json`) and three more additive
 `DeltaChurn` counters.
 
+**Amended by ADR-0061 (2026-08, ticket 03).** The context-enrichment scope boundary is closed
+(reuse now engages there, via an order-preserving overlay fold), and the overlay is merged
+document-interleaved in source order rather than appended — upgrading the equivalence property
+from "same ids/sets" to the same arrival stream. See ADR-0061.
+
 ## Context
 
 Before W17 the `DeltaRunner` re-ran the whole pipeline over the whole current source on every delta
@@ -172,14 +177,20 @@ Both risks flagged for this work are cleared, not hacked around:
 
 ## Scope boundary (deliberately deferred)
 
-Reuse falls back to full extraction (correct by construction) for a pipeline containing a
+> **Amended by ADR-0061 (ticket 03).** The `context_enrichment` fallback below is CLOSED: reuse
+> now engages for enrichment pipelines — the reuse store persists the pre-enrichment chunk
+> variant, the Runner folds the overlay into the enrichment Stage's per-carrier chunk stream
+> **document-interleaved in source order**, every chunk's header is re-derived from the CURRENT
+> graph each run, and the Export's overlay materialization is suppressed below a corpus-level
+> producer. The retract/purge survivor re-extraction below still stands.
+
+Reuse originally fell back to full extraction (correct by construction) for a pipeline containing a
 `context_enrichment` Stage: a chunk's `context_header` summarizes the MUTABLE assembled graph, so a
 reused document's enriched output can go stale when a delta changes the graph, and its enriched
-chunks would collide with the doc-level Export overlay. Rather than a fragile partial reuse that
-could corrupt the exported corpus, `DeltaRunner._reuse_supported` disables reuse for such a pipeline.
-Combining reuse with enrichment (re-enriching reused chunks over the current graph) is a clean
-follow-up. The retract/purge path also re-extracts the survivors from scratch (a split-on-delete must
-re-resolve them) — its reuse is out of scope here; it still refreshes the reuse store.
+chunks would collide with the doc-level Export overlay. That boundary was resolved by ADR-0061
+(see the amendment note above). The retract/purge path still re-extracts the survivors from
+scratch (a split-on-delete must re-resolve them) — its reuse remains out of scope; it still
+refreshes the reuse store.
 
 ## Consequences
 

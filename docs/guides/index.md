@@ -12,6 +12,10 @@ framework? Start with [Getting Started](../getting-started/index.md) and
   Assemble a full-stack Pipeline config and validate it end-to-end with
   `latence stack validate`.
 
+- :material-file-refresh: **[Incremental ingest](incremental-ingest.md)**
+  Document churn without a full rebuild: `latence delta` / `retract` / `purge`, O(changed)
+  extraction, exact corpus-level recompute — equivalence to a full rebuild proven on real data.
+
 - :material-tune: **[Tune a stack per device](../tuning.md)**
   Auto-tune batch sizes and device knobs per host with `latence tune`.
 

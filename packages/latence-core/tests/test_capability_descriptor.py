@@ -377,13 +377,16 @@ def test_the_reuse_store_keeps_the_per_document_chunk_not_the_kg_derived_one(
     """The BEHAVIOURAL consequence of unifying the delta set with the phase-boundary set (W17).
 
     ``context_enrichment`` is corpus-level — a chunk's ``context_header`` summarizes the mutable
-    assembled graph — which is exactly why ``DeltaRunner._reuse_supported`` refuses cross-run reuse
-    for such a pipeline. But the DeltaRunner's own skip tuple did not list it, so the reuse store
-    collected the ENRICHED chunk (topologically last, last-writer-wins) and persisted a
-    KG-derived artifact as if it were a per-document one — the stale-header hazard, written down.
+    assembled graph — so its output must never enter the cross-run reuse store. Before the sets
+    were unified, the DeltaRunner's own skip tuple did not list it, so the store collected the
+    ENRICHED chunk (topologically last, last-writer-wins) and persisted a KG-derived artifact as
+    if it were a per-document one — the stale-header hazard, written down.
 
-    Reading the level off the Capability descriptor makes the two agree: the store now keeps the
+    Reading the level off the Capability descriptor makes the two agree: the store keeps the
     redacted chunk (reproducible from the document's own bytes) and drops the enriched variant.
+    Since ADR-0061 this is what makes reuse SOUND for an enrichment pipeline: only the
+    pre-enrichment variant crosses the run boundary, and every header is re-derived from the
+    current graph each run.
     """
     storage_uri = tmp_path.as_uri()
     pipeline = _pipeline(

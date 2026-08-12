@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 59 records numbered 0001–0060.
+    the sequence simply skipped it), so the log holds 60 records numbered 0001–0061.
 
 ## Foundations & scope
 
@@ -85,6 +85,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0029](0029-delta-runner-affected-set-via-blocking-keys-and-source-exclusion-deletion.md) | Delta orchestration: DeltaRunner wraps the LocalRunner; affected-set via blocking keys |
 | [0041](0041-guided-setup-and-process-cli-opinionated-quality-baked-config-and-one-toggle.md) | Guided setup is a deterministic wizard emitting ONE opinionated, quality-baked config |
 | [0043](0043-incremental-extraction-frozen-schema-and-doc-level-cross-run-reuse.md) | Incremental extraction: a frozen induced schema + doc-level cross-run reuse |
+| [0061](0061-incremental-ingest-exact-corpus-recompute-over-an-order-preserving-reuse-union.md) | Incremental ingest: exact corpus-level recompute over an order-preserving reuse union (enrichment pipelines included) |
 
 ## Empirical choices
 

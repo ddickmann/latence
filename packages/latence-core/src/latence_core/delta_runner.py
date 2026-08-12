@@ -40,10 +40,11 @@ delta machinery on top of it, without forking the Runner (ADR-0018 reuses the ex
   only for an explicit ``granularity: corpus`` induction Stage, where the single shared vocabulary
   IS a genuine cross-document coupling. **``--reinduce``** now means *re-canonicalize from
   scratch*: no seed, no schema reuse, no doc-level reuse — the full O(corpus) rebuild, the rare
-  path. Reuse also falls back to full extraction for a pipeline whose stages are not purely
-  per-document reproducible (a ``context_enrichment`` Stage — its per-chunk output depends on the
-  mutable graph — see :meth:`DeltaRunner._reuse_supported`); the vocabulary is still seeded there,
-  because type stability is not a function of doc-level reuse.
+  path. Since ADR-0061 reuse also covers a ``context_enrichment`` pipeline (previously the one
+  fallback to full extraction): the reuse store persists the PRE-enrichment chunk variant, the
+  Runner folds the overlay into the enrichment Stage's per-carrier chunk stream in document
+  order, and every chunk's header is re-derived from the CURRENT graph each run — so no
+  KG-derived artifact ever crosses a run boundary and none can go stale.
 * **Retraction** (:meth:`retract`) is the default soft deletion: the deleted documents' derived
   records are tombstoned (excluded from the live set, retained on Storage for audit and
   rollback), affected clusters re-resolved, a new Version committed.
@@ -120,6 +121,21 @@ _CORPUS_LEVEL_KINDS: tuple[CapabilityKind, ...] = tuple(
 )
 
 
+@dataclass(frozen=True)
+class DeltaPreview:
+    """The churn a delta WOULD apply, classified by content-addressed id (ADR-0061 dry-run).
+
+    Produced by :meth:`DeltaRunner.preview` without running a single Stage: ``unchanged`` ids
+    would be reused (extraction skipped), ``new_or_changed`` ids would run the doc-level Stages,
+    ``missing`` ids would be classified DELETED. Ids are sorted for stable output.
+    """
+
+    parent_version: int | None
+    unchanged: list[str]
+    new_or_changed: list[str]
+    missing: list[str]
+
+
 class DeltaRunner:
     """Drives incremental deltas, retraction, and purge as Corpus Version transactions."""
 
@@ -143,6 +159,38 @@ class DeltaRunner:
         self._delta_provider = delta_provider
 
     # -- public API ---------------------------------------------------------
+
+    def preview(self, pipeline: Pipeline) -> DeltaPreview:
+        """What :meth:`apply_delta` WOULD do to this corpus — no Stage runs, no commit (ADR-0061).
+
+        The churn dry-run behind ``latence delta --dry-run``: reads the committed head Version's
+        manifest, enumerates the current source with the SAME cheap, content-fetch-free pass the
+        delta's reuse decision uses (:meth:`_current_document_ids`), and classifies by
+        content-addressed id:
+
+        * ``unchanged`` — present at the source AND committed (would be reused, not re-extracted);
+        * ``new_or_changed`` — present at the source, not committed (would run the doc-level
+          Stages; an in-place edit mints a new content id, so it lands here);
+        * ``missing`` — committed but not found at the source (would be classified DELETED).
+
+        Honest limits, inherited from the enumeration: a Source that can only *partially* name
+        its documents without fetching them under-reports ``unchanged`` and over-reports
+        ``missing`` (the delta itself uses the full union manifest, so its committed counts are
+        exact) — the preview is a planning signal, never the commit. Durably deleted ids (prior
+        retract/purge) are excluded exactly as the delta excludes them.
+        """
+        store = CorpusStore(Storage.for_uri(pipeline.storage_uri), pipeline.storage_uri)
+        parent_version = store.head_version()
+        prior_deletions = self._prior_deletions(store, parent_version)
+        previous_manifest = self._manifest_of(parent_version, store)
+        current_ids = self._current_document_ids(pipeline, sorted(prior_deletions))
+        committed = set(previous_manifest)
+        return DeltaPreview(
+            parent_version=parent_version,
+            unchanged=sorted(current_ids & committed),
+            new_or_changed=sorted(current_ids - committed),
+            missing=sorted(committed - current_ids),
+        )
 
     def apply_delta(
         self,
@@ -185,22 +233,21 @@ class DeltaRunner:
         # of NEW documents are unaffected — only the previously-deleted ids are excluded.)
         prior_deletions = self._prior_deletions(store, parent_version)
         parent_records = store.head_records()
-        previous_manifest = self._manifest_of(parent_records, parent_version, store)
+        previous_manifest = self._manifest_of(parent_version, store)
 
-        # W17: decide cross-run reuse. Reuse engages only from a committed parent, when not
-        # reinducing, and for a pipeline whose doc-level Stages are purely per-document reproducible
-        # (:meth:`_reuse_supported`). The frozen schema + the prior Version's doc-level store are
+        # W17/ADR-0061: decide cross-run reuse. Reuse engages from a committed parent whenever not
+        # reinducing — for EVERY pipeline, context-enrichment ones included (the Runner's
+        # document-ordered overlay fold makes the union reach every corpus-level Stage exactly as
+        # a rebuild would deliver it). The frozen schema + the prior Version's doc-level store are
         # read once; the reusable documents are those whose current content-addressed id matches a
         # committed one (content-addressing ⇒ an id match is byte-identical ⇒ unchanged).
-        reuse_on = (
-            parent_version is not None and not reinduce and self._reuse_supported(pipeline)
-        )
+        reuse_on = parent_version is not None and not reinduce
         frozen_schema = store.head_schema() if reuse_on else None
         # T4: the canonical TYPE vocabulary the committed corpus already uses. It is read
         # independently of ``reuse_on`` — vocabulary stability is not a function of doc-level
-        # reuse: a pipeline that cannot reuse documents (context enrichment) must STILL not rename
-        # the canonical types its committed KG is built from. Only ``--reinduce`` drops it, which
-        # is precisely what "re-canonicalize from scratch" means.
+        # reuse: even a run that reuses nothing (a bootstrap re-run, an all-changed delta) must
+        # not rename the canonical types its committed KG is built from. Only ``--reinduce``
+        # drops it, which is precisely what "re-canonicalize from scratch" means.
         seed_vocabulary = (
             store.head_type_vocabulary() if parent_version is not None and not reinduce else None
         )
@@ -313,7 +360,7 @@ class DeltaRunner:
             raise ValueError(msg)
         parent_records = store.head_records()
         parent_version_obj = store.read_version(parent_version)
-        previous_manifest = self._manifest_of(parent_records, parent_version, store)
+        previous_manifest = self._manifest_of(parent_version, store)
 
         deleted = sorted(set(document_ids) & set(previous_manifest))
         # The current manifest is the parent minus the deleted documents (a deletion changes no
@@ -661,23 +708,6 @@ class DeltaRunner:
 
     # -- W17 incremental extraction (frozen schema + doc-level reuse) --------
 
-    @staticmethod
-    def _reuse_supported(pipeline: Pipeline) -> bool:
-        """True if this pipeline's doc-level Stages are purely per-document reproducible (W17).
-
-        Cross-run doc-level reuse is sound when a document's reused records are byte-identical to
-        re-extracting it — which holds for the per-document Stages (parse/chunk/extract/redact)
-        under a frozen schema. A :class:`CapabilityKind.CONTEXT_ENRICHMENT` Stage is NOT
-        per-document — a chunk's ``context_header`` summarizes the mutable assembled graph — so a
-        reused document's enriched output could go stale across a delta. Rather than hazard a
-        fragile partial reuse (which could corrupt the exported corpus), reuse is disabled for such
-        a pipeline and it falls back to full extraction (correct by construction). Every other
-        reference pipeline (the KG spine, the RAG chunk/redact/export spine) is supported.
-        """
-        return not any(
-            stage.capability is CapabilityKind.CONTEXT_ENRICHMENT for stage in pipeline.stages
-        )
-
     def _current_document_ids(self, pipeline: Pipeline, excluded: list[str]) -> set[str]:
         """The content-addressed ids of the current live source documents (minus ``excluded``).
 
@@ -929,36 +959,46 @@ class DeltaRunner:
         return manifest
 
     def _manifest_of(
-        self, parent_records: list[Record], parent_version: int | None, store: CorpusStore
+        self, parent_version: int | None, store: CorpusStore
     ) -> dict[str, ManifestEntry]:
         """Reconstruct the parent Version's manifest (its committed doc-hash map), or empty.
 
         The manifest is persisted with the Corpus Version's delta (its entries carry the content
         hash), so the parent manifest is read straight off the committed :class:`Delta` rather
         than re-hashed — exact and cheap. On bootstrap (no parent) the manifest is empty.
+
+        A bootstrap Version's own entries list every document it committed; a subsequent delta
+        lists only that delta's view, so the walk reads the chain newest-first and a nearer
+        Version's entry always wins (``setdefault``). **A DELETED entry is a tombstone, not a
+        skip** (ticket-03): editing a file retires its old content-addressed id as DELETED, and
+        when that tombstone was merely skipped the ancestor chain resurrected the retired id into
+        the reconstructed manifest — every later delta then re-classified it DELETED
+        (``documents_deleted`` over-counted forever after an edit). A tombstone therefore shadows
+        the id for all OLDER Versions; a NEWER re-add (edit-then-revert mints the same
+        content-addressed id again) is seen first in the walk and wins over the older tombstone,
+        so reverted content still counts as live.
         """
-        if parent_version is None:
-            return {}
-        version = store.read_version(parent_version)
         manifest: dict[str, ManifestEntry] = {}
-        for entry in version.delta.entries:
-            if entry.kind is DeltaKind.DELETED or entry.content_hash is None:
-                continue
-            manifest[entry.document_id] = ManifestEntry(
-                document_id=entry.document_id,
-                content_hash=entry.content_hash,
-                file_name=entry.file_name,
-            )
-        # A bootstrap parent Version's own manifest lists every document it committed; but a
-        # subsequent delta only lists that delta's changed docs, so carry forward the parent's
-        # unchanged docs by re-hashing from the parent records is not possible (records are
-        # corpus-level). The delta entries above are authoritative for the docs this parent saw;
-        # its own parent chain fills the rest — read transitively.
-        if version.parent_version is not None:
-            for doc_id, ancestor_entry in self._manifest_of(
-                parent_records, version.parent_version, store
-            ).items():
-                manifest.setdefault(doc_id, ancestor_entry)
+        tombstoned: set[str] = set()
+        current = parent_version
+        while current is not None:
+            version = store.read_version(current)
+            for entry in version.delta.entries:
+                if entry.kind is DeltaKind.DELETED:
+                    if entry.document_id not in manifest:
+                        tombstoned.add(entry.document_id)
+                    continue
+                if entry.content_hash is None or entry.document_id in tombstoned:
+                    continue
+                manifest.setdefault(
+                    entry.document_id,
+                    ManifestEntry(
+                        document_id=entry.document_id,
+                        content_hash=entry.content_hash,
+                        file_name=entry.file_name,
+                    ),
+                )
+            current = version.parent_version
         return manifest
 
     @staticmethod

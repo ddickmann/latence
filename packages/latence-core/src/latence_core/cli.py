@@ -25,7 +25,9 @@
   (auditable, rollback-able); ``purge`` is the hard GDPR erasure (guarded by ``--yes``). Since W17
   (ADR-0043) ``delta`` extraction is INCREMENTAL: the induced schema is frozen and each unchanged
   document's records are reused, so only new/changed documents are extracted (``--reinduce`` is the
-  O(corpus) escape hatch). The *committed* corpus stays affected-set-scoped (issue #42, ADR-0018).
+  O(corpus) escape hatch; ``--dry-run`` previews the churn — unchanged/new/missing by
+  content-addressed id — without running a Stage, ADR-0061). The *committed* corpus stays
+  affected-set-scoped (issue #42, ADR-0018).
 """
 
 from __future__ import annotations
@@ -1325,6 +1327,17 @@ def delta(
             ),
         ),
     ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Preview only: classify the current source against the committed head Version "
+                "(unchanged / new-or-changed / missing) by content-addressed id and exit. "
+                "Runs NO Stage, loads NO model, commits NOTHING (ADR-0061)."
+            ),
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
 ) -> None:
     """Add/update the corpus from the current source and commit the next Corpus Version.
@@ -1334,16 +1347,39 @@ def delta(
     affected-set recompute. Since W17 (ADR-0043) the extraction is INCREMENTAL: each UNCHANGED
     document's doc-level records are reused, so only NEW/CHANGED documents run
     parse/chunk/extract/redact (and only their chunks are induced) — the compute is O(changed
-    documents), not O(corpus). Consistency with the base run comes from the corpus's canonical
-    TYPE vocabulary, which the delta EXTENDS rather than recomputes (T4/ADR-0054): a new type
-    aliases into an existing canonical entry or appends a new one, and existing canonical types
-    never churn. ``--reinduce`` is the full rebuild — re-induce and re-canonicalize from scratch.
+    documents), not O(corpus); since ADR-0061 this includes context-enrichment pipelines, whose
+    chunk headers are re-derived from the current graph every run. Consistency with the base run
+    comes from the corpus's canonical TYPE vocabulary, which the delta EXTENDS rather than
+    recomputes (T4/ADR-0054): a new type aliases into an existing canonical entry or appends a
+    new one, and existing canonical types never churn. ``--reinduce`` is the full rebuild —
+    re-induce and re-canonicalize from scratch. ``--dry-run`` previews the churn without running.
     """
     _configure_logging(verbose)
     pipeline = _load_pipeline(pipeline_path)
-    rid = run_id or _default_run_id("delta")
     from latence_core.delta_runner import DeltaRunner
 
+    if dry_run:
+        try:
+            preview = DeltaRunner().preview(pipeline)
+        except (LatenceError, ValueError) as exc:
+            typer.echo(f"delta --dry-run failed [{error_category(exc)}]: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        base = "empty corpus (bootstrap)" if preview.parent_version is None else (
+            f"Corpus Version v{preview.parent_version}"
+        )
+        typer.echo(f"delta preview against {base}:")
+        typer.echo(f"  unchanged (would reuse):        {len(preview.unchanged)}")
+        typer.echo(f"  new/changed (would extract):    {len(preview.new_or_changed)}")
+        typer.echo(f"  missing (would mark DELETED):   {len(preview.missing)}")
+        if verbose:
+            for label, ids in (
+                ("new/changed", preview.new_or_changed),
+                ("missing", preview.missing),
+            ):
+                for doc_id in ids:
+                    typer.echo(f"  {label}: {doc_id}")
+        return
+    rid = run_id or _default_run_id("delta")
     try:
         report = DeltaRunner().apply_delta(pipeline, rid, reinduce=reinduce)
     except (LatenceError, ValueError) as exc:
