@@ -52,11 +52,35 @@ selection; `hyper_rescue` = the rescue entry (alias + tier-0 `ann_node_ids` from
 plus top-BM25-document entities, seeds precomputed outside the timed region and shared
 byte-identically by every path).
 
-TABLE_PLACEHOLDER
+| dataset | lane | before median | before p95 | after median | after p95 | median speedup | p95 speedup |
+|---|---|---|---|---|---|---|---|
+| multihop_rag | kg | 1.5 ms | 23.2 ms | 0.78 ms | 1.66 ms | **2x** | 14x |
+| multihop_rag | hyper_ladder | 43.1 ms | 103.8 ms | 7.90 ms | 14.33 ms | **5x** | 7x |
+| multihop_rag | hyper_rescue | 85.3 ms | 120.5 ms | 6.50 ms | 14.19 ms | **13x** | 8x |
+| vidoseek | kg | 0.2 ms | 0.4 ms | 0.19 ms | 0.45 ms | 1x | 1x |
+| vidoseek | hyper_ladder | 5.8 ms | 13.8 ms | 3.55 ms | 9.19 ms | **2x** | 1x |
+| vidoseek | hyper_rescue | 10.6 ms | 17.8 ms | 3.89 ms | 9.03 ms | **3x** | 2x |
+| ohr_bench | kg | 0.3 ms | 5.3 ms | 0.34 ms | 1.21 ms | 1x | 4x |
+| ohr_bench | hyper_ladder | 20.9 ms | 90.0 ms | 5.65 ms | 12.39 ms | **4x** | 7x |
+| ohr_bench | hyper_rescue | 50.1 ms | 140.3 ms | 6.23 ms | 11.41 ms | **8x** | 12x |
+| wiki2multihop | kg | 7.9 ms | 116.4 ms | 0.81 ms | 3.24 ms | **10x** | 36x |
+| wiki2multihop | hyper_ladder | 489.8 ms | 826.4 ms | 14.90 ms | 22.03 ms | **33x** | 38x |
+| wiki2multihop | hyper_rescue | 959.5 ms | 1095.8 ms | 19.48 ms | 24.54 ms | **49x** | 45x |
+| uda | kg | 435.3 ms | 1777.9 ms | 3.92 ms | 30.11 ms | **111x** | 59x |
+| uda | hyper_ladder | 3570.5 ms | 4476.1 ms | 37.13 ms | 43.78 ms | **96x** | 102x |
+| uda | hyper_rescue | 3732.9 ms | 4576.4 ms | 33.03 ms | 39.68 ms | **113x** | 115x |
 
-The one-time index build runs at first open per process (transparent-at-load per the ticket) and
-is excluded from per-query numbers; it is reported per dataset above and amortises over any real
-run (the S5 sweep pays it once per worker per dataset).
+**"Orders of magnitude" is claimed exactly where the numbers show it**: at uda scale — the
+677,257-hyperedge regime the ticket was opened for — every graph lane is **~100× (96–113×
+median, 59–115× p95)**. The speedup grows with corpus size because the AFTER cost is nearly
+flat in scale (hyper ladder: 7.9 ms at 138k → 37.1 ms at 677k hyperedges, vs 490 ms → 3,570 ms
+before); the small corpora were never seconds-per-query and honestly gain 2–13×.
+
+One-time index build, at first open per process (transparent-at-load per the ticket), excluded
+from per-query numbers and amortised over any real run: multihop_rag 0.2 s, vidoseek 0.2 s,
+ohr_bench 0.9 s, wiki2multihop 2.8 s, uda 10.5 s (quiet machine). Resident index footprint
+(measured): wiki2multihop +347 MB (137,986 hyperedges / 271,261 nodes / 542,077 postings),
+uda +771 MB (677,257 / 516,509 / 1,955,311) — inside the sweep's 29 GB / 4-worker budget.
 
 ## Parity proof (the gate)
 
@@ -107,5 +131,6 @@ call-count pin, filter-before-truncation, pure-expansion, and the `hop_decay=1.0
 - The shipped `NetworkxGraphSource`/DuckDB graph sources still re-read `graph-edges.parquet`
   per call (the S5 harness bypasses them with a run-lifetime source). Out of this profile's
   scope; a candidate for the architecture pass / ticket 04 documentation.
-- Index memory: the decoded uda index is held per process; the S5 sweep budget (29 GB /
-  4 workers) absorbs it — measured resident growth noted in the profile logs.
+- Index memory: the decoded index is held per process for the file's lifetime (+347 MB wiki,
+  +771 MB uda — see the table section); the S5 sweep budget (29 GB / 4 workers) absorbs it,
+  and `cache=False` remains the zero-footprint escape for memory-constrained embedders.

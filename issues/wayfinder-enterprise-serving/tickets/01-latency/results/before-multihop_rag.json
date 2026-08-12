@@ -1,0 +1,25 @@
+{
+  "label": "before",
+  "dataset": "multihop_rag",
+  "queries": 50,
+  "load_seconds": 0.47,
+  "index_build_seconds": 0.0,
+  "kg": {
+    "median_ms": 1.48,
+    "mean_ms": 3.13,
+    "p95_ms": 23.21,
+    "max_ms": 24.38
+  },
+  "hyper_ladder": {
+    "median_ms": 43.06,
+    "mean_ms": 47.24,
+    "p95_ms": 103.85,
+    "max_ms": 117.62
+  },
+  "hyper_rescue": {
+    "median_ms": 85.28,
+    "mean_ms": 88.07,
+    "p95_ms": 120.46,
+    "max_ms": 138.32
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "label": "before",
+  "dataset": "vidoseek",
+  "queries": 50,
+  "load_seconds": 0.27,
+  "index_build_seconds": 0.0,
+  "kg": {
+    "median_ms": 0.17,
+    "mean_ms": 0.2,
+    "p95_ms": 0.39,
+    "max_ms": 0.76
+  },
+  "hyper_ladder": {
+    "median_ms": 5.84,
+    "mean_ms": 7.2,
+    "p95_ms": 13.78,
+    "max_ms": 52.25
+  },
+  "hyper_rescue": {
+    "median_ms": 10.64,
+    "mean_ms": 10.82,
+    "p95_ms": 17.79,
+    "max_ms": 19.32
+  }
+}

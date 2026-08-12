@@ -1,0 +1,25 @@
+{
+  "label": "after",
+  "dataset": "ohr_bench",
+  "queries": 50,
+  "load_seconds": 1.44,
+  "index_build_seconds": 0.86,
+  "kg": {
+    "median_ms": 0.34,
+    "mean_ms": 0.56,
+    "p95_ms": 1.21,
+    "max_ms": 4.36
+  },
+  "hyper_ladder": {
+    "median_ms": 5.65,
+    "mean_ms": 6.5,
+    "p95_ms": 12.39,
+    "max_ms": 15.22
+  },
+  "hyper_rescue": {
+    "median_ms": 6.23,
+    "mean_ms": 6.69,
+    "p95_ms": 11.41,
+    "max_ms": 16.24
+  }
+}

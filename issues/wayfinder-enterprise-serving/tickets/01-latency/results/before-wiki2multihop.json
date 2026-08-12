@@ -1,0 +1,25 @@
+{
+  "label": "before",
+  "dataset": "wiki2multihop",
+  "queries": 50,
+  "load_seconds": 3.05,
+  "index_build_seconds": 0.0,
+  "kg": {
+    "median_ms": 7.86,
+    "mean_ms": 18.55,
+    "p95_ms": 116.38,
+    "max_ms": 174.11
+  },
+  "hyper_ladder": {
+    "median_ms": 489.79,
+    "mean_ms": 437.04,
+    "p95_ms": 826.35,
+    "max_ms": 1021.39
+  },
+  "hyper_rescue": {
+    "median_ms": 959.55,
+    "mean_ms": 934.96,
+    "p95_ms": 1095.76,
+    "max_ms": 1195.11
+  }
+}
