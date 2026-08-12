@@ -602,3 +602,131 @@ def test_real_duckdb_document_source_maps_a_fault_to_a_typed_error(tmp_path: Any
         source.documents(["n_query"])
     # No raw engine text: no path, no driver stack.
     assert "does-not-exist" not in str(excinfo.value)
+
+
+# --- ticket 01 (wayfinder-enterprise-serving): tiered resolution, byte-identical + early stop ---
+#
+# A wider fixture than the recovery chain: a seed fanning out to two hop-1 entities and two hop-2
+# entities, with several documents per tier (some spanning tiers, some carrying nodes the
+# traversal never reached). The ORACLE below ranks it the pre-ticket way — resolve the whole
+# neighbourhood, score every document by its closest reached hop, sort by (-score, id), truncate —
+# so every tiered assertion is checked against an independent reimplementation, not against the
+# retriever's own internals.
+
+_TIER_EDGES = [
+    ("seed", "mid_a"),
+    ("seed", "mid_b"),
+    ("mid_a", "far_a"),
+    ("mid_b", "far_b"),
+]
+
+_TIER_DOCS = [
+    GraphDocument(id="doc_seed_1", node_ids=("seed",), text="s1"),
+    GraphDocument(id="doc_seed_2", node_ids=("seed", "far_a"), text="s2"),  # min hop is 0
+    GraphDocument(id="doc_mid_1", node_ids=("mid_a",), text="m1", metadata={"lang": "de"}),
+    GraphDocument(id="doc_mid_2", node_ids=("mid_b", "far_b"), text="m2"),  # min hop is 1
+    GraphDocument(id="doc_far_1", node_ids=("far_a",), text="f1"),
+    GraphDocument(id="doc_far_2", node_ids=("far_b",), text="f2", metadata={"lang": "de"}),
+    GraphDocument(id="doc_unreached", node_ids=("elsewhere",), text="x"),
+]
+
+
+class _CountingDocumentSource:
+    """The faithful fake plus a call log — which node sets were actually resolved."""
+
+    def __init__(self, documents: list[GraphDocument]) -> None:
+        self._inner = FakeGraphDocumentSource(documents)
+        self.calls: list[tuple[str, ...]] = []
+
+    def documents(self, node_ids: Any) -> list[GraphDocument]:
+        self.calls.append(tuple(sorted(node_ids)))
+        return self._inner.documents(node_ids)
+
+
+def _tier_leg(source: Any, **config: Any) -> GraphRetriever:
+    return GraphRetriever(
+        {"max_hops": 2, **config},
+        graph_source=FakeGraphSource(_TIER_EDGES),
+        document_source=source,
+    )
+
+
+def _oracle(
+    top_k: int,
+    *,
+    hop_decay: float = 0.5,
+    seed_score: float = 1.0,
+    include_seeds: bool = True,
+    predicate: dict[str, Any] | None = None,
+) -> list[tuple[str, float]]:
+    """The pre-ticket ranking, reimplemented from the documented contract."""
+    reachable = {"seed": 0, "mid_a": 1, "mid_b": 1, "far_a": 2, "far_b": 2}
+    if not include_seeds:
+        reachable = {n: h for n, h in reachable.items() if h > 0}
+    hits: list[tuple[str, float]] = []
+    for doc in _TIER_DOCS:
+        hops = [reachable[n] for n in doc.node_ids if n in reachable]
+        if not hops or (not include_seeds and min(hops) == 0):
+            continue
+        if predicate and any(doc.metadata.get(k) != v for k, v in predicate.items()):
+            continue
+        hits.append((doc.id, seed_score * hop_decay ** min(hops)))
+    hits.sort(key=lambda pair: (-pair[1], pair[0]))
+    return hits[:top_k]
+
+
+def _search(leg: GraphRetriever, top_k: int, predicate: dict[str, Any] | None = None) -> Any:
+    return leg.search(
+        RetrievalQuery(
+            mode=Capability.GRAPH,
+            seed_node_ids=("seed",),
+            top_k=top_k,
+            filter=predicate or {},
+        )
+    )
+
+
+@pytest.mark.parametrize("top_k", [1, 2, 3, 6, 50])
+def test_tiered_search_is_byte_identical_to_the_exhaustive_ranking(top_k: int) -> None:
+    """Ids AND scores match the oracle at every truncation depth — the parity claim."""
+    hits = _search(_tier_leg(_CountingDocumentSource(_TIER_DOCS)), top_k)
+    assert [(c.id, c.score) for c in hits] == _oracle(top_k)
+
+
+def test_tiered_search_stops_resolving_once_top_k_is_ranked() -> None:
+    """The latency claim: with top_k filled at hop 0, deeper tiers are never resolved."""
+    source = _CountingDocumentSource(_TIER_DOCS)
+    hits = _search(_tier_leg(source), 2)
+    assert [(c.id, c.score) for c in hits] == _oracle(2)
+    assert source.calls == [("seed",)], (
+        "hop-1/hop-2 node sets must not be resolved when the hop-0 tier already fills top_k"
+    )
+
+
+def test_tiered_search_filters_before_truncation() -> None:
+    """A predicate excluding the near tiers must surface deeper hits, never an empty list."""
+    hits = _search(_tier_leg(_CountingDocumentSource(_TIER_DOCS)), 1, {"lang": "de"})
+    assert [(c.id, c.score) for c in hits] == _oracle(1, predicate={"lang": "de"})
+    assert hits[0].id == "doc_mid_1"
+
+
+def test_tiered_search_honours_pure_expansion() -> None:
+    hits = _tier_leg(
+        _CountingDocumentSource(_TIER_DOCS), include_seed_documents=False
+    ).search(RetrievalQuery(mode=Capability.GRAPH, seed_node_ids=("seed",), top_k=10))
+    assert [(c.id, c.score) for c in hits] == _oracle(10, include_seeds=False)
+    # doc_seed_1 mentions ONLY the seed → gone; doc_seed_2 also carries a hop-2 entity, so as
+    # pure expansion it is a legitimate hop-2 hit — exactly the pre-ticket semantics.
+    ids = [c.id for c in hits]
+    assert "doc_seed_1" not in ids
+    assert "doc_seed_2" in ids
+
+
+def test_unit_hop_decay_keeps_the_exhaustive_path_and_its_id_order() -> None:
+    """``hop_decay=1.0`` ties every tier — ranked purely by id, exactly as before the ticket."""
+    source = _CountingDocumentSource(_TIER_DOCS)
+    hits = _tier_leg(source, hop_decay=1.0).search(
+        RetrievalQuery(mode=Capability.GRAPH, seed_node_ids=("seed",), top_k=3)
+    )
+    assert [(c.id, c.score) for c in hits] == _oracle(3, hop_decay=1.0)
+    assert len(source.calls) == 1, "the degenerate config must resolve in one exhaustive call"

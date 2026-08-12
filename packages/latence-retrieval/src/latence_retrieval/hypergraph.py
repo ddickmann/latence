@@ -4,10 +4,10 @@
 
 The query-time half of chain-of-evidence retrieval, over the sidecar KV the pipeline
 emitted (``graph-hyperedges.kv``, ADR-0056). Everything here is stateless in the ADR-0048
-sense — the store is opened per call, read, and closed; nothing is held between queries —
-and **zero-dep**: the paper-faithful pipeline order makes pure-Python propagation viable,
-because the expensive step (propagation) runs only AFTER the candidate universe is pruned
-to a small query-aware hypergraph.
+sense — identical inputs always yield identical outputs and nothing here is a system of
+record — and **zero-dep**: the paper-faithful pipeline order makes pure-Python propagation
+viable, because the expensive step (propagation) runs only AFTER the candidate universe is
+pruned to a small query-aware hypergraph.
 
 The order is load-bearing and measured (wayfinder ticket 20, verified head-to-head against
 HyCE-RAG §3.3, arXiv 2607.22597): propagating over the raw expansion drowns bridging
@@ -31,6 +31,22 @@ imports a model.
 ``s_rel`` half of the prune; absent, the prune degrades to entry-overlap only (β=1) —
 documented, not silent.
 
+**Latency at scale (wayfinder-enterprise-serving ticket 01, measured).** The original
+per-call read path re-ran a pure-Python binary search + JSON decode for every postings row
+and every solver row a query's expansion touched — at 677k hyperedges that is ~4.7M key
+comparisons and ~230k JSON decodes *per query* (seconds). ADR-0056's "resident buys
+0.56 ms" ruling was measured over an LMDB C-speed KV at |E_c| ≤ 2000; the shipped zero-dep
+reader at real expansion widths is a different regime, so :class:`HypergraphIndex` now
+precomputes, once per store FILE per process, exactly the two structures the expansion
+scans: the entity→hyperedge postings (int-indexed CSR) and the hyperedge→entity incidence
+(+ γ and its global rank). :meth:`HyperedgeKV.open` attaches the shared index
+transparently (keyed by file identity — device/inode/size/mtime — so a rewritten store is
+re-indexed, never served stale); ``open(path, cache=False)`` keeps the original
+scan-per-call path. Both paths produce **byte-identical** signals — pinned by tests and by
+the ticket-01 parity run over full real query sets. When ``numpy`` is importable the index
+uses vectorised kernels for the same arithmetic; the pure-Python kernels remain the
+zero-dep fallback and produce identical results.
+
 The KV reader here is a second, independent implementation of the ADR-0056 store FORMAT
 (the format is the contract, not the library): ``latence-retrieval`` depends on pydantic
 alone and cannot import ``latence-core``. Cross-implementation interop is pinned by a test
@@ -39,19 +55,38 @@ in latence-core (writer there, reader here, byte round-trip).
 
 from __future__ import annotations
 
+import heapq
 import json
 import mmap
+import os
 import struct
 import unicodedata
+from array import array
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+def _import_numpy() -> Any:
+    """The OPTIONAL accelerator: identical results, vectorised kernels (module docstring)."""
+    try:
+        import numpy
+    except ImportError:  # pragma: no cover - exercised in the zero-dep environment
+        return None
+    return numpy
+
+
+_np: Any = _import_numpy()
 
 __all__ = [
     "HyperedgeKV",
     "HypergraphConfig",
+    "HypergraphIndex",
     "HypergraphSignals",
     "Propagator",
     "RWRPropagator",
+    "clear_index_cache",
     "hypergraph_signals",
 ]
 
@@ -71,11 +106,18 @@ class HyperedgeKV:
 
         with HyperedgeKV.open(path) as kv:
             ids, gammas = kv.postings(node_id)
+
+    :meth:`open` additionally attaches the process-shared :class:`HypergraphIndex` for the
+    file (built on first open, reused while the file is unchanged) so
+    :func:`hypergraph_signals` runs its indexed fast path — same results, orders of
+    magnitude cheaper at scale. ``open(path, cache=False)`` and :meth:`from_bytes` readers
+    carry no index and serve every read from the store bytes.
     """
 
     def __init__(self, buf: mmap.mmap | memoryview, *, _close: Any = None) -> None:
         self._buf = buf
         self._close = _close
+        self._index: HypergraphIndex | None = None
         if bytes(buf[: len(_MAGIC)]) != _MAGIC:
             msg = "not a hyperedge store file (bad magic)."
             raise ValueError(msg)
@@ -89,11 +131,20 @@ class HyperedgeKV:
         self._values_base = self._keys_base + keys_len
 
     @classmethod
-    def open(cls, path: str) -> HyperedgeKV:
-        """Open the store file for one call's reads (mmap; closed with the reader)."""
+    def open(cls, path: str, *, cache: bool = True) -> HyperedgeKV:
+        """Open the store file for one call's reads (mmap; closed with the reader).
+
+        ``cache=True`` (the default) attaches the process-shared :class:`HypergraphIndex`
+        for this file — built on the first open, invalidated automatically when the file
+        changes (the cache key is device/inode/size/mtime). The index is a derived,
+        rebuildable read optimisation: results are byte-identical with and without it.
+        """
         fh = open(path, "rb")  # noqa: SIM115 - lifetime is the reader's, closed in close()
         buf = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
-        return cls(buf, _close=(buf, fh))
+        reader = cls(buf, _close=(buf, fh))
+        if cache:
+            reader._index = _shared_index(path, reader)
+        return reader
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> HyperedgeKV:
@@ -114,6 +165,11 @@ class HyperedgeKV:
             fh.close()
             self._close = None
 
+    @property
+    def index(self) -> HypergraphIndex | None:
+        """The attached process-shared index, or ``None`` for uncached readers."""
+        return self._index
+
     def _key_at(self, i: int) -> bytes:
         (start,) = _U64.unpack_from(self._buf, self._key_off_base + 8 * i)
         (end,) = _U64.unpack_from(self._buf, self._key_off_base + 8 * (i + 1))
@@ -123,6 +179,27 @@ class HyperedgeKV:
         (start,) = _U64.unpack_from(self._buf, self._val_off_base + 8 * i)
         (end,) = _U64.unpack_from(self._buf, self._val_off_base + 8 * (i + 1))
         return bytes(self._buf[self._values_base + start : self._values_base + end])
+
+    def _lower_bound(self, key: bytes) -> int:
+        """The first row whose key is ``>= key`` (``self._n`` when none is)."""
+        lo, hi = 0, self._n
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._key_at(mid) < key:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def _prefix_items(self, prefix: bytes) -> Iterator[tuple[bytes, bytes]]:
+        """``(key-suffix, value)`` for every row under ``prefix``, in stored (sorted) order.
+
+        The index builder's scan: keys are stored lexicographically, so one prefix is one
+        contiguous row range and the scan is a single forward pass — never per-key search.
+        """
+        stop_key = prefix[:-1] + bytes([prefix[-1] + 1])
+        for row in range(self._lower_bound(prefix), self._lower_bound(stop_key)):
+            yield self._key_at(row)[len(prefix) :], self._value_at(row)
 
     def get(self, key: bytes) -> bytes | None:
         """Point lookup: the value for ``key``, or None."""
@@ -160,6 +237,284 @@ class HyperedgeKV:
         """Tier-1 zero-model entry: node_ids whose canonical surface matches (ADR-0059)."""
         raw = self.get(b"a|" + _normalize_alias(surface).encode())
         return [] if raw is None else list(json.loads(raw))
+
+
+# -- the precomputed index (ticket 01: entity→hyperedge + hyperedge→entity, built once) ---------
+
+
+class HypergraphIndex:
+    """The decoded read-index over one store: postings + incidence as int-indexed CSR arrays.
+
+    Built once per store FILE per process (:func:`_shared_index`) and shared by every
+    reader over that file, this holds exactly what :func:`hypergraph_signals`'s expansion
+    and prune scan per query — the entity→hyperedge postings (stored γ-desc order
+    preserved), the hyperedge→entity incidence (stored JSON order preserved), each
+    hyperedge's γ, and γ's global rank under the ``(-γ, hyperedge_id)`` truncation order.
+    Node and hyperedge ids are mapped to dense ints; because the store's keys are sorted
+    byte-wise and UTF-8 byte order equals code-point order, **int order equals id string
+    order**, which is what makes every tie-break below reproduce the string-keyed original
+    exactly.
+
+    A posted hyperedge id with no solver row is dropped at build — byte-identical to the
+    per-call path, which skips exactly those ids during expansion. The index carries no
+    buffer and no file handle: solver fields for the (small) retained set are read through
+    the caller's open reader, so the store file's lifetime stays the caller's.
+
+    ``accelerated=None`` (default) uses ``numpy`` kernels when importable and the
+    pure-Python kernels otherwise; both are pinned byte-identical by tests. The index is
+    immutable after build.
+    """
+
+    def __init__(self, store: HyperedgeKV, *, accelerated: bool | None = None) -> None:
+        hids: list[str] = []
+        gammas = array("d")
+        ent_off = array("q", [0])
+        ent_lists: list[list[str]] = []
+        for suffix, raw in store._prefix_items(b"e|"):
+            fields = json.loads(raw)
+            hids.append(suffix.decode())
+            gammas.append(float(fields["gamma"]))
+            ent_lists.append([str(v) for v in fields["entity_node_ids"]])
+        hid_pos = {hid: row for row, hid in enumerate(hids)}
+
+        posted: list[tuple[str, list[str]]] = []
+        node_set: set[str] = set()
+        for suffix, raw in store._prefix_items(b"p|"):
+            node = suffix.decode()
+            ids, _gammas = json.loads(raw)
+            posted.append((node, [str(h) for h in ids]))
+            node_set.add(node)
+        for nodes in ent_lists:
+            node_set.update(nodes)
+        nids = sorted(node_set)
+        nid_pos = {nid: row for row, nid in enumerate(nids)}
+
+        ent_flat = array("i")
+        for nodes in ent_lists:
+            ent_flat.extend(nid_pos[v] for v in nodes)
+            ent_off.append(len(ent_flat))
+
+        rows_of: dict[int, list[int]] = {
+            nid_pos[node]: [hid_pos[h] for h in ids if h in hid_pos] for node, ids in posted
+        }
+        post_flat = array("i")
+        post_off = array("q", [0])
+        for row in range(len(nids)):
+            post_flat.extend(rows_of.get(row, ()))
+            post_off.append(len(post_flat))
+
+        order = sorted(range(len(hids)), key=lambda row: (-gammas[row], row))
+        gamma_rank = array("q", bytes(8 * len(hids)))
+        for rank, row in enumerate(order):
+            gamma_rank[row] = rank
+
+        self._hids = hids
+        self._nids = nids
+        self._nid_pos = nid_pos
+        self._gammas = gammas
+        self._gamma_rank = gamma_rank
+        self._ent_flat = ent_flat
+        self._ent_off = ent_off
+        self._post_flat = post_flat
+        self._post_off = post_off
+
+        if accelerated is None:
+            accelerated = _np is not None
+        if accelerated and _np is None:
+            msg = "HypergraphIndex(accelerated=True) requires numpy, which is not importable."
+            raise ValueError(msg)
+        self.accelerated = bool(accelerated)
+        if self.accelerated:
+            self._f_post = _np.frombuffer(post_flat, dtype=_np.int32)
+            self._f_post_off = _np.frombuffer(post_off, dtype=_np.int64)
+            self._f_ent = _np.frombuffer(ent_flat, dtype=_np.int32)
+            self._f_ent_off = _np.frombuffer(ent_off, dtype=_np.int64)
+            self._f_rank = _np.frombuffer(gamma_rank, dtype=_np.int64)
+
+    # -- id mapping ---------------------------------------------------------------
+
+    def hyperedge_id(self, row: int) -> str:
+        """The hyperedge id at dense ``row``."""
+        return self._hids[row]
+
+    def node_rows(self, node_ids: Iterator[str] | list[str]) -> list[int]:
+        """Dense rows of the known ids among ``node_ids``, ascending (== ascending ids)."""
+        positions = self._nid_pos
+        return sorted(positions[v] for v in node_ids if v in positions)
+
+    def entity_node_ids(self, row: int) -> list[str]:
+        """Hyperedge ``row``'s entity node ids, in stored (JSON) order."""
+        nids = self._nids
+        return [nids[v] for v in self._ent_flat[self._ent_off[row] : self._ent_off[row + 1]]]
+
+    # -- the expansion + truncation kernel ---------------------------------------
+
+    def expand(self, anchor_rows: list[int], config: HypergraphConfig) -> list[int]:
+        """Hop-priority, hub-capped expansion + per-layer γ truncation, in int space.
+
+        Returns the candidate hyperedge rows in exactly the order the per-call scan
+        produces its candidate ids: layers in hop order, first-encounter order within an
+        untruncated layer, ``(-γ, id)`` order within a truncated one.
+        """
+        by_hop = (
+            self._layers_np(anchor_rows, config)
+            if self.accelerated
+            else self._layers_py(anchor_rows, config)
+        )
+        candidates: list[int] = []
+        for layer in by_hop:
+            room = config.max_candidates - len(candidates)
+            if room <= 0:
+                break
+            if len(layer) > room:
+                layer = self._top_by_gamma(layer, room)
+            candidates.extend(int(row) for row in layer)
+        return candidates
+
+    def _layers_py(self, anchor_rows: list[int], config: HypergraphConfig) -> list[list[int]]:
+        post_flat, post_off = self._post_flat, self._post_off
+        ent_flat, ent_off = self._ent_flat, self._ent_off
+        seen = bytearray(len(self._hids))
+        by_hop: list[list[int]] = []
+        frontier = anchor_rows
+        for hop in range(config.hops):
+            layer: list[int] = []
+            append = layer.append
+            for v in frontier:
+                start = post_off[v]
+                stop = min(post_off[v + 1], start + config.hub_cap)
+                for h in post_flat[start:stop]:
+                    if not seen[h]:
+                        seen[h] = 1
+                        append(h)
+            if not layer:
+                break
+            by_hop.append(layer)
+            if hop + 1 < config.hops:
+                nxt: set[int] = set()
+                for h in layer[: config.expand_cap]:
+                    nxt.update(ent_flat[ent_off[h] : ent_off[h + 1]])
+                frontier = sorted(nxt)
+        return by_hop
+
+    def _layers_np(self, anchor_rows: list[int], config: HypergraphConfig) -> list[Any]:
+        post_flat, post_off = self._f_post, self._f_post_off
+        ent_flat, ent_off = self._f_ent, self._f_ent_off
+        seen = _np.zeros(len(self._hids), dtype=bool)
+        by_hop: list[Any] = []
+        frontier: Any = _np.asarray(anchor_rows, dtype=_np.int64)
+        for hop in range(config.hops):
+            parts = []
+            for v in frontier:
+                start = post_off[v]
+                stop = min(post_off[v + 1], start + config.hub_cap)
+                if stop > start:
+                    parts.append(post_flat[start:stop])
+            layer = _np.empty(0, dtype=_np.int32)
+            if parts:
+                stream = _np.concatenate(parts)
+                fresh = stream[~seen[stream]]
+                if fresh.size:
+                    _unique, first = _np.unique(fresh, return_index=True)
+                    first.sort()
+                    layer = fresh[first]
+                    seen[layer] = True
+            if layer.size == 0:
+                break
+            by_hop.append(layer)
+            if hop + 1 < config.hops:
+                sel = layer[: config.expand_cap]
+                ent_parts = [ent_flat[ent_off[h] : ent_off[h + 1]] for h in sel]
+                frontier = (
+                    _np.unique(_np.concatenate(ent_parts))
+                    if ent_parts
+                    else _np.empty(0, dtype=_np.int32)
+                )
+        return by_hop
+
+    def _top_by_gamma(self, layer: Any, room: int) -> Any:
+        """The ``room`` best rows of ``layer`` under ``(-γ, id)`` — γ ranks are unique ints."""
+        if self.accelerated and not isinstance(layer, list):
+            ranks = self._f_rank[layer]
+            part = _np.argpartition(ranks, room - 1)[:room]
+            return layer[part[_np.argsort(ranks[part], kind="stable")]]
+        rank = self._gamma_rank
+        return heapq.nsmallest(room, layer, key=rank.__getitem__)
+
+    # -- the s_hyp prune kernel ---------------------------------------------------
+
+    def prune(
+        self,
+        candidates: list[int],
+        anchor_rows: list[int],
+        beta: float,
+        sims: dict[str, float],
+        config: HypergraphConfig,
+    ) -> list[int]:
+        """Top-``k_h`` of ``candidates`` by ``(-s_hyp, id)`` — Eq 16–19 in int space.
+
+        ``s_hyp`` reproduces the per-call arithmetic operation-for-operation (same IEEE
+        ops in the same order), so the retained set and its order are byte-identical.
+        """
+        if len(candidates) <= config.k_h:
+            return candidates
+        if self.accelerated:
+            cand = _np.asarray(candidates, dtype=_np.int64)
+            mask = _np.zeros(len(self._nids), dtype=bool)
+            if anchor_rows:
+                mask[_np.asarray(anchor_rows, dtype=_np.int64)] = True
+            prefix = _np.concatenate(
+                (_np.zeros(1, dtype=_np.int64), _np.cumsum(mask[self._f_ent]))
+            )
+            starts = self._f_ent_off[cand]
+            stops = self._f_ent_off[cand + 1]
+            overlap = (prefix[stops] - prefix[starts]) / ((stops - starts) + 1e-9)
+            if sims:
+                hids = self._hids
+                sim_values = _np.fromiter(
+                    (float(sims.get(hids[row], 0.0)) for row in candidates),
+                    dtype=_np.float64,
+                    count=len(candidates),
+                )
+            else:
+                sim_values = _np.zeros(len(candidates), dtype=_np.float64)
+            scores = beta * overlap + (1.0 - beta) * sim_values
+            order = _np.lexsort((cand, -scores))
+            return [int(row) for row in cand[order[: config.k_h]]]
+        anchor_set = set(anchor_rows)
+        ent_flat, ent_off = self._ent_flat, self._ent_off
+        hids = self._hids
+        scores_py: list[float] = []
+        for row in candidates:
+            nodes = ent_flat[ent_off[row] : ent_off[row + 1]]
+            overlap_row = sum(1 for v in nodes if v in anchor_set) / (len(nodes) + 1e-9)
+            scores_py.append(
+                beta * overlap_row + (1.0 - beta) * float(sims.get(hids[row], 0.0))
+            )
+        order_py = sorted(
+            range(len(candidates)), key=lambda i: (-scores_py[i], candidates[i])
+        )
+        return [candidates[i] for i in order_py[: config.k_h]]
+
+
+#: Process-shared indices, one per store FILE version (device/inode/size/mtime).
+_INDEX_CACHE: dict[tuple[int, int, int, int], HypergraphIndex] = {}
+
+
+def _shared_index(path: str, reader: HyperedgeKV) -> HypergraphIndex:
+    """The cached index for ``path``'s current content, built through ``reader`` on a miss."""
+    stat = os.stat(path)
+    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    index = _INDEX_CACHE.get(signature)
+    if index is None:
+        index = HypergraphIndex(reader)
+        _INDEX_CACHE[signature] = index
+    return index
+
+
+def clear_index_cache() -> None:
+    """Drop every cached :class:`HypergraphIndex` (tests / long-lived processes)."""
+    _INDEX_CACHE.clear()
 
 
 # -- configuration and results --------------------------------------------------
@@ -300,6 +655,11 @@ def hypergraph_signals(
     at ``alpha``. ``eu_sims`` is the caller's eu_vecs ANN similarity (s_rel); absent, the
     ``s_hyp`` prune degrades to entry-overlap only (β=1) — a documented tier-0 degradation,
     never a silent one.
+
+    A store opened with the (default) shared :class:`HypergraphIndex` runs expansion and
+    prune over the precomputed int-indexed postings/incidence; an uncached or
+    :meth:`~HyperedgeKV.from_bytes` store scans per call. The two paths are byte-identical
+    (pinned by tests and the ticket-01 real-data parity run).
     """
     cfg = config or HypergraphConfig()
     kernel = propagator or RWRPropagator()
@@ -321,6 +681,75 @@ def hypergraph_signals(
             pruned_candidates=0,
         )
 
+    sims = eu_sims or {}
+    beta = cfg.beta if sims else 1.0  # tier-0 degradation: entry-overlap only
+
+    index = store.index
+    fields_of: Callable[[str], dict[str, Any]]
+    if index is not None:
+        anchor_rows = index.node_rows(list(anchors))
+        candidate_rows = index.expand(anchor_rows, cfg)
+        expanded = len(candidate_rows)
+        candidate_rows = index.prune(candidate_rows, anchor_rows, beta, sims, cfg)
+        pruned = len(candidate_rows)
+        candidates = [index.hyperedge_id(row) for row in candidate_rows]
+        incidence = {
+            hid: index.entity_node_ids(row)
+            for hid, row in zip(candidates, candidate_rows, strict=True)
+        }
+
+        def _indexed_fields(hid: str) -> dict[str, Any]:
+            fields = store.solver_fields(hid)
+            if fields is None:  # pragma: no cover - indexed rows exist by construction
+                msg = f"hyperedge {hid!r} is indexed but has no solver row."
+                raise ValueError(msg)
+            return fields
+
+        fields_of = _indexed_fields
+    else:
+        candidates, incidence, expanded, pruned, fields_of = _scan_candidates(
+            store, anchors, beta, sims, cfg
+        )
+
+    # -- propagation on the small query-aware hypergraph (Eq 26–28) ----------
+    c_star = kernel.propagate(incidence, anchors, cfg)
+
+    # -- ρ pooling + vertex gate + coverage (Eq 29–33) -----------------------
+    c_max = max(c_star.values(), default=0.0)
+    retained = {v for v, val in c_star.items() if c_max > 0.0 and val >= cfg.theta_v * c_max}
+    rho: dict[str, float] = {}
+    retained_fields: dict[str, dict[str, Any]] = {}
+    for hid in candidates:
+        nodes = incidence[hid]
+        if not nodes or not any(v in retained for v in nodes):
+            continue  # coverage gate: no retained entity → not a candidate evidence unit
+        vals = [c_star.get(v, 0.0) for v in nodes]
+        rho[hid] = sum(vals) / len(vals)  # mean pooling (Eq 29; sweep 6b: within noise)
+        retained_fields[hid] = fields_of(hid)
+    return HypergraphSignals(
+        rho=rho,
+        fields=retained_fields,
+        anchors=anchors,
+        vertex_confidence=c_star,
+        expanded_candidates=expanded,
+        pruned_candidates=pruned,
+    )
+
+
+def _scan_candidates(
+    store: HyperedgeKV,
+    anchors: dict[str, float],
+    beta: float,
+    sims: dict[str, float],
+    cfg: HypergraphConfig,
+) -> tuple[
+    list[str], dict[str, list[str]], int, int, Callable[[str], dict[str, Any]]
+]:
+    """The per-call expansion + prune over the store bytes — the original, index-free path.
+
+    Kept verbatim as the uncached/:meth:`~HyperedgeKV.from_bytes` path and as the parity
+    oracle the indexed path is pinned against.
+    """
     # -- expansion: hop-priority, hub-capped (ticket 20 — both guards measured) --
     seen: dict[str, dict[str, Any]] = {}
     by_hop: list[list[str]] = []
@@ -358,9 +787,6 @@ def hypergraph_signals(
     expanded = len(candidates)
 
     # -- s_hyp prune BEFORE propagation (Eq 16–19; the ticket-20 verified fix) ----
-    sims = eu_sims or {}
-    beta = cfg.beta if sims else 1.0  # tier-0 degradation: entry-overlap only
-
     def s_hyp(hid: str) -> float:
         nodes = seen[hid]["entity_node_ids"]
         overlap = sum(1 for v in nodes if v in anchors) / (len(nodes) + 1e-9)
@@ -370,27 +796,5 @@ def hypergraph_signals(
         candidates = sorted(candidates, key=lambda h: (-s_hyp(h), h))[: cfg.k_h]
     pruned = len(candidates)
 
-    # -- propagation on the small query-aware hypergraph (Eq 26–28) ----------
     incidence = {hid: list(seen[hid]["entity_node_ids"]) for hid in candidates}
-    c_star = kernel.propagate(incidence, anchors, cfg)
-
-    # -- ρ pooling + vertex gate + coverage (Eq 29–33) -----------------------
-    c_max = max(c_star.values(), default=0.0)
-    retained = {v for v, val in c_star.items() if c_max > 0.0 and val >= cfg.theta_v * c_max}
-    rho: dict[str, float] = {}
-    retained_fields: dict[str, dict[str, Any]] = {}
-    for hid in candidates:
-        nodes = incidence[hid]
-        if not nodes or not any(v in retained for v in nodes):
-            continue  # coverage gate: no retained entity → not a candidate evidence unit
-        vals = [c_star.get(v, 0.0) for v in nodes]
-        rho[hid] = sum(vals) / len(vals)  # mean pooling (Eq 29; sweep 6b: within noise)
-        retained_fields[hid] = seen[hid]
-    return HypergraphSignals(
-        rho=rho,
-        fields=retained_fields,
-        anchors=anchors,
-        vertex_confidence=c_star,
-        expanded_candidates=expanded,
-        pruned_candidates=pruned,
-    )
+    return candidates, incidence, expanded, pruned, seen.__getitem__

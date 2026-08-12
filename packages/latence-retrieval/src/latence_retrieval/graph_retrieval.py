@@ -353,7 +353,22 @@ RetrievalBackend` declaring ``GRAPH`` (T-RET-2).
         return frozenset({Capability.GRAPH, Capability.FILTER})
 
     def search(self, query: RetrievalQuery) -> list[Candidate]:
-        """Traverse from ``query.seed_node_ids`` and return the reached documents, ranked."""
+        """Traverse from ``query.seed_node_ids`` and return the reached documents, ranked.
+
+        Resolution is **tiered** whenever the hop scores are strictly decreasing (every
+        ``hop_decay < 1.0`` that does not underflow): the reached nodes are resolved to
+        documents closest hop first, and resolution STOPS as soon as ``top_k`` hits are
+        ranked — a document first reachable at hop *h* mentions no closer node (a
+        contract-honouring :class:`GraphDocumentSource` would have returned it at that
+        closer tier), tier scores strictly decrease, and each tier arrives in ascending
+        id, so the early stop returns byte-identical hits to ranking the full
+        neighbourhood (ticket 01, parity-pinned on real exports). At real scale this is
+        the difference between resolving ~10² and ~10⁵ documents per query. The
+        document source is queried once per non-empty tier (≤ ``max_hops + 1`` calls)
+        instead of once per search. Degenerate configs (``hop_decay == 1.0``, underflow)
+        keep the exhaustive single-call path — same results, no early stop to reason
+        about.
+        """
         if query.mode is not Capability.GRAPH:
             msg = (
                 f"graph retrieval leg does not declare capability {query.mode.value!r}; "
@@ -376,32 +391,83 @@ RetrievalBackend` declaring ``GRAPH`` (T-RET-2).
         if not reachable:
             return []
 
-        documents = self._resolve_documents().documents(sorted(reachable))
-        hits: list[Candidate] = []
-        for document in documents:
-            hops = [reachable[node] for node in document.node_ids if node in reachable]
-            if not hops:
-                # The source returned a document none of whose nodes we asked for — a real store
-                # would not, and scoring it would fabricate relevance. Drop it rather than guess.
-                continue
-            if not self._include_seed_documents and min(hops) == 0:
-                continue
-            score = self._seed_score * (self._hop_decay ** min(hops))
-            hits.append(
-                Candidate(
-                    id=document.id,
-                    score=score,
-                    text=document.text,
-                    metadata=dict(document.metadata),
-                )
-            )
-        # Filter BEFORE truncation: filtering after top_k would silently return fewer (or zero)
-        # hits than the store holds — the same anti-false-green rule the orchestrator applies to a
-        # filter it cannot serve.
-        if query.filter:
-            hits = [c for c in hits if _matches_filter(c, query.filter)]
+        if self._hop_scores_strictly_decrease():
+            hits = self._tiered_hits(query, reachable)
+        else:
+            hits = self._exhaustive_hits(query, reachable)
         hits.sort(key=lambda c: (-c.score, c.id))
         return hits[: query.top_k]
+
+    def _hop_scores_strictly_decrease(self) -> bool:
+        """Whether every deeper hop scores strictly lower — the tiered path's guard.
+
+        False for ``hop_decay == 1.0`` (all tiers tie, ranked purely by id across tiers)
+        and for decays so small the score underflows to equal values within ``max_hops``.
+        """
+        scores = [self._seed_score * self._hop_decay**hop for hop in range(self._max_hops + 1)]
+        return all(closer > deeper for closer, deeper in zip(scores, scores[1:], strict=False))
+
+    def _tiered_hits(self, query: RetrievalQuery, reachable: Mapping[str, int]) -> list[Candidate]:
+        """Resolve and rank tier by tier (closest hop first), stopping at ``top_k`` hits.
+
+        Byte-identical to :meth:`_exhaustive_hits` under the strictly-decreasing guard —
+        see :meth:`search`. The accumulated list is already in ``(-score, id)`` order, so
+        the caller's sort is a stable no-op kept for uniformity with the exhaustive path.
+        """
+        source = self._resolve_documents()
+        hits: list[Candidate] = []
+        resolved: set[str] = set()
+        for hop in sorted(set(reachable.values())):
+            tier = sorted(node for node, distance in reachable.items() if distance == hop)
+            for document in source.documents(tier):
+                if document.id in resolved:
+                    continue  # already ranked at a closer tier
+                resolved.add(document.id)
+                candidate = self._scored(document, reachable, query)
+                if candidate is None:
+                    continue
+                hits.append(candidate)
+                if len(hits) >= query.top_k:
+                    return hits
+        return hits
+
+    def _exhaustive_hits(
+        self, query: RetrievalQuery, reachable: Mapping[str, int]
+    ) -> list[Candidate]:
+        """Resolve the whole reached neighbourhood in one call and rank every document."""
+        documents = self._resolve_documents().documents(sorted(reachable))
+        return [
+            candidate
+            for document in documents
+            if (candidate := self._scored(document, reachable, query)) is not None
+        ]
+
+    def _scored(
+        self, document: GraphDocument, reachable: Mapping[str, int], query: RetrievalQuery
+    ) -> Candidate | None:
+        """``document`` as a scored hit, or ``None`` when it must not be ranked.
+
+        Dropped when: none of its nodes was asked for (a real store would not return it,
+        and scoring it would fabricate relevance); it is a seed document on a pure
+        expansion leg; or it fails the metadata predicate. Filtering happens BEFORE
+        truncation — filtering after top_k would silently return fewer (or zero) hits
+        than the store holds, the same anti-false-green rule the orchestrator applies to
+        a filter it cannot serve.
+        """
+        hops = [reachable[node] for node in document.node_ids if node in reachable]
+        if not hops:
+            return None
+        if not self._include_seed_documents and min(hops) == 0:
+            return None
+        candidate = Candidate(
+            id=document.id,
+            score=self._seed_score * (self._hop_decay ** min(hops)),
+            text=document.text,
+            metadata=dict(document.metadata),
+        )
+        if query.filter and not _matches_filter(candidate, query.filter):
+            return None
+        return candidate
 
     def _resolve_graph(self) -> GraphSource:
         if self._graph_source is None:

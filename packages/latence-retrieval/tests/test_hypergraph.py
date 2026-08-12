@@ -264,3 +264,122 @@ def test_reader_holds_nothing_between_calls(tmp_path: Path) -> None:
     reader.close()
     with pytest.raises(ValueError):
         reader.get(b"e|h_direct")  # a closed reader must never serve stale data
+
+
+# -- ticket 01 (wayfinder-enterprise-serving): the precomputed index -------------
+
+
+def _dense_corpus(count: int = 400, nodes: int = 120) -> dict[str, dict]:
+    """A deterministic, hub-heavy corpus with deliberate γ ties (tie-breaks must match)."""
+    hyperedges: dict[str, dict] = {}
+    for i in range(count):
+        arity = 2 + (i * 7) % 4
+        members = [f"n{(i * 13 + j * 29) % nodes:03d}" for j in range(arity)]
+        hyperedges[f"h{i:04d}"] = {
+            "nodes": list(dict.fromkeys(members)),
+            "gamma": round(0.2 + ((i * 11) % 8) / 10.0, 6),  # 8 distinct values → many ties
+        }
+    return hyperedges
+
+
+_DENSE_ALIASES = {"Seed Corp": ["n001"], "Hub Inc": ["n000", "n003"]}
+
+
+def _signals_tuple(signals) -> tuple:
+    return (
+        signals.rho,
+        signals.fields,
+        signals.anchors,
+        signals.vertex_confidence,
+        signals.expanded_candidates,
+        signals.pruned_candidates,
+    )
+
+
+_INDEX_CASES = [
+    {"alias_surfaces": ["Seed Corp"]},
+    {"alias_surfaces": ["Seed Corp", "Hub Inc"], "ann_node_ids": ["n007", "n_unknown"]},
+    {"ann_node_ids": ["n005", "n009"]},
+    {
+        "alias_surfaces": ["Hub Inc"],
+        "eu_sims": {f"h{i:04d}": ((i * 3) % 10) / 10.0 for i in range(400)},
+    },
+    {"alias_surfaces": ["Never Heard Of It"]},
+]
+
+_INDEX_CONFIGS = [
+    HypergraphConfig(),
+    HypergraphConfig(k_h=25, max_candidates=120, hub_cap=6, expand_cap=15),
+    HypergraphConfig(hops=3, k_h=40),
+]
+
+
+def test_indexed_path_is_byte_identical_to_the_scan_path(tmp_path: Path) -> None:
+    """The ticket's parity gate in miniature: every field equal, floats included, across
+    entry tiers, eu_sims, multi-hop, tight caps, γ ties and unknown anchors."""
+    path = tmp_path / "graph-hyperedges.kv"
+    path.write_bytes(_build_kv(_dense_corpus(), _DENSE_ALIASES))
+    for config in _INDEX_CONFIGS:
+        for case in _INDEX_CASES:
+            with HyperedgeKV.open(str(path), cache=False) as kv:
+                reference = _signals_tuple(hypergraph_signals(kv, config=config, **case))
+            with HyperedgeKV.open(str(path)) as kv:
+                assert kv.index is not None
+                indexed = _signals_tuple(hypergraph_signals(kv, config=config, **case))
+            assert indexed == reference
+
+
+def test_pure_python_kernels_match_the_accelerated_index(tmp_path: Path) -> None:
+    """The zero-dep fallback and the numpy kernels are the same function — pinned, not hoped."""
+    from latence_retrieval.hypergraph import HypergraphIndex
+
+    path = tmp_path / "graph-hyperedges.kv"
+    path.write_bytes(_build_kv(_dense_corpus(), _DENSE_ALIASES))
+    with HyperedgeKV.open(str(path), cache=False) as kv:
+        fallback_index = HypergraphIndex(kv, accelerated=False)
+    for config in _INDEX_CONFIGS:
+        for case in _INDEX_CASES:
+            with HyperedgeKV.open(str(path), cache=False) as kv:
+                reference = _signals_tuple(hypergraph_signals(kv, config=config, **case))
+            with HyperedgeKV.open(str(path), cache=False) as kv:
+                kv._index = fallback_index
+                fallback = _signals_tuple(hypergraph_signals(kv, config=config, **case))
+            assert fallback == reference
+
+
+def test_index_is_shared_per_file_and_invalidated_on_rewrite(tmp_path: Path) -> None:
+    """One build per store FILE version: reopened readers share; a rewrite re-indexes."""
+    path = tmp_path / "graph-hyperedges.kv"
+    path.write_bytes(_two_hop_corpus())
+    with HyperedgeKV.open(str(path)) as first, HyperedgeKV.open(str(path)) as second:
+        assert first.index is second.index
+
+    # Rewrite with a different corpus: the stale index must NOT serve the old content.
+    path.write_bytes(_build_kv(_dense_corpus(), _DENSE_ALIASES))
+    with HyperedgeKV.open(str(path)) as kv:
+        rebuilt = kv.index
+        assert rebuilt is not None
+        signals = hypergraph_signals(kv, alias_surfaces=["Seed Corp"])
+    with HyperedgeKV.open(str(path), cache=False) as kv:
+        reference = hypergraph_signals(kv, alias_surfaces=["Seed Corp"])
+    assert _signals_tuple(signals) == _signals_tuple(reference)
+
+
+def test_uncached_and_bytes_readers_carry_no_index(tmp_path: Path) -> None:
+    path = tmp_path / "graph-hyperedges.kv"
+    path.write_bytes(_two_hop_corpus())
+    with HyperedgeKV.open(str(path), cache=False) as kv:
+        assert kv.index is None
+    assert HyperedgeKV.from_bytes(_two_hop_corpus()).index is None
+
+
+def test_clear_index_cache_forces_a_rebuild(tmp_path: Path) -> None:
+    from latence_retrieval.hypergraph import clear_index_cache
+
+    path = tmp_path / "graph-hyperedges.kv"
+    path.write_bytes(_two_hop_corpus())
+    with HyperedgeKV.open(str(path)) as kv:
+        before = kv.index
+    clear_index_cache()
+    with HyperedgeKV.open(str(path)) as kv:
+        assert kv.index is not before
