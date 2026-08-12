@@ -1,25 +1,25 @@
 {
   "ann_recall@10": 0.952174,
   "ann_recall@100": 0.972826,
-  "collection": "multihop_rag-dot",
+  "collection": "multihop_rag",
   "dataset": "multihop_rag",
   "gate_agreement_rate": 1.0,
   "gate_hit_rate": 1.0,
   "latency_ms": {
     "dense_ms": {
-      "mean": 22.51,
-      "median": 11.71,
-      "p95": 14.9
+      "mean": 25.4,
+      "median": 12.55,
+      "p95": 15.58
     },
     "reference_ms": {
-      "mean": 25.11,
-      "median": 18.44,
-      "p95": 60.57
+      "mean": 24.89,
+      "median": 17.53,
+      "p95": 62.65
     },
     "served_ms": {
-      "mean": 30.97,
-      "median": 26.04,
-      "p95": 70.54
+      "mean": 30.73,
+      "median": 27.68,
+      "p95": 71.36
     }
   },
   "limit": 50,
