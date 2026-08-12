@@ -1,7 +1,7 @@
 # 01 — Hypergraph + graph lane latency at SOTA: orders of magnitude, zero quality loss
 
 Type: task
-Status: open
+Status: claimed
 Blocked by: —
 
 ## Why (Dennis, 2026-08-12)
