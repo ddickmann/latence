@@ -103,3 +103,29 @@ KV is a derived read-path artifact rebuildable from it.
   host) — stated, not hidden.
 - Absolute latencies come from a Python prototype on synthetic data and are not product SLAs. The
   *comparisons* hold — all strategies shared the same compute code — but the numbers will move.
+
+## Amendment (2026-08-12, wayfinder-enterprise-serving ticket 01): a process-shared, derived read index
+
+The "resident buys 0.56 ms" ruling above was measured over an **LMDB** point-lookup KV (C-speed
+lookups) with candidate sets of |E_c| ≤ 2000. The shipped query path is the **pure-Python**
+`latence_retrieval.hypergraph.HyperedgeKV` reader, and the verified expansion (ticket 20:
+hop-priority, hub-capped, `max_candidates=20000`) touches far more rows than the prototype did.
+Measured on real exports (cProfile, Mac dev host): at 677k hyperedges (uda) one query performed
+~4.7M binary-search key comparisons and ~230k JSON decodes — **3.4 s median** for the ladder's
+hypergraph lane, seconds not milliseconds. The regime the original numbers were taken in does not
+exist in the shipped code, so the conclusion drawn from them no longer binds.
+
+Decision: `HyperedgeKV.open` now attaches a **process-shared `HypergraphIndex`** — the
+entity→hyperedge postings and hyperedge→entity incidence (+ γ and its truncation rank) decoded
+once per store FILE per process, keyed by file identity (device/inode/size/mtime) and therefore
+invalidated by any rewrite. This does **not** reopen ADR-0048's escape hatch:
+
+- The index is a **derived, rebuildable memoization** of the emitted artifact, never a system of
+  record — nothing can be written to it, and byte-identical results with and without it are pinned
+  by tests and by the ticket-01 full-query-set parity runs on real exports (0 diffs).
+- Statelessness stays behavioral: identical inputs yield identical outputs; the store file's
+  lifetime is still the caller's per-call `open`/`close`.
+- `open(path, cache=False)` and `from_bytes` keep the original scan-per-call path (preserved
+  verbatim), which remains the parity oracle.
+- The global pairwise structure stays refused: no `A_E`, no global incidence CSR — the index holds
+  exactly the postings and incidence the store already contains, in int-mapped form.
