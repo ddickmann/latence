@@ -314,6 +314,22 @@ def scrub_sensitive(value: object) -> object:
     return value
 
 
+#: Digit runs in a record id, for the natural (emission-order) sort of the reuse overlay.
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
+def _natural_record_order(record_id: str) -> tuple[str | int, ...]:
+    """The digit-aware sort key that reconstructs emission order from an id-sorted store.
+
+    Splits the id into alternating text/digit runs (``re.split`` with one capture group always
+    alternates non-captured text and captured digits, starting with a possibly-empty text run),
+    so two ids are compared text-run by text-run and COUNTER BY NUMBER: ``…#chunk-2`` orders
+    before ``…#chunk-10``. The alternation guarantee makes the mixed tuple type-safe — an int
+    and a str never meet at the same tuple position.
+    """
+    return tuple(int(tok) if tok.isdigit() else tok for tok in _DIGIT_RUNS.split(record_id))
+
+
 def topological_order(stages: list[Stage]) -> list[Stage]:
     """Kahn's algorithm over ``depends_on`` edges. Raises on a cycle."""
     by_name = {s.name: s for s in stages}
@@ -921,9 +937,20 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         # accumulators + post-assembly transforms so those Stages see the whole corpus. Set for the
         # duration of the run and cleared in ``finally`` so the instance never leaks a delta's
         # overlay into a later plain run. ``None`` ⇒ no overlay (byte-identical to a non-delta run).
+        #
+        # ADR-0061: each carrier's overlay is ordered by the NATURAL (digit-aware) record-id key.
+        # The doc-level reuse store is persisted id-sorted LEXICOGRAPHICALLY (its canonical
+        # on-disk form — ``CorpusStore._encode_doclevel``), which is NOT emission order:
+        # ``…#chunk-10`` sorts before ``…#chunk-2``, and the equivalence proof caught exactly that
+        # as the one row-order divergence from a full rebuild. Every reference id scheme mints
+        # ``<parent>#<kind>-<counter>`` in emission order, so the digit-aware sort reconstructs
+        # each document's original within-run order from the canonical store — including stores
+        # committed by older versions (the fix is read-side, not a store rewrite).
         self._reuse_overlay_by_type = {}
         for record in reuse or []:
             self._reuse_overlay_by_type.setdefault(type(record), []).append(record)
+        for records in self._reuse_overlay_by_type.values():
+            records.sort(key=lambda r: _natural_record_order(r.record_id))
         # #185: the run-level OpenLineage bracket. Off unless an emitter was wired, in which case
         # the pipeline itself is one parent job whose START/COMPLETE/FAIL nests every Stage's job
         # underneath it in the catalog. The FAIL carries the stable typed error *category* only —

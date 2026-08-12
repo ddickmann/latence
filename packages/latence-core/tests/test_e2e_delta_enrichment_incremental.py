@@ -69,6 +69,7 @@ stages:
     capability: chunk
     provider: chunk.markdown
     depends_on: [parse]
+    config: {{max_tokens: 12, overlap_tokens: 2, min_tokens: 2}}
 {induce_stage if induce else ""}
   - name: entities
     capability: entity_extraction
@@ -127,7 +128,12 @@ def _read(store: str, run_id: str, rel: str) -> str:
 
 def _seed_docs(docs: Path) -> None:
     docs.mkdir()
-    (docs / "a.txt").write_text("Alice works at Acme. Acme is in town.\n", encoding="utf-8")
+    # ``a.txt`` is long enough to chunk into MORE THAN TEN chunks under the tiny chunker config:
+    # the reuse store persists doc-level records id-sorted LEXICOGRAPHICALLY (``#chunk-10`` before
+    # ``#chunk-2``), so a reused multi-chunk document is exactly what catches an overlay fold that
+    # is not restored to numeric emission order (the divergence the real-data proof surfaced).
+    filler = " ".join(f"Paragraph {i} says Alice works at Acme in town." for i in range(24))
+    (docs / "a.txt").write_text(f"Alice works at Acme. {filler}\n", encoding="utf-8")
     (docs / "b.txt").write_text("Bob works at Globex. Alice joined Globex.\n", encoding="utf-8")
     (docs / "c.txt").write_text("Carol works at Initech.\n", encoding="utf-8")
 

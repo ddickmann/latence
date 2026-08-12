@@ -59,7 +59,7 @@ def _line_multiset_diff(a: Path, b: Path) -> dict[str, int]:
 
 
 def _rowset_diff(a: Path, b: Path, key: str) -> dict[str, Any]:
-    ta, tb = pq.read_table(a), pq.read_table(b)
+    ta, tb = pq.read_table(a), pq.read_table(b)  # type: ignore[no-untyped-call]
     da = {r[key]: json.dumps(r, sort_keys=True, default=str) for r in ta.to_pylist()}
     db = {r[key]: json.dumps(r, sort_keys=True, default=str) for r in tb.to_pylist()}
     changed = [k for k in da.keys() & db.keys() if da[k] != db[k]]
@@ -74,7 +74,7 @@ def _rowset_diff(a: Path, b: Path, key: str) -> dict[str, Any]:
 
 
 def _embeddings(path: Path) -> tuple[list[str], np.ndarray]:
-    t = pq.read_table(path, columns=["record_id", "embedding"])
+    t = pq.read_table(path, columns=["record_id", "embedding"])  # type: ignore[no-untyped-call]
     ids = t.column("record_id").to_pylist()
     mat = np.array(t.column("embedding").to_pylist(), dtype=np.float64)
     order = np.argsort(np.array(ids))
@@ -85,7 +85,7 @@ def _bm25_rank(export: Path, queries: list[str]) -> list[list[str]]:
     stats = json.loads((export / "bm25-stats.json").read_text(encoding="utf-8"))
     idf = {t["term"]: t["idf"] for t in stats["terms"]}
     avgdl = stats["avgdl"]
-    postings = pq.read_table(export / "bm25-postings.parquet").to_pylist()
+    postings = pq.read_table(export / "bm25-postings.parquet").to_pylist()  # type: ignore[no-untyped-call]
     index: dict[str, list[tuple[str, int, int]]] = {}
     for row in postings:
         for term, tf in zip(row["terms"], row["term_frequencies"], strict=True):
