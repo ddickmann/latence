@@ -89,6 +89,7 @@ class _SearchingClient:
         query_filter: Any | None = None,
         limit: int = 10,
         with_payload: bool = False,
+        search_params: Any | None = None,
     ) -> _QueryResponse:
         return _QueryResponse(self._points[:limit])
 
@@ -128,8 +129,24 @@ def test_default_backend_reads_the_text_the_sink_wrote(tmp_path: Path) -> None:
     assert {c.text for c in hits} == {"alpha text", "beta text"}
     # …and the text is not duplicated into the metadata it was lifted out of.
     assert all("content" not in c.metadata for c in hits)
-    # the rest of the Export's columns still ride through as opaque provenance
-    assert all(c.metadata["record_id"] in {"c1", "c2"} for c in hits)
+
+
+def test_default_backend_restores_the_corpus_record_id(tmp_path: Path) -> None:
+    """DEFAULT config, both halves shipped: the corpus IDENTITY survives the handoff.
+
+    The sink derives a UUIDv5 point id from the content-addressed ``record_id`` (Qdrant rejects
+    arbitrary string ids) and writes the record_id into the payload precisely so nothing is lost.
+    The backend's default ``id_key`` reads it back, so ``Candidate.id`` is the corpus id every
+    downstream dedupe, gold join and graph-rescue append keys on — not the derived UUID (the
+    wayfinder-enterprise-serving/02 round-trip regression this pins).
+    """
+    points = _loaded_points(tmp_path, {"c1": "alpha text", "c2": "beta text"})
+
+    hits = _backend(points).search(_dense_query())
+
+    assert {c.id for c in hits} == {"c1", "c2"}
+    # consumed into the id — not duplicated into metadata (the text_key discipline).
+    assert all("record_id" not in c.metadata for c in hits)
 
 
 def test_a_wrong_text_key_is_loud_not_an_empty_string(tmp_path: Path) -> None:

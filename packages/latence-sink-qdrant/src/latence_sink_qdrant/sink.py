@@ -281,6 +281,13 @@ class QdrantSink:
             request size; the Export is streamed, so this is the only thing that grows with it.
         distance: str — ``"cosine"`` (default) / ``"dot"`` / ``"euclid"`` / ``"manhattan"``. Used
             **only** when the collection is created; an existing collection's metric is left alone.
+            Score-convention note (measured, wayfinder-enterprise-serving/02): Qdrant's ``cosine``
+            **re-normalises stored vectors at ingest**, so for an Export whose Embedder already
+            L2-normalised (all the shipped ones) the served score is ``dot(q, v/‖v‖)`` — which
+            reorders near-ties whenever the export's normalisation was reduced-precision (a GPU
+            fp16 embed leaves norms ~±0.4% off unit). ``"dot"`` stores the vectors verbatim and
+            serves the raw inner product — byte-comparable to a brute-force ``matrix @ query``
+            reference over the same Export, which is what a parity validation should load.
         vector: str — which of the Export's retrieval signals to project: ``"dense"`` (default,
             byte-identical to the sink before sparse existed), ``"sparse"`` (a SPLADE-only
             collection: no Embedder needed on the Export), or ``"both"`` (a hybrid collection —

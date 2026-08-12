@@ -270,6 +270,7 @@ class HypergraphIndex:
         gammas = array("d")
         ent_off = array("q", [0])
         ent_lists: list[list[str]] = []
+        self._solver_base = store._lower_bound(b"e|")  # the e| rows are one contiguous range
         for suffix, raw in store._prefix_items(b"e|"):
             fields = json.loads(raw)
             hids.append(suffix.decode())
@@ -347,6 +348,16 @@ class HypergraphIndex:
         nids = self._nids
         return [nids[v] for v in self._ent_flat[self._ent_off[row] : self._ent_off[row + 1]]]
 
+    def solver_fields_at(self, store: HyperedgeKV, row: int) -> dict[str, Any]:
+        """Hyperedge ``row``'s solver record, read straight off ``store``'s value table.
+
+        The ``e|`` rows are one contiguous, sorted KV range, so the index only remembers
+        where that range starts — no per-id binary search at query time. ``store`` must
+        read the same store content the index was built from, which the file-identity
+        cache key guarantees for cache-attached readers.
+        """
+        return dict(json.loads(store._value_at(self._solver_base + row)))
+
     # -- the expansion + truncation kernel ---------------------------------------
 
     def expand(self, anchor_rows: list[int], config: HypergraphConfig) -> list[int]:
@@ -415,9 +426,14 @@ class HypergraphIndex:
                 stream = _np.concatenate(parts)
                 fresh = stream[~seen[stream]]
                 if fresh.size:
-                    _unique, first = _np.unique(fresh, return_index=True)
-                    first.sort()
-                    layer = fresh[first]
+                    # First-occurrence dedupe WITHOUT a sort: scatter each position into a
+                    # per-value slot with the reversed stream (so the earliest write wins),
+                    # then keep exactly the positions that read back their own index. O(n),
+                    # order-preserving — the argsort inside np.unique was 60%+ of the lane.
+                    slots = _np.empty(len(self._hids), dtype=_np.int64)
+                    positions = _np.arange(fresh.size, dtype=_np.int64)
+                    slots[fresh[::-1]] = positions[::-1]
+                    layer = fresh[slots[fresh] == positions]
                     seen[layer] = True
             if layer.size == 0:
                 break
@@ -698,12 +714,11 @@ def hypergraph_signals(
             for hid, row in zip(candidates, candidate_rows, strict=True)
         }
 
+        row_of = dict(zip(candidates, candidate_rows, strict=True))
+        resolved_index = index
+
         def _indexed_fields(hid: str) -> dict[str, Any]:
-            fields = store.solver_fields(hid)
-            if fields is None:  # pragma: no cover - indexed rows exist by construction
-                msg = f"hyperedge {hid!r} is indexed but has no solver row."
-                raise ValueError(msg)
-            return fields
+            return resolved_index.solver_fields_at(store, row_of[hid])
 
         fields_of = _indexed_fields
     else:

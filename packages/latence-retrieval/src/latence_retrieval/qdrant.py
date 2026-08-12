@@ -61,8 +61,22 @@ _CONNECTION_KEYS: frozenset[str] = frozenset(
     {"url", "host", "port", "grpc_port", "prefer_grpc", "https", "api_key", "timeout", "location"}
 )
 _ADAPTER_KEYS: frozenset[str] = frozenset(
-    {"collection", "capabilities", "dimension", "vector_name", "sparse_vector_name", "text_key"}
+    {
+        "collection",
+        "capabilities",
+        "dimension",
+        "vector_name",
+        "sparse_vector_name",
+        "text_key",
+        "id_key",
+        "search_params",
+    }
 )
+#: The keys ``search_params`` may carry — Qdrant's per-query ANN accuracy knobs, and exactly the
+#: two a serving deployment tunes against a brute-force reference: ``hnsw_ef`` (the HNSW beam
+#: width; higher = more exact, slower) and ``exact`` (bypass the ANN index entirely — the
+#: rescoring option that turns the store into the brute-force reference itself).
+_SEARCH_PARAM_KEYS: frozenset[str] = frozenset({"hnsw_ef", "exact"})
 #: The payload field the chunk text lives under, by default. This is the framework's OWN Export
 #: column name (``content`` — ``latence_core.stages.export``), which ``latence-sink-qdrant``
 #: (#183) writes verbatim into the payload of every point it loads. The default therefore makes
@@ -71,6 +85,19 @@ _ADAPTER_KEYS: frozenset[str] = frozenset(
 #: set ``text_key`` to whatever key *they* used; a key the payload does not carry is a loud
 #: :class:`~latence_retrieval.errors.BackendSearchError`, never a silent empty ``Candidate.text``.
 DEFAULT_TEXT_KEY = "content"
+#: The payload field the corpus record identity lives under, by default. Qdrant point ids are
+#: unsigned integers or UUIDs, so ``latence-sink-qdrant`` derives a UUIDv5 point id from the
+#: Export's content-addressed ``record_id`` — and writes the ``record_id`` itself into the payload
+#: precisely so the identity survives the trip. Every downstream consumer of this seam
+#: (deduplicating fusers, gold scoring, :class:`~latence_retrieval.rescue.GraphRescueRetrieval`'s
+#: append-and-dedupe, hyperedge→chunk resolution) keys on :attr:`Candidate.id` being the *corpus*
+#: id, so the default restores it: a payload carrying this key yields ``Candidate.id`` from it
+#: (and drops it from ``metadata`` — no duplication, mirroring ``text_key``), while a payload
+#: without it — a collection somebody else built, keyed by its own point ids — gracefully keeps
+#: the stringified point id, which is the correct identity for that collection. Present-but-
+#: malformed is a loud :class:`~latence_retrieval.errors.BackendSearchError`; set ``id_key`` to
+#: another payload field, or to ``None`` to always use the store's point id.
+DEFAULT_ID_KEY = "record_id"
 
 
 class QdrantBackend:
@@ -101,6 +128,19 @@ class QdrantBackend:
             override); it becomes :attr:`Candidate.text` and is dropped from
             :attr:`Candidate.metadata` (no duplication). A non-empty payload missing this key is a
             :class:`~latence_retrieval.errors.BackendSearchError`, never a silent empty text.
+        id_key: str | None — the payload field holding the corpus record identity (default
+            :data:`DEFAULT_ID_KEY` = ``"record_id"``, the column ``latence-sink-qdrant`` writes
+            into every point precisely so the content-addressed id survives the UUID point-id
+            derivation). A payload carrying it yields :attr:`Candidate.id` from it (dropped from
+            ``metadata``); a payload without it keeps the stringified point id — the correct
+            identity for a collection somebody else keyed — while present-but-malformed is a loud
+            :class:`~latence_retrieval.errors.BackendSearchError`. ``None`` always uses the
+            store's point id.
+        search_params: dict | None — per-query ANN accuracy knobs threaded to ``query_points`` as
+            ``models.SearchParams``: ``hnsw_ef`` (int ≥ 1, the HNSW search beam width) and/or
+            ``exact`` (bool — bypass the ANN index and score exactly, the rescoring option).
+            Default ``None`` (the collection's own defaults). These are the two knobs a serving
+            deployment tunes when proving recall parity against a brute-force reference.
         url / host / port / grpc_port / prefer_grpc / https / api_key / timeout / location —
             connection kwargs threaded verbatim to ``QdrantClient`` when it is built lazily. Ignored
             when a ``client`` is injected.
@@ -149,6 +189,16 @@ class QdrantBackend:
             raise ValueError(msg)
         self._text_key = text_key
 
+        id_key = cfg.get("id_key", DEFAULT_ID_KEY)
+        if id_key is not None and (not isinstance(id_key, str) or not id_key):
+            msg = (
+                f"QdrantBackend 'id_key' must be a non-empty string or None, got {id_key!r}."
+            )
+            raise ValueError(msg)
+        self._id_key: str | None = id_key
+
+        self._search_params = self._parse_search_params(cfg.get("search_params"))
+
         self._client = client
         self._client_kwargs = {k: cfg[k] for k in _CONNECTION_KEYS if k in cfg}
         self._models: Any = None
@@ -177,6 +227,40 @@ class QdrantBackend:
                 raise ValueError(msg)
             parsed.add(cap)
         return frozenset(parsed)
+
+    @staticmethod
+    def _parse_search_params(raw: object) -> dict[str, Any] | None:
+        """Validate the ``search_params`` block at construction — offline, before any wire.
+
+        A typo'd knob or a wrong type here would otherwise surface as an opaque server rejection
+        (or, worse, a silently-ignored setting) three components deep into a serving run.
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or not raw:
+            msg = (
+                "QdrantBackend 'search_params' must be a non-empty dict with keys from "
+                f"{sorted(_SEARCH_PARAM_KEYS)} or omitted, got {raw!r}."
+            )
+            raise ValueError(msg)
+        unknown = set(raw) - _SEARCH_PARAM_KEYS
+        if unknown:
+            msg = (
+                f"QdrantBackend 'search_params' has unknown key(s) {sorted(unknown)}; "
+                f"valid keys: {sorted(_SEARCH_PARAM_KEYS)}."
+            )
+            raise ValueError(msg)
+        hnsw_ef = raw.get("hnsw_ef")
+        if hnsw_ef is not None and (
+            not isinstance(hnsw_ef, int) or isinstance(hnsw_ef, bool) or hnsw_ef < 1
+        ):
+            msg = f"QdrantBackend 'search_params.hnsw_ef' must be an int >= 1, got {hnsw_ef!r}."
+            raise ValueError(msg)
+        exact = raw.get("exact")
+        if exact is not None and not isinstance(exact, bool):
+            msg = f"QdrantBackend 'search_params.exact' must be a bool, got {exact!r}."
+            raise ValueError(msg)
+        return dict(raw)
 
     @staticmethod
     def _optional_str(value: object, name: str) -> str | None:
@@ -233,6 +317,7 @@ class QdrantBackend:
                 query_filter=query_filter,
                 limit=query.top_k,
                 with_payload=True,
+                search_params=self._build_search_params(models),
             )
             points = list(response.points)
         except (BackendCapabilityError, BackendDimensionError):  # pragma: no cover - never reached
@@ -266,6 +351,12 @@ class QdrantBackend:
             values.append(float(weight))
         return models.SparseVector(indices=indices, values=values), self._sparse_vector_name
 
+    def _build_search_params(self, models: Any) -> Any | None:
+        """The configured ANN knobs as a ``models.SearchParams``, or ``None`` for store defaults."""
+        if self._search_params is None:
+            return None
+        return models.SearchParams(**self._search_params)
+
     @staticmethod
     def _build_filter(predicate: dict[str, Any] | None, models: Any) -> Any | None:
         """Translate the exact per-field equality predicate into a Qdrant ``Filter`` (``must`` AND).
@@ -285,9 +376,12 @@ class QdrantBackend:
     def _to_candidate(self, point: Any) -> Candidate:
         """Map one Qdrant ``ScoredPoint`` (id/score/payload) to a frozen :class:`Candidate`.
 
-        The payload's ``text_key`` becomes the candidate ``text`` and is dropped from ``metadata``
-        (no duplication); every other payload field is carried through as opaque provenance. A point
-        id (Qdrant allows ``int`` or UUID ``str``) is stringified to the seam's string ``id``.
+        The payload's ``text_key`` becomes the candidate ``text`` and the payload's ``id_key`` —
+        when the payload carries one — becomes the candidate ``id``; both are dropped from
+        ``metadata`` (no duplication), and every other payload field is carried through as opaque
+        provenance. Without an ``id_key`` value the point id (Qdrant allows ``int`` or UUID
+        ``str``) is stringified to the seam's string ``id`` — see :data:`DEFAULT_ID_KEY` for why
+        the graceful-absent / loud-malformed split is the honest one here.
 
         A **non-empty** payload that does not carry ``text_key`` is a configuration fault, not a
         result: silently returning ``text=""`` would hand the pipeline a full page of Candidates
@@ -309,11 +403,33 @@ class QdrantBackend:
             raise BackendSearchError(msg)
         text = payload.pop(self._text_key, "")
         return Candidate(
-            id=str(point.id),
+            id=self._candidate_id(point, payload),
             score=float(point.score),
             text=str(text) if text is not None else "",
             metadata=payload,
         )
+
+    def _candidate_id(self, point: Any, payload: dict[str, Any]) -> str:
+        """The seam identity for one point: the payload's ``id_key`` value, or the point id.
+
+        Pops the consumed key from ``payload`` (the caller's metadata dict) so the identity is
+        never duplicated into ``metadata`` — the same discipline ``text_key`` follows. Absent is
+        graceful (a foreign collection's points ARE identified by their point ids); present-but-
+        malformed is loud, because an id that stringifies a dict or an empty value would corrupt
+        every downstream dedupe and join silently.
+        """
+        if self._id_key is None or self._id_key not in payload:
+            return str(point.id)
+        raw = payload.pop(self._id_key)
+        if not isinstance(raw, str) or not raw:
+            msg = (
+                f"qdrant collection {self._collection!r} carries a non-string or empty "
+                f"{self._id_key!r} payload field on point {point.id!s}; 'id_key' must name a "
+                "payload field holding non-empty string record ids (or be None to use the "
+                "store's point ids)."
+            )
+            raise BackendSearchError(msg)
+        return raw
 
     def _load_models(self) -> Any:
         """Import ``qdrant_client.models`` lazily (cached) for the filter/sparse translation."""
@@ -346,4 +462,4 @@ class QdrantBackend:
         return QdrantClient, models
 
 
-__all__ = ["DEFAULT_TEXT_KEY", "QdrantBackend"]
+__all__ = ["DEFAULT_ID_KEY", "DEFAULT_TEXT_KEY", "QdrantBackend"]

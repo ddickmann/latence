@@ -41,7 +41,7 @@ from latence_retrieval import (
     RetrievalBackend,
     RetrievalQuery,
 )
-from latence_retrieval.qdrant import DEFAULT_TEXT_KEY
+from latence_retrieval.qdrant import DEFAULT_ID_KEY, DEFAULT_TEXT_KEY
 
 # --- the faithful fake qdrant_client module ---------------------------------------------------
 
@@ -66,6 +66,14 @@ class _SparseVector:
     def __init__(self, indices: list[int], values: list[float]) -> None:
         self.indices = indices
         self.values = values
+
+
+class _SearchParams:
+    # Mirrors the real ``models.SearchParams`` keys the adapter may thread: an explicit signature,
+    # so a knob the real model lacks would fail here too.
+    def __init__(self, hnsw_ef: int | None = None, exact: bool = False) -> None:
+        self.hnsw_ef = hnsw_ef
+        self.exact = exact
 
 
 class _ScoredPoint:
@@ -103,6 +111,7 @@ class _FakeQdrantClient:
         query_filter: _Filter | None = None,
         limit: int = 10,
         with_payload: bool = False,
+        search_params: _SearchParams | None = None,
     ) -> _QueryResponse:
         self.calls.append(
             {
@@ -112,6 +121,7 @@ class _FakeQdrantClient:
                 "query_filter": query_filter,
                 "limit": limit,
                 "with_payload": with_payload,
+                "search_params": search_params,
             }
         )
         if collection_name not in self.store:
@@ -127,6 +137,7 @@ def _make_models_module() -> types.ModuleType:
     models_mod.FieldCondition = _FieldCondition  # type: ignore[attr-defined]
     models_mod.MatchValue = _MatchValue  # type: ignore[attr-defined]
     models_mod.SparseVector = _SparseVector  # type: ignore[attr-defined]
+    models_mod.SearchParams = _SearchParams  # type: ignore[attr-defined]
     return models_mod
 
 
@@ -357,6 +368,102 @@ def test_missing_payload_yields_empty_text_and_metadata(monkeypatch: pytest.Monk
     (only,) = _dense_backend().search(RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0)))
     assert only.text == ""
     assert only.metadata == {}
+
+
+# --- the id round trip (id_key) ----------------------------------------------------------------
+
+
+def test_the_default_id_key_is_the_column_the_shipped_sink_writes() -> None:
+    # The sink derives a UUIDv5 point id from the Export's `record_id` (Qdrant rejects arbitrary
+    # string ids) and writes the record_id into the payload precisely so the corpus identity
+    # survives the trip. Mismatched defaults would hand every downstream dedupe/join a UUID the
+    # rest of the corpus has never heard of.
+    assert DEFAULT_ID_KEY == "record_id"
+
+
+def test_default_id_key_restores_the_corpus_record_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = {
+        "docs": [
+            _ScoredPoint(
+                id="8b7d2b6e-0000-5000-8000-000000000001",
+                score=0.9,
+                payload={"content": "alpha", "record_id": "sha256:c1", "tenant": "acme"},
+            )
+        ]
+    }
+    _install_fake_qdrant(monkeypatch, store)
+    (only,) = _dense_backend().search(RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0)))
+    assert only.id == "sha256:c1"  # the corpus identity, not the derived point UUID
+    assert "record_id" not in only.metadata  # …and not duplicated into metadata
+
+
+def test_a_payload_without_the_id_key_keeps_the_point_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A foreign collection's points ARE identified by their point ids — graceful, not an error.
+    _install_fake_qdrant(monkeypatch, _CORPUS)
+    hits = _dense_backend().search(RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0)))
+    assert [c.id for c in hits] == ["1", "3", "2"]
+
+
+def test_id_key_none_always_uses_the_point_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = {
+        "docs": [
+            _ScoredPoint(id=7, score=0.9, payload={"content": "alpha", "record_id": "sha256:c1"})
+        ]
+    }
+    _install_fake_qdrant(monkeypatch, store)
+    (only,) = _dense_backend(id_key=None).search(
+        RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0))
+    )
+    assert only.id == "7"
+    assert only.metadata["record_id"] == "sha256:c1"  # untouched: nothing consumed it
+
+
+def test_a_malformed_id_key_value_is_a_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Present-but-malformed is loud: an empty id would silently corrupt every dedupe and join.
+    store = {"docs": [_ScoredPoint(id=7, score=0.9, payload={"content": "alpha", "record_id": ""})]}
+    _install_fake_qdrant(monkeypatch, store)
+    with pytest.raises(BackendSearchError, match="id_key"):
+        _dense_backend().search(RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0)))
+
+
+def test_rejects_a_bad_id_key_config() -> None:
+    with pytest.raises(ValueError, match="id_key"):
+        _dense_backend(id_key=123)
+
+
+# --- ANN accuracy knobs (search_params) --------------------------------------------------------
+
+
+def test_search_params_are_threaded_to_query_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    clients = _install_fake_qdrant(monkeypatch, _CORPUS)
+    _dense_backend(search_params={"hnsw_ef": 512, "exact": False}).search(
+        RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0))
+    )
+    sent = clients[0].calls[0]["search_params"]
+    assert isinstance(sent, _SearchParams)
+    assert (sent.hnsw_ef, sent.exact) == (512, False)
+
+
+def test_no_search_params_sends_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    clients = _install_fake_qdrant(monkeypatch, _CORPUS)
+    _dense_backend().search(RetrievalQuery(mode=Capability.DENSE, vector=(0.0, 0.0, 0.0)))
+    assert clients[0].calls[0]["search_params"] is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {},  # empty: a knob block that sets nothing is a config mistake, not a default
+        {"ef": 128},  # unknown key (the real knob is hnsw_ef)
+        {"hnsw_ef": 0},
+        {"hnsw_ef": True},
+        {"exact": "yes"},
+        "exact",
+    ],
+)
+def test_rejects_bad_search_params_at_construction(bad: Any) -> None:
+    with pytest.raises(ValueError, match="search_params"):
+        _dense_backend(search_params=bad)
 
 
 # --- sparse search behaviour ------------------------------------------------------------------

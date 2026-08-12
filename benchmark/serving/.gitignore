@@ -1,0 +1,4 @@
+# Local run state: query-vector checkpoints + per-query row logs. The committed evidence is the
+# .summary.json files (small aggregates) and the ticket report.
+cache/
+results/*.jsonl
