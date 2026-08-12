@@ -1,7 +1,7 @@
 # 02 — Qdrant serving-path parity: the benched stack on a real ANN engine
 
 Type: task
-Status: open
+Status: claimed
 Blocked by: —
 
 ## Why (Dennis, 2026-08-12)
