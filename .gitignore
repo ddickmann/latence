@@ -69,3 +69,11 @@ benchmark/sota-corpus/s3-exports/
 benchmark/sota-campaign/stages/s3-pipeline/reports/
 benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/samples/
 benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/induction-sample.jsonl
+# Local S3 export copies (corpus-derived text + embeddings — same lanes as above) and
+# run logs; the committed evidence is metrics.json + the stage REPORTs, never raw runs.
+benchmark/sota-campaign/stages/s3-pipeline/exports/
+benchmark/sota-campaign/stages/*.log
+benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/*.log
+# The whole acquired-corpus tree is dataset-derived and stays local (per-dataset lanes in
+# latence_benchmark.campaign.corpus_stage.CORPUS_PLAN; nothing under it is tracked).
+benchmark/sota-corpus/
