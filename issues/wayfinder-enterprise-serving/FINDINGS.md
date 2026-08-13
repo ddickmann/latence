@@ -94,3 +94,47 @@ before the final count line. A re-run of that torch-adjacent file plus the new
 (torch + everything in one interpreter) and is not attributable to any test or to the pure-
 Python Wave 2-E change. Same family as F7's single-process torch-state fragility on roster
 hosts; logged, not chased.
+
+## F7 addendum — ROOT-CAUSED and closed structurally (Wave 3-H)
+
+The `prims.iota only supports integer dtypes` flake reproduced DETERMINISTICALLY on the dev
+Mac (torch + sentence-transformers installed) with `test_perf_jit_capability_gate.py` +
+`test_real_weights_embeds_at_declared_width` in one interpreter, and bisected to a PAIR of
+gate tests (`test_unreadable_nvidia_smi_output_is_neutralized` +
+`test_nvidia_smi_missing_entirely_is_neutralized`). Mechanism, two compounding leaks:
+
+1. **Franken re-import of torch.** Both tests `monkeypatch.delitem(sys.modules, "torch")`
+   and then call `neutralize_torch_jit(config={})`, whose guarded `import torch`
+   RE-EXECUTES `torch/__init__.py` against the stale `torch.*` submodules still in
+   `sys.modules` (first such test imports torch cleanly; the second re-inits it). The
+   re-init corrupts prims/decomp registration process-wide; the next real-weights
+   `from_pretrained` (Granite 311m) dies in `prims.iota`. Fixed by pinning
+   `sys.modules["torch"] = None` (import raises → the seam's guarded torch-free path),
+   which is the established discipline everywhere else. The other `delitem` sites
+   (`test_perf_hardware_derived_defaults.py`, two probe tests in the gate file) never
+   trigger a torch import and are left as-is (their `"torch" not in sys.modules`
+   assertions need the delitem).
+2. **`PYTORCH_JIT=0` leaked past the file.** `monkeypatch.delenv(..., raising=False)` on an
+   already-unset var registers no undo, so the env switch the seam sets inside those tests
+   escaped into the remainder of any single-interpreter run. Closed by the Wave 3-H owner:
+   the file's autouse fixture now wraps every test in `scoped_torch_runtime()`, which
+   records and restores the env switch, the in-process JIT state, thread caps and dynamo
+   state. The embedder-st real-weights test scopes its own load the same way.
+
+Evidence: the failing pair is green after the fix, and the F7 configuration (embedder-st +
+extract-gliner2 + pii-gliner2 + splade + all 8 perf test files, single process,
+`PYTHONHASHSEED=0`) ran **3×: 388 passed / 1 skipped / 0 failed, exit 0, every run**.
+Claim calibrated: the roster-host polluter was never caught in the act, but the local
+reproduction shares the fingerprint (same error, same victim, order-dependent, single
+interpreter), and the class — unowned global torch state — is now owned either way.
+
+## F10 — gliner2/splade test suites swallow pytest's final summary line (pre-existing)
+
+`pytest packages/latence-extract-gliner2/tests packages/latence-pii-gliner2/tests
+packages/latence-splade/tests -q` exits 0 with all progress markers green but the log ends
+at `[100%]` — no warnings summary, no `N passed` line (with embedder-st + perf files added,
+the warnings summary appears but the count line is still missing). Reproduced on the
+UNTOUCHED suites, so it predates Wave 3-H and is not attributable to it; something in those
+suites' teardown swallows the terminal reporter's tail (F9's shutdown fragility family).
+Logged, not chased — gate verdicts on these suites should read the exit code + marker
+counts, not the summary line.

@@ -21,7 +21,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from latence_core.providers.perf import (
@@ -31,8 +31,12 @@ from latence_core.providers.perf import (
     detect_compute_capability,
     neutralize_torch_jit,
     resolve_torch_jit_policy,
+    scoped_torch_runtime,
     torch_jit_must_be_neutralized,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class _FakeEnabled:
@@ -69,10 +73,19 @@ def _install_fake_torch(
 
 
 @pytest.fixture(autouse=True)
-def _clean_jit_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with the JIT switch UNSET and no capability override in force."""
+def _clean_jit_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test starts with the JIT switch UNSET and LEAVES it that way (Wave 3-H).
+
+    ``monkeypatch.delenv(..., raising=False)`` on a var that is ALREADY unset registers no undo, so
+    the ``PYTORCH_JIT=0`` these tests make the seam set used to LEAK out of this file into every
+    later test of a single-interpreter run — half of FINDINGS F7. The scoped
+    :class:`~latence_core.providers.perf.TorchRuntime` records what the seam changes inside each
+    test (the env switch, an in-process JIT disable) and restores it on the way out.
+    """
     monkeypatch.delenv(TORCH_JIT_ENV, raising=False)
     monkeypatch.delenv(LATENCE_COMPUTE_CAPABILITY_ENV, raising=False)
+    with scoped_torch_runtime():
+        yield
 
 
 def _no_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +198,12 @@ def test_unreadable_nvidia_smi_output_is_neutralized(monkeypatch: pytest.MonkeyP
     An old driver whose ``nvidia-smi`` predates ``--query-gpu=compute_cap`` answers with an error
     string, not a capability. That must not be parsed into a false "known-good".
     """
-    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    # PIN torch to None (import raises, the guarded torch-free path) rather than delitem: with the
+    # real torch delitem'd from a process that already imported it, the seam's own ``import torch``
+    # would RE-EXECUTE torch/__init__ against the stale submodules still in sys.modules — the
+    # franken-reinit that corrupts prims/decomp registration and broke a LATER real-weights Granite
+    # load with ``prims.iota only supports integer dtypes`` (FINDINGS F7, root-caused Wave 3-H).
+    monkeypatch.setitem(sys.modules, "torch", None)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(
         "subprocess.run",
@@ -203,7 +221,8 @@ def test_unreadable_nvidia_smi_output_is_neutralized(monkeypatch: pytest.MonkeyP
 def test_nvidia_smi_missing_entirely_is_neutralized(monkeypatch: pytest.MonkeyPatch) -> None:
     """A host with neither torch nor ``nvidia-smi`` — the offline CI shape — is unknown → kill."""
     _no_nvidia_smi(monkeypatch)
-    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    # None, not delitem — see test_unreadable_nvidia_smi_output_is_neutralized (the F7 re-import).
+    monkeypatch.setitem(sys.modules, "torch", None)
 
     assert detect_compute_capability() is None
     assert torch_jit_must_be_neutralized({}) is True

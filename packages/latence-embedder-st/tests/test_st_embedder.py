@@ -264,14 +264,22 @@ def test_real_weights_embeds_at_declared_width() -> None:  # pragma: no cover - 
     where ``sentence-transformers`` and the Granite r2 311m checkpoint are actually available (a
     rig), and is skipped in the offline CPU-first CI env. It asserts the REAL model returns one
     correct-width, L2-normalised vector per input, in input order.
+
+    Wave 3-H / FINDINGS F7: the load runs inside :func:`scoped_torch_runtime`, so the
+    process-global torch state the composite touches (the intra-op thread cap; a compile if one
+    were configured) is RESTORED when this test exits — the real-weights boundary no longer leaks
+    torch state into the rest of a single-interpreter roster run.
     """
     import math
 
-    embedder = SentenceTransformersEmbedder({})  # Granite r2 311m default
-    out = list(embedder.embed(["hello world", "a different sentence"]))
-    assert len(out) == 2
-    assert embedder.dimension == 768
-    assert all(len(v) == 768 for v in out)
-    for v in out:
-        norm = math.sqrt(sum(x * x for x in v))
-        assert abs(norm - 1.0) < 1e-3  # normalize_embeddings=True ⇒ unit length
+    from latence_core.providers.perf import scoped_torch_runtime
+
+    with scoped_torch_runtime():
+        embedder = SentenceTransformersEmbedder({})  # Granite r2 311m default
+        out = list(embedder.embed(["hello world", "a different sentence"]))
+        assert len(out) == 2
+        assert embedder.dimension == 768
+        assert all(len(v) == 768 for v in out)
+        for v in out:
+            norm = math.sqrt(sum(x * x for x in v))
+            assert abs(norm - 1.0) < 1e-3  # normalize_embeddings=True ⇒ unit length
