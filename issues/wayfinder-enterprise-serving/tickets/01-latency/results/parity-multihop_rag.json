@@ -1,0 +1,8 @@
+{
+  "dataset": "multihop_rag",
+  "diffs": 0,
+  "queries": 2556,
+  "kg": 2556,
+  "hyper_ladder": 2556,
+  "hyper_rescue": 2556
+}

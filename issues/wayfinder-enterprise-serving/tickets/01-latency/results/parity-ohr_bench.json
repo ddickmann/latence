@@ -1,0 +1,8 @@
+{
+  "dataset": "ohr_bench",
+  "diffs": 0,
+  "queries": 4541,
+  "kg": 4541,
+  "hyper_ladder": 4541,
+  "hyper_rescue": 4541
+}

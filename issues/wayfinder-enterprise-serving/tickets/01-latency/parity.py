@@ -86,17 +86,25 @@ def main() -> None:
     dataset = sys.argv[1]
     limit: int | None = None
     shard = (0, 1)
+    skip = 0
     for arg in sys.argv[2:]:
         if arg.startswith("--limit"):
             limit = int(arg.split("=", 1)[1])
         if arg.startswith("--shard"):
             part, total = arg.split("=", 1)[1].split("/")
             shard = (int(part), int(total))
+        if arg.startswith("--skip"):
+            skip = int(arg.split("=", 1)[1])
     runner = load_runner(dataset)
     cases = lane_cases(runner, dataset, limit=limit)
     if shard != (0, 1):
         cases = cases[shard[0] :: shard[1]]
         print(f"[{dataset}] shard {shard[0]}/{shard[1]}: {len(cases)} cases", flush=True)
+    if skip:
+        # Resume: positions [0, skip) of this (shard's) case list were already parity-checked
+        # in an interrupted run (its log is the evidence); re-check only the remainder.
+        cases = cases[skip:]
+        print(f"[{dataset}] resuming at {skip}: {len(cases)} cases left", flush=True)
     assert runner.kv_path is not None
     with HyperedgeKV.open(str(runner.kv_path), cache=False) as kv:
         fallback_index = HypergraphIndex(kv, accelerated=False)
@@ -173,7 +181,7 @@ def main() -> None:
             elapsed = time.perf_counter() - started
             print(f"[{dataset}] {i + 1}/{len(cases)} parity-checked ({elapsed:.0f}s)", flush=True)
 
-    out = {"dataset": dataset, "diffs": diffs, **counts}
+    out = {"dataset": dataset, "diffs": diffs, "skipped_resume_offset": skip, **counts}
     results_dir = Path(__file__).resolve().parent / "results"
     results_dir.mkdir(exist_ok=True)
     suffix = f"-shard{shard[0]}of{shard[1]}" if shard != (0, 1) else ""
