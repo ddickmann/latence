@@ -32,9 +32,13 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 VENV = REPO / ".venv/bin"
 
-# phase -> (corpus mutation, pipeline yaml, CLI verb, run id, expected churn or None)
-PHASES: list[tuple[str, str | None, str, str, str, dict[str, int] | None]] = [
-    ("base", "base", "incr-noembed.yaml", "delta", "t03-v1", None),
+# phase -> (corpus mutation, pipeline yaml, CLI verb, run id, expected churn or None).
+# ``group`` marks phases that run CONCURRENTLY after the same mutation: once the delete
+# mutation lands, the final delta (t03-v4) and the full rebuild both read the FINAL input dir
+# read-only into separate stores — the two ~3 h CPU embedding passes overlap safely (same
+# torch thread count in both processes, so CPU numerics stay bitwise; no shared state).
+PHASES: list[tuple[str, str | None, str, str, str, dict[str, int] | None, int]] = [
+    ("base", "base", "incr-noembed.yaml", "delta", "t03-v1", None, 0),
     (
         "add",
         "add",
@@ -42,6 +46,7 @@ PHASES: list[tuple[str, str | None, str, str, str, dict[str, int] | None]] = [
         "delta",
         "t03-v2",
         {"documents_reused": 548, "documents_extracted": 61, "documents_added": 61},
+        1,
     ),
     (
         "update",
@@ -51,6 +56,7 @@ PHASES: list[tuple[str, str | None, str, str, str, dict[str, int] | None]] = [
         "t03-v3",
         # A content-addressed edit is add(new id) + delete(old id): 20 edited, 589 unchanged.
         {"documents_reused": 589, "documents_extracted": 20, "documents_deleted": 20},
+        2,
     ),
     (
         "delete",
@@ -59,8 +65,9 @@ PHASES: list[tuple[str, str | None, str, str, str, dict[str, int] | None]] = [
         "delta",
         "t03-v4",
         {"documents_reused": 589, "documents_extracted": 0, "documents_deleted": 20},
+        3,
     ),
-    ("rebuild", None, "rebuild.yaml", "run", "t03-rebuild", None),
+    ("rebuild", None, "rebuild.yaml", "run", "t03-rebuild", None, 3),
 ]
 
 
@@ -102,38 +109,62 @@ def main(proof_root: str) -> None:
     sys.path.insert(0, str(HERE))
     from prepare_corpus import apply_phase  # noqa: PLC0415 - sibling-script import
 
-    for phase, mutation, yaml_name, verb, run_id, expect in PHASES:
-        if state.get(phase) == "done":
-            _log(f"phase {phase}: already done, skipping")
+    def _save() -> None:
+        state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+
+    groups = sorted({g for *_, g in PHASES})
+    for group in groups:
+        members = [p for p in PHASES if p[-1] == group]
+        pending = [p for p in members if state.get(p[0]) != "done"]
+        if not pending:
+            for phase, *_ in members:
+                _log(f"phase {phase}: already done, skipping")
             continue
-        _log(f"phase {phase}: start")
-        if mutation is not None:
-            apply_phase(root, mutation)
-        cmd = [
-            str(VENV / "latence"),
-            verb,
-            str(HERE / "pipelines" / yaml_name),
-            "--run-id",
-            run_id,
-        ]
+        # One mutation per group (idempotent to re-apply on resume), then every pending member
+        # of the group runs CONCURRENTLY — separate stores, read-only shared input.
+        for phase, mutation, *_rest in pending:
+            if mutation is not None:
+                apply_phase(root, mutation)
+                _log(f"phase {phase}: mutation {mutation} applied")
         started = time.time()
-        with (logs / f"{phase}.log").open("ab") as log:
-            result = subprocess.run(  # noqa: S603 - fixed local command
-                cmd,
+        procs: list[tuple[str, str, str, dict[str, int] | None, subprocess.Popen[bytes]]] = []
+        for phase, _mutation, yaml_name, verb, run_id, expect, _g in pending:
+            _log(f"phase {phase}: start ({verb} {yaml_name} --run-id {run_id})")
+            log = (logs / f"{phase}.log").open("ab")
+            proc = subprocess.Popen(  # noqa: S603 - fixed local command
+                [
+                    str(VENV / "latence"),
+                    verb,
+                    str(HERE / "pipelines" / yaml_name),
+                    "--run-id",
+                    run_id,
+                ],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env={**os.environ, "PYTHONHASHSEED": "0"},
-                check=False,
             )
-        if result.returncode != 0:
-            state[phase] = "failed"
-            state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
-            msg = f"phase {phase} exited {result.returncode}; see {logs / f'{phase}.log'}"
+            procs.append((phase, yaml_name, run_id, expect, proc))
+        failed = False
+        for phase, yaml_name, run_id, expect, proc in procs:
+            code = proc.wait()
+            if code != 0:
+                state[phase] = "failed"
+                failed = True
+                _log(f"phase {phase}: EXITED {code}; see {logs / f'{phase}.log'}")
+                continue
+            try:
+                _probe(yaml_name, run_id, expect)
+            except SystemExit as exc:
+                state[phase] = "failed"
+                failed = True
+                _log(f"phase {phase}: PROBE FAILED — {exc}")
+                continue
+            state[phase] = "done"
+            _log(f"phase {phase}: done at +{(time.time() - started) / 60:.1f} min")
+        _save()
+        if failed:
+            msg = f"phase group {group} failed; see {logs}"
             raise SystemExit(msg)
-        _probe(yaml_name, run_id, expect)
-        state[phase] = "done"
-        state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
-        _log(f"phase {phase}: done in {(time.time() - started) / 60:.1f} min")
     _log("all phases done")
 
 

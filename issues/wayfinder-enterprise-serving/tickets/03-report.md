@@ -2,6 +2,15 @@
 
 Status: draft (proof running — this file is finalized when the real-data gate completes)
 
+> Run log: the first full-scale attempt (2026-08-12) was killed mid-base-extraction at 2 720 of
+> ~2 939 chunks when its host session ended (the supervisor was session-tied). No divergence —
+> a clean interruption; the WAL/checkpoint discipline left the run resumable. Relaunched
+> 2026-08-13 08:46 DETACHED (`nohup`, survives session death), with the two ~3 h embedding runs
+> (final delta t03-v4 + full rebuild) now overlapped after the delete mutation — both read the
+> finalized input dir read-only into separate stores; same torch thread count in both processes
+> keeps CPU numerics bitwise. A detached finalizer runs `compare.py` automatically on phase
+> completion (`benchmark/sota-corpus/ticket03-proof/{phases.json,logs/,compare.log,results.json}`).
+
 ## What landed
 
 * **ADR-0061** — `docs/adr/0061-incremental-ingest-exact-corpus-recompute-over-an-order-preserving-reuse-union.md`
@@ -37,6 +46,17 @@ Status: draft (proof running — this file is finalized when the real-data gate 
   **byte-for-byte** equal (export jsonl + graph checkpoint) to a batch rebuild of the same final
   corpus, reuse provably engaged; export no-double-count; induced-schema churn never re-induces
   unchanged documents (lexicon inducer witness). Plus a `--dry-run` CLI test.
+
+## Real-data smoke (already complete — the harness self-test)
+
+Before the full run, the identical protocol on a 14-doc multihop_rag subset (full s3 profile,
+CPU): base 12 docs → add 2 → delta (witness: 12 reused / 2 extracted) vs batch rebuild of all
+14. Result: **all six graph artifacts byte-identical** (nodes/edges/hyperedges parquet, KV
+store, TTL, GraphML), corpus row sets identical, **embeddings bitwise identical**, bm25-stats
+byte-identical, 200/200 BM25 and dense top-20 rankings identical. The smoke also CAUGHT a real
+divergence — the reuse store's lexicographic id-sort put `#chunk-10` before `#chunk-2` in a
+reused document's within-doc order — fixed read-side by the natural-order overlay fold
+(commit 4249620) and pinned by a >10-chunk document in the CI equivalence test.
 
 ## The equivalence proof (the gate)
 
