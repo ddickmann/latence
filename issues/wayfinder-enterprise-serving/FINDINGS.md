@@ -82,3 +82,15 @@ trailing slash would have had the demo read its graph checkpoint / write its sit
 `//_latence` path the runner never wrote (default URI unaffected, so no test caught it).
 Structurally closed, not spot-fixed: every consumer now mints paths through
 `latence_core.run_store.RunLayout`, so the divergence class cannot recur.
+
+## F9 — full latence-core suite segfaults at interpreter shutdown (after 2286 passed / 7 skipped / 0 failed)
+
+The Wave 2-E full-suite gate (single process, `PYTHONHASHSEED=0`, 2,293 tests) ran to
+`[100%]` with zero `F`/`E` progress markers and zero `FAILED`/`ERROR` lines (2,286 `.` +
+7 `s` counted from the log), printed the warnings summary — the last warning being the torch
+JIT deprecation from `test_perf_fp32_regression_guard` — and then died SIGSEGV (exit 139)
+before the final count line. A re-run of that torch-adjacent file plus the new
+`test_run_store.py` exits 0, so the crash needs the whole 2,293-test session's teardown
+(torch + everything in one interpreter) and is not attributable to any test or to the pure-
+Python Wave 2-E change. Same family as F7's single-process torch-state fragility on roster
+hosts; logged, not chased.
