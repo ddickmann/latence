@@ -20,7 +20,7 @@ import json
 import re
 import time
 from itertools import chain
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 # The run layout + checkpoint decode live in their own owned module (``run_store``, Wave 2-E):
 # the private path/decode methods below are thin delegators over it, so this engine's internal
@@ -51,7 +51,6 @@ from latence_core.capability import (
 )
 from latence_core.capability_descriptor import (
     ACCUMULATOR_KINDS,
-    CORPUS_LEVEL_KINDS,
     dag_protocol_for,
 )
 from latence_core.contracts import (
@@ -62,7 +61,6 @@ from latence_core.contracts import (
     FeatureRecord,
     GraphRecord,
     ParserInput,
-    Provenance,
     QuarantineRecord,
     Record,
     RedactionRecord,
@@ -101,6 +99,19 @@ from latence_core.quality_report_builder import (
 from latence_core.quality_report_builder import (
     _fingerprint_salt as _fingerprint_salt,
 )
+
+# The ADR-0061 §5 reuse-overlay fold rule lives in its own owned module (``reuse_overlay``,
+# Wave 3-G): WHERE the overlay folds (first doc-level producer), HOW (document-interleaved
+# merge), and what happens to an unclaimed overlay (the named trailer policies) are each
+# written once there. The six consumer sites below — the accumulator gather, the per-carrier
+# doc-level input, the corpus-wide gather, the accumulator input count, the Export dispatch and
+# the wiring-check carrier scan — are one call each into that module.
+from latence_core.reuse_overlay import (
+    OverlayTrailer,
+    ReuseOverlay,
+    is_doc_level_stage,
+    merge_overlay_doc_ordered,
+)
 from latence_core.stage_execution import StageContext, StageExecution
 from latence_core.storage import Storage
 from latence_core.tracing import RunTracer, SpanSink
@@ -137,22 +148,6 @@ _T = TypeVar("_T", bound=StageOutput)
 #: :meth:`LocalRunner._capability_provider`). Unbounded: the Protocols share no base.
 _P = TypeVar("_P")
 
-
-class _ProvenanceCarrier(Protocol):
-    """Any record the reuse-overlay merge can order — everything with a Provenance.
-
-    The ADR-0061 document-interleaved fold (:meth:`LocalRunner._merge_overlay_doc_ordered`) reads
-    exactly two fields: ``provenance.source_uri`` (the rebuild's arrival-order key) and
-    ``provenance.document_id`` (the grouping key). Every inter-Stage carrier — including
-    ``ParserInput`` and the ``Record`` base an Export materializes — carries a Provenance, so the
-    merge is typed against this Protocol rather than the ``StageOutput`` union.
-    """
-
-    provenance: Provenance
-
-
-#: A record type the merge/overlay helpers accept: bound by the Provenance the merge reads.
-_TP = TypeVar("_TP", bound=_ProvenanceCarrier)
 
 # WAL event kinds. The log is append-only and never read for control flow in S1
 # (checkpoint presence is authoritative); it exists for audit and crash forensics. The
@@ -319,22 +314,6 @@ def scrub_sensitive(value: object) -> object:
     return value
 
 
-#: Digit runs in a record id, for the natural (emission-order) sort of the reuse overlay.
-_DIGIT_RUNS = re.compile(r"(\d+)")
-
-
-def _natural_record_order(record_id: str) -> tuple[str | int, ...]:
-    """The digit-aware sort key that reconstructs emission order from an id-sorted store.
-
-    Splits the id into alternating text/digit runs (``re.split`` with one capture group always
-    alternates non-captured text and captured digits, starting with a possibly-empty text run),
-    so two ids are compared text-run by text-run and COUNTER BY NUMBER: ``…#chunk-2`` orders
-    before ``…#chunk-10``. The alternation guarantee makes the mixed tuple type-safe — an int
-    and a str never meet at the same tuple position.
-    """
-    return tuple(int(tok) if tok.isdigit() else tok for tok in _DIGIT_RUNS.split(record_id))
-
-
 def topological_order(stages: list[Stage]) -> list[Stage]:
     """Kahn's algorithm over ``depends_on`` edges. Raises on a cycle."""
     by_name = {s.name: s for s in stages}
@@ -379,7 +358,7 @@ class LocalRunner:
         # emission failure is logged and swallowed — lineage never fails a run.
         self._lineage = lineage
         # The run-scoped lineage handle, set for the duration of ``run()`` (mirrors the
-        # ``_reuse_overlay_by_type`` pattern) so ``_run`` can emit per-Stage events without
+        # ``_reuse_overlay`` pattern) so ``_run`` can emit per-Stage events without
         # threading a parameter through the whole executor. ``None`` ⇒ lineage off.
         self._lineage_run: RunLineage | None = None
         # #73: the optional tracing sink. ``None`` ⇒ each run's RunTracer defaults to the
@@ -405,23 +384,20 @@ class LocalRunner:
         # a parity/debug knob; the on-disk output, resume, and report are byte-identical either
         # way, only peak memory differs.
         self._release_doc_level_outputs = True
-        # W17 (ADR-0043): the cross-run doc-level REUSE OVERLAY, keyed by carrier type. A delta
-        # excludes an unchanged document at Source (so its doc-level Stages never run) and hands
-        # the Runner that document's persisted doc-level records here; the Runner streams them into
-        # the CORPUS-LEVEL accumulators (Profiling/Disambiguation/Graph) and the post-assembly
-        # per-chunk transforms (Context Enrichment) / a doc-level Export ALONGSIDE the
-        # freshly-extracted records, so those Stages see the whole corpus (reused ∪ fresh) exactly
-        # as if every document had been re-extracted — while the doc-level Stages ran only on the
-        # changed documents. The overlay is NEVER fed to a doc-level Stage (parse→…→redact) — those
+        # W17 (ADR-0043): the cross-run doc-level REUSE OVERLAY. A delta excludes an unchanged
+        # document at Source (so its doc-level Stages never run) and hands the Runner that
+        # document's persisted doc-level records; the Runner streams them into the CORPUS-LEVEL
+        # accumulators (Profiling/Disambiguation/Graph) and the post-assembly per-chunk
+        # transforms (Context Enrichment) / a doc-level Export ALONGSIDE the freshly-extracted
+        # records, so those Stages see the whole corpus (reused ∪ fresh) exactly as if every
+        # document had been re-extracted — while the doc-level Stages ran only on the changed
+        # documents. The overlay is NEVER fed to a doc-level Stage (parse→…→redact) — those
         # gather via ``_gather_inputs``, which is overlay-blind — so a reused document is never
         # re-parsed/-extracted. Empty by default (``run(reuse=None)``), so a non-delta run is
-        # byte-identical. Every record id is content-addressed, so a reused record is
-        # byte-identical to its fresh re-extraction; and since ADR-0061 the overlay is MERGED
-        # document-interleaved in source order (:meth:`_merge_overlay_doc_ordered`) rather than
-        # appended, so every corpus-level Stage consumes the union in the exact arrival order a
-        # full rebuild would deliver — the equivalence property covers the stream, not just the
-        # set (display spellings, tie-breaks and export row order included).
-        self._reuse_overlay_by_type: dict[type, list[Record]] = {}
+        # byte-identical. WHERE the overlay folds, in what ORDER, and what happens to a carrier
+        # no stream claims are the ADR-0061 §5 rule owned by
+        # :class:`~latence_core.reuse_overlay.ReuseOverlay` (Wave 3-G).
+        self._reuse_overlay = ReuseOverlay()
         # H-F1: the Quality Report half of the Runner, extracted into its own cohesive unit
         # (``quality_report_builder``). The engine composes it — passing itself as the
         # ``StageRecordReader`` (its public ``stage_records`` + ``read_findings``) and its live
@@ -884,24 +860,15 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
     ) -> QualityReport:
         # W17 (ADR-0043): ``reuse`` carries an unchanged document's persisted doc-level records
         # (from the prior Corpus Version) that this run did NOT re-extract (the document is
-        # excluded at Source). They are indexed by carrier type and streamed into the corpus-level
-        # accumulators + post-assembly transforms so those Stages see the whole corpus. Set for the
-        # duration of the run and cleared in ``finally`` so the instance never leaks a delta's
-        # overlay into a later plain run. ``None`` ⇒ no overlay (byte-identical to a non-delta run).
-        #
-        # ADR-0061: each carrier's overlay is ordered by the NATURAL (digit-aware) record-id key.
-        # The doc-level reuse store is persisted id-sorted LEXICOGRAPHICALLY (its canonical
-        # on-disk form — ``CorpusStore._encode_doclevel``), which is NOT emission order:
-        # ``…#chunk-10`` sorts before ``…#chunk-2``, and the equivalence proof caught exactly that
-        # as the one row-order divergence from a full rebuild. Every reference id scheme mints
-        # ``<parent>#<kind>-<counter>`` in emission order, so the digit-aware sort reconstructs
-        # each document's original within-run order from the canonical store — including stores
-        # committed by older versions (the fix is read-side, not a store rewrite).
-        self._reuse_overlay_by_type = {}
-        for record in reuse or []:
-            self._reuse_overlay_by_type.setdefault(type(record), []).append(record)
-        for records in self._reuse_overlay_by_type.values():
-            records.sort(key=lambda r: _natural_record_order(r.record_id))
+        # excluded at Source). :class:`~latence_core.reuse_overlay.ReuseOverlay` indexes them by
+        # carrier type — sorted per carrier by the NATURAL (digit-aware) record-id key, which
+        # reconstructs emission order from the lexicographically-id-sorted reuse store (the
+        # ADR-0061 divergence the ticket-03 smoke caught; see that module's docstring) — and the
+        # dispatch streams them into the corpus-level accumulators + post-assembly transforms so
+        # those Stages see the whole corpus. Set for the duration of the run and cleared in
+        # ``finally`` so the instance never leaks a delta's overlay into a later plain run.
+        # ``None`` ⇒ no overlay (byte-identical to a non-delta run).
+        self._reuse_overlay = ReuseOverlay(reuse)
         # #185: the run-level OpenLineage bracket. Off unless an emitter was wired, in which case
         # the pipeline itself is one parent job whose START/COMPLETE/FAIL nests every Stage's job
         # underneath it in the catalog. The FAIL carries the stable typed error *category* only —
@@ -923,7 +890,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
                 lineage.run_end(documents=report.document_count)
             return report
         finally:
-            self._reuse_overlay_by_type = {}
+            self._reuse_overlay = ReuseOverlay()
             self._lineage_run = None
 
     def _run(
@@ -1690,23 +1657,21 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # Consolidation, Disambiguation/Graph) receives the whole ``fresh ∪ reused`` union
             # through that Stage's checkpoint already — folding the overlay again would export
             # every reused record twice, so it is suppressed by the producer's level.
+            # The fold-target decision here is the Export flavour of the one ADR-0061 §5 rule:
+            # the producer walk guarantees "produces" by construction (it stops at the nearest
+            # ancestor producing the pass-through carrier), so only the LEVEL gate remains —
+            # and the mixed-carrier expansion (a fused ancestor's ``Record`` sentinel delivers
+            # both reused mention carriers) is the overlay's own
+            # (:meth:`~latence_core.reuse_overlay.ReuseOverlay.records_for_carrier`).
             producer = self._export_producer(stage, pipeline)
             materialized: list[Record]
-            if producer is None or not self._is_doc_level_stage(producer):
+            if producer is None or not is_doc_level_stage(producer):
                 materialized = list(exportable)
             else:
-                export_carrier = self._export_carrier(stage, pipeline)
-                extra: list[Record]
-                if export_carrier is Record:
-                    # A fused Entity+Relation ancestor: the pass-through carrier is the mixed
-                    # mention/relation stream, so both reused mention carriers are materialized.
-                    extra = [
-                        *self._overlay_of_type(EntityMention),
-                        *self._overlay_of_type(RelationMention),
-                    ]
-                else:
-                    extra = list(self._overlay_of_type(cast("type[Record]", export_carrier)))
-                materialized = list(self._merge_overlay_doc_ordered(exportable, extra))
+                extra = self._reuse_overlay.records_for_carrier(
+                    self._export_carrier(stage, pipeline)
+                )
+                materialized = list(merge_overlay_doc_ordered(exportable, extra))
             out_dir = self._export_dir(pipeline, run_id)
             exporter.export(materialized, storage, out_dir)
             # Export is a sink: it passes its input records through unchanged. (The overlay records
@@ -1887,90 +1852,31 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             storage, ckpt_uri, self._output_type(stage, pipeline)
         )
 
-    def _overlay_of_type(self, expected: type[_TP]) -> list[_TP]:
-        """The W17 reuse overlay's records of one carrier type (empty when no delta reuse).
+    def _records_of_type(
+        self,
+        stage_name: str,
+        outputs: Mapping[str, list[StageOutput]],
+        expected: type[_T],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> Iterator[_T]:
+        """One Stage's output (:meth:`_stage_records`) narrowed to one carrier, lazily.
 
-        The reused doc-level records for the carrier ``expected``, grouped per document with each
-        document's within-run record order preserved (the order its original checkpoints emitted).
-        Since ADR-0061 they are no longer *appended* after a corpus-level Stage's fresh inputs —
-        they are MERGED document-interleaved in source order (:meth:`_merge_overlay_doc_ordered`),
-        so the accumulator sees ``fresh ∪ reused`` in exactly the arrival order a full rebuild
-        would deliver. Empty (no reuse) ⇒ a no-op and the stream is exactly the checkpoint
-        records — byte-identical to a non-delta run.
+        The per-Stage stream every overlay-folding gather below hands to
+        :meth:`~latence_core.reuse_overlay.ReuseOverlay.fold_into`: reads the Stage's records
+        from the live dict or its checkpoint one at a time and yields only the ``expected``
+        carrier — the streamed form of ``[r for r in gathered if isinstance(r, expected)]``,
+        identical records in identical order.
         """
-        return self._reuse_overlay_by_type.get(expected, [])  # type: ignore[return-value]
-
-    @staticmethod
-    def _is_doc_level_stage(stage: Stage) -> bool:
-        """True when ``stage``'s Capability is document-level (the descriptor partition, L2/C2)."""
-        return stage.capability not in CORPUS_LEVEL_KINDS
-
-    @classmethod
-    def _stage_produces(cls, stage: Stage, pipeline: Pipeline, expected: type[_T]) -> bool:
-        """True when ``stage``'s checkpoint carrier includes the ``expected`` record type.
-
-        Read off the Stage's declared carrier (:meth:`_output_type`): an exact carrier match, or —
-        for a MIXED-carrier Stage (a fused extractor, Type Consolidation), whose carrier is the
-        :class:`~latence_core.contracts.Record` sentinel — either mention carrier. This is the
-        static half of the ADR-0061 overlay fold rule: the overlay of carrier ``T`` folds into the
-        FIRST doc-level Stage stream that produces ``T``, and never into a corpus-level Stage's
-        stream (a corpus-level re-emitter — Type Consolidation, Context Enrichment — already
-        carries the union, so folding again would double-count every reused record).
-        """
-        out = cls._output_type(stage, pipeline)
-        if out is Record:
-            return expected in (EntityMention, RelationMention)
-        return out is expected
-
-    def _merge_overlay_doc_ordered(
-        self, fresh: Iterable[_TP], overlay: Sequence[_TP]
-    ) -> Iterator[_TP]:
-        """Fold the reuse overlay into a doc-level stream in the full rebuild's arrival order.
-
-        (ADR-0061 §5.) Both sides are document-grouped subsequences of the same global order: a
-        doc-level checkpoint holds its records per document in the Source's globally-sorted URI
-        order (:meth:`Storage.walk_files`), and the overlay's records are grouped per reused
-        document with within-document order preserved from their original run. Merging the two by
-        ``(provenance.source_uri, document_id)`` therefore reproduces exactly the arrival order a
-        full rebuild of the whole corpus would deliver — which is what upgrades the ADR-0043
-        equivalence from "same set, ids stable" to "same stream": the resolver's first-seen
-        display spelling, the hyperedge dedup's tie-breaks and ``merged_sources`` order, the
-        profiler's last-document fields, the enriched chunk order and hence the export row order
-        (and the embedder's batch composition) all match a from-scratch run byte-for-byte.
-
-        Memory: O(overlay) — the delta path already holds the overlay whole
-        (``_reuse_overlay_by_type``) — plus O(1) fresh records; the fresh side stays a lazy
-        stream. An empty overlay yields the fresh stream untouched (the non-delta no-op).
-
-        Honest limit: with several Source Stages whose URI ranges interleave, a rebuild's arrival
-        order is "Source by Source", not globally URI-sorted, so the byte-order guarantee holds
-        for single-Source pipelines (every reference stack); the set/ranking equivalence holds
-        regardless.
-        """
-        if not overlay:
-            yield from fresh
-            return
-        groups: dict[str, list[_TP]] = {}
-        order_key: dict[str, tuple[str, str]] = {}
-        for record in overlay:
-            doc_id = record.provenance.document_id
-            groups.setdefault(doc_id, []).append(record)
-            order_key.setdefault(doc_id, (record.provenance.source_uri, doc_id))
-        pending = sorted(groups, key=order_key.__getitem__)
-        idx = 0
-        current_doc: str | None = None
-        for record in fresh:
-            doc_id = record.provenance.document_id
-            if doc_id != current_doc:
-                current_doc = doc_id
-                key = (record.provenance.source_uri, doc_id)
-                while idx < len(pending) and order_key[pending[idx]] < key:
-                    yield from groups[pending[idx]]
-                    idx += 1
-            yield record
-        while idx < len(pending):
-            yield from groups[pending[idx]]
-            idx += 1
+        return (
+            record
+            for record in self._stage_records(
+                stage_name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            if isinstance(record, expected)
+        )
 
     def _stream_inputs_of_type(
         self,
@@ -1995,41 +1901,29 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         followed by an ``isinstance`` filter — determinism preserved.
 
         W17/ADR-0061: the reuse overlay of this carrier is MERGED document-interleaved into the
-        FIRST doc-level parent stream that produces it (:meth:`_merge_overlay_doc_ordered`), so
-        the accumulator folds ``fresh ∪ reused`` in the full rebuild's arrival order. A
-        corpus-level parent (Type Consolidation re-emitting the run's mentions, Context
-        Enrichment re-emitting the run's chunks) already carries the union, so no fold happens
-        there — the old ``_parent_reemits_overlay`` suppression is the corpus-level half of this
-        one rule. An overlay carrier NO parent produces (a degenerate DAG) is still appended
-        last, so the union always reaches the accumulator exactly once.
+        FIRST doc-level parent stream that produces it, so the accumulator folds
+        ``fresh ∪ reused`` in the full rebuild's arrival order — the fold rule and this site's
+        trailer policy (``APPEND_IF_CARRIER_UNSEEN``: union semantics, corpus-level-parent
+        suppression) live in :mod:`~latence_core.reuse_overlay`.
         """
         by_name = {s.name: s for s in pipeline.stages}
-        overlay = self._overlay_of_type(expected)
-        overlay_pending = bool(overlay)
-        carrier_seen = False
-        for parent_name in stage.depends_on:
-            parent = by_name.get(parent_name)
-            parent_stream = (
-                record
-                for record in self._stage_records(
-                    parent_name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                if isinstance(record, expected)
+        sources = (
+            (
+                by_name.get(parent_name),
+                self._records_of_type(
+                    parent_name,
+                    outputs,
+                    expected,
+                    storage=storage,
+                    pipeline=pipeline,
+                    run_id=run_id,
+                ),
             )
-            produces = parent is not None and self._stage_produces(parent, pipeline, expected)
-            carrier_seen = carrier_seen or produces
-            if (
-                overlay_pending
-                and produces
-                and parent is not None
-                and self._is_doc_level_stage(parent)
-            ):
-                overlay_pending = False
-                yield from self._merge_overlay_doc_ordered(parent_stream, overlay)
-            else:
-                yield from parent_stream
-        if overlay_pending and not carrier_seen:
-            yield from overlay
+            for parent_name in stage.depends_on
+        )
+        yield from self._reuse_overlay.fold_into(
+            expected, sources, pipeline, trailer=OverlayTrailer.APPEND_IF_CARRIER_UNSEEN
+        )
 
     def _stream_parent_inputs_of_type(
         self,
@@ -2057,32 +1951,30 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         parent producing the carrier — which is what lets Context Enrichment run on a delta with
         cross-run reuse: its chunk stream then carries ``fresh ∪ reused`` in rebuild order, and
         every chunk's header is re-derived from the CURRENT assembled graph (no stale headers, by
-        construction). The overlay's GraphRecord side is always empty (corpus-level records are
-        never reused), so the graph stream is untouched. No delta reuse ⇒ byte-identical to the
-        overlay-blind form.
+        construction). What differs from the accumulator gather is only this site's trailer
+        policy (``NEVER``: a doc-level Stage's input is its parents' records, never records no
+        parent produced — see :class:`~latence_core.reuse_overlay.OverlayTrailer`). The
+        overlay's GraphRecord side is always empty (corpus-level records are never reused), so
+        the graph stream is untouched. No delta reuse ⇒ byte-identical to the overlay-blind form.
         """
         by_name = {s.name: s for s in pipeline.stages}
-        overlay = self._overlay_of_type(expected)
-        overlay_pending = bool(overlay)
-        for parent_name in stage.depends_on:
-            parent = by_name.get(parent_name)
-            parent_stream = (
-                record
-                for record in self._stage_records(
-                    parent_name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                if isinstance(record, expected)
+        sources = (
+            (
+                by_name.get(parent_name),
+                self._records_of_type(
+                    parent_name,
+                    outputs,
+                    expected,
+                    storage=storage,
+                    pipeline=pipeline,
+                    run_id=run_id,
+                ),
             )
-            if (
-                overlay_pending
-                and parent is not None
-                and self._stage_produces(parent, pipeline, expected)
-                and self._is_doc_level_stage(parent)
-            ):
-                overlay_pending = False
-                yield from self._merge_overlay_doc_ordered(parent_stream, overlay)
-            else:
-                yield from parent_stream
+            for parent_name in stage.depends_on
+        )
+        yield from self._reuse_overlay.fold_into(
+            expected, sources, pipeline, trailer=OverlayTrailer.NEVER
+        )
 
     def _stream_all_records_of_type(
         self,
@@ -2106,35 +1998,33 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         corpus-wide stream in without the executor materialising it (#69 memory bound preserved).
         A run with no producing Stage yields nothing (the empty-chunks fallback).
         """
-        overlay = self._overlay_of_type(expected)
-        overlay_pending = bool(overlay)
-        for stage in topological_order(list(pipeline.stages)):
-            stage_stream = (
-                record
-                for record in self._stage_records(
-                    stage.name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                if isinstance(record, expected)
+        # W17/ADR-0061: the corpus-wide gather spans the reused documents' records too. The
+        # overlay is MERGED document-interleaved into the first doc-level Stage producing this
+        # carrier (the position a rebuild's records of these documents would occupy); every
+        # later corpus-level re-emission (Type Consolidation, Context Enrichment) already
+        # carries the union in its own checkpoint. A reused document contributes its single
+        # persisted (most-processed) chunk variant where a rebuild threads each intermediate
+        # variant once per producing Stage — every corpus-wide consumer dedups by record id /
+        # max-folds, so the union it folds is identical (pinned by the equivalence tests).
+        # This site's trailer policy is ``ALWAYS``: the enumeration spans the whole pipeline,
+        # so an unclaimed overlay IS the corpus's only records of this carrier.
+        sources = (
+            (
+                stage,
+                self._records_of_type(
+                    stage.name,
+                    outputs,
+                    expected,
+                    storage=storage,
+                    pipeline=pipeline,
+                    run_id=run_id,
+                ),
             )
-            # W17/ADR-0061: the corpus-wide gather spans the reused documents' records too. The
-            # overlay is MERGED document-interleaved into the first doc-level Stage producing this
-            # carrier (the position a rebuild's records of these documents would occupy); every
-            # later corpus-level re-emission (Type Consolidation, Context Enrichment) already
-            # carries the union in its own checkpoint. A reused document contributes its single
-            # persisted (most-processed) chunk variant where a rebuild threads each intermediate
-            # variant once per producing Stage — every corpus-wide consumer dedups by record id /
-            # max-folds, so the union it folds is identical (pinned by the equivalence tests).
-            if (
-                overlay_pending
-                and self._stage_produces(stage, pipeline, expected)
-                and self._is_doc_level_stage(stage)
-            ):
-                overlay_pending = False
-                yield from self._merge_overlay_doc_ordered(stage_stream, overlay)
-            else:
-                yield from stage_stream
-        if overlay_pending:
-            yield from overlay
+            for stage in topological_order(list(pipeline.stages))
+        )
+        yield from self._reuse_overlay.fold_into(
+            expected, sources, pipeline, trailer=OverlayTrailer.ALWAYS
+        )
 
     def _gathered_count(
         self,
@@ -2155,7 +2045,8 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         W17/ADR-0061: the reused documents' records are counted where the fold rule delivers them
         — once per carrier, at the first doc-level parent producing it (a corpus-level parent's
         checkpoint already contains the union, so its line count needs no top-up). A mixed-carrier
-        parent (fused extractor) counts both mention overlays.
+        parent (fused extractor) counts both mention overlays. The counting re-derivation is the
+        overlay's own (:meth:`~latence_core.reuse_overlay.ReuseOverlay.count_for_stage`).
         """
         total = 0
         by_name = {s.name: s for s in pipeline.stages}
@@ -2166,21 +2057,10 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             ):
                 total += 1
             parent_stage = by_name.get(parent)
-            if parent_stage is None or not self._is_doc_level_stage(parent_stage):
-                continue
-            out = self._output_type(parent_stage, pipeline)
-            carriers: tuple[type[Record], ...]
-            if out is Record:
-                carriers = (EntityMention, RelationMention)
-            elif isinstance(out, type) and issubclass(out, Record):
-                carriers = (out,)
-            else:
-                continue
-            for carrier in carriers:
-                if carrier in counted:
-                    continue
-                counted.add(carrier)
-                total += len(self._reuse_overlay_by_type.get(carrier, []))
+            if parent_stage is not None:
+                total += self._reuse_overlay.count_for_stage(
+                    parent_stage, pipeline, already_counted=counted
+                )
         return total
 
     def _gather_inputs(
@@ -2599,7 +2479,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             parent_stage = by_name.get(parent)
             if parent_stage is not None:
                 parent_type = self._output_type(parent_stage, pipeline)
-                if self._reuse_overlay_by_type.get(parent_type):
+                if self._reuse_overlay.has_carrier(parent_type):
                     present.add(parent_type)  # type: ignore[arg-type]
                     names.add(parent_type.__name__)
         return present, names
