@@ -50,3 +50,15 @@ contract, no branch was deleted or will be without an explicit go.
 induction_sample.py}` are another session's in-flight, untracked scripts (2 ruff errors in
 chunk_stats.py). Deliberately neither fixed, ignored, nor committed here — the owning session
 decides whether they become evidence or disappear.
+
+## F7 — one order-dependent flake on roster hosts: `test_real_weights_embeds_at_declared_width`
+
+In the single-process full-suite run on a roster host (torch + sentence-transformers + gliner2
++ ULTRA all installed; 5,000+ tests in one interpreter), the embedder-st real-weights test
+failed once with `RuntimeError: prims.iota only supports integer dtypes` inside the Granite
+model load — global torch state polluted by some earlier test. It passes standalone, passes
+with its own package suite, and passes in every targeted combination tried
+(extract-gliner2 + pii-gliner2 + splade + embedder-st together: green). The CI-locked env
+(no torch) is unaffected and fully green. Polluter not yet identified; candidates are the
+torch.compile-using suites. A dynamo/state-reset fixture at the real-weights boundary would
+close it — out of scope for the readiness pass, logged here with the evidence.

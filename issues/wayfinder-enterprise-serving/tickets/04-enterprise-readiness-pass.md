@@ -1,7 +1,7 @@
 # 04 — Enterprise readiness pass: docs, deployment, release, CI — the final push
 
 Type: task
-Status: claimed
+Status: done
 Blocked by: 01, 02, 03
 
 ## Why (Dennis, 2026-08-12)
