@@ -73,3 +73,12 @@ with its own package suite, and passes in every targeted combination tried
 (no torch) is unaffected and fully green. Polluter not yet identified; candidates are the
 torch.compile-using suites. A dynamo/state-reset fixture at the real-weights boundary would
 close it — out of scope for the readiness pass, logged here with the evidence.
+
+## F8 — demo builder minted its run dir without the runner's `rstrip('/')` (closed by Wave 2-E)
+
+`latence_demo/builder.py` built `f"{self._storage_uri}/_latence/runs/{run_id}"` while the
+runner mints `f"{storage_uri.rstrip('/')}/_latence/runs/{run_id}"` — a `--storage-uri` with a
+trailing slash would have had the demo read its graph checkpoint / write its site page at a
+`//_latence` path the runner never wrote (default URI unaffected, so no test caught it).
+Structurally closed, not spot-fixed: every consumer now mints paths through
+`latence_core.run_store.RunLayout`, so the divergence class cannot recur.
