@@ -38,13 +38,7 @@ from typing import TYPE_CHECKING, Any
 from benchmark.s5.cell import Cell
 from benchmark.s5.datasets import CONTROL_DATASETS
 from benchmark.s5.goldmap import TRUST_THRESHOLD
-from benchmark.s5.legs import (
-    ABLATION_BASELINE,
-    ABLATION_LEG_NAMES,
-    LEG_NAMES,
-    RESCUE_LEG_NAMES,
-    leg_signals,
-)
+from benchmark.s5.legs import ABLATION_BASELINE, LEG_TABLE, leg_signals
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -65,6 +59,16 @@ _COLUMNS = (
     ("latency_ms_median", "lat med ms"),
     ("latency_ms_p95", "lat p95 ms"),
 )
+
+
+def _in_section(leg: str, section: str) -> bool:
+    """Whether ``leg``'s :data:`~benchmark.s5.legs.LEG_TABLE` row routes it to ``section``.
+
+    A name the table does not know belongs to no section — it is skipped, never guessed into
+    the ladder's Δ chain.
+    """
+    spec = LEG_TABLE.get(leg)
+    return spec is not None and spec.report_section == section
 
 
 def _fmt(value: Any) -> str:
@@ -188,7 +192,7 @@ def write_report(
             f"{_exclusions(resolution)} | {verdict} |"
         )
 
-    ladder = [leg for leg in legs if leg in LEG_NAMES]
+    ladder = [leg for leg in legs if _in_section(leg, "ladder")]
     for dataset in sorted(matrix):
         control = " (single-hop CONTROL)" if dataset in CONTROL_DATASETS else ""
         lines += ["", f"## {dataset}{control}", "", _cap_note(matrix[dataset]), ""]
@@ -253,7 +257,7 @@ def _ablation_section(
     as the refusal they are, because an absent content-only number must not read as "no
     difference".
     """
-    wanted = [leg for leg in legs if leg in ABLATION_LEG_NAMES]
+    wanted = [leg for leg in legs if _in_section(leg, "ablation")]
     if not wanted:
         return []
     lines = [
@@ -313,7 +317,7 @@ def _rescue_section(
     against the ladder's own graph rungs — ``kg``, ``hyperedges``, ``coe``, ``packer`` — and that is
     the table below.
     """
-    wanted = [leg for leg in legs if leg in RESCUE_LEG_NAMES]
+    wanted = [leg for leg in legs if _in_section(leg, "rescue")]
     if not wanted:
         return []
     lines = [

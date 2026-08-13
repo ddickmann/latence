@@ -95,61 +95,161 @@ from latence_retrieval.pack import Packer  # noqa: E402
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
 
-#: The legs, in ladder order. Each name is the *increment*; leg N runs signals 1..N.
-LEG_NAMES = ("dense", "bm25", "kg", "hyperedges", "coe", "packer")
-
-#: Ablation legs — deliberately NOT rungs of the ladder above. Each re-runs ONE rung against a
-#: different *input* so the report can attribute that input, and each is reported in its own
-#: section so the ladder's cumulative Δ chain stays a chain of single-signal increments.
-#:
-#: ``dense_content_only`` is the ``dense`` rung ranked with vectors built from each chunk's
-#: CONTENT ONLY, against the ``dense`` rung's vectors which embed content **plus** the W13
-#: ContextHeader (the chunk's KG entities and neighbour triples) — because that is what the S3
-#: Export wrote into ``corpus.parquet``. Without this leg the header would be an invisible
-#: advantage folded into every dense number, and worse, an *uneven* one: the S3 corpora carry
-#: populated headers while the reused M6 exports carry ``context_header: null`` on every row, so
-#: the same "dense" label would mean different things per dataset. Only the CORPUS side changes —
-#: queries have no context header, so both legs rank the identical query vectors.
-ABLATION_LEG_NAMES = ("dense_content_only",)
-
-#: The graph-as-RESCUE family (S5b) — a THIRD family, beside the ladder and beside the ablations.
-#:
-#: The ladder's graph rungs apply the graph lane as a co-equal fused list, which is the application
-#: the S5 matrix measured regressing (equal-weight RRF lets a weak alias hit outvote a strong dense
-#: hit). These legs apply the same shipped components the way the framework's own documented seams
-#: say to: ``dense+bm25`` is the base ranking, :class:`~latence_retrieval.expand.Expander` rescores
-#: it from the KG columns already denormalised onto each chunk, the graph lanes only **append**
-#: candidates the base missed, and a selector spends a token budget over the deduped union. They are
-#: NOT rungs — no ``Δ`` chain runs through them — so they live in their own tuple and their own
-#: report section, exactly like the ablation family. See :mod:`benchmark.s5.rescue`.
-RESCUE_LEG_NAMES = ("graph_rescue", "graph_rescue_packed", "graph_rescue_coe")
-
-#: Every leg name the matrix accepts, ladder first.
-ALL_LEG_NAMES = (*LEG_NAMES, *ABLATION_LEG_NAMES, *RESCUE_LEG_NAMES)
-
-#: Which ladder leg each ablation leg is the counterfactual of — the pair the report subtracts.
-ABLATION_BASELINE = {"dense_content_only": "dense"}
-
 #: The ranked lists that can enter the fusion, in the order the ladder appends them. ``packer`` is
 #: deliberately absent: it is a post-fusion *selector* over the fused list, not a list to fuse.
 FUSION_SIGNALS = ("dense", "bm25", "kg", "hyperedges", "coe")
 
-#: The fusible signals each leg contributes. Cumulative along the ladder; ``packer`` fuses exactly
-#: what ``coe`` fuses and then packs the result, and each ablation leg is its own single signal
-#: (it fuses nothing, which is what makes it subtractable against the rung it mirrors).
-_LEG_SIGNALS: dict[str, tuple[str, ...]] = {
-    "dense": ("dense",),
-    "bm25": ("dense", "bm25"),
-    "kg": ("dense", "bm25", "kg"),
-    "hyperedges": ("dense", "bm25", "kg", "hyperedges"),
-    "coe": FUSION_SIGNALS,
-    "packer": FUSION_SIGNALS,
-    "dense_content_only": ("dense_content_only",),
-    # The rescue family fuses `dense` and `bm25` and NOTHING else. Its graph lanes do not enter an
-    # RRF over the base — they append to it — so naming them here would advertise a weight slot
-    # that does not exist. This is the declaration that makes that architectural claim checkable.
-    **{leg: ("dense", "bm25") for leg in RESCUE_LEG_NAMES},
+
+@dataclass(frozen=True)
+class LegSpec:
+    """Everything the harness dispatches on for one leg — ONE row of :data:`LEG_TABLE`.
+
+    Before this table the same facts lived as ~8 membership tests spread over four modules
+    (``_LEG_SIGNALS`` plus the ``graph_legs``/``hyper_legs`` sets here, the cell-kind and
+    preload branches in ``run_matrix``, the section routing in ``report``, ``is_tunable_leg``
+    in ``tuning``). A new leg is now one new row; a leg whose row lies gets caught by the
+    consistency tests instead of by a silently-wrong cell.
+    """
+
+    #: ``"ladder"`` (a cumulative rung), ``"ablation"`` (one rung on a different input), or
+    #: ``"rescue"`` (base-then-append-then-select — see :mod:`benchmark.s5.rescue`).
+    family: str
+    #: The fusible signals the leg contributes, in ladder order. Cumulative along the ladder;
+    #: ``packer`` fuses exactly what ``coe`` fuses and then packs the result; each ablation leg
+    #: is its own single signal (it fuses nothing, which is what makes it subtractable against
+    #: the rung it mirrors); the rescue family fuses ``dense``+``bm25`` and NOTHING else — its
+    #: graph lanes append rather than enter an RRF, so naming them here would advertise a weight
+    #: slot that does not exist.
+    signals: tuple[str, ...]
+    #: The export artifacts the leg refuses without (:func:`missing_inputs`), RESOLVED per leg:
+    #: ladder rows carry their whole cumulative, already-deduplicated chain, ablation and rescue
+    #: rows their own all-of list. The tuple order is load-bearing — it appears verbatim in
+    #: every written ``missing-inputs`` cell. The same files gate component construction in
+    #: :func:`build_runner`: a leg needs the BM25/graph/hypergraph machinery exactly when the
+    #: corresponding artifact is on its list.
+    required_files: tuple[str, ...]
+    #: Whether the leg reads the denormalised 1-hop KG projection columns (ADR-0051) — three
+    #: more list columns per row over corpora of up to 220k chunks, so loaded only when used.
+    needs_graph_features: bool
+    #: Where the leg's dense vectors come from: ``"corpus"`` (``corpus.parquet``'s ``embedding``
+    #: column — content + ContextHeader, as exported) or ``"sidecar"``
+    #: (:data:`~benchmark.s5.corpus.CONTENT_ONLY_VECTORS` next to it).
+    vector_source: str
+    #: Which cell the matrix writes for the leg: ``"fusion"`` (equal- or tuned-weight RRF) or
+    #: ``"rescue"`` (headline + budget curve + gate).
+    cell_kind: str
+    #: Which REPORT.md table renders the leg: ``"ladder"``, ``"ablation"`` or ``"rescue"`` — the
+    #: ablation and rescue families stay OUT of the ladder's Δ chain by construction.
+    report_section: str
+    #: Whether a per-signal weight fit means anything for this leg (more than one fused list).
+    tunable: bool
+
+
+#: The cumulative artifact chains, written out so each ladder row reads as data, not derivation:
+#: dense → +bm25's index/stats → +kg's graph → +hyperedges' store (``coe`` adds only the kv the
+#: hyperedges rung already brought; ``packer`` adds nothing).
+_DENSE_FILES = ("corpus.parquet",)
+_BM25_FILES = (*_DENSE_FILES, "bm25-stats.json", "bm25-postings.parquet")
+_KG_FILES = (*_BM25_FILES, "graph-edges.parquet", "graph-nodes.parquet")
+_HYPER_FILES = (*_KG_FILES, "graph-hyperedges.kv", "graph-hyperedges.parquet")
+
+#: A rescue leg without ANY of these is not a weaker rescue leg, it is the base pipeline wearing
+#: the rescue leg's name — which would land in the report as "graph rescue bought nothing" when
+#: the graph never ran. Deliberately all-of, not cumulative.
+_RESCUE_FILES = _HYPER_FILES
+
+_RESCUE_SPEC = LegSpec(
+    family="rescue",
+    signals=("dense", "bm25"),
+    required_files=_RESCUE_FILES,
+    needs_graph_features=True,
+    vector_source="corpus",
+    cell_kind="rescue",
+    report_section="rescue",
+    tunable=True,
+)
+
+
+def _ladder(signals: tuple[str, ...], required_files: tuple[str, ...]) -> LegSpec:
+    return LegSpec(
+        family="ladder",
+        signals=signals,
+        required_files=required_files,
+        needs_graph_features=False,
+        vector_source="corpus",
+        cell_kind="fusion",
+        report_section="ladder",
+        tunable=len(signals) > 1,
+    )
+
+
+#: THE leg table. Insertion order is load-bearing twice over: it is the run order
+#: (:data:`ALL_LEG_NAMES` — ladder first, then ablations, then the rescue family) and the report's
+#: row order. The three families:
+#:
+#: * **ladder** — the cumulative rungs; each name is the *increment*, leg N runs signals 1..N.
+#: * **ablation** — deliberately NOT rungs. ``dense_content_only`` is the ``dense`` rung ranked
+#:   with vectors built from each chunk's CONTENT ONLY, against the ``dense`` rung's vectors
+#:   which embed content **plus** the W13 ContextHeader (the chunk's KG entities and neighbour
+#:   triples) — because that is what the S3 Export wrote into ``corpus.parquet``. Without this
+#:   leg the header would be an invisible advantage folded into every dense number, and worse,
+#:   an *uneven* one: the S3 corpora carry populated headers while the reused M6 exports carry
+#:   ``context_header: null`` on every row, so the same "dense" label would mean different
+#:   things per dataset. Only the CORPUS side changes — queries have no context header, so both
+#:   legs rank the identical query vectors.
+#: * **rescue** — the graph-as-RESCUE family (S5b). The ladder's graph rungs apply the graph
+#:   lane as a co-equal fused list, which is the application the S5 matrix measured regressing
+#:   (equal-weight RRF lets a weak alias hit outvote a strong dense hit). These legs apply the
+#:   same shipped components the way the framework's own documented seams say to: ``dense+bm25``
+#:   is the base ranking, :class:`~latence_retrieval.expand.Expander` rescores it from the KG
+#:   columns already denormalised onto each chunk, the graph lanes only **append** candidates
+#:   the base missed, and a selector spends a token budget over the deduped union. No ``Δ``
+#:   chain runs through them. See :mod:`benchmark.s5.rescue`.
+LEG_TABLE: dict[str, LegSpec] = {
+    "dense": _ladder(("dense",), _DENSE_FILES),
+    "bm25": _ladder(("dense", "bm25"), _BM25_FILES),
+    "kg": _ladder(("dense", "bm25", "kg"), _KG_FILES),
+    "hyperedges": _ladder(("dense", "bm25", "kg", "hyperedges"), _HYPER_FILES),
+    "coe": _ladder(FUSION_SIGNALS, _HYPER_FILES),
+    "packer": _ladder(FUSION_SIGNALS, _HYPER_FILES),
+    "dense_content_only": LegSpec(
+        family="ablation",
+        signals=("dense_content_only",),
+        # Not cumulative: one rung re-run against one other input, so it needs the corpus table
+        # (rows and ids) and its own vector file, nothing from the rungs above.
+        required_files=("corpus.parquet", CONTENT_ONLY_VECTORS),
+        needs_graph_features=False,
+        vector_source="sidecar",
+        cell_kind="fusion",
+        report_section="ablation",
+        tunable=False,
+    ),
+    "graph_rescue": _RESCUE_SPEC,
+    "graph_rescue_packed": _RESCUE_SPEC,
+    "graph_rescue_coe": _RESCUE_SPEC,
 }
+
+#: Every leg name the matrix accepts, ladder first — :data:`LEG_TABLE`'s own order.
+ALL_LEG_NAMES = tuple(LEG_TABLE)
+
+#: The ladder rungs, in ladder order.
+LEG_NAMES = tuple(leg for leg, spec in LEG_TABLE.items() if spec.family == "ladder")
+
+#: The ablation legs, each reported in its own section (see :data:`LEG_TABLE`).
+ABLATION_LEG_NAMES = tuple(
+    leg for leg, spec in LEG_TABLE.items() if spec.family == "ablation"
+)
+
+#: The graph-as-rescue family (see :data:`LEG_TABLE`).
+RESCUE_LEG_NAMES = tuple(leg for leg, spec in LEG_TABLE.items() if spec.family == "rescue")
+
+#: Which ladder leg each ablation leg is the counterfactual of — the pair the report subtracts.
+ABLATION_BASELINE = {"dense_content_only": "dense"}
+
+
+def leg_spec(leg: str) -> LegSpec:
+    """``leg``'s row of :data:`LEG_TABLE` — the one lookup every dispatch site goes through."""
+    return LEG_TABLE[leg]
 
 
 def leg_signals(leg: str) -> tuple[str, ...]:
@@ -158,7 +258,7 @@ def leg_signals(leg: str) -> tuple[str, ...]:
     "May", not "does": a signal whose backend is absent, or that returned nothing for a query,
     contributes no list at all — :meth:`Runner.signals` reports what a query *actually* produced.
     """
-    return _LEG_SIGNALS[leg]
+    return LEG_TABLE[leg].signals
 
 
 def tunable_signals(leg: str) -> tuple[str, ...]:
@@ -171,17 +271,15 @@ def tunable_signals(leg: str) -> tuple[str, ...]:
     has nothing to tune at all, which is correct rather than a shortcut: with one list the weight
     is a pure monotone scale and every value gives the identical ranking.
     """
-    return _LEG_SIGNALS[leg][1:]
+    return LEG_TABLE[leg].signals[1:]
 
 
 def vector_source(leg: str) -> str:
     """Where ``leg``'s dense vectors come from: ``"corpus"`` or ``"sidecar"``.
 
-    ``corpus`` is ``corpus.parquet``'s ``embedding`` column (content + ContextHeader, as
-    exported); ``sidecar`` is :data:`~benchmark.s5.corpus.CONTENT_ONLY_VECTORS` next to it. One
-    function, so no call site has to re-derive the mapping from a leg name.
+    One lookup (:data:`LEG_TABLE`), so no call site has to re-derive the mapping from a name.
     """
-    return "sidecar" if leg in ABLATION_LEG_NAMES else "corpus"
+    return LEG_TABLE[leg].vector_source
 
 #: Candidates each first-stage leg returns before fusion. Wide enough that recall@10 is a
 #: property of the legs rather than of the truncation.
@@ -852,10 +950,14 @@ def build_runner(
     """
     root = export.root
     wanted = set(legs)
-    # A rescue leg needs every component the ladder's graph rungs need — it applies them
-    # differently, it does not need fewer of them.
-    graph_legs = {"kg", "hyperedges", "coe", "packer", *RESCUE_LEG_NAMES}
-    hyper_legs = {"hyperedges", "coe", "packer", *RESCUE_LEG_NAMES}
+
+    def needs(artifact: str) -> bool:
+        # The table's required_files gate construction as well as refusal: a leg needs the
+        # BM25/graph/hypergraph machinery exactly when the corresponding artifact is on its
+        # chain — and a rescue leg's all-of chain names every one of them, because it applies
+        # the same components differently, it does not need fewer of them.
+        return any(artifact in LEG_TABLE[leg].required_files for leg in wanted)
+
     dense = DenseBackend(export) if export.embeddings is not None else None
     dense_content_only = None
     if content_only_vectors is not None and wanted & set(ABLATION_LEG_NAMES):
@@ -863,11 +965,11 @@ def build_runner(
             export, matrix=content_only_vectors, source=CONTENT_ONLY_VECTORS
         )
     bm25 = None
-    if wanted & ({"bm25"} | graph_legs) and (root / "bm25-stats.json").is_file():
+    if needs("bm25-stats.json") and (root / "bm25-stats.json").is_file():
         bm25 = Bm25Backend(export)
     graph = None
     seeder = None
-    if wanted & graph_legs and (root / "graph-edges.parquet").is_file():
+    if needs("graph-edges.parquet") and (root / "graph-edges.parquet").is_file():
         graph = GraphRetriever(
             graph_source=EdgeGraphSource(root / "graph-edges.parquet"),
             document_source=ChunkGraphDocumentSource(export),
@@ -875,7 +977,7 @@ def build_runner(
         seeder = AliasQuerySeeder(node_alias_map(root / "graph-nodes.parquet"))
     kv_path = None
     hyperedges: dict[str, str] = {}
-    if wanted & hyper_legs and (root / "graph-hyperedges.kv").is_file():
+    if needs("graph-hyperedges.kv") and (root / "graph-hyperedges.kv").is_file():
         kv_path = root / "graph-hyperedges.kv"
         hyperedges = hyperedge_chunk_map(root / "graph-hyperedges.parquet")
     return Runner(
@@ -892,46 +994,13 @@ def build_runner(
 
 
 def missing_inputs(export_dir: Path, leg: str) -> list[str]:
-    """Artifacts ``leg`` needs that ``export_dir`` does not have — a refusal, never a fake run."""
-    if leg in ABLATION_LEG_NAMES:
-        # Not cumulative: an ablation leg is one rung re-run against one other input, so it needs
-        # the corpus table (rows and ids) and its own vector file, nothing from the rungs above.
-        return [
-            f
-            for f in ("corpus.parquet", CONTENT_ONLY_VECTORS)
-            if not (export_dir / f).is_file()
-        ]
-    if leg in RESCUE_LEG_NAMES:
-        # Also not cumulative, and deliberately ALL-OF: a rescue leg without the hypergraph store
-        # is not a weaker rescue leg, it is the base pipeline wearing the rescue leg's name — which
-        # would land in the report as "graph rescue bought nothing" when the graph never ran.
-        return [
-            f
-            for f in (
-                "corpus.parquet",
-                "bm25-stats.json",
-                "bm25-postings.parquet",
-                "graph-edges.parquet",
-                "graph-nodes.parquet",
-                "graph-hyperedges.kv",
-                "graph-hyperedges.parquet",
-            )
-            if not (export_dir / f).is_file()
-        ]
-    needs: dict[str, tuple[str, ...]] = {
-        "dense": ("corpus.parquet",),
-        "bm25": ("bm25-stats.json", "bm25-postings.parquet"),
-        "kg": ("graph-edges.parquet", "graph-nodes.parquet"),
-        "hyperedges": ("graph-hyperedges.kv", "graph-hyperedges.parquet"),
-        "coe": ("graph-hyperedges.kv",),
-        "packer": (),
-    }
-    cumulative: list[str] = []
-    for name in LEG_NAMES:
-        cumulative.extend(needs[name])
-        if name == leg:
-            break
-    return [f for f in dict.fromkeys(cumulative) if not (export_dir / f).is_file()]
+    """Artifacts ``leg`` needs that ``export_dir`` does not have — a refusal, never a fake run.
+
+    Pure table lookup: each :data:`LEG_TABLE` row carries its resolved ``required_files`` chain
+    (cumulative for ladder rungs, all-of for the ablation and rescue families), in the order the
+    written cell states them.
+    """
+    return [f for f in LEG_TABLE[leg].required_files if not (export_dir / f).is_file()]
 
 
 def has_embeddings(export_dir: Path) -> bool:
@@ -946,6 +1015,7 @@ __all__ = [
     "COE_BUDGET",
     "FUSION_SIGNALS",
     "LEG_NAMES",
+    "LEG_TABLE",
     "PACK_BUDGET",
     "POOL_K",
     "RESCUE_LEG_NAMES",
@@ -954,12 +1024,14 @@ __all__ = [
     "DenseBackend",
     "EdgeGraphSource",
     "LegOutcome",
+    "LegSpec",
     "Runner",
     "SignalRanking",
     "build_runner",
     "fuse_signals",
     "has_embeddings",
     "leg_signals",
+    "leg_spec",
     "missing_inputs",
     "query_ngrams",
     "tunable_signals",

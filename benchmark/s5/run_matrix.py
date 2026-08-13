@@ -74,12 +74,11 @@ from benchmark.s5.corpus import (  # noqa: E402
 from benchmark.s5.datasets import CONTROL_DATASETS, DATASETS  # noqa: E402
 from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
 from benchmark.s5.legs import (  # noqa: E402
-    ABLATION_LEG_NAMES,
     ALL_LEG_NAMES,
-    RESCUE_LEG_NAMES,
     Runner,
     build_runner,
     has_embeddings,
+    leg_spec,
     missing_inputs,
     vector_source,
 )
@@ -285,7 +284,7 @@ def run_dataset(name: str, plan: Plan) -> None:
         with_embeddings=bool(from_corpus),
         # Only the rescue family reads the denormalised KG projection, and it is three more list
         # columns per row over corpora of up to 220k chunks — so it is loaded when it is used.
-        with_graph_features=any(leg in RESCUE_LEG_NAMES for leg in runnable),
+        with_graph_features=any(leg_spec(leg).needs_graph_features for leg in runnable),
     )
     usable = [r for r in resolved if r.is_usable]
     if not usable:
@@ -294,7 +293,7 @@ def run_dataset(name: str, plan: Plan) -> None:
     # Loaded here rather than inside `build_runner`, because this is where the corpus row ids the
     # sidecar must line up with are known; `read_vector_sidecar` raises if it does not.
     content_only = None
-    if any(leg in ABLATION_LEG_NAMES for leg in runnable):
+    if any(vector_source(leg) == "sidecar" for leg in runnable):
         print(f"[{name}] loading {CONTENT_ONLY_VECTORS} …", flush=True)
         content_only = read_vector_sidecar(
             spec.export_dir / CONTENT_ONLY_VECTORS,
@@ -325,7 +324,7 @@ def run_dataset(name: str, plan: Plan) -> None:
             limit=plan.limit,
             resolution=resolution.to_dict(),
         )
-        if leg in RESCUE_LEG_NAMES:
+        if leg_spec(leg).cell_kind == "rescue":
             body = _rescue_cell(runner, export, leg, scored, fusion=plan.fusion)
         elif plan.fusion == "equal":
             body = _equal_cell(runner, export, leg, scored)

@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from benchmark.s5.legs import (
-    ABLATION_LEG_NAMES,
+    LEG_TABLE,
     SignalRanking,
     fuse_signals,
     leg_signals,
@@ -363,9 +363,10 @@ def is_tunable_leg(leg: str) -> bool:
 
     ``dense`` and the ablation legs are single-signal, so their tuned cell is the equal-weight
     cell restricted to the test half: still worth writing (the weighted table needs its reference
-    row on the same queries), but honestly labelled as a fit over nothing.
+    row on the same queries), but honestly labelled as a fit over nothing. One table lookup
+    (:data:`~benchmark.s5.legs.LEG_TABLE`), declared per leg instead of re-derived here.
     """
-    return leg not in ABLATION_LEG_NAMES and len(leg_signals(leg)) > 1
+    return LEG_TABLE[leg].tunable
 
 
 __all__ = [
