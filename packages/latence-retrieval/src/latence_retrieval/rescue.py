@@ -61,11 +61,26 @@ a fraction of the budget.
 the framework's own benchmark (commits 9b41d7d, e9d66c2, 6f3b379): the knapsack saturates ~5.5k
 tokens so its budget is 10,000 with backfill; CoE keeps buying recall through 16k so its budget is
 16,000; the seed caps and gate thresholds are the values the measured run shipped with.
+
+**Shipped default vs the benchmarked composition — a real divergence, stated honestly.** The S5b
+bench decorates every candidate with the export's KG columns and a precomputed pairwise
+``redundancy`` map *before* the expander and selector run. The shipped default composition cannot:
+candidates carry only what the caller's engines put on them, and ``RrfFuser`` keeps the
+**first-seen** metadata per id — the base fusion order is ``(dense, bm25)`` — so a base candidate
+that only BM25 retrieved carries **no KG columns**: the Expander scores it with zero nodes
+silently, and the seed harvest reads nothing from it. Likewise the packer's default
+``similarity_key="redundancy"`` never fires (nothing populates that key on this path), so every
+pair falls back to the packer's own lexical Jaccard, re-tokenising ``O(selected × pool)`` per
+query. Both sides of the ticket-02 serving A/B shared this composition, so its parity numbers
+could not see the difference. Supplying a :class:`CandidateDecorator` (the ``decorate=``
+dependency; :class:`KgColumnDecorator` is the shipped reference adapter) closes both gaps for
+callers who opt in — ``decorate=None``, the default, preserves the shipped behaviour exactly.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
@@ -76,6 +91,7 @@ from latence_retrieval.expand import Expander
 from latence_retrieval.fuser import RrfFuser
 from latence_retrieval.hypergraph import HyperedgeKV, HypergraphSignals, hypergraph_signals
 from latence_retrieval.kg_columns import KG_NODE_IDS_KEY, parse_id_list
+from latence_retrieval.pack import _TOKEN as _PACK_TOKEN
 from latence_retrieval.pack import HeuristicTokenCounter, Packer
 
 if TYPE_CHECKING:
@@ -212,6 +228,120 @@ class HyperedgeDocumentSource(Protocol):
         ...
 
 
+@runtime_checkable
+class CandidateDecorator(Protocol):
+    """A stateless per-query metadata enricher for the candidates in hand (opt-in seam).
+
+    The decoration the S5b bench applies before its expander/selector — every candidate carries
+    its KG columns and a precomputed pairwise ``redundancy`` map — as a caller-supplied seam on
+    the shipped composition (see the module docstring's *shipped-vs-benchmarked divergence* note
+    for exactly what the default composition misses without it). The caller owns the mapping —
+    it was emitted alongside the corpus — so the component never guesses at it (ADR-0048).
+
+    Contract: :meth:`decorate` returns the SAME candidates (ids, order, scores unchanged;
+    :class:`~latence_retrieval.contracts.Candidate` is frozen, so enriched copies) with metadata
+    added, and existing metadata keys (the ``rescued`` stamp) preserved.
+    :class:`GraphRescueRetrieval` verifies the id/score sequence and fails loudly on a decorator
+    that reorders, drops, invents, or rescores — decoration enriches, it never ranks.
+    """
+
+    def decorate(self, candidates: Sequence[Candidate]) -> list[Candidate]:
+        """Return ``candidates`` in the same order with metadata enriched, never reranked."""
+        ...
+
+
+class KgColumnDecorator:
+    """The reference :class:`CandidateDecorator`: id→columns mapping + optional redundancy map.
+
+    Mirrors what the serving-parity ``KgDenseReference`` and the S5b bench's decoration do —
+    attach each candidate's denormalised KG columns (``kg_node_ids`` / ``neighbor_node_ids`` /
+    ``kg_node_community`` / ``kg_node_centrality``), read off the caller's own export, and
+    optionally precompute the full pairwise lexical-redundancy map the
+    :class:`~latence_retrieval.pack.Packer` reads through its ``similarity_key`` seam.
+
+    Args:
+        columns: ``candidate id → metadata row`` — the columns to merge onto each matching
+            candidate. The row's keys overwrite the candidate's own (the mapping is the
+            authoritative export truth, exactly as the bench decorates); keys the row does not
+            carry are preserved (the ``rescued`` stamp). A candidate absent from the mapping
+            passes through untouched. Any per-candidate metadata row works; the KG columns are
+            the shipped use.
+        redundancy_key: if set (e.g. ``"redundancy"``, the packer's default ``similarity_key``),
+            :meth:`decorate` also stores each candidate's ``{other id: similarity}`` map under
+            this key — the packer's own lexical (Jaccard) number, computed once per query pair
+            instead of ``O(selected × pool)`` times inside the greedy solver. Every pair is
+            stored, including the zeros, so no pair silently falls back to recomputation.
+            Default ``None`` (columns only).
+
+    Stateless per query (ADR-0048): the mapping is fixed at construction, nothing is held
+    between :meth:`decorate` calls, and identical inputs always yield identical outputs.
+    """
+
+    def __init__(
+        self,
+        columns: Mapping[str, Mapping[str, Any]],
+        *,
+        redundancy_key: str | None = None,
+    ) -> None:
+        if not isinstance(columns, Mapping):
+            msg = (
+                "KgColumnDecorator 'columns' must be a mapping of candidate id → metadata row, "
+                f"got {type(columns).__name__!r}."
+            )
+            raise TypeError(msg)
+        parsed: dict[str, dict[str, Any]] = {}
+        for cid, row in columns.items():
+            if not isinstance(cid, str) or not cid:
+                msg = f"KgColumnDecorator 'columns' keys must be candidate ids, got {cid!r}."
+                raise ValueError(msg)
+            if not isinstance(row, Mapping):
+                msg = (
+                    f"KgColumnDecorator 'columns[{cid!r}]' must be a metadata mapping, "
+                    f"got {row!r}."
+                )
+                raise TypeError(msg)
+            parsed[cid] = dict(row)
+        self._columns = parsed
+        if redundancy_key is not None and (
+            not isinstance(redundancy_key, str) or not redundancy_key
+        ):
+            msg = (
+                "KgColumnDecorator 'redundancy_key' must be a non-empty metadata key or None, "
+                f"got {redundancy_key!r}."
+            )
+            raise ValueError(msg)
+        self._redundancy_key = redundancy_key
+
+    def decorate(self, candidates: Sequence[Candidate]) -> list[Candidate]:
+        """Merge each candidate's column row (the row's keys win); add the redundancy map."""
+        items = [
+            candidate
+            if (row := self._columns.get(candidate.id)) is None
+            else candidate.model_copy(
+                update={"metadata": {**candidate.metadata, **row}}
+            )
+            for candidate in candidates
+        ]
+        key = self._redundancy_key
+        if key is None:
+            return items
+        # The packer's own lexical redundancy, once per pair per query (identical numbers by
+        # construction — `_pair_similarity` IS pack's Jaccard over pack's own token unit).
+        tokens = [_pack_token_set(candidate.text) for candidate in items]
+        similarity: list[dict[str, float]] = [{} for _ in items]
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                value = _pair_similarity(tokens[i], tokens[j])
+                similarity[i][items[j].id] = value
+                similarity[j][items[i].id] = value
+        return [
+            candidate.model_copy(
+                update={"metadata": {**candidate.metadata, key: similarity[index]}}
+            )
+            for index, candidate in enumerate(items)
+        ]
+
+
 class GraphRescueRetrieval:
     """The graph-as-rescue retrieval pipeline over caller-supplied engines (ADR-0048, S5b).
 
@@ -279,6 +409,11 @@ class GraphRescueRetrieval:
             lane.
         hyperedge_documents: an optional :class:`HyperedgeDocumentSource` — the hypergraph rescue
             lane's chunk resolver, paired with ``hyperedge_kv_path``.
+        decorate: an optional :class:`CandidateDecorator` — per-query metadata enrichment
+            (KG columns, precomputed redundancy) applied to the base ahead of the expander and to
+            the deduped union ahead of the selector, exactly where the bench decorates. ``None``
+            (the default) keeps the shipped composition byte-identical — see the module
+            docstring's shipped-vs-benchmarked divergence note for what the default misses.
     """
 
     def __init__(
@@ -289,6 +424,7 @@ class GraphRescueRetrieval:
         bm25: RetrievalBackend | None = None,
         graph: RetrievalBackend | None = None,
         hyperedge_documents: HyperedgeDocumentSource | None = None,
+        decorate: CandidateDecorator | None = None,
     ) -> None:
         cfg = dict(config or {})
         unknown = set(cfg) - _CONFIG_KEYS
@@ -375,6 +511,14 @@ class GraphRescueRetrieval:
         self._kv_path = kv_path
         self._hyperedge_documents = hyperedge_documents
 
+        if decorate is not None and not isinstance(decorate, CandidateDecorator):
+            msg = (
+                f"GraphRescueRetrieval 'decorate' {type(decorate).__name__!r} does not satisfy "
+                "the CandidateDecorator seam (needs 'decorate(candidates)')."
+            )
+            raise TypeError(msg)
+        self._decorator = decorate
+
         if self._selector == "coe" and self._kv_path is None:
             msg = (
                 "GraphRescueRetrieval selector 'coe' selects over the hypergraph lane's signals; "
@@ -415,12 +559,17 @@ class GraphRescueRetrieval:
         rescue: list[Candidate] = []
         signals: HypergraphSignals | None = None
         if gate.fired:
+            # Decoration (opt-in) runs where the bench decorates: the base ahead of the expander
+            # — so a bm25-only base candidate carries its KG columns into the rescore and the
+            # seed harvest — and the deduped union ahead of the selector (below).
+            base = self._decorated(base)
             base = self._expander.process(bundle.text, base)
             seeds = self._graph_seeds(query_seeds, base)
             rescue, signals = self._rescue(bundle.text, seeds)
 
         union = _append_and_dedupe(base, rescue, cap=self._rescue_cap, k=self._rank_score_k)
         rescued = len(union) - len(base)
+        union = self._decorated(union)
         return self._select(bundle.text, union, signals, gate, rescued)
 
     # -- step 1: the base -------------------------------------------------------------------------
@@ -450,6 +599,26 @@ class GraphRescueRetrieval:
         if not rankings:
             return []
         return _unit_scaled(self._fuser.fuse(rankings))
+
+    def _decorated(self, candidates: list[Candidate]) -> list[Candidate]:
+        """The injected decoration, applied and VERIFIED — or the list untouched (the default).
+
+        ``decorate=None`` is the identity, so the shipped default composition is byte-identical
+        to the pre-seam behaviour. When a decorator is supplied, its output must be the same
+        ranking — same ids, same order, same scores — with only metadata enriched; anything else
+        fails loudly here, because a decorator that reorders or rescores would be a hidden fifth
+        pipeline step, not decoration.
+        """
+        if self._decorator is None:
+            return candidates
+        decorated = self._decorator.decorate(candidates)
+        if [(c.id, c.score) for c in decorated] != [(c.id, c.score) for c in candidates]:
+            msg = (
+                "GraphRescueRetrieval decorator changed the ranking itself (ids, order, or "
+                "scores); a CandidateDecorator may only enrich metadata."
+            )
+            raise ValueError(msg)
+        return decorated
 
     # -- the policy gate (graph_mode) -------------------------------------------------------------
 
@@ -749,6 +918,23 @@ def _node_ids(candidate: Candidate) -> tuple[str, ...]:
     return parse_id_list(candidate, KG_NODE_IDS_KEY, context="graph-rescue")
 
 
+def _pack_token_set(text: str) -> frozenset[str]:
+    """The packer's own lexical term set, computed once per text (for the redundancy map).
+
+    Built on the very regex ``pack._lexical_similarity`` tokenises with (imported, not
+    mirrored), so :class:`KgColumnDecorator`'s precomputed numbers cannot drift from what the
+    packer would have recomputed pair-by-pair.
+    """
+    return frozenset(_PACK_TOKEN.findall(text.lower()))
+
+
+def _pair_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """``pack``'s lexical Jaccard over prebuilt term sets — the identical number, tokenised once."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 def _append_and_dedupe(
     base: Sequence[Candidate], rescue: Sequence[Candidate], *, cap: int, k: int
 ) -> list[Candidate]:
@@ -800,9 +986,11 @@ __all__ = [
     "GRAPH_MODES",
     "RELATION_CUES",
     "SELECTORS",
+    "CandidateDecorator",
     "GateDecision",
     "GraphRescueRetrieval",
     "HyperedgeDocumentSource",
+    "KgColumnDecorator",
     "RescueResult",
     "top_k_agreement",
 ]

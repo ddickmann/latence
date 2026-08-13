@@ -219,9 +219,11 @@ from latence_retrieval.rerank import (
     SentenceTransformersCrossEncoder,
 )
 from latence_retrieval.rescue import (
+    CandidateDecorator,
     GateDecision,
     GraphRescueRetrieval,
     HyperedgeDocumentSource,
+    KgColumnDecorator,
     RescueResult,
 )
 from latence_retrieval.sparse import SparseQueryEncoder, SpladeQueryEncoder
@@ -245,6 +247,7 @@ __all__ = [
     "BackendSearchError",
     "Bm25Rescorer",
     "Candidate",
+    "CandidateDecorator",
     "CandidateProcessor",
     "CandidateProcessorError",
     "Capability",
@@ -278,6 +281,7 @@ __all__ = [
     "HeuristicTokenCounter",
     "HeuristicUtility",
     "IdentityProcessor",
+    "KgColumnDecorator",
     "KgColumnKeys",
     "KgColumns",
     "MaxSimError",

@@ -23,9 +23,11 @@ from typing import Any
 import pytest
 from latence_retrieval import (
     Candidate,
+    CandidateDecorator,
     Capability,
     GraphRescueRetrieval,
     HyperedgeDocumentSource,
+    KgColumnDecorator,
     QueryBundle,
     RescueResult,
 )
@@ -486,3 +488,202 @@ class TestSelection:
         assert not any(c.metadata["rescued"] for c in result.candidates)
         assert result.tokens_packed is not None
         assert result.tokens_packed <= 20
+
+
+# -- decoration: the opt-in CandidateDecorator seam ---------------------------------------------
+
+
+class _RecordingGraph:
+    """A GRAPH backend spy: records every seed set it is asked to traverse, returns nothing."""
+
+    def __init__(self) -> None:
+        self.seed_sets: list[tuple[str, ...]] = []
+
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        return frozenset({Capability.GRAPH})
+
+    def search(self, query: Any) -> list[Candidate]:
+        self.seed_sets.append(tuple(query.seed_node_ids or ()))
+        return []
+
+
+def _decoration_fixture() -> tuple[list[Candidate], list[Candidate], list[Candidate]]:
+    """The pinned pre-seam fixture: a dual-retrieved base, a bm25-only candidate, one rescue."""
+    base = [
+        _cand("d1", 1.0, kg_node_ids=["n1"], neighbor_node_ids=["n2"], kg_node_community=["c1"],
+              kg_node_centrality=[0.9, 0.2]),
+        _cand("d2", 0.9, kg_node_ids=["n3"], neighbor_node_ids=["n1"]),
+        _cand("d3", 0.8),
+        _cand("d4", 0.7, kg_node_ids=["n2"], neighbor_node_ids=[], kg_node_community=["c1"]),
+    ]
+    bm25 = [_cand("d2", 3.0), _cand("b1", 2.0), _cand("d4", 1.0)]
+    rescue = [_cand("r1", 0.7, kg_node_ids=["n9"], neighbor_node_ids=[]), _cand("d3", 0.6)]
+    return base, bm25, rescue
+
+
+class TestDecoration:
+    def test_decorate_none_is_byte_identical_to_the_pre_seam_pipeline(self) -> None:
+        # The FULL RescueResult (ids, scores, metadata, gate, spend) of this fixture, captured
+        # verbatim on the pre-seam code (commit 85b8e59, PYTHONHASHSEED=0). `decorate=None` must
+        # reproduce it exactly — the seam's default is the identity, not "roughly the same".
+        base, bm25, rescue = _decoration_fixture()
+        pipeline = GraphRescueRetrieval(
+            {"graph_mode": "force", "selector": "packed", "budget": 40},
+            dense=_dense(base),
+            bm25=_bm25(bm25),
+            graph=_graph(rescue),
+        )
+        result = pipeline.retrieve(
+            QueryBundle(
+                text="why did d1 relate to d4", vector=_VEC, seed_node_ids=("n1", "n2")
+            )
+        )
+        expected = {
+            "budget": 40,
+            "candidates": [
+                {"id": "d2", "score": 0.016666666666666666, "text": "text d2",
+                 "metadata": {"kg_node_ids": ["n3"], "neighbor_node_ids": ["n1"],
+                              "rescued": False}},
+                {"id": "d4", "score": 0.01639344262295082, "text": "text d4",
+                 "metadata": {"kg_node_community": ["c1"], "kg_node_ids": ["n2"],
+                              "neighbor_node_ids": [], "rescued": False}},
+                {"id": "d1", "score": 0.016129032258064516, "text": "text d1",
+                 "metadata": {"kg_node_centrality": [0.9, 0.2], "kg_node_community": ["c1"],
+                              "kg_node_ids": ["n1"], "neighbor_node_ids": ["n2"],
+                              "rescued": False}},
+                {"id": "b1", "score": 0.015873015873015872, "text": "text b1",
+                 "metadata": {"rescued": False}},
+                {"id": "d3", "score": 0.015625, "text": "text d3",
+                 "metadata": {"rescued": False}},
+                {"id": "r1", "score": 0.015384615384615385, "text": "text r1",
+                 "metadata": {"kg_node_ids": ["n9"], "neighbor_node_ids": [], "rescued": True}},
+            ],
+            "gate": {"agreement": 0.4, "confidence": 1.0, "fired": True, "query_seeds": 2,
+                     "reasons": ["relation-cue", "entity-heavy"], "vetoed_by": None},
+            "rescued": 1,
+            "tokens_packed": 12,
+        }
+        assert json.loads(result.model_dump_json()) == expected
+
+    def test_the_seam_protocol_accepts_the_reference_adapter(self) -> None:
+        assert isinstance(KgColumnDecorator({}), CandidateDecorator)
+
+    def test_a_non_decorator_is_rejected_at_construction(self) -> None:
+        with pytest.raises(TypeError, match="CandidateDecorator"):
+            GraphRescueRetrieval({}, dense=_dense([]), decorate=object())  # type: ignore[arg-type]
+
+    def test_a_bm25_only_candidate_produces_graph_seeds_only_when_decorated(self) -> None:
+        # THE divergence the seam exists to close: RrfFuser keeps first-seen metadata and the
+        # base fusion is (dense, bm25), so bm25-only b1 reaches the seed harvest with no
+        # kg_node_ids — the traversal is seeded without its entities. Decorated, they arrive.
+        dense = [_cand("d1", 1.0, kg_node_ids=["n_d1"], neighbor_node_ids=[])]
+        bm25 = [_cand("b1", 2.0)]
+        columns = {"b1": {"kg_node_ids": ["n_b1"], "neighbor_node_ids": []}}
+
+        def seeds_reaching_traversal(decorate: CandidateDecorator | None) -> tuple[str, ...]:
+            spy = _RecordingGraph()
+            pipeline = GraphRescueRetrieval(
+                {"graph_mode": "force", "selector": "none"},
+                dense=_dense(dense),
+                bm25=_bm25(bm25),
+                graph=spy,  # type: ignore[arg-type]
+                decorate=decorate,
+            )
+            pipeline.retrieve(_bundle("q", seeds=("n_q",)))
+            assert len(spy.seed_sets) == 1
+            return spy.seed_sets[0]
+
+        undecorated = seeds_reaching_traversal(None)
+        assert "n_b1" not in undecorated  # the shipped default: b1's entities are invisible
+        decorated = seeds_reaching_traversal(KgColumnDecorator(columns))
+        assert "n_b1" in decorated
+        assert decorated[0] == "n_q"  # query seeds still come first, never displaced
+
+    def test_the_decorated_union_carries_columns_on_the_rescue_appendix_too(self) -> None:
+        base, bm25, rescue = _decoration_fixture()
+        pipeline = GraphRescueRetrieval(
+            {"graph_mode": "force", "selector": "none"},
+            dense=_dense(base),
+            bm25=_bm25(bm25),
+            graph=_graph(rescue),
+            decorate=KgColumnDecorator(
+                {"b1": {"kg_node_ids": ["n_b1"]}, "r1": {"kg_node_community": ["c9"]}}
+            ),
+        )
+        result = pipeline.retrieve(_bundle("why does d1 relate to d4", seeds=("n1", "n2")))
+        by_id = {c.id: c for c in result.candidates}
+        assert by_id["b1"].metadata["kg_node_ids"] == ["n_b1"]
+        assert by_id["r1"].metadata["kg_node_community"] == ["c9"]
+        assert by_id["r1"].metadata["rescued"] is True  # decoration preserved the stamp
+
+    def test_a_supplied_redundancy_map_short_circuits_the_packers_lexical_jaccard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from latence_retrieval import pack as pack_module
+
+        calls = {"n": 0}
+        real = pack_module._lexical_similarity  # noqa: SLF001 - the spy target
+
+        def counting(a: str, b: str) -> float:
+            calls["n"] += 1
+            return real(a, b)
+
+        monkeypatch.setattr(pack_module, "_lexical_similarity", counting)
+
+        def run(decorate: CandidateDecorator | None) -> None:
+            base, bm25, rescue = _decoration_fixture()
+            pipeline = GraphRescueRetrieval(
+                {"graph_mode": "force", "selector": "packed"},
+                dense=_dense(base),
+                bm25=_bm25(bm25),
+                graph=_graph(rescue),
+                decorate=decorate,
+            )
+            pipeline.retrieve(_bundle("why does d1 relate to d4", seeds=("n1", "n2")))
+
+        run(None)
+        assert calls["n"] > 0  # the shipped default recomputes redundancy inside the solver
+        calls["n"] = 0
+        run(KgColumnDecorator({}, redundancy_key="redundancy"))
+        assert calls["n"] == 0  # every pair was precomputed; the packer never re-tokenises
+
+    def test_the_adapters_redundancy_is_exactly_the_packers_own_lexical_similarity(self) -> None:
+        from latence_retrieval.pack import _lexical_similarity  # noqa: SLF001 - the oracle
+
+        candidates = [
+            _cand("a", 1.0, text="the quick brown fox"),
+            _cand("b", 0.9, text="the quick red panda"),
+            _cand("c", 0.8, text="völlig anderes Thema — Umsätze"),
+        ]
+        decorated = KgColumnDecorator({}, redundancy_key="redundancy").decorate(candidates)
+        for left in decorated:
+            for right in decorated:
+                if left.id == right.id:
+                    continue
+                stored = left.metadata["redundancy"][right.id]
+                assert stored == pytest.approx(
+                    _lexical_similarity(left.text, right.text), abs=0.0
+                )
+
+    def test_the_adapters_row_overwrites_stale_engine_columns_but_not_other_keys(self) -> None:
+        candidate = _cand("a", 1.0, kg_node_ids=["stale"], rescued=True)
+        decorated = KgColumnDecorator({"a": {"kg_node_ids": ["fresh"]}}).decorate([candidate])
+        assert decorated[0].metadata["kg_node_ids"] == ["fresh"]
+        assert decorated[0].metadata["rescued"] is True
+
+    def test_a_decorator_that_reranks_is_loud_not_silent(self) -> None:
+        class _Reorderer:
+            def decorate(self, candidates: Sequence[Candidate]) -> list[Candidate]:
+                return list(reversed(candidates))
+
+        base, bm25, rescue = _decoration_fixture()
+        pipeline = GraphRescueRetrieval(
+            {"graph_mode": "force", "selector": "none"},
+            dense=_dense(base),
+            bm25=_bm25(bm25),
+            graph=_graph(rescue),
+            decorate=_Reorderer(),
+        )
+        with pytest.raises(ValueError, match="only enrich metadata"):
+            pipeline.retrieve(_bundle("why does d1 relate to d4", seeds=("n1", "n2")))

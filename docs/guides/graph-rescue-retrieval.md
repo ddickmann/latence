@@ -148,7 +148,55 @@ surface them on each returned `Candidate.metadata`:
 An absent column simply contributes nothing (graceful degradation); a present-but-malformed
 column fails loudly at the boundary — never a silently wrong score. The traversal lane reads the
 emitted `graph-edges.parquet` + chunk parquet through `GraphRetriever`'s zero-ops DuckDB
-adapters; the hypergraph lane reads the emitted `graph-hyperedges.kv` sidecar.
+adapters; the hypergraph lane reads the emitted `graph-hyperedges.kv` sidecar. (The read
+contract itself — graceful-absent / loud-malformed, and the per-entity-list → peak reduction —
+has one home: `latence_retrieval.kg_columns`; every consumer above runs the same code.)
+
+## Decoration: the shipped default vs the benchmarked composition
+
+The S5b benchmark decorates every candidate with the export's KG columns **and** a precomputed
+pairwise `redundancy` map before the expander and selector run. The shipped default composition
+does not — candidates carry only what your engines put on them — and that opens a real, honest
+divergence from the benchmarked numbers:
+
+- **A base candidate only BM25 retrieved carries no KG columns.** `RrfFuser` keeps the
+  first-seen metadata per id, and the base fusion order is `(dense, bm25)` — so a bm25-only hit
+  reaches the expander with zero nodes (scored silently as column-free) and contributes no
+  entities to the traversal seed harvest. (Both sides of the serving-parity A/B shared this
+  composition, so its 0-delta could not surface it.)
+- **The packer's default `similarity_key: "redundancy"` never fires.** Nothing populates that
+  key on the default path, so every pair falls back to the packer's own lexical Jaccard,
+  re-tokenising `O(selected × pool)` per query — the recomputation the bench precomputes once.
+
+The opt-in fix is the `decorate=` dependency — a `CandidateDecorator` applied to the base ahead
+of the expander and to the deduped union ahead of the selector, exactly where the bench
+decorates. `decorate=None` (the default) preserves today's behaviour byte-for-byte (pinned by
+test). The shipped reference adapter mirrors the bench's decoration:
+
+```python
+from latence_retrieval import GraphRescueRetrieval, KgColumnDecorator
+
+decorator = KgColumnDecorator(
+    {   # candidate id -> the export's denormalised KG columns for that chunk
+        chunk_id: {
+            "kg_node_ids": row.node_ids,
+            "neighbor_node_ids": row.neighbor_node_ids,
+            "kg_node_community": row.community_ids,
+            "kg_node_centrality": row.centralities,
+        }
+        for chunk_id, row in my_export_rows.items()
+    },
+    redundancy_key="redundancy",   # optional: precompute the packer's pairwise redundancy
+)
+
+pipeline = GraphRescueRetrieval(config, dense=..., bm25=..., decorate=decorator)
+```
+
+A decorator may only **enrich metadata**: the pipeline verifies ids, order, and scores are
+unchanged and fails loudly on a decorator that reranks. With `redundancy_key` set, the stored
+numbers are computed with the packer's own tokeniser (imported, not mirrored), so they are
+byte-identical to what the packer would have recomputed — supplying them is purely a
+per-query-cost optimisation, never a semantic change.
 
 ## The two selectors
 
