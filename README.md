@@ -277,6 +277,49 @@ Method, the seven worked examples, and the limitations:
 [`results/dogfood-rfc/PROOF.md`](./results/dogfood-rfc/PROOF.md) and
 [`docs/DEEP-DIVE.md`](./docs/DEEP-DIVE.md).
 
+### Enterprise serving, measured (2026-08)
+
+The production question is not only "does the graph help" but "can you *serve* this — at scale,
+on a real engine, with a corpus that changes". Each of those three was closed with a measurement
+on real data, not a design note. The retrieval path has **zero LLM calls online**: every
+query-time signal is a precomputed export column, a graph traversal, or a deterministic solver.
+
+**Scale.** The end-to-end benchmark campaign pushed five public document-QA corpora through the
+full enterprise pipeline on one CUDA pod: **60,766 documents → 297,548 chunks, 3.4M entity
+mentions, 900,583 hyperedges, 731,266 PII findings**, per-dataset wall time 0.19–1.29 h; the
+only LLM spend was optional schema induction at **$29.26 measured** for 247,944 calls
+([`benchmark/sota-campaign/stages/s3-pipeline/metrics.json`](./benchmark/sota-campaign/stages/s3-pipeline/metrics.json)).
+
+**Graph latency at scale — ~100×, zero quality loss.** At the largest export (677,257
+hyperedges), a precomputed, transparently-cached hypergraph index plus tiered graph resolution
+took every graph lane from seconds to tens of milliseconds per query — hypergraph lane median
+3,570 ms → 37 ms (**96×**), traversal 435 ms → 3.9 ms (**111×**), rescue entry 3,733 ms → 33 ms
+(**113×**); small corpora honestly gain 2–13×. Quality loss is not "unlikely", it is **counted**:
+across **21,215 real gold queries × 3 lanes**, every ranked list, score and solver field compared
+equal across old and new code paths — **0 diffs**
+([`issues/wayfinder-enterprise-serving/tickets/01-report.md`](./issues/wayfinder-enterprise-serving/tickets/01-report.md)).
+
+**Served on a real ANN engine — same recall.** The benched stack was stood up on a live Qdrant
+(pinned compose, shipped loader, shipped backend) and compared against the brute-force reference
+over **full query sets**: recall deltas within −0.0004 absolute on 12,576 2Wiki queries and
+exactly 0.0 on MultiHop-RAG, at 42–83 ms median per served query through the whole composition
+([the serving guide](./docs/guides/serving-qdrant.md) · raw results in
+[`benchmark/serving/results/`](./benchmark/serving/results/)).
+
+**Incremental churn — byte-identical, O(changed).** Add/update/remove on a 609-document corpus
+through the full enterprise profile produced a final export **byte-identical to a from-scratch
+rebuild** (sha256-equal files, bitwise-equal embeddings, 200/200 BM25 and 200/200 dense top-20
+rankings identical on real queries), with an
+add of 61 docs costing 8.4 min vs 97.4 min for the rebuild (**11.6×**)
+([the incremental-ingest guide](./docs/guides/incremental-ingest.md) ·
+[`03-report.md`](./issues/wayfinder-enterprise-serving/tickets/03-report.md)).
+
+**In flight, stated as such:** the *recall* feature matrix of the graph-rescue architecture over
+the full query sets of all 7 campaign datasets is still landing from the running pod sweep — the
+committed [`S5 report`](./benchmark/sota-campaign/stages/s5-retrieval/REPORT.md) currently holds
+gold-resolution for all 7 plus pre-rescue 50-query cells for 2, and this README quotes no recall
+number from cells that have not landed.
+
 ---
 
 ## Status & maturity
@@ -310,24 +353,27 @@ unfilled table by forgetting is not possible.
 
 What is outstanding:
 
-- **The extended GPU end-to-end run is prepared, not executed.** The pipeline is built, merged and
-  green, and the RFC result above was measured on real hardware — but the large staged run on a 24 GB
-  Ampere card exists as decisions and tickets, not as numbers. Two defects are already documented
-  against it: a TorchScript-JIT kill that fires unconditionally on hardware that never needed it, and
-  micro-batch/thread defaults that encode one specific 32 GB / 128-core pod instead of reading the
-  machine. [`issues/e2e-extended/`](./issues/e2e-extended/README.md) holds the evidence for each.
-- **SPLADE as a fused signal, and graph traversal as a retrieval leg, are implemented but unproven
-  on real data.** Until recently the sparse index was never built despite a complete query path, and
-  the graph could only *reorder* a candidate pool it had not chosen. Both now work; neither has been
-  demonstrated against a live store — a sparse-only query returning documents dense-only does not, and
-  a gold document unreachable by dense and sparse recovered by traversal. Those are Gate 2 line items.
-- **The retrieval benchmark harness is designed but deliberately unbuilt.** Hop stratification, the
-  eight necessity gates (closed-book, single-hop baseline, per-edge necessity, DiRe, bridge leakage,
-  adversarial distractors, evidence accessibility, human audit) and the KG ablation are specified in
-  [`DECISIONS.md`](./issues/e2e-extended/DECISIONS.md) §D9 and remain **unimplemented** — building a
-  measurement harness against a stand-in corpus is a mistake this project has already paid for once.
-  The RFC numbers above are a real measurement of a narrower thing: one corpus, 90 generated
-  questions, single-passage gold, three signals rather than four.
+- **The `BENCHMARKS-E2E` protocol page is still all `PENDING` tokens.** A large staged GPU run
+  *has* now executed — the 60,766-document campaign above — but that page pins a specific
+  reproduction protocol (named hardware, named corpus, per-stage VRAM), and its values are filled
+  only by a run of that protocol, not by the nearest big number. The historical defects documented
+  against the original plan (a TorchScript-JIT kill on hardware that never needed it,
+  pod-specific micro-batch defaults) are recorded in
+  [`issues/e2e-extended/`](./issues/e2e-extended/README.md); the scaling fixes the campaign
+  forced are listed in its own metrics file.
+- **SPLADE as a fused signal is implemented but unproven on real data.** The sparse index loads
+  into a live Qdrant as a real named sparse vector (verified by the serving live-smoke), but no
+  retrieval-quality number exists for it — the S5 matrix deliberately scoped it out. Graph
+  traversal, by contrast, has graduated: it now runs as a measured production lane
+  ([graph-rescue](./docs/guides/graph-rescue-retrieval.md)) rather than a reorder-only leg,
+  with its full-query recall cells landing from the in-flight sweep.
+- **The retrieval benchmark harness is built and running; its necessity-gate battery is not.**
+  `benchmark/s5/` measures gold-resolution-audited recall/nDCG/chain-coverage with single-hop
+  control datasets over full query sets. The eight necessity gates specified in
+  [`DECISIONS.md`](./issues/e2e-extended/DECISIONS.md) §D9 (closed-book, per-edge necessity,
+  DiRe, bridge leakage, adversarial distractors, …) remain **unimplemented**, so "the graph was
+  *necessary*" is still an argued claim, not a gated one. The RFC numbers above are a real
+  measurement of a narrower thing: one corpus, 90 generated questions, single-passage gold.
 - **Scale is characterised, not eliminated.** The 100k / 1M-document envelopes are parked in
   `PERF-RESULTS.md` rather than previewed.
 - **Multi-vector / MUVERA ship as real but experimental, off by default,** naming no checkpoint
@@ -413,7 +459,8 @@ Copyright 2026 Dennis Dickmann (latence.ai). See [`NOTICE`](./NOTICE).
 | **Understand the whole thing** | [`docs/DEEP-DIVE.md`](./docs/DEEP-DIVE.md) — messy files → knowledge graph → multi-hop retrieval, with the reasoning |
 | **Run it on your corpus** | [`docs/getting-started/index.md`](./docs/getting-started/index.md), then [`docs/TUTORIAL-fresh-pod-walkthrough.md`](./docs/TUTORIAL-fresh-pod-walkthrough.md) |
 | **Read the results** | [`docs/getting-started/run-console.md`](./docs/getting-started/run-console.md) — the offline, read-only run console |
-| **Keep a corpus current** | [incremental add / update / retract / GDPR purge](./docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge) |
+| **Keep a corpus current** | [`docs/guides/incremental-ingest.md`](./docs/guides/incremental-ingest.md) — churn without rebuild, equivalence proven byte-identical; hands-on: [add / update / retract / GDPR purge](./docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge) |
+| **Serve it** | [`docs/guides/serving-qdrant.md`](./docs/guides/serving-qdrant.md) — Export → live Qdrant with measured recall parity · [`docs/guides/graph-rescue-retrieval.md`](./docs/guides/graph-rescue-retrieval.md) — the zero-LLM-online query path |
 | **Compare Providers** | [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) · [`docs/running-a-stack.md`](./docs/running-a-stack.md) |
 | **Check our numbers** | [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) (measured) · [`PERF-RESULTS.md`](./PERF-RESULTS.md) (measured) · [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) (reproduce them) |
 | **See what is still unproven** | [`RELEASE-GATES.md`](./RELEASE-GATES.md) · [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md) — every value there is still a placeholder, and the build knows it |
