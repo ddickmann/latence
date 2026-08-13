@@ -111,6 +111,10 @@ _SPDX_SCAN_SKIP_DIRS = frozenset(
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
+        # Parallel agent sessions materialise full sibling checkouts under .claude/worktrees;
+        # scanning them double-counts every retained-module header and fails the pinned-set
+        # gate on files that are not this checkout's. Tooling state, never repo content.
+        ".claude",
         "site",
         "build",
         "dist",
