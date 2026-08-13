@@ -21,8 +21,13 @@ Stage) it writes, deterministically, three representations of the same graph:
 
 Every file is byte-stable (records are emitted in the order Graph Assembly produced them —
 node-id then edge-id order — and every attribute is written in a fixed order), so a seeded
-run is reproducible (Baseline bar). The Provider is a pass-through sink: it returns its input
-records unchanged so the Runner can checkpoint them, exactly like the S1 exporter.
+run is reproducible (Baseline bar). The file set is also published **atomically as a set**
+(one :meth:`~latence_core.storage.Storage.atomic_writers` publication, the same discipline as
+the S1 corpus exporter): a consumer pairing the parquet with the TTL/KV can never observe a
+half-published set — a crash mid-export leaves the previous complete set, never a torn file
+and never a new ``graph.ttl`` beside a stale ``graph-hyperedges.kv``. The Provider is a
+pass-through sink: it returns its input records unchanged so the Runner can checkpoint them,
+exactly like the S1 exporter.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from latence_core.providers.profile import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import IO
 
     from latence_core.contracts import GraphEdge, GraphHyperedge, GraphNode, Record
     from latence_core.storage import Storage
@@ -152,40 +158,47 @@ class KnowledgeGraphExport:
                 hyperedges.append(r.hyperedge)
         base = out_dir.rstrip("/")
         stem = self._basename
-        # Parquet is written through storage.open (a raw handle that does not create parent
-        # dirs, unlike write_atomic), so ensure the export directory exists first.
-        storage.makedirs(base)
 
-        nodes_uri = f"{base}/{stem}-nodes.parquet"
-        edges_uri = f"{base}/{stem}-edges.parquet"
-        ttl_uri = f"{base}/{stem}.ttl"
-        graphml_uri = f"{base}/{stem}.graphml"
-
-        self._write_nodes_parquet(nodes, storage, nodes_uri)
-        self._write_edges_parquet(edges, storage, edges_uri)
-        storage.write_atomic(ttl_uri, self._render_ttl(nodes, edges).encode("utf-8"))
-        storage.write_atomic(graphml_uri, self._render_graphml(nodes, edges).encode("utf-8"))
-
-        uris = [nodes_uri, edges_uri, ttl_uri, graphml_uri]
+        # The KG deliverable is ONE file set — a downstream consumer (the ADR-0056 KV reader,
+        # a graph-RAG loader pairing parquet with TTL) treats these files as one graph, so they
+        # ride ONE :meth:`Storage.atomic_writers` publication, exactly like the corpus Export's
+        # jsonl/parquet set: every file streams into its own temp sibling (parent dir created by
+        # the publication, not here), not one byte is published until every stream has closed
+        # cleanly, and a crash mid-set sweeps the temps and leaves the previous complete set —
+        # never a new ``graph.ttl`` beside a stale ``graph-hyperedges.kv`` (the silent divergence
+        # ADR-0061 §2 forbids). The full set is known up front (the record pass above already
+        # partitioned the stream), so the optional hyperedge files join the same publication.
+        uris = [
+            f"{base}/{stem}-nodes.parquet",
+            f"{base}/{stem}-edges.parquet",
+            f"{base}/{stem}.ttl",
+            f"{base}/{stem}.graphml",
+        ]
         if hyperedges:
-            hyperedges_uri = f"{base}/{stem}-hyperedges.parquet"
-            self._write_hyperedges_parquet(hyperedges, storage, hyperedges_uri)
-            uris.append(hyperedges_uri)
+            uris.append(f"{base}/{stem}-hyperedges.parquet")
             # ADR-0056: the derived point-lookup KV the online path reads per call —
             # rebuildable from the parquet above (the durable form), written beside it so
             # the sidecar ships complete. Disable with ``hyperedge_kv: false`` to rebuild
             # downstream instead; either way an unconfigured stack (no HYPEREDGE records)
             # writes nothing and is byte-identical to before the feature existed.
             if self._hyperedge_kv:
-                kv_uri = f"{base}/{stem}-hyperedges.kv"
-                storage.write_atomic(kv_uri, build_store_bytes(store_entries(hyperedges, nodes)))
-                uris.append(kv_uri)
+                uris.append(f"{base}/{stem}-hyperedges.kv")
+
+        with storage.atomic_writers(uris) as streams:
+            self._write_nodes_parquet(nodes, streams[0])
+            self._write_edges_parquet(edges, streams[1])
+            streams[2].write(self._render_ttl(nodes, edges).encode("utf-8"))
+            streams[3].write(self._render_graphml(nodes, edges).encode("utf-8"))
+            if hyperedges:
+                self._write_hyperedges_parquet(hyperedges, streams[4])
+                if self._hyperedge_kv:
+                    streams[5].write(build_store_bytes(store_entries(hyperedges, nodes)))
         return uris
 
     # -- Parquet ------------------------------------------------------------
 
     @staticmethod
-    def _write_nodes_parquet(nodes: list[GraphNode], storage: Storage, uri: str) -> None:
+    def _write_nodes_parquet(nodes: list[GraphNode], fh: IO[bytes]) -> None:
         # ADR-0051: promote the graph-feature enrichment to FIRST-CLASS ``centrality`` (double) +
         # ``community`` (string) columns — the shape the Knapsack packer / a graph-aware ranker
         # reads directly (they also ride the ``properties`` JSON; this is the consumable view).
@@ -235,11 +248,10 @@ class KnowledgeGraphExport:
             fields.append(("centrality", pa.float64()))
             fields.append(("community", pa.string()))
         table = pa.Table.from_pylist(flat, schema=pa.schema(fields))
-        with storage.open(uri, "wb") as fh:
-            pq.write_table(table, fh)  # type: ignore[no-untyped-call]
+        pq.write_table(table, fh)  # type: ignore[no-untyped-call]
 
     @staticmethod
-    def _write_edges_parquet(edges: list[GraphEdge], storage: Storage, uri: str) -> None:
+    def _write_edges_parquet(edges: list[GraphEdge], fh: IO[bytes]) -> None:
         flat = [
             {
                 "edge_id": e.edge_id,
@@ -266,13 +278,10 @@ class KnowledgeGraphExport:
             ]
         )
         table = pa.Table.from_pylist(flat, schema=schema)
-        with storage.open(uri, "wb") as fh:
-            pq.write_table(table, fh)  # type: ignore[no-untyped-call]
+        pq.write_table(table, fh)  # type: ignore[no-untyped-call]
 
     @staticmethod
-    def _write_hyperedges_parquet(
-        hyperedges: list[GraphHyperedge], storage: Storage, uri: str
-    ) -> None:
+    def _write_hyperedges_parquet(hyperedges: list[GraphHyperedge], fh: IO[bytes]) -> None:
         # ADR-0057/0056: the solver-facing columns are FIRST-CLASS (token_cost, gamma, support,
         # has_relations, token_counter — everything the chain-of-evidence selector reads),
         # entity/relation sets ride as JSON like every other list column in this export.
@@ -318,8 +327,7 @@ class KnowledgeGraphExport:
             ]
         )
         table = pa.Table.from_pylist(flat, schema=schema)
-        with storage.open(uri, "wb") as fh:
-            pq.write_table(table, fh)  # type: ignore[no-untyped-call]
+        pq.write_table(table, fh)  # type: ignore[no-untyped-call]
 
     # -- TTL (RDF Turtle) ---------------------------------------------------
 
