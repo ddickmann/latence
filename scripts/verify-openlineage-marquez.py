@@ -105,7 +105,10 @@ def main(base_url: str) -> int:
         print(f"FAIL: Marquez is missing jobs {sorted(missing_jobs)}", file=sys.stderr)
         return 1
     if len(checkpoints) < len(STAGES):
-        print(f"FAIL: expected {len(STAGES)} checkpoint datasets, saw {len(checkpoints)}", file=sys.stderr)
+        print(
+        f"FAIL: expected {len(STAGES)} checkpoint datasets, saw {len(checkpoints)}",
+        file=sys.stderr,
+    )
         return 1
     runs = _get(f"{base_url}/api/v1/namespaces/{NAMESPACE}/jobs/{PIPELINE_NAME}/runs")
     states = [str(r["state"]) for r in runs.get("runs", [])]  # type: ignore[union-attr]

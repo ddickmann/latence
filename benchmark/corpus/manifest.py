@@ -134,7 +134,8 @@ def build_manifest(sources: list[SourceManifest]) -> dict[str, Any]:
             f"Modern OOXML is UNTESTED AT VOLUME for: {', '.join(thin)} — against "
             f"{summary['office_legacy_ole']} legacy OLE (doc/xls/ppt) from the 2009 GovDocs1 "
             "harvest. OOXML is a zipped-XML container parsed by a different code path than OLE, so "
-            "legacy coverage says nothing about it. Do not let 'many file types' imply modern-format "
+            "legacy coverage says nothing about it. Do not let 'many file types' imply "
+            "modern-format "
             "coverage for any format listed here."
         )
     if not any(s.publishable for s in sources):

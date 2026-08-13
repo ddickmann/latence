@@ -178,6 +178,22 @@ dev = [
 line-length = 100
 target-version = "py311"
 src = ["packages"]
+# Frozen measurement-evidence scripts and one-off prototypes, retained VERBATIM because they
+# produced numbers that are cited (RFC proof, M6 official evals, calibration judgments,
+# residency prototypes). They are not shipped, not imported by any package, and restyling them
+# would churn recorded provenance for zero product value — so they are declared out of lint
+# scope rather than left as permanent red. Everything else in the repo (packages/, benchmark/s5,
+# benchmark/serving, the campaign library, scripts/) IS in scope and clean (ticket
+# wayfinder-enterprise-serving/04).
+exclude = [
+    "benchmark/official",
+    "benchmark/official-data",
+    "benchmark/rfc",
+    "benchmark/musique-subset",
+    "issues/wayfinder-hypergraph-coe/prototypes",
+    "scripts/_pod_probe_gliner.py",
+    "results/dogfood-rfc",
+]
 
 [tool.ruff.lint]
 select = [

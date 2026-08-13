@@ -155,7 +155,7 @@ def main() -> None:
     auc_base, auc_fb = sum(base) / len(base), sum(fb) / len(fb)
     endpoints_ok = fb[0] >= base[0] and fb[-1] >= base[-1]
     worst_rel = min(
-        (f - b) / b if b > 0 else 0.0 for f, b in zip(fb, base)
+        (f - b) / b if b > 0 else 0.0 for f, b in zip(fb, base, strict=True)
     )
     gate = {
         "auc_baseline": round(auc_base, 4),

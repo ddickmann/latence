@@ -17,19 +17,18 @@ pure Python) or about tokenisation.
 from __future__ import annotations
 
 import json
-import math
 import os
 import pathlib
 import re
 import statistics
-from collections import Counter, defaultdict
+from collections import Counter
 
 import pytest
 from latence_core.chunking import ChunkBudget, chunk_document, estimate_tokens
 from latence_core.contracts import ChunkRecord, Classification, Provenance
 from latence_core.errors import ConfigError
 from latence_core.induced import LabelFloor, LabelSlot, effective_labels
-from latence_core.providers.perf import estimate_token_length, resolve_max_len
+from latence_core.providers.perf import estimate_token_length
 from latence_core.setup.recipe import MDEBERTA_TOKEN_EXPANSION, model_window_for
 from latence_extract_gliner2.provider import Gliner2FusedExtractor
 from latence_pii_gliner2.provider import Gliner2PIIRedactor
@@ -165,7 +164,7 @@ def test_real_mdeberta_token_count_of_real_chunks_fits_the_emitted_window(
     counts = [len(tokenizer.encode(c.content).ids) for c in corpus_chunks]
     ratios = [
         n / estimate_tokens(c.content)
-        for n, c in zip(counts, corpus_chunks)
+        for n, c in zip(counts, corpus_chunks, strict=True)
         if estimate_tokens(c.content)
     ]
     over = [n for n in counts if n > EMITTED_WINDOW]
