@@ -234,7 +234,8 @@ LATENCE_QDRANT_URL=http://localhost:6333 pytest packages/latence-sink-qdrant -k 
 
 ## Licensing
 
-Apache-2.0, like the rest of the framework. The optional `[client]` extra pulls `qdrant-client`,
+PolyForm Noncommercial 1.0.0, like the rest of the framework (commercial terms by agreement —
+see `COMMERCIAL.md`). The optional `[client]` extra pulls `qdrant-client`,
 **Apache-2.0** ([code](https://github.com/qdrant/qdrant-client/blob/master/LICENSE)); the Qdrant
 engine it talks to is **Apache-2.0** ([code](https://github.com/qdrant/qdrant/blob/master/LICENSE)).
 A vector store ships no model weights, so there is nothing to attest beyond the permissive code

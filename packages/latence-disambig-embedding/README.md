@@ -63,5 +63,5 @@ embedder in the Disambiguation Stage config:
 
 ## License
 
-Apache-2.0 (this package's own pure-Python code). A learned embedder opt-in carries its own
+PolyForm Noncommercial 1.0.0 (this package's own pure-Python code — the repository-wide licence). A learned embedder opt-in carries its own
 verified weights license in its own Provider package.

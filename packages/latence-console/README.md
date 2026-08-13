@@ -79,4 +79,4 @@ quarantine browser, the chunk inspector and the knowledge-graph browser. All of 
 the pipeline already wrote — Provenance, Evidence, offset maps, screening sidecars — so the deep
 views add **no** new persistent state and no new dependency.
 
-Licensed under Apache-2.0.
+Licensed under PolyForm Noncommercial 1.0.0 (the repository-wide licence; commercial terms by agreement — see `COMMERCIAL.md`).

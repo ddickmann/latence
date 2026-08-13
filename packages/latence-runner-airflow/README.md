@@ -46,5 +46,6 @@ end-to-end proof that the identical Stages run under a second Runner.
 
 ## Licensing
 
-Framework code, Apache-2.0. Apache Airflow (the optional `[airflow]` extra) is Apache-2.0. The
-adapter is offline and Airflow-free unless you build a real DAG.
+Framework code, PolyForm Noncommercial 1.0.0 (the repository-wide licence; commercial terms by
+agreement — see `COMMERCIAL.md`). Apache Airflow (the optional `[airflow]` extra) is Apache-2.0.
+The adapter is offline and Airflow-free unless you build a real DAG.

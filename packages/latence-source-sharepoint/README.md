@@ -223,7 +223,7 @@ conformance verdict for this Provider is flagged *verified against a stub*.
 
 | component | code license | weights license | source |
 | --- | --- | --- | --- |
-| `latence-source-sharepoint` | Apache-2.0 | n/a — ships no model | this repo's `LICENSE` |
+| `latence-source-sharepoint` | PolyForm-Noncommercial-1.0.0 | n/a — ships no model | this repo's `LICENSE` |
 | Python standard library (`urllib`, `json`, `hashlib`) | PSF-2.0 | n/a | <https://docs.python.org/3/license.html> |
 
 There are no other dependencies. Microsoft Graph is a **service**, not distributed code:

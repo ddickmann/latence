@@ -26,7 +26,7 @@ un-resolvable record.
 
 ## Licensing
 
-This Provider is framework code (**Apache-2.0**) and calls a user-supplied endpoint;
+This Provider is framework code (**PolyForm Noncommercial 1.0.0**, the repository-wide licence) and calls a user-supplied endpoint;
 it bundles no model weights. The `openai` client is **Apache-2.0** (code). The key
 and endpoint come from config/environment, never from code.
 

@@ -44,6 +44,6 @@ stages:
 
 ## Licensing
 
-- Code: Apache-2.0 (this package).
+- Code: PolyForm Noncommercial 1.0.0 (this package — the repository-wide licence).
 - `pypdf` dependency: BSD-3-Clause (permissive; commercial use, redistribution,
   and modification allowed). Verified 2026-07-06 per ADR-0012.

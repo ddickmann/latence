@@ -27,5 +27,5 @@ downstream vector DB gets a uniform column.
 
 ## Licensing
 
-Framework code, Apache-2.0. Bundles **no** weights — calls a user-supplied endpoint. The `openai`
+Framework code, PolyForm Noncommercial 1.0.0 (the repository-wide licence). Bundles **no** weights — calls a user-supplied endpoint. The `openai`
 client is Apache-2.0 (code).

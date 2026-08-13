@@ -245,7 +245,12 @@ Whichever wins, wins. RRF is the no-labels fallback and stays the orchestrator's
 
 ## Licensing
 
-Apache-2.0. The core has no non-permissive or heavy dependency (only `pydantic`). Heavy query-time
+PolyForm Noncommercial 1.0.0 (the repository-wide licence), with a deliberate file-level
+exception: seven query-time primitive modules (`bm25.py`, `graph_retrieval.py`, `maxsim.py`,
+`multihop.py`, `pack.py`, `sparse.py`, `tuning.py`) retain an **Apache-2.0** grant — each carries
+its own SPDX header, and the root `LICENSE` section *"SCOPE: THE RETAINED APACHE-2.0 MODULES"*
+is the authoritative statement. The core has no non-permissive or heavy dependency (only
+`pydantic`). Heavy query-time
 deps sit behind extras: the `[rerank]` extra pulls **`sentence-transformers`** (Apache-2.0 — code:
 <https://github.com/UKPLab/sentence-transformers/blob/master/LICENSE>). That library ships **no**
 model; a cross-encoder **checkpoint** is config-selected and its weights AND code license verified
@@ -261,7 +266,7 @@ is pinned (ADR-0012). The Knapsack QKP packer itself is ported Apache-2.0 (the m
 third-party or non-permissive code. The `bm25` rescorer is pure-Python (no extra) — an exact Okapi
 BM25 with no third-party code.
 
-The `[sparse]` extra pulls **`latence-splade`** (Apache-2.0), which owns the ADR-0053 SPLADE
+The `[sparse]` extra pulls **`latence-splade`** (PolyForm Noncommercial 1.0.0, like this package), which owns the ADR-0053 SPLADE
 composition the query-side encoder reuses. It ships **no** model; a multilingual SPLADE **checkpoint**
 is config-selected and its weights AND code license verified separately before it is wired — nothing
 is hardcoded (ADR-0012 / research-diligence). A compiled-Cython BM25 accelerator over the same exact
