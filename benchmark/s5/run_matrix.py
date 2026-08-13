@@ -54,6 +54,17 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import wiring
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmark.s5 import goldmap  # noqa: E402
+from benchmark.s5.cell import (  # noqa: E402
+    Header,
+    cell_path,
+    ladder_body,
+    load_cells,
+    missing_inputs_cell,
+    not_fusion_tunable_body,
+    rescue_body,
+    tuned_body,
+    write_cell,
+)
 from benchmark.s5.corpus import (  # noqa: E402
     CONTENT_ONLY_VECTORS,
     Export,
@@ -244,35 +255,23 @@ def run_dataset(name: str, plan: Plan) -> None:
     pending = [
         leg
         for leg in plan.legs
-        if plan.force or not (results_dir / f"{name}__{leg}.json").is_file()
+        if plan.force or not cell_path(results_dir, name, leg).is_file()
     ]
     blocked = {leg: missing_inputs(spec.export_dir, leg) for leg in pending}
-    if not spec.export_dir.is_file() and (spec.export_dir / "corpus.parquet").is_file():
-        pass
     for leg, missing in blocked.items():
         if missing:
-            _write_cell(
-                results_dir,
-                name,
-                leg,
-                {"status": "missing-inputs", "missing": missing, "dataset": name, "leg": leg},
-            )
+            write_cell(results_dir, name, leg, missing_inputs_cell(name, leg, missing))
     runnable = [leg for leg in pending if not blocked[leg]]
     # The embedding COLUMN is a per-leg input, not a per-dataset one: an ablation leg reads its
     # vectors from the sidecar and can run on an export whose corpus table has no column at all.
     from_corpus = [leg for leg in runnable if vector_source(leg) == "corpus"]
     if from_corpus and not has_embeddings(spec.export_dir):
         for leg in from_corpus:
-            _write_cell(
+            write_cell(
                 results_dir,
                 name,
                 leg,
-                {
-                    "status": "missing-inputs",
-                    "missing": ["corpus.parquet:embedding"],
-                    "dataset": name,
-                    "leg": leg,
-                },
+                missing_inputs_cell(name, leg, ["corpus.parquet:embedding"]),
             )
         runnable = [leg for leg in runnable if vector_source(leg) != "corpus"]
         from_corpus = []
@@ -317,24 +316,23 @@ def run_dataset(name: str, plan: Plan) -> None:
         for position, item in enumerate(usable)
     ]
     for leg in runnable:
-        header: dict[str, object] = {
-            "status": "ok",
-            "dataset": name,
-            "leg": leg,
-            "fusion": plan.fusion,
-            "vector_source": vector_source(leg),
-            "control": name in CONTROL_DATASETS,
-            "limit": plan.limit,
-            "resolution": resolution.to_dict(),
-        }
+        header = Header(
+            dataset=name,
+            leg=leg,
+            fusion=plan.fusion,
+            vector_source=vector_source(leg),
+            control=name in CONTROL_DATASETS,
+            limit=plan.limit,
+            resolution=resolution.to_dict(),
+        )
         if leg in RESCUE_LEG_NAMES:
             body = _rescue_cell(runner, export, leg, scored, fusion=plan.fusion)
         elif plan.fusion == "equal":
             body = _equal_cell(runner, export, leg, scored)
         else:
             body = _tuned_cell(runner, leg, scored)
-        payload = {**header, **body}
-        _write_cell(results_dir, name, leg, payload)
+        payload = header.merge(body)
+        write_cell(results_dir, name, leg, payload)
         print(f"[{name}/{leg}] {json.dumps(payload.get('metrics'))}", flush=True)
 
 
@@ -354,7 +352,7 @@ def _equal_cell(
             tokens_packed=outcome.tokens_packed,
             budget=outcome.budget,
         )
-    return {"metrics": cell.summary()}
+    return ladder_body(cell.summary())
 
 
 def _score(
@@ -405,13 +403,7 @@ def _rescue_cell(
     weighted, so there is no weight vector whose fitting could be reported.
     """
     if fusion != "equal":
-        return {
-            "status": "not-fusion-tunable",
-            "reason": (
-                "the graph-rescue family appends its graph lanes to the base list instead of "
-                "fusing them into it, so it has no per-signal RRF weight vector to fit"
-            ),
-        }
+        return not_fusion_tunable_body()
     # Each selector's headline sits at its own measured operating point: the knapsack saturates
     # ~5.5k so 10k is generous, while CoE keeps buying recall through 16k (operator ruling).
     headline = COE_SELECT_BUDGET if leg == "graph_rescue_coe" else SELECT_BUDGET
@@ -433,12 +425,12 @@ def _rescue_cell(
                 tokens_packed=outcome.tokens_packed,
                 budget=outcome.budget,
             )
-    return {
-        "metrics": cells[headline].summary(),
-        "budget_curve": {str(budget): cell.summary() for budget, cell in cells.items()},
-        "gate": gate.summary(),
-        "select_budget": headline,
-    }
+    return rescue_body(
+        metrics=cells[headline].summary(),
+        budget_curve={str(budget): cell.summary() for budget, cell in cells.items()},
+        gate=gate.summary(),
+        select_budget=headline,
+    )
 
 
 def _tuned_cell(
@@ -454,27 +446,13 @@ def _tuned_cell(
     outcome = run_tuned_leg(runner, leg, scored)
     if isinstance(outcome, InsufficientSplit):
         return outcome.to_dict()
-    return {
-        "metrics": outcome.tuned,
-        "metrics_equal_weight_on_test": outcome.equal,
-        "tuning": outcome.tuning.to_dict(),
-        "split": outcome.split,
-        "tunable": is_tunable_leg(leg),
-    }
-
-
-def _write_cell(results_dir: Path, dataset: str, leg: str, payload: dict[str, object]) -> None:
-    path = results_dir / f"{dataset}__{leg}.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _collect(results_dir: Path, dataset: str, legs: Sequence[str]) -> dict[str, object]:
-    out: dict[str, object] = {}
-    for leg in legs:
-        path = results_dir / f"{dataset}__{leg}.json"
-        if path.is_file():
-            out[leg] = json.loads(path.read_text(encoding="utf-8"))
-    return out
+    return tuned_body(
+        metrics=outcome.tuned,
+        metrics_equal_weight_on_test=outcome.equal,
+        tuning=outcome.tuning.to_dict(),
+        split=outcome.split,
+        tunable=is_tunable_leg(leg),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -505,7 +483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _matrix(plan: Plan, fusion: str) -> dict[str, dict[str, object]]:
     """One fusion variant's cells for every requested dataset (a dataset with none maps to {})."""
     directory = plan.out / RESULTS_DIRS[fusion]
-    return {name: _collect(directory, name, plan.legs) for name in plan.datasets}
+    return {name: load_cells(directory, name, plan.legs) for name in plan.datasets}
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry

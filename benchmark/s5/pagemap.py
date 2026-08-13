@@ -41,9 +41,6 @@ from latence_benchmark.campaign.ocr_lib import (  # noqa: E402
     normalize_html_tables,
 )
 
-#: The OCR'd datasets: the ones with an S2 ``pages/`` manifest and therefore page-level gold.
-PAGINATED_DATASETS = frozenset({"vidoseek", "ohr_bench", "uda"})
-
 
 class PageMapError(RuntimeError):
     """The page reconstruction did not reproduce the assembled markdown — never guess instead."""
@@ -178,7 +175,6 @@ def load_dataset_pages(
 
 
 __all__ = [
-    "PAGINATED_DATASETS",
     "DocumentPages",
     "PageMapError",
     "build_document_pages",

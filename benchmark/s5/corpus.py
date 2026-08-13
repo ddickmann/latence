@@ -146,12 +146,6 @@ class Export:
             hit.update(self._by_node.get(node, ()))
         return sorted(hit)
 
-    @property
-    def files(self) -> frozenset[str]:
-        """Every source file name present in the export."""
-        return frozenset(self._by_file)
-
-
 _EMBEDDING_COLUMN = "embedding"
 _RECORD_ID_COLUMN = "record_id"
 

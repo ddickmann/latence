@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from benchmark.s5.cell import Cell
 from benchmark.s5.datasets import CONTROL_DATASETS
 from benchmark.s5.goldmap import TRUST_THRESHOLD
 from benchmark.s5.legs import (
@@ -79,14 +80,14 @@ def _dataset_table(cells: Mapping[str, Any], legs: Sequence[str]) -> list[str]:
     lines = [header, "|" + "---|" * (len(_COLUMNS) + 2)]
     previous: float | None = None
     for leg in legs:
-        cell = cells.get(leg)
-        if not isinstance(cell, dict):
+        cell = Cell.of(cells.get(leg))
+        if cell is None:
             continue
-        if cell.get("status") != "ok":
-            missing = ", ".join(cell.get("missing", []))
+        if not cell.is_ok:
+            missing = ", ".join(cell.missing)
             lines.append(f"| {leg} | *missing inputs: {missing}* |" + " |" * len(_COLUMNS))
             continue
-        metrics = cell["metrics"]
+        metrics = cell.metrics
         row = [_fmt(metrics.get(key)) for key, _label in _COLUMNS]
         current = metrics.get("recall@10")
         delta = "—" if previous is None or current is None else f"{current - previous:+.4f}"
@@ -276,20 +277,20 @@ def _ablation_section(
         cells = matrix[dataset]
         for leg in wanted:
             baseline_name = ABLATION_BASELINE.get(leg, "dense")
-            cell = cells.get(leg)
-            if not isinstance(cell, dict):
+            cell = Cell.of(cells.get(leg))
+            if cell is None:
                 continue
-            if cell.get("status") != "ok":
-                missing = ", ".join(cell.get("missing", []))
+            if not cell.is_ok:
+                missing = ", ".join(cell.missing)
                 lines.append(
                     f"| {dataset} | {leg} | — | *missing inputs: {missing}* | — |"
                 )
                 continue
-            ablated = cell["metrics"].get("recall@10")
-            base_cell = cells.get(baseline_name)
+            ablated = cell.metrics.get("recall@10")
+            base_cell = Cell.of(cells.get(baseline_name))
             baseline = (
-                base_cell["metrics"].get("recall@10")
-                if isinstance(base_cell, dict) and base_cell.get("status") == "ok"
+                base_cell.metrics.get("recall@10")
+                if base_cell is not None and base_cell.is_ok
                 else None
             )
             delta = (
@@ -335,19 +336,17 @@ def _rescue_section(
     for dataset in sorted(matrix):
         cells = matrix[dataset]
         for leg in ("kg", "hyperedges", "coe", "packer", *wanted):
-            cell = cells.get(leg)
-            if not isinstance(cell, dict):
+            cell = Cell.of(cells.get(leg))
+            if cell is None:
                 continue
-            if cell.get("status") != "ok":
-                lines.append(
-                    f"| {dataset} | {leg} | *{cell.get('status', 'not run')}* |" + " |" * 9
-                )
+            if not cell.is_ok:
+                lines.append(f"| {dataset} | {leg} | *{cell.status}* |" + " |" * 9)
                 continue
-            metrics = cell["metrics"]
-            gate = cell.get("gate")
+            metrics = cell.metrics
+            gate = cell.gate
             rate = (
                 f"{float(gate['hit_rate']):.1%}"
-                if isinstance(gate, dict) and gate.get("hit_rate") is not None
+                if gate is not None and gate.get("hit_rate") is not None
                 else "— (ladder leg: no gate)"
             )
             lines.append(
@@ -393,11 +392,11 @@ def _budget_curve_rows(
     rows: list[str] = []
     for dataset in sorted(matrix):
         for leg in wanted:
-            cell = matrix[dataset].get(leg)
-            if not isinstance(cell, dict) or cell.get("status") != "ok":
+            cell = Cell.of(matrix[dataset].get(leg))
+            if cell is None or not cell.is_ok:
                 continue
-            curve = cell.get("budget_curve")
-            if not isinstance(curve, dict) or len(curve) < 2:
+            curve = cell.budget_curve
+            if curve is None or len(curve) < 2:
                 continue
             for budget in sorted(curve, key=int):
                 point = curve[budget]
@@ -516,18 +515,17 @@ def _weighted_section(
     for dataset in sorted(weighted):
         cells = weighted[dataset]
         for leg in legs:
-            cell = cells.get(leg)
-            if not isinstance(cell, dict):
+            cell = Cell.of(cells.get(leg))
+            if cell is None:
                 continue
-            if cell.get("status") != "ok":
+            if not cell.is_ok:
                 lines.append(
-                    f"| {dataset} | {leg} | — | — | *{cell.get('status', 'not run')}* |"
-                    + " |" * 8
+                    f"| {dataset} | {leg} | — | — | *{cell.status}* |" + " |" * 8
                 )
                 continue
-            tuned = cell.get("metrics", {})
-            equal = cell.get("metrics_equal_weight_on_test", {})
-            split = cell.get("split", {})
+            tuned = cell.metrics
+            equal = cell.equal_metrics
+            split = cell.split
             lines.append(
                 f"| {dataset} | {leg} | {split.get('dev_queries_tuned_on', '—')} | "
                 f"{split.get('test_queries', '—')} | "
@@ -557,16 +555,16 @@ def _weighted_section(
     return lines
 
 
-def _weights_row(dataset: str, leg: str, cell: Mapping[str, Any]) -> str:
+def _weights_row(dataset: str, leg: str, cell: Cell) -> str:
     """One fit, fully auditable: the weights, the cost, and whether the search actually settled."""
-    tuning = cell.get("tuning", {})
+    tuning = cell.tuning
     weights = tuning.get("weights", {})
     # Ladder order, not the alphabetical order the cell was serialised in: a weight vector reads
     # as "what each rung is worth relative to dense", which only makes sense in rung order.
     order = [name for name in leg_signals(leg) if name in weights]
     order += [name for name in weights if name not in order]
     rendered = ", ".join(f"{name} {float(weights[name]):.2f}" for name in order)
-    if cell.get("tunable") is False:
+    if cell.not_tunable:
         rendered = "— (single signal: the RRF weight is a pure scale, so there is nothing to fit)"
     objective = tuning.get("objective", "ndcg@10")
     before = tuning.get(f"dev_{objective}_equal_weight")
@@ -605,19 +603,19 @@ def _resolution_for(
         loaded = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             return loaded
-    for cell in cells.values():
-        if isinstance(cell, dict) and cell.get("status") == "ok":
-            resolution = cell.get("resolution")
-            if isinstance(resolution, dict):
-                return resolution
+    for value in cells.values():
+        cell = Cell.of(value)
+        if cell is not None and cell.is_ok and cell.resolution is not None:
+            return cell.resolution
     return None
 
 
 def _cap_note(cells: Mapping[str, Any]) -> str:
     """What the cells below were actually run over — never inherited from the current CLI flags."""
-    for cell in cells.values():
-        if isinstance(cell, dict) and cell.get("status") == "ok":
-            cap = cell.get("limit")
+    for value in cells.values():
+        cell = Cell.of(value)
+        if cell is not None and cell.is_ok:
+            cap = cell.limit
             return f"Legs run over **{cap if cap is not None else 'the full query set'}** queries."
     return "*No leg has been run for this dataset yet — gold resolution only.*"
 
@@ -646,12 +644,12 @@ def _delta(
     cells: Mapping[str, Any], lower: str, upper: str, *, metric: str = "recall@10"
 ) -> float | None:
     """``upper − lower`` for one metric, or ``None`` unless both cells ran and both carry it."""
-    low, high = cells.get(lower), cells.get(upper)
-    if not isinstance(low, dict) or not isinstance(high, dict):
+    low, high = Cell.of(cells.get(lower)), Cell.of(cells.get(upper))
+    if low is None or high is None:
         return None
-    if low.get("status") != "ok" or high.get("status") != "ok":
+    if not low.is_ok or not high.is_ok:
         return None
-    a, b = low["metrics"].get(metric), high["metrics"].get(metric)
+    a, b = low.metrics.get(metric), high.metrics.get(metric)
     if a is None or b is None:
         return None
     return float(b) - float(a)
