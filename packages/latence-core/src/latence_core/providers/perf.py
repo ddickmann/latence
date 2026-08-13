@@ -1,13 +1,25 @@
 """The shared **performance seam** every learned Provider loads its model through (W8-perf-accel).
 
-**Start here: the three entry points.** A learned Provider does not assemble this module's steps —
+**Start here: the four entry points.** A learned Provider does not assemble this module's steps —
 it calls exactly ONE function, keyed by the native library its adapter owns:
 
 * :func:`load_gliner_model` — the plain ``gliner`` library (``entity.gliner``,
   ``redaction.gliner_pii``, ``relation.gliner_relex``);
 * :func:`load_gliner2_model` — the ``gliner2`` framework (``fused_entity_relation.gliner2``,
   ``redaction.gliner2``);
-* :func:`load_transformers_model` — plain ``transformers`` models (the OCR VLMs, SPLADE).
+* :func:`load_transformers_model` — plain ``transformers`` models (the OCR VLMs, SPLADE);
+* :func:`load_sentence_transformer` — ``sentence-transformers`` checkpoints
+  (``embedding.sentence_transformers``).
+
+**Process-global torch state has an owner**: :class:`TorchRuntime`. Three of this module's steps
+mutate state that outlives any one Provider — the ``PYTORCH_JIT`` env switch + the in-process JIT
+state (:func:`neutralize_torch_jit`), the torch intra-op thread pool
+(:func:`cap_intra_op_threads`), and the TorchDynamo compilation state (:func:`maybe_compile`).
+Those three functions are thin delegators to the CURRENT runtime
+(:func:`current_torch_runtime`), which RECORDS the prior value of everything it changes; a test
+boundary or a Stage boundary wraps work in :func:`scoped_torch_runtime` to have the mutations made
+inside it restored on exit. Unscoped callers keep the exact process-lifetime semantics they always
+had (the root runtime records but is never restored).
 
 Each takes ``(import_model_cls, model_id, config, decision, *, provider_name)`` and returns a model
 that is ready to run. The **ordering** of JIT neutralization, backbone import, device check,
@@ -501,6 +513,224 @@ def inference_context() -> contextlib.AbstractContextManager[Any]:
     return cast("contextlib.AbstractContextManager[Any]", torch.inference_mode())
 
 
+# ---------------------------------------------------------------------------
+# TorchRuntime — the OWNER of the process-global torch state this seam mutates.
+# ---------------------------------------------------------------------------
+#
+# Three steps in this module reach past the model object into state that belongs to the whole
+# process: ``neutralize_torch_jit`` (the ``PYTORCH_JIT`` env switch + ``torch.jit._state``),
+# ``cap_intra_op_threads`` (``torch.set_num_threads``), and ``maybe_compile`` (TorchDynamo's
+# compilation caches/guards). Before Wave 3-H those mutations had no owner and no reset — the exact
+# fragility FINDINGS F7 (an order-dependent ``prims.iota`` flake in a 5,000-test single-interpreter
+# run) and F9 (an interpreter-shutdown segfault with torch loaded) are symptoms of. The runtime does
+# not change WHAT the three functions do; it records the prior value of every global they touch so a
+# boundary that wants isolation (a real-weights test, a Stage) can get it back.
+
+
+class TorchRuntime:
+    """Records the process-global torch state the perf seam mutates, and can restore it.
+
+    The three global-mutating steps (:func:`neutralize_torch_jit`, :func:`cap_intra_op_threads`,
+    :func:`maybe_compile`) delegate to the *current* runtime (:func:`current_torch_runtime`). Each
+    mutation records the FIRST prior value it displaces within this runtime's lifetime:
+
+    * ``"jit_env"`` — the prior ``PYTORCH_JIT`` value (``None`` = the variable was unset);
+    * ``"jit_enabled"`` — the prior ``torch.jit._state._enabled.enabled`` bool;
+    * ``"num_threads"`` — the prior ``torch.get_num_threads()`` int;
+    * ``"dynamo"`` — ``True`` when ``torch.compile`` was invoked (dynamo state has no readable
+      "prior"; the restore is ``torch._dynamo.reset()``, dropping the compilation caches/guards
+      back to a fresh state).
+
+    :meth:`restore` puts every recorded global back — guarded (never raises, torch-free-safe) and
+    idempotent (the records are consumed, so a second call is a no-op). A runtime is NOT
+    thread-safe; the perf seam runs on the single-process Runner (ADR-0033).
+    """
+
+    def __init__(self) -> None:
+        self._changes: dict[str, Any] = {}
+
+    @property
+    def recorded(self) -> dict[str, Any]:
+        """A snapshot of what this runtime changed: key → the prior value it would restore."""
+        return dict(self._changes)
+
+    def _record(self, key: str, prior: Any) -> None:
+        """Record the FIRST prior value per key — later mutations of the same lever keep it."""
+        self._changes.setdefault(key, prior)
+
+    # -- the three owned mutations (the module functions are thin delegators) --
+
+    def maybe_compile(
+        self, model: Any, config: Mapping[str, Any], *, provider_name: str = "provider"
+    ) -> Any:
+        """The :func:`maybe_compile` body — records that dynamo state was touched."""
+        if not config.get("compile", False):
+            return model
+        try:
+            import torch  # noqa: PLC0415 - optional heavy dep, only imported when compile is on
+
+            # Recorded BEFORE the call: even a failed compile may have touched dynamo state, and
+            # the restore (a dynamo reset) is safe either way. Pure flag set — cannot raise.
+            self._record("dynamo", True)
+            return torch.compile(model, mode="reduce-overhead")
+        except Exception:  # noqa: BLE001 - deliberate: a compile failure degrades to eager, never crashes
+            _log.warning(
+                "%s: torch.compile failed; running the uncompiled model (throughput only)",
+                provider_name,
+                exc_info=True,
+            )
+            return model
+
+    def neutralize_torch_jit(
+        self, *, provider_name: str = "provider", config: Mapping[str, Any] | None = None
+    ) -> bool:
+        """The :func:`neutralize_torch_jit` body — records the env switch + in-process JIT state."""
+        import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+        if config is not None and not torch_jit_must_be_neutralized(
+            config, provider_name=provider_name
+        ):
+            return False
+
+        self._record("jit_env", os.environ.get(TORCH_JIT_ENV))
+        os.environ[TORCH_JIT_ENV] = "0"
+        try:
+            import torch  # noqa: PLC0415 - optional heavy dep; the model load imports it next
+
+            state = torch.jit._state  # noqa: SLF001 - the only switch torch exposes for this
+            enabled_proxy = getattr(state, "_enabled", None)
+            prior = getattr(enabled_proxy, "enabled", None) if enabled_proxy is not None else None
+            if isinstance(prior, bool):
+                self._record("jit_enabled", prior)
+            disable = getattr(state, "disable", None)
+            if callable(disable):
+                disable()
+            if enabled_proxy is not None and getattr(enabled_proxy, "enabled", False):
+                # A torch whose ``disable()`` is missing/renamed: set the flag the proxy reads.
+                enabled_proxy.enabled = False
+            off = enabled_proxy is not None and not getattr(enabled_proxy, "enabled", False)
+        except Exception:  # noqa: BLE001 - deliberate: neutralizing the JIT must never crash a load
+            _log.info(
+                "%s: could not disable the torch JIT in-process (PYTORCH_JIT=0 set for any later "
+                "torch import)",
+                provider_name,
+                exc_info=True,
+            )
+            return False
+        _log.info(
+            "%s: torch JIT neutralized (PYTORCH_JIT=0%s) — nvrtc-free mdeberta forward, "
+            "throughput only",
+            provider_name,
+            ", runtime state disabled" if off else "",
+        )
+        return off
+
+    def cap_intra_op_threads(self, n: int | None, *, provider_name: str = "provider") -> int | None:
+        """The :func:`cap_intra_op_threads` body — records the prior torch thread-pool size."""
+        if n is None:
+            return None
+        try:
+            import torch  # noqa: PLC0415 - optional heavy dep, imported only when a cap is applied
+
+            prior: Any = None
+            with contextlib.suppress(Exception):
+                # Best-effort prior read (a stub torch may not expose it); the cap still applies.
+                prior = int(torch.get_num_threads())
+            torch.set_num_threads(n)
+        except Exception:  # noqa: BLE001 - deliberate: a thread-cap failure must never crash the load
+            _log.warning(
+                "%s: could not cap intra-op threads to %d (left at torch default)",
+                provider_name,
+                n,
+                exc_info=True,
+            )
+            return None
+        if isinstance(prior, int):
+            self._record("num_threads", prior)
+        _log.info(
+            "%s: capped torch intra-op threads to %d (many-core oversubscription guard)",
+            provider_name,
+            n,
+        )
+        return n
+
+    # -- restore --------------------------------------------------------------
+
+    def restore(self) -> None:
+        """Put every recorded global back to its prior value — guarded, idempotent, never raises.
+
+        The records are consumed (a second call is a no-op). Every step is individually suppressed:
+        restoring is insurance, never a correctness step, and it must work on a host where torch was
+        monkeypatched away between the mutation and the restore (the offline test envs do exactly
+        that). ``"jit_enabled": False`` needs no undo — the seam only ever disables, so a prior-off
+        JIT was off before and stays off.
+        """
+        import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+        import sys  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
+
+        changes, self._changes = self._changes, {}
+        if changes.pop("dynamo", False) and "torch" in sys.modules:
+            with contextlib.suppress(Exception):
+                import torch._dynamo  # noqa: PLC0415 - only reached when compile ran, so torch exists
+
+                torch._dynamo.reset()
+        if "num_threads" in changes:
+            with contextlib.suppress(Exception):
+                import torch  # noqa: PLC0415 - only reached when a cap was applied through torch
+
+                torch.set_num_threads(changes["num_threads"])
+        if changes.get("jit_enabled") is True:
+            with contextlib.suppress(Exception):
+                import torch  # noqa: PLC0415 - only reached when the JIT was disabled through torch
+
+                state = torch.jit._state  # noqa: SLF001 - the only switch torch exposes for this
+                enable = getattr(state, "enable", None)
+                if callable(enable):
+                    enable()
+                proxy = getattr(state, "_enabled", None)
+                if proxy is not None and not getattr(proxy, "enabled", False):
+                    proxy.enabled = True
+        if "jit_env" in changes:
+            prior_env = changes["jit_env"]
+            if prior_env is None:
+                os.environ.pop(TORCH_JIT_ENV, None)
+            else:
+                os.environ[TORCH_JIT_ENV] = str(prior_env)
+
+
+#: The runtime stack. The bottom entry is the process-lifetime ROOT runtime: it records what the
+#: unscoped process changed (diagnostics) but is never restored, so callers that never scope keep
+#: the exact semantics the three functions always had. :func:`scoped_torch_runtime` pushes a fresh
+#: runtime so mutations made inside the scope land in — and are restored by — that runtime.
+_RUNTIME_STACK: list[TorchRuntime] = [TorchRuntime()]
+
+
+def current_torch_runtime() -> TorchRuntime:
+    """The runtime that owns torch-global mutations right now (innermost scope, else the root)."""
+    return _RUNTIME_STACK[-1]
+
+
+@contextlib.contextmanager
+def scoped_torch_runtime() -> Iterator[TorchRuntime]:
+    """Scope the process-global torch mutations made inside the ``with`` block; restore on exit.
+
+    The boundary FINDINGS F7/F9 asked for: a real-weights test (or a Stage runner) wraps the work
+    that loads/compiles a model, and on exit the ``PYTORCH_JIT`` env switch, the in-process JIT
+    state, the intra-op thread cap and the dynamo compilation state go back to what they were when
+    the scope was entered — so one boundary's torch state cannot leak into the next. Scopes nest:
+    each records and restores only its own mutations. The yielded runtime exposes
+    :attr:`TorchRuntime.recorded` for assertions/diagnostics.
+    """
+    runtime = TorchRuntime()
+    _RUNTIME_STACK.append(runtime)
+    try:
+        yield runtime
+    finally:
+        with contextlib.suppress(ValueError):
+            _RUNTIME_STACK.remove(runtime)
+        runtime.restore()
+
+
 def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str = "provider") -> Any:
     """``torch.compile`` the model when ``config["compile"]`` is truthy — guarded, never crashes.
 
@@ -511,20 +741,11 @@ def maybe_compile(model: Any, config: Mapping[str, Any], *, provider_name: str =
     **uncompiled** model returned, so a bad compile can only ever cost throughput, never correctness
     or a crash. The compiled module is a drop-in for the eager one (same forward signature/outputs),
     so an adapter swaps it in transparently.
-    """
-    if not config.get("compile", False):
-        return model
-    try:
-        import torch  # noqa: PLC0415 - optional heavy dep, only imported when compile is requested
 
-        return torch.compile(model, mode="reduce-overhead")
-    except Exception:  # noqa: BLE001 - deliberate: a compile failure must degrade to eager, never crash
-        _log.warning(
-            "%s: torch.compile failed; running the uncompiled model (throughput only)",
-            provider_name,
-            exc_info=True,
-        )
-        return model
+    Thin delegator: the mutation is performed — and the touched dynamo state RECORDED — by the
+    current :class:`TorchRuntime`, so a :func:`scoped_torch_runtime` boundary can reset it.
+    """
+    return current_torch_runtime().maybe_compile(model, config, provider_name=provider_name)
 
 
 # ---------------------------------------------------------------------------
@@ -801,42 +1022,14 @@ def neutralize_torch_jit(
     absent or exposes no JIT state to read back; the env switch is set either way). A **gated call
     that decides to skip** also returns ``False`` — the in-process JIT is then known-ON, and neither
     lever is pulled (an operator's externally-exported ``PYTORCH_JIT`` is left exactly as it was).
+
+    Thin delegator: the mutation is performed — and the prior env value + in-process JIT state
+    RECORDED — by the current :class:`TorchRuntime`, so a :func:`scoped_torch_runtime` boundary can
+    put both levers back.
     """
-    import os  # noqa: PLC0415 - stdlib, kept local so import cost is only paid on use
-
-    if config is not None and not torch_jit_must_be_neutralized(
-        config, provider_name=provider_name
-    ):
-        return False
-
-    os.environ[TORCH_JIT_ENV] = "0"
-    try:
-        import torch  # noqa: PLC0415 - optional heavy dep; the model load imports it moments later
-
-        state = torch.jit._state  # noqa: SLF001 - the only switch torch exposes for this
-        disable = getattr(state, "disable", None)
-        if callable(disable):
-            disable()
-        enabled_proxy = getattr(state, "_enabled", None)
-        if enabled_proxy is not None and getattr(enabled_proxy, "enabled", False):
-            # A torch whose ``disable()`` is missing/renamed: set the flag the proxy reads directly.
-            enabled_proxy.enabled = False
-        off = enabled_proxy is not None and not getattr(enabled_proxy, "enabled", False)
-    except Exception:  # noqa: BLE001 - deliberate: neutralizing the JIT must never crash a load
-        _log.info(
-            "%s: could not disable the torch JIT in-process (PYTORCH_JIT=0 set for any later "
-            "torch import)",
-            provider_name,
-            exc_info=True,
-        )
-        return False
-    _log.info(
-        "%s: torch JIT neutralized (PYTORCH_JIT=0%s) — nvrtc-free mdeberta forward, throughput "
-        "only",
-        provider_name,
-        ", runtime state disabled" if off else "",
+    return current_torch_runtime().neutralize_torch_jit(
+        provider_name=provider_name, config=config
     )
-    return off
 
 
 # The valid explicit gliner2 quantize/compile config values (an operator may pin one). ``auto``
@@ -1069,27 +1262,11 @@ def cap_intra_op_threads(n: int | None, *, provider_name: str = "provider") -> i
     (returns ``None``) — capping threads is best-effort throughput insurance against the many-core
     oversubscription spin, never a hard dependency or a crash. Returns the applied cap, else
     ``None``.
-    """
-    if n is None:
-        return None
-    try:
-        import torch  # noqa: PLC0415 - optional heavy dep, imported only when a cap is applied
 
-        torch.set_num_threads(n)
-    except Exception:  # noqa: BLE001 - deliberate: a thread-cap failure must never crash the load
-        _log.warning(
-            "%s: could not cap intra-op threads to %d (left at torch default)",
-            provider_name,
-            n,
-            exc_info=True,
-        )
-        return None
-    _log.info(
-        "%s: capped torch intra-op threads to %d (many-core oversubscription guard)",
-        provider_name,
-        n,
-    )
-    return n
+    Thin delegator: the mutation is performed — and the prior pool size RECORDED — by the current
+    :class:`TorchRuntime`, so a :func:`scoped_torch_runtime` boundary can restore it.
+    """
+    return current_torch_runtime().cap_intra_op_threads(n, provider_name=provider_name)
 
 
 def _detect_model_device(model: Any) -> str | None:
@@ -1769,4 +1946,66 @@ def load_transformers_model(
         guard,
     )
     place_on_device(model, device, provider_name=provider_name)
+    return maybe_compile(model, config, provider_name=provider_name)
+
+
+def load_sentence_transformer(
+    import_model_cls: Callable[[], Any],
+    model_id: str,
+    config: Mapping[str, Any],
+    decision: DeviceDecision,
+    *,
+    provider_name: str,
+    guard: LoadGuard | None = None,
+    inspect_model: Callable[[Any], None] | None = None,
+) -> Any:
+    """Load a ``sentence-transformers`` checkpoint, ready to run — the WHOLE sequence, one call.
+
+    The entry point ``embedding.sentence_transformers`` loads through — previously the ONE learned
+    Provider assembling this module's steps piecemeal (``load_with_fa2_fallback`` + a hand-placed
+    ``maybe_compile``), i.e. re-opening by hand the ordering the other three composites exist to
+    own. Same interface as :func:`load_gliner_model`, with two family-specific differences:
+
+    * ``import_model_cls`` returns the ``SentenceTransformer`` CLASS; the load is a **constructor**
+      call, not ``from_pretrained``: ``st_cls(model_id, device=…, model_kwargs=…)``. ``device=`` is
+      ST's own documented placement (``None`` lets ST auto-select — the shape a Provider that
+      resolves no device hands in), and the W8 perf kwargs (``torch_dtype`` +
+      ``attn_implementation``) thread through ST's documented ``model_kwargs`` pass-through to the
+      backbone's ``from_pretrained``. A ``flash_attention_2`` load that raises is retried once on
+      ``sdpa`` (:func:`load_with_fa2_fallback`) — graceful degradation, never a crash.
+    * ``inspect_model`` — an optional hook run against the **eager** model after the load and
+      BEFORE the guarded compile wrap (the caller's read-back/validation step, e.g. the embedder's
+      ``get_sentence_embedding_dimension`` width check, which must read the container, not a
+      compiled wrapper). Holding the hook here is what keeps "inspect before compile" an ordering
+      a caller cannot get wrong. An exception it raises propagates unchanged.
+
+    Behind it, in order: skip check (#191, a skipped decision is a loud ConfigError) → intra-op
+    thread cap (W9-scaling; process-wide, so the embedding Stage caps like every other learned
+    family) → the backbone import (the factory's ``ImportError`` propagates unwrapped so the
+    "pip install …" hint survives) → perf-kwargs resolution → guarded native load with FA2→sdpa
+    fallback → ``inspect_model`` on the eager model → guarded ``torch.compile`` (off by default).
+
+    **Deliberately NO :func:`neutralize_torch_jit` here**, unlike the other three composites: the
+    kill exists for FM-NVRTC-JIT on ``@torch.jit.script``-ed DeBERTa helpers, and the ST family's
+    default backbones (Granite r2 = ModernBERT) carry none — pulling the process-wide
+    ``PYTORCH_JIT=0`` lever from this family would add exactly the unowned cross-provider global
+    mutation Wave 3-H exists to reduce. A DeBERTa-backed ST checkpoint on Blackwell/CUDA-13 can pin
+    ``torch_jit: off`` via its own Provider; the lever stays one config line away.
+    """
+    device = _require_device(decision, provider_name)
+    cap_intra_op_threads(resolve_intra_op_threads(config), provider_name=provider_name)
+    st_cls = import_model_cls()
+    perf = load_perf_kwargs(device, config)
+    model = _typed_load(
+        lambda: load_with_fa2_fallback(
+            lambda mid, **mk: st_cls(mid, device=device, model_kwargs=mk),
+            model_id,
+            perf,
+        ),
+        model_id,
+        provider_name,
+        guard,
+    )
+    if inspect_model is not None:
+        inspect_model(model)
     return maybe_compile(model, config, provider_name=provider_name)

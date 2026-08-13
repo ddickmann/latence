@@ -645,15 +645,25 @@ def test_no_provider_hand_rolls_the_cuda_cache_reclaim() -> None:
     )
 
 
-def test_sentence_transformers_construction_threads_model_kwargs() -> None:
-    """The ST embedder constructs ``SentenceTransformer`` through the FA2-fallback loader.
+def test_sentence_transformers_loads_through_the_st_composite() -> None:
+    """The ST embedder loads through the deep ST entry point, never piecemeal steps (Wave 3-H).
 
-    ``sentence-transformers`` is neither a ``from_pretrained`` family nor a device-placing one (the
-    library places its own model from a ``device=`` argument), so it stays on the step-level
-    ``load_with_fa2_fallback`` seam rather than a deep entry point — asserted here so that
-    exemption is a recorded decision rather than an omission.
+    This REVERSES the pre-3-H recorded exemption ("ST stays on the step-level
+    ``load_with_fa2_fallback`` seam"): assembling the steps by hand in the Provider was re-opening
+    the C4 ordering by hand, and ST was the ONE learned family without a composite. The Provider
+    now makes exactly one perf-seam call — :func:`load_sentence_transformer` — and the FA2
+    fallback + ``model_kwargs`` threading live inside that composite in ``perf.py``.
     """
-    path = _packages_root() / "latence-embedder-st/src/latence_embedder_st/provider.py"
-    src = path.read_text(encoding="utf-8")
-    assert "load_with_fa2_fallback" in src, "ST embedder must load through the shared perf seam"
-    assert "model_kwargs" in src, "ST embedder must thread perf kwargs via model_kwargs"
+    provider_path = _packages_root() / "latence-embedder-st/src/latence_embedder_st/provider.py"
+    provider_src = provider_path.read_text(encoding="utf-8")
+    assert "load_sentence_transformer" in provider_src, (
+        "ST embedder must load through the deep ST composite"
+    )
+    assert "load_with_fa2_fallback" not in provider_src, (
+        "no piecemeal step assembly in the Provider — the composite owns the sequence"
+    )
+    perf_path = _packages_root() / "latence-core/src/latence_core/providers/perf.py"
+    perf_src = perf_path.read_text(encoding="utf-8")
+    composite = perf_src[perf_src.index("def load_sentence_transformer") :]
+    assert "load_with_fa2_fallback" in composite, "the composite owns the FA2→sdpa fallback"
+    assert "model_kwargs=mk" in composite, "the composite threads perf kwargs via ST model_kwargs"

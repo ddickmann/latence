@@ -19,9 +19,15 @@ based (alternating attention + GeGLU/SiLU + RoPE), single-vector dense, 32,768-t
     * **GPU tier — the default** — ``ibm-granite/granite-embedding-311m-multilingual-r2``
       (768-dim). On a GPU it loads **bf16 + flash_attention_2** through the W8 perf seam
       (``attn_implementation`` + ``torch_dtype`` via ST ``model_kwargs``), with a graceful ``sdpa``
-      fallback when FA2 is unavailable
-      (:func:`~latence_core.providers.perf.load_with_fa2_fallback`); on a CPU box the same perf seam
+      fallback when FA2 is unavailable; on a CPU box the same perf seam
       resolves fp32 + sdpa, so it still runs (heavier, but no CUDA).
+
+The whole load runs through the perf seam's ST composite
+(:func:`~latence_core.providers.perf.load_sentence_transformer`) — ONE call owning the ordered
+sequence (device skip-check, intra-op thread cap, deferred backbone import, dtype/attn resolution,
+FA2→sdpa fallback, eager-model width check, guarded compile), so this Provider never re-assembles
+the perf steps piecemeal (the C4 discipline the gliner/gliner2/transformers families already load
+under).
     * **CPU tier** — ``ibm-granite/granite-embedding-97m-multilingual-r2`` (384-dim), the lighter
       laptop-CPU option (fp32, no FA2). Selected with one config line
       (``model: ibm-granite/granite-embedding-97m-multilingual-r2``, ``dimension: 384``).
@@ -59,7 +65,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ProviderError
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.perf import load_with_fa2_fallback as _load_with_fa2_fallback
+from latence_core.providers.perf import load_sentence_transformer as _load_sentence_transformer
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:
@@ -204,17 +210,41 @@ class SentenceTransformersEmbedder(AdapterBase):
     # -- lazy model load ----------------------------------------------------
 
     def _load_model(self) -> Any:
-        """Import ``sentence-transformers`` and load the checkpoint on first use (cached).
+        """Load the checkpoint through the perf seam's ST composite on first use (cached).
 
-        Deferred so Provider discovery (importing this module) never needs torch, and a missing
-        optional dependency surfaces as a clear install hint only when the Provider is actually
-        run. The chosen device (cpu|cuda) flows from the AdapterBase device seam into ST's
-        ``device=`` so placement stays the adapter's job (ADR-0003). After load, the model's real
-        embedding width is read and cross-checked against a declared ``dimension`` — a mismatch is
-        a loud :class:`~latence_core.errors.ProviderError`, never a silently wrong column.
+        ONE call — :func:`~latence_core.providers.perf.load_sentence_transformer` — owns the whole
+        ordered sequence (C4): the device skip-check (a skipped
+        :class:`~latence_core.providers.device.DeviceDecision` is a loud ConfigError, never a
+        silent CPU fallback), the intra-op thread cap, the deferred ``sentence-transformers``
+        import (:meth:`_import_st`, so discovery never needs torch and a missing optional dep
+        surfaces as the actionable install hint), the W8 dtype/attn resolution threaded through
+        ST's ``model_kwargs``, the FA2→sdpa fallback, the eager-model width check
+        (:meth:`_check_dimension`, run BEFORE any compile wrap so it reads the real container),
+        and the guarded compile (off by default). The resolved device flows into ST's ``device=``
+        (``None`` ⇒ ST auto-selects); native load faults map through :meth:`guard` to the typed
+        taxonomy.
         """
         if self._model is not None:
             return self._model
+        self._model = _load_sentence_transformer(
+            self._import_st,
+            self._model_id,
+            self.config,
+            self.device,
+            provider_name=self.provider_name,
+            guard=self.guard,
+            inspect_model=self._check_dimension,
+        )
+        return self._model
+
+    @staticmethod
+    def _import_st() -> Any:
+        """The deferred backbone import the composite calls at the one correct instant.
+
+        Deferred so Provider discovery (importing this module) never needs torch; the
+        ``ImportError`` carries the actionable install hint and propagates unwrapped through the
+        composite (a missing optional dependency is an operator message, not a provider fault).
+        """
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - exercised only without the dep
@@ -223,19 +253,16 @@ class SentenceTransformersEmbedder(AdapterBase):
                 "SentenceTransformersEmbedder. Install it with: pip install latence-embedder-st"
             )
             raise ImportError(msg) from exc
-        # Map the resolved device seam to ST's device= (None ⇒ ST auto-selects; the seam never
-        # hands a fabricated device — a GPU-only host would have been skipped upstream).
-        st_device = self.device.device
-        # W8 perf seam: thread the resolved dtype + attn implementation into the underlying
-        # transformer via ST's ``model_kwargs`` (its documented pass-through to from_pretrained),
-        # so the checkpoint loads bf16-on-GPU + sdpa/FA2 instead of the fp32/eager default. A FA2
-        # load that a model does not support degrades gracefully to sdpa (never a crash), then the
-        # model is optionally compiled (guarded, off by default).
-        perf = self.load_perf_kwargs()
-        with self.guard("load_model"):
-            model = self._load_st(SentenceTransformer, self._model_id, st_device, perf)
-        # Read the real embedding width from the loaded (uncompiled) model before any compile wrap —
-        # ``get_sentence_embedding_dimension`` is a container method, read it off the eager module.
+        return SentenceTransformer
+
+    def _check_dimension(self, model: Any) -> None:
+        """Read the real embedding width off the EAGER model and cross-check the declared one.
+
+        The composite runs this before any compile wrap — ``get_sentence_embedding_dimension`` is
+        a container method, read off the eager module. A declared ``dimension`` that disagrees
+        with the model is a loud :class:`~latence_core.errors.ProviderError`, never a silently
+        wrong column (a downstream vector DB needs a uniform width, ADR-0017).
+        """
         real_dim = int(model.get_sentence_embedding_dimension())
         if self._declared_dimension is not None and real_dim != self._declared_dimension:
             msg = (
@@ -244,27 +271,6 @@ class SentenceTransformersEmbedder(AdapterBase):
             )
             raise ProviderError(msg)
         self._dimension = real_dim
-        # Optional guarded compile (off by default) — after the width is read, so a compile wrap can
-        # never hide the container's introspection methods.
-        self._model = self.maybe_compile(model)
-        return self._model
-
-    @staticmethod
-    def _load_st(st_cls: Any, model_id: str, device: str | None, perf: dict[str, Any]) -> Any:
-        """Construct the ``SentenceTransformer``, threading perf kwargs, FA2→sdpa on FA2 failure.
-
-        The W8 perf kwargs (``torch_dtype`` + ``attn_implementation``) go through ST's documented
-        ``model_kwargs`` pass-through to the backbone's ``from_pretrained``. A ``flash_attention_2``
-        load can raise on a backbone that does not support it (e.g. no FA2 kernel for the arch); the
-        shared :func:`~latence_core.providers.perf.load_with_fa2_fallback` catches that and retries
-        once on ``sdpa`` so the embedder still loads — graceful degradation, never a crash. Any
-        non-FA2 load error propagates (mapped by the guard).
-        """
-        return _load_with_fa2_fallback(
-            lambda mid, **mk: st_cls(mid, device=device, model_kwargs=mk),
-            model_id,
-            perf,
-        )
 
     # -- embedding ----------------------------------------------------------
 
