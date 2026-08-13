@@ -36,22 +36,33 @@ COPY packages ./packages
 COPY README.md CONTEXT.md ./
 
 # 1) The default workspace set (latence-core + CPU text parsers + the CPU spine), lockfile-pinned.
-RUN uv sync --frozen --no-dev
+#    --no-editable is load-bearing: a plain `uv sync` installs workspace members EDITABLE
+#    (site-packages .pth files pointing at /app/packages/*/src), and the runtime stage copies
+#    only the venv — so every workspace import would 404 in the final image. Measured, not
+#    hypothetical: the image built green and `latence --help` died with ModuleNotFoundError
+#    until this flag (ticket wayfinder-enterprise-serving/04). The smoke RUN in the runtime
+#    stage keeps it from regressing.
+RUN uv sync --frozen --no-dev --no-editable
 
 # 2) The observability EXPORT extra (ADR-0047) so `LATENCE_METRICS=prometheus|otel` is live in
 #    this image. Optional group on latence-core; installed here, off unless the env opts in.
-RUN uv pip install "./packages/latence-core[observability]"
+#    --no-sources on every `uv pip install` below is the second half of the --no-editable fix:
+#    inside the workspace, a bare path install is rerouted through tool.uv.sources and lands
+#    EDITABLE again (measured: the sync was non-editable and this step alone put the
+#    /app/packages .pth back). --no-sources installs the path as a plain project; its latence-*
+#    dependencies are already satisfied by the sync, so nothing resolves from an index.
+RUN uv pip install --no-sources "./packages/latence-core[observability]"
 
 # 3) The LIGHT served/endpoint Provider set. The OpenAI-client Providers pull only `openai`
 #    (light); parser.lighton (heavy: torch/transformers) is installed --no-deps for its
 #    pure-Python rasteriser alone, and parser.lighton_vllm gets its real light deps explicitly —
 #    so the served OCR client works with NO GPU stack in the image.
-RUN uv pip install \
+RUN uv pip install --no-sources \
         "./packages/latence-parser-endpoint" \
         "./packages/latence-ner-endpoint" \
         "./packages/latence-embedder-endpoint" \
         "./packages/latence-relation-llm" \
-    && uv pip install --no-deps \
+    && uv pip install --no-sources --no-deps \
         "./packages/latence-parser-lighton" \
         "./packages/latence-parser-lighton-vllm" \
     && uv pip install "openai>=1.0,<3" "pypdfium2>=4.0" "pillow>=10.0"
@@ -81,6 +92,11 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 # The data root (corpus in, artifacts out, model cache) is a mounted volume/PVC at runtime.
 WORKDIR /app
 USER 10001
+
+# Build-time smoke: the image is broken if its own entrypoint cannot import. This is what
+# caught the editable-venv defect above — keep it, so `docker build` succeeding MEANS the
+# CLI stands up (no network, no model load; just the import graph + Typer wiring).
+RUN latence --help > /dev/null
 
 # The `latence` CLI is the entrypoint; the default command prints help. A deployment overrides the
 # command with e.g. `latence run /etc/latence/served-ocr.yaml --run-id run-0001`.
