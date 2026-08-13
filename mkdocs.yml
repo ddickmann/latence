@@ -207,6 +207,7 @@ nav:
       - Feed a retrieval engine:
           - Retrieval-quality tooling (design): retrieval-tooling.md
           - Graph-rescue retrieval: guides/graph-rescue-retrieval.md
+          - "Serving with Qdrant: measured parity": guides/serving-qdrant.md
           - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
           - Iceberg-table Export (optional): iceberg-export.md
       - Measure it:

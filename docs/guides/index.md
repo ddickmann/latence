@@ -49,6 +49,10 @@ framework? Start with [Getting Started](../getting-started/index.md) and
   lane that appends (never fuses), and a token-budget selector — measured defaults, zero
   LLM calls online.
 
+- :material-database-search: **[Serving with Qdrant](serving-qdrant.md)**
+  The verified Export → collection → served-queries path: pinned compose, `distance: dot`,
+  `hnsw_ef: 512` — recall parity with brute force measured on the full query sets.
+
 - :material-vector-combine: **[Embedders](../embedders.md)**
   The opt-in RAG-corpus vector augmentation and how it plugs into Export.
 

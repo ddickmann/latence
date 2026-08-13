@@ -8,9 +8,12 @@ in-process Provider or the vLLM server — a Hugging Face model cache.
 
 Contents:
 - [What the pipeline depends on](#what-the-pipeline-depends-on)
+- [What runs where — the cloud-agnostic compute story](#what-runs-where--the-cloud-agnostic-compute-story)
 - [GPU requirements + the Blackwell note](#gpu-requirements--the-blackwell-note)
 - [Option A — Docker Compose (single box)](#option-a--docker-compose-single-box)
 - [Option B — Kubernetes / Helm (on-prem, VPC)](#option-b--kubernetes--helm-on-prem-vpc)
+- [Serving the corpus — Qdrant](#serving-the-corpus--qdrant)
+- [Orchestrators — the Airflow adapter](#orchestrators--the-airflow-adapter)
 - [Air-gapped deployment](#air-gapped-deployment)
 - [Observability + secrets](#observability--secrets)
 - [Reproducible in-process environments](#reproducible-in-process-environments)
@@ -45,6 +48,35 @@ The pipeline image (`deploy/Dockerfile`) is therefore deliberately **torch-free*
 `latence-core` + the **light** endpoint Provider clients (each pulls only the `openai` client and,
 for OCR, a pure-Python rasteriser) + the observability extra. No CUDA stack lands in the pipeline
 image — that is the whole point of the served path.
+
+## What runs where — the cloud-agnostic compute story
+
+Nothing in the framework names a cloud. Storage is one fsspec seam (`file://`, `s3://`, `gs://`,
+`abfs://` — same code, one config key), models are reached either in process or over an
+OpenAI-compatible `base_url`, and the serving store is a `RetrievalBackend` adapter. "Runs in
+your environment" therefore decomposes into exactly three compute shapes, and each stage of the
+pipeline belongs to one of them:
+
+| Compute shape | Stages | Hardware |
+| --- | --- | --- |
+| **Deterministic CPU** — always local, no model | Source, intake/content screening, chunking, reference extraction, profiling, graph assembly + centrality, exports (Parquet/JSONL/TTL/GraphML, BM25 stats, hyperedge KV) | any CPU host |
+| **Learned, in-process** — GPU-accelerated, CPU-capable | GLiNER2 extraction + redaction, GLinker disambiguation, Granite embeddings, SPLADE | one GPU per worker, or CPU at lower throughput (measured envelopes: `PERF-RESULTS.md`) |
+| **Served over HTTP** — the endpoint seam | OCR (vLLM), optional LLM induction/relation extraction | wherever you host the endpoint; the pipeline host stays CPU |
+| **Query time** — after the pipeline | dense first stage (your ANN engine, e.g. [Qdrant](guides/serving-qdrant.md)), exact BM25 rescoring, graph traversal + hypergraph lanes, selectors | CPU; zero LLM calls online |
+
+The end-to-end scale point, measured (the e2e campaign's S3 stage, one 24 GB-class CUDA pod,
+`benchmark/sota-campaign/stages/s3-pipeline/metrics.json`): **60,766 documents → 297,548
+chunks / 3.4M entity mentions / 900,583 hyperedges / 731,266 PII findings**, with per-dataset
+wall times from 0.19 h (609 news articles) to 1.29 h (1,261 OCR'd documents, LLM induction on).
+The only LLM spend in that run was optional per-chunk schema induction on three of five
+datasets — 247,944 calls, **$29.26 measured** ($0.000118/call); the text-native datasets ran
+hand-authored schemas at zero LLM cost. Query-time serving needs no GPU at all: the measured
+serving path (single-node Qdrant + the full graph-rescue composition) answers at 42–83 ms median
+per query on CPU ([the serving guide](guides/serving-qdrant.md) carries the full tables).
+
+Incremental churn is also measured rather than promised: an add of 61 documents into a 609-doc
+corpus cost 8.4 min against 97.4 min for the full rebuild (11.6×), with the incremental export
+**byte-identical** to the rebuild — see [Incremental ingest](guides/incremental-ingest.md).
 
 ## GPU requirements + the Blackwell note
 
@@ -149,6 +181,28 @@ init step, an NFS export, or an `existingClaim` pre-populated out of band).
 **GPU scheduling.** The OCR/LLM Deployments carry a `nodeSelector` + `tolerations` for GPU nodes and
 request `nvidia.com/gpu`. The defaults match the common `nvidia.com/gpu.present` label and the
 `nvidia.com/gpu` taint the NVIDIA GPU Operator applies — change them to your cluster's convention.
+
+## Serving the corpus — Qdrant
+
+The pipeline's Exports are files; serving them behind a real ANN engine is one loader command
+against a pinned single-node compose (`deploy/qdrant/docker-compose.yml`), and the served path's
+recall parity with brute force is **measured on full query sets**, not assumed. The verified
+settings (`--distance dot` at load, `search_params: {hnsw_ef: 512}` at query) and the parity
+tables live in **[Serving with Qdrant](guides/serving-qdrant.md)**; the loader's idempotency,
+GDPR reconciliation and multi-tenancy contract are in
+[`packages/latence-sink-qdrant/README.md`](https://github.com/ddickmann/latence-framework/blob/main/packages/latence-sink-qdrant/README.md).
+
+## Orchestrators — the Airflow adapter
+
+`latence-runner-airflow` runs the identical Stages as an Airflow DAG (`build_dag`) — the proof
+that the Runner seam (ADR-0003/0030) really is pluggable. Its honest status: **tested, not yet
+operated**. The in-process topological driver (an Airflow-shaped executor + XCom stand-in) runs
+in every test environment; the real `build_dag` structure tests run in CI's heavy lane against a
+constraints-pinned `apache-airflow` install (`.github/workflows/ci-heavy.yml`, `airflow-dag`
+job). No production Airflow deployment of the framework has been stood up yet — treat the
+adapter as a verified seam you finish operationalising in your own Airflow, not a turnkey
+deployment artifact. The Compose/Helm paths above are the deployment shapes this guide stands
+behind end-to-end.
 
 ## Air-gapped deployment
 
