@@ -113,6 +113,15 @@ class TestInit:
         for name in ("musique", "uda", "ohr_bench"):
             assert f"- {name}" in text
 
+    def test_explicit_zero_overlap_is_honored_not_defaulted(self, tmp_path: Path) -> None:
+        # 0 is a VALID overlap; an explicit falsy answer must never fall back to the default.
+        out = tmp_path / "campaign.yaml"
+        rc = cli.main(
+            ["init", "--non-interactive", "-o", str(out), "--s3-chunk-overlap-tokens", "0"]
+        )
+        assert rc == 0
+        assert "overlap_tokens: 0\n" in out.read_text()
+
     def test_unknown_dataset_is_usage_error_exit_2(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -137,6 +146,104 @@ class TestInit:
         out = capsys.readouterr().out
         assert out.count("latence-campaign") == 1
         assert "status" in out
+
+
+class TestExplicitFalsyFlagsReachValidation:
+    """Regression: `flag or default` swallowed explicit falsy values silently.
+
+    Every flag resolves via `is not None` now, so an explicit-but-invalid answer must reach
+    the dataclass ``__post_init__`` (or the int/float cast) and fail LOUDLY with exit 2 —
+    never fall back to the default and write a config.
+    """
+
+    def _refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, value: str
+    ) -> str:
+        out = tmp_path / "campaign.yaml"
+        rc = cli.main(["init", "--non-interactive", "-o", str(out), flag, value])
+        assert rc == 2, f"{flag} {value!r} was not refused"
+        assert not out.exists(), f"{flag} {value!r} still wrote a config"
+        err = capsys.readouterr().err
+        assert "error:" in err
+        return err
+
+    @pytest.mark.parametrize(
+        ("flag", "knob"),
+        [
+            ("--s3-chunk-max-tokens", "max_tokens"),
+            ("--s3-chunk-min-tokens", "min_tokens"),
+            ("--s3-induction-max-concurrency", "max_concurrency"),
+            ("--retrieval-packed-budget", "packed_budget"),
+            ("--retrieval-coe-budget", "coe_budget"),
+            ("--retrieval-seed-top-k", "seed_top_k"),
+            ("--retrieval-seed-docs-k", "seed_docs_k"),
+            ("--retrieval-seed-node-cap", "seed_node_cap"),
+            ("--retrieval-rescue-cap", "rescue_cap"),
+        ],
+    )
+    def test_explicit_zero_int_hits_post_init_rejection(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, knob: str
+    ) -> None:
+        err = self._refused(tmp_path, capsys, flag, "0")
+        assert knob in err  # the dataclass rejection, naming the knob — not a silent default
+
+    def test_explicit_zero_float_hits_post_init_rejection(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        err = self._refused(tmp_path, capsys, "--s3-extraction-threshold", "0")
+        assert "threshold" in err
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "--s3-chunk-max-tokens",
+            "--s3-chunk-overlap-tokens",
+            "--s3-chunk-min-tokens",
+            "--s3-induction-max-concurrency",
+            "--retrieval-packed-budget",
+            "--retrieval-coe-budget",
+            "--retrieval-seed-top-k",
+            "--retrieval-seed-docs-k",
+            "--retrieval-seed-node-cap",
+            "--retrieval-rescue-cap",
+            "--s3-extraction-threshold",
+            "--retrieval-hop-weight",
+            "--retrieval-community-weight",
+            "--retrieval-centrality-weight",
+            "--retrieval-pack-centrality-weight",
+        ],
+    )
+    def test_explicit_empty_numeric_is_loud_not_silently_defaulted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str
+    ) -> None:
+        self._refused(tmp_path, capsys, flag, "")  # int('') / float('') -> ValueError, exit 2
+
+    @pytest.mark.parametrize(
+        ("flag", "knob"),
+        [
+            ("--s3-extraction-model", "extraction.model"),
+            ("--s3-induction-model", "induction.model"),
+            ("--s3-induction-base-url", "induction.base_url"),
+        ],
+    )
+    def test_explicit_empty_string_hits_post_init_rejection(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, knob: str
+    ) -> None:
+        err = self._refused(tmp_path, capsys, flag, "")
+        assert knob in err
+
+    @pytest.mark.parametrize(
+        ("flag", "knob"),
+        [
+            ("--s3-entity-labels", "labels.entity"),
+            ("--s3-relation-labels", "labels.relation"),
+        ],
+    )
+    def test_explicit_empty_label_list_hits_post_init_rejection(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, knob: str
+    ) -> None:
+        err = self._refused(tmp_path, capsys, flag, "")
+        assert knob in err
 
 
 class TestStatusAndFlow:

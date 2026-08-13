@@ -227,6 +227,17 @@ def _build_parser() -> argparse.ArgumentParser:
 # -- init -------------------------------------------------------------------------------------
 
 
+def _flag_or(flag: str | None, default: object) -> str:
+    """Explicit flag wins, default fills only ABSENCE (`is not None`, never truthiness).
+
+    Truthiness (`flag or default`) silently swallowed explicit falsy answers — ``--flag ''``
+    (and a programmatic ``0``) took the default instead of reaching the dataclass
+    ``__post_init__`` rejection the wizard promises. An explicit invalid value must fail
+    LOUDLY (exit 2), so the flag is kept verbatim whenever it was given at all.
+    """
+    return flag if flag is not None else str(default)
+
+
 def _ask(flag: str | None, prompt: str, why: str, default: str, *, interactive: bool) -> str:
     """flag > prompt > default — the `latence setup` resolution order, verbatim."""
     if flag is not None:
@@ -305,37 +316,37 @@ def _cmd_init(args: argparse.Namespace) -> int:
     retrieval_defaults = RetrievalAnswers()
     try:
         s3 = S3Answers(
-            chunk_max_tokens=int(args.s3_chunk_max_tokens or defaults.chunk_max_tokens),
+            chunk_max_tokens=int(_flag_or(args.s3_chunk_max_tokens, defaults.chunk_max_tokens)),
             chunk_overlap_tokens=int(
-                args.s3_chunk_overlap_tokens
-                if args.s3_chunk_overlap_tokens is not None
-                else defaults.chunk_overlap_tokens
+                _flag_or(args.s3_chunk_overlap_tokens, defaults.chunk_overlap_tokens)
             ),
-            chunk_min_tokens=int(args.s3_chunk_min_tokens or defaults.chunk_min_tokens),
-            extraction_model=args.s3_extraction_model or defaults.extraction_model,
+            chunk_min_tokens=int(_flag_or(args.s3_chunk_min_tokens, defaults.chunk_min_tokens)),
+            extraction_model=_flag_or(args.s3_extraction_model, defaults.extraction_model),
             extraction_threshold=float(
-                args.s3_extraction_threshold or defaults.extraction_threshold
+                _flag_or(args.s3_extraction_threshold, defaults.extraction_threshold)
             ),
             induction_mode=induction_mode.strip(),
-            induction_model=args.s3_induction_model or defaults.induction_model,
+            induction_model=_flag_or(args.s3_induction_model, defaults.induction_model),
             induction_reasoning=(
                 defaults.induction_reasoning
                 if args.s3_induction_reasoning is None
                 else args.s3_induction_reasoning == "true"
             ),
-            induction_base_url=args.s3_induction_base_url or defaults.induction_base_url,
+            induction_base_url=_flag_or(
+                args.s3_induction_base_url, defaults.induction_base_url
+            ),
             induction_budget_usd_cap=float(budget_raw),
             induction_max_concurrency=int(
-                args.s3_induction_max_concurrency or defaults.induction_max_concurrency
+                _flag_or(args.s3_induction_max_concurrency, defaults.induction_max_concurrency)
             ),
             entity_labels=(
                 tuple(x.strip() for x in args.s3_entity_labels.split(",") if x.strip())
-                if args.s3_entity_labels
+                if args.s3_entity_labels is not None
                 else defaults.entity_labels
             ),
             relation_labels=(
                 tuple(x.strip() for x in args.s3_relation_labels.split(",") if x.strip())
-                if args.s3_relation_labels
+                if args.s3_relation_labels is not None
                 else defaults.relation_labels
             ),
             redaction_guardrails=not args.s3_no_guardrails,
@@ -344,34 +355,33 @@ def _cmd_init(args: argparse.Namespace) -> int:
             graph_mode=retrieval_mode.strip(),
             selector=retrieval_selector.strip(),
             packed_budget=int(
-                args.retrieval_packed_budget or retrieval_defaults.packed_budget
+                _flag_or(args.retrieval_packed_budget, retrieval_defaults.packed_budget)
             ),
-            coe_budget=int(args.retrieval_coe_budget or retrieval_defaults.coe_budget),
-            seed_top_k=int(args.retrieval_seed_top_k or retrieval_defaults.seed_top_k),
+            coe_budget=int(_flag_or(args.retrieval_coe_budget, retrieval_defaults.coe_budget)),
+            seed_top_k=int(_flag_or(args.retrieval_seed_top_k, retrieval_defaults.seed_top_k)),
             hop_weight=float(
-                args.retrieval_hop_weight
-                if args.retrieval_hop_weight is not None
-                else retrieval_defaults.hop_weight
+                _flag_or(args.retrieval_hop_weight, retrieval_defaults.hop_weight)
             ),
             community_weight=float(
-                args.retrieval_community_weight
-                if args.retrieval_community_weight is not None
-                else retrieval_defaults.community_weight
+                _flag_or(args.retrieval_community_weight, retrieval_defaults.community_weight)
             ),
             centrality_weight=float(
-                args.retrieval_centrality_weight
-                if args.retrieval_centrality_weight is not None
-                else retrieval_defaults.centrality_weight
+                _flag_or(
+                    args.retrieval_centrality_weight, retrieval_defaults.centrality_weight
+                )
             ),
-            seed_docs_k=int(args.retrieval_seed_docs_k or retrieval_defaults.seed_docs_k),
+            seed_docs_k=int(
+                _flag_or(args.retrieval_seed_docs_k, retrieval_defaults.seed_docs_k)
+            ),
             seed_node_cap=int(
-                args.retrieval_seed_node_cap or retrieval_defaults.seed_node_cap
+                _flag_or(args.retrieval_seed_node_cap, retrieval_defaults.seed_node_cap)
             ),
-            rescue_cap=int(args.retrieval_rescue_cap or retrieval_defaults.rescue_cap),
+            rescue_cap=int(_flag_or(args.retrieval_rescue_cap, retrieval_defaults.rescue_cap)),
             pack_centrality_weight=float(
-                args.retrieval_pack_centrality_weight
-                if args.retrieval_pack_centrality_weight is not None
-                else retrieval_defaults.pack_centrality_weight
+                _flag_or(
+                    args.retrieval_pack_centrality_weight,
+                    retrieval_defaults.pack_centrality_weight,
+                )
             ),
         )
         answers = CampaignAnswers(
