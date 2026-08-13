@@ -327,7 +327,8 @@ def test_pack_consumes_the_frameworks_per_entity_centrality_list_by_its_peak() -
     # R5 regression: the framework emits kg_node_centrality as a per-entity list<double>
     # (export._context_columns_for_row), and both export.py and graph_features.py document it as
     # pack's centrality value-signal. The OLD scalar-only _signal_bonus raised ValueError on the
-    # emitted list; the fix reduces it to its PEAK, exactly like expand._peak_centrality, so the
+    # emitted list; the fix reduces it to its PEAK via the shared kg_columns.peak (the same
+    # reduction expand's hub bonus runs — one implementation, not a prose invariant), so the
     # documented graph-augmented-pack wiring runs on the framework's own corpus.
     #
     # Base scores favour "a" (max-scaled relevance 1.0); "b" carries the emitted per-entity

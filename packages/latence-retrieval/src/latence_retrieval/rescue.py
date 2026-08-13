@@ -75,6 +75,7 @@ from latence_retrieval.contracts import Candidate, Capability, RetrievalQuery
 from latence_retrieval.expand import Expander
 from latence_retrieval.fuser import RrfFuser
 from latence_retrieval.hypergraph import HyperedgeKV, HypergraphSignals, hypergraph_signals
+from latence_retrieval.kg_columns import KG_NODE_IDS_KEY, parse_id_list
 from latence_retrieval.pack import HeuristicTokenCounter, Packer
 
 if TYPE_CHECKING:
@@ -739,28 +740,13 @@ def _query_ngrams(question: str, max_n: int = _ALIAS_NGRAM_MAX) -> list[str]:
 def _node_ids(candidate: Candidate) -> tuple[str, ...]:
     """The candidate's own ``kg_node_ids`` column: absent → nothing, malformed → loud.
 
-    The same graceful-absent / loud-malformed discipline the
-    :class:`~latence_retrieval.expand.Expander` applies to the identical column: a store that never
-    denormalised the KG simply contributes no doc seeds, while a present-but-corrupt column fails
-    at the boundary instead of silently seeding nothing.
+    The shared KG-column reader (:func:`latence_retrieval.kg_columns.parse_id_list`) — the same
+    graceful-absent / loud-malformed discipline the :class:`~latence_retrieval.expand.Expander`
+    applies to the identical column: a store that never denormalised the KG simply contributes no
+    doc seeds, while a present-but-corrupt column fails at the boundary instead of silently
+    seeding nothing.
     """
-    if "kg_node_ids" not in candidate.metadata:
-        return ()
-    raw = candidate.metadata["kg_node_ids"]
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        msg = (
-            "graph-rescue metadata 'kg_node_ids' must be a list of node-id strings, "
-            f"got {raw!r} for candidate {candidate.id!r}."
-        )
-        raise TypeError(msg)
-    for element in raw:
-        if not isinstance(element, str) or not element:
-            msg = (
-                "graph-rescue metadata 'kg_node_ids' must contain non-empty strings, "
-                f"got {element!r} for candidate {candidate.id!r}."
-            )
-            raise ValueError(msg)
-    return tuple(raw)
+    return parse_id_list(candidate, KG_NODE_IDS_KEY, context="graph-rescue")
 
 
 def _append_and_dedupe(

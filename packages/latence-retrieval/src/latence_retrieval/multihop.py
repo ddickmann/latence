@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from latence_retrieval.contracts import Candidate
 from latence_retrieval.errors import GraphSourceError
+from latence_retrieval.kg_columns import parse_id_list
 from latence_retrieval.read_cache import FileIdentityCache
 
 if TYPE_CHECKING:
@@ -787,31 +788,11 @@ class MultiHopExpander:
     def _node_ids(self, candidate: Candidate) -> set[str]:
         """Read ``metadata[node_ids_key]`` as a set of id strings; ``set()`` if the key is absent.
 
-        Absent → no signal (graceful, as 1-hop ``expand``). Present-but-malformed → loud: the value
-        must be a list/tuple of non-empty strings (what the denormalised KG column is), so a dict, a
-        scalar, or a non-string element is a boundary error, not a silently-dropped signal
-        (anti-false-green).
+        The shared KG-column reader (:func:`latence_retrieval.kg_columns.parse_id_list`):
+        absent → no signal (graceful, as 1-hop ``expand``); present-but-malformed → loud at the
+        boundary (anti-false-green), with this consumer's own message prefix.
         """
-        key = self._node_ids_key
-        if key not in candidate.metadata:
-            return set()
-        raw = candidate.metadata[key]
-        if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-            msg = (
-                f"multihop_expand metadata {key!r} must be a list of node-id strings, got {raw!r} "
-                f"for candidate {candidate.id!r}."
-            )
-            raise TypeError(msg)
-        result: set[str] = set()
-        for element in raw:
-            if not isinstance(element, str) or not element:
-                msg = (
-                    f"multihop_expand metadata {key!r} must contain non-empty strings, got "
-                    f"{element!r} for candidate {candidate.id!r}."
-                )
-                raise ValueError(msg)
-            result.add(element)
-        return result
+        return set(parse_id_list(candidate, self._node_ids_key, context="multihop_expand"))
 
 
 # --- construction-time config parsing (shared) ------------------------------------------------

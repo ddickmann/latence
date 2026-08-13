@@ -86,6 +86,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from latence_retrieval.contracts import Candidate
 from latence_retrieval.errors import PackTokenizerError
+from latence_retrieval.kg_columns import peak as _peak
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -471,10 +472,12 @@ def _signal_scalar(key: str, candidate: Candidate) -> float:
     A richness signal is either an already-scalar number (``recency``, a numeric role priority) or
     the framework's own **per-entity graph feature** shape — ``kg_node_centrality`` is emitted as a
     ``list<double>``, one centrality per entity of the chunk (``export._context_columns_for_row``).
-    So a list/tuple is reduced to its **peak** (``max``), identically to how ``expand`` consumes the
-    same column (:meth:`~latence_retrieval.expand.Expander._peak_centrality`): the two query-time
-    consumers ADR-0051 names read the one emitted column the same way, so the documented
-    graph-augmented-pack wiring is alive on the framework's own corpus instead of raising.
+    So a list/tuple is reduced to its **peak** through the one shared reduction
+    (:func:`latence_retrieval.kg_columns.peak`) — the same code the
+    :class:`~latence_retrieval.expand.Expander` runs on the same column, so the two query-time
+    consumers ADR-0051 names read the one emitted column identically *by construction*, and the
+    documented graph-augmented-pack wiring is alive on the framework's own corpus instead of
+    raising.
 
     Graceful + loud, matching ``expand``: a scalar is used directly; an empty list contributes
     ``0.0`` (no signal); a non-numeric / non-finite entry, a ``bool``, or a ``str`` fails loudly
@@ -490,11 +493,10 @@ def _signal_scalar(key: str, candidate: Candidate) -> float:
     if isinstance(value, (int, float)):
         return _finite_signal(key, value, candidate)
     if isinstance(value, (list, tuple)):
-        # The per-entity graph-feature shape (e.g. kg_node_centrality): peak, like ``expand``.
-        # An empty list is no signal (0.0); otherwise the true max (never clamped), matching
-        # ``expand._peak_centrality`` so both consumers read the one emitted column identically.
-        elements = [_finite_signal(key, element, candidate) for element in value]
-        return max(elements) if elements else 0.0
+        # The per-entity graph-feature shape (e.g. kg_node_centrality): the shared peak
+        # reduction — an empty list is no signal (0.0); otherwise the true max (never clamped).
+        # Element validation stays here (pack's own messages); the reduction is `kg_columns.peak`.
+        return _peak([_finite_signal(key, element, candidate) for element in value])
     msg = (
         f"pack value_signal {key!r} must be a number or a per-entity list of numbers where "
         f"present, got {value!r} for candidate {candidate.id!r}."

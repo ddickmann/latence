@@ -176,6 +176,7 @@ from latence_retrieval.hypergraph import (
     RWRPropagator,
     hypergraph_signals,
 )
+from latence_retrieval.kg_columns import KgColumnKeys, KgColumns
 from latence_retrieval.maxsim import (
     HashingMultiVectorQueryEncoder,
     MaxSimReranker,
@@ -277,6 +278,8 @@ __all__ = [
     "HeuristicTokenCounter",
     "HeuristicUtility",
     "IdentityProcessor",
+    "KgColumnKeys",
+    "KgColumns",
     "MaxSimError",
     "MaxSimReranker",
     "MultiHopExpander",

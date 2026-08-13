@@ -56,13 +56,14 @@ resolved by config through :func:`~latence_retrieval.registry.resolve_processor`
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
-from latence_retrieval.contracts import Candidate
+from latence_retrieval.kg_columns import KgColumnKeys, KgColumns
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from latence_retrieval.contracts import Candidate
 
 _DEFAULT_SEED_TOP_K = 3
 _DEFAULT_HOP_WEIGHT = 0.5
@@ -127,17 +128,19 @@ class Expander:
             cfg.get("centrality_weight", 0.0), "centrality_weight"
         )
 
-        self._node_ids_key = self._non_empty_str(
-            cfg.get("node_ids_key", "kg_node_ids"), "node_ids_key"
-        )
-        self._neighbor_ids_key = self._non_empty_str(
-            cfg.get("neighbor_ids_key", "neighbor_node_ids"), "neighbor_ids_key"
-        )
-        self._community_key = self._non_empty_str(
-            cfg.get("community_key", "kg_node_community"), "community_key"
-        )
-        self._centrality_key = self._non_empty_str(
-            cfg.get("centrality_key", "kg_node_centrality"), "centrality_key"
+        self._keys = KgColumnKeys(
+            node_ids=self._non_empty_str(
+                cfg.get("node_ids_key", "kg_node_ids"), "node_ids_key"
+            ),
+            neighbor_ids=self._non_empty_str(
+                cfg.get("neighbor_ids_key", "neighbor_node_ids"), "neighbor_ids_key"
+            ),
+            community=self._non_empty_str(
+                cfg.get("community_key", "kg_node_community"), "community_key"
+            ),
+            centrality=self._non_empty_str(
+                cfg.get("centrality_key", "kg_node_centrality"), "centrality_key"
+            ),
         )
 
         top_k = cfg.get("top_k")
@@ -185,30 +188,29 @@ class Expander:
         if not items:
             return []
 
-        nodes = [self._nodes(candidate) for candidate in items]
-        reaches = [self._reach(candidate) for candidate in items]
-        communities = [self._communities(candidate) for candidate in items]
-        centralities = [self._peak_centrality(candidate) for candidate in items]
+        # Parse-once per candidate: the whole KG-column read contract lives in `kg_columns`
+        # (graceful-absent / loud-malformed), this transform only *scores* off the parsed view.
+        columns = [
+            KgColumns.parse(candidate, keys=self._keys, context="expand") for candidate in items
+        ]
 
         seed_indices = self._seed_indices(items)
         seed_communities: set[str] = set()
         for s in seed_indices:
-            seed_communities |= communities[s]
+            seed_communities |= columns[s].communities
 
         augmented: list[Candidate] = []
         for i, candidate in enumerate(items):
             bonus = 0.0
             if self._hop_weight:
                 links = sum(
-                    1
-                    for s in seed_indices
-                    if s != i and self._linked(nodes[i], reaches[i], nodes[s], reaches[s])
+                    1 for s in seed_indices if s != i and self._linked(columns[i], columns[s])
                 )
                 bonus += self._hop_weight * links
-            if self._community_weight and communities[i] & seed_communities:
+            if self._community_weight and columns[i].communities & seed_communities:
                 bonus += self._community_weight
             if self._centrality_weight:
-                bonus += self._centrality_weight * centralities[i]
+                bonus += self._centrality_weight * columns[i].peak_centrality
             augmented.append(candidate.model_copy(update={"score": candidate.score + bonus}))
 
         augmented.sort(key=lambda c: (-c.score, c.id))
@@ -227,90 +229,15 @@ class Expander:
         return order[: self._seed_top_k]
 
     @staticmethod
-    def _linked(
-        nodes_i: set[str], reach_i: set[str], nodes_s: set[str], reach_s: set[str]
-    ) -> bool:
-        """True when candidate ``i`` and seed ``s`` are 1-hop connected in the KG.
+    def _linked(a: KgColumns, b: KgColumns) -> bool:
+        """True when candidate ``a`` and seed ``b`` are 1-hop connected in the KG.
 
-        A connection is a KG **edge** (``i``'s own nodes fall in ``s``'s reach set, or ``s``'s nodes
-        in ``i``'s reach) or a **shared entity** node (co-mention). Both directions are checked
-        because the denormalised ``neighbor_node_ids`` records where a chunk's triples point, which
-        need not be symmetric across two independently-chunked hits.
+        A connection is a KG **edge** (``a``'s own nodes fall in ``b``'s reach set, or ``b``'s
+        nodes in ``a``'s reach) or a **shared entity** node (co-mention). Both directions are
+        checked because the denormalised ``neighbor_node_ids`` records where a chunk's triples
+        point, which need not be symmetric across two independently-chunked hits.
         """
-        return bool((nodes_i & reach_s) or (nodes_s & reach_i) or (nodes_i & nodes_s))
-
-    # --- per-candidate metadata extraction (graceful when absent, loud when malformed) -----------
-
-    def _nodes(self, candidate: Candidate) -> set[str]:
-        return self._id_set(candidate, self._node_ids_key)
-
-    def _reach(self, candidate: Candidate) -> set[str]:
-        return self._id_set(candidate, self._neighbor_ids_key)
-
-    def _communities(self, candidate: Candidate) -> set[str]:
-        return self._id_set(candidate, self._community_key)
-
-    @staticmethod
-    def _id_set(candidate: Candidate, key: str) -> set[str]:
-        """Read ``metadata[key]`` as a set of non-empty id strings; ``set()`` if the key is absent.
-
-        Absent → no signal (graceful). Present-but-malformed → loud: the value must be a list/tuple
-        of strings (what the denormalised KG columns are), so a dict, a scalar, or a non-string
-        element is a boundary error, not a silently-dropped signal (anti-false-green).
-        """
-        if key not in candidate.metadata:
-            return set()
-        raw = candidate.metadata[key]
-        if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-            msg = (
-                f"expand metadata {key!r} must be a list of node-id strings, got {raw!r} for "
-                f"candidate {candidate.id!r}."
-            )
-            raise TypeError(msg)
-        result: set[str] = set()
-        for element in raw:
-            if not isinstance(element, str) or not element:
-                msg = (
-                    f"expand metadata {key!r} must contain non-empty strings, got {element!r} for "
-                    f"candidate {candidate.id!r}."
-                )
-                raise ValueError(msg)
-            result.add(element)
-        return result
-
-    def _peak_centrality(self, candidate: Candidate) -> float:
-        """The candidate's most-central entity value; ``0.0`` when the column is absent.
-
-        Absent → no signal (graceful). Present → a list/tuple of finite floats (aligned per-entity
-        with ``kg_node_ids`` upstream), and the peak drives the hub bonus; an empty list yields
-        ``0.0`` and a non-numeric or non-finite entry fails loudly.
-        """
-        key = self._centrality_key
-        if key not in candidate.metadata:
-            return 0.0
-        raw = candidate.metadata[key]
-        if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-            msg = (
-                f"expand metadata {key!r} must be a list of centrality floats, got {raw!r} for "
-                f"candidate {candidate.id!r}."
-            )
-            raise TypeError(msg)
-        values: list[float] = []
-        for element in raw:
-            if isinstance(element, bool) or not isinstance(element, (int, float)):
-                msg = (
-                    f"expand metadata {key!r} must contain numbers, got {element!r} for candidate "
-                    f"{candidate.id!r}."
-                )
-                raise ValueError(msg)
-            if not math.isfinite(element):
-                msg = (
-                    f"expand metadata {key!r} must be finite, got {element!r} for candidate "
-                    f"{candidate.id!r}."
-                )
-                raise ValueError(msg)
-            values.append(float(element))
-        return max(values) if values else 0.0
+        return bool((a.nodes & b.reach) or (b.nodes & a.reach) or (a.nodes & b.nodes))
 
 
 __all__ = ["Expander"]
