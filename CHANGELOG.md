@@ -11,6 +11,30 @@ workspace are versioned and released together under one version number.
 
 ### Fixed
 
+- **The production Docker image's CLI could not import (deploy/Dockerfile).** The runtime stage
+  copies only the venv, but `uv sync` installs workspace members editable and a workspace-member
+  path given to `uv pip install` is rerouted editable through `tool.uv.sources` — so every
+  `latence_*` import in the shipped image resolved to a source tree that was not there. Fixed with
+  `--no-editable` / `--no-sources`, and the build now runs `latence --help` as a smoke so a broken
+  entrypoint fails the build itself.
+
+- **Delta manifests no longer resurrect edited-away content ids (`DeltaRunner._manifest_of`).** A
+  DELETED entry now shadows the ancestor Version chain; before, an in-place edit's retired content
+  id came back from an ancestor manifest and was re-counted DELETED on every later delta.
+
+- **Qdrant round-trip identity and accuracy knobs (`latence_retrieval.qdrant.QdrantBackend`).**
+  Served candidates now carry the corpus `record_id` as `Candidate.id` (config `id_key`, default
+  `record_id` — matching what the sink stores), so they merge with the BM25 lane, dedupe and graph
+  resolution instead of floating as opaque UUIDs; and `search_params` (`hnsw_ef`, `exact`) is
+  validated at construction and threaded to the live store. Both defects were found and the fixes
+  validated against a live Qdrant v1.19.0 on full query sets (recall parity within −0.0004
+  absolute; see `docs/guides/serving-qdrant.md`).
+
+- **Package READMEs no longer claim their own code is Apache-2.0.** The 2026-07-29 PolyForm
+  relicence had left sixteen stale prose claims; all now state PolyForm Noncommercial 1.0.0, the
+  `latence-retrieval` README names its seven retained Apache-2.0 modules explicitly, and a new
+  publish-readiness test pins the prose so it cannot drift back.
+
 - **Page provenance survives the OCR handoff (ADR-0060, contracts v21).** Page-accurate citation
   silently died whenever OCR happened out of band and its markdown was re-ingested: the plaintext
   Parser had no page structure to report, so it emitted a one-span map and every downstream record
@@ -33,6 +57,34 @@ workspace are versioned and released together under one version number.
   page it did before.
 
 ### Added
+
+- **Hypergraph query index — the graph lanes at serving latency (`latence_retrieval.hypergraph`,
+  ADR-0056 amendment).** `HyperedgeKV.open` now attaches a transparently cached, file-identity-keyed
+  `HypergraphIndex` (postings, incidence, γ-rank — decoded once per store per process; numpy-
+  accelerated when importable, pure-Python otherwise), and `GraphRetriever.search` resolves
+  documents tier-by-tier with a byte-identical early stop. Measured at the 677,257-hyperedge
+  export: every graph lane ~100× faster (e.g. hypergraph lane median 3,570 ms → 37 ms), with
+  parity counted over 21,215 real gold queries × 3 lanes across all code paths — 0 diffs.
+  `cache=False` restores the scan-per-call path bit-for-bit.
+
+- **Graph-rescue retrieval — the production graph-at-query-time composition
+  (`latence_retrieval.rescue.GraphRescueRetrieval`).** Base dense+BM25 fused and preserved, a
+  per-query policy gate, graph traversal + hypergraph lanes that APPEND (never fuse), and a
+  token-budgeted selector (knapsack with backfill / chain-of-evidence / none) — zero LLM calls
+  online, measured defaults, configurable from the campaign wizard. Guide:
+  `docs/guides/graph-rescue-retrieval.md`.
+
+- **Incremental ingest through the full enrichment pipeline (ADR-0061).** The flagship
+  enrichment+KG+export profile now reuses unchanged documents on churn (O(changed) extraction)
+  through an order-preserving overlay fold that upgrades delta/rebuild equivalence to
+  byte-identical streams — proven on a 609-document real corpus (sha256-equal exports, bitwise-
+  equal embeddings; add of 61 docs: 8.4 min vs 97.4 min rebuild). Plus `latence delta --dry-run`
+  (churn preview, no Stage run) and `docs/guides/incremental-ingest.md`.
+
+- **Qdrant serving path, verified end-to-end.** A pinned single-node compose
+  (`deploy/qdrant/docker-compose.yml`), and `docs/guides/serving-qdrant.md` — the measured
+  Export → collection → served-queries path (`distance: dot`, `hnsw_ef: 512`) with full-set
+  recall-parity tables.
 
 - **Hyperedge sidecar KV + entity descriptions (ADR-0056/0058/0059, hypergraph-m2;
   `latence_core.hyperedge_store`).** The opted-in hyperedge path now ships its query-time face:
