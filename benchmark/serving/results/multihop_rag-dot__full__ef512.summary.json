@@ -1,0 +1,48 @@
+{
+  "ann_recall@10": 1.0,
+  "ann_recall@100": 1.0,
+  "collection": "multihop_rag-dot",
+  "dataset": "multihop_rag",
+  "gate_agreement_rate": 1.0,
+  "gate_hit_rate": 1.0,
+  "latency_ms": {
+    "dense_ms": {
+      "mean": 26.85,
+      "median": 23.53,
+      "p95": 47.93
+    },
+    "reference_ms": {
+      "mean": 26.5,
+      "median": 22.22,
+      "p95": 39.49
+    },
+    "served_ms": {
+      "mean": 50.38,
+      "median": 42.24,
+      "p95": 83.14
+    }
+  },
+  "limit": null,
+  "queries": 2255,
+  "recall": {
+    "docr@10": {
+      "delta": 0.0,
+      "reference": 0.854176,
+      "served": 0.854176
+    },
+    "docr@5": {
+      "delta": 0.0,
+      "reference": 0.699076,
+      "served": 0.699076
+    },
+    "r@10": {
+      "delta": 0.0,
+      "reference": 0.375756,
+      "served": 0.375756
+    }
+  },
+  "search_params": {
+    "hnsw_ef": 512
+  },
+  "top10_identical_rate": 0.999557
+}

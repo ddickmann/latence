@@ -1,0 +1,48 @@
+{
+  "ann_recall@10": 0.999491,
+  "ann_recall@100": 0.999427,
+  "collection": "wiki2multihop-dot",
+  "dataset": "wiki2multihop",
+  "gate_agreement_rate": 1.0,
+  "gate_hit_rate": 0.999761,
+  "latency_ms": {
+    "dense_ms": {
+      "mean": 32.04,
+      "median": 28.11,
+      "p95": 57.23
+    },
+    "reference_ms": {
+      "mean": 90.6,
+      "median": 67.23,
+      "p95": 185.07
+    },
+    "served_ms": {
+      "mean": 104.88,
+      "median": 82.58,
+      "p95": 213.41
+    }
+  },
+  "limit": null,
+  "queries": 12576,
+  "recall": {
+    "docr@10": {
+      "delta": -0.000278,
+      "reference": 0.718333,
+      "served": 0.718054
+    },
+    "docr@5": {
+      "delta": -0.000398,
+      "reference": 0.670165,
+      "served": 0.669768
+    },
+    "r@10": {
+      "delta": -0.000278,
+      "reference": 0.708129,
+      "served": 0.707851
+    }
+  },
+  "search_params": {
+    "hnsw_ef": 512
+  },
+  "top10_identical_rate": 0.981552
+}
