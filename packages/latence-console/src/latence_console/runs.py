@@ -22,18 +22,26 @@ from typing import TYPE_CHECKING
 
 from latence_core.quality import QualityReport
 
+# The run layout is owned by ``latence_core.run_store`` (Wave 2-E): the console re-exports the
+# names it always exposed, now bound to the same constants every Runner writes with — the
+# console can never drift from where a run actually lands.
+from latence_core.run_store import (
+    MANIFEST_NAME as MANIFEST_NAME,
+)
+from latence_core.run_store import (
+    REPORT_NAME as REPORT_NAME,
+)
+from latence_core.run_store import (
+    RUNS_PREFIX as RUNS_PREFIX,
+)
+from latence_core.run_store import RunLayout
+
 from latence_console.artifacts import RunArtifacts
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from latence_core.storage import Storage
-
-# The run-state root the local Runner writes under (``LocalRunner.run_dir``).
-RUNS_PREFIX = "_latence/runs"
-
-MANIFEST_NAME = "manifest.json"
-REPORT_NAME = "quality-report.json"
 
 # A run id is a single path segment the Runner minted (``run-0001``, ``demo``,
 # ``delta-20260718T101500Z``). Anything else — a separator, a traversal dot-dot, a scheme — is
@@ -125,8 +133,11 @@ class RunIndex:
     def runs_uri(self) -> str:
         return f"{self._root}/{RUNS_PREFIX}"
 
+    def _layout(self, run_id: str) -> RunLayout:
+        return RunLayout(self._root, run_id)
+
     def _run_dir(self, run_id: str) -> str:
-        return f"{self.runs_uri}/{run_id}"
+        return self._layout(run_id).run_dir
 
     def artifacts(self, run_id: str) -> RunArtifacts:
         """A typed, read-only view over everything that run left on Storage (#188).
@@ -145,7 +156,7 @@ class RunIndex:
             run_id = entry.rstrip("/").rsplit("/", 1)[-1]
             if not is_run_id(run_id):
                 continue
-            if self._storage.exists(f"{self._run_dir(run_id)}/{MANIFEST_NAME}"):
+            if self._storage.exists(self._layout(run_id).manifest_uri):
                 found.append(run_id)
         return sorted(found)
 
@@ -158,7 +169,7 @@ class RunIndex:
         """
         if not is_run_id(run_id):
             return None
-        uri = f"{self._run_dir(run_id)}/{REPORT_NAME}"
+        uri = self._layout(run_id).report_uri
         if not self._storage.exists(uri):
             return None
         try:
@@ -167,7 +178,7 @@ class RunIndex:
             return None
 
     def _pipeline_name(self, run_id: str) -> str:
-        uri = f"{self._run_dir(run_id)}/{MANIFEST_NAME}"
+        uri = self._layout(run_id).manifest_uri
         try:
             payload = json.loads(self._storage.read_text(uri))
         except (ValueError, UnicodeDecodeError, OSError):
@@ -183,7 +194,7 @@ class RunIndex:
         """The list-row view of one run, or ``None`` if there is no such run."""
         if not is_run_id(run_id):
             return None
-        manifest_uri = f"{self._run_dir(run_id)}/{MANIFEST_NAME}"
+        manifest_uri = self._layout(run_id).manifest_uri
         if not self._storage.exists(manifest_uri):
             return None
         report = self.report(run_id)
@@ -194,7 +205,7 @@ class RunIndex:
             ),
             status=status_of(report),
             started_at=self._storage.modified(manifest_uri),
-            finished_at=self._storage.modified(f"{self._run_dir(run_id)}/{REPORT_NAME}"),
+            finished_at=self._storage.modified(self._layout(run_id).report_uri),
             document_count=report.document_count if report is not None else 0,
             duration_seconds=report.total_duration_seconds if report is not None else 0.0,
             is_delta=report is not None and report.delta is not None,

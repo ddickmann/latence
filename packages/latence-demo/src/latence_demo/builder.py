@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from latence_core.contracts import GraphEdge, GraphNode
 from latence_core.quality import QualityReport
+from latence_core.run_store import RunStore
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
@@ -101,24 +102,26 @@ class DemoBuilder:
         )
 
         report = LocalRunner(registry=self._registry).run(pipeline, run_id=self._run_id)
-        run_dir = f"{self._storage_uri}/_latence/runs/{self._run_id}"
+        # The run's layout (run dir, checkpoints, export dir) comes from the owned RunStore
+        # interface, so the demo reads exactly where the Runner wrote — never a hand-built path.
+        store = RunStore(storage, pipeline, self._run_id)
 
         # Compose the full showable page: recover the assembled graph from the Graph-Assembly
         # checkpoint + fold in the finalised Quality Report + the corpus manifest, then write
         # index.html next to the KG export (the Export-seam page had no report yet).
-        site_uri = self._compose_site(storage, run_dir, report, manifest)
+        site_uri = self._compose_site(storage, store, report, manifest)
 
-        summary = self._summarize(storage, run_dir, site_uri, report, manifest)
+        summary = self._summarize(storage, store, site_uri, report, manifest)
         return DemoResult(summary=summary, report=report, manifest=manifest)
 
     def _compose_site(
         self,
         storage: Storage,
-        run_dir: str,
+        store: RunStore,
         report: QualityReport,
         manifest: CorpusManifest,
     ) -> str:
-        graph_ckpt = f"{run_dir}/checkpoints/graph.jsonl"
+        graph_ckpt = store.checkpoint_uri("graph")
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
         if storage.exists(graph_ckpt):
@@ -132,19 +135,19 @@ class DemoBuilder:
             report=report_dict,
             corpus=corpus_view,
         )
-        site_uri = f"{run_dir}/export/index.html"
+        site_uri = f"{store.export_dir}/index.html"
         storage.write_atomic(site_uri, html.encode("utf-8"))
         return site_uri
 
     def _summarize(
         self,
         storage: Storage,
-        run_dir: str,
+        store: RunStore,
         site_uri: str,
         report: QualityReport,
         manifest: CorpusManifest,
     ) -> DemoRunSummary:
-        graph_ckpt = f"{run_dir}/checkpoints/graph.jsonl"
+        graph_ckpt = store.checkpoint_uri("graph")
         if storage.exists(graph_ckpt):
             nodes, edges = load_graph_records(storage.read_text(graph_ckpt))
             graph = summarize_graph(nodes, edges)
@@ -158,7 +161,7 @@ class DemoBuilder:
             pipeline_name=report.pipeline_name,
             run_id=report.run_id,
             storage_uri=self._storage_uri,
-            run_dir=run_dir,
+            run_dir=store.run_dir,
             site_uri=site_uri,
             documents_ingested=report.document_count,
             quarantined=quarantined,

@@ -22,6 +22,12 @@ import time
 from itertools import chain
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
+# The run layout + checkpoint decode live in their own owned module (``run_store``, Wave 2-E):
+# the private path/decode methods below are thin delegators over it, so this engine's internal
+# call sites and its subclass seams (tests intercept ``_stream_batches``) are unchanged while
+# every OTHER consumer (delta engine, Airflow adapter, CLI, console, demo, harnesses) goes
+# through the public :class:`~latence_core.run_store.RunStore` interface instead of reaching in.
+from latence_core import run_store
 from latence_core.capability import (
     Chunker,
     ContentScreener,
@@ -47,8 +53,6 @@ from latence_core.capability_descriptor import (
     ACCUMULATOR_KINDS,
     CORPUS_LEVEL_KINDS,
     dag_protocol_for,
-    descriptor_for,
-    export_carrier_of,
 )
 from latence_core.contracts import (
     ChunkRecord,
@@ -151,10 +155,11 @@ class _ProvenanceCarrier(Protocol):
 _TP = TypeVar("_TP", bound=_ProvenanceCarrier)
 
 # WAL event kinds. The log is append-only and never read for control flow in S1
-# (checkpoint presence is authoritative); it exists for audit and crash forensics.
+# (checkpoint presence is authoritative); it exists for audit and crash forensics. The
+# per-batch ``stage_batch`` event kind lives with the checkpoint-write discipline it belongs
+# to (``run_store``, Wave 2-E); this loop emits only the Stage-bracket events.
 _WAL_STAGE_BEGIN = "stage_begin"
 _WAL_STAGE_COMMIT = "stage_commit"
-_WAL_STAGE_BATCH = "stage_batch"
 
 # Checkpoint write batch size (ADR-0033 / #63): the number of records serialized and
 # flushed to the temp checkpoint at once, so the write transient is O(batch) instead of the
@@ -521,21 +526,30 @@ class LocalRunner:
         Public so a second Runner reusing this engine's report path can land the run's data
         artifacts where the shared report builder expects them, without reaching a private method
         (H-F1). The local Runner's own file-state (manifest, checkpoints, WAL) still lives here.
+
+        The layout itself is owned by :class:`~latence_core.run_store.RunLayout` (Wave 2-E) —
+        every path method below delegates there, so this engine and every other consumer mint
+        byte-identical locations from one decision.
         """
-        return f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
+        return self._layout(pipeline, run_id).run_dir
+
+    @staticmethod
+    def _layout(pipeline: Pipeline, run_id: str) -> run_store.RunLayout:
+        """The run's owned path layout (``run_store.RunLayout``), total in (storage_uri, run_id)."""
+        return run_store.RunLayout(pipeline.storage_uri, run_id)
 
     # Retained private name for the many internal call sites; a thin alias over the public method.
     def _run_dir(self, pipeline: Pipeline, run_id: str) -> str:
         return self.run_dir(pipeline, run_id)
 
     def _checkpoint_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
-        return f"{self._run_dir(pipeline, run_id)}/checkpoints/{stage_name}.jsonl"
+        return self._layout(pipeline, run_id).checkpoint_uri(stage_name)
 
     def _manifest_uri(self, pipeline: Pipeline, run_id: str) -> str:
-        return f"{self._run_dir(pipeline, run_id)}/manifest.json"
+        return self._layout(pipeline, run_id).manifest_uri
 
     def _wal_uri(self, pipeline: Pipeline, run_id: str) -> str:
-        return f"{self._run_dir(pipeline, run_id)}/wal.log"
+        return self._layout(pipeline, run_id).wal_uri
 
     def report_uri(self, pipeline: Pipeline, run_id: str) -> str:
         """The run's Quality Report location on Storage.
@@ -544,22 +558,22 @@ class LocalRunner:
         :class:`~latence_core.quality_report_builder.QualityReportBuilder` produced to the same
         place an adopter reads it regardless of Runner — no private reach-through (H-F1).
         """
-        return f"{self._run_dir(pipeline, run_id)}/quality-report.json"
+        return self._layout(pipeline, run_id).report_uri
 
     # Retained private name for the executor's own report writes; a thin alias.
     def _report_uri(self, pipeline: Pipeline, run_id: str) -> str:
         return self.report_uri(pipeline, run_id)
 
     def _export_dir(self, pipeline: Pipeline, run_id: str) -> str:
-        return f"{self._run_dir(pipeline, run_id)}/export"
+        return self._layout(pipeline, run_id).export_dir
 
     def _quarantine_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
         # Quarantined records are retained and inspectable (CONTEXT ``Quarantine``):
         # excluded from the DAG and Export, persisted here per Screening Stage.
-        return f"{self._run_dir(pipeline, run_id)}/quarantine/{stage_name}.jsonl"
+        return self._layout(pipeline, run_id).quarantine_uri(stage_name)
 
     def _findings_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
-        return f"{self._run_dir(pipeline, run_id)}/screening/{stage_name}.jsonl"
+        return self._layout(pipeline, run_id).findings_uri(stage_name)
 
     # -- WAL ---------------------------------------------------------------
 
@@ -573,23 +587,10 @@ class LocalRunner:
     ) -> None:
         """Append a per-batch checkpoint-progress WAL event (ADR-0033 / #63).
 
-        Logged as each checkpoint batch is durably written, so the WAL records batch-granular
-        progress (``batch_index`` + cumulative ``records`` flushed) for crash forensics and
-        audit. Like the other WAL events it is append-only and not read for control flow — the
-        finalized checkpoint's presence remains authoritative for resume (Stage-granular skip).
+        Thin delegator over :func:`latence_core.run_store.wal_append_batch`, which owns the
+        event shape with the rest of the checkpoint-write discipline (Wave 2-E).
         """
-        line = json.dumps(
-            {
-                "ts": time.time(),
-                "event": _WAL_STAGE_BATCH,
-                "stage": stage,
-                "batch": batch_index,
-                "records": records_so_far,
-            },
-            sort_keys=True,
-        )
-        existing = storage.read_text(uri) if storage.exists(uri) else ""
-        storage.write_atomic(uri, (existing + line + "\n").encode("utf-8"))
+        run_store.wal_append_batch(storage, uri, stage, batch_index, records_so_far)
 
     # -- checkpoint IO -----------------------------------------------------
 
@@ -610,16 +611,11 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         producing ancestor feeds (DocumentRecords on the S1/S2 spine, ChunkRecords once a Chunk
         Stage sits upstream), so its checkpoint re-reads with the right type on resume. A
         ``carrier`` of ``None`` is exactly that "resolve it from the DAG" signal.
+
+        Thin delegator over :func:`latence_core.run_store.stage_output_type` — the resolution
+        lives with the checkpoint decode it types (Wave 2-E).
         """
-        descriptor = descriptor_for(stage.capability)
-        if descriptor.carrier is not None:
-            return cast("type[StageOutput] | type[Record]", descriptor.carrier)
-        if descriptor.dag_node:
-            return cls._export_carrier(stage, pipeline)
-        # EMBEDDING: carrier-less AND not a DAG node (a nested Export sub-config, ADR-0017), so it
-        # is never a Stage and this is unreachable through a validated Pipeline. Answer with the
-        # spine's carrier rather than resolving through ``depends_on`` a non-Stage does not have.
-        return DocumentRecord
+        return run_store.stage_output_type(stage, pipeline)
 
     def _lineage_io(
         self,
@@ -720,13 +716,10 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         The frontier is walked breadth-first in ``depends_on`` order, so the nearest producing
         ancestor wins.
+
+        Thin delegator over :func:`latence_core.run_store.export_carrier` (Wave 2-E).
         """
-        producer = cls._export_producer(stage, pipeline)
-        if producer is not None:
-            carrier = export_carrier_of(producer.capability)
-            if carrier is not None:  # pragma: no branch - a producer's carrier is declared
-                return cast("type[StageOutput] | type[Record]", carrier)
-        return DocumentRecord
+        return run_store.export_carrier(stage, pipeline)
 
     @classmethod
     def _export_producer(cls, stage: Stage, pipeline: Pipeline) -> Stage | None:
@@ -739,23 +732,10 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         again, while a doc-level producer (chunk/redact/extract) emits only the fresh documents
         and the Export merges the overlay in. ``None`` when no ancestor produces an exportable
         carrier (the S1 spine fallback).
+
+        Thin delegator over :func:`latence_core.run_store.export_producer` (Wave 2-E).
         """
-        by_name = {s.name: s for s in pipeline.stages}
-        seen: set[str] = set()
-        frontier = list(stage.depends_on)
-        while frontier:
-            name = frontier.pop(0)
-            if name in seen:
-                continue
-            seen.add(name)
-            parent = by_name.get(name)
-            if parent is None:  # pragma: no cover - validated DAG
-                continue
-            carrier = export_carrier_of(parent.capability)
-            if carrier is not None:
-                return parent
-            frontier.extend(parent.depends_on)
-        return None
+        return run_store.export_producer(stage, pipeline)
 
     def _write_checkpoint(
         self,
@@ -816,37 +796,25 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         ``storage`` is here only for the WAL append — the checkpoint bytes go to ``fh``, whose
         publication (or sweep) is :meth:`_write_checkpoint`'s ``atomic_writer`` block.
+
+        Thin delegator over :func:`latence_core.run_store.stream_batches` (Wave 2-E). The batch
+        size is read from this module's ``_CHECKPOINT_BATCH_RECORDS`` at call time, so the
+        existing test knob (monkeypatching the module attribute) still shapes the batches.
         """
-        total = 0
-        batch_index = 0
-        batch: list[str] = []
-        for record in records:
-            batch.append(record.model_dump_json())
-            if len(batch) >= _CHECKPOINT_BATCH_RECORDS:
-                fh.write(("\n".join(batch) + "\n").encode("utf-8"))
-                total += len(batch)
-                batch = []
-                if wal_uri is not None and stage_name is not None:
-                    self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
-                # #73: mirror the WAL batch progress as a trace span (counts only), so a
-                # downstream tracer sees checkpoint throughput per batch, not just per Stage.
-                if tracer is not None and stage_name is not None:
-                    tracer.stage_batch(stage_name, batch_index=batch_index, records_so_far=total)
-                batch_index += 1
-        if batch:
-            fh.write(("\n".join(batch) + "\n").encode("utf-8"))
-            total += len(batch)
-            if wal_uri is not None and stage_name is not None:
-                self._wal_append_batch(storage, wal_uri, stage_name, batch_index, total)
-            if tracer is not None and stage_name is not None:
-                tracer.stage_batch(stage_name, batch_index=batch_index, records_so_far=total)
-            batch_index += 1
-        return total, batch_index
+        return run_store.stream_batches(
+            fh,
+            storage,
+            records,
+            wal_uri=wal_uri,
+            stage_name=stage_name,
+            tracer=tracer,
+            batch_size=_CHECKPOINT_BATCH_RECORDS,
+        )
 
     def _read_checkpoint(
         self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
     ) -> list[StageOutput]:
-        return self._read_checkpoint_text(storage.read_text(uri), record_type)
+        return run_store.read_checkpoint(storage, uri, record_type)
 
     def _stream_checkpoint(
         self, storage: Storage, uri: str, record_type: type[StageOutput] | type[Record]
@@ -866,16 +834,10 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         read produce byte-identical records in the same order — determinism and the
         Provenance/offset/Evidence contracts are untouched. The file handle is closed when the
         generator is exhausted or garbage-collected.
+
+        Thin delegator over :func:`latence_core.run_store.stream_checkpoint` (Wave 2-E).
         """
-        with storage.open(uri, "rb") as fh:
-            for raw_line in fh:
-                raw = raw_line.decode("utf-8")
-                if not raw.strip():
-                    continue
-                # Decode one line through the shared typed decode (identical validation +
-                # mixed-carrier discrimination as the whole-file read), so a streamed record is
-                # byte-identical to the buffered one. A blank line yields nothing.
-                yield from self._read_checkpoint_text(raw, record_type)
+        yield from run_store.stream_checkpoint(storage, uri, record_type)
 
     def _read_checkpoint_text(
         self, text: str, record_type: type[StageOutput] | type[Record]
@@ -884,17 +846,11 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         Split out from :meth:`_read_checkpoint` so a Runner adapter that transports Stage outputs
         over a non-file substrate (e.g. Airflow XCom, S12) reuses the *exact* same typed decode —
-        the contract survives the boundary, no bespoke (de)serialization per Runner.
+        the contract survives the boundary, no bespoke (de)serialization per Runner. The decode
+        itself now lives with the layout it types
+        (:func:`latence_core.run_store.decode_records`, Wave 2-E); this is a thin delegator.
         """
-        if record_type is Record:
-            # A fused Stage's mixed carrier (or an Export re-emitting one): each line
-            # is an EntityMention or a RelationMention — discriminate per line.
-            return self._read_mixed_lines(text)
-        records: list[StageOutput] = []
-        for raw in text.splitlines():
-            if raw.strip():
-                records.append(record_type.model_validate_json(raw))  # type: ignore[arg-type]
-        return records
+        return run_store.decode_records(text, record_type)
 
     @staticmethod
     def _read_mixed_lines(text: str) -> list[StageOutput]:
@@ -909,17 +865,12 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         Both records are inter-Stage Records; keeping them in one checkpoint is what
         lets a single fused Stage feed both downstream consumers (S5: one pass, no
         double-extract).
+
+        Thin delegator over the mixed decode inside
+        :func:`latence_core.run_store.decode_records` (Wave 2-E) — the ``Record`` sentinel
+        routes each line through the same per-line discrimination.
         """
-        records: list[StageOutput] = []
-        for raw in text.splitlines():
-            if not raw.strip():
-                continue
-            obj = json.loads(raw)
-            if isinstance(obj, dict) and "head_mention_id" in obj:
-                records.append(RelationMention.model_validate(obj))
-            else:
-                records.append(EntityMention.model_validate(obj))
-        return records
+        return run_store.decode_records(text, Record)
 
     # -- execution ---------------------------------------------------------
 
@@ -1786,7 +1737,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
     # -- Type-vocabulary sidecar (T3, off the DAG) --------------------------
 
     def _type_vocabulary_uri(self, pipeline: Pipeline, run_id: str, stage_name: str) -> str:
-        return f"{self._run_dir(pipeline, run_id)}/type-vocabulary/{stage_name}.json"
+        return self._layout(pipeline, run_id).type_vocabulary_uri(stage_name)
 
     def _persist_type_vocabulary(
         self,
@@ -2329,15 +2280,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         """
         if stage_name in outputs:
             return len(outputs[stage_name])
-        ckpt_uri = self._checkpoint_uri(pipeline, run_id, stage_name)
-        if not storage.exists(ckpt_uri):
-            return 0
-        total = 0
-        with storage.open(ckpt_uri, "rb") as fh:
-            for raw_line in fh:
-                if raw_line.strip():
-                    total += 1
-        return total
+        return run_store.count_checkpoint_records(
+            storage, self._checkpoint_uri(pipeline, run_id, stage_name)
+        )
 
     @staticmethod
     def _extract_input_chunks_streamed(

@@ -49,6 +49,7 @@ from latence_core.observability import (
     build_lineage_emitter,
 )
 from latence_core.pipeline import Pipeline
+from latence_core.run_store import RunLayout
 from latence_core.runner import LocalRunner
 from latence_core.storage import Storage
 
@@ -176,8 +177,8 @@ def _emit_delta_report(pipeline: Pipeline, run_id: str, report: QualityReport) -
     affected-set size vs the whole corpus-level set (the perf witness), plus the new Corpus Version.
     """
     storage = Storage.for_uri(pipeline.storage_uri)
-    run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-    storage.write_atomic(f"{run_dir}/quality-report.md", report.render().encode("utf-8"))
+    layout = RunLayout(pipeline.storage_uri, run_id)
+    storage.write_atomic(layout.report_markdown_uri, report.render().encode("utf-8"))
     dc = report.delta
     if dc is None:  # pragma: no cover - defensive; a delta run always attaches its churn
         typer.echo("warning: the delta run produced no churn", err=True)
@@ -207,7 +208,7 @@ def _emit_delta_report(pipeline: Pipeline, run_id: str, report: QualityReport) -
         "(unchanged documents' doc-level Stages skipped — issue #42 / ADR-0043)"
     )
     typer.echo(f"  drift: {dc.drift:.3f}")
-    typer.echo(f"report: {run_dir}/quality-report.json", err=True)
+    typer.echo(f"report: {layout.report_uri}", err=True)
 
 
 @app.command()
@@ -264,12 +265,12 @@ def _execute_pipeline_file(pipeline_path: Path, *, run_id: str, tuned: Path | No
     )
     _maybe_export_metrics(report)
     storage = Storage.for_uri(pipeline.storage_uri)
-    run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-    report_uri = f"{run_dir}/quality-report.json"
+    layout = RunLayout(pipeline.storage_uri, run_id)
+    report_uri = layout.report_uri
     # Persist the human-readable rendering alongside the machine-readable JSON (S10: the
     # Quality Report is both machine- and human-readable). stdout stays JSON (pipeable);
     # the rendered summary goes to Storage and to the log.
-    storage.write_atomic(f"{run_dir}/quality-report.md", report.render().encode("utf-8"))
+    storage.write_atomic(layout.report_markdown_uri, report.render().encode("utf-8"))
     logger.info("quality report:\n%s", report.render())
     typer.echo(report.to_json())
     if not storage.exists(report_uri):  # pragma: no cover - defensive

@@ -36,6 +36,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from latence_core.run_store import run_dir_for
+
 from latence_benchmark.campaign import s3_lib
 from latence_benchmark.campaign.corpus_stage import SOTA_CORPUS_DIR
 from latence_benchmark.campaign.ocr_stage import PodTransport, SubprocessTransport
@@ -88,7 +90,10 @@ def _remote_store(dataset: str) -> str:
 
 
 def _remote_run_dir(dataset: str) -> str:
-    return f"{_remote_store(dataset)}/_latence/runs/{run_id_for(dataset)}"
+    # The framework's own run layout (``latence_core.run_store``), addressed remotely: the
+    # pod-side ``latence process`` writes under exactly this directory, so the probe/pull
+    # paths can never drift from where the Runner actually lands its artifacts.
+    return run_dir_for(_remote_store(dataset), run_id_for(dataset))
 
 
 def _remote_pid(dataset: str) -> str:

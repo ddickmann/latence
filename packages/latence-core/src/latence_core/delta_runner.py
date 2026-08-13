@@ -81,6 +81,7 @@ from latence_core.contracts import (
 )
 from latence_core.observability import OpenLineageEmitter
 from latence_core.pipeline import CapabilityKind, Pipeline
+from latence_core.run_store import RunLayout, RunStore, runs_root_for
 from latence_core.runner import LocalRunner, StageOutput, topological_order
 from latence_core.state.corpus_store import CorpusStore
 from latence_core.state.delta_detector import DeltaDetector, ManifestEntry, content_hash
@@ -519,7 +520,7 @@ class DeltaRunner:
         after by :meth:`_attach_churn`.
         """
         storage = Storage.for_uri(pipeline.storage_uri)
-        runs_root = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs"
+        runs_root = runs_root_for(pipeline.storage_uri)
         if not storage.exists(runs_root):
             return
         for run_entry in storage.ls(runs_root):
@@ -669,7 +670,7 @@ class DeltaRunner:
         labels that legitimately move as the corpus grows and would flip an untouched document's
         hash.
         """
-        storage = Storage.for_uri(pipeline.storage_uri)
+        store = RunStore(Storage.for_uri(pipeline.storage_uri), pipeline, run_id)
         seen: set[str] = set()
         collected: list[StageOutput] = []
         for stage in pipeline.stages:
@@ -678,19 +679,13 @@ class DeltaRunner:
                 CapabilityKind.TYPE_CONSOLIDATION,
             ):
                 continue
-            ckpt = (
-                f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-                f"/checkpoints/{stage.name}.jsonl"
-            )
-            if not storage.exists(ckpt):
-                continue
-            record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
-            # C6: STREAM the checkpoint rather than buffering it. ``_read_checkpoint`` returned
+            # C6: STREAM the checkpoint rather than buffering it. The buffered read returned
             # the whole Stage's records as a list before this line even began filtering them, so
             # peak memory was O(largest checkpoint) on top of the collected set — in the one
-            # operation whose entire purpose is to be O(changed). ``_stream_checkpoint`` decodes
-            # one line at a time and yields byte-identical records in the same order.
-            for record in self._runner._stream_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+            # operation whose entire purpose is to be O(changed). ``RunStore.read`` decodes one
+            # line at a time (a missing checkpoint yields nothing) and yields byte-identical
+            # records in the same order — through the owned interface, no private reach-through.
+            for record in store.read(stage):
                 # A ParserInput (Source/Intake output) carries no record_id; key it by its
                 # source document id. Everything else is a Record keyed by record_id.
                 rid = getattr(record, "record_id", None) or record.provenance.document_id
@@ -850,20 +845,13 @@ class DeltaRunner:
         reuse store substitutes for RE-RUNNING the doc-level Stages, and a corpus-level decision is
         not a doc-level Stage output — it is recomputed (over the seeded vocabulary) every run.
         """
-        storage = Storage.for_uri(pipeline.storage_uri)
+        store = RunStore(Storage.for_uri(pipeline.storage_uri), pipeline, run_id)
         collected: dict[str, Record] = {}
         for stage in topological_order(list(pipeline.stages)):
             if stage.capability in _CORPUS_LEVEL_KINDS:
                 continue
-            ckpt = (
-                f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-                f"/checkpoints/{stage.name}.jsonl"
-            )
-            if not storage.exists(ckpt):
-                continue
-            record_type = self._runner._output_type(stage, pipeline)  # noqa: SLF001
             # C6: streamed, not buffered — same reason as ``_collect_outputs``.
-            for record in self._runner._stream_checkpoint(storage, ckpt, record_type):  # noqa: SLF001
+            for record in store.read(stage):
                 if not isinstance(record, _DOC_LEVEL):
                     continue
                 collected[f"{type(record).__name__}:{record.record_id}"] = record
@@ -879,19 +867,15 @@ class DeltaRunner:
         schema rides in each document's reused chunk records, no corpus-level freeze), a pipeline
         with no induction, or an all-fail-open run yields ``None`` — no corpus schema to freeze.
         """
-        storage = Storage.for_uri(pipeline.storage_uri)
+        store = RunStore(Storage.for_uri(pipeline.storage_uri), pipeline, run_id)
         for stage in pipeline.stages:
             if stage.capability is not CapabilityKind.SCHEMA_INDUCTION:
                 continue
             if str((stage.config or {}).get("granularity", "doc")).lower() != "corpus":
                 continue
-            ckpt = (
-                f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-                f"/checkpoints/{stage.name}.jsonl"
-            )
-            if not storage.exists(ckpt):
-                continue
-            for record in self._runner._read_checkpoint(storage, ckpt, ChunkRecord):  # noqa: SLF001
+            # A corpus-granularity induction Stage checkpoints ChunkRecords; the explicit
+            # ``record_type`` keeps the decode contract this reader has always used.
+            for record in store.read(stage, record_type=ChunkRecord):
                 if isinstance(record, ChunkRecord) and record.induced_labels is not None:
                     return record.induced_labels
         return None
@@ -1037,9 +1021,7 @@ class DeltaRunner:
         """Fold the delta churn into the Quality Report and re-persist it (S11 AC)."""
         report.delta = churn
         storage = Storage.for_uri(pipeline.storage_uri)
-        report_uri = (
-            f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}/quality-report.json"
-        )
+        report_uri = RunLayout(pipeline.storage_uri, run_id).report_uri
         storage.write_atomic(report_uri, report.to_json().encode("utf-8"))
         return report
 

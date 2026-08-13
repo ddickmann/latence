@@ -42,6 +42,7 @@ from latence_core.bakeoff.report import (
 from latence_core.capability import ProviderRegistry
 from latence_core.pipeline import CapabilityKind, Pipeline, Stage
 from latence_core.quality import QualityReport, StageMetrics
+from latence_core.run_store import RunLayout
 from latence_core.stacks.validate import _skip_reason_for_stage, load_stack
 from latence_core.storage import Storage
 
@@ -480,8 +481,7 @@ class BakeOffHarness:
         BITES). A Stage that wrote no checkpoint (all inputs quarantined) yields ``b""`` for both
         runs — identical, so an empty-but-stable Stage is honestly deterministic.
         """
-        run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-        uri = f"{run_dir}/checkpoints/{stage_name}.jsonl"
+        uri = RunLayout(pipeline.storage_uri, run_id).checkpoint_uri(stage_name)
         if not storage.exists(uri):
             return b""
         return storage.read_bytes(uri)

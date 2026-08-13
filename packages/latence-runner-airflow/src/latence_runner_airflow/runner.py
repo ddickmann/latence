@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from latence_core.pipeline import Pipeline
 from latence_core.quality import StageMetrics
+from latence_core.run_store import decode_records, stage_output_type
 from latence_core.runner import LocalRunner, StageOutput, topological_order
 from latence_core.stage_execution import StageContext
 from latence_core.storage import Storage
@@ -273,7 +274,7 @@ class AirflowRunner:
             for parent in stage.depends_on:
                 raw = ti.xcom_pull(task_ids=parent) or []
                 parent_stage = _stage_by_name(pipeline, parent)
-                parent_records = _deserialize(engine, parent_stage, pipeline, raw)
+                parent_records = _deserialize(parent_stage, pipeline, raw)
                 parent_outputs[parent] = parent_records
                 incoming.extend(parent_records)
             records, metrics = _execute(
@@ -307,7 +308,7 @@ class AirflowRunner:
             stage_metrics: list[StageMetrics] = []
             for stage in ordered:
                 raw = ti.xcom_pull(task_ids=stage.name) or []
-                outputs[stage.name] = _deserialize(engine, stage, pipeline, raw)
+                outputs[stage.name] = _deserialize(stage, pipeline, raw)
                 raw_metrics = ti.xcom_pull(task_ids=stage.name, key="metrics")
                 if raw_metrics is not None:
                     stage_metrics.append(StageMetrics.model_validate_json(raw_metrics))
@@ -378,17 +379,16 @@ def _stage_by_name(pipeline: Pipeline, name: str) -> Stage:
     raise KeyError(msg)
 
 
-def _deserialize(
-    engine: LocalRunner, stage: Stage, pipeline: Pipeline, raw: list[str]
-) -> list[StageOutput]:
+def _deserialize(stage: Stage, pipeline: Pipeline, raw: list[str]) -> list[StageOutput]:
     """Re-validate a parent Stage's XCom-transported JSON back into typed records.
 
-    Reuses the engine's own per-Stage output-type resolution + checkpoint reader so an XCom-carried
-    record round-trips through the exact same typed contract the local Runner's checkpoints use —
-    the contract survives the Airflow boundary, no bespoke (de)serialization.
+    Reuses the owned per-Stage output-type resolution + checkpoint decode
+    (:mod:`latence_core.run_store`) so an XCom-carried record round-trips through the exact
+    same typed contract the local Runner's checkpoints use — the contract survives the Airflow
+    boundary, no bespoke (de)serialization and no private reach-through (Wave 2-E).
     """
     if not raw:
         return []
     text = "\n".join(raw)
-    record_type = engine._output_type(stage, pipeline)  # noqa: SLF001
-    return engine._read_checkpoint_text(text, record_type)  # noqa: SLF001
+    record_type = stage_output_type(stage, pipeline)
+    return decode_records(text, record_type)

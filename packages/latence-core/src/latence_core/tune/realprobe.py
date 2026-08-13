@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from latence_core.run_store import RunLayout
 from latence_core.tune.probe import ProbeOutcome
 
 if TYPE_CHECKING:
@@ -198,8 +199,7 @@ class RegistrySampleProbe:
         light
         and never carries record content into a committed artifact.
         """
-        run_dir = f"{pipeline.storage_uri.rstrip('/')}/_latence/runs/{run_id}"
-        uri = f"{run_dir}/checkpoints/{stage_name}.jsonl"
+        uri = RunLayout(pipeline.storage_uri, run_id).checkpoint_uri(stage_name)
         raw = storage.read_bytes(uri) if storage.exists(uri) else b""
         return hashlib.sha256(raw).hexdigest()
 
