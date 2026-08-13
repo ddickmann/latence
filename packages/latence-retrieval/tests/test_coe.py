@@ -146,7 +146,7 @@ def test_greedy_beats_plain_value_density_baseline_on_chain_value() -> None:
     Σ_i v(e_i | {e_1..e_{i-1}}), the marginal selection must win — knapsack_refine is dropped
     (see the module docstring), so THIS is the value guarantee the milestone pins."""
     dup_nodes = ["n_q", "d1", "d2"]
-    edges = {
+    edges: dict[str, dict[str, Any]] = {
         "dup_a": {"rho": 1.0, "nodes": dup_nodes, "gamma": 0.9},
         "dup_b": {"rho": 1.0, "nodes": dup_nodes, "gamma": 0.9},
         "dup_c": {"rho": 1.0, "nodes": dup_nodes, "gamma": 0.9},

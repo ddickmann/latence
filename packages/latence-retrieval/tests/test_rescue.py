@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import struct
 import unicodedata
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +73,7 @@ def _norm(surface: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", surface).casefold().split())
 
 
-def _build_kv(hyperedges: dict[str, dict], aliases: dict[str, list[str]]) -> bytes:
+def _build_kv(hyperedges: dict[str, dict[str, Any]], aliases: dict[str, list[str]]) -> bytes:
     entries: dict[bytes, bytes] = {}
     postings: dict[str, list[tuple[float, str]]] = {}
     for hid, h in hyperedges.items():
@@ -99,17 +100,17 @@ def _build_kv(hyperedges: dict[str, dict], aliases: dict[str, list[str]]) -> byt
         entries[b"a|" + _norm(surface).encode()] = json.dumps(
             sorted(node_ids), separators=(",", ":")
         ).encode()
-    items = sorted(entries.items())
-    keys = [k for k, _ in items]
-    values = [v for _, v in items]
+    sorted_entries = sorted(entries.items())
+    keys = [k for k, _ in sorted_entries]
+    values = [val for _, val in sorted_entries]
     key_offs, val_offs = [0], [0]
     for k in keys:
         key_offs.append(key_offs[-1] + len(k))
-    for v in values:
-        val_offs.append(val_offs[-1] + len(v))
+    for val in values:
+        val_offs.append(val_offs[-1] + len(val))
     out = bytearray()
     out += _MAGIC
-    out += _U64.pack(len(items))
+    out += _U64.pack(len(sorted_entries))
     for off in key_offs:
         out += _U64.pack(off)
     for off in val_offs:
@@ -136,7 +137,7 @@ class _HyperedgeDocs:
     def __init__(self, mapping: dict[str, list[Candidate]]) -> None:
         self._mapping = mapping
 
-    def candidates(self, hyperedge_ids: list[str]) -> list[Candidate]:
+    def candidates(self, hyperedge_ids: Sequence[str]) -> list[Candidate]:
         out: list[Candidate] = []
         seen: set[str] = set()
         for hid in hyperedge_ids:

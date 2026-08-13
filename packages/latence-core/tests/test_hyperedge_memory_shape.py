@@ -162,7 +162,7 @@ def _entities() -> list[CanonicalEntity]:
     """One canonical entity per surface — small, and the only genuinely cross-chunk input."""
     out: list[CanonicalEntity] = []
     for ci in range(_CHUNKS):
-        surfaces = []
+        surfaces: list[str] = []
         for si in range(_SENTENCES):
             surfaces.extend((f"Alpha{ci}s{si}", f"Beta{ci}s{si}"))
         surfaces.extend((f"Gamma{ci}", f"Delta{ci}"))

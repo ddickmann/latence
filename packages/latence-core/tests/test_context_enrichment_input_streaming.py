@@ -37,7 +37,7 @@ from __future__ import annotations
 import gc
 from collections.abc import Sized
 from importlib import metadata
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import pytest
 from latence_core import ProviderRegistry
@@ -195,6 +195,9 @@ class _InputSpyRunner(LocalRunner):
         )
 
 
+_T = TypeVar("_T", bound=StageOutput)
+
+
 class _MaterialisingRunner(LocalRunner):
     """The parity control: the same run with every per-carrier input collected up front.
 
@@ -208,15 +211,19 @@ class _MaterialisingRunner(LocalRunner):
         self,
         stage: Stage,
         outputs: dict[str, list[StageOutput]],
-        expected: type[Any],
+        expected: type[_T],
         *,
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-    ) -> list[Any]:
-        return list(
-            super()._stream_parent_inputs_of_type(
-                stage, outputs, expected, storage=storage, pipeline=pipeline, run_id=run_id
+    ) -> Iterator[_T]:
+        # Materialise FIRST (the pre-fix memory shape), then hand over an iterator so the
+        # override signature matches the supertype contract exactly.
+        return iter(
+            list(
+                super()._stream_parent_inputs_of_type(
+                    stage, outputs, expected, storage=storage, pipeline=pipeline, run_id=run_id
+                )
             )
         )
 

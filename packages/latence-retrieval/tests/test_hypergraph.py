@@ -17,6 +17,7 @@ import json
 import struct
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import pytest
 from latence_retrieval.hypergraph import (
@@ -37,7 +38,7 @@ def _norm(surface: str) -> str:
 
 
 def _build_kv(
-    hyperedges: dict[str, dict], aliases: dict[str, list[str]]
+    hyperedges: dict[str, dict[str, Any]], aliases: dict[str, list[str]]
 ) -> bytes:
     """A minimal, independent writer for the store format (fixture-side)."""
     entries: dict[bytes, bytes] = {}
@@ -67,17 +68,17 @@ def _build_kv(
             sorted(node_ids), separators=(",", ":")
         ).encode()
 
-    items = sorted(entries.items())
-    keys = [k for k, _ in items]
-    values = [v for _, v in items]
+    sorted_entries = sorted(entries.items())
+    keys = [k for k, _ in sorted_entries]
+    values = [val for _, val in sorted_entries]
     key_offs, val_offs = [0], [0]
     for k in keys:
         key_offs.append(key_offs[-1] + len(k))
-    for v in values:
-        val_offs.append(val_offs[-1] + len(v))
+    for val in values:
+        val_offs.append(val_offs[-1] + len(val))
     out = bytearray()
     out += _MAGIC
-    out += _U64.pack(len(items))
+    out += _U64.pack(len(sorted_entries))
     for off in key_offs:
         out += _U64.pack(off)
     for off in val_offs:
@@ -269,9 +270,9 @@ def test_reader_holds_nothing_between_calls(tmp_path: Path) -> None:
 # -- ticket 01 (wayfinder-enterprise-serving): the precomputed index -------------
 
 
-def _dense_corpus(count: int = 400, nodes: int = 120) -> dict[str, dict]:
+def _dense_corpus(count: int = 400, nodes: int = 120) -> dict[str, dict[str, Any]]:
     """A deterministic, hub-heavy corpus with deliberate γ ties (tie-breaks must match)."""
-    hyperedges: dict[str, dict] = {}
+    hyperedges: dict[str, dict[str, Any]] = {}
     for i in range(count):
         arity = 2 + (i * 7) % 4
         members = [f"n{(i * 13 + j * 29) % nodes:03d}" for j in range(arity)]
@@ -285,7 +286,7 @@ def _dense_corpus(count: int = 400, nodes: int = 120) -> dict[str, dict]:
 _DENSE_ALIASES = {"Seed Corp": ["n001"], "Hub Inc": ["n000", "n003"]}
 
 
-def _signals_tuple(signals) -> tuple:
+def _signals_tuple(signals: Any) -> tuple[Any, ...]:
     return (
         signals.rho,
         signals.fields,
@@ -296,7 +297,7 @@ def _signals_tuple(signals) -> tuple:
     )
 
 
-_INDEX_CASES = [
+_INDEX_CASES: list[dict[str, Any]] = [
     {"alias_surfaces": ["Seed Corp"]},
     {"alias_surfaces": ["Seed Corp", "Hub Inc"], "ann_node_ids": ["n007", "n_unknown"]},
     {"ann_node_ids": ["n005", "n009"]},

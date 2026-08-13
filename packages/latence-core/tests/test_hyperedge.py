@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
 import pytest
@@ -169,7 +170,7 @@ def _fixture() -> tuple[list[ChunkRecord], list[EntityMention], list[RelationMen
     return [_chunk()], mentions, relations, entities
 
 
-def _build(**cfg: object) -> list:
+def _build(**cfg: object) -> list[Any]:
     chunks, mentions, relations, entities = _fixture()
     builder = HyperedgeBuilder("corpus-test", HyperedgeConfig(**cfg))  # type: ignore[arg-type]
     return builder.build(chunks, mentions, relations, entities, lambda e: _NODE_OF[e])
@@ -657,7 +658,7 @@ def test_unconfigured_run_is_byte_identical_and_exports_no_hyperedges(tmp_path: 
 # -- M2 (ticket 13): the sidecar KV ---------------------------------------------
 
 
-def _kv_fixture_records() -> tuple[list, list]:
+def _kv_fixture_records() -> tuple[list[Any], list[Any]]:
     """Hyperedges + nodes straight from the real builder over the standard fixture."""
     chunks, mentions, relations, entities = _fixture()
     builder = HyperedgeBuilder("corpus-test")

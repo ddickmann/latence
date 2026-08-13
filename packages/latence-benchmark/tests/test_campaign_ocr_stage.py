@@ -317,7 +317,7 @@ class TestSubprocessTransportFlags:
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        monkeypatch.setattr(ocr_stage.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)  # same module object ocr_stage uses
         return calls
 
     def test_push_dereferences_symlinks(
