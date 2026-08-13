@@ -36,14 +36,26 @@ class _FakeData:
         self.num_relations = num_relations
         self.relation_graph: Any = None
 
+    def to(self, device: Any) -> _FakeData:
+        # Real torch_geometric ``Data.to`` moves member tensors and returns the Data; the
+        # faithful shape is "callable, returns the graph" (the scorer re-assigns the result).
+        return self
+
+
+class _FakeRelationGraph:
+    """The relation-level graph member: the scorer only ever moves it between devices."""
+
+    def to(self, device: Any) -> _FakeRelationGraph:
+        return self
+
 
 class _FakeTasks:
     """Faithful ``tasks`` helpers: the REAL shapes (an un-faithful provider mis-uses these)."""
 
     @staticmethod
     def build_relation_graph(graph: _FakeData) -> _FakeData:
-        # Real ULTRA sets graph.relation_graph and returns graph.
-        graph.relation_graph = object()
+        # Real ULTRA sets graph.relation_graph (itself device-movable) and returns graph.
+        graph.relation_graph = _FakeRelationGraph()
         return graph
 
     @staticmethod

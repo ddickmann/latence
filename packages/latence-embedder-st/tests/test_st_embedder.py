@@ -147,6 +147,11 @@ def test_perf_kwargs_threaded_into_model_kwargs_fp32_on_cpu(
 ) -> None:
     """W8: the perf seam threads torch_dtype + attn_implementation via ST's ``model_kwargs`` (CPU)."""
     monkeypatch.setenv("LATENCE_CUDA", "0")  # CPU host → fp32 default
+    # PIN torch absence (the same sys.modules discipline as test_perf_seam): the perf seam
+    # materialises a real ``torch.dtype`` when torch is importable, so on a torch-carrying
+    # host this test would assert the host venv, not the contract. The name-string form is
+    # the documented torch-free degradation and what this test pins.
+    monkeypatch.setitem(sys.modules, "torch", None)
     list(SentenceTransformersEmbedder({"dimension": 4}).embed(["a"]))
     mk = fake_st.last_model_kwargs
     assert mk.get("torch_dtype") == "float32"  # torch-free env → dtype name string
@@ -158,6 +163,7 @@ def test_perf_kwargs_bf16_on_cuda_host(
 ) -> None:
     """W8: on a (pinned) CUDA host the ST backbone loads bf16 — the ~2× win, threaded via model_kwargs."""
     monkeypatch.setenv("LATENCE_CUDA", "1")
+    monkeypatch.setitem(sys.modules, "torch", None)  # pin the torch-free contract (see above)
     list(SentenceTransformersEmbedder({"dimension": 4, "device": "cuda"}).embed(["a"]))
     assert fake_st.last_model_kwargs.get("torch_dtype") == "bfloat16"
 

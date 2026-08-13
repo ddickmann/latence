@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from latence_benchmark.campaign import ocr_stage
 from latence_benchmark.campaign.ocr_stage import (
     FIN_CAP,
     REMOTE_ROOT,
