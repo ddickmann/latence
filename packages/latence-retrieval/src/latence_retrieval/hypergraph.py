@@ -58,12 +58,13 @@ from __future__ import annotations
 import heapq
 import json
 import mmap
-import os
 import struct
 import unicodedata
 from array import array
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from latence_retrieval.read_cache import FileIdentityCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -138,6 +139,8 @@ class HyperedgeKV:
         for this file — built on the first open, invalidated automatically when the file
         changes (the cache key is device/inode/size/mtime). The index is a derived,
         rebuildable read optimisation: results are byte-identical with and without it.
+        The cache's lifetime policy (bounded LRU + eviction of a rewritten store's
+        superseded index) is :mod:`latence_retrieval.read_cache`'s.
         """
         fh = open(path, "rb")  # noqa: SIM115 - lifetime is the reader's, closed in close()
         buf = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
@@ -513,19 +516,16 @@ class HypergraphIndex:
         return [candidates[i] for i in order_py[: config.k_h]]
 
 
-#: Process-shared indices, one per store FILE version (device/inode/size/mtime).
-_INDEX_CACHE: dict[tuple[int, int, int, int], HypergraphIndex] = {}
+#: Process-shared indices, one per store FILE version (device/inode/size/mtime), with the
+#: :mod:`~latence_retrieval.read_cache` lifetime policy: an index for a rewritten store evicts
+#: the superseded version's index (a serving process that outlives export refreshes holds at
+#: most one index per store), and the whole cache is LRU-bounded.
+_INDEX_CACHE: FileIdentityCache[HypergraphIndex] = FileIdentityCache()
 
 
 def _shared_index(path: str, reader: HyperedgeKV) -> HypergraphIndex:
     """The cached index for ``path``'s current content, built through ``reader`` on a miss."""
-    stat = os.stat(path)
-    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    index = _INDEX_CACHE.get(signature)
-    if index is None:
-        index = HypergraphIndex(reader)
-        _INDEX_CACHE[signature] = index
-    return index
+    return _INDEX_CACHE.get_or_build(path, lambda: HypergraphIndex(reader))
 
 
 def clear_index_cache() -> None:

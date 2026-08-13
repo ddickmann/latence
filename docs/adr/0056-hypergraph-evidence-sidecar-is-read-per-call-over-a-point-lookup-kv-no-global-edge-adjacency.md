@@ -129,3 +129,43 @@ invalidated by any rewrite. This does **not** reopen ADR-0048's escape hatch:
   verbatim), which remains the parity oracle.
 - The global pairwise structure stays refused: no `A_E`, no global incidence CSR — the index holds
   exactly the postings and incidence the store already contains, in int-mapped form.
+
+## Amendment (2026-08-13, architecture pass Wave 1-A): the read index is a generalized pattern with a lifetime policy
+
+The 2026-08-12 amendment's shape — a **derived, rebuildable memoization of an emitted artifact,
+keyed by file identity (`st_dev`/`st_ino`/`st_size`/`st_mtime_ns`), with `cache=False` preserving
+the original per-call path verbatim as the parity oracle** — turned out not to be specific to the
+hyperedge store. The shipped parquet graph adapters had exactly the friction the index fixed here:
+`NetworkxGraphSource.neighbors` re-read the parquet and rebuilt the whole graph per call,
+`DuckDBGraphSource.neighbors` re-ran the recursive CTE over the parquet per call, and
+`DuckDBGraphDocumentSource.documents` re-scanned the full chunk parquet per call — which the
+ticket-01 tiered `GraphRetriever.search` now invokes up to `max_hops + 1` times per query
+(FINDINGS F1: the tiering win was measured against run-lifetime bench sources; on the shipped
+adapters the per-call re-read multiplied instead).
+
+Decision: the pattern gets **one home** — `latence_retrieval.read_cache.FileIdentityCache` — and
+an explicit **lifetime policy** the first instance lacked (`_INDEX_CACHE` grew by one full index
+per store version per process, ~347 MB (wiki) / ~771 MB (uda), without bound across export
+refreshes):
+
+1. *Identity invalidation* — a rewrite changes the signature; stale content is never served.
+2. *Superseded-signature eviction* — decoding a NEW version of a file drops every cached decode of
+   its other versions (same `(st_dev, st_ino)`, any variant), so refresh churn never accumulates.
+3. *Bounded LRU* — a hard per-cache entry cap (default 8) as the safety valve for many distinct
+   live artifacts.
+
+Consumers, each with `cache: bool = True` and the untouched verbatim path under `cache=False`:
+`HyperedgeKV.open` (the `HypergraphIndex`, migrated onto the shared cache), `DuckDBGraphSource`
+(decoded undirected edge adjacency + the canonical `_traverse` BFS), `NetworkxGraphSource` (the
+loaded graph; identical per-seed bounded shortest-path reads), `DuckDBGraphDocumentSource` (the
+decoded ascending-`id` row table + node→row postings — reproducing the `ORDER BY id` contract the
+tiered early-stop depends on). Decode parameters (configurable column names) enter the key as a
+`variant`, so two decodings of one file never collide.
+
+The boundary is unchanged: nothing can be written through the cache, results are byte-identical
+with and without it (package equivalence tests + the ticket-01 `kg_shipped`/`kg_shipped_nx`
+parity lanes over real exports, 0 diffs), ADR-0048's escape hatch stays shut, and the global
+pairwise structure stays refused. Measured effect (adapter_timing.py, per-query median,
+`GraphRetriever.search` end-to-end): wiki2multihop DuckDB 60.0 ms → 0.34 ms, networkx 270.6 ms →
+0.34 ms; multihop_rag DuckDB 34.9 ms → 0.27 ms, networkx 26.7 ms → 0.29 ms; one-time decode ~1.0 s
+(wiki) / ~0.1 s (multihop_rag) on the first call per file version.

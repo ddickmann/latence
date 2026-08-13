@@ -37,7 +37,12 @@ from latence_retrieval import (
     build_graph_source,
 )
 from latence_retrieval.errors import GraphSourceError
-from latence_retrieval.multihop import _traverse
+from latence_retrieval.multihop import (
+    _DUCKDB_ADJACENCY_CACHE,
+    _NETWORKX_GRAPH_CACHE,
+    _traverse,
+    clear_graph_source_caches,
+)
 from latence_retrieval.testing import FakeGraphSource
 
 _HAS_DUCKDB = importlib.util.find_spec("duckdb") is not None
@@ -394,3 +399,111 @@ def test_factory_requires_a_uri_for_neo4j() -> None:
 def test_factory_rejects_a_non_mapping_spec() -> None:
     with pytest.raises(TypeError, match="mapping"):
         build_graph_source("nope")  # type: ignore[arg-type]
+
+
+# --- the read cache behind the parquet engines (arch pass Wave 1-A, FINDINGS F1) ---------------
+#
+# `cache=True` (the default) serves traversals from a process-shared decoded structure keyed by
+# the parquet's FILE IDENTITY; `cache=False` is the original per-call engine path, preserved
+# verbatim as the parity oracle. The bar is byte-identity: same dict, same hops, on every graph —
+# and a rewritten parquet is re-decoded, never served stale.
+
+
+def _rewrite_edges_parquet(path: str, edges: list[tuple[str, str]]) -> None:
+    """Rewrite the fixture parquet, forcing a distinct mtime_ns on coarse filesystem clocks."""
+    _write_edges_parquet(path, edges)
+    stat = os.stat(path)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+@pytest.mark.parametrize("max_hops", [1, 2, 3])
+def test_cached_duckdb_is_byte_identical_to_the_uncached_oracle(
+    tmp_path: Any, max_hops: int
+) -> None:
+    clear_graph_source_caches()
+    uri = str(tmp_path / "graph-edges.parquet")
+    _write_edges_parquet(uri, _EDGES)
+    seeds = ["n0", "n1"]
+    cached = DuckDBGraphSource(uri).neighbors(seeds, max_hops)
+    uncached = DuckDBGraphSource(uri, cache=False).neighbors(seeds, max_hops)
+    assert cached == uncached == FakeGraphSource(_EDGES).neighbors(seeds, max_hops)
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_duckdb_shares_one_decode_and_uncached_touches_no_cache(tmp_path: Any) -> None:
+    clear_graph_source_caches()
+    uri = str(tmp_path / "graph-edges.parquet")
+    _write_edges_parquet(uri, _EDGES)
+    DuckDBGraphSource(uri).neighbors(["n0"], 2)
+    DuckDBGraphSource(uri).neighbors(["n1"], 2)  # a second instance over the same file
+    assert len(_DUCKDB_ADJACENCY_CACHE) == 1  # one decode per file version, shared
+    DuckDBGraphSource(uri, cache=False).neighbors(["n0"], 2)
+    assert len(_DUCKDB_ADJACENCY_CACHE) == 1  # the oracle path never populates the cache
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_duckdb_reindexes_a_rewritten_parquet(tmp_path: Any) -> None:
+    clear_graph_source_caches()
+    uri = str(tmp_path / "graph-edges.parquet")
+    _write_edges_parquet(uri, _EDGES)
+    source = DuckDBGraphSource(uri)
+    assert source.neighbors(["n0"], 1) == {"n1": 1, "k1": 1}
+    # Rewrite with a different graph: the cached decode must NOT serve the old edges.
+    _rewrite_edges_parquet(uri, [("n0", "z9")])
+    assert source.neighbors(["n0"], 1) == {"z9": 1}
+    assert source.neighbors(["n0"], 1) == DuckDBGraphSource(uri, cache=False).neighbors(["n0"], 1)
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_duckdb_missing_parquet_is_a_typed_error_with_no_leak() -> None:
+    clear_graph_source_caches()
+    secret_path = "/no/such/super-secret-path.parquet"
+    with pytest.raises(GraphSourceError) as excinfo:
+        DuckDBGraphSource(secret_path).neighbors(["n0"], 2)
+    assert secret_path not in str(excinfo.value)  # the stat fault leaks no raw path either
+
+
+@pytest.mark.skipif(not _HAS_NETWORKX, reason="networkx extra not installed (offline)")
+@pytest.mark.parametrize("max_hops", [1, 2, 3])
+def test_cached_networkx_is_byte_identical_to_the_uncached_oracle(
+    tmp_path: Any, max_hops: int
+) -> None:
+    clear_graph_source_caches()
+    uri = str(tmp_path / "graph-edges.parquet")
+    _write_edges_parquet(uri, _EDGES)
+    seeds = ["n0", "n1"]
+    cached = NetworkxGraphSource(uri).neighbors(seeds, max_hops)
+    uncached = NetworkxGraphSource(uri, cache=False).neighbors(seeds, max_hops)
+    assert cached == uncached == FakeGraphSource(_EDGES).neighbors(seeds, max_hops)
+
+
+@pytest.mark.skipif(not _HAS_NETWORKX, reason="networkx extra not installed (offline)")
+def test_cached_networkx_shares_one_graph_and_reindexes_a_rewrite(tmp_path: Any) -> None:
+    clear_graph_source_caches()
+    uri = str(tmp_path / "graph-edges.parquet")
+    _write_edges_parquet(uri, _EDGES)
+    source = NetworkxGraphSource(uri)
+    source.neighbors(["n0"], 2)
+    NetworkxGraphSource(uri).neighbors(["n1"], 2)
+    assert len(_NETWORKX_GRAPH_CACHE) == 1  # one loaded graph per file version, shared
+    _rewrite_edges_parquet(uri, [("n0", "z9")])
+    assert source.neighbors(["n0"], 2) == {"z9": 1}  # re-loaded, never stale
+    assert len(_NETWORKX_GRAPH_CACHE) == 1  # the superseded version's graph was evicted
+
+
+@pytest.mark.skipif(not _HAS_NETWORKX, reason="networkx extra not installed (offline)")
+def test_cached_networkx_missing_parquet_is_a_typed_error() -> None:
+    clear_graph_source_caches()
+    with pytest.raises(GraphSourceError):
+        NetworkxGraphSource("/no/such/file.parquet").neighbors(["n0"], 2)
+
+
+def test_factory_passes_cache_through_and_rejects_a_non_boolean() -> None:
+    for name in ("duckdb", "networkx"):
+        cached = build_graph_source({"source": name, "edges_uri": "e.parquet"})
+        uncached = build_graph_source({"source": name, "edges_uri": "e.parquet", "cache": False})
+        assert cached._cache is True  # type: ignore[union-attr]
+        assert uncached._cache is False  # type: ignore[union-attr]
+    with pytest.raises(ValueError, match="cache"):
+        build_graph_source({"source": "duckdb", "edges_uri": "e.parquet", "cache": "yes"})

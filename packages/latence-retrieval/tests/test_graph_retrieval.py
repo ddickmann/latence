@@ -43,6 +43,10 @@ from latence_retrieval import (
     retrieve,
 )
 from latence_retrieval.errors import BackendCapabilityError, GraphSourceError
+from latence_retrieval.graph_retrieval import (
+    _DOCUMENT_TABLE_CACHE,
+    clear_document_source_cache,
+)
 from latence_retrieval.multihop import MultiHopExpander
 from latence_retrieval.testing import (
     FakeBackend,
@@ -730,3 +734,109 @@ def test_unit_hop_decay_keeps_the_exhaustive_path_and_its_id_order() -> None:
     )
     assert [(c.id, c.score) for c in hits] == _oracle(3, hop_decay=1.0)
     assert len(source.calls) == 1, "the degenerate config must resolve in one exhaustive call"
+
+
+# --- the read cache behind the document source (arch pass Wave 1-A, FINDINGS F1) ---------------
+#
+# `cache=True` (the default) serves node→document resolution from a process-shared decoded table
+# keyed by the chunk parquet's FILE IDENTITY; `cache=False` is the original per-call
+# connect-scan-close path, preserved verbatim as the parity oracle. The bar is byte-identity —
+# same documents, same ascending-id ORDER (the contract the tiered early-stop depends on) — and a
+# rewritten parquet is re-decoded, never served stale.
+
+
+def _rewrite_chunks_parquet(path: str, documents: list[GraphDocument]) -> None:
+    """Rewrite the fixture parquet, forcing a distinct mtime_ns on coarse filesystem clocks."""
+    import os
+
+    _write_chunks_parquet(path, documents)
+    stat = os.stat(path)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_document_source_is_byte_identical_to_the_uncached_oracle(tmp_path: Any) -> None:
+    clear_document_source_cache()
+    path = str(tmp_path / "chunks.parquet")
+    # Written in NON-ascending id order, so the ascending-id contract is exercised, not inherited
+    # from the fixture's layout.
+    _write_chunks_parquet(path, list(reversed(_GRAPH_DOCS)))
+    cached = DuckDBGraphDocumentSource(path)
+    uncached = DuckDBGraphDocumentSource(path, cache=False)
+    for nodes in (["n_query"], ["n_gold"], ["n_query", "n_gold"], ["n_gold", "n_query"],
+                  ["absent"], [], ["n_query", "n_bridge", "n_gold", "absent"]):
+        assert [d.model_dump() for d in cached.documents(nodes)] == [
+            d.model_dump() for d in uncached.documents(nodes)
+        ]
+    ids = [d.id for d in cached.documents(["n_query", "n_bridge", "n_gold"])]
+    assert ids == sorted(ids)  # ascending id — the tiered early-stop's ordering contract
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_document_source_shares_one_decode_and_the_oracle_touches_none(
+    tmp_path: Any,
+) -> None:
+    clear_document_source_cache()
+    path = str(tmp_path / "chunks.parquet")
+    _write_chunks_parquet(path, _GRAPH_DOCS)
+    DuckDBGraphDocumentSource(path).documents(["n_query"])
+    DuckDBGraphDocumentSource(path).documents(["n_gold"])  # a second instance, same file
+    assert len(_DOCUMENT_TABLE_CACHE) == 1  # one decoded table per file version, shared
+    DuckDBGraphDocumentSource(path, cache=False).documents(["n_query"])
+    assert len(_DOCUMENT_TABLE_CACHE) == 1  # the oracle path never populates the cache
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_document_source_reindexes_a_rewritten_parquet(tmp_path: Any) -> None:
+    clear_document_source_cache()
+    path = str(tmp_path / "chunks.parquet")
+    _write_chunks_parquet(path, _GRAPH_DOCS)
+    source = DuckDBGraphDocumentSource(path)
+    assert [d.id for d in source.documents(["n_query"])] == ["d1"]
+    replacement = [GraphDocument(id="fresh", node_ids=("n_query",), text="zeta")]
+    _rewrite_chunks_parquet(path, replacement)
+    assert [d.id for d in source.documents(["n_query"])] == ["fresh"]  # never stale
+    assert len(_DOCUMENT_TABLE_CACHE) == 1  # the superseded version's table was evicted
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_document_source_missing_parquet_is_a_typed_error_with_no_leak(
+    tmp_path: Any,
+) -> None:
+    clear_document_source_cache()
+    source = DuckDBGraphDocumentSource(str(tmp_path / "does-not-exist.parquet"))
+    with pytest.raises(GraphSourceError) as excinfo:
+        source.documents(["n_query"])
+    assert "does-not-exist" not in str(excinfo.value)  # the stat fault leaks no raw path either
+
+
+@pytest.mark.skipif(not _HAS_DUCKDB, reason="duckdb extra not installed (offline)")
+def test_cached_document_source_drives_the_whole_graph_leg(tmp_path: Any) -> None:
+    """The recovery claim holds through the cached path too — same leg, same gold hit."""
+    clear_document_source_cache()
+    path = str(tmp_path / "chunks.parquet")
+    _write_chunks_parquet(path, _GRAPH_DOCS)
+    leg = GraphRetriever(
+        {"max_hops": 2},
+        graph_source=FakeGraphSource(_EDGES),
+        document_source=DuckDBGraphDocumentSource(path),
+    )
+    result = retrieve(
+        _bundle(),
+        CompositeBackend([_store(), leg]),
+        OrchestrationPipeline(fetch_top_k=_FETCH_TOP_K),
+    )
+    assert "gold" in _ids(result)
+
+
+def test_document_source_factory_passes_cache_through_and_rejects_a_non_boolean() -> None:
+    cached = build_graph_document_source({"source": "duckdb", "chunks_uri": "c.parquet"})
+    uncached = build_graph_document_source(
+        {"source": "duckdb", "chunks_uri": "c.parquet", "cache": False}
+    )
+    assert cached._cache is True  # type: ignore[union-attr]
+    assert uncached._cache is False  # type: ignore[union-attr]
+    with pytest.raises(ValueError, match="cache"):
+        build_graph_document_source(
+            {"source": "duckdb", "chunks_uri": "c.parquet", "cache": "yes"}
+        )

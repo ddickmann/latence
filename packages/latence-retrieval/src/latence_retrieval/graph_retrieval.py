@@ -64,6 +64,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from latence_retrieval.contracts import Candidate, Capability
 from latence_retrieval.errors import BackendCapabilityError, GraphSourceError
 from latence_retrieval.multihop import _validate_max_hops
+from latence_retrieval.read_cache import FileIdentityCache
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -125,15 +126,53 @@ class GraphDocumentSource(Protocol):
         ...
 
 
+class _DocumentTable:
+    """One chunk-parquet version, decoded: ascending-``id`` rows + node→row postings.
+
+    The memoized structure :class:`DuckDBGraphDocumentSource` serves cached reads from. The rows
+    are held **in the uncached query's own order** (``ORDER BY id``, produced by the same engine
+    over the same column), so a postings union re-sorted by row position reproduces the
+    ascending-id contract the tiered early-stop depends on — exactly, not approximately. The
+    :class:`GraphDocument` values are frozen and shared across calls; a rebuild only costs a
+    re-decode.
+    """
+
+    def __init__(self, rows: list[GraphDocument], postings: dict[str, tuple[int, ...]]) -> None:
+        self._rows = rows
+        self._postings = postings
+
+    def documents(self, wanted: list[str]) -> list[GraphDocument]:
+        """The rows whose node-id list intersects ``wanted``, each once, ascending ``id``."""
+        positions: set[int] = set()
+        for node in wanted:
+            positions.update(self._postings.get(node, ()))
+        rows = self._rows
+        return [rows[position] for position in sorted(positions)]
+
+
+#: Process-shared decoded chunk tables for :class:`DuckDBGraphDocumentSource` (`cache=True`), one
+#: per chunk-parquet file version × column configuration — a derived, rebuildable memoization
+#: with the :mod:`~latence_retrieval.read_cache` lifetime policy (identity invalidation,
+#: superseded-version eviction, bounded LRU). Byte-identical results either way.
+_DOCUMENT_TABLE_CACHE: FileIdentityCache[_DocumentTable] = FileIdentityCache()
+
+
+def clear_document_source_cache() -> None:
+    """Drop every cached decoded chunk table (tests / long-lived processes)."""
+    _DOCUMENT_TABLE_CACHE.clear()
+
+
 class DuckDBGraphDocumentSource:
     """The zero-ops :class:`GraphDocumentSource`: embedded DuckDB over the emitted chunk parquet.
 
     The retrieval-side twin of :class:`~latence_retrieval.multihop.DuckDBGraphSource` (ADR-0051):
     an in-process, serverless DuckDB reads the parquet the pipeline **already emitted** — no graph
     database, no new artifact, no server to operate — and selects the rows whose denormalised
-    ``kg_node_ids`` list intersects the traversal's node set (``list_has_any``). Each call opens a
-    fresh in-memory connection, reads read-only, and closes it, so the source holds nothing between
-    calls (statelessness is structural, ADR-0048).
+    ``kg_node_ids`` list intersects the traversal's node set (``list_has_any``). With the default
+    ``cache=True`` that selection is served from a process-shared decoded table
+    (:class:`_DocumentTable`) built once per parquet file version; with ``cache=False`` each call
+    opens a fresh in-memory connection, reads read-only, and closes it — the original path,
+    preserved verbatim as the parity oracle.
 
     Args:
         chunks_uri: path to the emitted chunk parquet (the Export's row table). Required, non-empty.
@@ -142,6 +181,13 @@ class DuckDBGraphDocumentSource:
             ``"chunk_id"``.
         node_ids_column: the denormalised KG node-id list column. Default ``"kg_node_ids"``.
         text_column: the chunk text column. Default ``"content"`` (the Export column name).
+        cache: ``True`` (the default) memoizes the decoded table per file identity
+            (:mod:`~latence_retrieval.read_cache`: a rewritten export is re-decoded, never served
+            stale; bounded, superseded-evicting) — a derived, rebuildable read optimisation, never
+            a system of record (the ADR-0056-amendment pattern; statelessness stays behavioral,
+            ADR-0048). The ``GraphRetriever``'s tiered search calls :meth:`documents` up to
+            ``max_hops + 1`` times per query, which is what makes the per-call full-parquet scan
+            worth memoizing. ``cache=False`` keeps that per-call scan verbatim.
 
     Packaging: ``duckdb`` (MIT, an embedded engine — no server, no model) rides this package's
     ``[graph-duckdb]`` extra and is imported lazily on first :meth:`documents`, so constructing the
@@ -155,11 +201,13 @@ class DuckDBGraphDocumentSource:
         id_column: str = "chunk_id",
         node_ids_column: str = "kg_node_ids",
         text_column: str = "content",
+        cache: bool = True,
     ) -> None:
         self._chunks_uri = _require_non_empty_str(chunks_uri, "chunks_uri")
         self._id_column = _require_non_empty_str(id_column, "id_column")
         self._node_ids_column = _require_non_empty_str(node_ids_column, "node_ids_column")
         self._text_column = _require_non_empty_str(text_column, "text_column")
+        self._cache = _require_bool(cache, "cache")
 
     def documents(self, node_ids: Collection[str]) -> list[GraphDocument]:
         """Select the chunk rows whose node-id list intersects ``node_ids``; deterministic order."""
@@ -167,6 +215,20 @@ class DuckDBGraphDocumentSource:
         if not wanted:
             return []
         duckdb = self._load()
+        if self._cache:
+            try:
+                table = _DOCUMENT_TABLE_CACHE.get_or_build(
+                    self._chunks_uri,
+                    lambda: self._decode_table(duckdb),
+                    variant=(self._id_column, self._node_ids_column, self._text_column),
+                )
+            except GraphSourceError:
+                raise
+            except Exception as exc:
+                # A stat fault (missing/unreadable parquet) → the same typed error, no raw path.
+                msg = f"duckdb graph document resolution failed: {type(exc).__name__}."
+                raise GraphSourceError(msg) from exc
+            return table.documents(wanted)
         # The column names are validated identifiers the operator configures (never query input);
         # the parquet URI and the node list travel as bound parameters.
         sql = (
@@ -192,6 +254,42 @@ class DuckDBGraphDocumentSource:
             )
             for row in rows
         ]
+
+    def _decode_table(self, duckdb: Any) -> _DocumentTable:
+        """One read-only pass over the whole chunk parquet → the memoized :class:`_DocumentTable`.
+
+        The same engine runs the same ``ORDER BY id`` over the same column the per-call query
+        orders by, so stored row order **is** the per-call result order; each row is decoded with
+        the per-call path's exact expressions. A NULL node-id list posts nothing — in the engine
+        path ``list_has_any(NULL, ...)`` never selects the row either.
+        """
+        sql = (
+            f"SELECT {self._id_column} AS id, {self._node_ids_column} AS node_ids, "
+            f"       {self._text_column} AS text "
+            "  FROM read_parquet(?) "
+            " ORDER BY id"
+        )
+        connection = duckdb.connect(database=":memory:")
+        try:
+            raw = connection.execute(sql, [self._chunks_uri]).fetchall()
+        except Exception as exc:
+            msg = f"duckdb graph document resolution failed: {type(exc).__name__}."
+            raise GraphSourceError(msg) from exc
+        finally:
+            connection.close()
+        rows = [
+            GraphDocument(
+                id=str(row[0]),
+                node_ids=tuple(str(n) for n in (row[1] or ())),
+                text="" if row[2] is None else str(row[2]),
+            )
+            for row in raw
+        ]
+        postings: dict[str, list[int]] = {}
+        for position, document in enumerate(rows):
+            for node in dict.fromkeys(document.node_ids):
+                postings.setdefault(node, []).append(position)
+        return _DocumentTable(rows, {node: tuple(p) for node, p in postings.items()})
 
     @staticmethod
     def _load() -> Any:
@@ -503,8 +601,9 @@ def build_graph_document_source(spec: Mapping[str, Any]) -> GraphDocumentSource:
     """Build a :class:`GraphDocumentSource` from a config block (the ``config["documents"]``).
 
     ``spec["source"]`` selects the adapter by name — currently ``"duckdb"`` (the zero-ops default
-    over the emitted chunk parquet). The remaining keys are that adapter's constructor arguments.
-    An unknown ``source`` fails loudly at wiring time, never at query time.
+    over the emitted chunk parquet). The remaining keys are that adapter's constructor arguments
+    (including ``cache``, default ``True`` — see the adapter). An unknown ``source`` fails loudly
+    at wiring time, never at query time.
     """
     if not isinstance(spec, Mapping):
         msg = f"graph document source spec must be a mapping, got {type(spec).__name__}."
@@ -516,6 +615,7 @@ def build_graph_document_source(spec: Mapping[str, Any]) -> GraphDocumentSource:
             id_column=str(spec.get("id_column", "chunk_id")),
             node_ids_column=str(spec.get("node_ids_column", "kg_node_ids")),
             text_column=str(spec.get("text_column", "content")),
+            cache=_require_bool(spec.get("cache", True), "cache"),
         )
     msg = (
         f"unknown graph document source {source!r}; expected one of "
@@ -625,6 +725,13 @@ def _require_non_empty_str(value: object, name: str) -> str:
     return value
 
 
+def _require_bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        msg = f"{name!r} must be a boolean, got {value!r}."
+        raise ValueError(msg)
+    return value
+
+
 __all__ = [
     "AliasQuerySeeder",
     "CompositeBackend",
@@ -633,4 +740,5 @@ __all__ = [
     "GraphDocumentSource",
     "GraphRetriever",
     "build_graph_document_source",
+    "clear_document_source_cache",
 ]

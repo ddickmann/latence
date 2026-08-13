@@ -13,6 +13,17 @@ shipped sources directly pays a per-query file read. Candidate for the architect
 the same file-identity-keyed cache discipline as `HypergraphIndex` (ADR-0056 amendment) applies.
 (Found: ticket 01. Recorded there as a residual; carried here so it survives the ticket close.)
 
+**CLOSED (2026-08-13, architecture pass Wave 1-A).** The shipped adapters
+(`DuckDBGraphSource` / `NetworkxGraphSource` / `DuckDBGraphDocumentSource`) now default to a
+process-shared decoded read structure keyed by file identity
+(`latence_retrieval.read_cache.FileIdentityCache` — the generalized ADR-0056-amendment pattern,
+now with an explicit lifetime policy: superseded-version eviction + bounded LRU;
+`hypergraph._INDEX_CACHE` migrated onto it). `cache=False` preserves each original per-call path
+verbatim as the parity oracle. Byte-identity pinned by the ticket-01 `kg_shipped`/`kg_shipped_nx`
+parity lanes on wiki2multihop + multihop_rag (0 diffs) and package tests; per-query median
+`GraphRetriever.search` over the shipped adapters drops 60.0→0.34 ms (wiki, DuckDB) and
+270.6→0.34 ms (wiki, networkx). See the second ADR-0056 amendment (2026-08-13).
+
 ## F2 — `test_goldset_property.py` dense-cluster stress costs ~288 s CPU
 
 `packages/latence-core/tests/test_goldset_property.py` is green but its dense-cluster stress

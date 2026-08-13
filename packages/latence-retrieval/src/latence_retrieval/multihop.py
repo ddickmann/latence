@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from latence_retrieval.contracts import Candidate
 from latence_retrieval.errors import GraphSourceError
+from latence_retrieval.read_cache import FileIdentityCache
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Sequence
@@ -103,12 +104,26 @@ def _traverse(
 
     This is the *canonical* semantics the DuckDB / networkx / Neo4j adapters must reproduce and the
     faithful :class:`~latence_retrieval.testing.FakeGraphSource` runs directly, so equivalence to it
-    on a fixture graph is the anti-false-green proof that an engine's traversal is faithful.
+    on a fixture graph is the anti-false-green proof that an engine's traversal is faithful. It is
+    exactly :func:`_build_adjacency` + :func:`_traverse_adjacency` — split so a caller holding a
+    prebuilt adjacency (the read-cached DuckDB adapter) pays only the bounded BFS per call.
     """
+    return _traverse_adjacency(_build_adjacency(edges), seeds, max_hops)
+
+
+def _build_adjacency(edges: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
+    """The undirected adjacency of ``edges`` (each pair walked in both directions)."""
     adjacency: dict[str, set[str]] = {}
     for source, target in edges:
         adjacency.setdefault(source, set()).add(target)
         adjacency.setdefault(target, set()).add(source)
+    return adjacency
+
+
+def _traverse_adjacency(
+    adjacency: dict[str, set[str]], seeds: Collection[str], max_hops: int
+) -> dict[str, int]:
+    """:func:`_traverse`'s BFS over a prebuilt adjacency (the semantics live here)."""
     seen = set(seeds)
     frontier = set(seeds)
     result: dict[str, int] = {}
@@ -140,6 +155,23 @@ def _validate_max_hops(max_hops: int) -> int:
 def _dedupe_seeds(seeds: Collection[str]) -> list[str]:
     """The distinct seed node ids, order-preserved (a stable parameter for the engines)."""
     return list(dict.fromkeys(seeds))
+
+
+#: Process-shared decoded edge adjacencies for :class:`DuckDBGraphSource` (`cache=True`), one per
+#: ``graph-edges.parquet`` file version × column configuration — a derived, rebuildable
+#: memoization with the :mod:`~latence_retrieval.read_cache` lifetime policy (identity
+#: invalidation, superseded-version eviction, bounded LRU). Byte-identical results either way.
+_DUCKDB_ADJACENCY_CACHE: FileIdentityCache[dict[str, set[str]]] = FileIdentityCache()
+
+#: Process-shared loaded ``networkx`` graphs for :class:`NetworkxGraphSource` (`cache=True`),
+#: same keying and lifetime policy. Held as ``Any`` — networkx is an optional extra.
+_NETWORKX_GRAPH_CACHE: FileIdentityCache[Any] = FileIdentityCache()
+
+
+def clear_graph_source_caches() -> None:
+    """Drop every cached decoded edge structure (tests / long-lived processes)."""
+    _DUCKDB_ADJACENCY_CACHE.clear()
+    _NETWORKX_GRAPH_CACHE.clear()
 
 
 # --- the GraphSource seam ----------------------------------------------------------------------
@@ -190,6 +222,14 @@ class DuckDBGraphSource:
             edge table). Required, non-empty.
         source_column / target_column: the edge endpoint column names. Default the emitted
             ``"source_node_id"`` / ``"target_node_id"``.
+        cache: ``True`` (the default) serves traversals from a process-shared decoded edge list
+            (:mod:`~latence_retrieval.read_cache`: keyed by the parquet's file identity, so a
+            rewritten export is re-decoded, never served stale; bounded, superseded-evicting) and
+            runs the canonical :func:`_traverse` over it — a derived, rebuildable memoization of
+            the emitted artifact, byte-identical to the engine path and never a system of record
+            (the ADR-0056-amendment pattern; statelessness stays behavioral, ADR-0048).
+            ``cache=False`` keeps the original open-query-close DuckDB path verbatim — the parity
+            oracle.
 
     Packaging: ``duckdb`` (MIT, an embedded engine — no server, no model) rides this package's
     ``[graph-duckdb]`` extra and is imported lazily on first :meth:`neighbors`, so constructing the
@@ -202,10 +242,12 @@ class DuckDBGraphSource:
         *,
         source_column: str = "source_node_id",
         target_column: str = "target_node_id",
+        cache: bool = True,
     ) -> None:
         self._edges_uri = _require_non_empty_str(edges_uri, "edges_uri")
         self._source_column = _require_non_empty_str(source_column, "source_column")
         self._target_column = _require_non_empty_str(target_column, "target_column")
+        self._cache = _require_bool(cache, "cache")
 
     def neighbors(self, seeds: Collection[str], max_hops: int) -> dict[str, int]:
         """Traverse the edge parquet in DuckDB; ``node id → min hop distance``, seeds excluded."""
@@ -214,6 +256,25 @@ class DuckDBGraphSource:
         if not seed_list:
             return {}
         duckdb = self._load()
+        if self._cache:
+            # The cached path: decode the edge table once per file version (through DuckDB, one
+            # read-only pass) into the canonical undirected adjacency, and run `_traverse`'s BFS
+            # — the reference semantics every engine is already pinned against — over it, so a
+            # call pays only the bounded neighbourhood walk. `neighbors` returns a dict
+            # (order-free), so equality to the engine path is structural, not incidental.
+            try:
+                adjacency = _DUCKDB_ADJACENCY_CACHE.get_or_build(
+                    self._edges_uri,
+                    lambda: _build_adjacency(self._decode_edges(duckdb)),
+                    variant=(self._source_column, self._target_column),
+                )
+            except GraphSourceError:
+                raise
+            except Exception as exc:
+                # A stat fault (missing/unreadable parquet) → the same typed error, no raw path.
+                msg = f"duckdb multi-hop traversal failed: {type(exc).__name__}."
+                raise GraphSourceError(msg) from exc
+            return _traverse_adjacency(adjacency, seed_list, max_hops)
         # The endpoint columns are validated identifiers (non-empty strings the operator configures,
         # not query input); the edge URI and the seed list travel as bound parameters, so the only
         # interpolated text is the operator's own column names.
@@ -259,6 +320,24 @@ class DuckDBGraphSource:
             connection.close()
         return {str(node): int(hop) for node, hop in rows}
 
+    def _decode_edges(self, duckdb: Any) -> list[tuple[str, str]]:
+        """One read-only pass over the edge parquet → the decoded ``(source, target)`` list.
+
+        A row with a NULL endpoint is dropped: in the engine path such an edge can never join a
+        walk step (``NULL`` never equals a node) and a NULL node can never survive the seed
+        filter, so it contributes nothing there either.
+        """
+        sql = f"SELECT {self._source_column}, {self._target_column} FROM read_parquet(?)"
+        connection = duckdb.connect(database=":memory:")
+        try:
+            rows = connection.execute(sql, [self._edges_uri]).fetchall()
+        except Exception as exc:
+            msg = f"duckdb multi-hop traversal failed: {type(exc).__name__}."
+            raise GraphSourceError(msg) from exc
+        finally:
+            connection.close()
+        return [(str(s), str(t)) for s, t in rows if s is not None and t is not None]
+
     @staticmethod
     def _load() -> Any:
         try:
@@ -287,6 +366,13 @@ class NetworkxGraphSource:
     Args:
         edges_uri: path to ``graph-edges.parquet``. Required, non-empty.
         source_column / target_column: edge endpoint column names (defaults match the emitter).
+        cache: ``True`` (the default) serves traversals from a process-shared loaded graph
+            (:mod:`~latence_retrieval.read_cache`: keyed by the parquet's file identity — a
+            rewritten export is re-loaded, never served stale; bounded, superseded-evicting) and
+            reads hop distances with the very same bounded shortest-path calls — a derived,
+            rebuildable memoization, byte-identical results, never a system of record (the
+            ADR-0056-amendment pattern; statelessness stays behavioral, ADR-0048).
+            ``cache=False`` keeps the original load-per-call path verbatim — the parity oracle.
 
     Packaging: ``networkx`` (BSD, pure-Python) rides this package's ``[graph-networkx]`` extra and
     is
@@ -301,10 +387,12 @@ class NetworkxGraphSource:
         *,
         source_column: str = "source_node_id",
         target_column: str = "target_node_id",
+        cache: bool = True,
     ) -> None:
         self._edges_uri = _require_non_empty_str(edges_uri, "edges_uri")
         self._source_column = _require_non_empty_str(source_column, "source_column")
         self._target_column = _require_non_empty_str(target_column, "target_column")
+        self._cache = _require_bool(cache, "cache")
 
     def neighbors(self, seeds: Collection[str], max_hops: int) -> dict[str, int]:
         """Build an undirected networkx graph from the edge parquet; read bounded hop distances."""
@@ -313,6 +401,22 @@ class NetworkxGraphSource:
         if not seed_list:
             return {}
         nx = self._load()
+        if self._cache:
+            # The cached path: load the undirected graph once per file version, then answer with
+            # the SAME per-seed bounded shortest-path reads the uncached body runs — the only
+            # thing memoized is the parquet read + graph build.
+            try:
+                graph = _NETWORKX_GRAPH_CACHE.get_or_build(
+                    self._edges_uri,
+                    lambda: self._build_graph(nx),
+                    variant=(self._source_column, self._target_column),
+                )
+                return self._distances(nx, graph, seed_list, max_hops)
+            except GraphSourceError:
+                raise
+            except Exception as exc:
+                msg = f"networkx multi-hop traversal failed: {type(exc).__name__}."
+                raise GraphSourceError(msg) from exc
         try:
             edges = self._read_edges()
             graph = nx.Graph()
@@ -333,6 +437,28 @@ class NetworkxGraphSource:
         except Exception as exc:
             msg = f"networkx multi-hop traversal failed: {type(exc).__name__}."
             raise GraphSourceError(msg) from exc
+        return best
+
+    def _build_graph(self, nx: Any) -> Any:
+        """The loaded undirected graph for one file version (the memoized decode)."""
+        graph = nx.Graph()
+        graph.add_edges_from(self._read_edges())
+        return graph
+
+    @staticmethod
+    def _distances(nx: Any, graph: Any, seed_list: list[str], max_hops: int) -> dict[str, int]:
+        """The uncached body's per-seed bounded shortest-path reads, over a loaded ``graph``."""
+        seed_set = set(seed_list)
+        best: dict[str, int] = {}
+        for seed in seed_list:
+            if seed not in graph:
+                continue
+            lengths = nx.single_source_shortest_path_length(graph, seed, cutoff=max_hops)
+            for node, distance in lengths.items():
+                if distance == 0 or node in seed_set:
+                    continue
+                if node not in best or distance < best[node]:
+                    best[node] = int(distance)
         return best
 
     def _read_edges(self) -> list[tuple[str, str]]:
@@ -477,7 +603,8 @@ def build_graph_source(spec: Mapping[str, Any]) -> GraphSource:
     swapping the traversal engine is a one-line config change (user story 36). The remaining keys
     are
     the selected adapter's constructor arguments (``edges_uri`` for the parquet engines; ``uri`` +
-    optional auth/database for Neo4j). An unknown ``source`` fails loudly at wiring time.
+    optional auth/database for Neo4j; the parquet engines additionally take ``cache``, default
+    ``True`` — see the adapters). An unknown ``source`` fails loudly at wiring time.
     """
     if not isinstance(spec, Mapping):
         msg = f"graph source spec must be a mapping, got {type(spec).__name__}."
@@ -488,12 +615,14 @@ def build_graph_source(spec: Mapping[str, Any]) -> GraphSource:
             _require_non_empty_str(spec.get("edges_uri"), "edges_uri"),
             source_column=str(spec.get("source_column", "source_node_id")),
             target_column=str(spec.get("target_column", "target_node_id")),
+            cache=_require_bool(spec.get("cache", True), "cache"),
         )
     if source == "networkx":
         return NetworkxGraphSource(
             _require_non_empty_str(spec.get("edges_uri"), "edges_uri"),
             source_column=str(spec.get("source_column", "source_node_id")),
             target_column=str(spec.get("target_column", "target_node_id")),
+            cache=_require_bool(spec.get("cache", True), "cache"),
         )
     if source == "neo4j":
         return Neo4jGraphSource(
@@ -716,6 +845,13 @@ def _require_non_empty_str(value: object, name: str) -> str:
     return value
 
 
+def _require_bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        msg = f"{name!r} must be a boolean, got {value!r}."
+        raise ValueError(msg)
+    return value
+
+
 def _optional_str(value: object, name: str) -> str | None:
     if value is None:
         return None
@@ -732,4 +868,5 @@ __all__ = [
     "Neo4jGraphSource",
     "NetworkxGraphSource",
     "build_graph_source",
+    "clear_graph_source_caches",
 ]
