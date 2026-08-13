@@ -1,0 +1,9 @@
+{
+  "dataset": "wiki2multihop",
+  "diffs": 0,
+  "skipped_resume_offset": 1100,
+  "queries": 2044,
+  "kg": 2044,
+  "hyper_ladder": 2044,
+  "hyper_rescue": 2044
+}

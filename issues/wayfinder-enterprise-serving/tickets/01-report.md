@@ -1,7 +1,8 @@
 # Ticket 01 report — hypergraph + graph lane latency at SOTA
 
-Status: measurements complete on all five Mac-local exports; uda-at-full-sweep confirmation
-deferred to the post-sweep S5 re-run (map ruling 1 — the pod was not touched).
+Status: DONE on the Mac-local gate — measurements and parity complete on all five local
+exports; uda-at-full-sweep confirmation deferred to the post-sweep S5 re-run (map ruling 1 —
+the pod was not touched).
 
 ## What shipped (packages/latence-retrieval — never benchmark code)
 
@@ -92,7 +93,18 @@ verbatim) vs shared accelerated index vs pure-Python index kernels; tiered `Grap
 the preserved exhaustive resolution. Runner: `tickets/01-latency/parity.py`; raw results in
 `tickets/01-latency/results/parity-*.json`.
 
-PARITY_PLACEHOLDER
+| dataset | queries parity-checked | coverage | diffs |
+|---|---|---|---|
+| vidoseek | 1,142 | full usable gold set | **0** |
+| multihop_rag | 2,556 | full usable gold set | **0** |
+| ohr_bench | 4,541 | full usable gold set | **0** |
+| wiki2multihop | 12,576 | **full usable gold set** (4 shards of 3,144; per shard 1,100 checked before an infra interruption — the committed `*.interrupted.log`s are the zero-diff evidence — and the remaining 2,044 by the resumed run's result JSON; 1,100 + 2,044 = 3,144, 4 × 3,144 = 12,576) | **0** |
+| uda | 400 | evenly-strided sample of the 8,583 usable queries (200 pre-interruption per the committed log + 200 resumed) — full-uda confirmation rides the post-sweep S5 re-run | **0** |
+
+**Total: 21,215 real gold queries, 3 lanes each, every code-path comparison equal — 0 diffs.**
+Each hypergraph lane was compared across three paths per query (scan vs accelerated index vs
+pure-Python kernels — two equality checks over the full signals + ranked lists + CoE
+selection), the kg lane across two (tiered vs preserved exhaustive, ids and scores).
 
 Additionally pinned in the package suites (house style): 3-way byte-equality across entry
 tiers/eu_sims/hops=3/tight caps/γ ties/unknown anchors on synthetic stores; cache sharing +
