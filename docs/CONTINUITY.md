@@ -40,7 +40,7 @@ outside any employer.
   distribution. Noncommercial use is free and needs nobody's permission: a
   **noncommercial** fork does not need the maintainer's cooperation or continued
   existence. **Commercial use requires a separate written agreement** with the
-  copyright holder ([`COMMERCIAL.md`](../COMMERCIAL.md)) — and that agreement *does*
+  copyright holder ([`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md)) — and that agreement *does*
   depend on the maintainer being reachable, which is the single largest continuity
   risk on this page. Read §1 and §5 with that in mind.
 - **One deliberate permissive carve-out, and it is bounded.** Seven query-time retrieval
@@ -260,7 +260,7 @@ Regulation applies from 11 December 2027.
   commercial activity" case.** The previous text rested on the project being FOSS
   released by an individual with "no monetisation attached to it". That premise ended
   when the project relicensed to PolyForm Noncommercial and began offering commercial
-  licences ([`COMMERCIAL.md`](../COMMERCIAL.md)). This is exactly the trigger the
+  licences ([`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md)). This is exactly the trigger the
   bullet below reserves, and it is recorded here rather than left implicit.
 - **PolyForm Noncommercial is not an OSI-approved open-source licence** (it restricts
   the field of use), so the CRA's FOSS-specific carve-outs cannot simply be assumed to
@@ -298,7 +298,7 @@ you will be asked for:
 | Secure-by-default configuration | scheme allowlist denying `http`/`ftp`/`sftp` by default, two Screening checkpoints, universal redaction floor ([ADR-0044](adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)) |
 | Integrity & authenticity of the delivered artifact | keyless Sigstore signature over `SHA256SUMS` + the VERIFY.md instruction sheet, produced by `scripts/release-integrity.sh` (§5.4) |
 | Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `issues/gate/G1-RESULTS.md` |
-| Ability to remediate independently of the supplier | PolyForm Noncommercial's *Changes and New Works* licence + reproducible local gate (§2) — **for noncommercial use**; a commercial integrator needs the agreement in [`COMMERCIAL.md`](../COMMERCIAL.md) to rely on this |
+| Ability to remediate independently of the supplier | PolyForm Noncommercial's *Changes and New Works* licence + reproducible local gate (§2) — **for noncommercial use**; a commercial integrator needs the agreement in [`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md) to rely on this |
 
 **What it does not give you**, and you must cover yourself: automated dependency-CVE
 gating (§5.5), a supported-version lifetime with backports (§4), and any contractual
@@ -314,7 +314,7 @@ goes red — so this page cannot quietly become aspirational.
 
 | Claim | Artifact |
 | --- | --- |
-| PolyForm-Noncommercial-1.0.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](../COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md) |
+| PolyForm-Noncommercial-1.0.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md) |
 | Single maintainer, every path | `.github/CODEOWNERS` |
 | CLA required on every contribution | `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement* |
 | Docs-as-handover discipline | `CONTEXT.md`, [`docs/adr/`](adr/index.md), `CONTRIBUTING.md` → *ADR + CONTEXT discipline* |
