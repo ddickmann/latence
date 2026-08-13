@@ -1,7 +1,7 @@
 # 03 — Incremental ingest: document churn without full rebuild
 
 Type: task
-Status: claimed
+Status: done
 Blocked by: —
 
 ## Why (Dennis, 2026-08-12)

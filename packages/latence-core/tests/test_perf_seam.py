@@ -141,17 +141,24 @@ def test_resolve_attn_unknown_value_is_sdpa() -> None:
 # --- load_perf_kwargs: the from_pretrained dict --------------------------------------------------
 
 
-def test_load_perf_kwargs_shape_bf16_sdpa_on_cuda() -> None:
-    """The dict spread into ``from_pretrained`` carries torch_dtype + attn_implementation."""
+def test_load_perf_kwargs_shape_bf16_sdpa_on_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dict spread into ``from_pretrained`` carries torch_dtype + attn_implementation.
+
+    These two tests assert the TORCH-FREE fallback contract (the dtype NAME string — still a
+    valid from_pretrained kwarg), so torch absence is PINNED with the same ``sys.modules``
+    monkeypatch the torch-present sibling uses in reverse (a ``None`` entry makes ``import
+    torch`` raise ImportError). Unpinned, they asserted the host's venv instead of the contract:
+    green on a torch-free CI host, red on any dev venv that has torch installed.
+    """
+    monkeypatch.setitem(sys.modules, "torch", None)
     kwargs = load_perf_kwargs("cuda", {})
     assert set(kwargs) == {"torch_dtype", "attn_implementation"}
-    # torch is not installed offline, so torch_dtype degrades to the dtype NAME string (still a
-    # valid from_pretrained kwarg) — asserting exactly the torch-free fallback contract.
     assert kwargs["torch_dtype"] == DTYPE_BF16
     assert kwargs["attn_implementation"] == ATTN_SDPA
 
 
-def test_load_perf_kwargs_fp32_on_cpu() -> None:
+def test_load_perf_kwargs_fp32_on_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "torch", None)
     kwargs = load_perf_kwargs("cpu", {})
     assert kwargs["torch_dtype"] == DTYPE_FP32
 
