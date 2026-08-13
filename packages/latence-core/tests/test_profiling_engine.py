@@ -9,8 +9,8 @@ co-occurrence, corpus Zipf α). All deterministic and dependency-free.
 from __future__ import annotations
 
 from latence_core.profiling import (
+    AggregatorMentionView,
     CorpusAggregator,
-    MentionView,
     document_features,
     readability_score,
     zipf_alpha,
@@ -118,11 +118,11 @@ def test_corpus_aggregator_entity_frequency_and_type_frequency() -> None:
     agg = CorpusAggregator()
     agg.add_mentions(
         [
-            MentionView(document_id="d1", text="Acme", label="ORG"),
-            MentionView(document_id="d1", text="Alice", label="PERSON"),
+            AggregatorMentionView(document_id="d1", text="Acme", label="ORG"),
+            AggregatorMentionView(document_id="d1", text="Alice", label="PERSON"),
         ]
     )
-    agg.add_mentions([MentionView(document_id="d2", text="Acme", label="ORG")])
+    agg.add_mentions([AggregatorMentionView(document_id="d2", text="Acme", label="ORG")])
     result = agg.finalize()
     assert result.entity_frequency == {"Acme": 2, "Alice": 1}
     assert result.entity_type_frequency == {"ORG": 2, "PERSON": 1}
@@ -131,11 +131,11 @@ def test_corpus_aggregator_entity_frequency_and_type_frequency() -> None:
 def test_corpus_aggregator_type_consensus() -> None:
     agg = CorpusAggregator()
     # "Mercury" typed inconsistently: 2x PLANET, 1x ELEMENT -> consensus 2/3.
-    agg.add_mentions([MentionView(document_id="d1", text="Mercury", label="PLANET")])
-    agg.add_mentions([MentionView(document_id="d2", text="Mercury", label="PLANET")])
-    agg.add_mentions([MentionView(document_id="d3", text="Mercury", label="ELEMENT")])
+    agg.add_mentions([AggregatorMentionView(document_id="d1", text="Mercury", label="PLANET")])
+    agg.add_mentions([AggregatorMentionView(document_id="d2", text="Mercury", label="PLANET")])
+    agg.add_mentions([AggregatorMentionView(document_id="d3", text="Mercury", label="ELEMENT")])
     # "Acme" seen once -> not scored (single mention is trivially 1.0).
-    agg.add_mentions([MentionView(document_id="d4", text="Acme", label="ORG")])
+    agg.add_mentions([AggregatorMentionView(document_id="d4", text="Acme", label="ORG")])
     result = agg.finalize()
     assert result.entity_type_consensus == {"Mercury": round(2 / 3, 6)}
 
@@ -145,15 +145,15 @@ def test_corpus_aggregator_cross_document_co_occurrence() -> None:
     # Alice + Acme co-occur in d1 and d2 (2 docs); Alice + Bob only in d1 (1 doc).
     agg.add_mentions(
         [
-            MentionView(document_id="d1", text="Alice", label="PERSON"),
-            MentionView(document_id="d1", text="Acme", label="ORG"),
-            MentionView(document_id="d1", text="Bob", label="PERSON"),
+            AggregatorMentionView(document_id="d1", text="Alice", label="PERSON"),
+            AggregatorMentionView(document_id="d1", text="Acme", label="ORG"),
+            AggregatorMentionView(document_id="d1", text="Bob", label="PERSON"),
         ]
     )
     agg.add_mentions(
         [
-            MentionView(document_id="d2", text="Alice", label="PERSON"),
-            MentionView(document_id="d2", text="Acme", label="ORG"),
+            AggregatorMentionView(document_id="d2", text="Alice", label="PERSON"),
+            AggregatorMentionView(document_id="d2", text="Acme", label="ORG"),
         ]
     )
     result = agg.finalize()
@@ -168,9 +168,9 @@ def test_co_occurrence_deduplicates_within_document() -> None:
     # Alice mentioned twice in the same doc alongside Acme -> the pair counts d1 once.
     agg.add_mentions(
         [
-            MentionView(document_id="d1", text="Alice", label="PERSON"),
-            MentionView(document_id="d1", text="Alice", label="PERSON"),
-            MentionView(document_id="d1", text="Acme", label="ORG"),
+            AggregatorMentionView(document_id="d1", text="Alice", label="PERSON"),
+            AggregatorMentionView(document_id="d1", text="Alice", label="PERSON"),
+            AggregatorMentionView(document_id="d1", text="Acme", label="ORG"),
         ]
     )
     result = agg.finalize()
@@ -181,7 +181,7 @@ def test_co_occurrence_deduplicates_within_document() -> None:
 def test_co_occurrence_report_is_capped() -> None:
     agg = CorpusAggregator(max_co_occurrences=2)
     agg.add_mentions(
-        [MentionView(document_id="d1", text=name, label="X") for name in ("A", "B", "C", "D")]
+        [AggregatorMentionView(document_id="d1", text=name, label="X") for name in ("A", "B", "C", "D")]
     )
     result = agg.finalize()
     assert len(result.co_occurrences) == 2
@@ -225,7 +225,7 @@ def test_per_document_pair_fanout_is_capped() -> None:
     agg = CorpusAggregator(max_entities_per_document=cap)
     # 1000 distinct entity surfaces in a single document.
     agg.add_mentions(
-        [MentionView(document_id="d1", text=f"e{i:04d}", label="X") for i in range(1000)]
+        [AggregatorMentionView(document_id="d1", text=f"e{i:04d}", label="X") for i in range(1000)]
     )
     # Only k*(k-1)/2 pairs can exist across the whole (single-document) corpus.
     assert len(agg._pair_docs) == cap * (cap - 1) // 2  # noqa: SLF001
@@ -239,9 +239,9 @@ def test_per_document_cap_keeps_most_frequent_entities() -> None:
     agg = CorpusAggregator(max_entities_per_document=2)
     # "hot" x3, "warm" x2, "cold" x1 — the cap keeps {cold? no} the top two by frequency.
     mentions = (
-        [MentionView(document_id="d1", text="hot", label="X")] * 3
-        + [MentionView(document_id="d1", text="warm", label="X")] * 2
-        + [MentionView(document_id="d1", text="cold", label="X")] * 1
+        [AggregatorMentionView(document_id="d1", text="hot", label="X")] * 3
+        + [AggregatorMentionView(document_id="d1", text="warm", label="X")] * 2
+        + [AggregatorMentionView(document_id="d1", text="cold", label="X")] * 1
     )
     agg.add_mentions(mentions)
     pairs = {(left, right) for left, right, _ in agg.finalize().co_occurrences}
@@ -260,8 +260,8 @@ def test_accumulated_pair_table_is_capped() -> None:
     for i in range(50):
         agg.add_mentions(
             [
-                MentionView(document_id=f"d{i}", text=f"a{i}", label="X"),
-                MentionView(document_id=f"d{i}", text=f"b{i}", label="X"),
+                AggregatorMentionView(document_id=f"d{i}", text=f"a{i}", label="X"),
+                AggregatorMentionView(document_id=f"d{i}", text=f"b{i}", label="X"),
             ]
         )
     assert len(agg._pair_docs) == 3  # noqa: SLF001
@@ -273,22 +273,22 @@ def test_pair_cap_still_accumulates_tracked_pairs_across_docs() -> None:
     # First doc registers the (acme, alice) pair (fills the 1-slot table).
     agg.add_mentions(
         [
-            MentionView(document_id="d1", text="acme", label="ORG"),
-            MentionView(document_id="d1", text="alice", label="PERSON"),
+            AggregatorMentionView(document_id="d1", text="acme", label="ORG"),
+            AggregatorMentionView(document_id="d1", text="alice", label="PERSON"),
         ]
     )
     # Second doc's NEW pair (bob, carol) is dropped (table full)...
     agg.add_mentions(
         [
-            MentionView(document_id="d2", text="bob", label="PERSON"),
-            MentionView(document_id="d2", text="carol", label="PERSON"),
+            AggregatorMentionView(document_id="d2", text="bob", label="PERSON"),
+            AggregatorMentionView(document_id="d2", text="carol", label="PERSON"),
         ]
     )
     # ...but a repeat of the tracked pair still adds its document.
     agg.add_mentions(
         [
-            MentionView(document_id="d3", text="acme", label="ORG"),
-            MentionView(document_id="d3", text="alice", label="PERSON"),
+            AggregatorMentionView(document_id="d3", text="acme", label="ORG"),
+            AggregatorMentionView(document_id="d3", text="alice", label="PERSON"),
         ]
     )
     pairs = {(left, right): count for left, right, count in agg.finalize().co_occurrences}
@@ -302,9 +302,9 @@ def test_caps_do_not_change_result_below_threshold() -> None:
     for agg in (capped, default):
         agg.add_mentions(
             [
-                MentionView(document_id="d1", text="Alice", label="PERSON"),
-                MentionView(document_id="d1", text="Acme", label="ORG"),
-                MentionView(document_id="d1", text="Bob", label="PERSON"),
+                AggregatorMentionView(document_id="d1", text="Alice", label="PERSON"),
+                AggregatorMentionView(document_id="d1", text="Acme", label="ORG"),
+                AggregatorMentionView(document_id="d1", text="Bob", label="PERSON"),
             ]
         )
     assert capped.finalize() == default.finalize()

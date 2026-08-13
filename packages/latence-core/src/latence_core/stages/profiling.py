@@ -46,9 +46,9 @@ from latence_core.contracts import (
 from latence_core.profiling import (
     _MAX_ENTITIES_PER_DOCUMENT,
     _MAX_TRACKED_PAIRS,
+    AggregatorMentionView,
     CorpusAggregator,
     DocFeatureValues,
-    MentionView,
     document_features,
 )
 from latence_core.providers.profile import (
@@ -134,10 +134,10 @@ class StatisticalProfiler:
         # relative to the corpus text; grouping it lets each document fold its own
         # mentions without re-scanning. (This is the only non-streaming structure, and
         # it is bounded by the mention count, not the corpus text size.)
-        mentions_by_doc: dict[str, list[MentionView]] = {}
+        mentions_by_doc: dict[str, list[AggregatorMentionView]] = {}
         for mention in mentions:
             mentions_by_doc.setdefault(mention.document_record_id, []).append(
-                MentionView(
+                AggregatorMentionView(
                     document_id=mention.document_record_id,
                     text=mention.text,
                     label=mention.label,

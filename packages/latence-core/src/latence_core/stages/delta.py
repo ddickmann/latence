@@ -3,8 +3,8 @@
 The S11 Delta reference Provider (ADR-0004/0018; ships in core like every other reference
 Provider so the delta demo runs end to end, ADR-0007 CPU-first, ADR-0016 no extra deps). It
 composes the ported :class:`~latence_core.state.graph_patcher.GraphPatcher` (retract by
-Evidence provenance) with the blocking-neighborhood affected-set recompute
-(:func:`~latence_core.state.incremental.compute_affected_set`) to turn a parent Corpus Version +
+Evidence provenance) with the blocking-neighborhood closure
+(:func:`latence_core.blocking.closure`) to turn a parent Corpus Version +
 the current run's freshly-extracted corpus-level records + a classified
 :class:`~latence_core.contracts.Delta` into the next live derived set — surgically, so the
 *committed* corpus-level set is proportional to the affected region, not the corpus (ADR-0018).
@@ -31,7 +31,8 @@ carry-forward and mis-reports the churn. Instead:
    ``graph/patcher``);
 2. **keep** every other parent record verbatim (the untouched blocks — the lean win);
 3. **splice in** exactly the current records in the affected blocking neighborhood — the
-   *transitive* closure (:func:`compute_affected_set`) over shared blocking keys, seeded by the
+   *transitive* closure (:func:`latence_core.blocking.closure`) over shared blocking keys,
+   seeded by the
    current records whose reach touches a changed document or that share a canonical surface with a
    retracted parent record (the merge-on-add bridge). The closure catches a bridge two blocks
    away, which a single-hop surface match misses. De-duplicated by ``record_id`` with the current
@@ -51,6 +52,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from latence_core.blocking import closure
 from latence_core.capability import DeltaOutcome
 from latence_core.contracts import (
     DisambiguationRecord,
@@ -65,8 +67,7 @@ from latence_core.providers.profile import (
     REPO_LICENSE_SOURCE,
     ProviderProfile,
 )
-from latence_core.state.graph_patcher import GraphPatcher, _record_reach
-from latence_core.state.incremental import MentionView, compute_affected_set
+from latence_core.state.graph_patcher import GraphPatcher, record_reach
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -208,14 +209,13 @@ def _affected_current_records(
 ) -> list[Record]:
     """The current corpus-level records inside the affected blocking neighborhood (ADR-0018).
 
-    Wires the ported blocking-neighborhood engine (:func:`compute_affected_set`,
-    ``state/incremental.py``) onto the real delta path so the affected region is the genuine
-    *transitive* closure over shared blocking keys — "the affected blocks plus their immediate
-    neighbors" ADR-0018 promises — rather than a single-hop surface match. Each current
-    corpus-level record is folded in as one :class:`MentionView` keyed by ``record_id``, whose
-    blocking text is the record's canonical surface(s); records that share a surface (⇒ shared
-    tokens ⇒ shared blocking key) land in the same neighborhood, so a bridge two blocks away is
-    caught.
+    Wires the shared blocking primitive (:func:`latence_core.blocking.closure`) onto the real
+    delta path so the affected region is the genuine *transitive* closure over shared blocking
+    keys — "the affected blocks plus their immediate neighbors" ADR-0018 promises — rather
+    than a single-hop surface match. Each current corpus-level record enters the closure as
+    one ``(record_id, blocking_text)`` pair, its blocking text the record's canonical
+    surface(s); records that share a surface (⇒ shared tokens ⇒ shared blocking key) land in
+    the same neighborhood, so a bridge two blocks away is caught.
 
     The seeds are the records whose provenance reach touches a changed/deleted document
     (``affected_docs``) OR that carry a surface the retraction removed (``retracted_surfaces``,
@@ -224,39 +224,28 @@ def _affected_current_records(
     one-hop match (so every merge-on-add / split-on-delete it caught is still caught), now
     genuinely affected-set-scoped rather than surface-equality-scoped.
     """
-    views: list[MentionView] = []
-    seed_docs: set[str] = set()
+    items: list[tuple[str, str]] = []
+    seed_ids: set[str] = set()
     for record in current:
         surfaces = _canonical_surfaces(record)
         # A record with no canonical surface (e.g. a relation carrier already split into its
         # head/tail surfaces, or an unscoped record) has empty blocking text — its neighborhood
         # is only itself; direct-reach seeding below still pulls it in when touched.
-        blocking_text = " ".join(sorted(surfaces))
-        # Each record is its own pseudo-document so the closure keys on record identity; the
-        # real reach test that decides *seeding* is done separately below.
-        views.append(
-            MentionView(
-                mention_id=record.record_id,
-                document_id=record.record_id,
-                text=blocking_text,
-                label="",
-                confidence=1.0,
-            )
-        )
+        items.append((record.record_id, " ".join(sorted(surfaces))))
         touched = _touches(record, affected_docs) or bool(surfaces & retracted_surfaces)
         if touched:
-            seed_docs.add(record.record_id)
-    if not seed_docs:
+            seed_ids.add(record.record_id)
+    if not seed_ids:
         return []
-    affected = compute_affected_set(views, sorted(seed_docs))
-    return [r for r in current if r.record_id in affected.mention_ids]
+    affected_ids = closure(items, sorted(seed_ids))
+    return [r for r in current if r.record_id in affected_ids]
 
 
 def _touches(record: Record, docs: set[str]) -> bool:
     """True if a record's source-document reach intersects ``docs``."""
     if not docs:
         return False
-    return bool(set(_record_reach(record)) & docs)
+    return bool(set(record_reach(record)) & docs)
 
 
 def _canonical_surfaces(record: Record) -> set[str]:

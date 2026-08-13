@@ -31,7 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from latence_core.disambiguation import EntityResolver, MentionInput, ResolvedCluster, _tokens
+from latence_core.blocking import blocking_keys, closure
+from latence_core.disambiguation import EntityResolver, ResolvedCluster, as_mention_input
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -106,11 +107,6 @@ class MentionView:
     confidence: float
 
 
-def _blocking_keys(text: str) -> set[str]:
-    """A mention's blocking keys: its normalised alphanumeric tokens (shared ⇒ same block)."""
-    return set(_tokens(text))
-
-
 def compute_affected_set(
     mentions: Iterable[MentionView],
     seed_document_ids: Iterable[str],
@@ -122,45 +118,31 @@ def compute_affected_set(
     The seeds are every mention in a changed/deleted document. The affected set grows to
     every mention sharing a blocking key with a seed (a merge-on-add candidate two blocks
     over), then again to *their* keys' mentions — the "affected blocks plus immediate
-    neighbors" of ADR-0018. ``full=True`` short-circuits to the whole mention set (a
-    Reconciliation). Deterministic: keys and ids are sets, materialised sorted by the caller.
+    neighbors" of ADR-0018. The closure itself is the shared blocking primitive
+    (:func:`latence_core.blocking.closure`); this function adds the document-seeded mention
+    framing and the key inventory the :class:`AffectedSet` reports. ``full=True``
+    short-circuits to the whole mention set (a Reconciliation). Deterministic: keys and ids
+    are sets, materialised sorted by the caller.
     """
     mention_list = list(mentions)
     if full:
         return AffectedSet(
             mention_ids={m.mention_id for m in mention_list},
-            blocking_keys={k for m in mention_list for k in _blocking_keys(m.text)},
+            blocking_keys={k for m in mention_list for k in blocking_keys(m.text)},
             is_full=True,
         )
 
+    # Seed with mentions in the changed/deleted documents; close over shared blocking keys.
     seeds = set(seed_document_ids)
-    # Index: blocking key -> mention ids; mention id -> keys.
-    keys_by_mention: dict[str, set[str]] = {}
-    mentions_by_key: dict[str, set[str]] = {}
-    for m in mention_list:
-        keys = _blocking_keys(m.text)
-        keys_by_mention[m.mention_id] = keys
-        for k in keys:
-            mentions_by_key.setdefault(k, set()).add(m.mention_id)
-
-    # Seed with mentions in the changed/deleted documents.
-    affected_ids: set[str] = {m.mention_id for m in mention_list if m.document_id in seeds}
+    affected_ids = closure(
+        ((m.mention_id, m.text) for m in mention_list),
+        (m.mention_id for m in mention_list if m.document_id in seeds),
+    )
+    # The affected neighborhoods' key inventory: every affected mention's keys.
+    keys_by_mention = {m.mention_id: blocking_keys(m.text) for m in mention_list}
     affected_keys: set[str] = set()
-    frontier = set(affected_ids)
-    # Grow the neighborhood: a mention pulls in every mention that shares any of its keys, and
-    # that pull-in is itself a frontier, so the closure catches a bridge two blocks away.
-    while frontier:
-        next_frontier: set[str] = set()
-        for mid in frontier:
-            for key in keys_by_mention.get(mid, set()):
-                if key in affected_keys:
-                    continue
-                affected_keys.add(key)
-                for neighbor in mentions_by_key.get(key, set()):
-                    if neighbor not in affected_ids:
-                        affected_ids.add(neighbor)
-                        next_frontier.add(neighbor)
-        frontier = next_frontier
+    for mid in affected_ids:
+        affected_keys |= keys_by_mention.get(mid, set())
     return AffectedSet(mention_ids=affected_ids, blocking_keys=affected_keys)
 
 
@@ -200,12 +182,8 @@ class IncrementalDisambiguator:
         resolver = EntityResolver(**self._resolver_kwargs)  # type: ignore[arg-type]
         resolver.add_all(
             [
-                MentionInput(
-                    mention_id=view.mention_id,
-                    document_id=view.document_id,
-                    text=view.text,
-                    label=view.label,
-                    confidence=view.confidence,
+                as_mention_input(
+                    view, mention_id=view.mention_id, document_id=view.document_id
                 )
                 for mid, view in sorted(current_mentions.items())
                 if mid in affected.mention_ids

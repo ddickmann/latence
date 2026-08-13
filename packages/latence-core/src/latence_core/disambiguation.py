@@ -41,11 +41,18 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol
 
-# Normalisation for the EXACT strategy and for token overlap: fold case, collapse
-# internal whitespace, drop surrounding punctuation. Deterministic and dependency-free.
+from latence_core.blocking import blocking_tokens
+
+# Normalisation for the EXACT strategy: fold case, collapse internal whitespace, drop
+# surrounding punctuation. Deterministic and dependency-free.
 _WS_RE = re.compile(r"\s+")
-_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+# The blocking-key tokenizer lives in :mod:`latence_core.blocking` (its public home, shared
+# with the affected-set machinery); the private alias keeps every internal caller and this
+# engine's behavioural surface identical.
+_tokens = blocking_tokens
 
 
 def normalize_text(text: str) -> str:
@@ -70,20 +77,6 @@ def normalize_text(text: str) -> str:
     input ⇒ identical output, independent of platform (the Baseline bar).
     """
     return _WS_RE.sub(" ", unicodedata.normalize("NFKC", text).strip().casefold())
-
-
-def _tokens(text: str) -> list[str]:
-    """NFKC-folded, casefolded word tokens (the token-overlap unit for candidate gen).
-
-    Folds through the same NFKC + casefold pipeline as :func:`normalize_text` so token-level
-    strategies (acronym, substring, embedding similarity, KB candidate generation) see
-    compatibility-confusable surfaces identically to the exact strategy — otherwise a
-    fullwidth-spelled name would tokenise differently from its ASCII twin and evade both the
-    acronym and the overlap rungs. ``_WORD_RE`` matches Unicode word runs (letters/digits,
-    underscore excluded), so non-Latin scripts tokenise too. Deterministic.
-    """
-    folded = unicodedata.normalize("NFKC", text).casefold()
-    return _WORD_RE.findall(folded)
 
 
 def acronym_of(text: str) -> str:
@@ -140,6 +133,44 @@ class MentionInput:
     text: str
     label: str
     confidence: float
+
+
+class MentionPayload(Protocol):
+    """The payload fields (text/label/confidence) any mention-shaped object carries.
+
+    Structural, so both the contract :class:`~latence_core.contracts.EntityMention` and the
+    contract-free views (e.g. :class:`~latence_core.state.incremental.MentionView`) satisfy
+    it without this pure engine importing either.
+    """
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def label(self) -> str: ...
+
+    @property
+    def confidence(self) -> float: ...
+
+
+def as_mention_input(
+    payload: MentionPayload, *, mention_id: str, document_id: str
+) -> MentionInput:
+    """Project a mention-shaped object into the resolver's :class:`MentionInput`.
+
+    The single home for the field-by-field projection previously hand-copied at each
+    resolver call site. The payload fields (text/label/confidence) are read structurally;
+    the two identity fields are explicit keywords because that is exactly where the sources
+    differ (an ``EntityMention`` carries ``record_id`` + ``provenance.document_id``, a view
+    carries ``mention_id`` + ``document_id``).
+    """
+    return MentionInput(
+        mention_id=mention_id,
+        document_id=document_id,
+        text=payload.text,
+        label=payload.label,
+        confidence=payload.confidence,
+    )
 
 
 @dataclass(frozen=True)

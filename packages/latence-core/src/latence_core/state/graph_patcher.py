@@ -68,7 +68,7 @@ class PatchResult:
         """
         seen: set[str] = set()
         for record in self.partially_affected:
-            for doc_id in _record_reach(record):
+            for doc_id in record_reach(record):
                 seen.add(doc_id)
         return sorted(seen)
 
@@ -88,7 +88,7 @@ def _reach_of(obj: object) -> set[str]:
     return reach
 
 
-def _record_reach(record: Record) -> list[str]:
+def record_reach(record: Record) -> list[str]:
     """Every source document a derived record draws on (its provenance reach).
 
     Reads the richest available reach signal: Evidence ``document_ids`` (a corpus-level
@@ -106,6 +106,11 @@ def _record_reach(record: Record) -> list[str]:
         if payload is not None:
             reach |= _reach_of(payload)
     return sorted(reach)
+
+
+# Backwards-compatible alias: ``record_reach`` was born private and is imported under its
+# old name by the corpus store and several delta test suites. Same function object.
+_record_reach = record_reach
 
 
 class GraphPatcher:
@@ -133,7 +138,7 @@ class GraphPatcher:
             result.kept = list(records)
             return result
         for record in records:
-            reach = set(_record_reach(record))
+            reach = set(record_reach(record))
             hit = reach & deleted
             if not hit:
                 result.kept.append(record)

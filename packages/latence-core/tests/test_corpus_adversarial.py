@@ -44,8 +44,8 @@ from latence_core.disambiguation import (
 from latence_core.graph import GraphBuilder
 from latence_core.profiling import (
     _MAX_ENTITIES_PER_DOCUMENT,
+    AggregatorMentionView,
     CorpusAggregator,
-    MentionView,
 )
 
 # -- fixtures -----------------------------------------------------------------
@@ -184,7 +184,7 @@ def test_cooccurrence_fanout_is_bounded_by_the_63_guard() -> None:
     cap = 8
     n = 200  # far above the cap
     agg = CorpusAggregator(max_entities_per_document=cap)
-    agg.add_mentions([MentionView("d1", f"E{i:04d}", "ORG") for i in range(n)])
+    agg.add_mentions([AggregatorMentionView("d1", f"E{i:04d}", "ORG") for i in range(n)])
     # Exactly C(cap, 2) pairs are retained — the O(cap²) bound, not O(n²).
     assert len(agg._pair_docs) == cap * (cap - 1) // 2
     # And the default cap is the documented #63 value, so the guard is really wired.
@@ -200,7 +200,7 @@ def test_cooccurrence_default_cap_bounds_default_aggregator() -> None:
     """
     n = _MAX_ENTITIES_PER_DOCUMENT + 50
     agg = CorpusAggregator()  # default caps
-    agg.add_mentions([MentionView("d1", f"E{i:05d}", "ORG") for i in range(n)])
+    agg.add_mentions([AggregatorMentionView("d1", f"E{i:05d}", "ORG") for i in range(n)])
     expected = _MAX_ENTITIES_PER_DOCUMENT * (_MAX_ENTITIES_PER_DOCUMENT - 1) // 2
     assert len(agg._pair_docs) == expected
 

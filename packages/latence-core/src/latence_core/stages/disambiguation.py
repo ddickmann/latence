@@ -45,10 +45,10 @@ from latence_core.disambiguation import (
     EntityResolver,
     KBEntry,
     KnowledgeBase,
-    MentionInput,
     RelationInput,
     RelationNormalizer,
     ResolvedCluster,
+    as_mention_input,
     normalize_text,
 )
 from latence_core.providers.profile import (
@@ -237,12 +237,8 @@ class CascadeDisambiguator:
         resolver = EntityResolver(**self._resolver_kwargs)
         resolver.add_all(
             [
-                MentionInput(
-                    mention_id=m.record_id,
-                    document_id=m.provenance.document_id,
-                    text=m.text,
-                    label=m.label,
-                    confidence=m.confidence,
+                as_mention_input(
+                    m, mention_id=m.record_id, document_id=m.provenance.document_id
                 )
                 for m in mention_list
             ]

@@ -259,7 +259,7 @@ def _compression_ratio(text: str) -> float:
 
 
 @dataclass(frozen=True)
-class MentionView:
+class AggregatorMentionView:
     """The minimal view of an EntityMention the corpus aggregator folds in.
 
     Contract-free so the engine stays IO/contract-independent: the Provider projects
@@ -364,7 +364,7 @@ class CorpusAggregator:
             self._category_coverage[category] += 1
         self._sensitivity_coverage[sensitivity] += 1
 
-    def add_mentions(self, mentions: list[MentionView]) -> None:
+    def add_mentions(self, mentions: list[AggregatorMentionView]) -> None:
         """Fold one document's entity mentions into the cross-document tallies.
 
         Entity frequency and type frequency count every mention; type consensus tracks
