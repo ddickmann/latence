@@ -213,6 +213,7 @@ nav:
       - Measure it:
           - Public benchmark results: BENCHMARKS.md
           - Run the public benchmarks: running-the-benchmarks.md
+          - The e2e campaign wizard: guides/benchmark-campaign.md
 
   - API Reference:
       - reference/index.md

@@ -22,6 +22,10 @@ framework? Start with [Getting Started](../getting-started/index.md) and
 - :material-trophy: **[Run a bake-off](../running-a-bakeoff.md)**
   Compare Providers on a Capability — quality, throughput, license, and cost in one table.
 
+- :material-flag-checkered: **[The e2e campaign wizard](benchmark-campaign.md)**
+  `latence-campaign`: gated, resumable benchmark stages from corpus acquisition through the
+  full pipeline to measured retrieval — byte-identical configs, license lanes enforced.
+
 </div>
 
 ## Deployment & serving
