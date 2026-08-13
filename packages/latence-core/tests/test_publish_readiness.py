@@ -384,6 +384,39 @@ def test_no_owned_licence_document_still_grants_apache_2_0() -> None:
     )
 
 
+def test_no_package_readme_claims_its_own_code_is_apache() -> None:
+    """A package README stating the FRAMEWORK's own code licence must state PolyForm.
+
+    The 2026-07-29 relicence updated LICENSE/NOTICE/pyprojects but left sixteen README
+    prose claims behind ("Framework code, Apache-2.0", "Licensed under Apache-2.0",
+    "Apache-2.0 (this package)"), because the grant-line gate above only matches
+    "licensed under the Apache". This gate closes that hole for the phrasings that
+    actually occurred, plus the obvious variants: a claim that the package's or the
+    framework's OWN code is Apache-licensed. Third-party statements ("the ``openai``
+    client is Apache-2.0 (code)") and the latence-retrieval retained-modules exception
+    (which names its seven files and cites LICENSE) do not match these patterns.
+    """
+    own_code_apache = (
+        re.compile(r"[Ff]ramework code,? (is )?\*{0,2}Apache"),
+        re.compile(r"[Ll]icensed under (the )?Apache"),
+        re.compile(r"Apache-2\.0 \((this|the) package"),
+        re.compile(r"Apache-2\.0 \(framework code\)"),
+        re.compile(r"this framework code:? \*{0,2}Apache"),
+    )
+    offenders: list[str] = []
+    for path in sorted(_PACKAGES.glob("*/README.md")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            for pattern in own_code_apache:
+                if pattern.search(line):
+                    offenders.append(f"{path.relative_to(_REPO_ROOT)}: {line.strip()}")
+                    break
+    assert not offenders, (
+        "package READMEs still claim the framework's own code is Apache-licensed; the "
+        "repository licence is PolyForm-Noncommercial-1.0.0 (LICENSE, with the retained "
+        "seven-module exception stated there):\n" + "\n".join(offenders)
+    )
+
+
 def test_the_retained_apache_subset_is_exactly_the_pinned_set() -> None:
     """The permissive carve-out is CLOSED: not one file more, not one file fewer.
 
