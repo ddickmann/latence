@@ -36,10 +36,26 @@ from typing import Any
 
 _BASELINE = Path(".secrets.baseline")
 # Paths to keep out of the scan: the lockfile (huge, high-entropy hashes), the local
-# virtualenv, build outputs, and the baseline itself (its recorded ``hashed_secret``
+# virtualenv, build outputs, the baseline itself (its recorded ``hashed_secret``
 # SHA1 digests read as high-entropy strings, but they are one-way hashes of already
-# audited findings, not live secrets). Kept as one regex for ``--exclude-files``.
-_EXCLUDE_FILES = r"(^|/)\.secrets\.baseline$|uv\.lock|\.venv/|dist/|node_modules/"
+# audited findings, not live secrets), and GraphML knowledge-graph exports.
+#
+# On ``*.graphml``: these are not excluded because they are *noisy*, they are excluded
+# because every high-entropy string in them is STRUCTURALLY incapable of being a secret.
+# A GraphML export is a serialised knowledge graph whose node and edge ids are
+# CONTENT-ADDRESSED: a sha256 over the corpus id plus the node's own canonical text and
+# type (``contracts.py`` §"node/edge ids are content-addressed"). The id is therefore
+# derived FROM the element it names — it reveals nothing the same file does not already
+# state in the clear one line below, and it authenticates nothing. There is also no
+# credential-shaped field for one to hide in: ``stages/graph_export.py::_render_graphml``
+# emits exactly id, label, type, kb_id, confidence and evidence_count — never environment
+# or connection material. Auditing them one by one would mean writing ~83k hashes of
+# public benchmark text into the baseline (``benchmark/musique-subset/export/graph.graphml``
+# alone), bloating the anchor without adding a single bit of review — and a bloated anchor
+# is how a real finding gets lost. Kept as one regex for ``--exclude-files``.
+_EXCLUDE_FILES = (
+    r"(^|/)\.secrets\.baseline$|uv\.lock|\.venv/|dist/|node_modules/|\.graphml$"
+)
 
 
 def _audited_pairs(baseline: dict[str, Any]) -> set[tuple[str, str]]:

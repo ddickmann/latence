@@ -15,7 +15,7 @@ Companion documents, in the same directory:
 
 | | |
 |---|---|
-| Repo | `/Users/dennisdickmann/Developer/latence-framework` |
+| Repo | your `latence-framework` checkout |
 | Branch | `main`, tree clean |
 | Unpushed | **39 commits ahead of `origin/main`** — pushing is the operator's call, not yours |
 | `verify-local` | **GREEN**, `REAL_EXIT=0` |
@@ -29,7 +29,7 @@ tests.** If they still skip there, the environment is wrong — that is a signal
 ### How to re-verify before you trust any of this
 
 ```bash
-cd /Users/dennisdickmann/Developer/latence-framework
+cd path/to/latence-framework
 bash scripts/verify-local.sh > /tmp/verify.log 2>&1; echo "REAL_EXIT=$?"
 ```
 

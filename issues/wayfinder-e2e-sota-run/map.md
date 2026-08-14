@@ -82,13 +82,13 @@ Runner's stage checkpoints or two separate runs.
 5a. **OCR host = a dedicated big pod, FULL corpus** (Dennis, 2026-08-03, supersedes the
    fin-cap half of decision 1): OCR is the only heavy-lifting stage, so it runs UNCAPPED
    (~150k pages, all 788 fin docs) on a dedicated RTX PRO 6000 Blackwell 96GB pod
-   (`ssh root@198.13.252.15 -p 11791`, driver 580/CUDA-13, stock vLLM 0.26 works natively);
+   (`ssh root@<POD_HOST> -p <POD_PORT>`, driver 580/CUDA-13, stock vLLM 0.26 works natively);
    markdown results transfer back as input for the subsequent stages. Same pod scripts,
    scaled (max-num-seqs 64, worker concurrency 48). Full corpus = more reliable and
    comparable benchmark numbers. The small pod (paused at 4,862 pages/441 docs, work
    preserved) hosts everything downstream.
 5. **Processing host = the existing RunPod pod** (Dennis, 2026-08-02):
-   `ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519` — RTX 2000 Ada 16GB, verified
+   `ssh root@<POD_HOST> -p <POD_PORT> -i ~/.ssh/<KEY>` — RTX 2000 Ada 16GB, verified
    alive with `/workspace/latence-framework` + `podcheck.sh` already in place from the M6
    campaign. Heavy stages (S2 vLLM OCR serving, S3 GLiNER2 extraction/graph build) run
    there under a pod-side supervisor with progress-freeze detection; the campaign wizard's

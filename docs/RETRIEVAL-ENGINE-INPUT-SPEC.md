@@ -2,7 +2,7 @@
 
 **What the `latence-framework` pipeline delivers, as a build contract for a separate retrieval-engine team.**
 
-Branch this spec was written against: **`w13-context-enrichment`** (the branch that carries `ChunkRecord.context_header`; `wave-integration` and `main` do not yet). Worktree: `/Users/dennisdickmann/Developer/latence-framework-w13`.
+Branch this spec was written against: **`w13-context-enrichment`** (the branch that carries `ChunkRecord.context_header`; `wave-integration` and `main` do not yet). Written from a dedicated `latence-framework-w13` worktree of that branch.
 
 Schema-version constants, read from source at time of writing:
 

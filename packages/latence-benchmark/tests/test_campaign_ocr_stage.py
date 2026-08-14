@@ -275,13 +275,15 @@ class TestZipExtraction:
 
 
 class TestPodSshParsing:
-    def test_the_real_config_line_parses(self) -> None:
-        endpoint = parse_pod_ssh("ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519")
-        assert endpoint.target == "root@213.173.108.103"
+    def test_a_full_config_line_parses(self) -> None:
+        # 203.0.113.0/24 is RFC 5737 TEST-NET-3 (documentation only), so this fixture
+        # exercises the real parse shape without naming a reachable host.
+        endpoint = parse_pod_ssh("ssh root@203.0.113.10 -p 2222 -i ~/.ssh/id_ed25519")
+        assert endpoint.target == "root@203.0.113.10"
         assert endpoint.argv == (
-            "ssh", "-p", "11108", "-i", "~/.ssh/id_ed25519", "root@213.173.108.103"
+            "ssh", "-p", "2222", "-i", "~/.ssh/id_ed25519", "root@203.0.113.10"
         )
-        assert endpoint.rsh == "ssh -p 11108 -i '~/.ssh/id_ed25519'"
+        assert endpoint.rsh == "ssh -p 2222 -i '~/.ssh/id_ed25519'"
 
     def test_a_non_ssh_command_is_refused(self) -> None:
         with pytest.raises(StageBlockedError, match="full ssh command line"):

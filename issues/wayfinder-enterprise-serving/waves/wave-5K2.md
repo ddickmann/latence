@@ -151,7 +151,7 @@ artifact. Regenerated with:
 ```
 latence-campaign init --non-interactive \
   --campaign-root benchmark/sota-campaign \
-  --pod-ssh 'ssh root@… -p … -i ~/.ssh/id_ed25519' \
+  --pod-ssh 'ssh root@<POD_HOST> -p <POD_PORT> -i ~/.ssh/<KEY>' \
   -o benchmark/sota-campaign/campaign.yaml
 ```
 

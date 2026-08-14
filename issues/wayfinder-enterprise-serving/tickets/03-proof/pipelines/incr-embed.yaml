@@ -1,13 +1,13 @@
 schema_version: 2
 name: ticket03-incr-embed
-storage_uri: file:///Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/ticket03-proof/store-incr
+storage_uri: file://benchmark/sota-corpus/ticket03-proof/store-incr
 extract_on: unmasked
 stages:
 - name: source
   capability: source
   provider: source.local_folder
   config:
-    path: file:///Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/ticket03-proof/input/markdown
+    path: file://benchmark/sota-corpus/ticket03-proof/input/markdown
     sensitivity: internal
     extensions:
     - md

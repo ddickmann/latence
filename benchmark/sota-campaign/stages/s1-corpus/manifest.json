@@ -91,7 +91,7 @@
         "Referenced in place \u2014 verified present, NOT re-downloaded."
       ],
       "publishable": true,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/official-data/musique-full",
+      "root": "benchmark/official-data/musique-full",
       "total_bytes": 373813561
     },
     {
@@ -111,7 +111,7 @@
         "Referenced in place \u2014 verified present, NOT re-downloaded."
       ],
       "publishable": false,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/official-data/hotpot-full",
+      "root": "benchmark/official-data/hotpot-full",
       "total_bytes": 1254079217
     },
     {
@@ -133,7 +133,7 @@
         "Gold evidence triples double as extraction gold (S3 synergy)."
       ],
       "publishable": false,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/wiki2multihop/raw",
+      "root": "benchmark/sota-corpus/wiki2multihop/raw",
       "total_bytes": 401929536
     },
     {
@@ -153,7 +153,7 @@
         "provenance: hf:yixuantt/MultiHopRAG@71ac0d0bd1f951d2d6b70311f7d2ae404e1ffa82"
       ],
       "publishable": false,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/multihop_rag/raw",
+      "root": "benchmark/sota-corpus/multihop_rag/raw",
       "total_bytes": 11959126
     },
     {
@@ -176,7 +176,7 @@
         "The OCR anchor: per-OCR-pipeline retrieval numbers to compare S2 against."
       ],
       "publishable": false,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/ohr_bench/raw",
+      "root": "benchmark/sota-corpus/ohr_bench/raw",
       "total_bytes": 1712835072
     },
     {
@@ -198,7 +198,7 @@
         "ViDoSeek split only; the repo's SlideVQA files are not part of the S1 spec."
       ],
       "publishable": false,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/vidoseek/raw",
+      "root": "benchmark/sota-corpus/vidoseek/raw",
       "total_bytes": 759371502
     },
     {
@@ -221,7 +221,7 @@
         "uda: HTML subsets EXCLUDED (NqText -> wiki_nq, FetaTab -> wiki_feta) \u2014 no parser in the framework supports HTML input (S0 inventory), so acquiring them would gate the campaign on bytes nothing can consume. FinHybrid + PaperTab only; TAT/paper_text also skipped (not in the S1 spec)."
       ],
       "publishable": false,
-      "root": "/Users/dennisdickmann/Developer/latence-framework/benchmark/sota-corpus/uda/raw",
+      "root": "benchmark/sota-corpus/uda/raw",
       "total_bytes": 3321610686
     }
   ],

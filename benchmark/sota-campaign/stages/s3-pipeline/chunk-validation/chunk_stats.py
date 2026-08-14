@@ -23,7 +23,8 @@ from pathlib import Path
 
 from latence_core.chunking import ChunkBudget, chunk_document
 
-REPO = Path("/Users/dennisdickmann/Developer/latence-framework")
+# benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/<this file> → repo root.
+REPO = Path(__file__).resolve().parents[5]
 CORPUS = REPO / "benchmark" / "sota-corpus"
 OUTDIR = REPO / "benchmark/sota-campaign/stages/s3-pipeline/chunk-validation"
 SAMPLES = OUTDIR / "samples"

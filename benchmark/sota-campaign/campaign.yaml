@@ -8,7 +8,7 @@
 # corpus        : 7 dataset(s) — musique, hotpotqa, wiki2multihop, multihop_rag, ohr_bench, vidoseek, uda
 #                 (license lanes are classified and recorded by the s1-corpus stage
 #                 gate before any byte is fetched; see stages/s1-corpus/metrics.json)
-# pod ssh       : ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519
+# pod ssh       : ssh root@<POD_HOST> -p <POD_PORT> -i ~/.ssh/<KEY>
 # s3 pipeline   : chunk 640/80/8; fused_entity_relation.gliner2 @ 0.5
 #                 induction per_chunk (deepseek/deepseek-v4-flash-0731, reasoning off, cap $150.00); redaction guardrails on
 # retrieval     : graph auto; select packed @ 10000 tok; expand 5/0.05/0.01/0.05
@@ -22,7 +22,7 @@
 # Later campaign stages append their own config blocks below; unknown blocks are
 # preserved by older code, never rejected.
 campaign:
-  pod_ssh: ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519
+  pod_ssh: ssh root@<POD_HOST> -p <POD_PORT> -i ~/.ssh/<KEY>
   root: benchmark/sota-campaign
 corpus:
   datasets:
