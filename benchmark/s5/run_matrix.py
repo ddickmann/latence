@@ -45,6 +45,7 @@ import json
 import os
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -86,10 +87,11 @@ from benchmark.s5.metrics import CellAccumulator, documents_of  # noqa: E402
 from benchmark.s5.report import write_report  # noqa: E402
 from benchmark.s5.rescue import (  # noqa: E402
     BUDGET_CURVE,
-    COE_SELECT_BUDGET,
-    SELECT_BUDGET,
     GateStats,
-    RescuePipeline,
+    build_pipeline,
+    bundle_for,
+    headline_budget,
+    selector_for,
 )
 from benchmark.s5.tuning import (  # noqa: E402
     InsufficientSplit,
@@ -390,12 +392,18 @@ def _rescue_cell(
     *,
     fusion: str,
 ) -> dict[str, object]:
-    """A graph-rescue cell: the leg at :data:`SELECT_BUDGET`, plus its recall-over-budget curve.
+    """A graph-rescue cell: the leg at its headline budget, plus its recall-over-budget curve.
 
-    Each query is retrieved **once** and then selected at every budget in
+    The shipped :class:`~latence_retrieval.rescue.GraphRescueRetrieval` IS the pipeline (see
+    :mod:`benchmark.s5.rescue`): each query is
+    :meth:`~latence_retrieval.rescue.GraphRescueRetrieval.retrieve`\\ d **once** and then
+    :meth:`~latence_retrieval.rescue.GraphRescueRetrieval.select`\\ ed at every budget in
     :data:`~benchmark.s5.rescue.BUDGET_CURVE`, so the curve varies the budget and nothing else.
     ``graph_rescue`` has no selector, so its curve is a single entry: repeating one ranking under
-    five budget labels would imply a measurement that was not made.
+    seven budget labels would imply a measurement that was not made.
+
+    Latency is measured the way the cell consumes it — the retrieval paid once, plus this budget's
+    own selection — so a curve point's number is what that operating point actually costs.
 
     The ``tuned`` fusion variant does not apply here and says so instead of producing a number: the
     rescue family fuses only ``dense``+``bm25``, and its graph lanes are appended rather than
@@ -403,26 +411,30 @@ def _rescue_cell(
     """
     if fusion != "equal":
         return not_fusion_tunable_body()
-    # Each selector's headline sits at its own measured operating point: the knapsack saturates
-    # ~5.5k so 10k is generous, while CoE keeps buying recall through 16k (operator ruling).
-    headline = COE_SELECT_BUDGET if leg == "graph_rescue_coe" else SELECT_BUDGET
-    budgets = (headline,) if leg == "graph_rescue" else BUDGET_CURVE
+    selector = selector_for(leg)
+    headline = headline_budget(leg)
+    budgets = (headline,) if selector == "none" else BUDGET_CURVE
     cells = {budget: CellAccumulator() for budget in budgets}
     gate = GateStats()
-    pipeline = RescuePipeline(runner=runner)
+    pipeline = build_pipeline(runner, export)
     for query in scored:
-        retrieved = pipeline.retrieve(query.question, query.vector)
-        gate.add(retrieved.gate)
+        started = time.perf_counter()
+        retrieval = pipeline.retrieve(bundle_for(runner, query.question, query.vector))
+        retrieve_ms = (time.perf_counter() - started) * 1000.0
+        gate.add(retrieval.gate)
         for budget, cell in cells.items():
-            outcome = pipeline.select(query.question, retrieved, leg, budget)
+            started = time.perf_counter()
+            result = pipeline.select(
+                query.question, retrieval, selector=selector, budget=budget
+            )
             _score(
                 cell,
                 export,
                 query,
-                outcome.ranked,
-                outcome.latency_ms,
-                tokens_packed=outcome.tokens_packed,
-                budget=outcome.budget,
+                [candidate.id for candidate in result.candidates],
+                retrieve_ms + (time.perf_counter() - started) * 1000.0,
+                tokens_packed=result.tokens_packed,
+                budget=result.budget,
             )
     return rescue_body(
         metrics=cells[headline].summary(),

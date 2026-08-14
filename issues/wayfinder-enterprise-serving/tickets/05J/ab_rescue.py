@@ -1,25 +1,36 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Wave 5-J's A/B oracle: the S5b bench pipeline vs the SHIPPED component, query by query.
+"""Wave 5-J's A/B oracle for the S5b rescue pipeline: two ways of getting the same answer.
 
-The gate that licenses deleting ``benchmark/s5/rescue.py``'s duplicate pipeline (~600 lockstep
-lines) in favour of ``latence_retrieval.rescue.GraphRescueRetrieval``. Both sides run over the
-**same** :class:`~benchmark.s5.legs.Runner` — the same dense matrix, the same BM25 index, the same
-``GraphRetriever``, the same hyperedge store — so the only variable is which pipeline code drove
-them, and every comparison is ``==`` on full values rather than on a recall summary:
+**Before the deletion** this harness ran the bench's own ``RescuePipeline`` against the SHIPPED
+:class:`~latence_retrieval.rescue.GraphRescueRetrieval` over the same
+:class:`~benchmark.s5.legs.Runner`, query by query, on the full gold sets — the gate that
+licensed deleting the bench copy's ~600 lockstep lines (results in
+``issues/wayfinder-enterprise-serving/waves/wave-5J.md``). The bench copy is gone, so the
+harness now pins the equation the deletion *relies* on, on the same real data:
 
-* **retrieval** — the whole candidate ``union``: ``(id, score, metadata)`` per candidate, so the
-  ``rescued`` stamp, the four denormalised KG columns AND the precomputed ``redundancy`` row are
-  all in the comparison (a diff in any of them is a diff);
-* **the base** — ``(id, score)`` per candidate (the shipped base additionally carries the
-  ``redundancy`` row the single-decorator seam computes ahead of the expander; it is overwritten
-  on the union, and the union comparison is what proves that);
-* **the gate** — every field of the ``GateDecision``, not just ``fired``;
-* **the hypergraph signals** — ρ (ids, order, floats), fields, anchors, vertex confidences and
-  both stage counters: what the ``coe`` selector spends its budget on;
-* **selection** — for all three legs at **every** point of :data:`~benchmark.s5.rescue.BUDGET_CURVE`
-  (the ranking leg once, since it has no selector): the selected id list, the packed-token count
-  and the reported budget.
+* the **split path** — one :meth:`~latence_retrieval.rescue.GraphRescueRetrieval.retrieve` per
+  query, then a :meth:`~latence_retrieval.rescue.GraphRescueRetrieval.select` at every operating
+  point (exactly what ``run_matrix._rescue_cell`` does), against
+* the **reference path** — a pipeline *configured* at that operating point, run end-to-end for
+  that query alone (:data:`REFERENCE_POINTS`), which is what a budget curve would have cost
+  before the split and what its numbers must still equal.
+
+Both sides run over the **same** :class:`~benchmark.s5.legs.Runner` — the same dense matrix, the
+same BM25 index, the same ``GraphRetriever``, the same hyperedge store — so the only variable is
+how the pipeline was driven, and every comparison is ``==`` on full values rather than on a
+recall summary:
+
+* **the whole union** — the ``graph_rescue`` reference point has no selector, so its result *is*
+  the reference pipeline's entire union: ``(id, score, metadata)`` per candidate, which puts the
+  ``rescued`` stamp, the four denormalised KG columns AND the precomputed ``redundancy`` row
+  inside the comparison (a diff in any of them is a diff);
+* **selection** — the two selectors at their headline budgets and at the curve's extremes: the
+  whole :class:`~latence_retrieval.rescue.RescueResult` (candidates with scores and metadata,
+  gate, rescued count, packed tokens, budget), compared field by field *and* with ``==`` on the
+  models themselves. The hypergraph signals are in the comparison through what consumes them —
+  a ``coe`` selection is a function of ρ, so equal CoE selections at four budgets over the same
+  union is what a signals diff would have to survive.
 
 The three hazards the exploration named are each observable here rather than assumed away:
 ``_coe_select``'s budget threading (every curve point, both selectors), the module-level
@@ -54,25 +65,28 @@ if str(REPO) not in sys.path:  # pragma: no cover - script wiring
     sys.path.insert(0, str(REPO))
 
 from benchmark.s5 import goldmap  # noqa: E402
-from benchmark.s5.corpus import hyperedge_chunk_map, load_export  # noqa: E402
+from benchmark.s5.corpus import load_export  # noqa: E402
 from benchmark.s5.datasets import DATASETS  # noqa: E402
 from benchmark.s5.legs import Runner, build_runner  # noqa: E402
 from benchmark.s5.rescue import (  # noqa: E402
     BUDGET_CURVE,
     ExportDecorator,
-    RescuePipeline,
+    HyperedgeChunks,
+    build_pipeline,
+    bundle_for,
+    headline_budget,
+    selector_for,
 )
 from benchmark.s5.run_matrix import sample  # noqa: E402
-from latence_retrieval.orchestrator import QueryBundle  # noqa: E402
-from latence_retrieval.rescue import GraphRescueRetrieval  # noqa: E402
+from latence_retrieval.rescue import GraphRescueRetrieval, RescueResult  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
 
     from benchmark.s5.corpus import Export
-    from benchmark.s5.rescue import GateDecision
     from latence_retrieval.contracts import Candidate
-    from latence_retrieval.hypergraph import HypergraphSignals
+    from latence_retrieval.orchestrator import QueryBundle
+    from latence_retrieval.rescue import GateDecision, RescueRetrieval
 
 #: Where the serving-parity harness checkpoints its query embeddings. Reused verbatim (same
 #: digest scheme) so a full-set run costs no GPU: the vectors for both full gold sets are already
@@ -80,47 +94,56 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 CACHE_DIR = REPO / "benchmark" / "serving" / "cache"
 OUT_DIR = Path(__file__).resolve().parent / "results"
 
-#: The bench leg names and the shipped selector each one dispatches to.
-LEGS = {"graph_rescue": "none", "graph_rescue_packed": "packed", "graph_rescue_coe": "coe"}
-
 #: The rescue family's legs, which is what :func:`~benchmark.s5.legs.build_runner` needs to build
 #: every component the pipeline uses (dense, BM25, traversal + seeder, hyperedge store).
-RESCUE_LEGS = tuple(LEGS)
+RESCUE_LEGS = ("graph_rescue", "graph_rescue_packed", "graph_rescue_coe")
+
+#: The operating points a whole configured pipeline is run end-to-end at, per query — each one's
+#: result must equal the split path's selection at the same point. Both headlines are here (the
+#: numbers a cell reports) plus the two extreme curve points, because a budget that is NOT the
+#: pipeline's configured default is exactly where a threading defect would hide.
+REFERENCE_POINTS = (
+    ("graph_rescue", None),
+    ("graph_rescue_packed", 10000),
+    ("graph_rescue_packed", 2000),
+    ("graph_rescue_coe", 16000),
+    ("graph_rescue_coe", 32000),
+)
 
 
-class HyperedgeChunks:
-    """The shipped ``HyperedgeDocumentSource`` over the runner's own hyperedge→chunk mapping.
+def reference_pipelines(
+    runner: Runner, export: Export
+) -> dict[tuple[str, int | None], GraphRescueRetrieval]:
+    """One pipeline per :data:`REFERENCE_POINTS` entry, each CONFIGURED at that operating point.
 
-    Delegates to :meth:`~benchmark.s5.legs.Runner.chunks_from_hyperedges` — reused read-only, not
-    re-implemented, so the shipped composition resolves Hyperedges byte-identically to the bench.
-    """
-
-    def __init__(self, runner: Runner) -> None:
-        self._runner = runner
-
-    def candidates(self, hyperedge_ids: Sequence[str]) -> list[Candidate]:
-        """The chunk candidates carrying ``hyperedge_ids``, best-first, deduplicated."""
-        return self._runner.chunks_from_hyperedges(hyperedge_ids)
-
-
-def shipped_pipeline(runner: Runner, export: Export) -> GraphRescueRetrieval:
-    """The SHIPPED component over the bench's engines, in the bench's configuration.
-
-    Every knob left at its default is a knob whose default IS the bench constant (pool_k 100,
-    seed_docs_k 5, seed_node_cap 32, rescue_cap 50, rank_score_k 60, the expander weights, the
-    gate thresholds, ``similarity_key="redundancy"``, ``fill="backfill"``) — that lockstep is
-    what this harness exists to prove. The selector is configured as ``packed``; every leg's
-    selection is taken through :meth:`GraphRescueRetrieval.select`'s per-call override.
+    Configured, not overridden: this is the pre-split shape — a pipeline built for one selector
+    at one budget and run end to end — so nothing it computes can be inherited from the split
+    path's retrieval. Same runner, same engines, same decoration, so the only variable is how the
+    pipeline was driven.
     """
     assert runner.kv_path is not None, "the rescue family requires the hyperedge store"
-    return GraphRescueRetrieval(
-        {"graph_mode": "auto", "selector": "packed", "hyperedge_kv_path": str(runner.kv_path)},
-        dense=runner.dense,
-        bm25=runner.bm25,
-        graph=runner.graph,
-        hyperedge_documents=HyperedgeChunks(runner),
-        decorate=ExportDecorator(export),
-    )
+    pipelines: dict[tuple[str, int | None], GraphRescueRetrieval] = {}
+    for leg, budget in REFERENCE_POINTS:
+        selector = selector_for(leg)
+        pipeline = build_pipeline(runner, export, selector=selector)
+        if budget is not None:
+            # `build_pipeline` leaves every measured default in place; a non-default budget is
+            # the one thing a reference point may pin, so it is configured explicitly here.
+            pipeline = GraphRescueRetrieval(
+                {
+                    "graph_mode": "auto",
+                    "selector": selector,
+                    "budget": budget,
+                    "hyperedge_kv_path": str(runner.kv_path),
+                },
+                dense=runner.dense,
+                bm25=runner.bm25,
+                graph=runner.graph,
+                hyperedge_documents=HyperedgeChunks(runner),
+                decorate=ExportDecorator(export),
+            )
+        pipelines[(leg, budget)] = pipeline
+    return pipelines
 
 
 def query_vectors(dataset: str, usable: Sequence[goldmap.ResolvedGold]) -> Any:  # noqa: ANN401
@@ -148,11 +171,6 @@ def candidates_full(candidates: Sequence[Candidate]) -> list[tuple[str, float, d
     return [(c.id, c.score, dict(c.metadata)) for c in candidates]
 
 
-def candidates_ranked(candidates: Sequence[Candidate]) -> list[tuple[str, float]]:
-    """``(id, score)`` per candidate — the ranking without the metadata."""
-    return [(c.id, c.score) for c in candidates]
-
-
 def gate_tuple(gate: GateDecision | Any) -> tuple[object, ...]:
     """Every field of a gate decision, dataclass or model alike."""
     return (
@@ -165,65 +183,56 @@ def gate_tuple(gate: GateDecision | Any) -> tuple[object, ...]:
     )
 
 
-def signals_tuple(signals: HypergraphSignals | None) -> tuple[object, ...] | None:
-    """ρ, fields, anchors, vertex confidences and both stage counters (ticket-01's own view)."""
-    if signals is None:
-        return None
-    return (
-        signals.rho,
-        signals.fields,
-        signals.anchors,
-        signals.vertex_confidence,
-        signals.expanded_candidates,
-        signals.pruned_candidates,
-    )
+def selections(
+    pipeline: GraphRescueRetrieval, question: str, retrieval: RescueRetrieval
+) -> dict[tuple[str, int], RescueResult]:
+    """The split path: every leg at every curve point, all from ONE retrieval.
+
+    The ranking leg has no selector, so it is selected once — repeating one ranking under seven
+    budget labels would imply a measurement that was not made.
+    """
+    out: dict[tuple[str, int], RescueResult] = {}
+    for leg in RESCUE_LEGS:
+        selector = selector_for(leg)
+        budgets = (headline_budget(leg),) if selector == "none" else BUDGET_CURVE
+        for budget in budgets:
+            out[(leg, budget)] = pipeline.select(
+                question, retrieval, selector=selector, budget=budget
+            )
+    return out
 
 
 def compare_query(
     question: str,
-    vector: Any,  # noqa: ANN401 - a numpy row
-    bench: RescuePipeline,
-    shipped: GraphRescueRetrieval,
-    seeds: tuple[str, ...],
+    bundle: QueryBundle,
+    split: GraphRescueRetrieval,
+    references: dict[tuple[str, int | None], GraphRescueRetrieval],
 ) -> list[str]:
     """Every comparison for one query; returns the names of the lanes that differed (empty = 0)."""
-    bench_retrieved = bench.retrieve(question, vector)
-    shipped_retrieval = shipped.retrieve(
-        QueryBundle(
-            text=question,
-            vector=tuple(float(x) for x in vector),
-            seed_node_ids=seeds or None,
-        )
-    )
+    retrieval = split.retrieve(bundle)
+    selected = selections(split, question, retrieval)
 
     diffs: list[str] = []
-    if gate_tuple(bench_retrieved.gate) != gate_tuple(shipped_retrieval.gate):
-        diffs.append("gate")
-    if bench_retrieved.rescued != shipped_retrieval.rescued:
-        diffs.append("rescued")
-    if candidates_ranked(bench_retrieved.base) != candidates_ranked(shipped_retrieval.base):
-        diffs.append("base")
-    if candidates_full(bench_retrieved.union) != candidates_full(shipped_retrieval.union):
-        diffs.append("union")
-    if signals_tuple(bench_retrieved.signals) != signals_tuple(shipped_retrieval.signals):
-        diffs.append("signals")
-
-    for leg, selector in LEGS.items():
-        # The ranking leg has no selector, so one comparison is the whole of it; repeating it per
-        # budget would imply a measurement that was not made.
-        budgets = (BUDGET_CURVE[0],) if selector == "none" else BUDGET_CURVE
-        for budget in budgets:
-            outcome = bench.select(question, bench_retrieved, leg, budget)
-            result = shipped.select(question, shipped_retrieval, selector=selector, budget=budget)
-            observed = (
-                [c.id for c in result.candidates],
-                result.tokens_packed,
-                result.budget,
-            )
-            if (outcome.ranked, outcome.tokens_packed, outcome.budget) != observed:
-                diffs.append(f"{leg}@{budget}")
-            if gate_tuple(outcome.gate) != gate_tuple(result.gate):
-                diffs.append(f"{leg}@{budget}:gate")
+    for (leg, budget), pipeline in references.items():
+        reference = pipeline.run(bundle)
+        point = (leg, headline_budget(leg) if budget is None else budget)
+        result = selected[point]
+        if candidates_full(reference.candidates) != candidates_full(result.candidates):
+            diffs.append(f"{leg}@{budget}")
+        if (reference.tokens_packed, reference.budget, reference.rescued) != (
+            result.tokens_packed,
+            result.budget,
+            result.rescued,
+        ):
+            diffs.append(f"{leg}@{budget}:spend")
+        if gate_tuple(reference.gate) != gate_tuple(result.gate):
+            diffs.append(f"{leg}@{budget}:gate")
+        if reference != result:
+            diffs.append(f"{leg}@{budget}:result")
+    # The retrieval itself needs no separate comparison: the ``graph_rescue`` reference point is
+    # the selector-less leg, so its result IS that pipeline's whole union — candidates, scores,
+    # metadata (KG columns + redundancy), gate and rescued count — compared above against the
+    # union this query's single retrieval produced.
     return diffs
 
 
@@ -268,12 +277,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     vectors = query_vectors(dataset, usable)
 
     runner = build_runner(export, RESCUE_LEGS)
-    hyperedges = hyperedge_chunk_map(export.root / "graph-hyperedges.parquet")
-    assert runner.hyperedge_chunks == hyperedges or runner.hyperedge_chunks, (
+    assert runner.hyperedge_chunks, (
         "the runner must carry the hyperedge→chunk mapping the rescue lane resolves through"
     )
-    bench = RescuePipeline(runner=runner)
-    shipped = shipped_pipeline(runner, export)
+    split = build_pipeline(runner, export)
+    references = reference_pipelines(runner, export)
 
     positions = list(range(args.skip, len(usable)))
     if args.shard is not None:
@@ -286,8 +294,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.perf_counter()
     for done, position in enumerate(positions, start=1):
         item = usable[position]
-        seeds = tuple(runner.seeder.seeds(item.question)) if runner.seeder is not None else ()
-        lanes = compare_query(item.question, vectors[position], bench, shipped, seeds)
+        bundle = bundle_for(runner, item.question, vectors[position])
+        lanes = compare_query(item.question, bundle, split, references)
         if lanes:
             diffs += 1
             print(f"DIFF {item.query_id}: {lanes}", flush=True)
@@ -309,9 +317,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "limit": args.limit,
         "skip": args.skip,
         "shard": args.shard,
-        "legs": sorted(LEGS),
+        "legs": sorted(RESCUE_LEGS),
         "budget_curve": list(BUDGET_CURVE),
         "selections_per_query": 1 + 2 * len(BUDGET_CURVE),
+        "reference_points": [[leg, budget] for leg, budget in REFERENCE_POINTS],
         "seconds": round(time.perf_counter() - started, 1),
     }
     args.out.mkdir(parents=True, exist_ok=True)

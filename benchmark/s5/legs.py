@@ -783,7 +783,7 @@ class Runner:
             # read as "graph rescue bought nothing". Refuse instead.
             msg = (
                 f"{leg!r} is a graph-rescue leg: it does not fuse a signal list, so it cannot be "
-                "run through the ladder's fuse path. Use benchmark.s5.rescue.RescuePipeline."
+                "run through the ladder's fuse path. Use benchmark.s5.rescue.build_pipeline."
             )
             raise ValueError(msg)
         if leg in ABLATION_LEG_NAMES:

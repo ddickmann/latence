@@ -97,8 +97,10 @@ def lane_cases(runner: Runner, dataset: str, limit: int | None = None) -> list[L
 def _rescue_seeds(runner: Runner, question: str, query_seeds: tuple[str, ...]) -> tuple[str, ...]:
     """The rescue lane's seed set: query aliases first, then top-BM25 documents' entities.
 
-    Mirrors :meth:`benchmark.s5.rescue.RescuePipeline._graph_seeds` with the BM25 ranking as the
-    first stage (dense is deliberately absent here — see the module docstring).
+    Mirrors ``GraphRescueRetrieval._graph_seeds`` (the shipped pipeline the S5b rescue family
+    runs; :data:`~benchmark.s5.rescue.SEED_DOCS_K` / :data:`~benchmark.s5.rescue.SEED_NODE_CAP`
+    are its defaults, pinned there) with the BM25 ranking as the first stage — dense is
+    deliberately absent here, see the module docstring.
     """
     seeds: list[str] = list(dict.fromkeys(query_seeds))
     seen = set(seeds)
