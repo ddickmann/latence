@@ -68,6 +68,7 @@ from latence_retrieval.contracts import Candidate, Capability, RetrievalQuery
 from latence_retrieval.expand import Expander
 from latence_retrieval.hypergraph import HyperedgeKV, HypergraphSignals, hypergraph_signals
 from latence_retrieval.pack import Packer
+from latence_retrieval.rescue import KgColumnDecorator
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -653,6 +654,47 @@ class RescuePipeline:
         ]
 
 
+# -- the Export as a shipped CandidateDecorator (the Wave 2-F seam) ------------------------------
+
+
+class ExportDecorator:
+    """This harness's candidate decoration, as the shipped ``CandidateDecorator`` seam takes it.
+
+    :meth:`RescuePipeline._kg_metadata` + :meth:`RescuePipeline._decorate` in one adapter, so the
+    SHIPPED :class:`~latence_retrieval.rescue.GraphRescueRetrieval` can be driven over these
+    engines with exactly the bench's candidate contract: the export's four denormalised KG columns
+    per candidate (read off the export, never guessed — a caller-supplied signal in the ADR-0048
+    sense) plus the precomputed pairwise ``redundancy`` row the
+    :class:`~latence_retrieval.pack.Packer` reads through its ``similarity_key`` seam.
+
+    The columns mapping is built per call from the candidates in hand and handed to the shipped
+    :class:`~latence_retrieval.rescue.KgColumnDecorator`, rather than materialised once for the
+    whole corpus: a 220k-chunk export would cost hundreds of megabytes to hold as a dict of rows,
+    and the redundancy numbers must be the packer's own — which the shipped adapter guarantees by
+    computing them with the packer's own tokeniser.
+    """
+
+    def __init__(self, export: Export) -> None:
+        self._export = export
+
+    def decorate(self, candidates: Sequence[Candidate]) -> list[Candidate]:
+        """The KG columns of every candidate the export knows, plus the full redundancy map."""
+        rows = self._export.rows
+        columns: dict[str, dict[str, Any]] = {}
+        for candidate in candidates:
+            position = self._export.index_of(candidate.id)
+            if position is None:
+                continue
+            row = rows[position]
+            columns[candidate.id] = {
+                "kg_node_ids": list(row.node_ids),
+                "neighbor_node_ids": list(row.neighbor_node_ids),
+                "kg_node_community": list(row.community_ids),
+                "kg_node_centrality": list(row.centralities),
+            }
+        return KgColumnDecorator(columns, redundancy_key="redundancy").decorate(candidates)
+
+
 # -- module-level helpers (pure, so a test can drive each on its own) ---------------------------
 
 
@@ -761,6 +803,7 @@ __all__ = [
     "SEED_NODE_CAP",
     "SELECT_BUDGET",
     "SELECT_POOL_K",
+    "ExportDecorator",
     "GateDecision",
     "GateStats",
     "RescueOutcome",
