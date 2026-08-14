@@ -16,9 +16,12 @@ skips cells whose file already exists (``--force`` re-runs them). A matrix that 
 therefore be interrupted, extended one dataset at a time, or resumed after a crash without
 losing or silently re-mixing work.
 
-Deterministic: ``PYTHONHASHSEED=0`` is asserted at start (the hypergraph entry and several
-dict-ordered paths are hash-order sensitive), query sampling under ``--limit`` is a fixed-seed
-shuffle, and every rank list breaks ties on ascending id.
+Deterministic: ``PYTHONHASHSEED=0`` **and** a pinned BLAS thread count are asserted at start,
+query sampling under ``--limit`` is a fixed-seed shuffle, and every rank list breaks ties on
+ascending id. The thread pin joined the contract after a measurement: the dense leg is a
+brute-force cosine (a BLAS ``gemv``) and the query embedder is a torch forward pass, and both
+reassociate their float sums per thread count — enough to change which documents land in the
+pool. See :data:`THREADS_REFUSAL` for the numbers.
 
 Refuses rather than fakes: a leg whose export artifacts are absent (the reused M6
 MuSiQue/HotpotQA exports carry no ``embedding`` column and no BM25 artifacts) is recorded as
@@ -36,13 +39,15 @@ disjoint test split (:mod:`benchmark.s5.tuning`), writing ``results-weighted/``.
 untouched by the second variant's existence — same code path, same cells, same directory — and
 ``REPORT.md`` shows both side by side whenever weighted cells exist.
 
-Usage::
+Usage — ``PIN`` is the determinism contract, and the harness refuses without all of it::
 
-    PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
+    PIN="PYTHONHASHSEED=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1"
+
+    env $PIN .venv/bin/python -m benchmark.s5.run_matrix \\
         --datasets vidoseek,multihop_rag --legs all --limit 50
-    PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
+    env $PIN .venv/bin/python -m benchmark.s5.run_matrix \\
         --datasets multihop_rag --legs dense,dense_content_only --limit 200
-    PYTHONHASHSEED=0 .venv/bin/python -m benchmark.s5.run_matrix \\
+    env $PIN .venv/bin/python -m benchmark.s5.run_matrix \\
         --datasets all --legs all --fusion tuned
 """
 
@@ -134,6 +139,29 @@ HASHSEED_REFUSAL = (
     "not reproducible)."
 )
 
+#: The BLAS thread-count variables. The dense leg is a brute-force cosine (a BLAS ``gemv``) and
+#: the query embedder is a torch forward pass; both reassociate their floating-point sums
+#: differently at different thread counts, so the thread count is part of the run's identity in
+#: exactly the way the hash seed is.
+THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+#: The thread count every recorded cell was measured at. Pinning to one is not a performance
+#: choice — it is the only value that makes two runs comparable without also pinning the machine.
+PINNED_THREADS = "1"
+
+#: The refusal text when the thread count is not pinned.
+#:
+#: This is not theoretical. Running musique/bm25 at ``OMP_NUM_THREADS=4`` instead of ``1``, same
+#: code and same corpus, gives 33 of 1,209 queries a different dense pool, 4 a different top-10
+#: membership, and exactly one a different gold-hit count — which moves ``recall@10`` from
+#: 0.3404 to 0.3406. That single query is the whole delta: 1/(1209x6) = 1.37855e-04, matching the
+#: observed difference exactly. An unpinned harness reports thread scheduling as a quality change.
+THREADS_REFUSAL = (
+    f"pin {' = '.join(THREAD_VARS)} = {PINNED_THREADS} (the dense leg's BLAS gemv and the query "
+    "embedder reassociate their float sums per thread count, which changes rankings: measured, "
+    "33/1209 musique queries get a different dense pool at 4 threads vs 1)."
+)
+
 
 class MatrixRefused(RuntimeError):
     """The harness refused to run — the message is the reason, verbatim."""
@@ -189,9 +217,17 @@ class MatrixOutcome:
 
 
 def require_deterministic() -> None:
-    """Refuse unless ``PYTHONHASHSEED=0`` — at the API entry, not only in ``main``."""
+    """Refuse unless the run is reproducible — at the API entry, not only in ``main``.
+
+    Two variables, not one. ``PYTHONHASHSEED`` was always asserted; the BLAS thread count was
+    not, and it is the one that silently moved numbers between the two full-matrix sweeps. Both
+    are checked here so a cell cannot be written by a process that was never pinned.
+    """
     if os.environ.get("PYTHONHASHSEED") != "0":
         raise MatrixRefused(HASHSEED_REFUSAL)
+    unpinned = [var for var in THREAD_VARS if os.environ.get(var) != PINNED_THREADS]
+    if unpinned:
+        raise MatrixRefused(f"{THREADS_REFUSAL} Unpinned: {', '.join(unpinned)}.")
 
 
 def planned_cells(plan: Plan) -> tuple[Path, ...]:
@@ -204,9 +240,7 @@ def planned_cells(plan: Plan) -> tuple[Path, ...]:
     if plan.resolution_only:
         return ()
     return tuple(
-        cell_path(plan.results_dir, dataset, leg)
-        for dataset in plan.datasets
-        for leg in plan.legs
+        cell_path(plan.results_dir, dataset, leg) for dataset in plan.datasets for leg in plan.legs
     )
 
 
@@ -253,14 +287,18 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
         ),
     )
     args = parser.parse_args(argv)
-    datasets = tuple(DATASET_NAMES) if args.datasets == "all" else tuple(
-        d.strip() for d in args.datasets.split(",") if d.strip()
+    datasets = (
+        tuple(DATASET_NAMES)
+        if args.datasets == "all"
+        else tuple(d.strip() for d in args.datasets.split(",") if d.strip())
     )
     unknown = [d for d in datasets if d not in DATASET_NAMES]
     if unknown:
         parser.error(f"unknown dataset(s) {unknown}; known: {sorted(DATASET_NAMES)}")
-    legs = ALL_LEG_NAMES if args.legs == "all" else tuple(
-        leg.strip() for leg in args.legs.split(",") if leg.strip()
+    legs = (
+        ALL_LEG_NAMES
+        if args.legs == "all"
+        else tuple(leg.strip() for leg in args.legs.split(",") if leg.strip())
     )
     bad = [leg for leg in legs if leg not in ALL_LEG_NAMES]
     if bad:
@@ -344,9 +382,7 @@ def run_dataset(name: str, plan: Plan) -> list[Path]:
         return written
 
     pending = [
-        leg
-        for leg in plan.legs
-        if plan.force or not cell_path(results_dir, name, leg).is_file()
+        leg for leg in plan.legs if plan.force or not cell_path(results_dir, name, leg).is_file()
     ]
     blocked = {leg: missing_inputs(spec.export_dir, leg) for leg in pending}
     for leg, missing in blocked.items():
@@ -518,9 +554,7 @@ def _rescue_cell(
         gate.add(retrieval.gate)
         for budget, cell in cells.items():
             started = time.perf_counter()
-            result = pipeline.select(
-                query.question, retrieval, selector=selector, budget=budget
-            )
+            result = pipeline.select(query.question, retrieval, selector=selector, budget=budget)
             _score(
                 cell,
                 export,
@@ -538,9 +572,7 @@ def _rescue_cell(
     )
 
 
-def _tuned_cell(
-    runner: Runner, leg: str, scored: Sequence[ScoredQuery]
-) -> dict[str, object]:
+def _tuned_cell(runner: Runner, leg: str, scored: Sequence[ScoredQuery]) -> dict[str, object]:
     """The weighted cell: weights fitted on dev, BOTH variants scored on the disjoint test half.
 
     ``metrics`` is the tuned variant on test and ``metrics_equal_weight_on_test`` is the

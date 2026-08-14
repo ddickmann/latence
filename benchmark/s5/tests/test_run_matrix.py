@@ -42,9 +42,7 @@ class TestDefaultsDidNotMove:
         assert RESULTS_DIRS == {"equal": "results", "tuned": "results-weighted"}
         plan = run_matrix.parse_args(["--datasets", "vidoseek", "--legs", "dense"])
         assert plan.results_dir == plan.out / "results"
-        assert run_matrix.planned_cells(plan) == (
-            plan.out / "results" / "vidoseek__dense.json",
-        )
+        assert run_matrix.planned_cells(plan) == (plan.out / "results" / "vidoseek__dense.json",)
         tuned = run_matrix.parse_args(
             ["--datasets", "vidoseek", "--legs", "dense", "--fusion", "tuned"]
         )
@@ -56,9 +54,7 @@ class TestDefaultsDidNotMove:
 
 class TestPlannedCells:
     def test_every_dataset_x_leg_in_matrix_order(self) -> None:
-        plan = run_matrix.parse_args(
-            ["--datasets", "musique,vidoseek", "--legs", "bm25,dense"]
-        )
+        plan = run_matrix.parse_args(["--datasets", "musique,vidoseek", "--legs", "bm25,dense"])
         # Legs are canonicalised into ladder order by parse_args, not left as typed.
         assert plan.legs == ("dense", "bm25")
         assert [p.name for p in run_matrix.planned_cells(plan)] == [
@@ -90,9 +86,7 @@ class TestCorpusLayout:
         assert specs["vidoseek"].export_dir == (
             tmp_path / "benchmark" / "sota-corpus" / "s3-exports" / "vidoseek"
         )
-        assert specs["vidoseek"].s2_root == (
-            tmp_path / "benchmark" / "sota-corpus" / "s2-output"
-        )
+        assert specs["vidoseek"].s2_root == (tmp_path / "benchmark" / "sota-corpus" / "s2-output")
         assert specs["musique"].export_dir == (
             tmp_path / "benchmark" / "official-data" / "musique-full" / "export"
         )
@@ -116,9 +110,7 @@ class TestDeterminismRefusal:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("PYTHONHASHSEED", raising=False)
-        plan = run_matrix.Plan(
-            datasets=(), legs=("dense",), limit=None, out=tmp_path, force=False
-        )
+        plan = run_matrix.Plan(datasets=(), legs=("dense",), limit=None, out=tmp_path, force=False)
         # At the API entry — the campaign stage never calls main(), and must be refused too.
         with pytest.raises(run_matrix.MatrixRefused, match="PYTHONHASHSEED=0"):
             run_matrix.run(plan)
@@ -132,6 +124,31 @@ class TestDeterminismRefusal:
             "refusing to run: set PYTHONHASHSEED=0 (the hypergraph entry is hash-order "
             "sensitive; a run without it is not reproducible).\n"
         )
+
+    @pytest.mark.parametrize("var", run_matrix.THREAD_VARS)
+    def test_run_refuses_when_any_blas_thread_count_is_unpinned(
+        self, var: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hash seed alone is not reproducibility.
+
+        Thread count changes float summation order in the dense leg's BLAS ``gemv`` and in the
+        query embedder, which changes rankings — measured at 33/1209 musique queries getting a
+        different dense pool at 4 threads versus 1. Every one of these variables has to be
+        pinned, so each is checked independently rather than as a group.
+        """
+        monkeypatch.setenv("PYTHONHASHSEED", "0")
+        for name in run_matrix.THREAD_VARS:
+            monkeypatch.setenv(name, run_matrix.PINNED_THREADS)
+        monkeypatch.setenv(var, "4")
+        plan = run_matrix.Plan(datasets=(), legs=("dense",), limit=None, out=tmp_path, force=False)
+        with pytest.raises(run_matrix.MatrixRefused, match=f"Unpinned: {var}"):
+            run_matrix.run(plan)
+
+    def test_a_fully_pinned_environment_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PYTHONHASHSEED", "0")
+        for name in run_matrix.THREAD_VARS:
+            monkeypatch.setenv(name, run_matrix.PINNED_THREADS)
+        run_matrix.require_deterministic()  # does not raise
 
 
 class TestRunReportsWhatItDid:

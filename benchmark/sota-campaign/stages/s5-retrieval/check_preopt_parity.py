@@ -17,7 +17,16 @@ claim. Two things make a cell pair incomparable, and neither is a regression:
   after the pre-optimization sweep. A key going absent → present is an addition; only a
   key present in *both* whose value moved is evidence of a regression.
 
-Everything else must match exactly. Run:
+Everything else must match exactly — with one measured caveat. The pre-optimization sweep ran
+four contended processes with an unpinned BLAS thread count; the re-run ran one process at
+``OMP_NUM_THREADS=1``. Thread count changes float summation order in the dense leg's ``gemv``
+and in the query embedder, which changes *rankings*: 33 of 1,209 musique queries get a different
+dense pool at 4 threads versus 1, and one gets a different gold-hit count. That is the harness's
+reproducibility floor across the two sweeps — about ±1 query in 1,209 — and it is why
+``run_matrix`` now refuses to run unless the thread count is pinned. Cells produced under the
+pinned contract are comparable without this caveat; these two matrices straddle it.
+
+Run:
 
     python benchmark/sota-campaign/stages/s5-retrieval/check_preopt_parity.py
 """

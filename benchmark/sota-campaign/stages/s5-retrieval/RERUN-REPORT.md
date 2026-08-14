@@ -111,16 +111,55 @@ across 10+ hours. It completes now.
 
 ---
 
-## 5. The open item
+## 5. The 7 moved cells — measured, and the answer was not the obvious one
 
-The 7 fourth-decimal moves in §1 have a hypothesis — that the vectorized BM25 reassociated
-floating-point summation, shifting scores in their last bits, and a metric value sitting within
-1e-4 of a rounding boundary tipped — and that hypothesis is **under measurement, not assumed**.
-The decisive test is whether the observed delta (0.0001) is smaller than the smallest step a
-single query's ranking change could produce in the mean; if it is, no document moved and the
-change is arithmetic. That probe is running against the real corpus. Until it returns, the
-correct statement is *"39 of 46 comparable cells are bit-identical and 7 moved in the fourth
-decimal for a reason not yet established,"* not *"parity held."*
+The hypothesis was that the vectorized BM25 reassociated floating-point summation and tipped a
+value sitting on a rounding boundary. **That is wrong, and the measurement killed it.**
+
+Three findings, in the order they landed:
+
+1. **The arithmetic cannot reach it.** musique/bm25's unrounded `recall@10` is
+   0.3404457170718723 — it sits 4.283e-06 below the 0.34045 rounding boundary, while the
+   metric's own float-summation error is 1.1e-15. Six orders of magnitude short. No
+   ranking-independent arithmetic produces this move; the per-query recall multiset must have
+   differed. Likewise `tokens_packed_mean` is `round(S/N, 1)` over an **integer** sum of
+   `HeuristicTokenCounter` counts (`N = 1142`, verified all-int), so float accumulation cannot
+   move it at all — the 16k vidoseek cell requires ≥170 tokens of genuinely different packed
+   content.
+2. **The ranking code is byte-identical between the two sweeps.** `git diff fa4818f..400bbce`
+   over `DenseBackend`, `Bm25Backend`, `_Bm25TermMatrix`, `fuse_signals`, `POOL_K`, `_tokenize`,
+   `Runner`, `fuser.py`, both `bm25.py`, `metrics.py`, `goldmap.py`, `embed.py`: zero functional
+   diff. The BM25 vectorization predates *both* sweeps.
+3. **The variable that changed was the environment.** The pre-optimization sweep ran four
+   contended unpinned processes; the re-run ran one process at `OMP_NUM_THREADS=1`. Flipping
+   only that switch on current head reproduces the effect exactly:
+
+   | threads | `recall@10` unrounded | cell | `ndcg@10` | cell |
+   |---|---|---|---|---|
+   | 1 | 0.3404457170718723 | 0.3404 | 0.4161434108235836 | 0.4161 |
+   | 4 | 0.3405835720484370 | 0.3406 | 0.4161918995551152 | 0.4162 |
+
+   Same code, same corpus, same 1,209 queries: 33 get a different dense pool, 4 a different
+   top-10 membership, and exactly **one** (`musique-2hop__67660_158861`, `|gold|=6`) a different
+   gold-hit count. That one query is the entire delta — `1/(1209x6) = 1.37855e-04`, matching the
+   observed difference to the digit.
+
+This also corrects the premise in §1. `hyperedges`, `coe` and `packer` *do* involve BM25 and did
+not move; the five that moved report identical metrics on musique because on that corpus they
+collapse to **one ranking** (dense+bm25 RRF — the graph lanes contribute nothing and the 10k
+budget never binds). One ranking flipped, five cells reported it.
+
+**So: a real ranking change, not a regression, and not caused by the optimization work.** The
+correct reading is 39 of 46 cells exact and 7 inside the harness's own reproducibility floor —
+roughly ±1 query in 1,209 — which until now was **undeclared**.
+
+### What was fixed
+
+The determinism contract asserted `PYTHONHASHSEED=0` and said nothing about thread count. It now
+refuses unless `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` are all pinned to
+1, at the API entry so the campaign stage is bound by it too. A benchmark that lets the thread
+scheduler edit its results is not a benchmark, and the fix belongs in the harness rather than in
+a note telling operators to remember.
 
 ---
 

@@ -59,6 +59,26 @@ refused blocks the stage: that is an absent or unfinished export being advanced 
 measurement. Gold resolution is audited per dataset before any recall number is trusted, and
 single-hop control datasets are reported as controls, not headlines.
 
+### The run has to be pinned, twice over
+
+The harness refuses to start unless **`PYTHONHASHSEED=0`** *and* **`OMP_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS` are all `1`**:
+
+```bash
+PYTHONHASHSEED=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  python -m benchmark.s5.run_matrix --datasets all --legs all
+```
+
+The hash seed is the obvious one — the hypergraph entry is hash-order sensitive. The thread pin
+is the one that costs people a day. The dense leg is a brute-force cosine (a BLAS `gemv`) and
+the query embedder is a torch forward pass; both reassociate their floating-point sums
+differently at different thread counts, and that is enough to change *which documents land in
+the pool*. Measured on this corpus: running musique/bm25 at 4 threads instead of 1, with
+identical code, gives 33 of 1,209 queries a different dense pool and one query a different
+gold-hit count — moving `recall@10` from 0.3404 to 0.3406. An unpinned harness reports thread
+scheduling as a quality change. Because the campaign stage calls the harness in-process, the
+pins have to be in the environment you launch `latence-campaign` from.
+
 Every dataset's corpus/toolkit licenses and lanes are recorded in one place —
 [`THIRD-PARTY-LICENSES.md`](https://github.com/ddickmann/latence-framework/blob/main/THIRD-PARTY-LICENSES.md)
 — and corpus-derived artifacts (raw acquisitions, OCR output, exports, reports) stay local by
