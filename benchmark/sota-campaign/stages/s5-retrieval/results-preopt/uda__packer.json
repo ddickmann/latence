@@ -1,0 +1,41 @@
+{
+  "control": true,
+  "dataset": "uda",
+  "fusion": "equal",
+  "leg": "packer",
+  "limit": 1000,
+  "metrics": {
+    "chain_coverage@10": null,
+    "chain_queries": 0,
+    "full_chain_hit@10": null,
+    "latency_ms_median": 5487.31,
+    "latency_ms_p95": 6832.25,
+    "ndcg@10": 0.0318,
+    "queries": 1000,
+    "recall@1": 0.0107,
+    "recall@10": 0.0322,
+    "recall@5": 0.0262,
+    "token_budget": 4000,
+    "tokens_packed_max": 4000,
+    "tokens_packed_mean": 3889.5
+  },
+  "resolution": {
+    "dataset": "uda",
+    "exclusions": {},
+    "granularity": {
+      "document": 141,
+      "page": 859
+    },
+    "page_share_of_resolved": 0.859,
+    "queries_excluded": 0,
+    "queries_total": 1000,
+    "queries_usable": 1000,
+    "refs_excluded": 0,
+    "refs_resolved": 1000,
+    "refs_total": 1000,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok",
+  "vector_source": "corpus"
+}

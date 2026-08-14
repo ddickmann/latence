@@ -1,0 +1,71 @@
+{
+  "budget_curve": {
+    "10000": {
+      "chain_coverage@10": 0.5905,
+      "chain_queries": 1209,
+      "doc_recall@10": 0.6068,
+      "doc_recall@5": 0.5239,
+      "full_chain_hit@10": 0.2266,
+      "latency_ms_median": 351.86,
+      "latency_ms_p95": 686.8,
+      "ndcg@10": 0.4162,
+      "queries": 1209,
+      "recall@1": 0.1343,
+      "recall@10": 0.3405,
+      "recall@5": 0.2861,
+      "token_budget": null
+    }
+  },
+  "control": false,
+  "dataset": "musique",
+  "fusion": "equal",
+  "gate": {
+    "fired": 1208,
+    "hit_rate": 0.9992,
+    "mode": "auto",
+    "queries": 1209,
+    "reasons": {
+      "entity-heavy": 1185,
+      "low-agreement": 1089,
+      "relation-cue": 64
+    },
+    "vetoed_navigational": 0
+  },
+  "leg": "graph_rescue",
+  "limit": null,
+  "metrics": {
+    "chain_coverage@10": 0.5905,
+    "chain_queries": 1209,
+    "doc_recall@10": 0.6068,
+    "doc_recall@5": 0.5239,
+    "full_chain_hit@10": 0.2266,
+    "latency_ms_median": 351.86,
+    "latency_ms_p95": 686.8,
+    "ndcg@10": 0.4162,
+    "queries": 1209,
+    "recall@1": 0.1343,
+    "recall@10": 0.3405,
+    "recall@5": 0.2861,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "musique",
+    "exclusions": {},
+    "granularity": {
+      "document": 3204,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 1209,
+    "queries_usable": 1209,
+    "refs_excluded": 0,
+    "refs_resolved": 3204,
+    "refs_total": 3204,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "select_budget": 10000,
+  "status": "ok",
+  "vector_source": "corpus"
+}

@@ -1,0 +1,41 @@
+{
+  "control": false,
+  "dataset": "hotpotqa",
+  "fusion": "equal",
+  "leg": "packer",
+  "limit": 1000,
+  "metrics": {
+    "chain_coverage@10": 0.596,
+    "chain_queries": 1000,
+    "full_chain_hit@10": 0.325,
+    "latency_ms_median": 1407.83,
+    "latency_ms_p95": 2406.15,
+    "ndcg@10": 0.4122,
+    "queries": 1000,
+    "recall@1": 0.1452,
+    "recall@10": 0.399,
+    "recall@5": 0.3484,
+    "token_budget": 4000,
+    "tokens_packed_max": 1347,
+    "tokens_packed_mean": 646.5
+  },
+  "resolution": {
+    "dataset": "hotpotqa",
+    "exclusions": {},
+    "granularity": {
+      "document": 2000,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 1000,
+    "queries_usable": 1000,
+    "refs_excluded": 0,
+    "refs_resolved": 2000,
+    "refs_total": 2000,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok",
+  "vector_source": "corpus"
+}

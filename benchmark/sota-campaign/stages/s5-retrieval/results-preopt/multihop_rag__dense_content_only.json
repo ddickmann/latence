@@ -1,0 +1,38 @@
+{
+  "control": false,
+  "dataset": "multihop_rag",
+  "leg": "dense_content_only",
+  "limit": null,
+  "metrics": {
+    "chain_coverage@10": 0.6402,
+    "chain_queries": 2255,
+    "full_chain_hit@10": 0.3401,
+    "latency_ms_median": 8.84,
+    "latency_ms_p95": 100.05,
+    "ndcg@10": 0.4631,
+    "queries": 2255,
+    "recall@1": 0.0525,
+    "recall@10": 0.3347,
+    "recall@5": 0.214,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "multihop_rag",
+    "exclusions": {},
+    "granularity": {
+      "document": 5908,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 2556,
+    "queries_usable": 2255,
+    "refs_excluded": 0,
+    "refs_resolved": 5908,
+    "refs_total": 5908,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok",
+  "vector_source": "sidecar"
+}

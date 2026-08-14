@@ -1,0 +1,41 @@
+{
+  "control": true,
+  "dataset": "ohr_bench",
+  "fusion": "equal",
+  "leg": "hyperedges",
+  "limit": null,
+  "metrics": {
+    "chain_coverage@10": null,
+    "chain_queries": 0,
+    "full_chain_hit@10": null,
+    "latency_ms_median": 1365.6,
+    "latency_ms_p95": 1552.15,
+    "ndcg@10": 0.4194,
+    "queries": 4541,
+    "recall@1": 0.1536,
+    "recall@10": 0.5265,
+    "recall@5": 0.3893,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "ohr_bench",
+    "exclusions": {
+      "corpus-missing-domain": 498
+    },
+    "granularity": {
+      "document": 18,
+      "page": 4523
+    },
+    "page_share_of_resolved": 0.996,
+    "queries_excluded": 498,
+    "queries_total": 5039,
+    "queries_usable": 4541,
+    "refs_excluded": 498,
+    "refs_resolved": 4541,
+    "refs_total": 4541,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok",
+  "vector_source": "corpus"
+}
