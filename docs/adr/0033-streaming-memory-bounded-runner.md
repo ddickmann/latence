@@ -10,9 +10,12 @@ exist as a list. `outputs` retains nothing at all by default; the finalized chec
 source of truth (ADR-0017) and every reader streams it back. The matching **doc-level input**
 materialisation — `_gather_inputs` concatenating every parent's records into the list a Stage held
 for its whole execution — was removed by **audit R2** for the Capabilities whose Protocol allows
-it (`_STREAMED_INPUT_KINDS`: Parse, Chunk, Schema Induction, Entity Extraction, Fused, Redaction),
+it (`STREAMED_INPUT_KINDS`: Parse, Chunk, Schema Induction, Entity Extraction, Fused, Redaction),
 and by **dogfood-3** for the multi-carrier Context Enrichment, which receives one independent lazy
-stream per carrier instead (`_PER_CARRIER_INPUT_KINDS`).
+stream per carrier instead (`PER_CARRIER_INPUT_KINDS`). Since the 2026-08 architecture pass
+(Wave 4-I) both sets are DERIVED from the Capability's own declared `input_plan`
+(`capability_descriptor.StageInputPlan`) rather than hand-maintained in the Runner, and the
+resolution itself is one object — `stage_inputs.StageInputs` — that the dispatch queries.
 It is **still whole-corpus for the rest** — Screening, Relation Extraction,
 Export — because their Provider materialises the input anyway. See **Honest memory boundary**
 below for the per-transient status; that residue is why this ADR is *partially*, not fully,
@@ -40,7 +43,7 @@ The local Runner is a whole-corpus-in-memory DAG executor: `runner.py` holds `ou
 ## Decision (two stage classes + incremental IO)
 The DAG splits into two kinds of stage, routed by CapabilityKind:
 
-1. **Streaming transforms** (doc-level: Source, Screening, Parse, Chunk, Entity, Relation, Redaction). These are per-document and independent, so the Runner *should* push the corpus through them in **bounded batches** (configurable `batch_docs`, default e.g. 256) instead of whole lists: a batch flows the full doc-level chain, its outputs are appended to checkpoints, then it is released before the next batch. Provider signatures are already `Iterable`-in/`Iterable`-out, so provider code barely changes — the change is in the Runner's execution loop. **STATUS: the `batch_docs` *scheduling* loop is still DEFERRED (issue #110); the per-Stage materialisation it was wanted for is gone for seven of the ten doc-level Capabilities.** What is built: the *release* of a doc-level Stage's retained output once its consumers have run (#69), the streamed **output** dispatch (C6), the streamed **input** for `_STREAMED_INPUT_KINDS` (audit R2) and the per-carrier streamed input for `_PER_CARRIER_INPUT_KINDS` (dogfood-3) — so those Stages are `O(checkpoint batch)` on both sides without any scheduling change. Screening / Relation / Export still materialise their input by Provider Protocol, and only `batch_docs` bounds those.
+1. **Streaming transforms** (doc-level: Source, Screening, Parse, Chunk, Entity, Relation, Redaction). These are per-document and independent, so the Runner *should* push the corpus through them in **bounded batches** (configurable `batch_docs`, default e.g. 256) instead of whole lists: a batch flows the full doc-level chain, its outputs are appended to checkpoints, then it is released before the next batch. Provider signatures are already `Iterable`-in/`Iterable`-out, so provider code barely changes — the change is in the Runner's execution loop. **STATUS: the `batch_docs` *scheduling* loop is still DEFERRED (issue #110); the per-Stage materialisation it was wanted for is gone for seven of the ten doc-level Capabilities.** What is built: the *release* of a doc-level Stage's retained output once its consumers have run (#69), the streamed **output** dispatch (C6), the streamed **input** for `STREAMED_INPUT_KINDS` (audit R2) and the per-carrier streamed input for `PER_CARRIER_INPUT_KINDS` (dogfood-3) — so those Stages are `O(checkpoint batch)` on both sides without any scheduling change. Screening / Relation / Export still materialise their input by Provider Protocol, and only `batch_docs` bounds those.
 2. **Accumulators** (corpus-level: Profiling, Disambiguation, Graph Assembly). These inherently need the whole corpus, but their **output is bounded by the knowledge-graph size, not the corpus size** — canonical entities, KG nodes/edges, corpus features — which is `O(entities + edges) << O(all mentions)`. The design formalizes the contract that an accumulator consumes a stream and holds only bounded aggregate/canonical state (Profiling already spills features; Disambiguation/Graph already emit canonical records, not raw mentions). They receive the doc-level output as a stream (read back from checkpoints batch-by-batch), not a materialized list.
 
 **Incremental Export.** Replace `from_pylist(whole)` with a `pq.ParquetWriter` writing **row-group batches** + JSONL append. This kills the single biggest transient (peak RSS currently coincides with Export).
@@ -90,24 +93,24 @@ per-transient** boundary, not the aspirational end state.
 * **The doc-level stage INPUT materialisation — for seven of the ten Capabilities (audit R2 +
   dogfood-3).**
   C6 bounded only the output side; the input side was still `_gather_inputs` concatenating every
-  parent's records into one list that lived in `ctx.incoming` for the Stage's entire execution,
+  parent's records into one list that reached the dispatch for the Stage's entire execution,
   with `_as_type` building a second list of the same size and (under `extract_on: masked`)
   `_extract_input_chunks` a third of fresh `model_copy` objects. Measured on the shipped code:
-  an Entity Stage's `ctx.incoming` held 48 records at 4 documents and 192 at 16 — exactly linear.
-  For the Capabilities in `runner._STREAMED_INPUT_KINDS` — **Parse, Chunk, Schema Induction,
+  an Entity Stage's gathered input held 48 records at 4 documents and 192 at 16 — exactly linear.
+  For the Capabilities in `STREAMED_INPUT_KINDS` — **Parse, Chunk, Schema Induction,
   Entity Extraction, Fused, Redaction** — the Runner now hands the Stage a lazy stream over the
-  parents' checkpoints (`_stream_doc_inputs` + `_as_type_stream` +
+  parents' checkpoints (`StageInputs.stream` + `_as_type_stream` +
   `_extract_input_chunks_streamed`); pulling the *k*-th input record has read exactly *k* records
   back. Both sides of those Stages are `O(checkpoint batch)`. `records_in` stays exact without a
-  buffer: `_streamed_input_count` counts the checkpoint's lines (one record per line by
+  buffer: `StageInputs.count` counts the checkpoint's lines (one record per line by
   construction of `_write_checkpoint`) rather than decoding the corpus a second time.
-  * **The MULTI-CARRIER case — Context Enrichment (`_PER_CARRIER_INPUT_KINDS`, dogfood-3).** One
+  * **The MULTI-CARRIER case — Context Enrichment (`PER_CARRIER_INPUT_KINDS`, dogfood-3).** One
     `incoming` stream cannot serve a Stage that reads two carriers out of one `depends_on` set,
     which is why this Capability was first listed as inherently unbounded: partitioning the stream
     buffers at least one side. But its Provider consumes each input exactly once and folds/projects
     on arrival, so the Runner hands it NOTHING through `incoming` (an empty list) and opens one
     independent lazy stream per carrier over the same parents
-    (`_stream_parent_inputs_of_type`) — N carriers cost N `O(1)`-memory passes over re-readable
+    (`StageInputs.stream_of`) — N carriers cost N `O(1)`-memory passes over re-readable
     checkpoints, the trade Disambiguation already makes for its mention + relation streams. This
     was not academic: the S3 UDA run (220 129 chunks / ~90 k graph records, a fixture-measured
     ~5.1 kB per `GraphNode`) was OOM-killed with the gathered list resident, inside a 29 GB cgroup.
@@ -207,7 +210,7 @@ KG) would need sharding / external accumulator state — a separate effort, out 
 
 **Net:** IO transients (Export + checkpoint write) and the retained live set are bounded; a
 doc-level Stage's transient is bounded on **both** sides for the six Capabilities in
-`_STREAMED_INPUT_KINDS` plus Context Enrichment (`_PER_CARRIER_INPUT_KINDS`, one lazy stream per
+`STREAMED_INPUT_KINDS` plus Context Enrichment (`PER_CARRIER_INPUT_KINDS`, one lazy stream per
 carrier), and on the **output side only** for Screening / Relation /
 Export, whose input is still `O(corpus-slice)` because their Provider materialises it;
 corpus-level memory is bounded by the KG for Profiling/Graph and by the **mention set** for
@@ -299,17 +302,17 @@ Runner execution loop + checkpoint format (batch-granular) + Export writer chang
   **output** materialisation is gone, and the Provider teardown moved after consumption so the
   tallies and the VRAM lifecycle stay correct under lazy iteration (see **Honest memory
   boundary**).
-* **Streaming the doc-level INPUT (audit R2).** `StageContext.incoming` is an `Iterable`, not a
-  list: for `_STREAMED_INPUT_KINDS` the Runner passes a lazy stream over the parents' checkpoints
+* **Streaming the doc-level INPUT (audit R2).** `StageInputs.stream` is an `Iterable`, not a
+  list: for `STREAMED_INPUT_KINDS` the Runner passes a lazy stream over the parents' checkpoints
   and the narrowing/masking stay lazy too, so neither side of those Stages is ever corpus-sized.
-  The interface got *smaller* (a consumer may iterate `incoming` at most once) rather than gaining
+  The interface got *smaller* (a consumer may iterate the stream at most once) rather than gaining
   a layer; a Runner adapter on a materialised substrate (Airflow XCom) still passes a list. The
   now-unreachable `_require_redaction_inputs` guard folded into the streamed narrowing's message,
   which is the first time its W16 advice can actually reach an operator.
 * **Streaming a MULTI-CARRIER doc-level input (dogfood-3).** A Stage that reads two carriers out of
-  one `depends_on` set gets neither a list nor a single stream: it receives an empty `incoming` and
-  the dispatch opens one lazy stream per carrier (`_PER_CARRIER_INPUT_KINDS`,
-  `_stream_parent_inputs_of_type`). Context Enrichment is the first — its eager gather is what the
+  one `depends_on` set gets neither a list nor a single stream: nothing is handed to it through
+  one input stream at all, and the dispatch opens one lazy stream per carrier
+  (`PER_CARRIER_INPUT_KINDS`, `StageInputs.stream_of`). Context Enrichment is the first — its eager gather is what the
   Stage's own bounded fold/projection could not save it from. Its wiring check moved to the carrier
   pre-pass the accumulators already use, so the typed `ContractError` is unchanged.
 * **The accumulator audit** the "Blast radius / risk" section required — performed, the ADR's

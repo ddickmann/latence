@@ -139,8 +139,8 @@ class KnowledgeGraphExport:
         # inside a 29 GB container. Partitioning in a single pass keeps ONLY the inner records
         # (the envelope becomes garbage immediately), and consuming ``records`` exactly once is
         # what lets the Runner hand this Stage a lazy stream instead of a gathered corpus list
-        # (:data:`~latence_core.runner._STREAMED_INPUT_KINDS`). Output is unchanged: the three
-        # lists hold the same objects, in the same input order, as the three comprehensions did.
+        # (:data:`~latence_core.capability_descriptor.STREAMED_INPUT_KINDS`). Output is unchanged:
+        # the three lists hold the same objects, in the same order, as the comprehensions did.
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
         # ADR-0057: the OPTIONAL Hyperedge stream. Present only when Graph Assembly was

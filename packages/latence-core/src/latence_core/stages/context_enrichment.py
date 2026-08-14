@@ -57,8 +57,8 @@ not: the Runner gathered this Stage's ``depends_on`` inputs into one list and pa
 carrier, so every ChunkRecord and every GraphRecord stayed resident for the Stage's whole execution
 regardless of what this module retained. Because ``enrich`` consumes each of its three inputs
 exactly once (pinned by ``test_context_enrichment_memory_shape``), the Runner now hands it one
-independent lazy stream per carrier instead (``runner._PER_CARRIER_INPUT_KINDS``, ADR-0033) — which
-is what makes the bound below real end to end rather than only inside this file.
+independent lazy stream per carrier instead (the declared ``PER_CARRIER`` input shape, ADR-0033)
+— which is what makes the bound below real end to end rather than only inside this file.
 
 What is deliberately NOT done: the folded per-chunk map is *not* popped as each chunk is emitted.
 Unlike the Hyperedge builder — which dedups its chunk views by ``record_id`` — this Provider threads

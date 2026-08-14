@@ -1255,9 +1255,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         Provider's iterator is handed back **uncollapsed** — the Runner writes it record-by-record
         into the checkpoint and the Stage's output never exists as a list.
 
-        Audit R2 completes the other half: a STREAMED Capability's :meth:`~latence_core.\
-stage_inputs.StageInputs.stream` is a lazy read over the parents' checkpoints, and the narrowing
-        is lazy too (:meth:`_as_type_stream`), so the Stage's INPUT is never a list either. Those
+        Audit R2 completes the other half: a STREAMED Capability's ``inputs.stream()`` is a lazy
+        read over the parents' checkpoints, and the narrowing is lazy too
+        (:meth:`_as_type_stream`), so the Stage's INPUT is never a list either. Those
         branches trade an eager wiring check for the bound: the same typed ``ContractError`` is
         raised at the first record of the wrong carrier instead of before the Provider is called
         (same accept/reject set — see :meth:`_as_type_stream`). Every other branch validates
@@ -1556,7 +1556,7 @@ stage_inputs.StageInputs.stream` is a lazy read over the parents' checkpoints, a
             # dogfood-3: BOTH parent-side carriers are streamed, not gathered. The Provider consumes
             # each of its three inputs exactly once and folds/projects on arrival, so the Runner
             # opens one independent lazy stream per carrier over the same parents
-            # (:data:`_PER_CARRIER_INPUT_KINDS`) instead of materialising ``incoming`` and
+            # (the declared PER_CARRIER shape) instead of materialising one gathered list and
             # partitioning it. Same records in the same order as the eager partition — a per-carrier
             # stream reads the parents in ``depends_on`` order and filters, which is exactly what
             # ``[r for r in gathered if isinstance(r, ...)]`` did — so the chunk stream is still

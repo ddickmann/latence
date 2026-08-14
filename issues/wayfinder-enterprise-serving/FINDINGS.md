@@ -138,3 +138,24 @@ UNTOUCHED suites, so it predates Wave 3-H and is not attributable to it; somethi
 suites' teardown swallows the terminal reporter's tail (F9's shutdown fragility family).
 Logged, not chased — gate verdicts on these suites should read the exit code + marker
 counts, not the summary line.
+
+## F11 — the accumulator wiring scans still read the whole input (Wave 4-I, deliberate)
+
+`StageInputs.carriers_present` streams a Stage's parents to collect the carrier TYPES its
+wiring rules need. The scan can stop the moment every REQUIRED carrier has been seen —
+nothing later in the stream can change a presence verdict — and Context Enrichment declares
+that (`scan_short_circuit`, dogfood-3). The four accumulator checks that predate it
+(Profiling, Type Consolidation, Disambiguation, and both exclusive-rule Stages) do **not**:
+they still read every parent record before the Provider runs, which for an accumulator is a
+full extra pass over the corpus slice.
+
+For the presence-only rules (Profiling / Type Consolidation / Disambiguation) the
+short-circuit is provably verdict-identical: the only consumer of the partial scan is the
+`X in present` test, and the `got:` list in the message is built only on the failure path,
+which by construction ran the whole scan. Turning it on is a real read-volume change on the
+accumulator path, so it was NOT bundled into a byte-identity-gated re-homing — the flag is
+declared per-plan precisely so this stays a deliberate, separately-measured decision.
+
+The two EXCLUSIVE rules (Graph Assembly, Graph Completion) can never take it: their verdict
+depends on every type in the stream. That constraint is asserted in
+`test_stage_inputs.py::test_the_scan_short_circuits_only_where_the_plan_declares_it_sound`.
