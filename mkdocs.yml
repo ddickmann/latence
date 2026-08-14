@@ -213,6 +213,10 @@ nav:
       - Measure it:
           - Public benchmark results: BENCHMARKS.md
           - Run the public benchmarks: running-the-benchmarks.md
+          # README.md and RELEASE-GATES.md both send readers here — it is the page whose every
+          # value is still a PENDING: token, i.e. the single most important thing an evaluator
+          # should be able to find. It was published but unreachable from the nav.
+          - "End-to-end protocol (still unmeasured)": BENCHMARKS-E2E.md
           - The e2e campaign wizard: guides/benchmark-campaign.md
 
   - API Reference:
@@ -269,6 +273,7 @@ nav:
           - 0031 — Entity Extraction true original offsets: adr/0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md
           - 0042 — Chunk-level redaction: adr/0042-chunk-level-redaction-fixes-the-document-truncation-leak.md
           - 0044 — Universal redaction floor: adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md
+          - 0060 — Page boundaries cross the OCR handoff in a sidecar: adr/0060-page-boundaries-cross-the-ocr-handoff-in-a-sidecar-and-an-absent-page-map-is-a-value-not-a-page-1.md
       - Optional Stages:
           - 0037 — Graph Completion optional stage: adr/0037-graph-completion-capability-optional-post-assembly-stage-and-inferred-edge-representation.md
           - 0038 — Schema Induction optional LLM stage: adr/0038-schema-induction-optional-llm-stage-induced-labels-contract-and-additive-extractor-seam.md
@@ -295,6 +300,10 @@ nav:
           # "0052 — Retrieval MCP: ported …" makes mkdocs.yml unparseable YAML.
           - "0052 — Retrieval MCP: ported hardening + config-driven copy": adr/0052-retrieval-mcp-ports-memory-engine-hardening-with-config-driven-stack-adaptive-copy.md
           - 0053 — SPLADE structured composition: adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md
+          - 0056 — Hypergraph Evidence sidecar read per call: adr/0056-hypergraph-evidence-sidecar-is-read-per-call-over-a-point-lookup-kv-no-global-edge-adjacency.md
+          - 0057 — Hyperedge is a third GraphScope: adr/0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md
+          - 0058 — token_cost is an index-time weight, verified at query time: adr/0058-token-cost-is-an-approximate-index-time-weight-with-an-exact-query-time-verification-pass.md
+          - 0059 — Query-side entry is tiered, GLiNER2 opt-in: adr/0059-query-side-entry-is-tiered-zero-model-default-with-gliner2-strictly-opt-in.md
 
   - Project:
       - Governance & security:
@@ -309,6 +318,16 @@ nav:
       - Provenance of the code:
           - Algorithmic asset inventory: ASSET-INVENTORY.md
           - Porting map: PORTING-MAP.md
+      # CONTRIBUTING / CHANGELOG / SECURITY / SUPPORT live at the repository root, outside
+      # docs_dir, so they cannot be nav'd as pages — mkdocs would need a copy, and a copy drifts.
+      # They are nav'd as absolute links to the canonical file on GitHub instead, which is what
+      # Scrapling does and what keeps one source of truth. A reader of the docs site should never
+      # have to guess that the contribution rules, the changelog or the disclosure policy exist.
+      - On GitHub:
+          - How to contribute (+ the CLA requirement): https://github.com/ddickmann/latence-framework/blob/main/CONTRIBUTING.md
+          - Changelog: https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md
+          - Security & coordinated disclosure: https://github.com/ddickmann/latence-framework/blob/main/SECURITY.md
+          - Getting help: https://github.com/ddickmann/latence-framework/blob/main/SUPPORT.md
 
 # Pages that are published but deliberately NOT in the nav. Listing them here is how the
 # omission is *declared* rather than merely tolerated: mkdocs otherwise logs an INFO for every

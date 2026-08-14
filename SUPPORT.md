@@ -10,12 +10,17 @@ Pick the right channel and you will get a faster, better answer.
 
 | You want to… | Go here |
 | --- | --- |
-| Ask how to do something, or sanity-check a design | **[Discussions](https://github.com/ddickmann/latence-framework/discussions)** |
+| Ask how to do something, or sanity-check a design | **`docs/` first** (see below), then the **Feature request** template if the answer should have been there and wasn't. There is **no discussion forum** — see the note under this table |
 | Report something that behaves incorrectly | **Bug report** issue template |
 | Propose a feature, a Stage behaviour, or a contract change | **Feature request** issue template |
 | Propose a new Provider (a model, endpoint, or cloud service) | **Provider request** issue template — it carries the licence-verification fields that gate a Provider |
 | Report a suspected security vulnerability | **Privately.** [`SECURITY.md`](SECURITY.md) — never a public issue |
 | Contribute code | [`CONTRIBUTING.md`](CONTRIBUTING.md) — read the CLA requirement and the gates first |
+
+**GitHub Discussions is not enabled on this repository.** This page used to link a
+`/discussions` URL; it did not resolve, and a dead link that looks like a supported channel is
+worse than an absent one. Whether to open Discussions is still an open decision; if it is turned
+on, the row above and `.github/ISSUE_TEMPLATE/config.yml` change together, and this note goes.
 
 Please search existing issues and the Decision Log in `docs/adr/` before filing. A
 surprising amount of "why does it work this way" already has a written answer with the

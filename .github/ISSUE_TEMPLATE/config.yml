@@ -1,10 +1,16 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Questions & discussion
-    url: https://github.com/ddickmann/latence-framework/discussions
+  # No GitHub Discussions link here, deliberately: Discussions is NOT enabled on this
+  # repository, so a /discussions URL in the issue chooser is a dead end that looks like a
+  # supported channel. SUPPORT.md is the live routing table and says the same thing in prose.
+  # If Discussions is ever turned on, this entry becomes the Discussions link again and the
+  # matching row in SUPPORT.md changes with it — the two must never disagree.
+  - name: Getting help — where to ask what
+    url: https://github.com/ddickmann/latence-framework/blob/main/SUPPORT.md
     about: >
-      Usage questions, design discussion, and ideas that aren't yet a concrete bug or
-      feature. Please ask here before filing a bug for a how-do-I question.
+      Usage questions and design sanity-checks: what channel exists for what, what makes a
+      question answerable, and what this project explicitly does not offer (no SLA, no paid
+      support). Read this before filing a bug for a how-do-I question.
   - name: Report a security vulnerability (private)
     url: https://github.com/ddickmann/latence-framework/security/advisories/new
     about: >

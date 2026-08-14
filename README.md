@@ -6,13 +6,15 @@ you own.**
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](./pyproject.toml)
-[![tests 5,139 passing](https://img.shields.io/badge/tests-5%2C139%20passing-brightgreen)](./CONTRIBUTING.md)
+[![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](./scripts/verify-local.sh)
 [![mypy --strict](https://img.shields.io/badge/mypy-strict-brightgreen)](./scripts/typecheck.sh)
 [![status pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange)](#status--maturity)
 
 *(No CI or PyPI badge: no release has been cut and no distribution has ever been published, so
-either badge would report a state that does not exist. See [Status & maturity](#status--maturity)
-for what is and is not proven.)*
+either badge would report a state that does not exist. The test badge deliberately carries **no
+number** — a hardcoded count is stale one merge later; the exact count, the commit it was measured
+at and the command that produces it are in [Status & maturity](#status--maturity), which is the
+source of truth. See it for what is and is not proven.)*
 
 ---
 
@@ -388,11 +390,29 @@ Bus factor, fork posture, support lifetime and CRA readiness are written down ra
 
 ## Install
 
-A thin core plus one distribution per Provider family (ADR-0016) — you install only what you use, so
-the "runs on a laptop" promise holds. There is no `latence` meta-package; installing is always one or
-more of these. Python ≥ 3.11.
+> **⚠️ Nothing is on PyPI yet.** No release has been cut, so every `pip install latence-*` command
+> below fails today with `ERROR: No matching distribution found`. Those names are *reserved by the
+> workspace, not published* — see [Status & maturity](#status--maturity). **The install that works
+> right now is from a clone.** The distribution map is kept below the fold because the split is the
+> design (ADR-0016) and worth seeing before you clone, not because you can install it.
+
+**Today — from a clone.** This is the same path the [quickstart](#60-second-quickstart) uses, and it
+is exercised end-to-end on every CI run:
 
 ```bash
+git clone https://github.com/ddickmann/latence-framework && cd latence-framework
+uv sync                                          # CPU-first env: core, demo, console, retrieval
+uv run latence --help                            # the CLI
+uv pip install -e packages/latence-embedder-st   # add any opt-in Provider package by path
+```
+
+**After the first release** — a thin core plus one distribution per Provider family (ADR-0016), so
+you install only what you use and the "runs on a laptop" promise holds. There is no `latence`
+meta-package; installing will always be one or more of these. Python ≥ 3.11.
+
+```bash
+# NOT YET AVAILABLE — no release exists and none of these are published. Reproduced here as the
+# map of the eventual distribution split, not as commands to run today.
 pip install latence-core          # contracts, Capabilities, local Runner, Storage, CLI
 pip install latence-demo          # + the CPU demo set and its self-contained viewer
 pip install latence-console       # + the read-only, offline localhost run console
@@ -406,7 +426,8 @@ pip install latence-sink-qdrant        # one-shot idempotent loader: Export → 
 ```
 
 `packages/` holds every distribution and each carries its own README; the list above is a tour, not
-the index.
+the index. Whether these ever go to PyPI at all under a noncommercial licence is an open decision,
+not an oversight.
 
 ---
 
@@ -464,6 +485,7 @@ Copyright 2026 Dennis Dickmann (latence.ai). See [`NOTICE`](./NOTICE).
 | **Compare Providers** | [`docs/running-a-bakeoff.md`](./docs/running-a-bakeoff.md) · [`docs/running-a-stack.md`](./docs/running-a-stack.md) |
 | **Check our numbers** | [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) (measured) · [`PERF-RESULTS.md`](./PERF-RESULTS.md) (measured) · [`docs/running-the-benchmarks.md`](./docs/running-the-benchmarks.md) (reproduce them) |
 | **See what is still unproven** | [`RELEASE-GATES.md`](./RELEASE-GATES.md) · [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md) — every value there is still a placeholder, and the build knows it |
+| **Roadmap** | There isn't a dated one, and one will not be invented for the look of it. The plan *is* the unmet set: [`RELEASE-GATES.md`](./RELEASE-GATES.md) worked gate by gate, then the *Not yet proven* items in [Status & maturity](#status--maturity) — the E2E protocol run, SPLADE as a measured signal, the eight necessity gates, the 100k/1M envelopes. Order is gate order. No target dates: this is maintained by one person ([`docs/CONTINUITY.md`](./docs/CONTINUITY.md)), and a date would be a claim about capacity nobody has measured |
 | **Read the decisions** | [`docs/adr/`](./docs/adr/) · [`CONTEXT.md`](./CONTEXT.md) — the glossary |
 | **Contribute** | [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — note the contributor position in `COMMERCIAL.md` |
 | **Evaluate for adoption** | [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) · [`SECURITY.md`](./SECURITY.md) · [`CHANGELOG.md`](./CHANGELOG.md) |

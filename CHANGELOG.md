@@ -9,7 +9,59 @@ workspace are versioned and released together under one version number.
 
 ## [Unreleased]
 
+**Everything in this file is unreleased.** No `v*` tag has been cut and no distribution has ever
+been published, so this section is not a backlog sitting on top of shipped versions — it *is* the
+history. It is large for that reason. When the first tag is cut (`docs/RELEASING.md`), this block
+becomes that release's section and the cadence starts from there; until then there is no cadence to
+report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to stop.
+
 ### Fixed
+
+- **CI never left Linux while all 33 packages claimed `Operating System :: OS Independent`.**
+  Every `runs-on:` in every workflow was `ubuntu-latest`. The `test` job now matrixes over
+  `os` as well as interpreter — `ubuntu-latest` on every supported Python plus a
+  `macos-latest` leg — and the whole suite was run on an arm64 macOS host before the lane was
+  added, so the claim is evidenced rather than hoped for. **Windows is not claimed**, and the
+  classifiers changed instead of the workflow: `latence-demo` defaults to the POSIX path
+  `file:///tmp/latence-demo`, ~98 test modules build `file:///…` URIs with no Windows spelling,
+  the entire merge gate is bash, and the pinned GLinker wheels are Linux/x86-64 only. All 33
+  packages now declare `Operating System :: POSIX :: Linux` + `Operating System :: MacOS` —
+  exactly what CI runs — and `test_publish_readiness.py` pins the classifier set to the OS
+  matrix so the two cannot drift apart again.
+- **`requires-python = ">=3.11"` was unbounded with only 3.11/3.12 tested.** Rather than
+  capping the claim, the tested range was widened: 3.13 was run locally against a
+  `uv sync --python 3.13` of this exact lockfile, then added to the CI matrix and to every
+  package's classifiers.
+- **`CHANGELOG.md` recorded a "first public release" that never happened.** The `[0.1.0]` entry
+  claimed a public, Apache-2.0-licensed release; no `v*` tag exists, nothing was ever published,
+  and the workspace was relicensed to PolyForm on 2026-07-29. It is now labelled as what it was
+  — an internal version pin — and the two link references (`compare/v0.1.0...HEAD`,
+  `releases/tag/v0.1.0`), both of which would 404 on a public repository, are gone.
+- **Two files routed users to a GitHub Discussions tab that does not exist.**
+  `.github/ISSUE_TEMPLATE/config.yml` and `SUPPORT.md` both linked `/discussions` on an
+  unpublished repository. The issue chooser now points at `SUPPORT.md`, and `SUPPORT.md` says
+  plainly that there is no forum. Whether to enable Discussions is left as an owner decision.
+- **The `## Install` section read as live for ten distributions that are not on PyPI.** The
+  honest line was eight lines above; the block itself was not marked. `## Install` now leads
+  with the not-yet-published caveat and the working from-clone path, and the PyPI list is
+  explicitly labelled as the eventual distribution map.
+- **The `tests 5,139 passing` badge was a hardcoded count that goes stale on the next merge.**
+  Replaced with a non-numeric capability badge; the exact count, the commit it was measured at
+  and the command that produces it stay in `## Status & maturity`, which is the source of truth.
+- **`RELEASE-GATES.md` Gate 3 stated a licence defect that had already been fixed.** All 33
+  packages have declared the same SPDX identifier for some time, and a release-mode test already
+  enforces it. The item is ticked and reworded to state the invariant and name its enforcing test.
+- **`test_campaign_s5_wizard.py::test_the_vocabularies_mirror_the_harness` was red in CI and
+  green on developer machines.** It imports `benchmark.s5.legs`, which imports `numpy` at module
+  scope, while the CPU-first dev env is deliberately numpy-free (ADR-0016) — a pristine
+  `uv sync`, which is exactly what `.github/actions/setup-workspace` produces, has no numpy. It
+  passed locally only where numpy had been picked up transitively (a docs sync, a heavy Provider
+  install). Found while standing up the py3.13 lane, on the only truly pristine environment in
+  play. Now `pytest.importorskip("numpy")` with the reason stated, so it skips where the harness
+  is not installable and still asserts lockstep where it is.
+- **Five ADRs (0056–0060) and `docs/BENCHMARKS-E2E.md` were published but unreachable from the
+  docs nav** — the same class of defect `#189` fixed for ADR-0032/0047. `BENCHMARKS-E2E.md` is
+  the page `README.md` and `RELEASE-GATES.md` both send evaluators to.
 
 - **The production Docker image's CLI could not import (deploy/Dockerfile).** The runtime stage
   copies only the venv, but `uv sync` installs workspace members editable and a workspace-member
@@ -57,6 +109,43 @@ workspace are versioned and released together under one version number.
   page it did before.
 
 ### Added
+
+- **`.pre-commit-config.yaml`** — a commit-time mirror of the two fastest CI gates (the ruff lint
+  scope and the `detect-secrets` audited-baseline gate). Every hook is `local` /
+  `language: system` and runs the *identical* command from `ci.yml`: pulling hook code from a
+  third-party `rev:` would add an unpinned execution surface to a repository that SHA-pins every
+  GitHub Action, and a hook that has drifted from CI is worse than no hook. A test asserts each
+  hook's `entry:` still appears verbatim in `ci.yml`. `scripts/verify-local.sh` remains the merge
+  gate.
+
+- **A single `all green` aggregate CI job.** Branch protection can now require one check instead
+  of enumerating every job and matrix leg by name — the failure mode being that a newly added
+  matrix leg (the macOS and py3.13 legs) creates a status nobody required. It runs under
+  `if: always()` and treats `skipped` as failure, since nothing in the workflow is conditional.
+
+- **`CITATION.cff`** — GitHub's "Cite this repository" button. It deliberately carries no
+  `version` / `date-released` / `doi`, because nothing has been released, and a test enforces
+  that along with agreement between its URLs and the rest of the tree.
+
+- **`Documentation` in `[project.urls]` for all 33 packages**, pinned by test to equal
+  `mkdocs.yml`'s `site_url` so the docs URL cannot rot in one place and not the other.
+
+- **`examples/*.yaml` are validated (`test_shipped_examples_validate.py`).** All 13 shipped
+  examples now parse through the real `Pipeline` model, resolve every `provider:` against the live
+  registry, and topologically sort (`Pipeline._validate_dag` catches unknown and self-dependencies
+  but not a longer cycle). Every example must appear in an explicit classification map, so a new
+  one cannot be added silently unvalidated — the rule `stacks/*.yaml` has had for a long time and
+  `examples/` did not, despite the README quoting one as a proof. That proof is pinned too:
+  `demo-pipeline.yaml` and `demo-pipeline.swap.yaml` must keep an identical Stage graph and differ
+  only in Providers, or "one line changes, the pipeline does not" quietly stops being true while
+  the diff still looks small.
+
+- **`CONTRIBUTING.md` §"Contributing with AI"** and a matching disclosure checkbox in the PR
+  template — disclose it, you own it, write the PR prose yourself. Assistance is expected;
+  undisclosed assistance is what costs trust.
+
+- **A `Roadmap` row in the README's "Where to go next".** No dates and no invented plan: the
+  roadmap is `RELEASE-GATES.md` worked gate by gate, then the *Not yet proven* list.
 
 - **`s5-retrieval` — the retrieval feature matrix is a campaign stage
   (`latence_benchmark.campaign.retrieval_stage`).** The S5 harness already honoured the campaign
@@ -485,11 +574,19 @@ workspace are versioned and released together under one version number.
   GitHub-compatible slugifier, so a hand-written `#anchor` resolves on github.com *and* on
   the docs site (this fixes four broken in-page links in `deployment.md`).
 
-## [0.1.0] - 2026-07-14
+## 0.1.0 — 2026-07-14 · internal version pin, never released
 
-First public, coherent release of the workspace. All publishable distributions
-(`latence-core` plus the provider packages) are pinned to `0.1.0` and licensed
-Apache-2.0.
+**This was not a release.** No `v0.1.0` tag exists (`git tag -l 'v*'` is empty), no artifact was
+ever published, and nothing has ever been on PyPI — the same state `README.md` §"Status & maturity"
+records. What happened on this date is the internal version pin: every publishable distribution
+(`latence-core` plus the provider packages) was set to `0.1.0` so the workspace versioned as one
+unit. The entry is kept because the work below is the substantive history of the project; the
+heading is not a version link, because there is nothing to link to.
+
+The licence in force at the time was Apache-2.0. The workspace was relicensed to
+**PolyForm Noncommercial 1.0.0** on 2026-07-29 — see the provenance record in
+[`LICENSE`](./LICENSE) — with a deliberately retained Apache-2.0 subset in `latence-retrieval`.
+Everything named below therefore ships under PolyForm today, whatever it said in July.
 
 ### Added
 
@@ -550,5 +647,11 @@ Apache-2.0.
   scaffolded, environment-gated, and disabled pending the maintainer's go-ahead
   (see `docs/RELEASING.md`).
 
-[Unreleased]: https://github.com/ddickmann/latence-framework/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ddickmann/latence-framework/releases/tag/v0.1.0
+<!--
+No version link definitions here, deliberately. Keep a Changelog links each heading to a
+compare/tag view; this project has cut no `v*` tag and published no release, so
+`compare/v0.1.0...HEAD` and `releases/tag/v0.1.0` would both 404 the moment the repository is
+public. The link definitions go back in — one per released version — when the first real tag is
+cut per `docs/RELEASING.md`, at which point the `[Unreleased]` block above becomes that release's
+section.
+-->

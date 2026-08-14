@@ -61,8 +61,13 @@ stated method is worse than a missing one, because it looks checked.
 
 - [ ] `LICENSE` is the intended licence, reproduced verbatim from its canonical source
 - [ ] `COMMERCIAL.md` states how commercial terms are obtained
-- [ ] **All 33 `packages/*/pyproject.toml`** declare the same SPDX identifier — one package still
-      declaring the old licence undermines the whole relicense
+- [x] **All 33 `packages/*/pyproject.toml`** declare the same SPDX identifier. Met, and it stays met
+      without anyone re-reading this line: `test_public_release_gate.py`'s
+      `test_release_the_licence_is_declared_consistently_across_every_package` fails the release
+      check on any divergent package, and it has a negative control proving the check still fires.
+      Verified by hand at the time of ticking —
+      `grep -h "^license = " packages/*/pyproject.toml | sort | uniq -c` → `33
+      license = "PolyForm-Noncommercial-1.0.0"`
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
 - [ ] `CONTRIBUTING.md` states the CLA requirement
