@@ -41,12 +41,30 @@ import os
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 # tests/  ->  latence-core/  ->  packages/  ->  repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PACKAGES = _REPO_ROOT / "packages"
+
+
+def _mkdocs_site_url() -> str:
+    """The docs site URL mkdocs actually publishes, read from ``mkdocs.yml``.
+
+    Read by line rather than by ``yaml.safe_load`` on purpose: ``mkdocs.yml`` carries
+    mkdocs-material's ``!!python/name:`` tags, which ``safe_load`` refuses, and pulling in
+    the full mkdocs loader to read one scalar would make this gate depend on the docs extra.
+    """
+    for line in (_REPO_ROOT / "mkdocs.yml").read_text().splitlines():
+        if line.startswith("site_url:"):
+            return line.split(":", 1)[1].strip().strip("\"'")
+    raise AssertionError("mkdocs.yml declares no site_url — the docs site has no canonical URL")
+
+
+_MKDOCS_SITE_URL = _mkdocs_site_url()
 
 # The project's outbound licence, as the SPDX License List spells it.
 _SPDX_LICENSE = "PolyForm-Noncommercial-1.0.0"
@@ -136,10 +154,68 @@ _LICENCE_TERMS_HEADING = "\nLICENCE TERMS\n"
 # presence (issue #72, item 2). It is doubly wrong now: PolyForm Noncommercial is not
 # OSI-approved, so there is no correct ``License :: OSI Approved ::`` classifier to use.
 _DEPRECATED_LICENSE_CLASSIFIER_PREFIX = "License ::"
-_PY_VERSION_CLASSIFIERS = {
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+
+# A trove classifier is a CLAIM, and the only evidence behind it is the CI matrix. So both
+# classifier sets below are DERIVED from `.github/workflows/ci.yml` rather than written out:
+# adding a matrix leg without widening the classifiers, or widening the classifiers without a
+# lane to back them, fails here. That is the defect this pair of assertions exists for — the
+# packages claimed `Operating System :: OS Independent` while every `runs-on:` in every
+# workflow was `ubuntu-latest`, and `requires-python = ">=3.11"` while only 3.11/3.12 ran.
+#
+# `requires-python` is deliberately NOT derived from the matrix. It states what is *permitted*
+# (nothing is known to break on a newer interpreter), while the classifiers state what is
+# *tested*. Narrowing `requires-python` to the matrix would assert that 3.14 is broken, which
+# nobody has measured — a different false claim, not a fix.
+_CI_WORKFLOW = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci.yml"
+
+# GitHub runner label -> the trove classifier that runner is evidence for.
+_RUNNER_OS_CLASSIFIERS = {
+    "ubuntu": "Operating System :: POSIX :: Linux",
+    "macos": "Operating System :: MacOS",
+    "windows": "Operating System :: Microsoft :: Windows",
 }
+
+
+def _ci_test_matrix() -> dict[str, Any]:
+    workflow = yaml.safe_load(_CI_WORKFLOW.read_text())
+    matrix = workflow["jobs"]["test"]["strategy"]["matrix"]
+    assert isinstance(matrix, dict), "ci.yml job `test` declares no matrix"
+    return matrix
+
+
+def _tested_python_versions() -> set[str]:
+    matrix = _ci_test_matrix()
+    versions = {str(v) for v in matrix.get("python-version", [])}
+    for entry in matrix.get("include", []):
+        if "python-version" in entry:
+            versions.add(str(entry["python-version"]))
+    assert versions, "ci.yml job `test` exercises no interpreter"
+    return versions
+
+
+def _tested_operating_systems() -> set[str]:
+    matrix = _ci_test_matrix()
+    runners = {str(v) for v in matrix.get("os", [])}
+    for entry in matrix.get("include", []):
+        if "os" in entry:
+            runners.add(str(entry["os"]))
+    assert runners, "ci.yml job `test` names no runner OS"
+
+    classifiers = set()
+    for runner in runners:
+        family = runner.split("-")[0]
+        assert family in _RUNNER_OS_CLASSIFIERS, (
+            f"ci.yml runs on {runner!r}, which maps to no known trove OS classifier — add it "
+            "to _RUNNER_OS_CLASSIFIERS so the packages can honestly claim that platform."
+        )
+        classifiers.add(_RUNNER_OS_CLASSIFIERS[family])
+    return classifiers
+
+
+_PY_VERSION_CLASSIFIERS = {
+    f"Programming Language :: Python :: {v}" for v in _tested_python_versions()
+}
+_OS_CLASSIFIERS = _tested_operating_systems()
 
 
 def _package_pyprojects() -> list[Path]:
@@ -316,9 +392,44 @@ def test_governance_and_third_party_docs_exist() -> None:
         "SECURITY.md",
         "THIRD-PARTY-LICENSES.md",
         "COMMERCIAL.md",
+        "SUPPORT.md",
+        "CITATION.cff",
     ):
         p = _REPO_ROOT / name
         assert p.is_file() and p.read_text().strip(), f"missing or empty: {name}"
+
+
+def test_citation_cff_is_parseable_and_claims_nothing_unreleased() -> None:
+    """``CITATION.cff`` renders GitHub's "Cite this repository" button — if it parses.
+
+    A malformed CFF is not a silent no-op: GitHub surfaces an error banner on the repository
+    landing page, so a typo here is a front-door defect. The two substantive assertions are
+    that it points at the same docs site and repository everything else points at, and that
+    it does NOT carry ``version``/``date-released`` — no release has been cut, and a version
+    in the citation block is exactly the class of claim CHANGELOG.md's ``0.1.0`` entry had to
+    be corrected for.
+    """
+    data = yaml.safe_load((_REPO_ROOT / "CITATION.cff").read_text())
+
+    assert data["cff-version"] == "1.2.0"
+    for required in ("message", "title", "authors", "repository-code"):
+        assert data.get(required), f"CITATION.cff is missing {required!r}"
+
+    assert data["url"] == _MKDOCS_SITE_URL, (
+        f"CITATION.cff points at {data['url']!r} but mkdocs publishes {_MKDOCS_SITE_URL!r}"
+    )
+    core_urls = tomllib.loads((_PACKAGES / "latence-core" / "pyproject.toml").read_text())[
+        "project"
+    ]["urls"]
+    assert data["repository-code"] == core_urls["Repository"], (
+        "CITATION.cff and latence-core's [project.urls] name different repositories"
+    )
+
+    for forbidden in ("version", "date-released", "doi"):
+        assert forbidden not in data, (
+            f"CITATION.cff declares {forbidden!r}, but nothing has been released "
+            "(no v* tag, nothing on PyPI). Add it with the first real tag, not before."
+        )
 
 
 def test_commercial_md_routes_commercial_use_without_inventing_terms() -> None:
@@ -680,8 +791,31 @@ def test_every_package_has_pypi_release_metadata() -> None:
                 f"{name}: deprecated license classifier(s) {deprecated} alongside an SPDX "
                 "License-Expression — strict validators reject the combination"
             )
-        if not classifiers >= _PY_VERSION_CLASSIFIERS:
-            problems.append(f"{name}: missing Python-version classifiers")
+        # Both classifier sets are derived from the CI matrix (see above), so these two
+        # assertions are "the package claims exactly what CI runs", in both directions.
+        # The bare ``Programming Language :: Python :: 3`` is a family marker, not a version
+        # claim; only the dotted ones say "this interpreter is supported".
+        declared_py = {
+            c for c in classifiers if c.startswith("Programming Language :: Python :: 3.")
+        }
+        if declared_py != _PY_VERSION_CLASSIFIERS:
+            problems.append(
+                f"{name}: Python-version classifiers {sorted(declared_py)} do not match the "
+                f"interpreters ci.yml tests, {sorted(_PY_VERSION_CLASSIFIERS)}"
+            )
+
+        declared_os = {c for c in classifiers if c.startswith("Operating System ::")}
+        if "Operating System :: OS Independent" in declared_os:
+            problems.append(
+                f"{name}: claims 'Operating System :: OS Independent'. Nothing tests that — "
+                "name the platforms ci.yml actually runs on: "
+                f"{sorted(_OS_CLASSIFIERS)}"
+            )
+        elif declared_os != _OS_CLASSIFIERS:
+            problems.append(
+                f"{name}: OS classifiers {sorted(declared_os)} do not match the platforms "
+                f"ci.yml tests, {sorted(_OS_CLASSIFIERS)}"
+            )
 
         if not proj.get("keywords"):
             problems.append(f"{name}: no keywords")
@@ -691,9 +825,23 @@ def test_every_package_has_pypi_release_metadata() -> None:
             problems.append(f"{name}: readme != README.md")
 
         urls = proj.get("urls", {})
-        for key in ("Homepage", "Repository", "Issues"):
+        # ``Documentation`` is required, not optional: PyPI renders it as the "Documentation"
+        # sidebar link, and a package page with no route to the docs site sends the reader
+        # straight back to a bare repository. The docs site is built and deployed by
+        # `.github/workflows/docs.yml`, so the URL is not aspirational.
+        for key in ("Homepage", "Repository", "Issues", "Documentation"):
             if key not in urls:
                 problems.append(f"{name}: project.urls missing {key}")
+
+        # And it must be the SAME site mkdocs publishes. Two spellings of the docs URL is how
+        # one of them silently rots after a rename (the org/repo name is not settled — every
+        # URL in the tree moves together when it is).
+        documentation = urls.get("Documentation")
+        if documentation is not None and documentation != _MKDOCS_SITE_URL:
+            problems.append(
+                f"{name}: project.urls Documentation is {documentation!r}, but mkdocs.yml "
+                f"publishes {_MKDOCS_SITE_URL!r} — they must be the same site"
+            )
 
     assert not problems, "PyPI metadata problems:\n" + "\n".join(problems)
 
@@ -798,6 +946,46 @@ def test_ci_secret_scan_uses_a_baseline_tolerant_gate() -> None:
         "rewritten with a fresh timestamp on every `scan --baseline`, so that check is "
         "always red on a clean tree"
     )
+
+
+def test_pre_commit_hooks_run_the_same_commands_as_ci() -> None:
+    """A commit hook that has drifted from CI is worse than no commit hook.
+
+    ``.pre-commit-config.yaml`` exists to run the two fastest CI gates earlier, not to be a
+    second, subtly different gate: the moment the ruff scope or the secret-gate invocation
+    differs, a green commit stops predicting a green build and people learn to distrust the
+    hook. So each hook's ``entry:`` must appear VERBATIM as a command in ``ci.yml``.
+
+    The comparison is on the command string with the workflow's ``uv run`` prefix intact,
+    because that prefix is what makes both run inside the synced workspace rather than
+    against whatever interpreter happens to be first on PATH.
+    """
+    config = _REPO_ROOT / ".pre-commit-config.yaml"
+    assert config.is_file(), (
+        "missing .pre-commit-config.yaml — the commit-time mirror of the CI lint + secret gates"
+    )
+    data = yaml.safe_load(config.read_text())
+
+    ci = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    # The workflow wraps long commands, so compare on whitespace-collapsed text.
+    ci_flat = " ".join(ci.split())
+
+    entries = [
+        hook["entry"] for repo in data["repos"] for hook in repo["hooks"] if repo["repo"] == "local"
+    ]
+    assert entries, ".pre-commit-config.yaml declares no local hooks"
+
+    for entry in entries:
+        assert " ".join(entry.split()) in ci_flat, (
+            f"pre-commit hook runs {entry!r}, which is not a command in ci.yml. Either the "
+            "hook or the workflow drifted; make them identical again."
+        )
+
+    # And the two gates that MUST be mirrored are actually present, so the check above
+    # cannot be satisfied by an empty-but-well-formed config.
+    joined = " ".join(entries)
+    assert "ruff check" in joined, "pre-commit does not mirror the CI ruff lint step"
+    assert "secret_scan_gate.py" in joined, "pre-commit does not mirror the CI secret-scan gate"
 
 
 def test_secret_scan_gate_script_exists_and_is_wired() -> None:

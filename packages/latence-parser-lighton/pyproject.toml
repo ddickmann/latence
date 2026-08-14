@@ -15,10 +15,12 @@ keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Text Processing :: Linguistic",
@@ -44,6 +46,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"
 Repository = "https://github.com/ddickmann/latence-framework"
+Documentation = "https://ddickmann.github.io/latence-framework/"
 Issues = "https://github.com/ddickmann/latence-framework/issues"
 Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
 

@@ -1,0 +1,40 @@
+# Citation File Format 1.2.0 — https://citation-file-format.github.io/
+#
+# GitHub renders a "Cite this repository" button from this file. It is here because the
+# citable artefact of this project is not only the code: docs/BENCHMARKS.md and
+# docs/running-the-benchmarks.md publish a measurement methodology (licence-checked corpora,
+# revision-pinned datasets, a per-suite published/not-published column), and docs/adr/ is a
+# decision log with the rejected alternatives written down. Those are things a reader cites.
+#
+# NOTE ON `version` / `date-released`: deliberately absent. No release has been cut and no
+# `v*` tag exists (see CHANGELOG.md and RELEASE-GATES.md), so a version here would be the
+# same false claim CHANGELOG.md's 0.1.0 entry had to be corrected for. They go in when the
+# first tag is cut, per docs/RELEASING.md.
+#
+# NOTE ON `license`: the SPDX identifier is PolyForm-Noncommercial-1.0.0. It is expressed as
+# `license-url` rather than `license` because the CFF 1.2.0 schema validates `license`
+# against an SPDX enum frozen at schema-release time, and a value that enum does not carry
+# makes GitHub reject the whole file — which would lose the citation block over a spelling
+# technicality. The URL points at the authoritative text shipped in this repository.
+cff-version: 1.2.0
+message: "If you use this framework, or the measurements and decisions published with it, please cite it as below."
+title: "Latence Framework: messy enterprise documents to AI-ready data"
+abstract: >-
+  A model-agnostic, cloud-agnostic framework that turns messy, siloed enterprise documents into
+  PII-handled, embedded, provenance-carrying RAG corpora and evidence-linked knowledge graphs.
+  Every Stage declares typed input/output contracts and is fulfilled by a swappable Provider.
+type: software
+authors:
+  - family-names: Dickmann
+    given-names: Dennis
+    email: ddickmann81@gmail.com
+repository-code: "https://github.com/ddickmann/latence-framework"
+url: "https://ddickmann.github.io/latence-framework/"
+license-url: "https://github.com/ddickmann/latence-framework/blob/main/LICENSE"
+keywords:
+  - ai-ready-data
+  - knowledge-graph
+  - retrieval-augmented-generation
+  - entity-resolution
+  - pii-redaction
+  - data-pipeline
