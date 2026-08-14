@@ -67,8 +67,12 @@ jobs:
       # stage's runtime (latence_benchmark.campaign.retrieval_stage imports it from the
       # checkout), it is declared in-scope + clean by ticket wayfinder-enterprise-serving/04,
       # and until now nothing in CI enforced that. Linted and (below) strictly typed here.
+      #
+      # The lint scope matches the in-scope set the ruff config's `exclude` comment claims —
+      # packages, the benchmark harnesses, the campaign stage scripts and scripts/ — so the
+      # claim is enforced rather than asserted. Frozen evidence scripts stay excluded there.
       - name: Ruff (lint)
-        run: uv run ruff check packages benchmark/s5
+        run: uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
 
       # Strict type check over BOTH src AND tests for every workspace package (issue #24).
       # The per-package loop (not a single `mypy --strict packages`) is deliberate: the

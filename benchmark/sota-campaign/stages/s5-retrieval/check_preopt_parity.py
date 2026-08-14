@@ -54,7 +54,8 @@ def diff_paths(before: Any, after: Any, path: str = "") -> list[str]:
     if isinstance(before, list):
         if len(before) != len(after):
             return [f"{path}: length {len(before)} -> {len(after)}"]
-        return [d for i, (b, a) in enumerate(zip(before, after, strict=True)) for d in diff_paths(b, a, f"{path}[{i}]")]
+        pairs = enumerate(zip(before, after, strict=True))
+        return [d for i, (b, a) in pairs for d in diff_paths(b, a, f"{path}[{i}]")]
     return [] if before == after else [f"{path}: {before!r} -> {after!r}"]
 
 

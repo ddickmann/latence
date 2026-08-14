@@ -58,9 +58,9 @@ def _table_truncated(orig_span: str) -> bool:
         return False
     # Starts mid-table: first line is a pipe row, and it is not a header
     # (header would be immediately followed by a separator row).
-    if _is_pipe_row(lines[0]) and not _is_sep_row(lines[0]):
-        if len(lines) < 2 or not _is_sep_row(lines[1]):
-            return True
+    starts_in_table = _is_pipe_row(lines[0]) and not _is_sep_row(lines[0])
+    if starts_in_table and (len(lines) < 2 or not _is_sep_row(lines[1])):
+        return True
     # Ends mid-table: last line is a pipe row and the contiguous trailing pipe
     # block contains no separator row (header row + separator are outside).
     if _is_pipe_row(lines[-1]) and not _is_sep_row(lines[-1]):
@@ -179,7 +179,9 @@ def run_dataset(ds: str, pool: mp.pool.Pool) -> dict:
         "token_dist": _dist(all_tokens),
         "pct_lt_64": round(100 * sum(1 for t in all_tokens if t < 64) / n, 2) if n else 0,
         "pct_at_max_640": round(100 * sum(1 for t in all_tokens if t >= MAX_T) / n, 2) if n else 0,
-        "pct_ge_608_95pct_cap": round(100 * sum(1 for t in all_tokens if t >= 608) / n, 2) if n else 0,
+        "pct_ge_608_95pct_cap": (
+            round(100 * sum(1 for t in all_tokens if t >= 608) / n, 2) if n else 0
+        ),
         "chunks_per_doc_dist": _dist(chunks_per_doc),
         "placeholder_or_empty_chunks": n_placeholder,
         "table_truncated_chunks": n_table_trunc,
