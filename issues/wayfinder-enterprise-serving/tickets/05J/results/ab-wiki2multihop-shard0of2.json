@@ -1,0 +1,26 @@
+{
+  "dataset": "wiki2multihop",
+  "queries": 6288,
+  "usable_total": 12576,
+  "identical": 6288,
+  "diffs": 0,
+  "limit": null,
+  "skip": 0,
+  "shard": "0/2",
+  "legs": [
+    "graph_rescue",
+    "graph_rescue_coe",
+    "graph_rescue_packed"
+  ],
+  "budget_curve": [
+    2000,
+    4000,
+    8000,
+    10000,
+    16000,
+    24000,
+    32000
+  ],
+  "selections_per_query": 15,
+  "seconds": 4425.6
+}

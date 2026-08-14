@@ -1,0 +1,48 @@
+{
+  "dataset": "wiki2multihop",
+  "queries": 300,
+  "usable_total": 300,
+  "identical": 300,
+  "diffs": 0,
+  "limit": 300,
+  "skip": 0,
+  "shard": null,
+  "legs": [
+    "graph_rescue",
+    "graph_rescue_coe",
+    "graph_rescue_packed"
+  ],
+  "budget_curve": [
+    2000,
+    4000,
+    8000,
+    10000,
+    16000,
+    24000,
+    32000
+  ],
+  "selections_per_query": 15,
+  "reference_points": [
+    [
+      "graph_rescue",
+      null
+    ],
+    [
+      "graph_rescue_packed",
+      10000
+    ],
+    [
+      "graph_rescue_packed",
+      2000
+    ],
+    [
+      "graph_rescue_coe",
+      16000
+    ],
+    [
+      "graph_rescue_coe",
+      32000
+    ]
+  ],
+  "seconds": 627.8
+}
