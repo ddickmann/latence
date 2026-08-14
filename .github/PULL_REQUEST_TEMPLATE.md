@@ -16,6 +16,7 @@ you explain why in the summary — a silently-skipped gate is not.
 ## Licence
 
 - [ ] **I can sign the Contributor Licence Agreement for this contribution.** Every merged contribution requires one, because the licence reserves commercial rights to the owner and the owner must hold sufficient rights to grant them. If your employer may own this work, say so here.
+- [ ] **AI assistance disclosed.** If an assistant wrote or drafted part of this change, say which parts and which tool, in the summary above — one line is enough. Using one is expected; not disclosing it is what costs trust. You own the result either way: you can explain why it is correct, and you have the rights to contribute it. See `CONTRIBUTING.md` §"Contributing with AI".
 
 ## Definition of Done
 

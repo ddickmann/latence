@@ -74,6 +74,19 @@ uv pip install --no-deps -e packages/latence-ner-gliner
 `scripts/verify-local.sh` does this for the whole heavy set automatically; read its opening
 section for the exact list.
 
+**Optional but recommended — the commit hooks.** `.pre-commit-config.yaml` runs the two fastest
+CI gates at commit time: the ruff lint (identical scope to CI) and the `detect-secrets`
+audited-baseline gate. The second is the one worth having, because a secret caught after it is
+committed means rewriting history.
+
+```bash
+uv run --with pre-commit --no-project pre-commit install
+```
+
+Every hook is `local` / `language: system` and invokes the *same command* as `ci.yml` — a test
+asserts the strings still match, because a hook that has drifted from CI is worse than no hook.
+It is not a substitute for `scripts/verify-local.sh`, which stays the merge gate.
+
 ---
 
 ## The gates
@@ -328,6 +341,39 @@ green — not when the change looks right.
 The reviewer verifies the claim against the **code**, not against the PR description. Make
 that easy: name the test that fails without your change, and state which gates you ran and
 which you could not.
+
+---
+
+## Contributing with AI
+
+Using an AI assistant to write code for this project is **allowed and expected**. Three rules,
+and they are about *disclosure and ownership*, not about restriction.
+
+**1. Disclose it.** Say so in the PR description — which parts, and which tool. One line is
+enough ("the Provider adapter and its tests were drafted with Claude; the offset-mapping fix is
+hand-written"). This is not a confession; it tells the reviewer where to concentrate. Undisclosed
+AI output that then turns out to be AI output is the thing that costs trust, not the tool.
+
+**2. You own it.** Submitting a change asserts that you understand it, that you can explain why
+it is correct, and — under the CLA above — that you have the rights to contribute it. "The model
+generated it" is not an answer to a review question, and it is not a defence if the code turns
+out to be copied from somewhere incompatible with this project's licence. If you cannot defend a
+line under questioning, do not ship it; that is true of hand-written code too, and an assistant
+just makes it much easier to produce a lot of it quickly.
+
+**3. Write the PR description yourself.** The prose a human reviewer reads should come from the
+human asking for the review. Generated summaries reliably restate the diff and reliably omit the
+thing the reviewer needs — what you *tried*, what you *rejected*, and which claim you are least
+sure of. The PR template asks for "the test that was red" for exactly this reason: a test that
+fails before your change and passes after is a fact about the code, and no amount of confident
+narration substitutes for it.
+
+Two things follow from the way this repository is gated, and they cut in the contributor's
+favour. Fabricated confidence has a short life here: `scripts/verify-local.sh`, the strict type
+check, the Provider Conformance suite and the doc-truth gates are the arbiter, not the PR
+description. And the doc-truth gates apply to generated prose exactly as they do to hand-written
+prose — a README or docstring claim that the tests can falsify will be falsified, whoever or
+whatever typed it.
 
 ---
 
