@@ -171,7 +171,9 @@ class _Bench:
         """One query's retrieval, with this bench's query-signal-gen in front of it."""
         return self.pipeline.retrieve(bundle_for(self.runner, question, vector))
 
-    def select(self, question: str, retrieval: RescueRetrieval, leg: str, budget: int):  # noqa: ANN201
+    def select(
+        self, question: str, retrieval: RescueRetrieval, leg: str, budget: int
+    ) -> RescueResult:
         """One leg's selection over that retrieval, at ``budget``."""
         return self.pipeline.select(
             question, retrieval, selector=selector_for(leg), budget=budget

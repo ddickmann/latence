@@ -159,3 +159,26 @@ declared per-plan precisely so this stays a deliberate, separately-measured deci
 The two EXCLUSIVE rules (Graph Assembly, Graph Completion) can never take it: their verdict
 depends on every type in the stream. That constraint is asserted in
 `test_stage_inputs.py::test_the_scan_short_circuits_only_where_the_plan_declares_it_sound`.
+
+## F12 — the strict-typecheck gate only means what CI's env means (env drift, two directions)
+
+`scripts/typecheck.sh` invokes `${MYPY_CMD:-mypy}`. Run bare on a dev machine it picks up
+whatever `mypy` is on `PATH` (here: `~/anaconda3/bin/mypy`, which has none of the workspace
+installed) and reports **33/33 packages FAILED — 347 errors**, essentially all of them
+`import-not-found` for `latence_*` / `pyarrow` / `pyiceberg`, plus the `unused-ignore`
+cascade that follows from an unresolvable `pyarrow` (every `# type: ignore[no-untyped-call]`
+on a `pq.*` call becomes "unused" once the module is `Any`). None of that is a code defect.
+CI runs `MYPY_CMD="uv run mypy"`; the reproducible local form is
+`MYPY_CMD=.venv/bin/mypy` (or ticket-04's clean `uv sync` + the `--no-deps` heavy-source list
+from `.github/actions/setup-workspace`).
+
+Drift also runs the other way. This repo's `.venv` has heavy deps installed that the CI env
+declares absent by design (ADR-0016): with `transformers` / `torch` / `qdrant_client` real
+rather than `Any`, `latence-parser-glm` (6), `latence-parser-lighton` (7) and
+`latence-sink-qdrant` (4) fail strict mypy on their *fakes'* shapes. Verified **pre-existing
+at ticket-04's commit** (`0d147f2`), i.e. not attributable to the architecture pass, and
+invisible to CI. Not fixed: annotating those tests to satisfy a library the env is designed
+not to have would invert ADR-0016. What would close it: either pin those heavy deps out of
+the local dev env (`scripts/verify-local.sh` parity), or teach `typecheck.sh` to refuse a
+`mypy` that cannot import `latence_core`, so a wrong-interpreter run fails loudly as an env
+error instead of as 347 phantom type errors.

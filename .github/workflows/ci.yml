@@ -63,8 +63,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `benchmark/s5` is measurement-harness code, not a package — but it is the S5 campaign
+      # stage's runtime (latence_benchmark.campaign.retrieval_stage imports it from the
+      # checkout), it is declared in-scope + clean by ticket wayfinder-enterprise-serving/04,
+      # and until now nothing in CI enforced that. Linted and (below) strictly typed here.
       - name: Ruff (lint)
-        run: uv run ruff check packages
+        run: uv run ruff check packages benchmark/s5
 
       # Strict type check over BOTH src AND tests for every workspace package (issue #24).
       # The per-package loop (not a single `mypy --strict packages`) is deliberate: the
@@ -74,6 +78,13 @@ jobs:
       # process; one non-zero exit fails the whole step.
       - name: Mypy (strict, src + tests)
         run: MYPY_CMD="uv run mypy" bash scripts/typecheck.sh
+
+      # The S5 harness, checked as its own package (`-p benchmark.s5`, src + tests). The
+      # per-package loop above cannot reach it — `benchmark/` holds no `packages/*/src` — and
+      # the incidental reachability through latence-benchmark's wizard-mirror test covers only
+      # the modules that test imports. This step is the harness's own gate.
+      - name: Mypy (strict, benchmark/s5 harness)
+        run: uv run mypy --strict --namespace-packages -p benchmark.s5
 
   # ---- Full test suite + provider conformance + coverage, on both interpreters.
   test:

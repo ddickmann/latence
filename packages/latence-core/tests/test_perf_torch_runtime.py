@@ -338,7 +338,12 @@ def test_st_load_inspects_the_eager_model_before_any_compile_wrap(
     st = _FakeST(log)
     seen: list[Any] = []
     wrapped = object()
-    fake_torch.compile = lambda _m, **_kw: (log.append("compiled"), wrapped)[1]
+
+    def compile_(_model: Any, **_kw: Any) -> Any:
+        log.append("compiled")
+        return wrapped
+
+    fake_torch.compile = compile_
 
     out = load_sentence_transformer(
         st.make_cls,

@@ -292,8 +292,12 @@ def test_gathered_concatenates_parents_in_declared_order_and_is_idempotent() -> 
     inputs, _ = _inputs(
         pipeline, "export", {"a": [_chunk("c1"), _chunk("c2")], "b": [_mention("m1")]}
     )
-    assert [r.record_id for r in inputs.gathered()] == ["c1", "c2", "m1"]
-    assert [r.record_id for r in inputs.gathered()] == ["c1", "c2", "m1"]
+    # `ParserInput` is the one StageOutput member without a `record_id`, and it is not among the
+    # records fed above — the narrow ignore keeps this assertion about ORDER, not about types.
+    first = [r.record_id for r in inputs.gathered()]  # type: ignore[union-attr]
+    second = [r.record_id for r in inputs.gathered()]  # type: ignore[union-attr]
+    assert first == ["c1", "c2", "m1"]
+    assert second == ["c1", "c2", "m1"]
 
 
 def test_materialised_reports_the_transient_and_is_none_until_one_exists() -> None:

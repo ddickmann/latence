@@ -503,7 +503,7 @@ def test_factory_passes_cache_through_and_rejects_a_non_boolean() -> None:
     for name in ("duckdb", "networkx"):
         cached = build_graph_source({"source": name, "edges_uri": "e.parquet"})
         uncached = build_graph_source({"source": name, "edges_uri": "e.parquet", "cache": False})
-        assert cached._cache is True  # type: ignore[union-attr]
-        assert uncached._cache is False  # type: ignore[union-attr]
+        assert cached._cache is True  # type: ignore[attr-defined]
+        assert uncached._cache is False  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="cache"):
         build_graph_source({"source": "duckdb", "edges_uri": "e.parquet", "cache": "yes"})

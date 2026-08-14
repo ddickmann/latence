@@ -589,7 +589,7 @@ class TestDecoration:
                 {"graph_mode": "force", "selector": "none"},
                 dense=_dense(dense),
                 bm25=_bm25(bm25),
-                graph=spy,  # type: ignore[arg-type]
+                graph=spy,
                 decorate=decorate,
             )
             pipeline.run(_bundle("q", seeds=("n_q",)))

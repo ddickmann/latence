@@ -228,7 +228,10 @@ module = [
     "presidio_analyzer", "presidio_analyzer.*", "airflow.*",
     # LightOn-OCR heavy stack (latence-parser-lighton, GPU) — not in the CPU-first dev env
     # (ADR-0016); the Provider monkeypatches them with shape-matching fakes in tests.
-    "pypdfium2", "transformers", "torch",
+    # ``torch.*`` as well as ``torch``: the TorchRuntime seam reaches submodules (``torch._dynamo``
+    # for the compile-cache reset), and an override that named only the top package left those
+    # import-not-found under the CPU-first env where torch is absent by design.
+    "pypdfium2", "transformers", "torch", "torch.*",
     # Universal any-file Parser heavy stack (latence-parser-render, W5-universal-parser) — the
     # office/image readers (python-docx/openpyxl/python-pptx MIT, Pillow HPND) are isolated in that
     # package (ADR-0016), NOT in the CPU-first dev env; the Provider lazily imports them and its

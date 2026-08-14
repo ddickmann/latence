@@ -834,8 +834,8 @@ def test_document_source_factory_passes_cache_through_and_rejects_a_non_boolean(
     uncached = build_graph_document_source(
         {"source": "duckdb", "chunks_uri": "c.parquet", "cache": False}
     )
-    assert cached._cache is True  # type: ignore[union-attr]
-    assert uncached._cache is False  # type: ignore[union-attr]
+    assert cached._cache is True  # type: ignore[attr-defined]
+    assert uncached._cache is False  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="cache"):
         build_graph_document_source(
             {"source": "duckdb", "chunks_uri": "c.parquet", "cache": "yes"}
