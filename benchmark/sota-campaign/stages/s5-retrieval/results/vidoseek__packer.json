@@ -1,31 +1,43 @@
 {
   "control": true,
   "dataset": "vidoseek",
+  "fusion": "equal",
   "leg": "packer",
-  "limit": 50,
+  "limit": null,
   "metrics": {
     "chain_coverage@10": null,
     "chain_queries": 0,
+    "doc_recall@10": 0.9685,
+    "doc_recall@5": 0.9457,
     "full_chain_hit@10": null,
-    "latency_ms_median": 736.79,
-    "latency_ms_p95": 932.79,
-    "ndcg@10": 0.6479,
-    "queries": 50,
-    "recall@1": 0.3567,
-    "recall@10": 0.8067,
-    "recall@5": 0.75,
+    "latency_ms_median": 721.03,
+    "latency_ms_p95": 934.37,
+    "ndcg@10": 0.6165,
+    "queries": 1142,
+    "recall@1": 0.3496,
+    "recall@10": 0.7538,
+    "recall@5": 0.723,
     "token_budget": 4000,
     "tokens_packed_max": 4000,
-    "tokens_packed_mean": 3892.2
+    "tokens_packed_mean": 3887.9
   },
   "resolution": {
     "dataset": "vidoseek",
-    "queries_total": 50,
-    "queries_usable": 50,
-    "refs_resolved": 50,
-    "refs_total": 50,
+    "exclusions": {},
+    "granularity": {
+      "document": 0,
+      "page": 1142
+    },
+    "page_share_of_resolved": 1.0,
+    "queries_excluded": 0,
+    "queries_total": 1142,
+    "queries_usable": 1142,
+    "refs_excluded": 0,
+    "refs_resolved": 1142,
+    "refs_total": 1142,
     "resolution_rate": 1.0,
     "trustworthy": true
   },
-  "status": "ok"
+  "status": "ok",
+  "vector_source": "corpus"
 }

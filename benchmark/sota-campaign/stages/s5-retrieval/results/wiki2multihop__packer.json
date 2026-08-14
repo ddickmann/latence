@@ -1,0 +1,43 @@
+{
+  "control": false,
+  "dataset": "wiki2multihop",
+  "fusion": "equal",
+  "leg": "packer",
+  "limit": null,
+  "metrics": {
+    "chain_coverage@10": 0.5547,
+    "chain_queries": 12212,
+    "doc_recall@10": 0.554,
+    "doc_recall@5": 0.4993,
+    "full_chain_hit@10": 0.2417,
+    "latency_ms_median": 510.05,
+    "latency_ms_p95": 965.53,
+    "ndcg@10": 0.5331,
+    "queries": 12576,
+    "recall@1": 0.2805,
+    "recall@10": 0.5446,
+    "recall@5": 0.49,
+    "token_budget": 4000,
+    "tokens_packed_max": 3999,
+    "tokens_packed_mean": 1902.7
+  },
+  "resolution": {
+    "dataset": "wiki2multihop",
+    "exclusions": {},
+    "granularity": {
+      "document": 30654,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 12576,
+    "queries_usable": 12576,
+    "refs_excluded": 0,
+    "refs_resolved": 30654,
+    "refs_total": 30654,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok",
+  "vector_source": "corpus"
+}

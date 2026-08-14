@@ -1,31 +1,43 @@
 {
   "control": false,
   "dataset": "multihop_rag",
+  "fusion": "equal",
   "leg": "packer",
-  "limit": 50,
+  "limit": null,
   "metrics": {
-    "chain_coverage@10": 0.6377,
-    "chain_queries": 46,
-    "full_chain_hit@10": 0.3478,
-    "latency_ms_median": 872.64,
-    "latency_ms_p95": 1009.68,
-    "ndcg@10": 0.2741,
-    "queries": 46,
-    "recall@1": 0.0273,
-    "recall@10": 0.1777,
-    "recall@5": 0.1346,
+    "chain_coverage@10": 0.6206,
+    "chain_queries": 2255,
+    "doc_recall@10": 0.6269,
+    "doc_recall@5": 0.5452,
+    "full_chain_hit@10": 0.3282,
+    "latency_ms_median": 724.22,
+    "latency_ms_p95": 883.56,
+    "ndcg@10": 0.3071,
+    "queries": 2255,
+    "recall@1": 0.0405,
+    "recall@10": 0.2028,
+    "recall@5": 0.1546,
     "token_budget": 4000,
-    "tokens_packed_max": 3995,
-    "tokens_packed_mean": 3872.1
+    "tokens_packed_max": 4000,
+    "tokens_packed_mean": 3858.8
   },
   "resolution": {
     "dataset": "multihop_rag",
-    "queries_total": 50,
-    "queries_usable": 46,
-    "refs_resolved": 117,
-    "refs_total": 117,
+    "exclusions": {},
+    "granularity": {
+      "document": 5908,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 2556,
+    "queries_usable": 2255,
+    "refs_excluded": 0,
+    "refs_resolved": 5908,
+    "refs_total": 5908,
     "resolution_rate": 1.0,
     "trustworthy": true
   },
-  "status": "ok"
+  "status": "ok",
+  "vector_source": "corpus"
 }

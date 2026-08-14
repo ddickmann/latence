@@ -1,29 +1,41 @@
 {
   "control": true,
   "dataset": "vidoseek",
+  "fusion": "equal",
   "leg": "kg",
-  "limit": 50,
+  "limit": null,
   "metrics": {
     "chain_coverage@10": null,
     "chain_queries": 0,
+    "doc_recall@10": 0.9965,
+    "doc_recall@5": 0.9947,
     "full_chain_hit@10": null,
-    "latency_ms_median": 162.98,
-    "latency_ms_p95": 244.39,
-    "ndcg@10": 0.8381,
-    "queries": 50,
-    "recall@1": 0.5867,
-    "recall@10": 0.99,
-    "recall@5": 0.93,
+    "latency_ms_median": 1.29,
+    "latency_ms_p95": 1.68,
+    "ndcg@10": 0.8125,
+    "queries": 1142,
+    "recall@1": 0.5144,
+    "recall@10": 0.9638,
+    "recall@5": 0.8951,
     "token_budget": null
   },
   "resolution": {
     "dataset": "vidoseek",
-    "queries_total": 50,
-    "queries_usable": 50,
-    "refs_resolved": 50,
-    "refs_total": 50,
+    "exclusions": {},
+    "granularity": {
+      "document": 0,
+      "page": 1142
+    },
+    "page_share_of_resolved": 1.0,
+    "queries_excluded": 0,
+    "queries_total": 1142,
+    "queries_usable": 1142,
+    "refs_excluded": 0,
+    "refs_resolved": 1142,
+    "refs_total": 1142,
     "resolution_rate": 1.0,
     "trustworthy": true
   },
-  "status": "ok"
+  "status": "ok",
+  "vector_source": "corpus"
 }

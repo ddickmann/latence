@@ -1,0 +1,8 @@
+{
+  "dataset": "hotpotqa",
+  "leg": "dense_content_only",
+  "missing": [
+    "corpus-vectors-content-only.parquet"
+  ],
+  "status": "missing-inputs"
+}

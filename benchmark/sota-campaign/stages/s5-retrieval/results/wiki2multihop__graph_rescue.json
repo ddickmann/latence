@@ -1,0 +1,71 @@
+{
+  "budget_curve": {
+    "10000": {
+      "chain_coverage@10": 0.7202,
+      "chain_queries": 12212,
+      "doc_recall@10": 0.7198,
+      "doc_recall@5": 0.6702,
+      "full_chain_hit@10": 0.4222,
+      "latency_ms_median": 240.86,
+      "latency_ms_p95": 451.7,
+      "ndcg@10": 0.7006,
+      "queries": 12576,
+      "recall@1": 0.353,
+      "recall@10": 0.7096,
+      "recall@5": 0.6583,
+      "token_budget": null
+    }
+  },
+  "control": false,
+  "dataset": "wiki2multihop",
+  "fusion": "equal",
+  "gate": {
+    "fired": 12573,
+    "hit_rate": 0.9998,
+    "mode": "auto",
+    "queries": 12576,
+    "reasons": {
+      "entity-heavy": 12575,
+      "low-agreement": 10504,
+      "relation-cue": 881
+    },
+    "vetoed_navigational": 3
+  },
+  "leg": "graph_rescue",
+  "limit": null,
+  "metrics": {
+    "chain_coverage@10": 0.7202,
+    "chain_queries": 12212,
+    "doc_recall@10": 0.7198,
+    "doc_recall@5": 0.6702,
+    "full_chain_hit@10": 0.4222,
+    "latency_ms_median": 240.86,
+    "latency_ms_p95": 451.7,
+    "ndcg@10": 0.7006,
+    "queries": 12576,
+    "recall@1": 0.353,
+    "recall@10": 0.7096,
+    "recall@5": 0.6583,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "wiki2multihop",
+    "exclusions": {},
+    "granularity": {
+      "document": 30654,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 12576,
+    "queries_usable": 12576,
+    "refs_excluded": 0,
+    "refs_resolved": 30654,
+    "refs_total": 30654,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "select_budget": 10000,
+  "status": "ok",
+  "vector_source": "corpus"
+}

@@ -1,0 +1,41 @@
+{
+  "control": false,
+  "dataset": "musique",
+  "fusion": "equal",
+  "leg": "hyperedges",
+  "limit": null,
+  "metrics": {
+    "chain_coverage@10": 0.5834,
+    "chain_queries": 1209,
+    "doc_recall@10": 0.6011,
+    "doc_recall@5": 0.5167,
+    "full_chain_hit@10": 0.2117,
+    "latency_ms_median": 22.33,
+    "latency_ms_p95": 34.66,
+    "ndcg@10": 0.4019,
+    "queries": 1209,
+    "recall@1": 0.124,
+    "recall@10": 0.3392,
+    "recall@5": 0.2805,
+    "token_budget": null
+  },
+  "resolution": {
+    "dataset": "musique",
+    "exclusions": {},
+    "granularity": {
+      "document": 3204,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 1209,
+    "queries_usable": 1209,
+    "refs_excluded": 0,
+    "refs_resolved": 3204,
+    "refs_total": 3204,
+    "resolution_rate": 1.0,
+    "trustworthy": true
+  },
+  "status": "ok",
+  "vector_source": "corpus"
+}

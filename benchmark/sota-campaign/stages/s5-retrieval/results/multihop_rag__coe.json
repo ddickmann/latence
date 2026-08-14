@@ -1,29 +1,41 @@
 {
   "control": false,
   "dataset": "multihop_rag",
+  "fusion": "equal",
   "leg": "coe",
-  "limit": 50,
+  "limit": null,
   "metrics": {
-    "chain_coverage@10": 0.6793,
-    "chain_queries": 46,
-    "full_chain_hit@10": 0.3913,
-    "latency_ms_median": 321.8,
-    "latency_ms_p95": 445.86,
-    "ndcg@10": 0.3332,
-    "queries": 46,
-    "recall@1": 0.0273,
-    "recall@10": 0.2383,
-    "recall@5": 0.1406,
+    "chain_coverage@10": 0.6468,
+    "chain_queries": 2255,
+    "doc_recall@10": 0.7353,
+    "doc_recall@5": 0.5722,
+    "full_chain_hit@10": 0.3685,
+    "latency_ms_median": 19.0,
+    "latency_ms_p95": 33.63,
+    "ndcg@10": 0.3536,
+    "queries": 2255,
+    "recall@1": 0.0406,
+    "recall@10": 0.2523,
+    "recall@5": 0.1624,
     "token_budget": null
   },
   "resolution": {
     "dataset": "multihop_rag",
-    "queries_total": 50,
-    "queries_usable": 46,
-    "refs_resolved": 117,
-    "refs_total": 117,
+    "exclusions": {},
+    "granularity": {
+      "document": 5908,
+      "page": 0
+    },
+    "page_share_of_resolved": 0.0,
+    "queries_excluded": 0,
+    "queries_total": 2556,
+    "queries_usable": 2255,
+    "refs_excluded": 0,
+    "refs_resolved": 5908,
+    "refs_total": 5908,
     "resolution_rate": 1.0,
     "trustworthy": true
   },
-  "status": "ok"
+  "status": "ok",
+  "vector_source": "corpus"
 }
