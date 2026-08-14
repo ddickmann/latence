@@ -71,8 +71,10 @@ workspace are versioned and released together under one version number.
   (`latence_retrieval.rescue.GraphRescueRetrieval`).** Base dense+BM25 fused and preserved, a
   per-query policy gate, graph traversal + hypergraph lanes that APPEND (never fuse), and a
   token-budgeted selector (knapsack with backfill / chain-of-evidence / none) — zero LLM calls
-  online, measured defaults, configurable from the campaign wizard. Guide:
-  `docs/guides/graph-rescue-retrieval.md`.
+  online, measured defaults, configurable from the campaign wizard. Retrieval and selection are
+  separable: `run(bundle)` is the one-shot call and is exactly `select(text, retrieve(bundle))`,
+  so one `RescueRetrieval` serves any number of budget/selector A/Bs without re-running the
+  engines. Guide: `docs/guides/graph-rescue-retrieval.md`.
 
 - **Incremental ingest through the full enrichment pipeline (ADR-0061).** The flagship
   enrichment+KG+export profile now reuses unchanged documents on churn (O(changed) extraction)

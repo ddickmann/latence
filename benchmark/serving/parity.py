@@ -313,10 +313,10 @@ def score_query(
     dense_ms = (time.perf_counter() - started) * 1000.0
 
     started = time.perf_counter()
-    reference_result = reference_pipe.retrieve(bundle)
+    reference_result = reference_pipe.run(bundle)
     reference_ms = (time.perf_counter() - started) * 1000.0
     started = time.perf_counter()
-    served_result = served_pipe.retrieve(bundle)
+    served_result = served_pipe.run(bundle)
     served_ms = (time.perf_counter() - started) * 1000.0
 
     ranked_reference = [c.id for c in reference_result.candidates]

@@ -213,6 +213,38 @@ class RescueResult(BaseModel):
     budget: int | None = None
 
 
+class RescueRetrieval(BaseModel):
+    """Everything one query's pipeline produced **before** a token budget is chosen.
+
+    The handoff between the two halves of the component:
+    :meth:`GraphRescueRetrieval.retrieve` produces it (steps 1–3: base, gate, rescore, rescue
+    append) and :meth:`GraphRescueRetrieval.select` spends a budget over it (step 4). Holding the
+    two apart is what makes a budget — or selector — A/B honest *and* affordable: every operating
+    point is settled against the identical candidate union, so the comparison measures the
+    selector rather than N slightly different retrievals, and the expensive half (two first-stage
+    fetches, a traversal, a hypergraph propagation) is paid once.
+
+    ``base`` is the rescored (and, with a decorator, decorated) base ranking in its own order;
+    ``union`` is that base followed by the deduplicated rescue appendix, every candidate stamped
+    ``metadata["rescued"]`` and rank-scored; ``gate`` is the policy decision this query got;
+    ``rescued`` counts the appendix; ``signals`` is the hypergraph lane's propagation result
+    (``None`` when the lane did not run) — the evidence the ``coe`` selector spends its budget on,
+    which is precisely why it has to survive the split.
+
+    Frozen like every contract in this library. It is a per-query *handoff*, not a persisted
+    record: ``signals`` carries the hypergraph solver's own value object, so equality is exact but
+    JSON round-tripping is not part of its contract.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base: tuple[Candidate, ...]
+    union: tuple[Candidate, ...]
+    gate: GateDecision
+    rescued: int
+    signals: HypergraphSignals | None = None
+
+
 @runtime_checkable
 class HyperedgeDocumentSource(Protocol):
     """A read-only, stateless hyperedge→chunk index: which chunks carry these Hyperedges.
@@ -351,6 +383,14 @@ class GraphRescueRetrieval:
     holds no per-query state, so one instance serves a whole corpus and identical inputs always
     yield identical results.
 
+    **Three entry points, one pipeline.** :meth:`run` is the one-shot production call.
+    :meth:`retrieve` is its expensive half (steps 1–3, returning a :class:`RescueRetrieval`) and
+    :meth:`select` is its cheap half (step 4) — ``run(bundle)`` *is*
+    ``select(bundle.text, retrieve(bundle))``, byte for byte. Keeping them separable is what lets
+    a caller settle several budgets or selectors against the identical candidate union without
+    paying for the fetches, the traversal and the hypergraph propagation again (see
+    :meth:`retrieve`).
+
     Config (every default is the measured S5b operating point):
         graph_mode: ``"off" | "auto" | "force"`` — the policy gate. Default ``"auto"``.
         selector: ``"packed" | "coe" | "none"`` — step 4. Default ``"packed"``.
@@ -458,18 +498,18 @@ class GraphRescueRetrieval:
             }
         )
 
-        # The Packer validates budget/fill/value_signals/similarity_key itself.
+        # The Packer validates budget/fill/value_signals/similarity_key itself. Everything except
+        # the budget is fixed by config; the budget is the one knob :meth:`select` may override,
+        # so it is kept separate and the configured packer is built once, here.
         pack_centrality = cfg.get("pack_centrality_weight", 0.25)
+        self._pack_config: dict[str, Any] = {
+            "value_signals": {"kg_node_centrality": pack_centrality},
+            "similarity_key": cfg.get("similarity_key", "redundancy"),
+            "fill": cfg.get("fill", "backfill"),
+        }
         self._packer: Packer | None = None
         if self._selector == "packed":
-            self._packer = Packer(
-                {
-                    "budget": self._budget,
-                    "value_signals": {"kg_node_centrality": pack_centrality},
-                    "similarity_key": cfg.get("similarity_key", "redundancy"),
-                    "fill": cfg.get("fill", "backfill"),
-                }
-            )
+            self._packer = Packer({"budget": self._budget, **self._pack_config})
 
         self._relation_cues = self._cue_set(cfg.get("relation_cues", RELATION_CUES))
         self._entity_heavy_seeds = self._positive_int(
@@ -542,13 +582,35 @@ class GraphRescueRetrieval:
 
     # -- the per-query pipeline -------------------------------------------------------------------
 
-    def retrieve(self, bundle: QueryBundle) -> RescueResult:
-        """Run the whole pipeline for one query: base, gate, rescore, rescue append, select.
+    def run(self, bundle: QueryBundle) -> RescueResult:
+        """The whole pipeline for one query, in one call: ``select(text, retrieve(bundle))``.
+
+        The one-shot production entry point — retrieval and selection at the configured operating
+        point. It is exactly the composition of the two halves and nothing else, so a caller that
+        needs no budget A/B never has to know the split exists.
 
         ``bundle`` carries the caller-generated query signals exactly as the Level-2 orchestrator's
         does: ``text`` (always), ``vector`` (the dense leg's signal — absent drops the leg) and
         ``seed_node_ids`` (the query's linked entity nodes — the gate's entity signal and the
         traversal's primary anchors). Identical bundles always yield identical results.
+        """
+        return self.select(bundle.text, self.retrieve(bundle))
+
+    def retrieve(self, bundle: QueryBundle) -> RescueRetrieval:
+        """Steps 1–3 for one query: base, gate, rescore, rescue append — *no* budget spent yet.
+
+        The expensive half: two first-stage fetches, the expander rescore, the traversal and the
+        hypergraph propagation. What it returns (:class:`RescueRetrieval`) is everything
+        :meth:`select` needs, so **one retrieval serves any number of selections** — a production
+        caller A/Bs budgets (or selectors) over the identical union instead of re-running the
+        pipeline per operating point::
+
+            retrieval = pipeline.retrieve(bundle)
+            for budget in (4_000, 10_000, 16_000):
+                result = pipeline.select(bundle.text, retrieval, budget=budget)
+
+        Both halves are stateless (ADR-0048): nothing is held between calls, and
+        ``select(text, retrieve(bundle))`` is byte-identical to :meth:`run`.
         """
         dense = self._search_dense(bundle)
         bm25 = self._search_bm25(bundle)
@@ -570,7 +632,13 @@ class GraphRescueRetrieval:
         union = _append_and_dedupe(base, rescue, cap=self._rescue_cap, k=self._rank_score_k)
         rescued = len(union) - len(base)
         union = self._decorated(union)
-        return self._select(bundle.text, union, signals, gate, rescued)
+        return RescueRetrieval(
+            base=tuple(base),
+            union=tuple(union),
+            gate=gate,
+            rescued=rescued,
+            signals=signals,
+        )
 
     # -- step 1: the base -------------------------------------------------------------------------
 
@@ -759,31 +827,83 @@ class GraphRescueRetrieval:
 
     # -- step 4: selection over the deduped union -------------------------------------------------
 
-    def _select(
+    def select(
         self,
         question: str,
-        union: list[Candidate],
-        signals: HypergraphSignals | None,
-        gate: GateDecision,
-        rescued: int,
+        retrieval: RescueRetrieval,
+        *,
+        selector: str | None = None,
+        budget: int | None = None,
     ) -> RescueResult:
-        if self._selector == "none":
-            return RescueResult(candidates=tuple(union), gate=gate, rescued=rescued)
+        """Step 4: spend a token budget over ``retrieval``'s union and return the result.
+
+        The cheap half, and a pure function of its inputs — so the same
+        :class:`RescueRetrieval` can be selected from as many times as a caller likes.
+
+        Args:
+            question: the query text (the packer scores relevance against it). Pass the same
+                ``bundle.text`` the retrieval was produced from; anything else is a different
+                measurement wearing the same union.
+            retrieval: what :meth:`retrieve` returned for this query.
+            selector: ``"packed" | "coe" | "none"`` — overrides the configured selector for this
+                call only. ``None`` (the default) uses the configured one.
+            budget: the token budget for this call only. ``None`` uses the configured budget when
+                the selector is the configured one, and that selector's measured default
+                (:data:`_DEFAULT_BUDGETS`) when it is an override. Ignored by ``"none"``, which
+                returns the ranked union and reports no spend.
+
+        Overriding ``selector="coe"`` needs the hypergraph lane configured, exactly as choosing it
+        in the config does — CoE selects Hyperedges, so a pipeline that never propagated any has
+        nothing for it to buy.
+        """
+        if not isinstance(retrieval, RescueRetrieval):
+            msg = (
+                "GraphRescueRetrieval.select needs the RescueRetrieval that retrieve() returned, "
+                f"got {type(retrieval).__name__!r}."
+            )
+            raise TypeError(msg)
+        name = self._selector if selector is None else self._choice(selector, "selector", SELECTORS)
+        if name == "coe" and self._kv_path is None:
+            msg = (
+                "GraphRescueRetrieval selector 'coe' selects over the hypergraph lane's signals; "
+                "configure 'hyperedge_kv_path' + 'hyperedge_documents' or choose another selector."
+            )
+            raise ValueError(msg)
+        union = list(retrieval.union)
+        if name == "none":
+            return RescueResult(
+                candidates=tuple(union), gate=retrieval.gate, rescued=retrieval.rescued
+            )
+        spend = self._spend(name, budget)
         pool = union[: self._select_pool_k]
-        if self._packer is not None:
-            selected = self._packer.process(question, pool)
+        if name == "packed":
+            selected = self._packer_for(spend).process(question, pool)
         else:
-            selected = self._coe_select(pool, signals)
+            selected = self._coe_select(pool, retrieval.signals, spend)
         return RescueResult(
             candidates=tuple(selected),
-            gate=gate,
-            rescued=rescued,
+            gate=retrieval.gate,
+            rescued=retrieval.rescued,
             tokens_packed=sum(_TOKENS.count(c.text) for c in selected),
-            budget=self._budget,
+            budget=spend,
         )
 
+    def _spend(self, selector: str, budget: int | None) -> int:
+        """The budget this call spends: the argument, else the configured one, else the default."""
+        if budget is not None:
+            return self._positive_int(budget, "budget")
+        if selector == self._selector:
+            return self._budget
+        return _DEFAULT_BUDGETS.get(selector, 0)
+
+    def _packer_for(self, budget: int) -> Packer:
+        """The configured knapsack, or an identically-configured one at an overriding budget."""
+        if self._packer is not None and budget == self._budget:
+            return self._packer
+        return Packer({"budget": budget, **self._pack_config})
+
     def _coe_select(
-        self, pool: Sequence[Candidate], signals: HypergraphSignals | None
+        self, pool: Sequence[Candidate], signals: HypergraphSignals | None, budget: int
     ) -> list[Candidate]:
         """The alternative selector: CoE decides the graph spend, the base fills the rest.
 
@@ -798,7 +918,7 @@ class GraphRescueRetrieval:
             and signals.rho
             and self._hyperedge_documents is not None
         ):
-            selection = coe_select(signals, budget=self._budget)
+            selection = coe_select(signals, budget=budget)
             allowed = {
                 candidate.id
                 for candidate in self._hyperedge_documents.candidates(selection.selected)
@@ -809,7 +929,7 @@ class GraphRescueRetrieval:
             if candidate.metadata.get("rescued", False) and candidate.id not in allowed:
                 continue
             cost = max(_TOKENS.count(candidate.text), 1)
-            if spent + cost > self._budget:
+            if spent + cost > budget:
                 continue
             selected.append(candidate)
             spent += cost
@@ -992,5 +1112,6 @@ __all__ = [
     "HyperedgeDocumentSource",
     "KgColumnDecorator",
     "RescueResult",
+    "RescueRetrieval",
     "top_k_agreement",
 ]

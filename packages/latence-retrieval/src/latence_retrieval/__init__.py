@@ -120,7 +120,9 @@ already fetched. This foundation ticket ships the seam every query-time capabili
   (:class:`~latence_retrieval.pack.Packer` knapsack or :func:`~latence_retrieval.coe.select`)
   over the union, all behind a per-query policy gate (``graph_mode: off|auto|force``) whose
   :class:`~latence_retrieval.rescue.GateDecision` rides every
-  :class:`~latence_retrieval.rescue.RescueResult`. Engines and signals are the caller's
+  :class:`~latence_retrieval.rescue.RescueResult`. Retrieval and selection are separable
+  (``run`` = ``select(text, retrieve(bundle))``), so a caller A/Bs budgets over one
+  :class:`~latence_retrieval.rescue.RescueRetrieval`. Engines and signals are the caller's
   (ADR-0048); every default is the measured S5b operating point; zero LLM calls on the path.
 """
 
@@ -225,6 +227,7 @@ from latence_retrieval.rescue import (
     HyperedgeDocumentSource,
     KgColumnDecorator,
     RescueResult,
+    RescueRetrieval,
 )
 from latence_retrieval.sparse import SparseQueryEncoder, SpladeQueryEncoder
 from latence_retrieval.tuning import (
@@ -303,6 +306,7 @@ __all__ = [
     "RerankModelError",
     "Reranker",
     "RescueResult",
+    "RescueRetrieval",
     "RetrievalBackend",
     "RetrievalError",
     "RetrievalQuery",

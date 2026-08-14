@@ -49,9 +49,14 @@ query bundle (text, dense vector, entity seed node ids)
                  -> seed entities from query + top-5 first-stage docs (cap 32)
                  -> GraphRetriever traversal  ┐ fused with each other,
                  -> hypergraph_signals lane   ┘ APPENDED below the base, dedupe, cap 50
+  -> RescueRetrieval (base + union + GateDecision + rescued count + hypergraph signals)
   -> selector over the union: Packer (knapsack) | coe.select | none
   -> RescueResult (candidates + GateDecision + rescued count + tokens spent)
 ```
+
+The `RescueRetrieval` line is a real seam, not a diagram step: `run(bundle)` is exactly
+`select(bundle.text, retrieve(bundle))`, and the two halves are callable on their own — see
+[budget A/Bs without re-retrieval](#budget-abs-without-re-retrieval).
 
 Each step is computed by the shipped component named beside it — the composition adds **policy
 only** (ADR-0048: the caller supplies engines and signals; the library holds no index and fetches
@@ -91,7 +96,7 @@ pipeline = GraphRescueRetrieval(
     hyperedge_documents=my_hyperedge_chunk_resolver,  # optional, paired with the kv path
 )
 
-result = pipeline.retrieve(
+result = pipeline.run(
     QueryBundle(
         text="why did the merger between Acme and Beta collapse",
         vector=my_query_embedding,          # caller-run query-signal-gen
@@ -102,6 +107,31 @@ result.candidates      # base order preserved, rescue appendix stamped `rescued`
 result.gate            # the policy decision: fired, reasons, veto, agreement, confidence
 result.tokens_packed   # the selector's actual spend against result.budget
 ```
+
+### Budget A/Bs without re-retrieval
+
+`run` is the one-shot call; underneath it the pipeline is two halves you can call yourself —
+`retrieve(bundle)` (the expensive one: two first stages, the rescore, the traversal and the
+hypergraph propagation) returning a frozen `RescueRetrieval`, and `select(text, retrieval, …)`
+(the cheap one) spending a budget over it. One retrieval serves any number of selections:
+
+```python
+retrieval = pipeline.retrieve(bundle)          # engines run ONCE
+for budget in (4_000, 10_000, 16_000):
+    result = pipeline.select(bundle.text, retrieval, budget=budget)
+    print(budget, result.tokens_packed, [c.id for c in result.candidates][:5])
+
+coe = pipeline.select(bundle.text, retrieval, selector="coe")   # selector A/B, same union
+```
+
+`selector=` / `budget=` override the configured values for that call only; omitted, they *are*
+the configured values, so `select(bundle.text, pipeline.retrieve(bundle))` is byte-identical to
+`run(bundle)` (pinned per selector in `tests/test_rescue.py::TestTheSplit`). An overriding
+selector with no explicit budget falls back to **its own** measured default (10k packed / 16k
+coe), and `selector="coe"` still requires the hypergraph lane. This is the shape a budget curve
+needs: every operating point is settled against the identical candidate union, so the curve
+measures the *selector* rather than N slightly different retrievals — which is exactly how the
+S5b benchmark's `BUDGET_CURVE` cells are produced.
 
 Both graph lanes are optional and degrade honestly: no `graph` backend means no traversal lane,
 no `hyperedge_kv_path`/`hyperedge_documents` pair means no hypergraph lane (supplying only half
