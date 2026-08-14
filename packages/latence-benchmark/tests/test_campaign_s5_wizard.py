@@ -46,6 +46,17 @@ class TestDefaults:
     def test_the_vocabularies_mirror_the_harness(self) -> None:
         # Kept in lockstep with benchmark/s5 (the campaign package configures the harness and
         # deliberately does not import it — numpy/pyarrow/latence-retrieval stay out).
+        #
+        # `benchmark.s5.legs` imports numpy at module scope, and the CPU-first dev env is
+        # deliberately numpy-free (ADR-0016): a pristine `uv sync` — which is exactly what
+        # `.github/actions/setup-workspace` produces — has no numpy, so this import raised
+        # ModuleNotFoundError in CI while passing on any developer machine that had picked
+        # numpy up transitively. Skipped-with-a-reason where the harness is not installable;
+        # the lockstep assertion still runs wherever it is.
+        pytest.importorskip(
+            "numpy",
+            reason="benchmark/s5 imports numpy; the CPU-first dev env is numpy-free (ADR-0016)",
+        )
         from benchmark.s5.legs import ALL_LEG_NAMES
         from benchmark.s5.run_matrix import FUSIONS
 

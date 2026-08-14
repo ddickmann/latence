@@ -1,0 +1,42 @@
+# Commit-time mirror of the two fastest CI gates.
+#
+# Install once:  uv run --with pre-commit --no-project pre-commit install
+# Run manually:  uv run --with pre-commit --no-project pre-commit run --all-files
+#
+# WHY EVERY HOOK IS `local` / `language: system`, with no third-party repos:
+#   1. `.github/workflows/` pins every action by full commit SHA. Pulling hook code from a
+#      `rev:` tag on someone else's repository would add an unpinned execution surface that
+#      runs on this machine, before the commit, with the developer's credentials in the
+#      environment — the exact thing the SHA pinning exists to avoid.
+#   2. The point of a commit hook here is *not* to add gates. It is to run the gates CI
+#      already runs, earlier. So each hook below invokes the identical command from
+#      `.github/workflows/ci.yml`, and `test_publish_readiness.py` asserts the strings still
+#      match — a hook that drifts from CI is worse than no hook, because it teaches people
+#      that a green commit means a green build.
+#
+# NOT here, on purpose:
+#   - the full pytest suite and `mypy --strict` — minutes, not seconds. They belong to
+#     `scripts/verify-local.sh`, which stays the merge gate.
+#   - `ruff format` — this codebase is not ruff-format-clean and CI does not check formatting,
+#     so a format hook would rewrite files nobody asked it to touch and produce diffs CI has
+#     no opinion about.
+repos:
+  - repo: local
+    hooks:
+      # Byte-identical to ci.yml job `lint-type`, step "Ruff (lint)".
+      - id: ruff-check
+        name: ruff check (CI lint scope)
+        entry: uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
+        language: system
+        pass_filenames: false
+        types_or: [python, pyi]
+
+      # Byte-identical to ci.yml job `secret-scan`, step "detect-secrets (audited baseline gate)".
+      # This is the FIRST job in CI; catching a secret after it is committed means rewriting
+      # history, so commit time is the only useful place to catch it.
+      - id: detect-secrets-gate
+        name: detect-secrets (audited baseline gate)
+        entry: uv run --with detect-secrets --no-project python scripts/secret_scan_gate.py
+        language: system
+        pass_filenames: false
+        always_run: true

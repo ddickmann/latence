@@ -90,15 +90,40 @@ jobs:
       - name: Mypy (strict, benchmark/s5 harness)
         run: uv run mypy --strict --namespace-packages -p benchmark.s5
 
-  # ---- Full test suite + provider conformance + coverage, on both interpreters.
+  # ---- Full test suite + provider conformance + coverage.
+  #
+  # OS COVERAGE. Every package declares the operating systems it is tested on, and this matrix
+  # is what makes that declaration true rather than aspirational:
+  #   * Linux — the primary lane, every supported interpreter.
+  #   * macOS — one leg (py3.12). Not a token entry: the whole suite was run on an
+  #     arm64 macOS host before this lane was added, so it is known to pass rather than
+  #     hoped to. One interpreter is enough because what macOS exercises that Linux does not
+  #     is the platform (filesystem semantics, arm64 wheels), not the interpreter version.
+  #   * Windows — deliberately ABSENT, and the classifiers say so. It is not a cost decision:
+  #     `latence-demo` defaults to the POSIX path `file:///tmp/latence-demo`, ~98 test modules
+  #     build `file:///…` URIs that have no Windows spelling, the entire merge gate is bash
+  #     (`scripts/verify-local.sh`, `typecheck.sh`, `release-integrity.sh`), and the pinned
+  #     GLinker wheels are Linux/x86-64 only (docs/compatibility-matrix.md). A Windows lane
+  #     would be red on day one, so the packages claim POSIX/Linux + macOS and nothing more.
+  #     Adding Windows means doing that work first, not adding a matrix entry.
+  #
+  # INTERPRETER COVERAGE. `requires-python = ">=3.11"` is unbounded, so the matrix has to
+  # reach the newest release or the metadata over-promises. 3.13 was run locally against a
+  # `uv sync --python 3.13` of this exact lockfile before being added here. 3.14 is not
+  # claimed: `requires-python` stays open because nothing is known to break, and the
+  # classifiers list only what this matrix actually runs.
   test:
-    name: test · conformance · coverage (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: test · conformance · coverage (${{ matrix.os }} · py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     needs: lint-type
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
 
@@ -134,12 +159,15 @@ jobs:
           LATENCE_CUDA: "0"
         run: uv run pytest packages/latence-core/tests/test_conformance.py packages/latence-core/tests/test_e2e_conformance.py -q
 
+      # `uv run python`, not bare `python`: the workspace interpreter is the one uv installed,
+      # and a bare `python` resolves to whatever the runner image happens to ship — which
+      # differs between the ubuntu and macOS images and is not the interpreter under test.
       - name: Coverage summary → job summary + badge number
         if: always()
         run: |
-          pct=$(python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
+          pct=$(uv run python -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.1f}\")")
           {
-            echo "### Coverage — py${{ matrix.python-version }}"
+            echo "### Coverage — ${{ matrix.os }} · py${{ matrix.python-version }}"
             echo ""
             echo "**\`coverage: ${pct}%\`**  (line coverage over \`packages/\`, tests/vendor omitted)"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -150,7 +178,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: coverage-py${{ matrix.python-version }}
+          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
           path: |
             coverage.xml
             coverage.json
@@ -225,3 +253,34 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+
+  # ---- THE single required status check.
+  #
+  # Branch protection should require ONLY `CI / all green`. Without it, protection has to
+  # enumerate every job AND every matrix leg by name — and the failure mode is silent: adding
+  # a matrix entry (as the macOS and py3.13 legs above just did) creates a check nobody
+  # required, so it can go red without blocking a merge. That is the opposite of a gate.
+  #
+  # `if: always()` is what makes this correct: a job that merely `needs:` its dependencies is
+  # SKIPPED when one of them fails, and a skipped required check does not block a merge on
+  # every protection configuration. So this job always runs and inspects the results itself.
+  #
+  # `skipped` is a failure here, deliberately. Nothing in this workflow is conditional, so a
+  # skip means a dependency failed or was cancelled — never "legitimately not needed".
+  all-green:
+    name: all green
+    if: always()
+    needs: [secret-scan, lint-type, test, stacks, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every required job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          # Any result other than "success" (failure, cancelled, or skipped) fails the gate.
+          if echo "$RESULTS" | grep -q '"result": *"\(failure\|cancelled\|skipped\)"'; then
+            echo "::error::At least one required CI job did not succeed. See the results above."
+            exit 1
+          fi
+          echo "All required jobs succeeded."
