@@ -9,6 +9,14 @@
 #                 (license lanes are classified and recorded by the s1-corpus stage
 #                 gate before any byte is fetched; see stages/s1-corpus/metrics.json)
 # pod ssh       : ssh root@213.173.108.103 -p 11108 -i ~/.ssh/id_ed25519
+# s3 pipeline   : chunk 640/80/8; fused_entity_relation.gliner2 @ 0.5
+#                 induction per_chunk (deepseek/deepseek-v4-flash-0731, reasoning off, cap $150.00); redaction guardrails on
+# retrieval     : graph auto; select packed @ 10000 tok; expand 5/0.05/0.01/0.05
+#                 (the S5b graph-as-rescue architecture — graph appends, never fuses;
+#                 every default is the measured operating point)
+# s5 matrix     : 7 dataset(s) (the corpus selection) × 10 leg(s); full query sets; fusion equal
+#                 (the s5-retrieval stage runs this matrix; one JSON cell per
+#                 (dataset, leg), REPORT.md + metrics.json are its gate artifacts)
 #
 # Stages are gated: `run <stage>` refuses until the PREVIOUS stage was `approve`d.
 # Later campaign stages append their own config blocks below; unknown blocks are
@@ -25,3 +33,72 @@ corpus:
   - ohr_bench
   - vidoseek
   - uda
+retrieval:
+  expand:
+    centrality_weight: 0.05
+    community_weight: 0.01
+    hop_weight: 0.05
+    seed_top_k: 5
+  graph:
+    mode: auto
+    rescue_cap: 50
+    seed_docs_k: 5
+    seed_node_cap: 32
+  select:
+    coe_budget: 16000
+    pack_centrality_weight: 0.25
+    packed_budget: 10000
+    selector: packed
+s3:
+  chunk:
+    max_tokens: 640
+    min_tokens: 8
+    overlap_tokens: 80
+  extraction:
+    model: fastino/gliner2-multi-v1
+    provider: fused_entity_relation.gliner2
+    threshold: 0.5
+  induction:
+    base_url: https://openrouter.ai/api/v1
+    budget_usd_cap: 150.0
+    max_concurrency: 32
+    mode: per_chunk
+    model: deepseek/deepseek-v4-flash-0731
+    reasoning: false
+  labels:
+    entity:
+    - PERSON
+    - ORGANIZATION
+    - LOCATION
+    - WORK
+    - EVENT
+    - DATE
+    - PRODUCT
+    relation:
+    - located_in
+    - part_of
+    - member_of
+    - created_by
+    - founded_by
+    - spouse_of
+    - directed_by
+    - works_for
+    - released_in
+  redaction:
+    guardrails: true
+    provider: redaction.gliner2
+s5:
+  datasets: []
+  fusion: equal
+  legs:
+  - dense
+  - bm25
+  - kg
+  - hyperedges
+  - coe
+  - packer
+  - dense_content_only
+  - graph_rescue
+  - graph_rescue_packed
+  - graph_rescue_coe
+  limit: null

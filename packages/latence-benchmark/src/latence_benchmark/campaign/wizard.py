@@ -82,6 +82,30 @@ RETRIEVAL_GRAPH_MODES: tuple[str, ...] = ("off", "auto", "force")
 #: chain-of-evidence (recall point — keeps buying recall through 16k), ``none`` skips selection.
 RETRIEVAL_SELECTORS: tuple[str, ...] = ("packed", "coe", "none")
 
+#: The S5 feature-matrix legs, in matrix order, mirroring ``benchmark.s5.legs.ALL_LEG_NAMES``:
+#: the six cumulative ladder rungs, the content-only dense ablation, and the three graph-rescue
+#: legs. Same posture as the retrieval mirrors above — the campaign package configures the
+#: harness, it never imports it, and ``tests/test_campaign_s5_wizard.py`` pins the two tuples
+#: against each other (order included, because the order IS the report's column order).
+S5_LEGS: tuple[str, ...] = (
+    "dense",
+    "bm25",
+    "kg",
+    "hyperedges",
+    "coe",
+    "packer",
+    "dense_content_only",
+    "graph_rescue",
+    "graph_rescue_packed",
+    "graph_rescue_coe",
+)
+
+#: The two fusion variants, mirroring ``benchmark.s5.run_matrix.FUSIONS``. ``equal`` is the
+#: untuned RRF baseline (writes ``results/``); ``tuned`` fits per-signal weights on a dev split
+#: and reports them on the disjoint test split (writes ``results-weighted/``) — a separate cell
+#: namespace, so choosing it can never overwrite the baseline.
+S5_FUSIONS: tuple[str, ...] = ("equal", "tuned")
+
 
 @dataclass(frozen=True)
 class S3Answers:
@@ -251,6 +275,84 @@ class RetrievalAnswers:
 
 
 @dataclass(frozen=True)
+class S5Answers:
+    """The ``s5:`` block of campaign.yaml — the retrieval feature matrix's shape.
+
+    Four knobs, because four is what a matrix run *is*: which datasets, which legs, how many
+    queries each, and which fusion variant. The defaults are the campaign's headline run — every
+    leg, every dataset in the corpus selection, the full query set, equal-weight RRF — so an
+    operator who edits nothing measures exactly what the published matrix measured.
+
+    :param datasets: The datasets to measure, or empty (the default) for **the campaign's own
+        corpus selection**. Empty is not "none": the matrix follows ``corpus.datasets`` unless
+        it is told otherwise, so trimming the corpus trims the matrix with it and the two can
+        never silently disagree. An explicit list is taken verbatim.
+    :param legs: The legs to run, a subset of :data:`S5_LEGS`. Reordered into matrix order by
+        the stage, since the order is the report's column order and not an operator choice.
+    :param limit: Query cap per dataset (a smoke run), or ``None`` for the full gold set. The
+        sample is a fixed-seed draw, so a capped run is reproducible, not merely small.
+    :param fusion: ``equal`` (the baseline) or ``tuned`` — see :data:`S5_FUSIONS`.
+
+    None of these is prompted for interactively, deliberately: the default IS the full matrix,
+    and every deviation from it is a narrowing an operator makes on purpose (a smoke limit, one
+    leg) — not a headline choice worth interrogating before the S3 gate is even approved.
+    """
+
+    datasets: tuple[str, ...] = ()
+    legs: tuple[str, ...] = field(default=S5_LEGS)
+    limit: int | None = None
+    fusion: str = "equal"
+
+    def __post_init__(self) -> None:
+        unknown = [d for d in self.datasets if d not in KNOWN_DATASETS]
+        if unknown:
+            msg = (
+                f"s5.datasets has unknown dataset(s): {', '.join(unknown)}. "
+                f"Known: {', '.join(KNOWN_DATASETS)}."
+            )
+            raise CampaignConfigError(msg)
+        _reject_duplicates("s5.datasets", self.datasets)
+        if not self.legs:
+            msg = (
+                "s5.legs is empty — a matrix with no legs measures nothing. "
+                f"Choose from: {', '.join(S5_LEGS)}."
+            )
+            raise CampaignConfigError(msg)
+        unknown_legs = [leg for leg in self.legs if leg not in S5_LEGS]
+        if unknown_legs:
+            msg = (
+                f"s5.legs has unknown leg(s): {', '.join(unknown_legs)}. "
+                f"Known: {', '.join(S5_LEGS)}."
+            )
+            raise CampaignConfigError(msg)
+        _reject_duplicates("s5.legs", self.legs)
+        if self.limit is not None and self.limit < 1:
+            msg = (
+                f"s5.limit must be a positive integer or null for the full query set "
+                f"(got {self.limit})."
+            )
+            raise CampaignConfigError(msg)
+        if self.fusion not in S5_FUSIONS:
+            msg = (
+                f"s5.fusion must be one of {', '.join(S5_FUSIONS)} (got {self.fusion!r})."
+            )
+            raise CampaignConfigError(msg)
+
+
+def _reject_duplicates(name: str, values: tuple[str, ...]) -> None:
+    """A repeated selection is a typo, never an instruction — deduplicating would hide it."""
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for value in values:
+        if value in seen:
+            dupes.append(value)
+        seen.add(value)
+    if dupes:
+        msg = f"{name} lists {', '.join(sorted(set(dupes)))} more than once."
+        raise CampaignConfigError(msg)
+
+
+@dataclass(frozen=True)
 class CampaignAnswers:
     """The fully-resolved wizard answers — the SAME struct from prompts and from flags.
 
@@ -267,6 +369,9 @@ class CampaignAnswers:
     :param retrieval: The graph-rescue retrieval block (policy gate, selector + budgets,
         expander weights, seed caps) — the S5b production architecture's knobs. Older configs
         without a ``retrieval:`` block parse to the measured defaults.
+    :param s5: The retrieval feature-matrix block (datasets, legs, limit, fusion) the
+        ``s5-retrieval`` stage runs on. Older configs without an ``s5:`` block parse to the full
+        matrix over the campaign's own corpus selection.
     """
 
     campaign_root: str
@@ -274,6 +379,7 @@ class CampaignAnswers:
     pod_ssh: str = ""
     s3: S3Answers = field(default_factory=S3Answers)
     retrieval: RetrievalAnswers = field(default_factory=RetrievalAnswers)
+    s5: S5Answers = field(default_factory=S5Answers)
 
     def __post_init__(self) -> None:
         if not self.campaign_root.strip():
@@ -292,15 +398,7 @@ class CampaignAnswers:
                 f"Known: {', '.join(KNOWN_DATASETS)}."
             )
             raise CampaignConfigError(msg)
-        seen: set[str] = set()
-        dupes: list[str] = []
-        for d in self.datasets:
-            if d in seen:
-                dupes.append(d)
-            seen.add(d)
-        if dupes:
-            msg = f"Dataset(s) selected more than once: {', '.join(sorted(set(dupes)))}."
-            raise CampaignConfigError(msg)
+        _reject_duplicates("corpus.datasets", self.datasets)
 
 
 def build_campaign_config(answers: CampaignAnswers) -> str:
@@ -312,8 +410,15 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
     """
     s3 = answers.s3
     retrieval = answers.retrieval
+    s5 = answers.s5
     body: str = yaml.safe_dump(
         {
+            "s5": {
+                "datasets": list(s5.datasets),
+                "legs": list(s5.legs),
+                "limit": s5.limit,
+                "fusion": s5.fusion,
+            },
             "retrieval": {
                 "graph": {
                     "mode": retrieval.graph_mode,
@@ -384,6 +489,12 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
         else f"{s3.induction_mode} ({s3.induction_model}{reasoning}, "
         f"cap ${s3.induction_budget_usd_cap:.2f})"
     )
+    s5_datasets = (
+        f"{len(answers.datasets)} dataset(s) (the corpus selection)"
+        if not s5.datasets
+        else f"{len(s5.datasets)} dataset(s) — {', '.join(s5.datasets)}"
+    )
+    s5_limit = "full query sets" if s5.limit is None else f"limit {s5.limit} queries/dataset"
     if retrieval.selector == "packed":
         select_line = f"packed @ {retrieval.packed_budget} tok"
     elif retrieval.selector == "coe":
@@ -411,6 +522,10 @@ def build_campaign_config(answers: CampaignAnswers) -> str:
         f"{retrieval.centrality_weight}",
         "#                 (the S5b graph-as-rescue architecture — graph appends, never fuses;",
         "#                 every default is the measured operating point)",
+        f"# s5 matrix     : {s5_datasets} × {len(s5.legs)} leg(s); {s5_limit}; fusion "
+        f"{s5.fusion}",
+        "#                 (the s5-retrieval stage runs this matrix; one JSON cell per",
+        "#                 (dataset, leg), REPORT.md + metrics.json are its gate artifacts)",
         "#",
         "# Stages are gated: `run <stage>` refuses until the PREVIOUS stage was `approve`d.",
         "# Later campaign stages append their own config blocks below; unknown blocks are",
@@ -464,6 +579,7 @@ def parse_campaign_config(text: str) -> CampaignAnswers:
         pod_ssh=pod_ssh,
         s3=_parse_s3_block(raw.get("s3")),
         retrieval=_parse_retrieval_block(raw.get("retrieval")),
+        s5=_parse_s5_block(raw.get("s5")),
     )
 
 
@@ -521,6 +637,66 @@ def _label_list(block: dict[str, object], key: str, default: tuple[str, ...]) ->
         msg = f"`s3.labels.{key}` must be a list of strings."
         raise CampaignConfigError(msg)
     return tuple(raw)
+
+
+def _name_list(
+    block: dict[str, object], key: str, default: tuple[str, ...], *, prefix: str
+) -> tuple[str, ...]:
+    """A ``<prefix>.<key>`` list of names; absent = ``default``, an EXPLICIT ``[]`` = empty.
+
+    The distinction is load-bearing for ``s5.datasets``, where an empty list means "follow the
+    corpus selection" and an absent key means "the block was never written". Both land on the
+    same value here only because the default IS empty; the two are kept separable by taking the
+    key's presence, not its truthiness, as the question.
+    """
+    if key not in block:
+        return default
+    raw = block[key]
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        msg = f"`{prefix}.{key}` must be a list of strings."
+        raise CampaignConfigError(msg)
+    return tuple(str(x) for x in raw)
+
+
+def _limit_knob(block: dict[str, object], default: int | None) -> int | None:
+    """``s5.limit``: a positive int, or an explicit ``null`` for the full query set."""
+    value = block.get("limit", default)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        msg = f"`s5.limit` must be a positive integer or null (got {value!r})."
+        raise CampaignConfigError(msg)
+    return value
+
+
+def _parse_s5_block(raw: object) -> S5Answers:
+    """The optional ``s5:`` block → :class:`S5Answers`; absent = the full default matrix.
+
+    Flat, not nested, because the four knobs are one concern (the matrix's shape) rather than
+    four — but the block discipline is the ``s3:``/``retrieval:`` one unchanged: an older
+    campaign.yaml without the block keeps loading, a typo'd knob is LOUD, and a wrongly-typed
+    value is rejected at parse instead of at cell-writing time.
+    """
+    if raw is None:
+        return S5Answers()
+    if not isinstance(raw, dict):
+        msg = "`s5` must be a mapping (datasets, legs, limit, fusion)."
+        raise CampaignConfigError(msg)
+    known = ("datasets", "legs", "limit", "fusion")
+    unknown = sorted(set(raw) - set(known))
+    if unknown:
+        msg = (
+            f"`s5` has unknown key(s): {', '.join(unknown)}. Known: {', '.join(known)}."
+        )
+        raise CampaignConfigError(msg)
+    block = dict(raw)
+    defaults = S5Answers()
+    return S5Answers(
+        datasets=_name_list(block, "datasets", defaults.datasets, prefix="s5"),
+        legs=_name_list(block, "legs", defaults.legs, prefix="s5"),
+        limit=_limit_knob(block, defaults.limit),
+        fusion=str(_typed(block, "fusion", str, defaults.fusion, prefix="s5")),
+    )
 
 
 def _parse_retrieval_block(raw: object) -> RetrievalAnswers:

@@ -185,7 +185,8 @@ class FakeClock:
 
 class TestGating:
     def test_s3_is_registered_directly_after_s2(self) -> None:
-        assert [spec.name for spec in registry()] == ["s1-corpus", "s2-ocr", STAGE_NAME]
+        names = [spec.name for spec in registry()]
+        assert names[: names.index(STAGE_NAME) + 1] == ["s1-corpus", "s2-ocr", STAGE_NAME]
 
     def test_run_refuses_until_s2_is_approved(self, tmp_path: Path) -> None:
         specs = registry()

@@ -58,6 +58,21 @@ workspace are versioned and released together under one version number.
 
 ### Added
 
+- **`s5-retrieval` — the retrieval feature matrix is a campaign stage
+  (`latence_benchmark.campaign.retrieval_stage`).** The S5 harness already honoured the campaign
+  contract (per-cell resumability, refuse-don't-fake, `REPORT.md` + `metrics.json` gate artifacts)
+  through machinery no campaign could reach: an argparse `main`, a hardcoded output directory, and
+  module-level corpus constants. Now `benchmark.s5.run_matrix.run(plan) -> MatrixOutcome` is the
+  harness API (argparse demoted to one adapter over it, with the `PYTHONHASHSEED` refusal at that
+  entry rather than in `main`), `benchmark.s5.datasets` resolves every input from a passed-in
+  `CorpusLayout`, and the campaign registry gains a fourth stage — gated on `s3-pipeline`'s
+  approval, done-probed on every planned cell plus the two gate artifacts, and blocked when a whole
+  dataset recorded only refusals (an absent export is not a measurement). The wizard grew a
+  byte-deterministic `s5:` block (datasets, legs, limit, fusion), and the committed
+  `benchmark/sota-campaign/campaign.yaml` was regenerated with it. One cheap cell produced through
+  BOTH entries — CLI and `latence-campaign run s5-retrieval` — is identical modulo wall-clock
+  latency keys.
+
 - **Hypergraph query index — the graph lanes at serving latency (`latence_retrieval.hypergraph`,
   ADR-0056 amendment).** `HyperedgeKV.open` now attaches a transparently cached, file-identity-keyed
   `HypergraphIndex` (postings, incidence, γ-rank — decoded once per store per process; numpy-

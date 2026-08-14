@@ -28,6 +28,9 @@ The prompts cover: the campaign root, the dataset selection (from the known-data
 the pod SSH target for GPU stages, the S3 induction mode, and the two headline retrieval
 choices (policy-gate mode, selector) — the full `retrieval:` block with measured defaults is
 documented in [Graph-rescue retrieval](graph-rescue-retrieval.md#configuring-it-from-the-campaign-wizard).
+The `s5:` matrix block is flag-only (`--s5-datasets`, `--s5-legs`, `--s5-limit`, `--s5-fusion`):
+its default *is* the full matrix over the corpus selection, so every deviation is a deliberate
+narrowing rather than an answer worth interrogating up front.
 
 ## The stage chain
 
@@ -39,12 +42,22 @@ and `approve` is an explicit operator sign-off, never automatic:
 | `s1-corpus` | Acquires the selected public datasets under their **machine-enforced license lanes** (a research-only corpus requires `--accept-non-commercial`; an unverifiable one is refused unconditionally) | acquisition manifest + per-dataset counts |
 | `s2-ocr` | OCRs the scanned corpora into markdown (served LightOn-OCR-2), page maps carried in sidecars | OCR metrics + spot-check dir |
 | `s3-pipeline` | Runs the full enterprise pipeline per dataset on the pod (extraction, redaction, KG, hyperedges, embeddings, exports) | per-dataset `metrics.json` — the campaign scale numbers |
+| `s5-retrieval` | Runs the retrieval feature matrix — every (dataset × leg) cell from `dense` through `+bm25 / +KG / +hyperedges / +CoE / +packer`, the content-only ablation and the three graph-rescue legs | one JSON cell per (dataset, leg) under `stages/s5-retrieval/results/`, plus `REPORT.md` + `metrics.json` |
 
-Retrieval measurement (the S5 feature matrix and the graph-rescue cells) runs from the same
-config through the harness under `benchmark/s5/` (`run_matrix.py`; results land under
-`benchmark/sota-campaign/stages/s5-retrieval/`). Gold resolution is audited per dataset before
-any recall number is trusted, and single-hop control datasets are reported as controls, not
-headlines.
+The matrix is configured by the `s5:` block (`datasets`, `legs`, `limit`, `fusion`) and, when
+`s5.datasets` is left empty, follows the campaign's own `corpus.datasets` — so trimming the
+corpus trims the matrix with it. The stage derives its plan from that block and calls the
+harness's API (`benchmark.s5.run_matrix.run`) directly; the same harness is still drivable
+standalone as `python -m benchmark.s5.run_matrix`, and a cell produced either way is the same
+file. Resumability is per cell: a matrix that takes hours can be interrupted and re-entered, and
+`run` never re-runs a cell it already has.
+
+Two refusals are load-bearing. A leg whose export artifacts are absent is recorded as
+`missing-inputs` with the file list, never as a zero — the reused MuSiQue/HotpotQA exports
+genuinely carry no embedding column, and the matrix says so. But a *dataset* whose every leg
+refused blocks the stage: that is an absent or unfinished export being advanced as a
+measurement. Gold resolution is audited per dataset before any recall number is trusted, and
+single-hop control datasets are reported as controls, not headlines.
 
 Every dataset's corpus/toolkit licenses and lanes are recorded in one place —
 [`THIRD-PARTY-LICENSES.md`](https://github.com/ddickmann/latence-framework/blob/main/THIRD-PARTY-LICENSES.md)

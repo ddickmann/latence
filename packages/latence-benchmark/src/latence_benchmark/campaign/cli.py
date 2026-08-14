@@ -49,10 +49,13 @@ from latence_benchmark.campaign.wizard import (
     RETRIEVAL_GRAPH_MODES,
     RETRIEVAL_SELECTORS,
     S3_INDUCTION_MODES,
+    S5_FUSIONS,
+    S5_LEGS,
     CampaignAnswers,
     CampaignConfigError,
     RetrievalAnswers,
     S3Answers,
+    S5Answers,
     build_campaign_config,
     parse_campaign_config,
 )
@@ -170,6 +173,27 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     ):
         init.add_argument(flag, default=None, help=help_text)
+    # S5 feature matrix: flag-only, no prompts — the default IS the full matrix over the
+    # corpus selection, and every deviation is a deliberate narrowing (see S5Answers).
+    init.add_argument(
+        "--s5-fusion",
+        default=None,
+        choices=[*S5_FUSIONS],
+        help="Matrix fusion variant: equal (default, the untuned RRF baseline) or tuned "
+        "(weights fitted on a dev split, reported on the disjoint test split).",
+    )
+    for flag, help_text in (
+        (
+            "--s5-datasets",
+            "comma-separated matrix datasets (default: empty = the corpus selection).",
+        ),
+        (
+            "--s5-legs",
+            f"comma-separated legs to run (default: all of {','.join(S5_LEGS)}).",
+        ),
+        ("--s5-limit", "query cap per dataset for a smoke matrix (default: the full sets)."),
+    ):
+        init.add_argument(flag, default=None, help=help_text)
     init.add_argument(
         "--non-interactive",
         action="store_true",
@@ -244,6 +268,11 @@ def _flag_or(flag: str | None, default: object) -> str:
     LOUDLY (exit 2), so the flag is kept verbatim whenever it was given at all.
     """
     return flag if flag is not None else str(default)
+
+
+def _name_tuple(raw: str) -> tuple[str, ...]:
+    """A comma-separated flag value as a name tuple; blanks dropped, ``''`` = empty."""
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
 def _ask(flag: str | None, prompt: str, why: str, default: str, *, interactive: bool) -> str:
@@ -392,12 +421,29 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 )
             ),
         )
+        s5_defaults = S5Answers()
+        s5 = S5Answers(
+            # `is not None`, never truthiness: `--s5-datasets ''` is the explicit "follow the
+            # corpus selection" answer and `--s5-legs ''` must reach the empty-legs refusal,
+            # not silently restore the full ladder (the Wave 1-C flag rule).
+            datasets=(
+                _name_tuple(args.s5_datasets)
+                if args.s5_datasets is not None
+                else s5_defaults.datasets
+            ),
+            legs=(
+                _name_tuple(args.s5_legs) if args.s5_legs is not None else s5_defaults.legs
+            ),
+            limit=(int(args.s5_limit) if args.s5_limit is not None else s5_defaults.limit),
+            fusion=_flag_or(args.s5_fusion, s5_defaults.fusion).strip(),
+        )
         answers = CampaignAnswers(
             campaign_root=root,
             datasets=datasets,
             pod_ssh=pod_ssh.strip(),
             s3=s3,
             retrieval=retrieval,
+            s5=s5,
         )
     except (CampaignConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -432,6 +478,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
         f"  retrieval: graph {answers.retrieval.graph_mode}, "
         f"selector {answers.retrieval.selector}"
         + (f" @ {budget} tok" if budget is not None else "")
+    )
+    matrix_datasets = answers.s5.datasets or answers.datasets
+    print(
+        f"  s5 matrix: {len(matrix_datasets)} dataset(s) × {len(answers.s5.legs)} leg(s), "
+        + ("full query sets" if answers.s5.limit is None else f"limit {answers.s5.limit}")
+        + f", fusion {answers.s5.fusion}"
     )
     print("")
     print(f"Run `latence-campaign status -c {output}` to see the stage table.")

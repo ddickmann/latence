@@ -300,9 +300,13 @@ class TestStatusAndFlow:
         assert rc == 0
         capsys.readouterr()
 
+        # resume advances into s5-retrieval, the last stage. This fixture repo is a corpus
+        # tree, not a latence-framework checkout, so the matrix harness is REFUSED rather
+        # than run against whatever happens to be importable — the stage's own suite drives
+        # its behaviour through an injected harness.
         rc = cli.main(["resume", "-c", str(config), "--repo-root", str(repo)])
-        assert rc == 0
-        assert "complete" in capsys.readouterr().out
+        assert rc == 1
+        assert "S5 harness is not importable" in capsys.readouterr().err
 
     def test_rerun_of_done_stage_is_noop(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
