@@ -43,11 +43,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
 # -- the status vocabulary ----------------------------------------------------------------------
 
@@ -55,6 +55,22 @@ OK = "ok"
 MISSING_INPUTS = "missing-inputs"
 NOT_FUSION_TUNABLE = "not-fusion-tunable"
 INSUFFICIENT_SPLIT = "insufficient-split"
+
+# -- where cells live ---------------------------------------------------------------------------
+
+#: Each fusion variant's cell directory, relative to a run's ``--out``. Separate directories,
+#: never separate *keys* in one directory: the equal-weight matrix is a long-running job, and a
+#: variant must not be able to overwrite, reorder or shadow one of its cells even by accident.
+#:
+#: It lives HERE, beside :func:`cell_path`, because "where a cell file is" and "what a cell file
+#: is called" are one fact — and the campaign's ``s5-retrieval`` done-probe needs that fact
+#: without importing the whole harness (this module is stdlib-only on purpose).
+RESULTS_DIRS = {"equal": "results", "tuned": "results-weighted"}
+
+
+def results_dir(out: Path, fusion: str) -> Path:
+    """The cell directory ``fusion`` owns under a run's output root."""
+    return out / RESULTS_DIRS[fusion]
 
 #: Why the rescue family has no tuned-fusion cell — written verbatim into the refusal body.
 NOT_FUSION_TUNABLE_REASON = (
@@ -272,6 +288,7 @@ __all__ = [
     "NOT_FUSION_TUNABLE",
     "NOT_FUSION_TUNABLE_REASON",
     "OK",
+    "RESULTS_DIRS",
     "Cell",
     "Header",
     "cell_path",
@@ -280,6 +297,7 @@ __all__ = [
     "missing_inputs_cell",
     "not_fusion_tunable_body",
     "rescue_body",
+    "results_dir",
     "tuned_body",
     "write_cell",
 ]

@@ -1,6 +1,14 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""``run_matrix.py`` — the S5 feature-matrix CLI: (dataset × leg) → one comparable table.
+"""``run_matrix.py`` — the S5 feature matrix: (dataset × leg) → one comparable table.
+
+**The API is :func:`run`, not the CLI.** ``run(plan) -> MatrixOutcome`` is the whole harness:
+a :class:`Plan` in, the cells + report on disk and a record of what happened out. Everything
+argparse-shaped (:func:`parse_args`, :func:`main`) is one thin adapter over it, and so is the
+``s5-retrieval`` campaign stage — which derives its own :class:`Plan` from ``campaign.yaml``
+and calls :func:`run` directly. The determinism refusal and the sample seed therefore live at
+that entry, not in ``main``: a caller that never touches argparse must still be unable to
+produce a non-reproducible cell.
 
 Resumable by construction: every (dataset, leg) cell is written to its own JSON file under
 ``benchmark/sota-campaign/stages/s5-retrieval/results/`` the moment it finishes, and a re-run
@@ -56,6 +64,7 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import wiring
 
 from benchmark.s5 import goldmap  # noqa: E402
 from benchmark.s5.cell import (  # noqa: E402
+    RESULTS_DIRS,
     Header,
     cell_path,
     ladder_body,
@@ -66,13 +75,21 @@ from benchmark.s5.cell import (  # noqa: E402
     tuned_body,
     write_cell,
 )
+from benchmark.s5.cell import results_dir as fusion_results_dir  # noqa: E402
 from benchmark.s5.corpus import (  # noqa: E402
     CONTENT_ONLY_VECTORS,
     Export,
     load_export,
     read_vector_sidecar,
 )
-from benchmark.s5.datasets import CONTROL_DATASETS, DATASETS  # noqa: E402
+from benchmark.s5.datasets import (  # noqa: E402
+    CONTROL_DATASETS,
+    DATASET_NAMES,
+    DEFAULT_LAYOUT,
+    CorpusLayout,
+    DatasetSpec,
+    dataset_specs,
+)
 from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
 from benchmark.s5.legs import (  # noqa: E402
     ALL_LEG_NAMES,
@@ -106,16 +123,32 @@ if TYPE_CHECKING:
 DEFAULT_OUT = REPO_ROOT / "benchmark" / "sota-campaign" / "stages" / "s5-retrieval"
 SAMPLE_SEED = 20260809
 
-#: Where each fusion variant's cells live. Separate directories, never separate *keys* in one
-#: directory: the equal-weight matrix is a long-running job, and a variant must not be able to
-#: overwrite, reorder or shadow one of its cells even by accident.
-RESULTS_DIRS = {"equal": "results", "tuned": "results-weighted"}
+#: The fusion variants, in declaration order — each owning its own cell directory (the layout
+#: itself lives with the cell schema, :data:`benchmark.s5.cell.RESULTS_DIRS`).
 FUSIONS = tuple(RESULTS_DIRS)
+
+#: The refusal text when ``PYTHONHASHSEED`` is not pinned. One constant, because it is asserted
+#: at the API entry AND printed by the CLI, and the two must say the same thing.
+HASHSEED_REFUSAL = (
+    "set PYTHONHASHSEED=0 (the hypergraph entry is hash-order sensitive; a run without it is "
+    "not reproducible)."
+)
+
+
+class MatrixRefused(RuntimeError):
+    """The harness refused to run — the message is the reason, verbatim."""
 
 
 @dataclass(frozen=True)
 class Plan:
-    """One resolved run request."""
+    """One resolved run request — the harness's whole input.
+
+    ``layout`` is where the inputs are read from (:class:`~benchmark.s5.datasets.CorpusLayout`);
+    it defaults to this checkout, so a plan built the old way behaves identically. ``out`` is
+    where cells, ``REPORT.md`` and ``metrics.json`` are written, and it is independent of the
+    layout on purpose: the campaign stage writes into its own stage directory while reading a
+    corpus that lives wherever the checkout put it.
+    """
 
     datasets: tuple[str, ...]
     legs: tuple[str, ...]
@@ -124,15 +157,66 @@ class Plan:
     force: bool
     resolution_only: bool = False
     fusion: str = "equal"
+    layout: CorpusLayout = DEFAULT_LAYOUT
 
     @property
     def results_dir(self) -> Path:
         """The cell directory this fusion variant owns."""
-        return self.out / RESULTS_DIRS[self.fusion]
+        return fusion_results_dir(self.out, self.fusion)
+
+    @property
+    def specs(self) -> dict[str, DatasetSpec]:
+        """This plan's dataset table, resolved against its own layout."""
+        return dataset_specs(self.layout)
+
+
+@dataclass(frozen=True)
+class MatrixOutcome:
+    """What one :func:`run` did — the record a caller reports or gates on.
+
+    ``cells`` is every planned cell that EXISTS on disk afterwards (the resume view: cells a
+    previous run left count), ``written`` is only what this invocation produced. A stage's
+    done-probe reads the filesystem itself rather than trusting this struct — but the two must
+    agree, and a run that returns cleanly with ``len(cells) < len(planned_cells(plan))`` is
+    precisely the "exited 0, produced nothing" shape the campaign contract blocks on.
+    """
+
+    plan: Plan
+    cells: tuple[Path, ...]
+    written: tuple[Path, ...]
+    report: Path
+    metrics: Path
+
+
+def require_deterministic() -> None:
+    """Refuse unless ``PYTHONHASHSEED=0`` — at the API entry, not only in ``main``."""
+    if os.environ.get("PYTHONHASHSEED") != "0":
+        raise MatrixRefused(HASHSEED_REFUSAL)
+
+
+def planned_cells(plan: Plan) -> tuple[Path, ...]:
+    """Every ``<dataset>__<leg>.json`` this plan is responsible for, in matrix order.
+
+    The done-probe's definition of "finished", derived from the plan rather than restated
+    beside it — the campaign stage asks this function instead of rebuilding the file naming.
+    A ``--resolution-only`` plan writes no cells and owns none.
+    """
+    if plan.resolution_only:
+        return ()
+    return tuple(
+        cell_path(plan.results_dir, dataset, leg)
+        for dataset in plan.datasets
+        for leg in plan.legs
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> Plan:
-    """Parse the CLI into a :class:`Plan` (``all`` expands to every dataset / every leg)."""
+    """Parse the CLI into a :class:`Plan` (``all`` expands to every dataset / every leg).
+
+    One adapter over :func:`run`, nothing more: it resolves flags into the same struct the
+    campaign stage builds from ``campaign.yaml``, and every rule that must hold for BOTH
+    callers (the hash-seed refusal, the sample seed, the cell naming) lives past this function.
+    """
     parser = argparse.ArgumentParser(description="S5 retrieval feature-matrix harness")
     parser.add_argument("--datasets", default="all", help="comma list, or 'all'")
     parser.add_argument(
@@ -169,12 +253,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Plan:
         ),
     )
     args = parser.parse_args(argv)
-    datasets = tuple(DATASETS) if args.datasets == "all" else tuple(
+    datasets = tuple(DATASET_NAMES) if args.datasets == "all" else tuple(
         d.strip() for d in args.datasets.split(",") if d.strip()
     )
-    unknown = [d for d in datasets if d not in DATASETS]
+    unknown = [d for d in datasets if d not in DATASET_NAMES]
     if unknown:
-        parser.error(f"unknown dataset(s) {unknown}; known: {sorted(DATASETS)}")
+        parser.error(f"unknown dataset(s) {unknown}; known: {sorted(DATASET_NAMES)}")
     legs = ALL_LEG_NAMES if args.legs == "all" else tuple(
         leg.strip() for leg in args.legs.split(",") if leg.strip()
     )
@@ -209,7 +293,7 @@ def measure_resolution(
     UDA's 393 paper_tab queries are document-level gold, and reassembling their 307 papers to
     answer a question no reference asks would dominate the measurement.
     """
-    spec = DATASETS[name]
+    spec = plan.specs[name]
     queries = sample(spec.queries(), plan.limit)
     page_docs = frozenset(
         Path(ref.file_name).stem
@@ -243,15 +327,21 @@ def measure_resolution(
     return resolution, resolved, export
 
 
-def run_dataset(name: str, plan: Plan) -> None:
-    """Run every requested leg for one dataset; write each cell as it completes."""
-    spec = DATASETS[name]
+def run_dataset(name: str, plan: Plan) -> list[Path]:
+    """Run every requested leg for one dataset; write each cell as it completes.
+
+    Returns the cell files THIS call wrote (refusals included — a recorded missing-inputs cell
+    is a written cell), so the caller can report what a resumed run actually did instead of
+    re-deriving it from timestamps.
+    """
+    spec = plan.specs[name]
     results_dir = plan.results_dir
     results_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
 
     if plan.resolution_only:
         measure_resolution(name, plan, with_embeddings=False)
-        return
+        return written
 
     pending = [
         leg
@@ -262,6 +352,7 @@ def run_dataset(name: str, plan: Plan) -> None:
     for leg, missing in blocked.items():
         if missing:
             write_cell(results_dir, name, leg, missing_inputs_cell(name, leg, missing))
+            written.append(cell_path(results_dir, name, leg))
     runnable = [leg for leg in pending if not blocked[leg]]
     # The embedding COLUMN is a per-leg input, not a per-dataset one: an ablation leg reads its
     # vectors from the sidecar and can run on an export whose corpus table has no column at all.
@@ -274,11 +365,12 @@ def run_dataset(name: str, plan: Plan) -> None:
                 leg,
                 missing_inputs_cell(name, leg, ["corpus.parquet:embedding"]),
             )
+            written.append(cell_path(results_dir, name, leg))
         runnable = [leg for leg in runnable if vector_source(leg) != "corpus"]
         from_corpus = []
 
     if not runnable:
-        return
+        return written
 
     resolution, resolved, export = measure_resolution(
         name,
@@ -290,7 +382,7 @@ def run_dataset(name: str, plan: Plan) -> None:
     )
     usable = [r for r in resolved if r.is_usable]
     if not usable:
-        return
+        return written
 
     # Loaded here rather than inside `build_runner`, because this is where the corpus row ids the
     # sidecar must line up with are known; `read_vector_sidecar` raises if it does not.
@@ -334,7 +426,9 @@ def run_dataset(name: str, plan: Plan) -> None:
             body = _tuned_cell(runner, leg, scored)
         payload = header.merge(body)
         write_cell(results_dir, name, leg, payload)
+        written.append(cell_path(results_dir, name, leg))
         print(f"[{name}/{leg}] {json.dumps(payload.get('metrics'))}", flush=True)
+    return written
 
 
 def _equal_cell(
@@ -466,18 +560,17 @@ def _tuned_cell(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the requested matrix, then rewrite ``REPORT.md`` + ``metrics.json`` from the cells."""
-    if os.environ.get("PYTHONHASHSEED") != "0":
-        print(
-            "refusing to run: set PYTHONHASHSEED=0 (the hypergraph entry is hash-order "
-            "sensitive; a run without it is not reproducible).",
-            file=sys.stderr,
-        )
-        return 2
-    plan = parse_args(argv)
+def run(plan: Plan) -> MatrixOutcome:
+    """THE harness entry: run ``plan``, rewrite ``REPORT.md`` + ``metrics.json``, report back.
+
+    Both the CLI (:func:`main`) and the campaign stage come through here, which is why the
+    determinism refusal is the first thing it does: the guarantee "every committed cell was
+    produced under a pinned hash seed" belongs to the harness, not to one of its two callers.
+    """
+    require_deterministic()
+    written: list[Path] = []
     for name in plan.datasets:
-        run_dataset(name, plan)
+        written.extend(run_dataset(name, plan))
     # Both namespaces are read back from disk regardless of which one this invocation wrote, so a
     # plain `--fusion equal` run still renders any weighted cells a previous run left, and a
     # `--fusion tuned` run still renders the baseline it must be compared against. Cells are the
@@ -487,13 +580,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     # "the variant was not run", not as a table of blanks implying it found nothing.
     weighted = {name: cells for name, cells in _matrix(plan, "tuned").items() if cells}
     write_report(plan.out, equal, legs=plan.legs, limit=plan.limit, weighted=weighted)
-    print(f"wrote {plan.out / 'REPORT.md'} and {plan.out / 'metrics.json'}")
+    return MatrixOutcome(
+        plan=plan,
+        cells=tuple(path for path in planned_cells(plan) if path.is_file()),
+        written=tuple(written),
+        report=plan.out / "REPORT.md",
+        metrics=plan.out / "metrics.json",
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """The CLI adapter: flags → :class:`Plan` → :func:`run` → one line and an exit code."""
+    try:
+        require_deterministic()
+    except MatrixRefused as exc:
+        print(f"refusing to run: {exc}", file=sys.stderr)
+        return 2
+    outcome = run(parse_args(argv))
+    print(f"wrote {outcome.report} and {outcome.metrics}")
     return 0
 
 
 def _matrix(plan: Plan, fusion: str) -> dict[str, dict[str, object]]:
     """One fusion variant's cells for every requested dataset (a dataset with none maps to {})."""
-    directory = plan.out / RESULTS_DIRS[fusion]
+    directory = fusion_results_dir(plan.out, fusion)
     return {name: load_cells(directory, name, plan.legs) for name in plan.datasets}
 
 

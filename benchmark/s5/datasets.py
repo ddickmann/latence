@@ -50,6 +50,13 @@ translation is invisible downstream:
 ``musique`` / ``hotpotqa``
     ``paragraphs[].file`` is already the export's ``provenance.file_name``; the supporting ones
     are the gold set, one chain slot each.
+
+**Where the files are is an argument, not a constant.** Every loader and the dataset table take
+a :class:`CorpusLayout`; :data:`DEFAULT_LAYOUT` is this checkout, so the module constants
+(:data:`SOTA_CORPUS`, :data:`S3_EXPORTS`, :data:`S2_OUTPUT`, :data:`OFFICIAL_DATA`) and every
+existing call site are unchanged to the byte — but a caller operating on a different checkout
+(the ``s5-retrieval`` campaign stage, which is handed a ``repo_root``) can now say so instead of
+being silently pointed back here.
 """
 
 from __future__ import annotations
@@ -59,13 +66,16 @@ import json
 import re
 import sys
 import unicodedata
-from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow.parquet as pq
 from benchmark.s5.goldmap import ExclusionReason, GoldQuery, GoldRef, RefKind
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _BENCH_SRC = Path(__file__).resolve().parents[2] / "packages" / "latence-benchmark" / "src"
 if str(_BENCH_SRC) not in sys.path:  # pragma: no cover - import wiring
@@ -74,10 +84,56 @@ if str(_BENCH_SRC) not in sys.path:  # pragma: no cover - import wiring
 from latence_benchmark.campaign.s3_lib import slugify  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SOTA_CORPUS = REPO_ROOT / "benchmark" / "sota-corpus"
-S3_EXPORTS = SOTA_CORPUS / "s3-exports"
-S2_OUTPUT = SOTA_CORPUS / "s2-output"
-OFFICIAL_DATA = REPO_ROOT / "benchmark" / "official-data"
+
+
+@dataclass(frozen=True)
+class CorpusLayout:
+    """The two roots every S5 input hangs off — passed in, never reached for.
+
+    These were four module constants, which made the harness's inputs a property of *where its
+    source file sits* rather than of what it was asked to measure: a campaign whose root is not
+    this checkout could not redirect them at all, and the campaign stage (``s5-retrieval``) is
+    exactly the caller that has to. One struct, two roots, the rest derived:
+
+    * ``sota_corpus`` — the S1/S2/S3 campaign corpus (``raw/`` acquisitions, ``s2-output/``
+      page artifacts, ``s3-exports/`` per-dataset exports),
+    * ``official_data`` — the reused M6 exports + question sets (MuSiQue, HotpotQA), which
+      live outside the campaign corpus because the campaign did not produce them.
+
+    :data:`DEFAULT_LAYOUT` is this checkout, so every default-argument call site keeps reading
+    byte-identical paths; the stage builds its own from ``CampaignContext.repo_root``.
+    """
+
+    sota_corpus: Path
+    official_data: Path
+
+    @classmethod
+    def under(cls, repo_root: Path) -> CorpusLayout:
+        """The standard layout of a latence-framework checkout at ``repo_root``."""
+        return cls(
+            sota_corpus=repo_root / "benchmark" / "sota-corpus",
+            official_data=repo_root / "benchmark" / "official-data",
+        )
+
+    @property
+    def s3_exports(self) -> Path:
+        """Per-dataset S3 export directories (``corpus.parquet``, bm25, graph, hyperedges)."""
+        return self.sota_corpus / "s3-exports"
+
+    @property
+    def s2_output(self) -> Path:
+        """The S2 OCR output root (``pages/<dataset>/``, ``markdown/<dataset>/``)."""
+        return self.sota_corpus / "s2-output"
+
+
+#: This checkout — the layout every loader defaults to, so the module constants below (and the
+#: behaviour of every existing caller) are unchanged.
+DEFAULT_LAYOUT = CorpusLayout.under(REPO_ROOT)
+
+SOTA_CORPUS = DEFAULT_LAYOUT.sota_corpus
+S3_EXPORTS = DEFAULT_LAYOUT.s3_exports
+S2_OUTPUT = DEFAULT_LAYOUT.s2_output
+OFFICIAL_DATA = DEFAULT_LAYOUT.official_data
 
 
 def prep_filename(title: str, body: str) -> str:
@@ -96,26 +152,26 @@ def prep_filename(title: str, body: str) -> str:
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    """Where a dataset's export, page artifacts and queries live, and how to read them."""
+    """Where a dataset's export, page artifacts and queries live, and how to read them.
+
+    Every path is resolved by :func:`dataset_specs` from one :class:`CorpusLayout`, so a spec
+    never derives a location itself. ``s2_root`` is ``None`` for the datasets that have no
+    per-page artifacts (the text-native sets), which is what turns the page reconstruction off.
+    """
 
     name: str
     export_dir: Path
     queries: Callable[[], list[GoldQuery]]
-    s2_dataset: str | None = None
+    s2_root: Path | None = None
     single_hop: bool = False
-
-    @property
-    def s2_root(self) -> Path | None:
-        """The S2 output root when this dataset has per-page artifacts, else ``None``."""
-        return S2_OUTPUT if self.s2_dataset else None
 
 
 # -- vidoseek ---------------------------------------------------------------------------------
 
 
-def load_vidoseek() -> list[GoldQuery]:
+def load_vidoseek(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """1,142 ViDoSeek queries; gold is ``(pdf__<sha>.md, 1-based reference_page)``."""
-    raw = json.loads((SOTA_CORPUS / "vidoseek" / "raw" / "vidoseek.json").read_text())
+    raw = json.loads((layout.sota_corpus / "vidoseek" / "raw" / "vidoseek.json").read_text())
     out: list[GoldQuery] = []
     for example in raw["examples"]:
         meta = example.get("meta_info") or {}
@@ -141,9 +197,11 @@ def load_vidoseek() -> list[GoldQuery]:
 # -- multihop_rag -----------------------------------------------------------------------------
 
 
-def multihop_rag_title_map() -> dict[str, str]:
+def multihop_rag_title_map(layout: CorpusLayout = DEFAULT_LAYOUT) -> dict[str, str]:
     """``article title → prep filename`` over MultiHop-RAG's 609-article ``corpus.json``."""
-    articles = json.loads((SOTA_CORPUS / "multihop_rag" / "raw" / "corpus.json").read_text())
+    articles = json.loads(
+        (layout.sota_corpus / "multihop_rag" / "raw" / "corpus.json").read_text()
+    )
     out: dict[str, str] = {}
     for article in articles:
         body = str(article.get("body", "") or "")
@@ -155,10 +213,12 @@ def multihop_rag_title_map() -> dict[str, str]:
     return out
 
 
-def load_multihop_rag() -> list[GoldQuery]:
+def load_multihop_rag(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """2,556 MultiHop-RAG queries; each distinct evidence article is one gold chain slot."""
-    titles = multihop_rag_title_map()
-    raw = json.loads((SOTA_CORPUS / "multihop_rag" / "raw" / "MultiHopRAG.json").read_text())
+    titles = multihop_rag_title_map(layout)
+    raw = json.loads(
+        (layout.sota_corpus / "multihop_rag" / "raw" / "MultiHopRAG.json").read_text()
+    )
     out: list[GoldQuery] = []
     for index, item in enumerate(raw):
         refs: list[GoldRef] = []
@@ -186,10 +246,10 @@ def load_multihop_rag() -> list[GoldQuery]:
 # -- wiki2multihop (2Wiki) --------------------------------------------------------------------
 
 
-def load_wiki2multihop() -> list[GoldQuery]:
+def load_wiki2multihop(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """12,576 2Wiki dev queries; gold paragraphs come from the question's own context row."""
     table = pq.read_table(  # type: ignore[no-untyped-call]
-        SOTA_CORPUS / "wiki2multihop" / "raw" / "dev.parquet",
+        layout.sota_corpus / "wiki2multihop" / "raw" / "dev.parquet",
         columns=["_id", "type", "question", "context", "supporting_facts", "evidences"],
     )
     out: list[GoldQuery] = []
@@ -283,7 +343,7 @@ def ohr_bench_exclusion(doc_name: str) -> ExclusionReason | None:
     return None
 
 
-def load_ohr_bench() -> list[GoldQuery]:
+def load_ohr_bench(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """OHR-Bench QAs; gold is ``(<domain>__<doc>.md, page_idx + 1)`` — page_idx is 0-based.
 
     The page is a refinement of a document reference that is itself certain, so the reference
@@ -292,7 +352,7 @@ def load_ohr_bench() -> list[GoldQuery]:
     granularity mix) instead of being dropped from the denominator.
     """
     table = pq.read_table(  # type: ignore[no-untyped-call]
-        SOTA_CORPUS / "ohr_bench" / "raw" / "OHR-Bench.parquet",
+        layout.sota_corpus / "ohr_bench" / "raw" / "OHR-Bench.parquet",
         columns=["doc_name", "page_idx", "qas"],
     )
     out: list[GoldQuery] = []
@@ -355,9 +415,9 @@ def uda_page_from_q_uid(q_uid: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _uda_rows(split: str) -> list[dict[str, Any]]:
+def _uda_rows(split: str, layout: CorpusLayout) -> list[dict[str, Any]]:
     """The ``(doc_name, q_uid, question)`` rows of a UDA split, in shard-name order."""
-    shards = sorted((SOTA_CORPUS / "uda" / "raw" / split).glob("test_*.parquet"))
+    shards = sorted((layout.sota_corpus / "uda" / "raw" / split).glob("test_*.parquet"))
     rows: list[dict[str, Any]] = []
     for shard in shards:
         table = pq.read_table(shard, columns=["doc_name", "q_uid", "question"])  # type: ignore[no-untyped-call]
@@ -365,7 +425,7 @@ def _uda_rows(split: str) -> list[dict[str, Any]]:
     return rows
 
 
-def load_uda() -> list[GoldQuery]:
+def load_uda(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """UDA fin + paper_tab QAs, keyed on the parquets' own ``doc_name``.
 
     **fin** keeps the finer PAGE gold wherever it is genuinely available: the page comes from
@@ -379,7 +439,7 @@ def load_uda() -> list[GoldQuery]:
     preprocessed form, not the OCR'd markdown.
     """
     out: list[GoldQuery] = []
-    for row in _uda_rows("fin"):
+    for row in _uda_rows("fin", layout):
         q_uid = str(row["q_uid"])
         out.append(
             GoldQuery(
@@ -397,7 +457,7 @@ def load_uda() -> list[GoldQuery]:
                 question_type="fin",
             )
         )
-    for row in _uda_rows("paper_tab"):
+    for row in _uda_rows("paper_tab", layout):
         out.append(
             GoldQuery(
                 query_id=str(row["q_uid"]),
@@ -439,72 +499,98 @@ def _load_supporting_paragraph_queries(path: Path, prefix: str) -> list[GoldQuer
     return out
 
 
-def load_musique() -> list[GoldQuery]:
+def load_musique(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """MuSiQue dev (the reused M6 question set); gold = the supporting paragraph files."""
     return _load_supporting_paragraph_queries(
-        OFFICIAL_DATA / "musique-full" / "musique-full-dev.jsonl", "musique"
+        layout.official_data / "musique-full" / "musique-full-dev.jsonl", "musique"
     )
 
 
-def load_hotpotqa() -> list[GoldQuery]:
+def load_hotpotqa(layout: CorpusLayout = DEFAULT_LAYOUT) -> list[GoldQuery]:
     """HotpotQA dev (the reused M6 question set); gold = the supporting paragraph files."""
     return _load_supporting_paragraph_queries(
-        OFFICIAL_DATA / "hotpot-full" / "hotpot-full-dev.jsonl", "hotpot"
+        layout.official_data / "hotpot-full" / "hotpot-full-dev.jsonl", "hotpot"
     )
 
 
-DATASETS: dict[str, DatasetSpec] = {
-    "vidoseek": DatasetSpec(
-        name="vidoseek",
-        export_dir=S3_EXPORTS / "vidoseek",
-        queries=load_vidoseek,
-        s2_dataset="vidoseek",
-        single_hop=True,
-    ),
-    "multihop_rag": DatasetSpec(
-        name="multihop_rag",
-        export_dir=S3_EXPORTS / "multihop_rag",
-        queries=load_multihop_rag,
-    ),
-    "wiki2multihop": DatasetSpec(
-        name="wiki2multihop",
-        export_dir=S3_EXPORTS / "wiki2multihop",
-        queries=load_wiki2multihop,
-    ),
-    "ohr_bench": DatasetSpec(
-        name="ohr_bench",
-        export_dir=S3_EXPORTS / "ohr_bench",
-        queries=load_ohr_bench,
-        s2_dataset="ohr_bench",
-        single_hop=True,
-    ),
-    "uda": DatasetSpec(
-        name="uda",
-        export_dir=S3_EXPORTS / "uda",
-        queries=load_uda,
-        s2_dataset="uda",
-        single_hop=True,
-    ),
-    "musique": DatasetSpec(
-        name="musique",
-        export_dir=OFFICIAL_DATA / "musique-full" / "export",
-        queries=load_musique,
-    ),
-    "hotpotqa": DatasetSpec(
-        name="hotpotqa",
-        export_dir=OFFICIAL_DATA / "hotpot-full" / "export",
-        queries=load_hotpotqa,
-    ),
-}
+# -- the dataset table -------------------------------------------------------------------------
+
+
+def dataset_specs(layout: CorpusLayout = DEFAULT_LAYOUT) -> dict[str, DatasetSpec]:
+    """Every dataset the S5 matrix knows, resolved against ``layout``.
+
+    The one place a dataset name becomes paths. Loaders are bound to the same layout here
+    (``partial``), so a spec's queries and its export can never come from different roots —
+    which is the failure a campaign root redirecting only *some* of the constants would have
+    produced silently.
+    """
+    exports = layout.s3_exports
+    official = layout.official_data
+    return {
+        "vidoseek": DatasetSpec(
+            name="vidoseek",
+            export_dir=exports / "vidoseek",
+            queries=partial(load_vidoseek, layout),
+            s2_root=layout.s2_output,
+            single_hop=True,
+        ),
+        "multihop_rag": DatasetSpec(
+            name="multihop_rag",
+            export_dir=exports / "multihop_rag",
+            queries=partial(load_multihop_rag, layout),
+        ),
+        "wiki2multihop": DatasetSpec(
+            name="wiki2multihop",
+            export_dir=exports / "wiki2multihop",
+            queries=partial(load_wiki2multihop, layout),
+        ),
+        "ohr_bench": DatasetSpec(
+            name="ohr_bench",
+            export_dir=exports / "ohr_bench",
+            queries=partial(load_ohr_bench, layout),
+            s2_root=layout.s2_output,
+            single_hop=True,
+        ),
+        "uda": DatasetSpec(
+            name="uda",
+            export_dir=exports / "uda",
+            queries=partial(load_uda, layout),
+            s2_root=layout.s2_output,
+            single_hop=True,
+        ),
+        "musique": DatasetSpec(
+            name="musique",
+            export_dir=official / "musique-full" / "export",
+            queries=partial(load_musique, layout),
+        ),
+        "hotpotqa": DatasetSpec(
+            name="hotpotqa",
+            export_dir=official / "hotpot-full" / "export",
+            queries=partial(load_hotpotqa, layout),
+        ),
+    }
+
+
+#: The default-layout table — the names are the vocabulary (``--datasets``, the campaign's
+#: ``s5.datasets``), so callers that only need the NAMES never build a redirected table.
+DATASETS: dict[str, DatasetSpec] = dataset_specs()
+
+#: Every known dataset name, in matrix order. Layout-independent, so plan validation (CLI and
+#: campaign stage alike) never has to resolve a single path.
+DATASET_NAMES: tuple[str, ...] = tuple(DATASETS)
 
 #: The single-hop CONTROL group: hypergraph/CoE gains here should be ~zero. A large gain is
-#: evidence of leakage in the harness, not a retrieval win (S5 ticket).
+#: evidence of leakage in the harness, not a retrieval win (S5 ticket). Derived from the table's
+#: own flag and layout-independent — which dataset is single-hop is a property of the benchmark,
+#: never of where its files sit.
 CONTROL_DATASETS = frozenset(name for name, spec in DATASETS.items() if spec.single_hop)
 
 
 __all__ = [
     "CONTROL_DATASETS",
     "DATASETS",
+    "DATASET_NAMES",
+    "DEFAULT_LAYOUT",
     "OFFICIAL_DATA",
     "OHR_DOCUMENT_ALIASES",
     "OHR_DOMAIN_ALIASES",
@@ -513,7 +599,9 @@ __all__ = [
     "S3_EXPORTS",
     "SOTA_CORPUS",
     "UDA_SPLIT_PREFIXES",
+    "CorpusLayout",
     "DatasetSpec",
+    "dataset_specs",
     "ohr_bench_exclusion",
     "ohr_bench_file_name",
     "prep_filename",
