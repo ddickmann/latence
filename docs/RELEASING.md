@@ -160,7 +160,7 @@ third-party requirements plus 33 workspace path entries (see below). Running
 > requirements that `uv export --no-emit-project` does not strip and that `cyclonedx-py`
 > cannot resolve to a name or version. They are inert for CVE matching — the third-party
 > surface an adopter scans is the 147 pinned components — but they do pad the component
-> count. Recorded in `issues/audit/R2-docs_truth-7.md`.
+> count. Recorded during the pre-release documentation-truth audit.
 >
 > There is one such entry per package built, and that is the point: `generate-sbom.sh`
 > exports with `--all-packages` and **fails closed** if the export covers fewer packages
@@ -169,7 +169,7 @@ third-party requirements plus 33 workspace path entries (see below). Running
 > none of the heavy Providers — the SBOM then covered 12 of the 32 distributions and
 > omitted `torch`, `transformers`, `gliner`, `openai`, `presidio-analyzer`,
 > `sentence-transformers` and the rest, while still being stamped, checksummed and
-> Sigstore-signed as evidence. Recorded in `issues/audit/R4-security_secrets-3.md`.
+> Sigstore-signed as evidence. Recorded during the pre-release supply-chain audit.
 
 > The SBOM generator is version-pinned (`cyclonedx-bom>=7,<8`) on purpose. It had silently
 > stopped working: `cyclonedx-py` 7 removed the `--outfile` flag the script passed, so the

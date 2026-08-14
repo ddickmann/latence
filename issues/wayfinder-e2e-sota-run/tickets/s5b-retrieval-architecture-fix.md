@@ -31,7 +31,8 @@ Its own words: *"It does not replace the base retrieval engine with graph traver
 what our ladder did.
 
 **2. HyCE-RAG (arXiv:2607.22597)** — the paper hyperedges + CoE derive from. Verified in
-`issues/wayfinder-hypergraph-coe/tickets/02`: its evidence budget is a **COUNT cap of 6
+`issues/wayfinder-hypergraph-coe/tickets/02-research-external-landscape-and-licences.md`: its
+evidence budget is a **COUNT cap of 6
 segments**, not a token budget, and it reports **no recall@token-budget curves**. Our 4,000-token
 packer budget came from neither the paper nor a measurement.
 

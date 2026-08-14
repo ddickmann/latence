@@ -38,8 +38,8 @@ generic pipeline quality is a spin-off map charted after M6 from measured weak s
 - Standing prefs: no fake green — real models, real datasets, real deps for any eval claim;
   diagnose tight (max 2 live validation runs per fix cycle); research tickets carry licence/IP/
   regulation verification per the research-diligence directive.
-- Research subagents resolve their ticket file only; their Decisions-so-far pointers are synced by
-  the next map session (concurrency safety).
+- A research ticket resolves its own file only; Decisions-so-far pointers are synced by the next
+  map session (concurrency safety).
 
 ## Close-out
 
@@ -61,9 +61,9 @@ are queued there for the production direction.
 
 - [Task: enterprise gold set + calibration data](tickets/21-task-enterprise-gold-set.md) — **complete + validated** (harness verified; data LLM-generated at Dennis's direction with provenance recorded, pending his spot-check): 40-doc corpus with 80 planted cross-doc chains, byte-deterministic export (226 hyperedges), **100 gold questions (validate exit 0)**, **226 calibration judgments (224/1/1)**. The generation runs **found two real builder defects** (stream-copy support ×3 with PII-primary risk; duplicate relation triples) — fixed at source with regression tests, suite 4730→**4732P/0F**, before the data was accepted.
 
-- [Task: M5 — chain assembly + traces](tickets/16-task-m5-chains-traces.md) — **BUILT + green** (subagent, verified after its suite-gate stall): sparse chain components, BFS-from-anchor ordering, spec-6.3 directed preference behind a `relations_lookup` seam, peripheral evidence last, byte-deterministic emission, redaction-safe τ by construction; selection **trace hook** (ids/counts only — no raw text) seeding the future learned utility. Suite 4694→**4730P/0F** (incl. the labeling harness's 22).
+- [Task: M5 — chain assembly + traces](tickets/16-task-m5-chains-traces.md) — **BUILT + green** (independently verified after a suite-gate stall): sparse chain components, BFS-from-anchor ordering, spec-6.3 directed preference behind a `relations_lookup` seam, peripheral evidence last, byte-deterministic emission, redaction-safe τ by construction; selection **trace hook** (ids/counts only — no raw text) seeding the future learned utility. Suite 4694→**4730P/0F** (incl. the labeling harness's 22).
 
-- [Task: M4 — chain-of-evidence selector](tickets/15-task-m4-coe-selector.md) — **BUILT + green** (subagent, verified): UtilityModel/HeuristicUtility + lazy greedy with theta_min, **incremental sparse redundancy** (the measured requirement), **ADR-0058 exact verification pass live** (mandatory on counter mismatch, trim not scale); **the M3-deferred ranking claim now pinned — the 2-hop chain beats the maximally-advantaged lexical distractor AT SELECTION**; `knapsack_refine` **dropped with recorded rationale** (same greedy family = no-op; frozen-value DP optimises the wrong objective); dedup invariant makes the hard-redundancy case unrepresentable. Suite 4679→**4694P/0F**. [M4-RESULT.md](M4-RESULT.md).
+- [Task: M4 — chain-of-evidence selector](tickets/15-task-m4-coe-selector.md) — **BUILT + green** (independently verified): UtilityModel/HeuristicUtility + lazy greedy with theta_min, **incremental sparse redundancy** (the measured requirement), **ADR-0058 exact verification pass live** (mandatory on counter mismatch, trim not scale); **the M3-deferred ranking claim now pinned — the 2-hop chain beats the maximally-advantaged lexical distractor AT SELECTION**; `knapsack_refine` **dropped with recorded rationale** (same greedy family = no-op; frozen-value DP optimises the wrong objective); dedup invariant makes the hard-redundancy case unrepresentable. Suite 4679→**4694P/0F**. [M4-RESULT.md](M4-RESULT.md).
 
 - [Task: KV under concurrent load](tickets/19-task-kv-concurrency-validation.md) — **measured, fine as-is**: per-call open = 0.04–0.06 ms p50, flat c=1→16 and 50k→500k HEs; c=16 tail is CPU saturation in reads, not open contention — ADR-0056's contingency fix would save nothing and stays unbuilt. Cold-cache honestly unmeasured (needs sudo). ADR-0056's consequences updated.
 - [Grilling: licence placement](tickets/07-grilling-licence-placement.md) — **all hypergraph/CoE modules stay PolyForm-NC** (Dennis); Apache set stays exactly the seven generic primitives, publish-readiness pin untouched; revisitable after the M6 gate as a fresh decision.

@@ -20,10 +20,13 @@ Five independent falsifiers, each of which failed on the tree that introduced it
   Decision Log and the go-live runbook all said 52.
 * **Dangling cross-references.** ``docs/retrieval-tooling.md`` and ADR-0048 pointed at a
   ``docs/INTEROP.md`` that was never written. No markdown link and no backticked
-  ``docs/...md`` reference in the front-door set may point at a missing file. The same rule
-  extends past the docs site to ``CHANGELOG.md`` and every ``packages/*/README.md`` (each a
-  PyPI long_description), where two ADR-0048 links pointed at a near-miss filename that no
-  gate walked.
+  ``docs/``/``issues/`` file reference in the front-door set may point at a file the published
+  repository does not carry. The same rule extends past the docs site to ``CHANGELOG.md`` and
+  every ``packages/*/README.md`` (each a PyPI long_description), where two ADR-0048 links
+  pointed at a near-miss filename that no gate walked. "Missing" is judged against the git
+  **index**, not the working tree: the public-repo scrub drops private operating material with
+  ``git rm --cached``, which leaves every file sitting on the maintainer's disk and 404-ing for
+  everyone else — an existence check passes locally and fails only in CI's fresh clone.
 * **The install story.** The README advertised a meta-package that is not publishable, and
   every ``pip install`` line must name a distribution that actually exists under
   ``packages/``.
@@ -52,7 +55,16 @@ _ADR_DIR = _REPO_ROOT / "docs" / "adr"
 _FRONT_DOOR = ("README.md", "CONTEXT.md", "CONTRIBUTING.md", "SECURITY.md")
 
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-_BACKTICKED_DOC = re.compile(r"`(docs/[A-Za-z0-9_\-/.]+\.md)`")
+# A backticked reference to a concrete file in one of the two trees a published page sends
+# readers into. The first version of this policed `docs/...md` alone, which left a hole the
+# public-repo scrub walked straight into: `issues/audit/SUMMARY.md` and two
+# `issues/audit/R*.md` pointers sat in published pages, and the day that tree stopped being
+# published nothing failed. Directory gestures (`docs/adr/`, `issues/`) are deliberately NOT
+# matched — those are prose, and `test_continuity_statement.py` already pins the ones that
+# carry a claim.
+_BACKTICKED_REPO_PATH = re.compile(
+    r"`((?:docs|issues)/[A-Za-z0-9_\-./]*[A-Za-z0-9_-]\.(?:md|py|ya?ml|json|sh|toml))`"
+)
 
 
 def _tracked_paths() -> set[Path] | None:
@@ -72,6 +84,33 @@ def _tracked_paths() -> set[Path] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return {_REPO_ROOT / p for p in out.decode().split("\0") if p}
+
+
+def _reaches_a_reader(resolved: Path, tracked: set[Path] | None) -> bool:
+    """Would a reader of the *published* repository find ``resolved``?
+
+    Existence on the maintainer's disk is the wrong question, and asking it is how a green
+    local run ships a broken link: publication follows the git **index**, so a file that was
+    untracked (or ``git rm --cached``'d) is still sitting right there for whoever runs the
+    gate and is a 404 for everyone else. The public-repo scrub is exactly that move — a
+    directory dropped from tracking while staying on disk — so the gate has to read the index
+    the way CI's fresh clone does.
+
+    Paths outside the repository (the synthetic ``tmp_path`` trees the resolver tests build)
+    have no index to consult and fall back to plain existence.
+    """
+    if not resolved.exists():
+        return False
+    if tracked is None:
+        return True
+    if _REPO_ROOT not in resolved.parents and resolved != _REPO_ROOT:
+        return True
+    if resolved in tracked:
+        return True
+    if resolved.is_dir():
+        prefix = f"{resolved}/"
+        return any(str(p).startswith(prefix) for p in tracked)
+    return False
 
 
 def _front_door_docs() -> list[Path]:
@@ -106,13 +145,15 @@ def _dangling_links(pages: list[Path]) -> tuple[list[str], int]:
     """``(problems, links_checked)`` over the relative markdown links in ``pages``."""
     problems: list[str] = []
     checked = 0
+    tracked = _tracked_paths()
     for page in pages:
         for lineno, line in enumerate(page.read_text().splitlines(), 1):
             for target in _MD_LINK.findall(line):
                 if target.startswith(("http://", "https://", "mailto:", "#")):
                     continue
                 checked += 1
-                if not (page.parent / target.split("#", 1)[0]).resolve().exists():
+                resolved = (page.parent / target.split("#", 1)[0]).resolve()
+                if not _reaches_a_reader(resolved, tracked):
                     where = (
                         page.name
                         if _REPO_ROOT not in page.parents
@@ -272,8 +313,14 @@ def test_adr_count_matches_the_tree_on_every_front_door_page() -> None:
 
 
 def test_no_dangling_cross_references_in_the_front_door() -> None:
-    """No relative link or backticked ``docs/...md`` reference points at a missing file."""
+    """No relative link, and no backticked ``docs/``/``issues/`` file reference, may 404.
+
+    "Missing" means *missing from the published repository*, not missing from this disk —
+    see :func:`_reaches_a_reader`. Both halves of the check go through it, because a link and
+    a backticked path make the same promise to a reader who has only the clone.
+    """
     problems: list[str] = []
+    tracked = _tracked_paths()
     for page in _front_door_docs():
         for lineno, line in enumerate(page.read_text().splitlines(), 1):
             targets = [
@@ -283,13 +330,32 @@ def test_no_dangling_cross_references_in_the_front_door() -> None:
             ]
             for target in targets:
                 resolved = (page.parent / target.split("#", 1)[0]).resolve()
-                if not resolved.exists():
+                if not _reaches_a_reader(resolved, tracked):
                     problems.append(f"{page.relative_to(_REPO_ROOT)}:{lineno}: link -> {target}")
-            for doc_ref in _BACKTICKED_DOC.findall(line):
-                if not (_REPO_ROOT / doc_ref).exists():
+            for doc_ref in _BACKTICKED_REPO_PATH.findall(line):
+                if not _reaches_a_reader(_REPO_ROOT / doc_ref, tracked):
                     problems.append(f"{page.relative_to(_REPO_ROOT)}:{lineno}: ref -> {doc_ref}")
 
     assert not problems, "dangling cross-references in published docs:\n" + "\n".join(problems)
+
+
+def test_the_reference_check_reads_the_index_not_the_working_tree(tmp_path: Path) -> None:
+    """A file present on disk but absent from the index does NOT reach a reader.
+
+    The falsifier this pins is the public-repo scrub's failure mode: ``git rm --cached`` a
+    tree, keep it on disk, and every existence-based gate stays green locally while CI's
+    fresh clone goes red. Nothing else in this module would notice.
+    """
+    present = _REPO_ROOT / "README.md"
+    assert _reaches_a_reader(present, None) is True  # no index available -> existence
+    assert _reaches_a_reader(present, {present}) is True
+    assert _reaches_a_reader(present, set()) is False  # on disk, not in the index
+
+    outside = tmp_path / "synthetic.md"
+    outside.write_text("# synthetic\n")
+    assert _reaches_a_reader(outside, set()) is True  # no index governs a tmp tree
+
+    assert _reaches_a_reader(_REPO_ROOT / "does-not-exist.md", None) is False
 
 
 # --------------------------------------------------------------------------------------

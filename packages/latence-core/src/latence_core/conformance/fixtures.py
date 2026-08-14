@@ -51,7 +51,7 @@ from latence_core.stages.relation import PatternRelationExtractor
 # every Provider must resolve a sub-chunk offset's OWN page through a ``PageIndexResolver`` rather
 # than stamp the parent chunk's inherited range on it. On a single page every such degradation is
 # *coincidentally* correct, so the suite reported a silently mis-paging Provider as
-# conformance-verified (``issues/audit-arch/R4-invariants_and_adrs-2.md``). Paginated, chunk 1
+# conformance-verified (architecture-audit finding R4, invariants and ADRs). Paginated, chunk 1
 # spans pages 2–3 and its mentions land on page 2 or page 3, so an inherited range is a WRONG
 # range and the suite sees it.
 CANONICAL_PAGES: tuple[str, ...] = (

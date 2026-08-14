@@ -20,7 +20,7 @@ enterprise production lane. Then one final `/improve-codebase-architecture` pass
 3. **No quality degradation**: latency work must produce identical (or measurably equal)
    rankings — "orders of magnitude faster" is only claimed with a before/after measurement
    AND a parity proof on real data.
-4. Subagents execute the heavy work; long runs get an on-host supervisor.
+4. Long runs get an on-host supervisor.
 5. **The running S5 rescue sweep on the pod is untouchable** — ticket work runs on the Mac
    (local exports, local Docker) until the sweep completes. The sweep re-runs AFTER ticket 01
    lands to measure the latency gain at full scale.

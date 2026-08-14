@@ -77,3 +77,36 @@ benchmark/sota-campaign/stages/s3-pipeline/chunk-validation/*.log
 # The whole acquired-corpus tree is dataset-derived and stays local (per-dataset lanes in
 # latence_benchmark.campaign.corpus_stage.CORPUS_PLAN; nothing under it is tracked).
 benchmark/sota-corpus/
+
+# ---------------------------------------------------------------------------
+# Private operating material (ticket 05 Part B — public-repo scrub)
+# ---------------------------------------------------------------------------
+# These files stay ON DISK and keep working for the maintainer; they are simply
+# not part of the published repository. Each is a record of how this codebase was
+# operated rather than something a reader can use.
+#
+# Hostile-audit findings ledgers: per-file historical vulnerabilities with
+# reproduction steps and adjudications, addressed to whoever ran the audit.
+issues/audit/
+issues/audit-arch/
+# Campaign execution logs (wave reports) and the out-of-scope "logged, not
+# chased" ledger. Their durable content is restated in the ADRs and NN-report.md.
+issues/wayfinder-*/waves/
+issues/**/FINDINGS.md
+issues/wayfinder-enterprise-serving/architecture-pass.md
+# Personal WIP pointer, internal issue-ID cross-reference, launch plan.
+issues/NEXT.md
+issues/GITHUB-MAP.md
+issues/RELEASE-FLEET.md
+# This scrub's own audit: it necessarily quotes the identifiers it removed.
+issues/wayfinder-enterprise-serving/tickets/05-part-b-inventory.md
+# Maintainer-local assistant tooling.
+.claude/
+# Build-harness scripts: they drive a maintainer-local agent harness, hardcode a
+# commit-author identity and a `git push origin main`, and no test covers them.
+orchestration/
+# One operator's campaign run: live config (pod endpoint, budget cap) and run
+# state. `latence-campaign init` regenerates campaign.yaml for anyone else, and
+# STATE.json is rewritten on every stage transition. No test reads either.
+benchmark/sota-campaign/campaign.yaml
+benchmark/sota-campaign/STATE.json

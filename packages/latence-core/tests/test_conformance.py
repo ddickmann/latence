@@ -709,7 +709,7 @@ class _InheritingEntityExtractor(GazetteerEntityExtractor):
 def test_the_canonical_corpus_has_the_shape_the_page_audit_is_defined_over() -> None:
     """The fixture corpus must be MULTI-page and MULTI-chunk, with a page-STRADDLING chunk.
 
-    Regression guard for ``issues/audit-arch/R4-invariants_and_adrs-2.md``. The canonical corpus
+    Regression guard for architecture-audit finding R4 (invariants and ADRs). The canonical corpus
     used to be one page and one chunk, so every page fallback was *coincidentally* correct and the
     C1 page audit could not distinguish a compliant Provider from a silently mis-paging one,
     whatever it asserted. This pins the three properties that make the audit capable of observing
@@ -741,7 +741,7 @@ def test_the_canonical_corpus_has_the_shape_the_page_audit_is_defined_over() -> 
 def test_c1_bites_a_provider_that_inherits_the_chunk_page_instead_of_resolving() -> None:
     """C1 FAILs a Provider that inherits the chunk's page range; the compliant one still PASSes.
 
-    THE regression guard for ``issues/audit-arch/R4-invariants_and_adrs-2.md``. Rule 3 of
+    THE regression guard for architecture-audit finding R4 (invariants and ADRs). Rule 3 of
     docs/CONFORMANCE.md forbids the degradation, but the suite that actually gates Providers ran a
     one-page/one-chunk corpus and threw the resolved page numbers away, so ``entity.inherits``
     (below) passed all six checks green while mis-paging 54 of 62 mentions on a 24-page document.

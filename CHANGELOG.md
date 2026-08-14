@@ -157,8 +157,8 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   `CorpusLayout`, and the campaign registry gains a fourth stage — gated on `s3-pipeline`'s
   approval, done-probed on every planned cell plus the two gate artifacts, and blocked when a whole
   dataset recorded only refusals (an absent export is not a measurement). The wizard grew a
-  byte-deterministic `s5:` block (datasets, legs, limit, fusion), and the committed
-  `benchmark/sota-campaign/campaign.yaml` was regenerated with it. One cheap cell produced through
+  byte-deterministic `s5:` block (datasets, legs, limit, fusion), and the campaign config the
+  wizard emits was regenerated with it. One cheap cell produced through
   BOTH entries — CLI and `latence-campaign run s5-retrieval` — is identical modulo wall-clock
   latency keys.
 

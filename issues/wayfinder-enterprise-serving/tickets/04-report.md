@@ -51,7 +51,7 @@ verified here, it is stated as deferred with the reason, not checked.
   Sigstore-signed → GitHub Release); PyPI stays off until the maintainer flips the gated job.
 - **Not done here**: no tag, no push of a tag, no registry publish, no branch deletion.
 
-## Findings (logged, not chased) — `../FINDINGS.md`
+## Findings (logged, not chased)
 
 F1 graph sources re-read parquet per call · F2 goldset-property test costs ~288 s CPU ·
 F3 e2e-sota-run ticket statuses lag their stages · F4 local campaign STATE.json is a stale

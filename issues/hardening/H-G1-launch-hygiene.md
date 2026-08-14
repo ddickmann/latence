@@ -19,18 +19,17 @@ gets a `KeyError`.
   endpoint tests still pass with the new name.
 
 ## 2. Parameterize hardcoded maintainer paths
-Tracked files embed the maintainer's home directory (`/Users/dennisdickmann/...`), which is
+Tracked files embed the maintainer's home directory (`/Users/<maintainer>/...`), which is
 non-portable and leaks a local path into a public repo:
-- `orchestration/*.workflow.js` — the `repo`/`worktree` **default** constants (e.g.
-  `const repo = '/Users/dennisdickmann/Developer/latence-framework'`). Replace the hardcoded absolute
-  defaults with a portable derivation: default `repo` to the git toplevel (e.g. derive from the
-  script's own location / `process.cwd()` / a `LATENCE_REPO` env var), and default `worktree` relative
-  to it. These are Claude-workflow harness scripts (dev tooling); keep them working when driven by
-  args (as they are today) but make the *defaults* portable, not machine-specific.
-- `issues/gate/G1-RESULTS.md` — replace the absolute `/Users/dennisdickmann/...` path with a
+- The `orchestration/*.workflow.js` build-harness scripts hardcoded the `repo`/`worktree`
+  **default** constants to an absolute maintainer path. **Resolved by removing them from
+  tracking**: they only run against a maintainer-local agent harness, carry a hardcoded commit
+  author identity and a `git push origin main`, and no test covers them. They stay on disk and
+  are ignored — nothing in the published repo depends on them.
+- `issues/gate/G1-RESULTS.md` — replace the absolute `/Users/<maintainer>/...` path with a
   repo-relative path or a `<REPO_ROOT>` placeholder.
-- Grep the tracked tree for `/Users/dennisdickmann` and `/Users/` and fix every hit that ships in the
-  repo (source, docs, configs, orchestration). Do NOT touch untracked/scratch files.
+- Grep the tracked tree for the maintainer's home directory and for `/Users/` and fix every hit
+  that ships in the repo (source, docs, configs). Do NOT touch untracked/scratch files.
 
 ## 3. Dependency pins on fast-moving model libs (optional, low-risk)
 The packaging audit noted lower-bound-only pins on libraries whose APIs move across majors

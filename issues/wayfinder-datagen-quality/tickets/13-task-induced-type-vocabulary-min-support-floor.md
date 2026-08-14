@@ -10,7 +10,7 @@ Per-chunk LLM label induction produces a **long tail of one-off entity types**. 
 the sanitized ohr_bench run (1,261 docs, 154,545 mentions): **15,584 distinct entity types**
 and **1,343 distinct relation types**, the bulk of them singletons.
 
-Ticket-12-adjacent but distinct: the [value-shape guard](../../packages/latence-schema-inducer/src/latence_schema_inducer/sanitize.py)
+Ticket-12-adjacent but distinct: the [value-shape guard](../../../packages/latence-schema-inducer/src/latence_schema_inducer/sanitize.py)
 (shipped 2026-08-04, commit `0809260`) removes SHAPE-junk — pure numerics (`10.3`),
 fiscal/quarter forms (`1q22`), dates, addresses with a street-suffix token, `.net`-style
 fragments. It cannot catch the remaining class, which is **well-formed but instance-specific**:

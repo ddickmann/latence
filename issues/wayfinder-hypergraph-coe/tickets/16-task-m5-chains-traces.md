@@ -10,7 +10,7 @@ Implement spec 3.4–3.5: connected-component chains, BFS ordering from V0 with 
 
 ## Answer
 
-**BUILT + green** (subagent; independently verified — the agent stalled before its full-suite
+**BUILT + green** (independently verified — the build stalled before its full-suite
 gate, so the supervising session re-ran every gate: package tests, ruff, `mypy --strict`, and
 `make test` = **4730 passed / 0 failed**). Details in [M5-RESULT.md](../M5-RESULT.md). Chains:
 sparse component assembly, BFS-from-anchor ordering (ρ/id ties), spec-6.3 directed preference

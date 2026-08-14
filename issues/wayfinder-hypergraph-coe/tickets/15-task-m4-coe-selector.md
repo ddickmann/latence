@@ -20,7 +20,7 @@ Tests per spec M4: budget never exceeded; identical relation signature never sel
 
 ## Answer
 
-**BUILT + green** (subagent build from a full handoff; independently verified — commit
+**BUILT + green** (built from a full handoff; independently verified — commit
 [`5136383`] contains exactly the four permitted files, and the 14 new tests pass on a fresh
 run). Full detail in [M4-RESULT.md](../M4-RESULT.md); the load-bearing points:
 

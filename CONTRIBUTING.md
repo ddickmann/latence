@@ -334,8 +334,8 @@ contract, not the substrate, is what has to stay stable.
 
 ## Review and merge
 
-Work is tracked as version-controlled issues under `issues/` (WIP = 1 on the critical path;
-see `issues/NEXT.md`). An issue is done when its declared DoD bar is met and the gates are
+Work is tracked as version-controlled issues under `issues/` (WIP = 1 on the critical
+path). An issue is done when its declared DoD bar is met and the gates are
 green — not when the change looks right.
 
 The reviewer verifies the claim against the **code**, not against the PR description. Make

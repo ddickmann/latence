@@ -23,8 +23,8 @@ published-number comparisons. Delivered as a **stage-gated, resumable campaign w
    is the API a future UI frontend calls. No interactive-only paths.
 5. **Investigate → spec → run, per stage.** Before each stage: an investigation of the
    available features/options; Dennis decides the spec; only then does the stage run.
-6. Subagents execute the heavy work; long runs get an on-host supervisor with
-   progress-freeze detection (carved lesson, never bare polling).
+6. Long runs get an on-host supervisor with progress-freeze detection (carved lesson,
+   never bare polling).
 
 ## Standing rules carried over
 

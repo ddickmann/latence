@@ -5,8 +5,7 @@
 **Before the deletion** this harness ran the bench's own ``RescuePipeline`` against the SHIPPED
 :class:`~latence_retrieval.rescue.GraphRescueRetrieval` over the same
 :class:`~benchmark.s5.legs.Runner`, query by query, on the full gold sets — the gate that
-licensed deleting the bench copy's ~600 lockstep lines (results in
-``issues/wayfinder-enterprise-serving/waves/wave-5J.md``). The bench copy is gone, so the
+licensed deleting the bench copy's ~600 lockstep lines. The bench copy is gone, so the
 harness now pins the equation the deletion *relies* on, on the same real data:
 
 * the **split path** — one :meth:`~latence_retrieval.rescue.GraphRescueRetrieval.retrieve` per

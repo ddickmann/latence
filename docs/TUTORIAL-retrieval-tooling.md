@@ -1015,5 +1015,4 @@ uv run latence stack validate stacks/graph-features.yaml
 | MCP server | `RetrievalServer` | — | tool-call boundary (§6) |
 
 **Design scope + decisions:** [`docs/retrieval-tooling.md`](retrieval-tooling.md) and ADRs
-[0048](adr/0048-retrieval-tooling-is-strictly-stateless.md)–0053. **Audit trail:**
-`issues/audit/SUMMARY.md`.
+[0048](adr/0048-retrieval-tooling-is-strictly-stateless.md)–0053.
