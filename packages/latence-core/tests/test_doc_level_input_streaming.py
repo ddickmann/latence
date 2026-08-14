@@ -3,8 +3,8 @@
 C6 streamed the **output** side: ``_dispatch_stage`` hands the Provider's iterator back
 uncollapsed and the Runner writes it record-by-record into the checkpoint, so a doc-level Stage's
 records never exist as a list. Its **input** side was still materialised whole-corpus:
-``LocalRunner._gather_inputs`` concatenated every parent's records into one
-``list[StageOutput]`` that lived in ``ctx.incoming`` for the Stage's entire execution — and
+the Runner's gather concatenated every parent's records into one
+``list[StageOutput]`` that reached the dispatch for the Stage's entire execution — and
 ``_as_type`` then built a SECOND full list of the same size (a third under
 ``extract_on: masked``, via ``model_copy``). An Entity Stage over a 1M-chunk corpus therefore
 still held ~1M ChunkRecords while the ADR recorded that transient as ``O(checkpoint batch)``.
@@ -23,7 +23,6 @@ lets the Runner stream it (Parse, Chunk, Schema Induction, Entity Extraction, Re
 
 from __future__ import annotations
 
-from collections.abc import Sized
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -40,6 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from latence_core.pipeline import Stage
+    from latence_core.stage_inputs import StageInputs
 
 from importlib import metadata
 
@@ -101,7 +101,9 @@ class _InputSpyRunner(LocalRunner):
     """Records, per Stage, how many input records the Runner MATERIALISED before dispatch.
 
     ``None`` means the Stage received a lazy stream (nothing materialised); an ``int`` is the
-    length of the list the Runner built — the transient this test bounds.
+    length of the list the Runner built — the transient this test bounds. Read off
+    :attr:`~latence_core.stage_inputs.StageInputs.materialised`, which is that fact itself rather
+    than an inference from the parameter's runtime type.
     """
 
     def __init__(self) -> None:
@@ -115,15 +117,10 @@ class _InputSpyRunner(LocalRunner):
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: Iterable[StageOutput],
-        outputs: dict[str, list[StageOutput]],
+        inputs: StageInputs,
     ) -> Iterator[StageOutput]:
-        self.materialised_input[stage.name] = (
-            len(incoming) if isinstance(incoming, Sized) else None
-        )
-        return super()._dispatch_stage(
-            stage, provider, storage, pipeline, run_id, incoming, outputs
-        )
+        self.materialised_input[stage.name] = inputs.materialised
+        return super()._dispatch_stage(stage, provider, storage, pipeline, run_id, inputs)
 
 
 def _run_and_spy(tmp_path: Path, *, docs: int, tag: str) -> _InputSpyRunner:
@@ -136,7 +133,7 @@ def _run_and_spy(tmp_path: Path, *, docs: int, tag: str) -> _InputSpyRunner:
 def test_doc_level_stage_input_is_never_materialised_whole_corpus(tmp_path: Path) -> None:
     """A streamable doc-level Stage's input is a lazy stream at ANY corpus size.
 
-    Pre-fix the Runner called ``_gather_inputs`` for every non-accumulator Stage and handed the
+    Pre-fix the Runner gathered every non-accumulator Stage's parents into a list and handed the
     resulting ``list`` to the executor, so this recorded a count that grew exactly linearly with
     the corpus (the auditor measured 48 → 192 over a 4× scale-up). The bound ADR-0033 claims
     requires that no such list exists at all.

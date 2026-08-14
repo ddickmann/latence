@@ -20,6 +20,7 @@ from latence_core.contracts import DisambiguationRecord, DisambiguationScope
 from latence_core.pipeline import Pipeline
 from latence_core.quality import QualityReport
 from latence_core.runner import LocalRunner
+from latence_core.stage_inputs import StageInputs
 from latence_core.storage import Storage
 from latence_disambig_embedding.provider import EmbeddingDisambiguator
 
@@ -336,8 +337,8 @@ def test_broken_threading_drops_the_merge_regression_guard(
 ) -> None:
     """Break the Runner's chunk-threading → the context-gated merge MUST vanish (the regression guard).
 
-    Fully breaks the rework's mechanism by making ``_stream_all_records_of_type`` yield NO chunks,
-    so no context reaches the provider. With the SAME context-gated embedder + threshold, the Globex
+    Fully breaks the rework's mechanism by making ``StageInputs.corpus_records_of`` yield NO
+    chunks, so no context reaches the provider. With the SAME context-gated embedder + threshold, the Globex
     variants now embed as bare surfaces (far apart) and stay SEPARATE. This is exactly the failure a
     silent chunk-drop in the Runner would cause — and it is now observable: if this assertion ever
     passes with the merge still present, the threading is not actually load-bearing.
@@ -347,7 +348,7 @@ def test_broken_threading_drops_the_merge_regression_guard(
     )
     # Break the corpus-wide chunk gather the rework adds: yield nothing.
     monkeypatch.setattr(
-        LocalRunner, "_stream_all_records_of_type", lambda self, *a, **k: iter(())
+        StageInputs, "corpus_records_of", lambda self, *a, **k: iter(())
     )
     docs = _gated_docs(tmp_path)
     store = f"file://{tmp_path}/store"

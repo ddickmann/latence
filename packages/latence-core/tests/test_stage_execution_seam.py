@@ -170,8 +170,9 @@ def test_metrics_before_the_stream_is_consumed_is_a_loud_error(tmp_path: Path) -
             storage=storage,
             pipeline=pipeline,
             run_id="r",
-            incoming=[],
-            outputs={},
+            inputs=runner.stage_inputs(
+                stage, {}, storage=storage, pipeline=pipeline, run_id="r"
+            ),
             runner="local",
         ),
     )
@@ -191,8 +192,13 @@ def test_record_stream_is_one_shot(tmp_path: Path) -> None:
             storage=Storage.for_uri(store),
             pipeline=pipeline,
             run_id="r",
-            incoming=[],
-            outputs={},
+            inputs=runner.stage_inputs(
+                pipeline.stages[0],
+                {},
+                storage=Storage.for_uri(store),
+                pipeline=pipeline,
+                run_id="r",
+            ),
             runner="local",
         ),
     )

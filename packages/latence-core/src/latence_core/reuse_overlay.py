@@ -200,19 +200,20 @@ class OverlayTrailer(Enum):
     behavioral differences between the Runner's consumers, preserved exactly:
 
     * ``APPEND_IF_CARRIER_UNSEEN`` — the accumulator gather over a Stage's ``depends_on``
-      parents (``_stream_inputs_of_type``). An accumulator's contract is union semantics: an
+      parents (``StageInputs.stream_of`` under an ACCUMULATOR plan). An accumulator's contract is
+      union semantics: an
       overlay carrier NO parent produces (a degenerate DAG) is still appended last, so the
       union always reaches the accumulator exactly once. But a CORPUS-LEVEL parent producing
       the carrier means the union already arrived through that parent's checkpoint — appending
       would double-count — so "seen" counts producers of ANY level.
-    * ``NEVER`` — the per-carrier doc-level input (``_stream_parent_inputs_of_type``, Context
-      Enrichment). A doc-level Stage's input contract is "its parents' records", never records
-      no parent produced: its chunk carrier always has a doc-level parent (the Stage's own
-      wiring check requires one), and its graph carrier is never in the overlay (corpus-level
-      records are not reused) — so an unclaimed overlay is dropped, exactly as the
+    * ``NEVER`` — the per-carrier doc-level input (``StageInputs.stream_of`` under a PER_CARRIER
+      plan, Context Enrichment). A doc-level Stage's input contract is "its parents' records",
+      never records no parent produced: its chunk carrier always has a doc-level parent (the
+      Stage's own wiring check requires one), and its graph carrier is never in the overlay
+      (corpus-level records are not reused) — so an unclaimed overlay is dropped, exactly as the
       overlay-blind eager gather would have.
     * ``ALWAYS`` — the corpus-wide gather over every Stage in topological order
-      (``_stream_all_records_of_type``). Its contract is "every record of this carrier in the
+      (``StageInputs.corpus_records_of``). Its contract is "every record of this carrier in the
       run"; the enumeration spans the whole pipeline, so an unclaimed overlay means no
       doc-level producer exists anywhere and the reused records ARE the corpus's records of
       that carrier — appended last, unconditionally.
@@ -254,8 +255,8 @@ class ReuseOverlay:
         """True when the overlay holds records whose concrete type IS ``carrier``.
 
         Deliberately an exact-type lookup, not an :func:`overlay_carriers` expansion: the one
-        consumer (``_scan_input_carriers``'s wiring-check top-up) asks whether a parent whose
-        FRESH output is empty — because every one of its documents was reused — still
+        consumer (``StageInputs.carriers_present``'s wiring-check top-up) asks whether a parent
+        whose FRESH output is empty — because every one of its documents was reused — still
         "produces" its declared carrier via the overlay, and a mixed-carrier declaration (the
         ``Record`` sentinel) is not a concrete overlay carrier.
         """
@@ -281,11 +282,11 @@ class ReuseOverlay:
         """Overlay records the fold rule delivers through this parent's stream — counted once.
 
         The counting twin of :meth:`fold_into` for an accumulator's ``records_in`` metric
-        (``_gathered_count``): a DOC-level parent tops the count up by its carrier(s)' overlay
-        sizes; a corpus-level parent contributes nothing (its checkpoint's line count already
-        contains the union). ``already_counted`` is the caller's cross-parent memory of the
-        "first producer only" half of the rule — a carrier two parents produce is counted at
-        the first, mirroring where the fold would deliver it.
+        (``StageInputs.count`` under an ACCUMULATOR plan): a DOC-level parent tops the count up
+        by its carrier(s)' overlay sizes; a corpus-level parent contributes nothing (its
+        checkpoint's line count already contains the union). ``already_counted`` is the caller's
+        cross-parent memory of the "first producer only" half of the rule — a carrier two parents
+        produce is counted at the first, mirroring where the fold would deliver it.
         """
         if not is_doc_level_stage(stage):
             return 0

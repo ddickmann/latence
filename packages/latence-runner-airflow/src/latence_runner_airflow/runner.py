@@ -357,13 +357,22 @@ def _execute(
     XCom is a materialised substrate by construction (a task's return value is a value), so the
     Stage's lazily-streamed records are collected here — at the adapter, which is where the
     substrate's shape belongs, not in the shared executor.
+
+    The Stage's INPUT is resolved by the engine's own
+    :meth:`~latence_core.runner.LocalRunner.stage_inputs` over this task's parent map, so which
+    shape each Capability receives (a gathered list, a lazy stream, one stream per carrier, an
+    accumulator's per-carrier gather), how ``records_in`` is counted and which wiring rules apply
+    are the Capability's declaration — not a second copy of that table living in this adapter.
+    Every parent's records are present in ``parent_outputs`` (nothing is released under XCom), so
+    the resolution reads the map and never the local Runner's checkpoint fallback.
     """
     ctx = StageContext(
         storage=storage,
         pipeline=pipeline,
         run_id=run_id,
-        incoming=incoming,
-        outputs=parent_outputs,
+        inputs=engine.stage_inputs(
+            stage, parent_outputs, storage=storage, pipeline=pipeline, run_id=run_id
+        ),
         runner=RUNNER_NAME,
     )
     outcome = engine.stage_execution.execute(stage, ctx)

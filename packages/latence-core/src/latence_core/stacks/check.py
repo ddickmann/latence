@@ -47,6 +47,13 @@ What it checks, in one pass over the DAG:
     a ``{provider, ...}`` block under a Capability that declares no such slot (silently ignored at
     run time), and a slot wired without the companion it requires (``fde_converter`` without
     ``multivector_embedder``).
+``wiring``
+    a Stage whose parents cannot supply a carrier its Capability REQUIRES (a Relation-Extraction
+    Stage with no Entity-Extraction parent, a Context-Enrichment Stage with no Graph Assembly
+    above it). Both halves are declarations — what a Capability's Stage must receive
+    (:attr:`~latence_core.capability_descriptor.CapabilityDescriptor.input_plan`) and what a Stage
+    checkpoints — so the run-time ``ContractError`` a full extraction would eventually raise is
+    decidable here, with the same message.
 
 Severity, and why a WARNING exists at all: this check runs on hosts that deliberately do not have
 the heavy Provider packages installed. Treating "not installed" as an error would make the command
@@ -68,8 +75,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from latence_core.capability_descriptor import input_plan_for
 from latence_core.errors import ConfigError
 from latence_core.pipeline import Pipeline
+from latence_core.reuse_overlay import stage_produces
+from latence_core.run_store import stage_output_type
 from latence_core.subprovider import (
     class_satisfies_capability,
     missing_required_slots,
@@ -109,8 +119,8 @@ class Finding:
     """One thing wrong with a stack, addressed to the operator who has to fix it.
 
     ``check`` names the family (``structure`` / ``phase_boundary`` / ``capability`` / ``provider``
-    / ``sub_provider`` / ``config_key``) so CI can filter; ``stage`` is the Stage it belongs to
-    (``None`` for a whole-document finding); ``message`` says what to change.
+    / ``sub_provider`` / ``config_key`` / ``wiring``) so CI can filter; ``stage`` is the Stage it
+    belongs to (``None`` for a whole-document finding); ``message`` says what to change.
     """
 
     check: str
@@ -202,6 +212,7 @@ def check_stack(
         findings.extend(capability_findings.get(stage.name, ()))
         findings.extend(_sub_provider_findings(stage, installed, registry))
         findings.extend(_config_key_findings(stage))
+        findings.extend(_wiring_findings(stage, pipeline))
     return StackCheck(tuple(findings))
 
 
@@ -347,6 +358,42 @@ def _sub_provider_findings(
                 )
             )
     return tuple(findings)
+
+
+def _wiring_findings(stage: Stage, pipeline: Pipeline) -> tuple[Finding, ...]:
+    """A Stage wired to parents that cannot supply a carrier its Capability REQUIRES.
+
+    The static half of the run-time wiring check. A Capability declares what its Stage must receive
+    (:attr:`~latence_core.capability_descriptor.CapabilityDescriptor.input_plan`), and a Stage's
+    carrier is likewise declared, so "no parent of this Stage produces the DocumentRecords a
+    Profiling Stage profiles" is decidable with no corpus and no run — and it is the mistake that
+    otherwise surfaces only after a full extraction, as a typed ``ContractError`` from the
+    Runner's dispatch. The message IS the Runner's, formatted from the same declaration, so an
+    operator reads one wording whichever end catches it (``got:`` naming the carriers the wiring
+    actually delivers rather than the ones a run observed).
+
+    Only the "required carrier" half is checked, and only for a Stage that HAS parents. The
+    exclusive rules (Graph Assembly / Graph Completion reject *any other* carrier) are deliberately
+    left to the run: a mixed-carrier ancestor's contribution is a per-record fact, and a linter
+    that guesses would fail stacks that run correctly. A parentless Stage is not a finding either —
+    an empty input is legitimately empty, exactly as at run time.
+    """
+    plan = input_plan_for(stage.capability)
+    by_name = {s.name: s for s in pipeline.stages}
+    parents = [by_name[name] for name in stage.depends_on if name in by_name]
+    if not plan.requires or not parents:
+        return ()
+    delivered = sorted({stage_output_type(parent, pipeline).__name__ for parent in parents})
+    return tuple(
+        Finding(
+            check="wiring",
+            severity=Severity.ERROR,
+            message=str(requirement.error(stage, delivered)),
+            stage=stage.name,
+        )
+        for requirement in plan.requires
+        if not any(stage_produces(parent, pipeline, requirement.carrier) for parent in parents)
+    )
 
 
 def _config_key_findings(stage: Stage) -> tuple[Finding, ...]:

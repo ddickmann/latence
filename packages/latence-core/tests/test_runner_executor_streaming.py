@@ -30,7 +30,7 @@ These tests pin the invariants the streamed executor must keep; each would fail 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from latence_core.contracts import (
@@ -41,14 +41,15 @@ from latence_core.contracts import (
 )
 from latence_core.errors import ContractError
 from latence_core.pipeline import Pipeline
-from latence_core.runner import _ACCUMULATOR_KINDS, LocalRunner, StageOutput
+from latence_core.runner import _ACCUMULATOR_KINDS, LocalRunner, RunRecords, StageOutput
 from latence_core.storage import Storage
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterator
 
     from latence_core.pipeline import Stage
     from latence_core.quality import QualityReport
+    from latence_core.stage_inputs import StageInputs
 
 # Doc-level carriers whose retained output the accumulators consume — the sets #69 releases.
 _DOC_LEVEL_CARRIERS = (DocumentRecord, EntityMention)
@@ -174,22 +175,21 @@ class _SpyRunner(LocalRunner):
         pipeline: Pipeline,
         run_id: str,
         # Audit R2: a doc-level Stage's input is a lazy stream for the Capabilities the Runner
-        # streams (``_STREAMED_INPUT_KINDS``), so the seam's parameter is an ``Iterable``. This
-        # spy only inspects ``outputs``, never ``incoming``, so it must not consume it.
-        incoming: Iterable[StageOutput],
-        outputs: dict[str, list[StageOutput]],
+        # streams, so the seam never hands the dispatch a materialised list to inspect. This spy
+        # reads the executor's RETAINED map through the input's own record source (the substrate
+        # half of the seam) and never touches the Stage's input itself, so it consumes nothing.
+        inputs: StageInputs,
     ) -> Iterator[StageOutput]:
         if not self._doc_level_names:
             self._doc_level_names = {
                 s.name for s in pipeline.stages if s.capability not in _ACCUMULATOR_KINDS
             }
+        outputs = cast("RunRecords", inputs.source).outputs
         retained_doc_level = {n for n in outputs if n in self._doc_level_names}
         self.retained_doc_level_at[stage.name] = set(retained_doc_level)
         retained_records = sum(len(outputs[n]) for n in retained_doc_level)
         self.peak_retained_doc_records = max(self.peak_retained_doc_records, retained_records)
-        return super()._dispatch_stage(
-            stage, provider, storage, pipeline, run_id, incoming, outputs
-        )
+        return super()._dispatch_stage(stage, provider, storage, pipeline, run_id, inputs)
 
 
 def test_doc_level_outputs_released_before_accumulators(tmp_path: Path) -> None:

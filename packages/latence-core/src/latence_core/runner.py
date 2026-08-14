@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import dataclass
 from itertools import chain
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -107,12 +108,19 @@ from latence_core.quality_report_builder import (
 # doc-level input, the corpus-wide gather, the accumulator input count, the Export dispatch and
 # the wiring-check carrier scan — are one call each into that module.
 from latence_core.reuse_overlay import (
-    OverlayTrailer,
     ReuseOverlay,
     is_doc_level_stage,
     merge_overlay_doc_ordered,
 )
 from latence_core.stage_execution import StageContext, StageExecution
+
+# What a Stage RECEIVES is the Capability's own declaration (``input_plan``, Wave 4-I) and one
+# object built from it: ``StageInputs`` resolves the shape, counts ``records_in`` the way that
+# shape allows, folds the reuse overlay per site, and raises the plan's wiring errors. The
+# executor's four-way input branch, the two hand-maintained kind frozensets, the dispatch's second
+# decision of the same shape and the ~10 ``_require_*`` validators were all that decision, written
+# four times.
+from latence_core.stage_inputs import StageInputs
 from latence_core.storage import Storage
 from latence_core.tracing import RunTracer, SpanSink
 
@@ -183,61 +191,6 @@ _CHECKPOINT_READ_BATCH_RECORDS = 1024
 # because the executor's memory-shaping decisions are order-insensitive but its logs are not.
 _ACCUMULATOR_KINDS: tuple[CapabilityKind, ...] = tuple(
     kind for kind in CapabilityKind if kind in ACCUMULATOR_KINDS
-)
-
-# The doc-level Capabilities whose INPUT the Runner streams (ADR-0033, audit R2).
-#
-# C6 streamed the output side — the Provider's iterator goes straight into the checkpoint, so a
-# Stage's records never exist as a list. Its INPUT was still materialised whole-corpus:
-# ``_gather_inputs`` concatenated every parent's records into one list held for the Stage's whole
-# execution, and ``_as_type`` built a second list of the same size (a third under
-# ``extract_on: masked``). For the Capabilities below the Protocol is ``Iterable``-in and the
-# Provider consumes it exactly once, so the Runner hands it a lazy stream read record-by-record
-# from the parents' checkpoints (:meth:`LocalRunner._stream_doc_inputs`) — the input transient
-# becomes O(1) records rather than O(corpus-slice).
-#
-# The doc-level Capabilities NOT listed here are excluded because their Protocol makes the
-# materialisation the PROVIDER's, not a Runner-side buffer — streaming the input would move no
-# memory and only cost a second pass:
-#   * INTAKE_SCREENING / CONTENT_SCREENING return a ``ScreeningOutcome`` holding passed +
-#     quarantined lists, and Content Screening's page-map re-homing needs the input set to know
-#     what was dropped;
-#   * RELATION_EXTRACTION partitions ONE input stream into two carriers (chunks + mentions) and
-#     its Provider indexes the mentions per chunk, so one side must be buffered whatever the
-#     Runner does (Context Enrichment is the two-carrier case that does NOT — see
-#     :data:`_PER_CARRIER_INPUT_KINDS`);
-#   * EXPORT writes a file and holds what it materialises (streamed internally in row groups).
-# Their transients are the two inherent exceptions ADR-0033 already names, plus Relation's
-# two-carrier partition — see the ADR's **Honest memory boundary**.
-_STREAMED_INPUT_KINDS: frozenset[CapabilityKind] = frozenset(
-    {
-        CapabilityKind.PARSE,
-        CapabilityKind.CHUNK,
-        CapabilityKind.SCHEMA_INDUCTION,
-        CapabilityKind.ENTITY_EXTRACTION,
-        CapabilityKind.FUSED_ENTITY_RELATION,
-        CapabilityKind.REDACTION,
-    }
-)
-
-# The MULTI-CARRIER Capabilities whose input the Runner streams PER CARRIER (ADR-0033, dogfood-3).
-#
-# These read more than one carrier out of one ``depends_on`` set, so a single ``incoming`` stream
-# cannot serve them: the Provider consumes the carriers in its own order (Context Enrichment reads
-# the whole graph, then the whole mention stream, then threads the chunks 1:1), and partitioning one
-# stream into two would buffer at least one side whole-corpus — the very thing the bound forbids.
-# So they receive NOTHING through ``incoming`` (an empty list, like an accumulator's) and the
-# dispatch opens one INDEPENDENT lazy stream per carrier over the same parents
-# (:meth:`LocalRunner._stream_parent_inputs_of_type`). A checkpoint is re-readable, so N carriers
-# cost N O(1)-memory passes, not one O(corpus) list — the same trade Disambiguation already makes
-# for its mention + relation streams.
-#
-# The wiring check pays for it: the eager form validated a materialised list, so a streamed input
-# needs the carrier-set pre-pass (:meth:`LocalRunner._scan_input_carriers`) to raise the same typed
-# ``ContractError`` for a missing ``depends_on`` edge — bounded by the distinct carriers seen, and
-# short-circuited the moment every required carrier has been.
-_PER_CARRIER_INPUT_KINDS: frozenset[CapabilityKind] = frozenset(
-    {CapabilityKind.CONTEXT_ENRICHMENT}
 )
 
 # Secret-handling (issue #30): the run manifest persists the whole Pipeline
@@ -338,6 +291,48 @@ def topological_order(stages: list[Stage]) -> list[Stage]:
     return [by_name[n] for n in order]
 
 
+@dataclass(frozen=True)
+class RunRecords:
+    """One run's record substrate for :class:`~latence_core.stage_inputs.StageInputs` (#69).
+
+    The live retained ``outputs`` map first, the Stage's on-disk checkpoint as the fallback — the
+    two-source read that makes doc-level release transparent. Reads go through the engine's public
+    :meth:`LocalRunner.stage_records` / :meth:`LocalRunner.stage_record_count` rather than around
+    them, so a subclass that intercepts the checkpoint stream (the test seam) still sees every
+    read, and a second Runner can construct one of these over its own substrate map.
+    """
+
+    runner: LocalRunner
+    outputs: dict[str, list[StageOutput]]
+    storage: Storage
+    pipeline: Pipeline
+    run_id: str
+
+    def records(self, stage_name: str) -> Iterator[StageOutput]:
+        """One Stage's output — from the live map if retained, else streamed from its checkpoint."""
+        return self.runner.stage_records(
+            stage_name,
+            self.outputs,
+            storage=self.storage,
+            pipeline=self.pipeline,
+            run_id=self.run_id,
+        )
+
+    def count(self, stage_name: str) -> int:
+        """How many records one Stage produced — a ``len`` or the checkpoint's line count."""
+        return self.runner.stage_record_count(
+            stage_name,
+            self.outputs,
+            storage=self.storage,
+            pipeline=self.pipeline,
+            run_id=self.run_id,
+        )
+
+    def carrier(self, stage: Stage) -> type[StageOutput] | type[Record]:
+        """The record type a Stage checkpoints (``Record`` for a mixed-carrier Stage)."""
+        return run_store.stage_output_type(stage, self.pipeline)
+
+
 class LocalRunner:
     """Executes a Pipeline on the local node with resumable file-based state."""
 
@@ -392,7 +387,8 @@ class LocalRunner:
         # records, so those Stages see the whole corpus (reused ∪ fresh) exactly as if every
         # document had been re-extracted — while the doc-level Stages ran only on the changed
         # documents. The overlay is NEVER fed to a doc-level Stage (parse→…→redact) — those
-        # gather via ``_gather_inputs``, which is overlay-blind — so a reused document is never
+        # gather via ``StageInputs.stream``/``gathered``, which are overlay-blind — so a reused
+        # document is never
         # re-parsed/-extracted. Empty by default (``run(reuse=None)``), so a non-delta run is
         # byte-identical. WHERE the overlay folds, in what ORDER, and what happens to a carrier
         # no stream claims are the ADR-0061 §5 rule owned by
@@ -441,6 +437,34 @@ class LocalRunner:
         """
         return self._stage_execution
 
+    def stage_inputs(
+        self,
+        stage: Stage,
+        outputs: dict[str, list[StageOutput]],
+        *,
+        storage: Storage,
+        pipeline: Pipeline,
+        run_id: str,
+    ) -> StageInputs:
+        """This Stage's input, resolved against the Capability's declared plan (Wave 4-I).
+
+        The one call a Runner makes to answer "what does this Stage receive, how much of it is
+        there, and is it wired correctly?" — replacing the executor's four-way shape branch and the
+        per-shape counting rules. Public because it is the other half of the
+        :class:`~latence_core.stage_execution.StageContext` a second Runner builds: an adapter
+        hands its own substrate map in as ``outputs`` and gets the identical input semantics,
+        rather than re-deriving which Capabilities stream and which gather.
+
+        Bound to this run's reuse overlay, so a delta's reused records fold in exactly where
+        ADR-0061 §5 says they do.
+        """
+        return StageInputs(
+            stage,
+            pipeline,
+            RunRecords(self, outputs, storage, pipeline, run_id),
+            overlay=self._reuse_overlay,
+        )
+
     def dispatch_stage(
         self,
         stage: Stage,
@@ -448,8 +472,7 @@ class LocalRunner:
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: Iterable[StageOutput],
-        outputs: dict[str, list[StageOutput]],
+        inputs: StageInputs,
     ) -> Iterator[StageOutput]:
         """The :class:`~latence_core.stage_execution.StageDispatch` half this engine supplies.
 
@@ -458,9 +481,7 @@ class LocalRunner:
         separate module and reaching a private name across it is exactly the reach-through this
         refactor removes.
         """
-        return self._dispatch_stage(
-            stage, provider, storage, pipeline, run_id, incoming, outputs
-        )
+        return self._dispatch_stage(stage, provider, storage, pipeline, run_id, inputs)
 
     def _retaining(
         self,
@@ -980,51 +1001,18 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         for stage in ordered:
             ckpt_uri = self._checkpoint_uri(pipeline, run_id, stage.name)
-            # #69: a corpus-level accumulator (Profiling/Disambiguation/Graph) consumes the whole
-            # doc-level output — materialising it into a list here would reintroduce the O(all
-            # records) transient the ADR bounds. So its input is NOT gathered eagerly: the
-            # dispatch streams each carrier from the parents' checkpoints one record at a time
-            # (:meth:`_stream_inputs_of_type`). ``records_in`` for it is a streamed count only
-            # (:meth:`_gathered_count`), never a retained list. Every other Stage is per-document
-            # and small enough to gather eagerly (its own output is then released once dead).
-            is_accumulator = stage.capability in _ACCUMULATOR_KINDS
-            incoming: Iterable[StageOutput]
-            if is_accumulator:
-                incoming = []
-                records_in = self._gathered_count(
-                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-            elif stage.capability in _PER_CARRIER_INPUT_KINDS:
-                # dogfood-3: a MULTI-CARRIER Stage (Context Enrichment) reads its carriers as
-                # independent lazy streams inside the dispatch, so nothing is handed through
-                # ``incoming`` at all — an empty list rather than a one-shot stream nobody drains.
-                # Gathering it here is what made the Stage corpus-resident despite the Provider
-                # itself folding/projecting every input on arrival: at UDA scale the gathered list
-                # alone held ~90 k GraphRecords + 220 k ChunkRecords as pydantic records for the
-                # Stage's whole execution. ``records_in`` is the parents' checkpoint LINE count —
-                # exactly ``len(gathered)`` would have been, without decoding a record.
-                incoming = []
-                records_in = self._streamed_input_count(
-                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-            elif stage.capability in _STREAMED_INPUT_KINDS:
-                # Audit R2: the doc-level INPUT side of the same bound. The Stage's Provider
-                # consumes an ``Iterable`` exactly once, so it is handed a lazy stream over the
-                # parents' checkpoints instead of a gathered list — nothing corpus-sized is ever
-                # built (:data:`_STREAMED_INPUT_KINDS`). ``records_in`` is counted without
-                # decoding a single record (:meth:`_streamed_input_count`), so the span/lineage
-                # column stays exact and the count costs no memory and no validation pass.
-                incoming = self._stream_doc_inputs(
-                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                records_in = self._streamed_input_count(
-                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-            else:
-                incoming = self._gather_inputs(
-                    stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                records_in = len(incoming)
+            # The Stage's input, resolved against the Capability's own declared plan (Wave 4-I).
+            # This used to be a four-way branch over two hand-maintained frozensets that picked
+            # BOTH the shape and the counting rule — a corpus-level accumulator streams each
+            # carrier from the parents' checkpoints rather than materialising the whole doc-level
+            # output (#69, ADR-0033); a multi-carrier Stage opens one independent stream per
+            # carrier (dogfood-3); a streamed doc-level Stage takes a lazy stream and is counted
+            # from checkpoint LINES without decoding a record (audit R2); everything else gathers.
+            # All four are the Capability's ``input_plan``, and the object below is what serves it.
+            inputs = self.stage_inputs(
+                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
+            )
+            records_in = inputs.count()
 
             # #185: this Stage's lineage datasets (its parents' checkpoints in, its own out),
             # resolved once and reused by every exit below (resumed / skipped / ran / failed) so
@@ -1040,8 +1028,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
                 storage=storage,
                 pipeline=pipeline,
                 run_id=run_id,
-                incoming=incoming,
-                outputs=outputs,
+                inputs=inputs,
                 runner=runner_name,
             )
 
@@ -1260,8 +1247,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: Iterable[StageOutput],
-        outputs: dict[str, list[StageOutput]],
+        inputs: StageInputs,
     ) -> Iterator[StageOutput]:
         """Narrow a Stage's input to its capability's carrier and return the Provider's STREAM.
 
@@ -1269,13 +1255,22 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         Provider's iterator is handed back **uncollapsed** — the Runner writes it record-by-record
         into the checkpoint and the Stage's output never exists as a list.
 
-        Audit R2 completes the other half: for the Capabilities in :data:`_STREAMED_INPUT_KINDS`
-        the ``incoming`` this receives is itself a lazy stream over the parents' checkpoints, and
-        the narrowing is lazy too (:meth:`_as_type_stream`), so the Stage's INPUT is never a list
-        either. Those branches trade an eager wiring check for the bound: the same typed
-        ``ContractError`` is raised at the first record of the wrong carrier instead of before the
-        Provider is called (same accept/reject set — see :meth:`_as_type_stream`). Every other
-        branch still receives a gathered list and validates eagerly.
+        Audit R2 completes the other half: a STREAMED Capability's :meth:`~latence_core.\
+stage_inputs.StageInputs.stream` is a lazy read over the parents' checkpoints, and the narrowing
+        is lazy too (:meth:`_as_type_stream`), so the Stage's INPUT is never a list either. Those
+        branches trade an eager wiring check for the bound: the same typed ``ContractError`` is
+        raised at the first record of the wrong carrier instead of before the Provider is called
+        (same accept/reject set — see :meth:`_as_type_stream`). Every other branch validates
+        eagerly, through the Capability's declared plan
+        (:meth:`~latence_core.stage_inputs.StageInputs.validate`, a no-op for a Capability that
+        declares no wiring rule — which is why every branch can call it in the same place).
+
+        Each branch is now: check the Provider against the Capability's declared Protocol, check
+        the wiring, ask :class:`~latence_core.stage_inputs.StageInputs` for the shape this
+        Capability takes, call the Provider. WHICH shape that is, and what the wiring rules are, is
+        declared on the Capability (``input_plan``) rather than re-decided here — the second copy
+        of that decision (a membership test against two frozensets, guarding a one-shot generator
+        from a double read) is gone, because every accessor re-reads from the record source.
 
         The remaining materialisations are inherent, not oversights: Export must hold the records
         it materialises (it writes a file); the screening Capabilities return an outcome object
@@ -1285,29 +1280,14 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
         """
         if stage.capability is CapabilityKind.SOURCE:
             source = self._capability_provider(stage, provider, Source)
+            inputs.validate()
             # A Source is a root: it reads Storage, not upstream records.
             return iter(source.produce(storage))
 
-        # The eager branches partition their input more than once (or hand it to a Provider that
-        # returns an outcome object), so they need it as a list — and they always receive one:
-        # only :data:`_STREAMED_INPUT_KINDS` are handed a lazy stream, and
-        # :data:`_PER_CARRIER_INPUT_KINDS` are handed nothing at all (they open their own
-        # per-carrier streams below). Binding it here once makes which branch reads which shape
-        # explicit, keeps a future streamed Capability from silently double-reading a one-shot
-        # generator, and holds the bound under a Runner adapter that materialises ``incoming`` by
-        # substrate (Airflow's XCom).
-        gathered: list[StageOutput] = (
-            []
-            if stage.capability in _STREAMED_INPUT_KINDS
-            or stage.capability in _PER_CARRIER_INPUT_KINDS
-            else incoming
-            if isinstance(incoming, list)
-            else list(incoming)
-        )
-
         if stage.capability is CapabilityKind.INTAKE_SCREENING:
             intake_screener = self._capability_provider(stage, provider, IntakeScreener)
-            raw_inputs = self._as_type(stage, gathered, ParserInput)
+            inputs.validate()
+            raw_inputs = self._as_type(stage, inputs.gathered(), ParserInput)
             intake_outcome = intake_screener.screen_intake(raw_inputs)
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, intake_outcome)
             # Only the passed raw inputs proceed to Parse; the quarantined ones are
@@ -1316,17 +1296,20 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         if stage.capability is CapabilityKind.PARSE:
             parser = self._capability_provider(stage, provider, Parser)
-            parser_inputs = self._as_type_stream(stage, incoming, ParserInput)
+            inputs.validate()
+            parser_inputs = self._as_type_stream(stage, inputs.stream(), ParserInput)
             return iter(parser.parse(parser_inputs))
 
         if stage.capability is CapabilityKind.CHUNK:
             chunker = self._capability_provider(stage, provider, Chunker)
-            doc_records = self._as_type_stream(stage, incoming, DocumentRecord)
+            inputs.validate()
+            doc_records = self._as_type_stream(stage, inputs.stream(), DocumentRecord)
             return iter(chunker.chunk(doc_records))
 
         if stage.capability is CapabilityKind.CONTENT_SCREENING:
             content_screener = self._capability_provider(stage, provider, ContentScreener)
-            chunk_records = self._as_type(stage, gathered, ChunkRecord)
+            inputs.validate()
+            chunk_records = self._as_type(stage, inputs.gathered(), ChunkRecord)
             content_outcome = content_screener.screen_content(chunk_records)
             self._persist_screening_sidecar(storage, pipeline, run_id, stage, content_outcome)
             # Passed chunks (some now carrying propagated RiskMarkers) proceed to
@@ -1344,6 +1327,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         if stage.capability is CapabilityKind.SCHEMA_INDUCTION:
             label_inducer = self._capability_provider(stage, provider, LabelInducer)
+            inputs.validate()
             # W4: a chunk→chunk transform (the Content-Screening shape). It consumes the run's
             # chunks and returns the SAME chunks with ``induced_labels`` populated (one LLM call
             # per document, broadcast to that doc's chunks). Fail-open lives in the Provider: a
@@ -1353,16 +1337,17 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # the chunk directly. Redaction reads a per-document DocumentRecord, so when a stack
             # also wires this chunk stream into ``redact`` the Runner projects each document's
             # induced labels onto its DocumentRecord (the bridge in the REDACTION dispatch below).
-            induce_chunks = self._as_type_stream(stage, incoming, ChunkRecord)
+            induce_chunks = self._as_type_stream(stage, inputs.stream(), ChunkRecord)
             return iter(label_inducer.induce(induce_chunks))
 
         if stage.capability is CapabilityKind.ENTITY_EXTRACTION:
             entity_extractor = self._capability_provider(stage, provider, EntityExtractor)
+            inputs.validate()
             # Audit R2: chunks in, one at a time — the corpus-sized transient this branch used to
             # hold (the gathered list + its narrowed copy + the masked ``model_copy`` of it) is
             # what made an Entity Stage over a large corpus OOM despite C6.
             entity_chunks = self._extract_input_chunks_streamed(
-                pipeline, self._as_type_stream(stage, incoming, ChunkRecord)
+                pipeline, self._as_type_stream(stage, inputs.stream(), ChunkRecord)
             )
             return iter(entity_extractor.extract(entity_chunks))
 
@@ -1370,11 +1355,13 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             relation_extractor = self._capability_provider(stage, provider, RelationExtractor)
             # Relation Extraction is multi-input: it wires BOTH a Chunk (or
             # Content-Screening) parent for text/page-map context AND an
-            # Entity-Extraction parent for the mentions it relates. Partition the
-            # gathered inputs by carrier; a missing side is a wiring error.
+            # Entity-Extraction parent for the mentions it relates. Both sides are declared
+            # REQUIRED on the Capability, so ``validate`` raises the wiring error; the partition
+            # itself is this Provider's two-carrier shape.
+            inputs.validate()
+            gathered = inputs.gathered()
             rel_chunks = [r for r in gathered if isinstance(r, ChunkRecord)]
             rel_mentions = [r for r in gathered if isinstance(r, EntityMention)]
-            self._require_relation_inputs(stage, gathered, rel_chunks, rel_mentions)
             rel_chunks = self._extract_input_chunks(pipeline, rel_chunks)
             return iter(relation_extractor.relate(rel_chunks, rel_mentions))
 
@@ -1382,17 +1369,19 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             fused_extractor = self._capability_provider(
                 stage, provider, FusedEntityRelationExtractor
             )
+            inputs.validate()
             # One pass over the chunks yields BOTH mentions and relations; the fused
             # Stage threads them together downstream (no separate Entity-Extraction
             # Stage — the S5 no-double-extract routing).
             fused_chunks = self._extract_input_chunks_streamed(
-                pipeline, self._as_type_stream(stage, incoming, ChunkRecord)
+                pipeline, self._as_type_stream(stage, inputs.stream(), ChunkRecord)
             )
             fused = fused_extractor.extract_fused(fused_chunks)
             return chain(fused.mentions, fused.relations)
 
         if stage.capability is CapabilityKind.REDACTION:
             pii_detector = self._capability_provider(stage, provider, PIIDetector)
+            inputs.validate()
             # W16 (ADR-0042): Redaction is a chunk→chunk transform (the fix for the document-level
             # 768-token truncation leak). It consumes the run's ChunkRecords (each ≤ the model
             # window) and yields the SAME chunks with ``masked_content`` + ``pii_spans`` populated
@@ -1413,7 +1402,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # (better) advice never reached an operator.
             redaction_chunks = self._as_type_stream(
                 stage,
-                incoming,
+                inputs.stream(),
                 ChunkRecord,
                 message=lambda got: (
                     f"Stage {stage.name!r} (redaction) received no ChunkRecords "
@@ -1437,15 +1426,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # checkpoints (the Profiler folds one at a time — the S7 streaming contract), so the
             # accumulator never materialises the whole doc-level output. A pre-pass validates the
             # wiring (below) before the provider consumes the streams.
-            self._require_profiling_inputs_streamed(
-                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            profile_docs = self._stream_inputs_of_type(
-                stage, outputs, DocumentRecord, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            profile_mentions = self._stream_inputs_of_type(
-                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
-            )
+            inputs.validate()
+            profile_docs = inputs.stream_of(DocumentRecord)
+            profile_mentions = inputs.stream_of(EntityMention)
             return iter(profiler.profile(profile_docs, profile_mentions))
 
         if stage.capability is CapabilityKind.TYPE_CONSOLIDATION:
@@ -1464,15 +1447,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # SAME records relabelled, so it holds them regardless; a lazy input would only move
             # the materialisation inside the Provider. The retained set is the mention set, which
             # the extraction Stages' own checkpoints already bound.
-            self._require_type_consolidation_inputs_streamed(
-                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            tc_mentions = self._stream_inputs_of_type(
-                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            tc_relations = self._stream_inputs_of_type(
-                stage, outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
-            )
+            inputs.validate()
+            tc_mentions = inputs.stream_of(EntityMention)
+            tc_relations = inputs.stream_of(RelationMention)
             consolidated = type_consolidator.consolidate(tc_mentions, tc_relations)
             # The vocabulary is not a Record and never enters the DAG — it describes the corpus's
             # SCHEMA, not a span of a document. It is persisted beside the run's checkpoints as a
@@ -1493,15 +1470,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # parents' checkpoints (a fused parent's mixed checkpoint is read twice, once per
             # carrier — each pass O(batch)), so the disambiguator never materialises the whole
             # mention/relation set. A pre-pass validates the wiring before the provider runs.
-            self._require_disambiguation_inputs_streamed(
-                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            disambig_mentions = self._stream_inputs_of_type(
-                stage, outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            disambig_relations = self._stream_inputs_of_type(
-                stage, outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
-            )
+            inputs.validate()
+            disambig_mentions = inputs.stream_of(EntityMention)
+            disambig_relations = inputs.stream_of(RelationMention)
             # W1 rework (#94): thread the run's ChunkRecords so a context-embedding Disambiguator
             # can locate each mention's parent chunk and embed surface+surrounding-context (the pod
             # proved bare-surface ER over-merges distinct short surfaces). Chunks are gathered from
@@ -1512,9 +1483,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # bounded output/checkpoint, so the Runner never materialises them; the cascade ignores
             # them (byte-identical), and a run with no Chunk Stage yields an empty stream. The
             # algorithmic-path Disambiguators accept ``chunks=()`` by default, so this is additive.
-            disambig_chunks = self._stream_all_records_of_type(
-                outputs, ChunkRecord, storage=storage, pipeline=pipeline, run_id=run_id
-            )
+            disambig_chunks = inputs.corpus_records_of(ChunkRecord)
             return iter(
                 disambiguator.disambiguate(disambig_mentions, disambig_relations, disambig_chunks)
             )
@@ -1527,19 +1496,10 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # non-empty input carrying no DisambiguationRecord is a wiring error. #69: the
             # DisambiguationRecords are streamed from the parent (its bounded accumulator output,
             # or its checkpoint), validated by a pre-pass that mirrors ``_as_type`` +
-            # ``_require_graph_inputs`` (any wrong carrier / an all-wrong non-empty input is a
-            # typed wiring error) before the assembler folds the stream.
-            self._require_graph_inputs_streamed(
-                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            graph_records = self._stream_inputs_of_type(
-                stage,
-                outputs,
-                DisambiguationRecord,
-                storage=storage,
-                pipeline=pipeline,
-                run_id=run_id,
-            )
+            # the Capability's declared EXCLUSIVE rule (any wrong carrier / an all-wrong
+            # non-empty input is a typed wiring error) before the assembler folds the stream.
+            inputs.validate()
+            graph_records = inputs.stream_of(DisambiguationRecord)
             # ADR-0057: a Provider that OPTS IN (``wants_document_streams``, absent/False on
             # every other Provider) additionally receives the run's chunks + mentions +
             # relations for the Hyperedge projection — gathered from the WHOLE pipeline with
@@ -1547,15 +1507,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # Disambiguation chunk gather above. A Provider that never opts in takes the
             # unchanged single-stream path: no extra reads, byte-identical behavior.
             if getattr(graph_assembler, "wants_document_streams", False):
-                assembly_chunks = self._stream_all_records_of_type(
-                    outputs, ChunkRecord, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                assembly_mentions = self._stream_all_records_of_type(
-                    outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-                assembly_relations = self._stream_all_records_of_type(
-                    outputs, RelationMention, storage=storage, pipeline=pipeline, run_id=run_id
-                )
+                assembly_chunks = inputs.corpus_records_of(ChunkRecord)
+                assembly_mentions = inputs.corpus_records_of(EntityMention)
+                assembly_relations = inputs.corpus_records_of(RelationMention)
                 assemble_with_documents = getattr(graph_assembler, "assemble_with_documents")  # noqa: B009 - the opt-in gate above proves presence; getattr keeps the Protocol narrow
                 return iter(
                     assemble_with_documents(
@@ -1579,17 +1533,8 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # the GraphRecords are streamed from the parent (bounded output/checkpoint), validated
             # by a pre-pass, before the completer folds the stream. The Stage is genuinely optional
             # — a stack without it is byte-identical to today (no predicted edges appear).
-            self._require_graph_completion_inputs_streamed(
-                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            assembled = self._stream_inputs_of_type(
-                stage,
-                outputs,
-                GraphRecord,
-                storage=storage,
-                pipeline=pipeline,
-                run_id=run_id,
-            )
+            inputs.validate()
+            assembled = inputs.stream_of(GraphRecord)
             return iter(graph_completer.complete(assembled))
 
         if stage.capability is CapabilityKind.CONTEXT_ENRICHMENT:
@@ -1619,35 +1564,28 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             # is resident: at UDA scale (220 129 chunks / ~90 k graph records, a fixture-measured
             # ~5.1 kB per GraphNode) the gathered list was GiBs held for the Stage's whole
             # execution, inside the 29 GB cgroup that OOM-killed this pipeline twice.
-            self._require_context_enrichment_inputs_streamed(
-                stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            enrich_chunks = self._stream_parent_inputs_of_type(
-                stage, outputs, ChunkRecord, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            enrich_graph = self._stream_parent_inputs_of_type(
-                stage, outputs, GraphRecord, storage=storage, pipeline=pipeline, run_id=run_id
-            )
+            inputs.validate()
+            enrich_chunks = inputs.stream_of(ChunkRecord)
+            enrich_graph = inputs.stream_of(GraphRecord)
             # W17/ADR-0061: Context Enrichment is NOT a per-document transform — a chunk's
             # ``context_header`` summarizes the mutable assembled graph — which is exactly why
             # reuse composes with it soundly: the reuse store persists the PRE-enrichment
             # (redacted) chunk variant, the per-carrier chunk stream above folds the reused
-            # chunks in document order (``_stream_parent_inputs_of_type``), and EVERY chunk's
+            # chunks in document order (the PER_CARRIER trailer policy), and EVERY chunk's
             # header — reused and fresh alike — is re-derived here from the CURRENT assembled
             # graph. No header ever crosses a run boundary, so none can go stale. The enriched
             # union then flows to Export, whose overlay fold is suppressed below a corpus-level
             # producer (this Stage) — no collision, no double count.
-            enrich_mentions = self._stream_all_records_of_type(
-                outputs, EntityMention, storage=storage, pipeline=pipeline, run_id=run_id
-            )
+            enrich_mentions = inputs.corpus_records_of(EntityMention)
             return iter(context_enricher.enrich(enrich_chunks, enrich_mentions, enrich_graph))
 
         if stage.capability is CapabilityKind.EXPORT:
             exporter = self._capability_provider(stage, provider, Export)
+            inputs.validate()
             # Export materializes any inter-Stage Record: DocumentRecords (S1/S2
             # spine) or ChunkRecords (S3, when a Chunk Stage sits upstream). Only a
             # raw ParserInput (not a Record) is an invalid Export input.
-            exportable = self._as_records(stage, gathered)
+            exportable = self._as_records(stage, inputs.gathered())
             # W17/ADR-0061: an Export whose nearest producing ancestor is DOC-LEVEL (a
             # chunk/redact RAG corpus, a mention export) sees only the fresh documents' records in
             # its gathered input, so the reused documents' records are folded in here — MERGED
@@ -1852,296 +1790,7 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
             storage, ckpt_uri, self._output_type(stage, pipeline)
         )
 
-    def _records_of_type(
-        self,
-        stage_name: str,
-        outputs: Mapping[str, list[StageOutput]],
-        expected: type[_T],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> Iterator[_T]:
-        """One Stage's output (:meth:`_stage_records`) narrowed to one carrier, lazily.
-
-        The per-Stage stream every overlay-folding gather below hands to
-        :meth:`~latence_core.reuse_overlay.ReuseOverlay.fold_into`: reads the Stage's records
-        from the live dict or its checkpoint one at a time and yields only the ``expected``
-        carrier — the streamed form of ``[r for r in gathered if isinstance(r, expected)]``,
-        identical records in identical order.
-        """
-        return (
-            record
-            for record in self._stage_records(
-                stage_name, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            if isinstance(record, expected)
-        )
-
-    def _stream_inputs_of_type(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        expected: type[_T],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> Iterator[_T]:
-        """Lazily yield a Stage's gathered inputs narrowed to one carrier type (#69).
-
-        The streaming companion to :meth:`_gather_inputs` for the corpus-level accumulators
-        (Profiling/Disambiguation/Graph): it re-reads each parent's output from the live dict or
-        its checkpoint (:meth:`_stage_records`) one record at a time and yields only the
-        ``expected`` carrier, so an accumulator that needs the whole doc-level stream folds it in
-        without the executor materialising the stream into a retained list. A checkpoint is
-        re-readable, so calling this once per carrier (Disambiguation needs both mentions and
-        relations) keeps each pass O(batch), not O(all records). Parents are read in declared
-        ``depends_on`` order, so the yielded order is byte-identical to :meth:`_gather_inputs`
-        followed by an ``isinstance`` filter — determinism preserved.
-
-        W17/ADR-0061: the reuse overlay of this carrier is MERGED document-interleaved into the
-        FIRST doc-level parent stream that produces it, so the accumulator folds
-        ``fresh ∪ reused`` in the full rebuild's arrival order — the fold rule and this site's
-        trailer policy (``APPEND_IF_CARRIER_UNSEEN``: union semantics, corpus-level-parent
-        suppression) live in :mod:`~latence_core.reuse_overlay`.
-        """
-        by_name = {s.name: s for s in pipeline.stages}
-        sources = (
-            (
-                by_name.get(parent_name),
-                self._records_of_type(
-                    parent_name,
-                    outputs,
-                    expected,
-                    storage=storage,
-                    pipeline=pipeline,
-                    run_id=run_id,
-                ),
-            )
-            for parent_name in stage.depends_on
-        )
-        yield from self._reuse_overlay.fold_into(
-            expected, sources, pipeline, trailer=OverlayTrailer.APPEND_IF_CARRIER_UNSEEN
-        )
-
-    def _stream_parent_inputs_of_type(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        expected: type[_T],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> Iterator[_T]:
-        """Lazily yield ONE carrier of a multi-carrier doc-level input (dogfood-3).
-
-        The streaming form of the eager ``[r for r in gathered if isinstance(r, X)]`` partition a
-        :data:`_PER_CARRIER_INPUT_KINDS` Stage used to do: it re-reads the parents in declared
-        ``depends_on`` order (:meth:`_stream_doc_inputs`, live dict or checkpoint) one record at a
-        time and yields only the ``expected`` carrier, so a Stage that reads two carriers costs two
-        O(1)-memory passes over re-readable checkpoints instead of one O(corpus) list. Order is
-        the gathered order filtered — identical records, identical sequence — so a 1:1 carrier
-        (Context Enrichment's chunk stream) is still threaded in order and the output is
-        byte-identical.
-
-        W17/ADR-0061: the reuse overlay folds in under the same rule as
-        :meth:`_stream_inputs_of_type` — merged document-interleaved into the first doc-level
-        parent producing the carrier — which is what lets Context Enrichment run on a delta with
-        cross-run reuse: its chunk stream then carries ``fresh ∪ reused`` in rebuild order, and
-        every chunk's header is re-derived from the CURRENT assembled graph (no stale headers, by
-        construction). What differs from the accumulator gather is only this site's trailer
-        policy (``NEVER``: a doc-level Stage's input is its parents' records, never records no
-        parent produced — see :class:`~latence_core.reuse_overlay.OverlayTrailer`). The
-        overlay's GraphRecord side is always empty (corpus-level records are never reused), so
-        the graph stream is untouched. No delta reuse ⇒ byte-identical to the overlay-blind form.
-        """
-        by_name = {s.name: s for s in pipeline.stages}
-        sources = (
-            (
-                by_name.get(parent_name),
-                self._records_of_type(
-                    parent_name,
-                    outputs,
-                    expected,
-                    storage=storage,
-                    pipeline=pipeline,
-                    run_id=run_id,
-                ),
-            )
-            for parent_name in stage.depends_on
-        )
-        yield from self._reuse_overlay.fold_into(
-            expected, sources, pipeline, trailer=OverlayTrailer.NEVER
-        )
-
-    def _stream_all_records_of_type(
-        self,
-        outputs: dict[str, list[StageOutput]],
-        expected: type[_T],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> Iterator[_T]:
-        """Lazily yield every Stage's output narrowed to one carrier — corpus-wide (W1 rework #94).
-
-        A corpus-level Stage sometimes needs a carrier that is NOT one of its direct
-        ``depends_on`` parents. Disambiguation depends on the Entity-Extraction (mentions) and
-        optional Relation-Extraction (relations) parents, but a context-embedding Disambiguator
-        also needs the run's :class:`~latence_core.contracts.ChunkRecord`s — produced by the
-        Chunk Stage, a *mention ancestor*, not a Disambiguation parent. This streams every
-        Stage's output in topological order (the same order :meth:`_gather_inputs` reads parents,
-        so it is deterministic) from the live dict or its checkpoint (:meth:`_stage_records`), one
-        record at a time, yielding only the ``expected`` carrier — so the accumulator folds the
-        corpus-wide stream in without the executor materialising it (#69 memory bound preserved).
-        A run with no producing Stage yields nothing (the empty-chunks fallback).
-        """
-        # W17/ADR-0061: the corpus-wide gather spans the reused documents' records too. The
-        # overlay is MERGED document-interleaved into the first doc-level Stage producing this
-        # carrier (the position a rebuild's records of these documents would occupy); every
-        # later corpus-level re-emission (Type Consolidation, Context Enrichment) already
-        # carries the union in its own checkpoint. A reused document contributes its single
-        # persisted (most-processed) chunk variant where a rebuild threads each intermediate
-        # variant once per producing Stage — every corpus-wide consumer dedups by record id /
-        # max-folds, so the union it folds is identical (pinned by the equivalence tests).
-        # This site's trailer policy is ``ALWAYS``: the enumeration spans the whole pipeline,
-        # so an unclaimed overlay IS the corpus's only records of this carrier.
-        sources = (
-            (
-                stage,
-                self._records_of_type(
-                    stage.name,
-                    outputs,
-                    expected,
-                    storage=storage,
-                    pipeline=pipeline,
-                    run_id=run_id,
-                ),
-            )
-            for stage in topological_order(list(pipeline.stages))
-        )
-        yield from self._reuse_overlay.fold_into(
-            expected, sources, pipeline, trailer=OverlayTrailer.ALWAYS
-        )
-
-    def _gathered_count(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> int:
-        """Count a Stage's gathered inputs by streaming — never materialising them (#69).
-
-        The ``records_in`` metric for a corpus-level accumulator (whose input is the whole
-        doc-level output). Streams each parent's records one at a time (:meth:`_stage_records`)
-        and counts, so the count is exact without holding the input as a list — the memory bound
-        the ADR requires for the accumulator input side.
-
-        W17/ADR-0061: the reused documents' records are counted where the fold rule delivers them
-        — once per carrier, at the first doc-level parent producing it (a corpus-level parent's
-        checkpoint already contains the union, so its line count needs no top-up). A mixed-carrier
-        parent (fused extractor) counts both mention overlays. The counting re-derivation is the
-        overlay's own (:meth:`~latence_core.reuse_overlay.ReuseOverlay.count_for_stage`).
-        """
-        total = 0
-        by_name = {s.name: s for s in pipeline.stages}
-        counted: set[type[Record]] = set()
-        for parent in stage.depends_on:
-            for _ in self._stage_records(
-                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            ):
-                total += 1
-            parent_stage = by_name.get(parent)
-            if parent_stage is not None:
-                total += self._reuse_overlay.count_for_stage(
-                    parent_stage, pipeline, already_counted=counted
-                )
-        return total
-
-    def _gather_inputs(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> list[StageOutput]:
-        """A Stage's input = the concatenation of ALL its parents' outputs.
-
-        Parents are read in declared ``depends_on`` order for determinism. This
-        is what makes a converging DAG ({a, b} -> c) correct and multi-input:
-        c sees a's records followed by b's — never a single overwritten variable,
-        and always the parents' *current* outputs. A parent whose retained output was
-        already released (#69) is streamed back from its checkpoint (:meth:`_stage_records`),
-        so gathering is release-transparent and byte-identical to reading the live dict.
-        """
-        gathered: list[StageOutput] = []
-        for parent in stage.depends_on:
-            gathered.extend(
-                self._stage_records(
-                    parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-            )
-        return gathered
-
-    def _stream_doc_inputs(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> Iterator[StageOutput]:
-        """The lazy form of :meth:`_gather_inputs` for a doc-level Stage (audit R2, ADR-0033).
-
-        Same records, same order — parents read in declared ``depends_on`` order, each from the
-        live dict if still retained and otherwise streamed back from its checkpoint
-        (:meth:`_stage_records`) — but nothing is concatenated into a list. The Stage's Provider
-        pulls one record at a time, so the whole input side of a doc-level Stage costs O(1)
-        records instead of O(corpus-slice). Deterministic and byte-identical to the gathered form:
-        the two differ only in what memory is held while the Stage runs.
-
-        Overlay-blind, exactly like :meth:`_gather_inputs`: the W17 reuse overlay is folded in for
-        the corpus-level accumulators only (:meth:`_stream_inputs_of_type`), never here.
-        """
-        for parent in stage.depends_on:
-            yield from self._stage_records(
-                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-
-    def _streamed_input_count(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> int:
-        """``records_in`` for a streamed doc-level Stage — counted, never materialised (audit R2).
-
-        The metric the span, the lineage START event and the ``StageMetrics`` row all report is
-        needed BEFORE the Stage executes, so it cannot be a tally taken while the stream flows.
-        Counting a retained parent is a ``len``; counting a released one counts the checkpoint's
-        non-blank LINES (:meth:`_stage_record_count`) — one record per line by construction of
-        :meth:`_write_checkpoint`, so the count is exact without decoding (and therefore without
-        re-validating) a single record. O(1) memory, and no second Pydantic pass over the corpus.
-        """
-        return sum(
-            self._stage_record_count(
-                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            )
-            for parent in stage.depends_on
-        )
-
-    def _stage_record_count(
+    def stage_record_count(
         self,
         stage_name: str,
         outputs: Mapping[str, list[StageOutput]],
@@ -2152,7 +1801,9 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
     ) -> int:
         """How many records one Stage produced — from the live dict, else its checkpoint's lines.
 
-        The counting companion to :meth:`_stage_records`. A checkpoint is newline-delimited
+        The counting companion to :meth:`stage_records`, and public for the same reason: the input
+        resolution (:class:`~latence_core.stage_inputs.StageInputs`) reads a streamed Stage's
+        ``records_in`` through it rather than around it. A checkpoint is newline-delimited
         ``model_dump_json`` (one record per non-blank line, blank lines skipped on read), so
         counting lines equals counting decoded records — including a fused Stage's mixed-carrier
         checkpoint, where each line is still exactly one record. A Stage with no checkpoint (not
@@ -2268,365 +1919,6 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
                     raise ContractError(message(got))
                 raise cls._wrong_carrier_error(stage, expected, [got])
             yield record
-
-    @staticmethod
-    def _require_relation_inputs(
-        stage: Stage,
-        incoming: list[StageOutput],
-        chunks: list[ChunkRecord],
-        mentions: list[EntityMention],
-    ) -> None:
-        """A Relation-Extraction Stage must be wired to BOTH chunks and mentions.
-
-        It depends on an Entity-Extraction parent (the mentions it relates) and a
-        Chunk / Content-Screening parent (the text + page map it needs for triggers
-        and offset→page resolution). A missing side means the Pipeline forgot a
-        ``depends_on`` edge — surface it as a clear typed error, not an empty result.
-        An empty run (no documents ⇒ no chunks and no mentions) is legitimately empty.
-        """
-        if not incoming:
-            return
-        if not mentions:
-            msg = (
-                f"Stage {stage.name!r} (relation_extraction) received no EntityMentions. "
-                f"A Relation-Extraction Stage must depend on an Entity-Extraction Stage "
-                f"(the mentions it relates). Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-        if not chunks:
-            msg = (
-                f"Stage {stage.name!r} (relation_extraction) received no ChunkRecords. "
-                f"A Relation-Extraction Stage must also depend on the Chunk (or "
-                f"Content-Screening) Stage for the text + page map. Check depends_on."
-            )
-            raise ContractError(msg)
-
-    def _require_context_enrichment_inputs_streamed(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> None:
-        """A Context-Enrichment Stage must be wired to BOTH the chunk stream and Graph Assembly
-        (W13).
-
-        It depends on a Chunk / Content-Screening / Schema-Induction parent (the ChunkRecords it
-        enriches + passes through) AND a Graph-Assembly parent (the assembled GraphRecords it reads
-        the KG from). A missing side means the Pipeline forgot a ``depends_on`` edge — surface it as
-        a clear typed error, not a silently-empty header. An empty run (no documents ⇒ no chunks and
-        no graph) is legitimately empty. (The run's EntityMentions are gathered corpus-wide, not
-        from a direct parent, so they are validated only by their own upstream Stages — a run with
-        none just yields no headers.)
-
-        Streamed (dogfood-3): the eager form read a materialised ``incoming`` list, which is exactly
-        the corpus-sized retention this Stage no longer pays (:data:`_PER_CARRIER_INPUT_KINDS`). It
-        now scans the parents once for the carrier TYPES present (:meth:`_scan_input_carriers`,
-        O(distinct carriers)) and raises the SAME typed errors with the same messages, still before
-        the Provider is called. ``required`` short-circuits the scan the moment both carriers have
-        been seen — the correct case never reads past the first record of the second carrier — so
-        the pre-pass only runs to completion on the wiring error it is there to report.
-        """
-        present, names = self._scan_input_carriers(
-            stage,
-            outputs,
-            storage=storage,
-            pipeline=pipeline,
-            run_id=run_id,
-            required=(ChunkRecord, GraphRecord),
-        )
-        if not present:
-            return
-        if not any(issubclass(carrier, ChunkRecord) for carrier in present):
-            got = sorted(names)
-            msg = (
-                f"Stage {stage.name!r} (context_enrichment) received no ChunkRecords "
-                f"(got: {', '.join(got)}). A Context-Enrichment Stage must depend on the Chunk "
-                f"(or Content-Screening / Schema-Induction) Stage — the chunks it enriches. "
-                f"Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-        if not any(issubclass(carrier, GraphRecord) for carrier in present):
-            got = sorted(names)
-            msg = (
-                f"Stage {stage.name!r} (context_enrichment) received no GraphRecords "
-                f"(got: {', '.join(got)}). A Context-Enrichment Stage must also depend on the "
-                f"Graph Assembly Stage — the assembled KG it projects onto each chunk. "
-                f"Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    @staticmethod
-    def _require_profiling_inputs(
-        stage: Stage, incoming: list[StageOutput], documents: list[DocumentRecord]
-    ) -> None:
-        """A Profiling Stage must be wired to a Parse parent (the documents it profiles).
-
-        Profiling depends on a Parse parent for the DocumentRecords (per-document
-        features + the corpus text aggregates). The EntityMention side is optional (a
-        Parse-only Profiling pipeline is valid — it yields text features with empty
-        entity aggregates), so it is not checked here. A non-empty input that carries no
-        DocumentRecord means the Pipeline wired Profiling to the wrong parent (e.g. an
-        Entity-Extraction Stage with no Parse) — surface it as a clear typed error. An
-        empty run (no documents) is legitimately empty.
-        """
-        if not incoming:
-            return
-        if not documents:
-            got = sorted({type(r).__name__ for r in incoming})
-            msg = (
-                f"Stage {stage.name!r} (profiling) received no DocumentRecords "
-                f"(got: {', '.join(got)}). A Profiling Stage must depend on the Parse "
-                f"Stage (the documents it profiles). Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    @staticmethod
-    def _require_disambiguation_inputs(
-        stage: Stage, incoming: list[StageOutput], mentions: list[EntityMention]
-    ) -> None:
-        """A Disambiguation Stage must be wired to an Entity-Extraction parent (the mentions).
-
-        Disambiguation depends on an Entity-Extraction (or fused) parent for the
-        EntityMentions it resolves and links — the mentions are REQUIRED (unlike Profiling's
-        optional mentions: with no mentions there is nothing to disambiguate). The
-        RelationMention side is optional (an entity-only Disambiguation pipeline is valid), so
-        it is not checked here. A non-empty input that carries no EntityMention means the
-        Pipeline wired Disambiguation to the wrong parent — surface it as a clear typed error.
-        An empty run (no documents ⇒ no mentions) is legitimately empty.
-        """
-        if not incoming:
-            return
-        if not mentions:
-            got = sorted({type(r).__name__ for r in incoming})
-            msg = (
-                f"Stage {stage.name!r} (disambiguation) received no EntityMentions "
-                f"(got: {', '.join(got)}). A Disambiguation Stage must depend on an "
-                f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
-                f"the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    @staticmethod
-    def _require_graph_inputs(
-        stage: Stage, incoming: list[StageOutput], records: list[DisambiguationRecord]
-    ) -> None:
-        """A Graph Assembly Stage must be wired to a Disambiguation parent (the entities/relations).
-
-        Graph Assembly depends on a Disambiguation parent for the DisambiguationRecords (the
-        canonical entities + normalized relations it turns into nodes + edges). A non-empty
-        input that carries no DisambiguationRecord means the Pipeline wired Graph Assembly to
-        the wrong parent — surface it as a clear typed error. An empty run (no documents ⇒ no
-        entities) is legitimately empty. (``_as_type`` already rejects a mixed/wrong carrier;
-        this guards the all-wrong case with a Stage-specific message.)
-        """
-        if not incoming:
-            return
-        if not records:  # pragma: no cover - _as_type raises first on a wrong carrier
-            got = sorted({type(r).__name__ for r in incoming})
-            msg = (
-                f"Stage {stage.name!r} (graph_assembly) received no DisambiguationRecords "
-                f"(got: {', '.join(got)}). A Graph Assembly Stage must depend on the "
-                f"Disambiguation Stage (the canonical entities + relations it assembles). "
-                f"Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    def _scan_input_carriers(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-        required: tuple[type[StageOutput] | type[Record], ...] = (),
-    ) -> tuple[set[type[StageOutput]], set[str]]:
-        """Stream a Stage's gathered inputs once, returning the carrier types present (#69).
-
-        The streaming replacement for materialising ``incoming`` just to validate an accumulator's
-        wiring: it reads each parent's records one at a time (:meth:`_stage_records`) and collects
-        only the set of carrier *types* (and their names) seen — O(distinct-carriers) memory, not
-        O(records). The streamed ``_require_*`` checks below use this so a mis-wired
-        accumulator still raises the same typed error, without holding the input list.
-
-        ``required`` names the carriers a caller only needs to prove PRESENT (never absent), and
-        short-circuits the scan as soon as every one of them has been seen: nothing later in the
-        stream can change that verdict, so the correct wiring stops early and the full pass is paid
-        only when a carrier really is missing — the case the message describes. It must stay empty
-        for a caller that rejects a WRONG carrier (Graph Assembly / Graph Completion): those
-        verdicts depend on every type in the stream, so their scan must run to the end.
-        """
-        present: set[type[StageOutput]] = set()
-        names: set[str] = set()
-        unseen = set(required)
-        by_name = {s.name: s for s in pipeline.stages}
-        for parent in stage.depends_on:
-            for record in self._stage_records(
-                parent, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-            ):
-                present.add(type(record))
-                names.add(type(record).__name__)
-                if unseen:
-                    unseen -= {carrier for carrier in unseen if isinstance(record, carrier)}
-                    if not unseen:
-                        return present, names
-            # W17: a parent whose fresh output is empty because every one of its documents was
-            # reused still "produces" that carrier via the overlay — so the wiring check sees the
-            # carrier and an all-reused delta is not misread as a mis-wired empty parent.
-            parent_stage = by_name.get(parent)
-            if parent_stage is not None:
-                parent_type = self._output_type(parent_stage, pipeline)
-                if self._reuse_overlay.has_carrier(parent_type):
-                    present.add(parent_type)  # type: ignore[arg-type]
-                    names.add(parent_type.__name__)
-        return present, names
-
-    def _require_profiling_inputs_streamed(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> None:
-        """Streaming form of :meth:`_require_profiling_inputs` (#69) — same typed error."""
-        present, names = self._scan_input_carriers(
-            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-        )
-        if not present:
-            return
-        if DocumentRecord not in present:
-            got = sorted(names)
-            msg = (
-                f"Stage {stage.name!r} (profiling) received no DocumentRecords "
-                f"(got: {', '.join(got)}). A Profiling Stage must depend on the Parse "
-                f"Stage (the documents it profiles). Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    def _require_disambiguation_inputs_streamed(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> None:
-        """Streaming form of :meth:`_require_disambiguation_inputs` (#69) — same typed error."""
-        present, names = self._scan_input_carriers(
-            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-        )
-        if not present:
-            return
-        if EntityMention not in present:
-            got = sorted(names)
-            msg = (
-                f"Stage {stage.name!r} (disambiguation) received no EntityMentions "
-                f"(got: {', '.join(got)}). A Disambiguation Stage must depend on an "
-                f"Entity-Extraction (or fused) Stage (the mentions it resolves). Check "
-                f"the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    def _require_type_consolidation_inputs_streamed(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> None:
-        """A Type-Consolidation Stage must be wired to an Entity-Extraction parent (T3).
-
-        The mentions' labels ARE the vocabulary it canonicalizes, so the mention side is REQUIRED
-        (the relation side is optional — an entity-only stack is valid). A non-empty input that
-        carries no EntityMention means the Pipeline wired the Stage to the wrong parent; that is a
-        typed wiring error, never a silent pass-through that would leave the KG's types drifted
-        while the report claimed consolidation ran (ADR-0034). An empty run is legitimately empty.
-        """
-        present, names = self._scan_input_carriers(
-            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-        )
-        if not present:
-            return
-        if EntityMention not in present:
-            got = sorted(names)
-            msg = (
-                f"Stage {stage.name!r} (type_consolidation) received no EntityMentions "
-                f"(got: {', '.join(got)}). A Type-Consolidation Stage must depend on an "
-                f"Entity-Extraction (or fused) Stage (the mentions whose types it "
-                f"canonicalizes). Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    def _require_graph_inputs_streamed(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> None:
-        """Streaming form of :meth:`_as_type` + :meth:`_require_graph_inputs` (#69).
-
-        Graph Assembly's input must be entirely DisambiguationRecords (``_as_type`` rejected any
-        other carrier); an empty run is legitimately empty. Preserves both the wrong-carrier and
-        the all-wrong-non-empty typed errors while streaming — the wrong-carrier set is bounded,
-        never the record list.
-        """
-        present, names = self._scan_input_carriers(
-            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-        )
-        if not present:
-            return
-        wrong = sorted(t.__name__ for t in present if t is not DisambiguationRecord)
-        if wrong:
-            # Mirror ``_as_type``'s exact message (the check this streamed path replaces).
-            msg = (
-                f"Stage {stage.name!r} ({stage.capability.value}) requires "
-                f"DisambiguationRecord inputs but received: {', '.join(wrong)}. "
-                f"Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
-
-    def _require_graph_completion_inputs_streamed(
-        self,
-        stage: Stage,
-        outputs: dict[str, list[StageOutput]],
-        *,
-        storage: Storage,
-        pipeline: Pipeline,
-        run_id: str,
-    ) -> None:
-        """A Graph Completion Stage must be wired to a Graph-Assembly parent (W2-linkpred).
-
-        Graph Completion consumes the assembled graph's GraphRecords (NODE + EDGE). Its input must
-        be entirely GraphRecords; a non-empty input carrying any other carrier means the Pipeline
-        wired Graph Completion to the wrong parent (it must depend on the Graph Assembly Stage, not
-        Disambiguation or anything else). An empty run (no documents ⇒ no graph) is legitimately
-        empty. Streams the carrier types once (bounded), never the record list (#69).
-        """
-        present, names = self._scan_input_carriers(
-            stage, outputs, storage=storage, pipeline=pipeline, run_id=run_id
-        )
-        if not present:
-            return
-        wrong = sorted(t.__name__ for t in present if t is not GraphRecord)
-        if wrong:
-            msg = (
-                f"Stage {stage.name!r} (graph_completion) requires GraphRecord inputs "
-                f"but received: {', '.join(wrong)}. A Graph Completion Stage must depend on "
-                f"the Graph Assembly Stage (the assembled nodes + edges it completes). "
-                f"Check the Pipeline's depends_on wiring."
-            )
-            raise ContractError(msg)
 
     @staticmethod
     def _as_records(

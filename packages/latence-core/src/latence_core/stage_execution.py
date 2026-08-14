@@ -39,10 +39,10 @@ Internal composition
 The capability→Protocol dispatch itself is supplied as a :class:`StageDispatch` collaborator
 rather than inlined here. It is **not** part of this module's interface — no Runner adapter names
 it, constructs one, or varies it; :class:`~latence_core.runner.LocalRunner` composes itself in as
-the one implementation. It is a small internal part behind a deep interface (the dispatch body is
-~400 lines of capability-specific input narrowing that reaches a dozen of the engine's checkpoint
-and stream helpers; relocating it is a mechanical follow-up that changes no behaviour, and is
-deliberately not bundled with this behavioural change).
+the one implementation. It is a small internal part behind a deep interface: the dispatch body is
+one branch per Capability that narrows the Stage's input to its carrier and calls the Provider,
+and everything it used to re-derive about *which* input shape a Capability takes now comes from
+the Capability's own declared plan, through :class:`~latence_core.stage_inputs.StageInputs`.
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from latence_core.capability import ProviderRegistry
     from latence_core.pipeline import Pipeline, Stage
     from latence_core.runner import StageOutput
+    from latence_core.stage_inputs import StageInputs
     from latence_core.storage import Storage
 
 
@@ -72,23 +73,24 @@ if TYPE_CHECKING:
 class StageContext:
     """Everything a Stage needs from its Runner that is not the Stage itself.
 
-    ``incoming`` is the Stage's input, and it is only an ``Iterable`` on purpose (ADR-0033): a
-    doc-level Stage whose Provider consumes its input exactly once is handed a **lazy stream** over
-    the parents' checkpoints, so neither side of such a Stage — input or output — is ever a
-    corpus-sized list. It is empty for a corpus-level accumulator (which streams its input per
-    carrier instead) and a plain list for the Capabilities whose Provider materialises the input
-    anyway (screening outcomes, two-carrier partitions, Export). A consumer must therefore iterate
-    it AT MOST ONCE; a Runner adapter on a materialised substrate (Airflow XCom) may of course
-    pass a list. ``outputs`` is the per-Stage record map the accumulator streams *from* — a live
-    dict under the local Runner, the XCom store under Airflow. ``runner`` is the name stamped onto
-    the Stage's metrics, which is the only place the two Runners are allowed to differ.
+    ``inputs`` is the Stage's input, resolved: a :class:`~latence_core.stage_inputs.StageInputs`
+    built from the Capability's declared
+    :class:`~latence_core.capability_descriptor.StageInputPlan`. The dispatch asks it for the shape
+    that Capability takes — a lazy stream over the parents' checkpoints for a Stage whose Provider
+    consumes its input exactly once (ADR-0033), one independent lazy stream per carrier for a
+    multi-carrier Stage, a gathered list for the Capabilities whose Provider materialises the input
+    anyway (screening outcomes, the Relation partition, Export) — and it is the object that knows
+    ``records_in`` and the Stage's wiring rules. A Runner adapter supplies the record substrate
+    behind it (:class:`~latence_core.stage_inputs.StageRecordSource`: checkpoint files locally, the
+    XCom store under Airflow) and nothing else; the executor's own live record map is no longer
+    part of this context. ``runner`` is the name stamped onto the Stage's metrics, which is the
+    only place the two Runners are allowed to differ.
     """
 
     storage: Storage
     pipeline: Pipeline
     run_id: str
-    incoming: Iterable[StageOutput]
-    outputs: dict[str, list[StageOutput]]
+    inputs: StageInputs
     runner: str = "local"
 
 
@@ -102,8 +104,7 @@ class StageDispatch(Protocol):
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        incoming: Iterable[StageOutput],
-        outputs: dict[str, list[StageOutput]],
+        inputs: StageInputs,
     ) -> Iterator[StageOutput]:
         """Narrow the Stage's input to its capability's carrier and return the Provider's stream."""
         ...  # pragma: no cover - Protocol
@@ -404,8 +405,7 @@ class StageExecution:
                     ctx.storage,
                     ctx.pipeline,
                     ctx.run_id,
-                    ctx.incoming,
-                    ctx.outputs,
+                    ctx.inputs,
                 )
             finally:
                 # THE ordering that makes lazy Stage output sound. Every counter below is written

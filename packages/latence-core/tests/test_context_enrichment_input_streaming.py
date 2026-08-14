@@ -4,7 +4,7 @@
 arrival and projects ``GraphNode``/``GraphEdge`` to compact views, so no input record is retained
 (``test_context_enrichment_memory_shape``). That made the Stage's own retention small — and left
 the RUNNER as the binding constraint. ``CapabilityKind.CONTEXT_ENRICHMENT`` was not in
-``_STREAMED_INPUT_KINDS``, so the executor called ``_gather_inputs`` and handed the dispatch ONE
+a streamed-input Capability, so the executor gathered its parents and handed the dispatch ONE
 materialised list of every parent record, which the branch then partitioned by carrier:
 
     enrich_chunks = [r for r in gathered if isinstance(r, ChunkRecord)]
@@ -14,7 +14,7 @@ At UDA scale (220 129 chunks / 516 512 canonical entities / ~90 k edges, a fixtu
 ~5.1 kB per ``GraphNode``) that is GiBs of pydantic records resident for the Stage's whole
 execution, inside a container with a hard 29 GB cgroup cap that OOM-killed this pipeline twice.
 Since the Provider consumes each of its three inputs exactly once, the Runner can hand it one
-INDEPENDENT lazy stream per carrier instead (``_PER_CARRIER_INPUT_KINDS``).
+INDEPENDENT lazy stream per carrier instead (the Capability's declared ``PER_CARRIER`` shape).
 
 These tests pin that bound at the Runner level; each fails if the eager gather comes back:
 
@@ -35,7 +35,6 @@ These tests pin that bound at the Runner level; each fails if the eager gather c
 from __future__ import annotations
 
 import gc
-from collections.abc import Sized
 from importlib import metadata
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -45,7 +44,8 @@ from latence_core.contracts import GraphRecord
 from latence_core.errors import ContractError
 from latence_core.pipeline import Pipeline
 from latence_core.quality import QualityReport
-from latence_core.runner import LocalRunner, StageOutput
+from latence_core.runner import LocalRunner, RunRecords, StageOutput
+from latence_core.stage_inputs import StageInputs
 from latence_core.stages.context_enrichment import ContextHeaderEnricher
 from latence_core.storage import Storage
 
@@ -166,9 +166,12 @@ def _registry_with(name: str, cls: type) -> ProviderRegistry:
 class _InputSpyRunner(LocalRunner):
     """Records, per Stage, how many input records the Runner MATERIALISED before dispatch.
 
-    ``None`` means a lazy stream reached the Stage; an ``int`` is the length of the list the
-    Runner built — the transient these tests bound. A per-carrier Stage receives neither: an
-    empty list, because it opens its own streams inside the dispatch.
+    ``None`` means NOTHING was materialised — a lazy stream (or, for a per-carrier Stage, streams
+    the dispatch opens itself) is all the Stage ever gets; an ``int`` is the length of the list the
+    Runner built, the transient these tests bound. Read off
+    :attr:`~latence_core.stage_inputs.StageInputs.materialised`, so the spy asks the input whether
+    it was materialised rather than inferring it from a parameter's runtime type — and it never
+    touches the Stage's records, which for a streamed Capability are one-shot.
     """
 
     def __init__(self) -> None:
@@ -182,20 +185,26 @@ class _InputSpyRunner(LocalRunner):
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-        # Never consume ``incoming`` here — for the streamed Capabilities it is the Stage's
-        # one-shot input stream, and a second pass would read an empty corpus.
-        incoming: Iterable[StageOutput],
-        outputs: dict[str, list[StageOutput]],
+        inputs: StageInputs,
     ) -> Iterator[StageOutput]:
-        self.materialised_input[stage.name] = (
-            len(incoming) if isinstance(incoming, Sized) else None
-        )
-        return super()._dispatch_stage(
-            stage, provider, storage, pipeline, run_id, incoming, outputs
-        )
+        self.materialised_input[stage.name] = inputs.materialised
+        return super()._dispatch_stage(stage, provider, storage, pipeline, run_id, inputs)
 
 
 _T = TypeVar("_T", bound=StageOutput)
+
+
+class _MaterialisingInputs(StageInputs):
+    """A ``StageInputs`` whose per-carrier streams are fully read before the Provider sees them.
+
+    The pre-fix memory shape restored at exactly the one seam that changed: ``stream_of`` — the
+    per-carrier read Context Enrichment takes — hands over a fully-materialised carrier LIST
+    (wrapped in an iterator so the signature is unchanged), which is what
+    ``[r for r in gathered if isinstance(...)]`` produced. Everything else delegates.
+    """
+
+    def stream_of(self, expected: type[_T]) -> Iterator[_T]:
+        return iter(list(super().stream_of(expected)))
 
 
 class _MaterialisingRunner(LocalRunner):
@@ -207,24 +216,20 @@ class _MaterialisingRunner(LocalRunner):
     is a difference streaming caused, not a difference in the corpus.
     """
 
-    def _stream_parent_inputs_of_type(
+    def stage_inputs(
         self,
         stage: Stage,
         outputs: dict[str, list[StageOutput]],
-        expected: type[_T],
         *,
         storage: Storage,
         pipeline: Pipeline,
         run_id: str,
-    ) -> Iterator[_T]:
-        # Materialise FIRST (the pre-fix memory shape), then hand over an iterator so the
-        # override signature matches the supertype contract exactly.
-        return iter(
-            list(
-                super()._stream_parent_inputs_of_type(
-                    stage, outputs, expected, storage=storage, pipeline=pipeline, run_id=run_id
-                )
-            )
+    ) -> StageInputs:
+        return _MaterialisingInputs(
+            stage,
+            pipeline,
+            RunRecords(self, outputs, storage, pipeline, run_id),
+            overlay=self._reuse_overlay,
         )
 
 
@@ -301,7 +306,7 @@ def test_context_enrichment_input_is_never_materialised(tmp_path: Path) -> None:
 
     Pre-fix this recorded ``len(chunks) + len(graph records)`` and grew linearly with the corpus:
     the gathered list WAS the Stage's input. The bound requires that no such list exists, so the
-    Stage receives an empty ``incoming`` and reads each carrier as its own stream.
+    Stage materialises NOTHING and reads each carrier as its own stream.
     """
     counts: dict[str, int | None] = {}
     for tag, docs in (("small", 3), ("big", 12)):
@@ -319,7 +324,7 @@ def test_context_enrichment_input_is_never_materialised(tmp_path: Path) -> None:
     small_input, big_input = counts["small-input"], counts["big-input"]
     assert small_input is not None and big_input is not None
     assert big_input > small_input > 0, "the corpus did not grow; the assertion below is vacuous"
-    assert counts["small"] == 0 and counts["big"] == 0, (
+    assert counts["small"] is None and counts["big"] is None, (
         f"the context_enrichment Stage received a MATERIALISED input: {counts['small']} records "
         f"at 3 documents, {counts['big']} at 12 (the run's own input grew {small_input} -> "
         f"{big_input}). The Runner is holding the corpus-level gather ADR-0033 bounds — the very "
