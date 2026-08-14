@@ -9,6 +9,7 @@
                              [--accept-non-commercial]
     latence-campaign approve <stage> [-c campaign.yaml]
     latence-campaign resume  [-c campaign.yaml] [--repo-root DIR] [--accept-non-commercial]
+    latence-campaign retrieval-config [-c campaign.yaml]
 
 Stdlib ``argparse`` deliberately, matching ``latence-label``: the campaign must be drivable
 straight from a clone with the framework installed and nothing else.
@@ -26,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from latence_benchmark.campaign.retrieval_lib import render_rescue_config
 from latence_benchmark.campaign.stages import (
     CampaignContext,
     GateRefusedError,
@@ -220,6 +222,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(resume, repo_root=True)
     resume.add_argument("--accept-non-commercial", action="store_true", help=argparse.SUPPRESS)
+
+    retrieval_config = sub.add_parser(
+        "retrieval-config",
+        help="Render the `retrieval:` block as the GraphRescueRetrieval config it configures.",
+    )
+    _common(retrieval_config, repo_root=False)
 
     return parser
 
@@ -433,13 +441,18 @@ def _cmd_init(args: argparse.Namespace) -> int:
 # -- shared loading ---------------------------------------------------------------------------
 
 
-def _load(
-    config: Path,
-) -> tuple[CampaignAnswers, Path, Sequence[StageSpec], CampaignState]:
+def _read_answers(config: Path) -> CampaignAnswers:
+    """The config file → validated answers; a missing file names the command that creates it."""
     if not config.is_file():
         msg = f"Campaign config not found: {config} (run `latence-campaign init` first)."
         raise CampaignConfigError(msg)
-    answers = parse_campaign_config(config.read_text(encoding="utf-8"))
+    return parse_campaign_config(config.read_text(encoding="utf-8"))
+
+
+def _load(
+    config: Path,
+) -> tuple[CampaignAnswers, Path, Sequence[StageSpec], CampaignState]:
+    answers = _read_answers(config)
     campaign_root = Path(answers.campaign_root)
     specs = registry()
     state = CampaignState(campaign_root / STATE_FILENAME, [s.name for s in specs])
@@ -541,6 +554,22 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- retrieval-config ---------------------------------------------------------------------------
+
+
+def _cmd_retrieval_config(args: argparse.Namespace) -> int:
+    """Print the config the campaign's ``retrieval:`` block hands ``GraphRescueRetrieval``.
+
+    The block's one consumer on the CLI surface: it resolves the file (so a typo'd knob is the
+    same loud parse error every subcommand gives) and renders the mapping the production
+    component is constructed from, so "campaign.yaml is a valid production config source" is
+    something an operator can see rather than a claim in a guide.
+    """
+    answers = _read_answers(args.config)
+    print(render_rescue_config(answers.retrieval), end="")
+    return 0
+
+
 # -- entry ------------------------------------------------------------------------------------
 
 
@@ -552,6 +581,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run": _cmd_run,
         "approve": _cmd_approve,
         "resume": _cmd_resume,
+        "retrieval-config": _cmd_retrieval_config,
     }
     handler = commands[args.command]
     try:

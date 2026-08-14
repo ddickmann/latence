@@ -284,7 +284,32 @@ retrieval:
     pack_centrality_weight: 0.25
 ```
 
-The block maps one-to-one onto `GraphRescueRetrieval`'s config (same names, same semantics), so
-a campaign.yaml is a valid production config source — not a bench-only dialect. A pre-existing
-campaign.yaml without the block keeps loading and parses to the defaults; a typo'd knob is a loud
-parse error, never a silent fallback.
+A pre-existing campaign.yaml without the block keeps loading and parses to the defaults; a typo'd
+knob is a loud parse error, never a silent fallback.
+
+The block maps onto `GraphRescueRetrieval`'s config — same names, same semantics — so a
+campaign.yaml is a valid production config source, not a bench-only dialect. That mapping is a
+FUNCTION, not a prose claim: `latence_benchmark.campaign.retrieval_lib.rescue_config(answers)`
+is its one home, and you can print what your own config resolves to:
+
+```console
+$ latence-campaign retrieval-config -c campaign.yaml
+```
+
+Two tests enforce it (`packages/latence-benchmark/tests/test_campaign_retrieval_wizard.py`):
+`TestRescueConfig::test_every_emitted_key_is_a_real_graph_rescue_config_key` pins every emitted
+key to the component's own `_CONFIG_KEYS`, so renaming a knob on either side fails a test instead
+of surfacing as `unknown config key(s)` on a run; and
+`TestRescueConfig::test_the_defaults_construct_the_production_component` constructs a real
+`GraphRescueRetrieval` from the defaults, so the VALUES are pinned too, not just the names.
+
+Two deliberate non-identities, both documented on the function:
+
+* the block carries **both** per-selector budgets (`packed_budget`, `coe_budget`) so switching
+  selectors keeps each one's measured operating point; the component takes the single `budget` of
+  the selector in force, and selector `none` gets none at all;
+* the deployment-side knobs (`pool_k`, `select_pool_k`, `rank_score_k`, the gate thresholds,
+  `hyperedge_kv_path`) are **not** campaign answers — their component defaults are the measured
+  operating point, and the deployment merges its own on top. Selector `coe` is the case that
+  matters: it selects over the hypergraph lane, so the deployment must add `hyperedge_kv_path`
+  plus the injected `hyperedge_documents` resolver or construction is refused.

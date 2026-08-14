@@ -1,6 +1,11 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""The retrieval wizard block: measured defaults, contradictions, determinism, backward compat."""
+"""The retrieval wizard block: measured defaults, contradictions, determinism, backward compat.
+
+Plus the block's CONSUMER — :func:`latence_benchmark.campaign.retrieval_lib.rescue_config`, the
+one wizard→component mapping — pinned against the real ``GraphRescueRetrieval`` (imported here,
+never in the shipped campaign package, which stays import-independent of latence-retrieval).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from latence_benchmark.campaign import cli
+from latence_benchmark.campaign.retrieval_lib import render_rescue_config, rescue_config
 from latence_benchmark.campaign.wizard import (
     RETRIEVAL_GRAPH_MODES,
     RETRIEVAL_SELECTORS,
@@ -143,6 +149,124 @@ class TestGeneratorAndParser:
         )
         with pytest.raises(CampaignConfigError, match="off, auto, force"):
             parse_campaign_config(text)
+
+
+class TestRescueConfig:
+    """The one wizard→component mapping, pinned to the component it claims to configure."""
+
+    def test_every_emitted_key_is_a_real_graph_rescue_config_key(self) -> None:
+        # The pin: the guide's "maps one-to-one onto GraphRescueRetrieval's config" is CHECKED
+        # here, not asserted in prose. A rename on either side (a wizard field, or a key in
+        # rescue._CONFIG_KEYS) fails this test instead of surfacing at query time as
+        # "unknown config key(s)" on a pod run.
+        from latence_retrieval import rescue
+
+        keys: set[str] = set()
+        for selector in RETRIEVAL_SELECTORS:
+            for mode in RETRIEVAL_GRAPH_MODES:
+                keys |= set(rescue_config(RetrievalAnswers(selector=selector, graph_mode=mode)))
+        assert keys <= set(rescue._CONFIG_KEYS)  # noqa: SLF001
+
+    def test_the_defaults_construct_the_production_component(self) -> None:
+        # Keys being legal is not enough — the VALUES must survive the component's own
+        # validation (positive ints, unit floats, known choices), so the mapping is exercised
+        # through a real construction, not a membership test.
+        from latence_retrieval.contracts import Capability
+        from latence_retrieval.rescue import GraphRescueRetrieval
+        from latence_retrieval.testing import FakeBackend
+
+        pipeline = GraphRescueRetrieval(
+            rescue_config(RetrievalAnswers()),
+            bm25=FakeBackend([], {Capability.BM25}),
+        )
+        assert pipeline is not None
+
+    def test_the_budget_follows_the_selector_in_force(self) -> None:
+        # The block carries BOTH per-selector budgets (each at its measured operating point);
+        # the component takes ONE. 'none' selects nothing, so it gets no budget at all.
+        assert rescue_config(RetrievalAnswers())["budget"] == 10_000
+        assert rescue_config(RetrievalAnswers(selector="coe"))["budget"] == 16_000
+        assert "budget" not in rescue_config(RetrievalAnswers(selector="none"))
+
+    def test_the_answers_reach_the_config_verbatim(self) -> None:
+        answers = RetrievalAnswers(
+            graph_mode="force",
+            packed_budget=4_000,
+            seed_top_k=9,
+            hop_weight=0.2,
+            community_weight=0.02,
+            centrality_weight=0.03,
+            seed_docs_k=7,
+            seed_node_cap=64,
+            rescue_cap=25,
+            pack_centrality_weight=0.5,
+        )
+        assert rescue_config(answers) == {
+            "graph_mode": "force",
+            "selector": "packed",
+            "budget": 4_000,
+            "seed_top_k": 9,
+            "hop_weight": 0.2,
+            "community_weight": 0.02,
+            "centrality_weight": 0.03,
+            "seed_docs_k": 7,
+            "seed_node_cap": 64,
+            "rescue_cap": 25,
+            "pack_centrality_weight": 0.5,
+        }
+
+    def test_the_render_is_deterministic_and_headed_by_its_own_values(self) -> None:
+        text = render_rescue_config(RetrievalAnswers())
+        assert text == render_rescue_config(RetrievalAnswers())
+        header = "\n".join(line for line in text.splitlines() if line.startswith("#"))
+        assert "selector packed @ 10000 tok | graph auto" in header
+        body = "\n".join(line for line in text.splitlines() if not line.startswith("#"))
+        assert "budget: 10000" in body
+        assert "pack_centrality_weight: 0.25" in body
+
+    def test_the_selector_none_render_says_so(self) -> None:
+        text = render_rescue_config(RetrievalAnswers(selector="none"))
+        assert "ranked union, no budget" in text
+        assert "budget:" not in text
+
+
+class TestRetrievalConfigCommand:
+    """The CLI consumer: `latence-campaign retrieval-config` renders the block's real config."""
+
+    def test_it_renders_the_config_of_the_configs_retrieval_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config = tmp_path / "campaign.yaml"
+        config.write_text(
+            build_campaign_config(
+                CampaignAnswers(
+                    campaign_root=str(tmp_path),
+                    datasets=("musique",),
+                    retrieval=RetrievalAnswers(graph_mode="force", rescue_cap=11),
+                )
+            ),
+            encoding="utf-8",
+        )
+        rc = cli.main(["retrieval-config", "-c", str(config)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "graph_mode: force" in out
+        assert "rescue_cap: 11" in out
+        assert out == render_rescue_config(RetrievalAnswers(graph_mode="force", rescue_cap=11))
+
+    def test_a_missing_config_is_an_invalid_artifact_exit_1(self, tmp_path: Path) -> None:
+        rc = cli.main(["retrieval-config", "-c", str(tmp_path / "nope.yaml")])
+        assert rc == 1
+
+    def test_a_typoed_knob_is_the_same_loud_parse_error_here(self, tmp_path: Path) -> None:
+        config = tmp_path / "campaign.yaml"
+        config.write_text(
+            "campaign:\n  root: /c\n  pod_ssh: ''\n"
+            "corpus:\n  datasets: [musique]\n"
+            "retrieval:\n  select:\n    packed_budgett: 4000\n",
+            encoding="utf-8",
+        )
+        assert cli.main(["retrieval-config", "-c", str(config)]) == 1
 
 
 class TestCliFlags:
