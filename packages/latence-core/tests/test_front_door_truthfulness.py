@@ -52,7 +52,14 @@ _ADR_DIR = _REPO_ROOT / "docs" / "adr"
 
 # The pages an outsider reads before they read any code. Broken claims here are the
 # expensive ones, so this is the set the tests police.
-_FRONT_DOOR = ("README.md", "CONTEXT.md", "CONTRIBUTING.md", "SECURITY.md")
+#
+# ``AGENTS.md`` is in the set for a stronger reason than the others: it is read by machines
+# that ACT on it. A dangling path in README costs a human one click; the same path in AGENTS.md
+# is an instruction an unattended agent follows, and it is dense with concrete file paths and
+# commands precisely because that is what makes it useful. So it is held to the same gate — and
+# the gate resolving through the git index rather than the working tree is exactly the failure
+# mode the page itself warns agents about.
+_FRONT_DOOR = ("README.md", "CONTEXT.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md")
 
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 # A backticked reference to a concrete file in one of the two trees a published page sends
