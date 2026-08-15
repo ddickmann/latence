@@ -39,8 +39,12 @@ for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence
 done
 ok "workspace synced + heavy sources installed --no-deps"
 
+# The lint scope is CI's, verbatim. This script's whole promise is "what CI will say, before
+# you push", and a narrower scope here breaks that promise silently: the campaign scripts and
+# scripts/ were unlinted locally while CI checked them. test_verify_local_mirrors_ci_lint_scope
+# pins the two together so they cannot drift apart again.
 step "ruff (lint)"
-uv run ruff check packages
+uv run ruff check packages benchmark/s5 benchmark/serving benchmark/sota-campaign scripts
 ok "ruff"
 
 step "mypy --strict (src + tests, per-package)"

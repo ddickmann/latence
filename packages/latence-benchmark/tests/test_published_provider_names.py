@@ -17,12 +17,15 @@ import re
 import tomllib
 from pathlib import Path
 
-import latence_benchmark
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PACKAGES = _REPO_ROOT / "packages"
-_BENCHMARK_SRC = Path(latence_benchmark.__file__).resolve().parent
+# Derived from THIS checkout, not from ``latence_benchmark.__file__``. The installed module
+# resolves to wherever the venv points — in a git worktree that is the *main* repo, so the
+# scan silently audited a different tree than the one under test and ``relative_to`` blew up
+# on it. A repo-hygiene gate has to read the repo it is running in.
+_BENCHMARK_SRC = _PACKAGES / "latence-benchmark" / "src" / "latence_benchmark"
 
 #: ``--provider foo.bar`` as written in prose/notes, optionally wrapped in backticks.
 _PROVIDER_FLAG = re.compile(r"--provider\s+`?([a-z0-9_]+\.[a-z0-9_]+)`?")

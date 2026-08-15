@@ -1008,6 +1008,33 @@ def test_pre_commit_hooks_run_the_same_commands_as_ci() -> None:
     assert "secret_scan_gate.py" in joined, "pre-commit does not mirror the CI secret-scan gate"
 
 
+def test_verify_local_mirrors_ci_lint_scope() -> None:
+    """``scripts/verify-local.sh`` lints exactly what CI lints — same paths, same order.
+
+    The script's entire promise is "what CI will say, before you push". A narrower scope is
+    worse than no script, because it reports green on a tree CI will reject — which is what
+    happened: `verify-local.sh` checked only ``packages`` while CI checked the benchmark
+    harnesses, the campaign scripts and ``scripts/`` too, and two real violations sat in that
+    gap. Pinning the two argument lists to each other is what stops it recurring; a comment
+    asking the next person to remember would not.
+    """
+    ci = " ".join((_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text().split())
+    script = " ".join((_REPO_ROOT / "scripts" / "verify-local.sh").read_text().split())
+
+    match = re.search(r"uv run ruff check ([^\n&|;]+?) ok ", script)
+    assert match, "verify-local.sh no longer has a recognisable `uv run ruff check` step"
+    scope = match.group(1).strip()
+
+    assert f"uv run ruff check {scope}" in ci, (
+        f"verify-local.sh lints {scope!r}, which is not what ci.yml's Ruff step lints. The "
+        "local script must mirror CI exactly or it reports a green that CI will not honour."
+    )
+    # Not satisfiable by an empty or one-path scope: the harnesses and scripts/ are the
+    # paths that were missing, so name them.
+    for required in ("packages", "benchmark/s5", "scripts"):
+        assert required in scope, f"verify-local.sh's ruff scope no longer covers {required}"
+
+
 def test_secret_scan_gate_script_exists_and_is_wired() -> None:
     """The set-based gate script exists and CI actually invokes it."""
     gate = _REPO_ROOT / "scripts" / "secret_scan_gate.py"
