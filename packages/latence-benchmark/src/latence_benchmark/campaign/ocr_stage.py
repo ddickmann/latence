@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Stage ``s2-ocr`` — LightOnOCR-2-1B on the pod turns the PDF corpus into markdown.
 
 The stage runs CLIENT-side and treats the pod as a file server plus one long-lived job:

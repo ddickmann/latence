@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The S5 metrics: recall@k, nDCG@10, gold-chain coverage, latency — set-gold, not single-gold.
 
 Every metric here treats gold as a **set of chunk ids** rather than one relevant document,

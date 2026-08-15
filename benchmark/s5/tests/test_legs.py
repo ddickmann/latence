@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The harness-supplied engines — contract-checked, and equivalence-checked against the shipped ones.
 
 Most of the adapters here exist only because a shipped adapter's *packaging* does not fit this

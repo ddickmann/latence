@@ -4,7 +4,7 @@
 provenance-carrying RAG corpus and an evidence-linked knowledge graph — as plain Parquet files
 you own.**
 
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](./LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](./pyproject.toml)
 [![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](./scripts/verify-local.sh)
 [![mypy --strict](https://img.shields.io/badge/mypy-strict-brightgreen)](./scripts/typecheck.sh)
@@ -199,7 +199,7 @@ the whole spine on a laptop with checkpoint/resume, and a shipped Airflow adapte
 (`latence-runner-airflow`) runs the identical Stages as a DAG. **Storage** is one fsspec seam. Every
 record carries Provenance and Classification, validated at every Stage boundary.
 
-The reasoning behind each of those choices is written down: **60 architecture decisions** in
+The reasoning behind each of those choices is written down: **62 architecture decisions** in
 [`docs/adr/`](./docs/adr/), and the glossary that fixes the vocabulary in
 [`CONTEXT.md`](./CONTEXT.md).
 
@@ -390,11 +390,17 @@ Bus factor, fork posture, support lifetime and CRA readiness are written down ra
 
 ## Install
 
-> **⚠️ Nothing is on PyPI yet.** No release has been cut, so every `pip install latence-*` command
-> below fails today with `ERROR: No matching distribution found`. Those names are *reserved by the
-> workspace, not published* — see [Status & maturity](#status--maturity). **The install that works
-> right now is from a clone.** The distribution map is kept below the fold because the split is the
-> design (ADR-0016) and worth seeing before you clone, not because you can install it.
+> **⚠️ Nothing is on PyPI, and nothing will be.** No release has been cut yet, so every
+> `pip install latence-*` command below fails today with `ERROR: No matching distribution found` —
+> and when releases start, they will be **signed GitHub Releases**
+> ([ADR-0062](./docs/adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)
+> declined PyPI on the strength of the PolyForm licence; that rationale was superseded by
+> [ADR-0063](./docs/adr/0063-relicence-to-apache-2-0.md) and the decision is reopened — the
+> publish job stays disabled until it is retaken). Those names are *used by the workspace, not
+> published* — see
+> [Status & maturity](#status--maturity). **The install that works right now is from a clone.** The
+> distribution map is kept below the fold because the split is the design (ADR-0016) and worth
+> seeing before you clone, not because you can install it.
 
 **Today — from a clone.** This is the same path the [quickstart](#60-second-quickstart) uses, and it
 is exercised end-to-end on every CI run:
@@ -406,13 +412,15 @@ uv run latence --help                            # the CLI
 uv pip install -e packages/latence-embedder-st   # add any opt-in Provider package by path
 ```
 
-**After the first release** — a thin core plus one distribution per Provider family (ADR-0016), so
-you install only what you use and the "runs on a laptop" promise holds. There is no `latence`
-meta-package; installing will always be one or more of these. Python ≥ 3.11.
+**After the first release** — the wheels and sdists are attached to the signed GitHub Release, so
+you install a Release URL (`pip install <url-of-the-wheel>`), not a name from an index. The split
+is a thin core plus one distribution per Provider family (ADR-0016), so you install only what you
+use and the "runs on a laptop" promise holds. There is no `latence` meta-package; installing will
+always be one or more of these. Python ≥ 3.11.
 
 ```bash
-# NOT YET AVAILABLE — no release exists and none of these are published. Reproduced here as the
-# map of the eventual distribution split, not as commands to run today.
+# NOT INSTALLABLE BY NAME — no release exists yet, and these are never published to an index
+# (ADR-0062). Reproduced here as the map of the distribution split, not as commands to run.
 pip install latence-core          # contracts, Capabilities, local Runner, Storage, CLI
 pip install latence-demo          # + the CPU demo set and its self-contained viewer
 pip install latence-console       # + the read-only, offline localhost run console
@@ -426,8 +434,10 @@ pip install latence-sink-qdrant        # one-shot idempotent loader: Export → 
 ```
 
 `packages/` holds every distribution and each carries its own README; the list above is a tour, not
-the index. Whether these ever go to PyPI at all under a noncommercial licence is an open decision,
-not an oversight.
+the index. Whether these ever go to PyPI was answered "no" under the noncommercial licence
+([ADR-0062](./docs/adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md));
+that licence is gone ([ADR-0063](./docs/adr/0063-relicence-to-apache-2-0.md)) and the question is
+open again. Nothing is published either way until it is decided.
 
 ---
 
@@ -452,22 +462,28 @@ not an oversight.
 
 ## Licence
 
-**PolyForm Noncommercial License 1.0.0** (SPDX: `PolyForm-Noncommercial-1.0.0`).
+**Apache License 2.0** (SPDX: `Apache-2.0`).
 
-- **Noncommercial use is free** — personal study, research, teaching, and use by noncommercial
-  organisations, including the right to distribute and to make changes within that purpose.
-- **Commercial use requires a separate written agreement** with the copyright holder. Terms are by
-  agreement; there is no price list. `COMMERCIAL.md` sets out what counts as commercial use, what a
-  commercial licence does and does not cover, and how to ask.
-- [`LICENSE`](./LICENSE) governs, and carries the provenance record for the relicence: this
-  repository was Apache-2.0 internally until 2026-07-29 and **was never published** — private since
-  creation, zero forks, nothing on PyPI, no release cut, every commit by the sole copyright holder —
-  so no one holds a prior grant.
-- A commercial licence covers this project's own code only. Third-party dependencies, model weights
-  and datasets keep their own terms, and several restrict commercial use independently
-  ([`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md)).
-- Not legal advice, and not reviewed by counsel — a caveat written into the licence documents
-  themselves rather than left for you to infer.
+- **Any use is free, commercial included** — in a for-profit company, in a product you sell, as a
+  hosted service, in consulting work. No agreement, no permission, nothing to buy. `COMMERCIAL.md`
+  says so in one page for readers arriving from an older link.
+- **You get an express patent licence** (Apache-2.0 §3) from every contributor, which terminates if
+  you sue alleging the software infringes. The conditions on redistribution are §4's: ship the
+  licence, reproduce [`NOTICE`](./NOTICE), and mark files you changed.
+- [`LICENSE`](./LICENSE) governs and is the canonical Apache-2.0 text, byte for byte. The
+  provenance record lives in [`NOTICE`](./NOTICE): the repository was Apache-2.0 from its first
+  commit, carried PolyForm Noncommercial 1.0.0 from 2026-07-29 to 2026-08-15
+  ([ADR-0055](./docs/adr/0055-relicence-to-polyform-noncommercial.md), superseded by
+  [ADR-0063](./docs/adr/0063-relicence-to-apache-2-0.md)), and **was never published under either**
+  — private since creation, zero forks, nothing on PyPI, no release cut, no tag, no CLA signed,
+  every commit by the sole copyright holder — so no one holds a grant under a superseded state.
+- The licence covers this project's own code only. Third-party dependencies, model weights and
+  datasets keep their own terms, and several restrict commercial use independently
+  ([`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md)). An outbound licence is never a shield
+  against inbound terms.
+- Not legal advice, and the project's statements around the licence have not been reviewed by
+  counsel — a caveat written into the licence documents themselves rather than left for you to
+  infer.
 
 Copyright 2026 Dennis Dickmann (latence.ai). See [`NOTICE`](./NOTICE).
 
@@ -487,5 +503,5 @@ Copyright 2026 Dennis Dickmann (latence.ai). See [`NOTICE`](./NOTICE).
 | **See what is still unproven** | [`RELEASE-GATES.md`](./RELEASE-GATES.md) · [`docs/BENCHMARKS-E2E.md`](./docs/BENCHMARKS-E2E.md) — every value there is still a placeholder, and the build knows it |
 | **Roadmap** | There isn't a dated one, and one will not be invented for the look of it. The plan *is* the unmet set: [`RELEASE-GATES.md`](./RELEASE-GATES.md) worked gate by gate, then the *Not yet proven* items in [Status & maturity](#status--maturity) — the E2E protocol run, SPLADE as a measured signal, the eight necessity gates, the 100k/1M envelopes. Order is gate order. No target dates: this is maintained by one person ([`docs/CONTINUITY.md`](./docs/CONTINUITY.md)), and a date would be a claim about capacity nobody has measured |
 | **Read the decisions** | [`docs/adr/`](./docs/adr/) · [`CONTEXT.md`](./CONTEXT.md) — the glossary |
-| **Contribute** | [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — note the contributor position in `COMMERCIAL.md` |
+| **Contribute** | [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`CLA.md`](./CLA.md) — every merged contribution needs it signed · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — the CLA predates the relicence and may be replaced by a DCO; see `COMMERCIAL.md` § *Contributions* |
 | **Evaluate for adoption** | [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) · [`SECURITY.md`](./SECURITY.md) · [`CHANGELOG.md`](./CHANGELOG.md) |

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Graph-as-rescue retrieval: :class:`GraphRescueRetrieval` — the production composition (S5b).
 
 The S5 benchmark ladder measured every graph leg *lowering* recall when graph results were fused

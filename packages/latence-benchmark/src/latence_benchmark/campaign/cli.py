@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """``latence-campaign`` — the e2e-sota-run campaign CLI.
 
     latence-campaign init    [--campaign-root DIR] [--datasets a,b,c] [--pod-ssh TARGET]

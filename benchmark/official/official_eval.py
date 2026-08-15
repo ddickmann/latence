@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M6 OFFICIAL eval (ticket 08's full design): per-tier curves, four A/Bs, recall@5.
 
 Config axes (every one pre-registered here, tuned on DEV only, scored ONCE on test):

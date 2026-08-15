@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Per-dataset query loading + gold **naming translation** — where each benchmark's idiom ends.
 
 :mod:`benchmark.s5.goldmap` resolves references to chunk ids; this module is the layer above it

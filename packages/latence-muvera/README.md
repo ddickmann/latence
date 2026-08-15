@@ -65,7 +65,7 @@ vs **FDE + kept multi-vectors** (the sidecar for a later exact-MaxSim rerank).
 
 MUVERA FDE is **data-oblivious and training-free**: it ships no model and no weights, so there is no
 separate weights license to defer (unlike `sparse.splade` or a real ColBERT multi-vector encoder). The
-`ProviderProfile` declares `model_id=None` and a **verified** PolyForm-Noncommercial-1.0.0 (the package's own code, this
+`ProviderProfile` declares `model_id=None` and a **verified** Apache-2.0 (the package's own code, this
 repo's `LICENSE`) — an honest, non-fabricated attestation, because there genuinely is nothing else to
 verify. The deferred, higher-quality **LightOn-regularizer** converter (which *does* train) is out of
 scope (ADR-0050); so is any bake-off that *blesses* a production FDE default.

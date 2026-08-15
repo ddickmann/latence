@@ -10,17 +10,24 @@ Pick the right channel and you will get a faster, better answer.
 
 | You want to… | Go here |
 | --- | --- |
-| Ask how to do something, or sanity-check a design | **`docs/` first** (see below), then the **Feature request** template if the answer should have been there and wasn't. There is **no discussion forum** — see the note under this table |
+| Ask how to do something, or sanity-check a design | **`docs/` first** (see below), then **[GitHub Discussions](https://github.com/ddickmann/latence-framework/discussions)** — that is the front door for questions |
 | Report something that behaves incorrectly | **Bug report** issue template |
 | Propose a feature, a Stage behaviour, or a contract change | **Feature request** issue template |
 | Propose a new Provider (a model, endpoint, or cloud service) | **Provider request** issue template — it carries the licence-verification fields that gate a Provider |
 | Report a suspected security vulnerability | **Privately.** [`SECURITY.md`](SECURITY.md) — never a public issue |
 | Contribute code | [`CONTRIBUTING.md`](CONTRIBUTING.md) — read the CLA requirement and the gates first |
 
-**GitHub Discussions is not enabled on this repository.** This page used to link a
-`/discussions` URL; it did not resolve, and a dead link that looks like a supported channel is
-worse than an absent one. Whether to open Discussions is still an open decision; if it is turned
-on, the row above and `.github/ISSUE_TEMPLATE/config.yml` change together, and this note goes.
+**Discussions is the front door; the issue tracker is for structured reports.** Blank issues are
+disabled deliberately, so a question, a "should it work this way", or a half-formed idea belongs in
+Discussions, and the three issue templates stay reserved for a reproducible bug, a concrete feature
+proposal, or a Provider request. A discussion that turns out to be one of those gets moved into the
+right template — you do not have to guess which it is up front. Best-effort still applies: Discussions is
+not an SLA, and quiet threads are a one-maintainer project being quiet, not a policy.
+
+Note that Discussions is a repository *setting*. This page and
+`.github/ISSUE_TEMPLATE/config.yml` describe the enabled state and must stay in step with it — if
+the link above 404s, the tab has not been switched on yet, and the fix is to enable it rather than
+to remove the link.
 
 Please search existing issues and the Decision Log in `docs/adr/` before filing. A
 surprising amount of "why does it work this way" already has a written answer with the

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The weighted-fusion variant: weight threading, the split, and that the fit never sees test.
 
 The load-bearing test in here is :func:`test_the_tuner_never_sees_a_test_query`. Every other

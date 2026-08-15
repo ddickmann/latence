@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The KG-column read contract (:mod:`latence_retrieval.kg_columns`), tested at its boundary.
 
 This module is the ONE implementation of the graceful-absent / loud-malformed column reader and

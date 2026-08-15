@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """S5 — the retrieval feature-matrix harness (dataset × cumulative leg ladder).
 
 See ``issues/wayfinder-e2e-sota-run/tickets/s5-retrieval-benchmarks.md`` for the locked spec and

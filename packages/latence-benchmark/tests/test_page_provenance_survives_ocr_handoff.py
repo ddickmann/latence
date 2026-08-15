@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The regression that would have caught the page-1 corpus (ADR-0060).
 
 An OCR'd multi-page document is produced exactly the way S2 produces one — per-page markdown

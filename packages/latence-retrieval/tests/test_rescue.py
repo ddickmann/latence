@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Graph-as-rescue retrieval (:class:`GraphRescueRetrieval`), tested at the boundary.
 
 Every assertion is on the *observable output* of the composition — the base order surviving the

@@ -65,10 +65,10 @@ class PlaintextParser:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         A byte-decoding plain-text Parser ships no model weights (``model_id=None``) and is
-        framework code (PolyForm-Noncommercial-1.0.0, verified — weights-and-code trivially the same
+        framework code (Apache-2.0, verified — weights-and-code trivially the same
         code). The decode is deterministic, CPU-only, does not batch (a per-document transform), and
         has no per-call cost.
         """

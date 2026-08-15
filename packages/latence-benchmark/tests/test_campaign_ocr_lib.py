@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The shared S2 OCR logic: table normalization, repetition flag, manifest, fin cap.
 
 These functions run in two places — the campaign stage locally and ``ocr_worker.py`` on

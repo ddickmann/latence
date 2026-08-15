@@ -290,10 +290,10 @@ class CanonicalGraphAssembler:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The canonical Graph Assembler builds content-addressed nodes/edges + Evidence.
-        A pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified per ADR-0012
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012
         — the package's own code, weights-and-code trivially the same), it ships no model weights
         (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call cost,
         so a bake-off/conformance run reads honest, non-fabricated columns off it.
@@ -534,10 +534,10 @@ class WeightedGraphAssembler:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The weighted Graph Assembler folds parallel same-typed relations into weighted edges.
-        A pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified per ADR-0012
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012
         — the package's own code, weights-and-code trivially the same), it ships no model weights
         (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call cost,
         so a bake-off/conformance run reads honest, non-fabricated columns off it.

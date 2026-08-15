@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 60 records numbered 0001–0061.
+    the sequence simply skipped it), so the log holds 62 records numbered 0001–0063.
 
 ## Foundations & scope
 
@@ -17,7 +17,9 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0002](0002-clean-monorepo-mined-from-private-repos.md) | Clean-history monorepo; private repos are quarries, not ancestors |
 | [0005](0005-v1-scope-the-ai-ready-data-spine.md) | v1 scope: the AI-ready-data spine, nothing else |
 | [0015](0015-python-core-declarative-yaml-rust-for-hot-paths.md) | Python core, declarative-YAML Pipeline contract, Rust only for proven hot paths |
-| [0055](0055-relicence-to-polyform-noncommercial.md) | Relicence to PolyForm Noncommercial — free for research, commercial by agreement (supersedes 0001's Apache-2.0; amends 0012, 0023) |
+| [0055](0055-relicence-to-polyform-noncommercial.md) | ~~Relicence to PolyForm Noncommercial — free for research, commercial by agreement~~ — **SUPERSEDED by [0063](0063-relicence-to-apache-2-0.md)**; kept as the dated record of a decision that was made and reversed |
+| [0062](0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md) | Distribution is signed GitHub Releases only — no PyPI — **rationale SUPERSEDED by [0063](0063-relicence-to-apache-2-0.md), decision REOPENED**; the `pypi-publish` job stays disabled pending a new decision |
+| [0063](0063-relicence-to-apache-2-0.md) | Relicence to Apache-2.0 — the licence the intended adopter is allowed to install (supersedes 0055, restores 0001's grant; reopens 0062) |
 
 ## The core seams
 

@@ -89,7 +89,7 @@ class DocumentParser:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, permissive.
 
         Ships no model weights (``model_id=None``): decoding is deterministic pure-Python
-        (this Provider is PolyForm-Noncommercial-1.0.0 framework code; its one dep ``pypdf`` is
+        (this Provider is Apache-2.0 framework code; its one dep ``pypdf`` is
         pure-Python, BSD-3-Clause — both weights-and-code permissive, verified per ADR-0012). CPU-
         only, does not batch (a per-document transform), and has no per-call cost.
         """

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The second fusion variant: per-signal RRF weights **fitted on dev, reported on test**.
 
 **Why this exists.** Every S5 ladder leg fuses its signals with ``RrfFuser`` at equal weights, and

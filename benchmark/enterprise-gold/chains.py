@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E501 - a data table: one fact / one question per line, kept readable as a row.
 """The planted fact graph and the question chains derived from it (ticket 21, part D).
 

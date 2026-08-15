@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Gold-set mode: corpus loading, question capture, span integrity, coverage (ticket 21).
 
 The manual enterprise gold set (ticket 08) is ~100 multi-hop questions with hand-marked

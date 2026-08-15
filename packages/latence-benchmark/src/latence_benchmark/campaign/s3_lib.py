@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Pure S3 building blocks: corpus preps, the budget model, the pipeline.yaml generator.
 
 Everything in this module is a pure function of its inputs — no filesystem, no clock, no

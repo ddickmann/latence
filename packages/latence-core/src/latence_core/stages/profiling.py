@@ -94,8 +94,8 @@ class StatisticalProfiler:
     """
 
     # The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-    # PolyForm-Noncommercial-1.0.0. The statistical Profiler folds per-document + cross-document
-    # features streaming — a pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0,
+    # Apache-2.0. The statistical Profiler folds per-document + cross-document
+    # features streaming — a pure-Python part of ``latence-core`` (Apache-2.0,
     # verified per ADR-0012), no model weights (``model_id=None``), deterministic, CPU-only,
     # non-batching, no per-call cost. Declared as a ``PROFILE`` ClassVar (not a ``profile``
     # classmethod) BECAUSE the Profiler Capability's own I/O method is named ``profile(self,
@@ -283,7 +283,7 @@ class LightweightProfiler:
     """
 
     # The declared descriptor (ADR-0036 §2): the lightweight Profiler is the scale-oriented
-    # streaming feature pass — a pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0,
+    # streaming feature pass — a pure-Python part of ``latence-core`` (Apache-2.0,
     # verified per ADR-0012), no model weights, deterministic, CPU-only, non-batching, no per-call
     # cost. Declared as a ``PROFILE`` ClassVar (not a ``profile`` classmethod) because the Profiler
     # Capability's I/O method is itself named ``profile`` (see StatisticalProfiler.PROFILE).

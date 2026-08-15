@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Query-side embedding with the **same** model the S3 export used — the dense leg's precondition.
 
 The exported corpus vectors come from ``ibm-granite/granite-embedding-311m-multilingual-r2``

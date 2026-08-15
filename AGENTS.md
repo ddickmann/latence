@@ -227,28 +227,30 @@ The rule underneath all of them: **assert observable repository facts, never a f
 intent.** If you add a doc-truth gate, make it fail on the tree that motivated it before you make it
 pass.
 
-### 5. The licence carve-out is exactly seven files, and it is pinned
+### 5. The licence topology is uniform, and it is pinned
 
-The repository is **PolyForm Noncommercial 1.0.0**, with one deliberate, bounded exception: seven
-modules in `packages/latence-retrieval/src/latence_retrieval/` (`bm25.py`, `graph_retrieval.py`,
-`maxsim.py`, `multihop.py`, `pack.py`, `sparse.py`, `tuning.py`) carry
-`SPDX-License-Identifier: Apache-2.0` in their headers, and that identifier is the operative grant
-for those files.
+The repository is **Apache-2.0**, everywhere, with no exception and no carve-out (ADR-0063, which
+supersedes ADR-0055's relicence to PolyForm Noncommercial). Every source file that declares an SPDX
+identifier declares `Apache-2.0`, and `LICENSE` is the canonical Apache-2.0 text byte for byte —
+nothing added, not even a copyright line, because scanners identify that file by its bytes.
 
-`test_publish_readiness.py` scans every `.py`/`.pyi`/`.rs`/`.sh` header in the tree and asserts the
-non-PolyForm set is **exactly** that seven — failing in both directions:
+`test_publish_readiness.py` scans every `.py`/`.pyi`/`.rs`/`.sh` header in the tree and fails on
+**any** identifier that is not `Apache-2.0`, digests `LICENSE` against the canonical text, and
+checks that no owned document still grants PolyForm or claims commercial use needs an agreement.
 
-- an **eighth** file acquiring a permissive header (usually by copy-pasting a neighbouring module's
-  header) silently widens the grant;
-- one of the **seven** losing its header — to a refactor or a rename — silently retracts a grant the
-  owner made deliberately and makes `LICENSE` false.
+So: if you add an SPDX header to a new file, it says `Apache-2.0` and nothing else. Do not invent a
+per-file exception — if one is ever genuinely wanted it needs an ADR, a statement in the file, and a
+pin in that test, in one commit, so the code, the licence document and the gate cannot disagree.
 
-So: **do not add an SPDX header to a new file**, do not copy a header from a neighbouring module,
-and do not move or rename one of the seven casually. If the boundary genuinely should move, change
-it in three places in one commit — the file header, the `SCOPE: THE RETAINED APACHE-2.0 MODULES`
-section of `LICENSE`, and the pinned set in the test — so the code, the licence document and the
-gate cannot disagree. Each of the seven also has to keep the `DELIBERATE, BOUNDED EXCEPTION` note
-next to its SPDX line, so a reader looking at one file can tell the grant is intended.
+Two things are NOT licence drift and must survive:
+
+- **`pack.py`'s inbound provenance.** It records that the QKP packer was ported from the
+  maintainer's own `colsearch` project and relicensed Apache-2.0 for that use. That is *where the
+  code came from*, not *what you may do with it*; both claims now name the same identifier, so the
+  `INBOUND` / `OUTBOUND` labels are what keeps them apart. A gate requires them.
+- **Third-party noncommercial terms.** `naver/splade-v3`'s CC-BY-NC-SA-4.0 weights and
+  research-only corpora like OmniDocBench are still noncommercial and still gated behind their
+  opt-in flags. The framework's outbound licence does not touch a third party's terms.
 
 ### 6. `-q` on the command line resolves to `-qq`
 
@@ -407,7 +409,7 @@ be helpful.
 | Running it on a real corpus | [`docs/getting-started/index.md`](./docs/getting-started/index.md) |
 | What is proven and what is not | [`README.md`](./README.md) · [`RELEASE-GATES.md`](./RELEASE-GATES.md) |
 | Security-relevant surfaces, and how to report a vulnerability privately | [`SECURITY.md`](./SECURITY.md) |
-| Licence terms, including the retained Apache-2.0 subset | [`LICENSE`](./LICENSE) · [`COMMERCIAL.md`](./COMMERCIAL.md) |
+| Licence terms (Apache-2.0, uniform) and what commercial use needs (nothing) | [`LICENSE`](./LICENSE) · [`NOTICE`](./NOTICE) · [`COMMERCIAL.md`](./COMMERCIAL.md) |
 
 **Do not open a public issue or pull request for a suspected vulnerability.** Report it privately as
 described in [`SECURITY.md`](./SECURITY.md).

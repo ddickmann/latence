@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The pure S3 building blocks: corpus preps, budget model, and — the load-bearing half —
 every generated pipeline.yaml variant validated through the REAL latence-core Pipeline
 model (``extra="forbid"`` at root and stage level, so a typo'd key fails HERE) plus the

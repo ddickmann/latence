@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The ticket-21 labeling harness — format round-trip, resume, coverage, span integrity.
 
 Offline throughout: the corpus fixture reproduces the real S1 export row shape

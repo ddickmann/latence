@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The single-page labeling UI — one static HTML document, no external assets (ticket 21).
 
 Served verbatim by :mod:`latence_benchmark.labeling.server` at ``/``. The page asks

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Render the S5 matrix as ``REPORT.md`` + ``metrics.json`` — deltas and control checks included.
 
 Two things the report does that a plain table does not, both because the ablation is the point:

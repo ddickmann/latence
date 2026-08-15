@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Wave 5-J's A/B oracle for the S5b rescue pipeline: two ways of getting the same answer.
 
 **Before the deletion** this harness ran the bench's own ``RescuePipeline`` against the SHIPPED

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Atomic, per-campaign stage state — the Python port of supervise.sh's ``STATE.json``.
 
 Two properties are carried over from the shell supervisor verbatim, because both were paid

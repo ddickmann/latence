@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Resolve the planted chains against the EXPORTED corpus and write gold.jsonl + CHAINS.md.
 
     PYTHONHASHSEED=0 uv run python benchmark/enterprise-gold/build_gold.py

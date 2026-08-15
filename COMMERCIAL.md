@@ -1,113 +1,85 @@
-# Commercial licensing
+# Commercial use
 
-The Latence Framework is licensed under the **PolyForm Noncommercial License
-1.0.0** (SPDX: `PolyForm-Noncommercial-1.0.0`). Noncommercial use is free.
-**Commercial use requires a separate written agreement with the copyright
-holder.**
+**Commercial use of the Latence Framework is granted by its licence. No separate
+agreement is required, and there is nothing to buy from the copyright holder.**
 
-> **Provenance.** This repository carried an Apache-2.0 `LICENSE` internally from
-> its first commit until 2026-07-29 and was **never published publicly** — the
-> GitHub repository has been private since it was created, no distribution was
-> ever published to PyPI, no release was ever cut, and every commit in its
-> history was authored by the sole copyright holder, Dennis Dickmann. The
-> relicence is therefore clean: no one holds a prior Apache-2.0 grant, because no
-> one ever received a copy under one. The verified record — what was checked, how,
-> and when — is at the top of [`LICENSE`](./LICENSE).
+The framework is licensed under the **Apache License 2.0** (SPDX: `Apache-2.0`),
+reproduced verbatim in [`LICENSE`](./LICENSE). That licence grants you — any
+person or company, for any purpose including a commercial one — the right to
+use, modify, distribute, sublicense and sell the software, together with a
+patent licence from every contributor, subject only to the attribution
+conditions in its §4.
 
 This document is a plain-language pointer. **`LICENSE` governs.** Where this
 document and `LICENSE` differ, `LICENSE` wins.
 
+> **Why this page still exists.** Between 2026-07-29 and 2026-08-15 the project
+> carried the PolyForm Noncommercial 1.0.0 licence, and this page was the route to
+> a commercial licence. That model is gone
+> ([ADR-0063](./docs/adr/0063-relicence-to-apache-2-0.md), which supersedes
+> [ADR-0055](./docs/adr/0055-relicence-to-polyform-noncommercial.md)). The page is
+> kept, at its old name, so that every inbound link — from the README, from
+> `NOTICE`, from the superseded ADRs, from anything anyone bookmarked — lands on
+> a correction instead of a 404 or, worse, on a stale page telling a reader to
+> ask permission they do not need.
+
 ---
 
-## What is free
+## What you may do
 
-Everything the PolyForm Noncommercial License calls a *permitted purpose*. In the
-licence's own words, that is:
+Everything Apache-2.0 permits, without asking and without telling anyone:
 
-- **Any noncommercial purpose.**
-- **Personal use** — "research, experiment, and testing for the benefit of public
-  knowledge, personal study, private entertainment, hobby projects, amateur
-  pursuits, or religious observance, without any anticipated commercial
-  application".
-- **Use by a noncommercial organization** — "any charitable organization,
-  educational institution, public research organization, public safety or health
-  organization, environmental protection organization, or government institution
-  … regardless of the source of funding or obligations resulting from the
-  funding".
+- Use the framework inside a for-profit company, on customer data, in production.
+- Build a product or a paid service on it, and sell that.
+- Offer it, or anything built on it, as a hosted or managed service.
+- Deliver consulting, integration or systems-integration work with it.
+- Embed it in a commercial distribution, an appliance, or an SDK.
+- Fork it, modify it, and redistribute your fork — including under a different
+  licence, provided you meet §4.
 
-Within a permitted purpose the licence grants you the right to use, distribute,
-and make changes and new works, plus a patent licence, subject to its `Notices`,
-`Patent Defense`, and `Violations` sections. Read those sections; they are short.
+Three obligations, and they are the whole of it (Apache-2.0 §4):
 
-Two obligations that catch people out:
+1. **Ship the licence.** Give every recipient a copy of `LICENSE`.
+2. **Ship the notice.** The distribution includes a [`NOTICE`](./NOTICE) file;
+   redistributors must reproduce its attribution notices. `NOTICE` also carries
+   the provenance record for the two relicences.
+3. **Mark your changes.** Modified files must carry a prominent notice saying you
+   changed them.
 
-1. **Carry the notice.** If you give anyone a copy of any part of this software,
-   you must also give them these terms (or the URL for them) **and** the
-   `Required Notice:` line at the top of `LICENSE`.
-2. **Fair use is untouched.** The licence explicitly does not limit rights you
-   already have under law.
+Two things worth knowing rather than discovering:
 
-## What you do not need a licence for at all
+- **The patent grant terminates defensively.** Apache-2.0 §3 grants you a patent
+  licence from every contributor, and ends it if you initiate patent litigation
+  alleging the software infringes.
+- **No trademark rights.** §6 grants none; "Latence" is not licensed to you as a
+  name.
 
-Seven modules in `latence-retrieval` — the query-time retrieval primitives — are
-**not** under the PolyForm licence. They carry a file-level
-`SPDX-License-Identifier: Apache-2.0` grant, deliberately, so you may use, modify
-and redistribute those files **commercially** with no agreement here.
+## Support, consulting and sponsorship
 
-That exception is bounded, enumerated and machine-pinned in
-[`LICENSE`](./LICENSE), section *"SCOPE: THE RETAINED APACHE-2.0 MODULES"* — that
-section is authoritative and this is only a pointer to it. Read it before you rely
-on the exception: it names the exact seven files, and it is explicit that the rest
-of `latence-retrieval` (which those seven import from) is **not** covered.
+The licence grants rights, not a relationship. There is no commercial support
+contract, no SLA, and no paid tier — see
+[`SUPPORT.md`](./SUPPORT.md) for what support actually exists (best-effort,
+via GitHub issues) and [`docs/CONTINUITY.md`](./docs/CONTINUITY.md) for the
+honest bus-factor and support-lifetime statement an enterprise reader should
+read before depending on this.
 
-## What counts as commercial use
-
-Commercial use is **anything that is not a permitted purpose** under the licence.
-The licence defines the permitted purposes positively (above); it does not define
-"commercial" separately, and this document does not add a definition.
-
-Cases that are, in practice, outside the permitted purposes and need an
-agreement — this list is illustrative, not a definition:
-
-- Using the framework in or for a product or service you sell, license, or
-  monetise, including internally within a for-profit company's operations.
-- Offering it, or anything built on it, as a hosted or managed service.
-- Consulting, integration, or systems-integration work delivered to a paying
-  client.
-- Embedding it in a commercial distribution, appliance, or SDK.
-- Using it to process a customer's data as part of a commercial engagement.
-
-If you are unsure which side of the line you are on, ask before you build.
-Asking costs an email.
-
-## How to get a commercial licence
-
-Contact the copyright holder:
+If you want to talk to the maintainer anyway — about a deployment, about
+prioritising something you need, about consulting or sponsorship, or simply to
+say you are using it:
 
 **Dennis Dickmann — ddickmann81@gmail.com**
 
-Please include:
+That is an invitation, not a condition. Nothing on this page gates your use of
+the software, and no arrangement made by email changes the licence in
+`LICENSE`.
 
-- who the licensee is (legal entity name and jurisdiction);
-- what you want to do with the framework, concretely;
-- which packages/extras you intend to use (they have different third-party
-  obligations — see below);
-- whether you intend to redistribute, and in what form (source, wheels, binaries,
-  container images, an appliance).
+## What the licence does *not* reach
 
-**Terms are by agreement.** There is no published price list, no tier structure,
-and no standard contract text in this repository. Anything you have read
-elsewhere about pricing or terms for this project is not from the copyright
-holder. Scope, fee, duration, support, and any warranty are settled in the
-written agreement itself.
-
-## What a commercial licence from the copyright holder does *not* cover
-
-A commercial licence covers **the Latence Framework's own code** — the copyright
-that Dennis Dickmann holds. It cannot and does not grant rights in third-party
-software, model weights, or datasets. Those carry their own terms, and several of
-them have their own commercial-use restrictions that survive any agreement made
-here. The ones that matter, all documented in
+Apache-2.0 settles rights in **the Latence Framework's own code** — the
+copyright Dennis Dickmann holds. It cannot and does not grant rights in
+third-party software, model weights, or datasets, several of which carry their
+own commercial-use restrictions. An outbound licence is never a shield against
+inbound terms. The ones that matter, all documented in
 [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md):
 
 | Component | Terms | Why it matters commercially |
@@ -116,8 +88,9 @@ here. The ones that matter, all documented in
 | NVIDIA CUDA wheels (`deploy/env/gpu-learned/`, `deploy/env/served-ocr-server/`) | **Proprietary NVIDIA EULAs** | Not open-source. Installing either environment means accepting NVIDIA's terms. |
 | `google/embeddinggemma-300m` | **Gemma license** — opt-in, non-default, no Gemma-backed Provider ships here | Permits commercial use but carries a Prohibited Use Policy and a flow-down obligation to every downstream recipient. |
 | `opendatalab/OmniDocBench` | **Research-only, non-commercial** | Gated behind `--accept-non-commercial` in the benchmark harness. Never usable in a commercial benchmark. |
+| `naver/splade-v3` weights | **CC-BY-NC-SA-4.0** | Gated behind `--accept-noncommercial-license`. The SPLADE *code path* in this repository is Apache-2.0; those *weights* are not. |
 | `Babelscape/REDFM` | CC BY-SA 4.0 | Commercial use permitted with attribution; ShareAlike binds adaptations of the corpus. |
-| Every other runtime dependency and default model checkpoint | Permissive (Apache-2.0 / MIT / BSD / ISC / PSF / MPL-2.0) | No commercial restriction. |
+| Every other runtime dependency and default model checkpoint | Permissive (Apache-2.0 / MIT / BSD / ISC / PSF / MPL-2.0) | No restriction on commercial use. |
 
 You are responsible for your own compliance with those third-party terms.
 `latence env matrix` machine-checks the CUDA disclosure, and the benchmark
@@ -126,38 +99,41 @@ explicitly — but neither is a substitute for your own review.
 
 ## Contributions
 
-The project has **no signed CLA and no DCO process**. To date it has had no
-outside contributions: every commit in the repository's history was authored by
-the copyright holder.
+To date the project has had **no outside contributions**: every commit in the
+repository's history was authored by the copyright holder.
 
-`CONTRIBUTING.md` currently carries only an inbound-equals-outbound sentence
-("by contributing you agree your contributions are licensed under the project's
-licence"). **That is not sufficient for this licensing model, and it is not yet
-updated for the relicence.** Under a dual arrangement — noncommercial terms to
-the public, commercial terms by agreement — inbound-equals-outbound means the
-copyright holder would receive a contribution under *noncommercial* terms and
-would then have no right to license that contribution commercially. Every
-commercial licence granted after such a contribution would be partly
-unauthorised.
+[`CLA.md`](./CLA.md) at the repository root is a Contributor Licence Agreement,
+and `CONTRIBUTING.md` makes a recorded signature a precondition of every merge.
+It was written for the PolyForm model, where it was load-bearing: under
+noncommercial-public/commercial-by-agreement terms, a contribution arriving on
+noncommercial terms could not lawfully be included in a commercial licence, and
+Section 2 of the CLA was the grant that closed that gap.
 
-Until a CLA (or a copyright assignment) is in place, outside contributions
-should be declined or held. This is flagged, not solved, here.
+Apache-2.0 is inbound-equals-outbound — §5 places every contribution under the
+same licence as the work — so that gap no longer exists, and a DCO would now
+suffice. **Whether to retire the CLA in favour of a DCO is an open decision for
+the copyright holder**, recorded as such in
+[ADR-0063](./docs/adr/0063-relicence-to-apache-2-0.md); until he takes it,
+`CONTRIBUTING.md` is what governs.
+
+`CLA.md` has not been reviewed by a lawyer, and it says so at the top. That
+review is tracked as `RELEASE-GATES.md` **Gate 3 — Licence coherence**, and it
+is open.
 
 ## Legal review
 
-The relicence in this repository was prepared by the copyright holder with
+The licensing in this repository was prepared by the copyright holder with
 machine assistance. **It is not legal advice, and it has not been reviewed by
-counsel.** Before relying on it commercially — as licensor or as licensee — have
-a lawyer confirm at minimum:
+counsel.** Apache-2.0 itself needs no review — it is one of the most widely
+deployed licences in existence and is reproduced here verbatim and digest-pinned
+— but the project's own statements around it do. Before relying on this
+commercially, have a lawyer confirm at minimum:
 
-1. that PolyForm Noncommercial 1.0.0 is the right instrument for the intended
-   business model, and that its "noncommercial purpose" boundary is enforceable
-   in the relevant jurisdictions;
-2. the LGPL-3.0 `easydict` interaction, specifically LGPL-3.0 §4 and §6 if
+1. the LGPL-3.0 `easydict` interaction, specifically LGPL-3.0 §4 and §6 if
    anything is ever shipped as a binary or a container image;
-3. that the Apache-2.0 → PolyForm transition is clean given the repository's
-   never-published history (the facts are recorded at the top of `LICENSE`);
-4. the contributor position above — specifically, what instrument (CLA or
-   assignment) is needed so that contributions can be licensed commercially, and
-   what `CONTRIBUTING.md` must say instead of inbound-equals-outbound — **before
-   any outside contribution is accepted**.
+2. that the two relicences are clean given the repository's never-published
+   history (the facts are recorded in [`NOTICE`](./NOTICE) and in
+   [ADR-0063](./docs/adr/0063-relicence-to-apache-2-0.md));
+3. the contributor position above — whether to keep `CLA.md` or move to a DCO,
+   and if the CLA is kept, the open points its own
+   [Notes for the reviewer](./CLA.md#notes-for-the-reviewer) list.

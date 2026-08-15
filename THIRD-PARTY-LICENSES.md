@@ -1,32 +1,33 @@
 # Third-party licenses
 
-> **The framework's own licence changed on 2026-07-29.** It is no longer
-> Apache-2.0. It is the **PolyForm Noncommercial License 1.0.0**
-> (SPDX: `PolyForm-Noncommercial-1.0.0`) — free for noncommercial use, commercial
-> use by separate written agreement (see [`LICENSE`](./LICENSE) and
-> [`COMMERCIAL.md`](./COMMERCIAL.md)). The repository was Apache-2.0 internally
-> and **never published publicly** — private since creation, nothing on PyPI, no
-> release cut, sole copyright holder across every commit — so the relicence is
-> clean. The verified provenance record is at the top of `LICENSE`.
+> **The framework's own licence is Apache-2.0** (SPDX: `Apache-2.0`), see
+> [`LICENSE`](./LICENSE). It has moved twice: Apache-2.0 from the first commit,
+> PolyForm Noncommercial 1.0.0 from 2026-07-29 (ADR-0055), and back to Apache-2.0
+> on 2026-08-15 (ADR-0063, which supersedes it). It was **never published
+> publicly** under any of those states — private since creation, nothing on PyPI,
+> no release cut, no tag, sole copyright holder across every commit — so both
+> relicences are clean and nobody holds a grant under a superseded one. The
+> verified provenance record is in [`NOTICE`](./NOTICE).
 >
 > **What that changes in this file, and what it does not.** The verified facts
-> below are unchanged: every licence, version, and verification date still holds.
-> What changed is the *framing*. This file used to argue that every inbound
-> licence was permissive and therefore compatible with the project's own
-> permissive outbound posture. That argument no longer applies, and the honest
-> version runs in the opposite direction of travel:
+> below are unchanged: every licence, version, and verification date still holds,
+> across both relicences. What moves is the *framing*, and the honest version of
+> it has been the same throughout:
 >
-> * **Inbound compatibility got easier, not harder.** A noncommercial outbound
->   licence imposes no obligations that a permissive inbound licence could
->   conflict with. Nothing here is now *in*compatible that was compatible before.
-> * **But the outbound licence is not a shield.** Third-party terms bind the
->   *user* of this framework directly, independently of what licence the framework
->   itself carries. The LGPL-3.0, Gemma, NVIDIA-EULA and non-commercial-dataset
->   obligations recorded below apply to a commercial licensee exactly as they did
->   to a user under the old licence. A commercial agreement with the copyright
->   holder settles rights in *this* code and nothing else.
-> * **Reciprocal licences are still the thing to watch, in both directions.** A
->   future inbound GPL/AGPL dependency would be a problem; there is none today.
+> * **The outbound licence is not a shield.** Third-party terms bind the *user* of
+>   this framework directly, independently of what licence the framework itself
+>   carries. The LGPL-3.0, Gemma, NVIDIA-EULA and non-commercial-dataset
+>   obligations recorded below bind you under Apache-2.0 exactly as they did under
+>   PolyForm. Apache-2.0 grants you broad rights in *this* code and nothing else —
+>   in particular, it does **not** make a research-only corpus or a
+>   CC-BY-NC-SA-licensed checkpoint usable commercially.
+> * **Inbound compatibility is easy in both directions, and always was.** Every
+>   default-path dependency is permissive, so nothing here conflicts with an
+>   Apache-2.0 outbound grant. Nothing became incompatible at either relicence.
+> * **Reciprocal licences are still the thing to watch.** A future inbound
+>   GPL/AGPL dependency would be a problem — and is now a *harder* problem than it
+>   was under PolyForm, because an Apache-2.0 outbound grant cannot absorb a
+>   copyleft obligation. There is none today.
 >
 > This file records verified facts. It is not legal advice.
 
@@ -163,7 +164,7 @@ dependency and the entire obligation. That remains a real option, recorded here 
 choice stays deliberate (ADR-0012 / research-diligence) rather than defaulted into.
 
 **Not legal advice.** This is a reading of the licence text, not counsel's opinion. See
-the legal-review list in `COMMERCIAL.md`.
+the legal-review list in `COMMERCIAL.md` § *Legal review*.
 
 `gliner`, `openai`, `presidio-analyzer`/`spacy`, and `apache-airflow` are heavy/optional
 dependencies kept out of the CPU-first dev environment by design (ADR-0016); their licenses
@@ -217,9 +218,10 @@ precisely](#the-lgpl-30-obligation-stated-precisely)), and the MPL-2.0 `pathspec
 transitive, dev-only, never shipped in any wheel).
 
 That statement is about **inbound** licences only. It says nothing about whether *your*
-use of the framework is permitted — that is governed by `LICENSE` (PolyForm Noncommercial
-1.0.0) and, for commercial use, by a separate agreement (`COMMERCIAL.md`). A commercial
-licensee is bound by the third-party terms above exactly as anyone else is.
+use of the framework is permitted — that is governed by `LICENSE` (Apache-2.0), which
+grants any use including a commercial one. Being licensed by the copyright holder does
+not license you for anything above: the third-party terms bind you directly and in
+addition.
 
 ## Default reference-model weights
 
@@ -349,7 +351,7 @@ What that means for this project, stated plainly:
   OCR **client** environment — the CUDA wheels are pulled in **only** by `gpu-learned/` and
   `served-ocr-server/`, and only because the operator chose to install a GPU stack.
   `latence-core` and every Provider package remain CUDA-free (ADR-0016) and carry the
-  framework's own licence (PolyForm Noncommercial 1.0.0), never NVIDIA's terms.
+  framework's own licence (Apache-2.0), never NVIDIA's terms.
 * An operator installing `deploy/env/gpu-learned/` **or** `deploy/env/served-ocr-server/` accepts
   NVIDIA's terms for those runtime libraries, exactly as they would installing CUDA from NVIDIA
   directly. This is normal for GPU serving and is called out here so it is a decision, not a
@@ -393,7 +395,7 @@ UNVERIFIED one unconditionally.
 | allenai/olmOCR-bench | Parse benchmark suite (default) | ODC-BY-1.0 (dataset-card `license: odc-by`) | Apache-2.0 (github.com/allenai/olmocr) | Yes, with attribution | Default; attribution carried on the published results page |
 | opendatalab/OmniDocBench | Parse benchmark suite (opt-in) | **research-only, non-commercial** (project Copyright Statement: "The dataset is for research purposes only and not for commercial use.") | Apache-2.0 | **No** | Registered but GATED behind `--accept-non-commercial`; never a default, never vendored |
 | Babelscape/REDFM | Entity-Extraction, Relation-Extraction and Disambiguation suites (#187) | CC BY-SA 4.0 (dataset-card `license: cc-by-sa-4.0` **and** its prose License section) | Apache-2.0 (the repo's own `REDFM.py` loader, per its file header) | Yes, with attribution | Default for the three suites; fetched at run time, never vendored, and only aggregate metrics are published — so ShareAlike, which binds adaptations of the corpus, is not triggered |
-| Latence synthetic PII corpus | Redaction suite (#187) | PolyForm-Noncommercial-1.0.0 (this repository) | PolyForm-Noncommercial-1.0.0 (this repository) | Noncommercial free; commercial by agreement (`COMMERCIAL.md`) | SHIPPED in `latence_benchmark/corpora/`. Contains **no real personal data**: RFC 2606 example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone numbers, published test card/IBAN values, AWS's `AKIAIOSFODNN7EXAMPLE` docs key, fictional names. Generated by a committed generator and pinned by content digest |
+| Latence synthetic PII corpus | Redaction suite (#187) | Apache-2.0 (this repository) | Apache-2.0 (this repository) | Commercial use granted by the licence | SHIPPED in `latence_benchmark/corpora/`. Contains **no real personal data**: RFC 2606 example domains, RFC 5737 TEST-NET addresses, 555 fiction-reserved phone numbers, published test card/IBAN values, AWS's `AKIAIOSFODNN7EXAMPLE` docs key, fictional names. Generated by a committed generator and pinned by content digest |
 
 ### E2E-SOTA campaign datasets (retrieval benchmarks)
 

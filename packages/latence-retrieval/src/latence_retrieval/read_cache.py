@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """File-identity-keyed memoization of derived read structures — the ADR-0056-amendment pattern.
 
 The one home for a pattern three read paths share (:class:`~latence_retrieval.hypergraph.\

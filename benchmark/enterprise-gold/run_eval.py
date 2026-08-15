@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M6, enterprise leg (wayfinder ticket 17): supporting-fact recall@budget, CoE vs chunk-topk.
 
 Runs entirely locally over the enterprise-gold export (no GPU, no model): the baseline is

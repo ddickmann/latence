@@ -198,7 +198,7 @@ class SharePointSource:
         Pure-code and dependency-free: this Provider ships **no model weights**
         (``model_id=None``) and pulls no third-party library — it speaks Graph's REST/JSON API
         over the Python standard library, so its code license is this repo's
-        PolyForm-Noncommercial-1.0.0 (verified per ADR-0012; weights-and-code trivially the same for
+        Apache-2.0 (verified per ADR-0012; weights-and-code trivially the same for
         a pure-code Provider) and ``latence-core`` takes no new dependency (ADR-0016).
 
         ``compute="cpu"`` (no accelerator), ``batch=False`` (Graph is fetched per item), and

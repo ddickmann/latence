@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """``build_vectors.py`` — add the missing dense + BM25 artifacts to an already-exported corpus.
 
 The two reused M6 exports (``benchmark/official-data/musique-full/export`` and

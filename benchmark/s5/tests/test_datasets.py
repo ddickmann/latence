@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The dataset gold translations — pinned against the real S1 prep functions and the real files.
 
 The tests that matter here are the *agreement* ones: the harness derives corpus filenames from

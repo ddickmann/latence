@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Abbreviation-safe sentence segmentation for Hyperedge building (ADR-0057, hypergraph-m1).
 
 Hyperedge segmentation (spec 1.2) needs sentence boundaries over chunk text. The chunker's

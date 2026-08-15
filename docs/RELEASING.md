@@ -25,7 +25,12 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
    the merged PRs since the previous tag, appends the verification instructions and the
    coordinated-vulnerability-disclosure link, and attaches the **signed asset set**.
 
-PyPI publishing is **not** part of this automatic flow — see "Publishing to PyPI" below.
+PyPI publishing is **not** part of this flow at all, automatic or otherwise: the project is
+distributed as signed GitHub Releases only
+([ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md) — whose
+rationale is superseded and whose decision is reopened by
+[ADR-0063](adr/0063-relicence-to-apache-2-0.md), without being reversed).
+See "Publishing to PyPI" below for the current state and what enabling it would take.
 
 ## Release integrity (signing + SBOM)
 
@@ -220,23 +225,47 @@ the commit you are about to tag.
 > or a release script). It was left out of 0.1.0 to avoid perturbing the already-green
 > per-package build backends; adopt it when the release cadence justifies the machinery.
 
-## Publishing to PyPI (manual, gated — currently OFF)
+## Publishing to PyPI — not enabled, and the decision is open
 
-Per the maintainer-manual-publish policy, releasing to PyPI is a deliberate human act and
-is **not** wired to fire on a tag. `release.yml` contains a fully-formed `pypi-publish`
-job that uses **PyPI Trusted Publishing (OIDC)** — no API token is ever stored — but it is
-disabled with a leading `false &&` in its `if:` condition and gated behind a protected
-`pypi` GitHub Environment.
+**Nothing is uploaded to PyPI today, and `release.yml`'s `pypi-publish` job stays
+short-circuited.** The distribution channel is the signed GitHub Release.
 
-To enable it (one-time setup, then per-release approval):
+[ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)
+decided this, and its reasoning was entirely about the licence: `pip install` is
+overwhelmingly a corporate action, PolyForm Noncommercial did not licence commercial use, and
+corporate SCA scanners hard-block the `PolyForm-Noncommercial-1.0.0` SPDX identifier — so
+publishing would have put the artifact in a channel whose majority consumer was, by the
+licence's own terms, unlicensed.
+
+[ADR-0063](adr/0063-relicence-to-apache-2-0.md) relicensed the project to **Apache-2.0**, and
+every one of those premises is now false: `pip install` consumers are licensed, no scanner
+blocks `Apache-2.0`, and there is no retained-subset invisibility problem because there is no
+retained subset. ADR-0062's own revisit condition ("reopen if the `pip install` audience
+changes") is met. So its **rationale is superseded and the decision is reopened** — but it has
+**not** been reversed here: whether to publish is a distribution question (name claims, release
+cadence, support expectations, an irreversible first upload) that the licence change did not
+answer. It stays disabled pending the maintainer's decision, which needs its own ADR.
+
+The install path an adopter uses today is therefore the Release URL or a clone — see the
+README's `## Install` section, which states it.
+
+### If the decision is taken the other way
+
+The `pypi-publish` job is kept, fully formed, precisely so this stays cheap. It uses **PyPI
+Trusted Publishing (OIDC)** — no API token is ever stored — disabled with a leading `false &&`
+in its `if:` condition and gated behind a protected `pypi` GitHub Environment. To enable it
+(one-time setup, then per-release approval):
 
 1. **Claim the names on PyPI.** Create each distribution project (`latence-core`,
    `latence-parser-*`, …) and, on each, add a Trusted Publisher:
    owner `ddickmann`, repo `latence-framework`, workflow `release.yml`, environment `pypi`.
+   Verified when the decision was taken: `latence-core` is free, while `latence` itself is
+   taken (0.2.0, MIT) under the maintainer's separate `latenceainew` account and is unrelated
+   to this workspace.
 2. **Create the `pypi` Environment** in repo Settings → Environments and add the
    maintainer(s) as **Required reviewers**, so every publish pauses for a manual approval.
-3. **Settle the namespace** (see "Open decisions") — the `latence-*` names must be
-   available or owned on PyPI, or the upload 403s.
+3. **Settle the namespace** — every `latence-*` name must be available or owned on PyPI, or
+   the upload 403s mid-way and leaves a partially released set.
 4. **Turn it on, then tag — in that order.** Remove the `false &&` from the `if:` condition
    on the `pypi-publish` job (keep the `dry_run` clause) and merge it to `main` **before**
    cutting the tag you want published. From then on, a `v*` tag builds + creates the GitHub
@@ -254,12 +283,21 @@ To enable it (one-time setup, then per-release approval):
 Optional dry run: point the publish step at TestPyPI first by setting
 `repository-url: https://test.pypi.org/legacy/` (a commented hint is in the workflow).
 
-## Open decisions (maintainer)
+## Decided, not open (maintainer)
 
-- **Brand / PyPI namespace.** The distribution names are `latence-*`. Confirm these are
-  available (or owned) on PyPI before first publish, or pick/claim a namespace. `latence`
-  as a lead name may already be taken — verify. Consider reserving the namespace even
-  before enabling auto-publish.
-- **Auto-publish.** Whether to ever remove the `false &&` short-circuit and let approved tags flow to PyPI,
-  or keep publishing fully manual (`uv publish` from a maintainer machine). Both are
-  supported; the gated workflow is the recommended path.
+Both of the questions this section used to leave open were settled by
+[ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md),
+which also supplied the one they never raised — the licence. That licence has since changed
+([ADR-0063](adr/0063-relicence-to-apache-2-0.md)), so the *namespace* question below is live
+again in the sense that publishing is no longer ruled out; nothing is claimed or published
+until the decision is retaken:
+
+- **Brand / PyPI namespace.** Moot for release purposes. Nothing is published, so no
+  `latence-*` name has to be claimed and no upload can 403. The accepted consequence is that
+  the names stay unclaimed and could be taken by someone else; reserving them would mean
+  uploading a placeholder distribution, which is the act the ADR declines.
+- **Auto-publish.** No. The `false &&` short-circuit stays, and manual `uv publish` from a
+  maintainer machine is not a substitute route — the decision is about the channel, not about
+  the automation. The scaffolding is kept only so a future reversal is a one-line edit.
+
+Reopening either means amending ADR-0062, not editing this page.

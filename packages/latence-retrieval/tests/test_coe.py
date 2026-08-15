@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M4 (ticket 15): the chain-of-evidence selector over M3's HypergraphSignals.
 
 The spec-M4 acceptance criteria, plus the ADR-0058 verification contract: the budget is never

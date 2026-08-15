@@ -87,10 +87,10 @@ class AffectedSetDeltaProcessor:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The affected-set DeltaProcessor is the ported graph patcher + blocking recompute.
-        A pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified per ADR-0012
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012
         — the package's own code, weights-and-code trivially the same), it ships no model weights
         (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call cost,
         so a bake-off/conformance run reads honest, non-fabricated columns off it.

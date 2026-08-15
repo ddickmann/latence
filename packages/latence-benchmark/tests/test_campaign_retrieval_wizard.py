@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The retrieval wizard block: measured defaults, contradictions, determinism, backward compat.
 
 Plus the block's CONSUMER — :func:`latence_benchmark.campaign.retrieval_lib.rescue_config`, the

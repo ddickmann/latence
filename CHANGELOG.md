@@ -15,6 +15,56 @@ history. It is large for that reason. When the first tag is cut (`docs/RELEASING
 becomes that release's section and the cadence starts from there; until then there is no cadence to
 report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to stop.
 
+### Changed
+
+- **The outbound licence is Apache-2.0 again
+  ([ADR-0063](docs/adr/0063-relicence-to-apache-2-0.md), superseding
+  [ADR-0055](docs/adr/0055-relicence-to-polyform-noncommercial.md)).** The workspace relicensed
+  from Apache-2.0 to PolyForm Noncommercial 1.0.0 on 2026-07-29 and back to **Apache-2.0** on
+  2026-08-15. Commercial use is now granted by the licence outright: there is no agreement to
+  obtain and nothing to buy. The reason is the adopter — this is enterprise data infrastructure,
+  corporate SCA scanners hard-block the `PolyForm-Noncommercial-1.0.0` identifier as a matter of
+  policy, and "ask us for a commercial licence" is not a step anyone takes for an unproven tool;
+  even a corporate *evaluation* was, strictly, unlicensed. Apache-2.0 rather than MIT for the
+  express §3 patent grant and its defensive termination, which is what enterprise legal reads
+  past the identifier. The switch is clean and was cheap only right now: nothing published,
+  no tag, no PyPI, sole copyright holder, no CLA signed — so nobody holds a grant under a
+  superseded state. What changed concretely: `LICENSE` is the canonical Apache-2.0 text byte for
+  byte (nothing added — the provenance record moved to `NOTICE`, which Apache-2.0 §4(d) carries
+  downstream anyway), all 33 `packages/*/LICENSE` copies and `pyproject.toml` declarations, all
+  129 `SPDX-License-Identifier` headers, and the prose in `README.md`, `NOTICE`,
+  `THIRD-PARTY-LICENSES.md`, `CITATION.cff`, `AGENTS.md`, `CONTRIBUTING.md`, `CLA.md`,
+  `RELEASE-GATES.md`, `mkdocs.yml` and the published docs pages.
+- **The retained Apache-2.0 subset is dissolved, and the gate that pinned it is now a
+  universal.** Seven query-time modules in `latence-retrieval` kept a file-level Apache-2.0
+  grant as a bounded exception to the PolyForm licence; with the whole repository Apache-2.0 the
+  concept has no referent. `test_publish_readiness.py` no longer pins a seven-file allow-list —
+  it walks the tree and fails on **any** SPDX identifier that is not `Apache-2.0`, which is
+  strictly stronger: the old gate permitted a bounded set of files to disagree with the package
+  metadata, the new one permits none. `pack.py` keeps its INBOUND/OUTBOUND provenance labels,
+  which matter more now that both claims name the same identifier.
+- **`COMMERCIAL.md` is now a correction page, not a route.** It keeps its name and every inbound
+  link so a reader arriving from ADR-0055, from `NOTICE` or from a bookmark is told the gate is
+  gone — instead of hitting a 404 or a stale demand for an agreement. Its gate test was inverted
+  rather than deleted: it now asserts the page *grants* in so many words and that no agreement
+  requirement, price or tier has crept back in.
+- **PyPI: ADR-0062's rationale is superseded and its decision is REOPENED — not reversed.**
+  ADR-0062 declined PyPI entirely on the strength of the PolyForm licence (corporate `pip
+  install` audience, SCA identifier block, retained-subset invisibility). Every one of those
+  premises is false under Apache-2.0, and ADR-0062's own revisit condition is met. The
+  `pypi-publish` job in `release.yml` nevertheless **stays disabled** behind its `false &&`:
+  whether to publish is a distribution decision (name claims, cadence, support expectations, an
+  irreversible first upload) that the relicence did not weigh, and it needs its own ADR.
+- **`CLA.md` is no longer required for the reason it was written.** It exists to secure
+  relicensing and commercial-grant rights that Apache-2.0's inbound-equals-outbound (§5) no
+  longer requires; a DCO would now suffice. It is *not* retired here — that is the copyright
+  holder's decision, recorded as open in ADR-0063 — and `CONTRIBUTING.md` still requires it,
+  because a stated precondition that is quietly not enforced is worse than either alternative.
+- **Two `RELEASE-GATES.md` Gate-3 items were dissolved rather than resolved.** The benchmark
+  corpus's `dataset_license="Apache-2.0" / commercial_use=True` flags and `latence-splade`'s
+  single-valued `license_code` were both blocked on a contradiction that only existed under a
+  noncommercial repository licence. Both are now true as written and are ticked.
+
 ### Fixed
 
 - **CI never left Linux while all 33 packages claimed `Operating System :: OS Independent`.**
@@ -33,14 +83,17 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   `uv sync --python 3.13` of this exact lockfile, then added to the CI matrix and to every
   package's classifiers.
 - **`CHANGELOG.md` recorded a "first public release" that never happened.** The `[0.1.0]` entry
-  claimed a public, Apache-2.0-licensed release; no `v*` tag exists, nothing was ever published,
-  and the workspace was relicensed to PolyForm on 2026-07-29. It is now labelled as what it was
+  claimed a public, Apache-2.0-licensed release; no `v*` tag exists and nothing was ever
+  published. It is now labelled as what it was
   — an internal version pin — and the two link references (`compare/v0.1.0...HEAD`,
   `releases/tag/v0.1.0`), both of which would 404 on a public repository, are gone.
 - **Two files routed users to a GitHub Discussions tab that does not exist.**
   `.github/ISSUE_TEMPLATE/config.yml` and `SUPPORT.md` both linked `/discussions` on an
-  unpublished repository. The issue chooser now points at `SUPPORT.md`, and `SUPPORT.md` says
-  plainly that there is no forum. Whether to enable Discussions is left as an owner decision.
+  unpublished repository. Both were rewritten to stop claiming a channel that was not there.
+  The owner decision they were waiting on has since been taken — Discussions is ON and is the
+  front door (see *Changed*, below) — so both files link it again, this time with the
+  repository setting that makes the link resolve written into the go-live runbook as a
+  required step rather than an optional nicety.
 - **The `## Install` section read as live for ten distributions that are not on PyPI.** The
   honest line was eight lines above; the block itself was not marked. `## Install` now leads
   with the not-yet-published caveat and the working from-clone path, and the PyPI list is
@@ -82,10 +135,13 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   validated against a live Qdrant v1.19.0 on full query sets (recall parity within −0.0004
   absolute; see `docs/guides/serving-qdrant.md`).
 
-- **Package READMEs no longer claim their own code is Apache-2.0.** The 2026-07-29 PolyForm
-  relicence had left sixteen stale prose claims; all now state PolyForm Noncommercial 1.0.0, the
-  `latence-retrieval` README names its seven retained Apache-2.0 modules explicitly, and a new
-  publish-readiness test pins the prose so it cannot drift back.
+- **Package READMEs no longer disagree with the repository licence.** The 2026-07-29 PolyForm
+  relicence had left sixteen stale prose claims saying Apache-2.0; they were corrected to
+  PolyForm, and the ADR-0063 relicence back to Apache-2.0 moved all sixteen again. The gate that
+  found them is kept and inverted each time — it now fails on a README claiming the framework's
+  own code is PolyForm or commercially restricted — so the prose cannot drift in either
+  direction. Third-party noncommercial statements (research-only corpora, CC-BY-NC-SA weights)
+  are deliberately not matched: those really are noncommercial.
 
 - **Page provenance survives the OCR handoff (ADR-0060, contracts v21).** Page-accurate citation
   silently died whenever OCR happened out of band and its markdown was re-ingested: the plaintext
@@ -478,6 +534,24 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Changed
 
+- **Distribution is signed GitHub Releases only — PyPI is closed, not pending
+  ([ADR-0062](docs/adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)).**
+  *(Superseded within the same Unreleased block by ADR-0063 — see the licence entry above. The
+  decision is reopened; nothing is published either way.)* PyPI's Terms of Use permit a
+  PolyForm-Noncommercial upload, so this was a choice rather than a prohibition — but `pip
+  install` is overwhelmingly a corporate action, PolyForm-NC did not licence commercial use, and
+  corporate SCA scanners hard-block the `PolyForm-Noncommercial-1.0.0` SPDX identifier, so
+  publishing would have put the artifact in a channel whose majority consumer was by the
+  licence's own terms unlicensed. The retained Apache-2.0 subset in `latence-retrieval` did not
+  change that: scanners read package metadata, which said PolyForm for the whole distribution.
+  `release.yml`'s `pypi-publish` job keeps its full OIDC scaffolding and its `false &&`
+  short-circuit.
+- **GitHub Discussions is ON, and is the front door for questions.** Blank issues stay disabled,
+  Discussions is contact link #1 in `.github/ISSUE_TEMPLATE/config.yml`, and `SUPPORT.md` routes
+  every question there while the three issue templates keep only structured reports. Both files
+  describe a **repository setting**; enabling it is now a numbered step in
+  `docs/GO-LIVE-RUNBOOK.md` step 1, because no test in this tree can turn a GitHub setting on and
+  the last defect here was exactly a docs-vs-settings disagreement.
 - **A chunk describes its OWN pages — `ChunkRecord.page_map` becomes `ChunkRecord.page_slice`
   and `PageIndexResolver` becomes STATELESS (`SCHEMA_VERSION` 18 → 19, BREAKING).** v18 kept the
   payload win (below) but bought it with a SHAPE defect: the whole document's `PageMap` rode ONE
@@ -584,9 +658,10 @@ unit. The entry is kept because the work below is the substantive history of the
 heading is not a version link, because there is nothing to link to.
 
 The licence in force at the time was Apache-2.0. The workspace was relicensed to
-**PolyForm Noncommercial 1.0.0** on 2026-07-29 — see the provenance record in
-[`LICENSE`](./LICENSE) — with a deliberately retained Apache-2.0 subset in `latence-retrieval`.
-Everything named below therefore ships under PolyForm today, whatever it said in July.
+**PolyForm Noncommercial 1.0.0** on 2026-07-29 (ADR-0055) and back to **Apache-2.0** on
+2026-08-15 (ADR-0063) — see the provenance record in [`NOTICE`](./NOTICE). Everything named
+below therefore carries the same licence today that it carried in July; the noncommercial
+interlude reached nobody, because nothing was ever published under it.
 
 ### Added
 

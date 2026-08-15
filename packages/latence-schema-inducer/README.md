@@ -76,6 +76,6 @@ machinery and every safety net.
 
 ## Licensing
 
-PolyForm Noncommercial 1.0.0 (framework code — the repository-wide licence). No model weights bundled — the model is a user-supplied
+Apache-2.0 (framework code — the repository-wide licence). No model weights bundled — the model is a user-supplied
 service. The `openai` client is Apache-2.0. Nothing is called unless a Pipeline
 configures this Provider (ADR-0016 thin-core / heavy-dep isolation).

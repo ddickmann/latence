@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M6 final block (ticket 17): dev-tune the composition policy, score test + enterprise, gate.
 
 Discipline (ticket 08): the ONE free parameter — the CoE budget share in the deployable

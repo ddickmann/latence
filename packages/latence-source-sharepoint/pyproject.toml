@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "SharePoint / OneDrive Source Provider (Microsoft Graph, zero third-party dependencies) for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "PolyForm-Noncommercial-1.0.0"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "data-pipeline", "sharepoint", "onedrive", "microsoft-graph", "connector"]
@@ -26,7 +26,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 # LICENSE DILIGENCE (ADR-0012, verified 2026-07-18).
-#   * This package's own CODE: PolyForm-Noncommercial-1.0.0 (the repo LICENSE). It ships NO model weights, so
+#   * This package's own CODE: Apache-2.0 (the repo LICENSE). It ships NO model weights, so
 #     there is no separate weights license to verify — the weights/code split is trivially
 #     satisfied for a pure-code connector.
 #   * Third-party runtime dependencies: NONE. The connector speaks Microsoft Graph's REST/JSON

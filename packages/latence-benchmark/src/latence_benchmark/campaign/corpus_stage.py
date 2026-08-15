@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Stage ``s1-corpus`` — acquire the 6+2 e2e-sota-run datasets behind the license gate.
 
 The order of operations is the point: the **license gate runs before any byte moves**

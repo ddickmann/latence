@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The gold-resolution rules, driven by a hand-written index (no corpus, no model)."""
 
 from __future__ import annotations

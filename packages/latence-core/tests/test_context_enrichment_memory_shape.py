@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The memory SHAPE of :meth:`ContextHeaderEnricher.enrich`, pinned structurally (no RSS).
 
 Why this file exists: the S3 campaign's UDA dataset (220 129 chunks / 2 603 887 EntityMentions /

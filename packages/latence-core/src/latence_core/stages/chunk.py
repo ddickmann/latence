@@ -72,10 +72,10 @@ class MarkdownChunker:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The offset-preserving Chunker is a pure-Python part of ``latence-core``
-        (PolyForm-Noncommercial-1.0.0, verified), ships no weights (``model_id=None``), is
+        (Apache-2.0, verified), ships no weights (``model_id=None``), is
         deterministic, CPU-only, and has no per-call cost. It processes a stream of documents
         (``batch=True``: it accepts an iterable and folds chunks per document).
         """
@@ -143,10 +143,10 @@ class SentenceWindowChunker:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The sentence-window Chunker is a pure-Python part of ``latence-core``
-        (PolyForm-Noncommercial-1.0.0, verified), ships no weights (``model_id=None``), is
+        (Apache-2.0, verified), ships no weights (``model_id=None``), is
         deterministic (greedy sentence packing), CPU-only, does not batch, and has no per-call cost.
         """
         return ProviderProfile(

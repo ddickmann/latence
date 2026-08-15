@@ -193,7 +193,7 @@ def test_parse_bakeoff_runs_all_candidates(tmp_path: Path) -> None:
         assert row.memory.declared_mb is not None
         assert row.memory.measured_mb > 0.0
         # license is READ off the declared profile. A pure-code CPU reference declares the
-        # REPO's own licence (PolyForm-Noncommercial-1.0.0 since 2026-07-29); a model- or
+        # REPO's own licence (Apache-2.0 since 2026-07-29); a model- or
         # library-bearing one declares that third party's permissive licence.
         assert row.license.spdx in {REPO_LICENSE_CODE, "Apache-2.0", "MIT"}
         assert row.license.verified is True

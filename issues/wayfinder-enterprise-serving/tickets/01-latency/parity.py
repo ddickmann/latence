@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Byte-identical parity over FULL real query sets: the ticket-01 gate.
 
 For every usable gold query of a dataset, each lane is executed through every code path and the

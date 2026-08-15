@@ -50,16 +50,16 @@ connector a plugin rather than a fork.
 
 | Provider | Package | Technique | License | Compute |
 | --- | --- | --- | --- | --- |
-| `source.sharepoint` | `latence-source-sharepoint` | SharePoint / OneDrive via Microsoft Graph; content-hash Delta skips unchanged documents **without downloading them**; secrets env-only | PolyForm-Noncommercial-1.0.0 (code), **no third-party dependency** | cpu |
+| `source.sharepoint` | `latence-source-sharepoint` | SharePoint / OneDrive via Microsoft Graph; content-hash Delta skips unchanged documents **without downloading them**; secrets env-only | Apache-2.0 (code), **no third-party dependency** | cpu |
 
 ## Parse
 
 | Provider | Package | Model / technique | License | Compute |
 | --- | --- | --- | --- | --- |
-| `parser.plaintext` | `latence-parser-plaintext` | Passthrough plain-text / markdown | PolyForm-Noncommercial-1.0.0 (code) | cpu |
-| `parser.document` | `latence-parser-document` | PDF + text → markdown + page map | PolyForm-Noncommercial-1.0.0 (code) | cpu |
+| `parser.plaintext` | `latence-parser-plaintext` | Passthrough plain-text / markdown | Apache-2.0 (code) | cpu |
+| `parser.document` | `latence-parser-document` | PDF + text → markdown + page map | Apache-2.0 (code) | cpu |
 | `parser.pdfplumber` | `latence-parser-pdfplumber` | Page-aware PDF text layer (pdfplumber) | MIT (code) | cpu |
-| `parser.render` | `latence-parser-render` | Universal any-file render → OCR, **license-clean (no PyMuPDF/AGPL)** | PolyForm-Noncommercial-1.0.0 (code) | either |
+| `parser.render` | `latence-parser-render` | Universal any-file render → OCR, **license-clean (no PyMuPDF/AGPL)** | Apache-2.0 (code) | either |
 | `parser.lighton` | `latence-parser-lighton` | `lightonai/LightOnOCR-1B-1025` (1B VLM OCR) | Apache-2.0 | gpu |
 | `parser.glm` | `latence-parser-glm` | `zai-org/GLM-OCR` (0.9B VLM OCR) | MIT | gpu |
 | `parser.lighton_vllm` | `latence-parser-lighton-vllm` | `lightonai/LightOnOCR-2-1B` served via vLLM | Apache-2.0 | either (endpoint) |
@@ -87,7 +87,7 @@ connector a plugin rather than a fork.
 
 | Provider | Package | Model / technique | License | Compute |
 | --- | --- | --- | --- | --- |
-| `disambiguation.embedding` | `latence-disambig-embedding` | Learned surface+context resolution (registry Embedder) | PolyForm-Noncommercial-1.0.0 (code) | either |
+| `disambiguation.embedding` | `latence-disambig-embedding` | Learned surface+context resolution (registry Embedder) | Apache-2.0 (code) | either |
 | `disambiguation.glinker` | `latence-disambig-glinker` | `knowledgator/gliner-linker-large-v1.0` neural linker + audited resolver | Apache-2.0 | gpu |
 
 ## Graph Completion & Schema Induction (optional Stages)
@@ -96,7 +96,7 @@ connector a plugin rather than a fork.
 | --- | --- | --- | --- | --- |
 | `graph_completion.ultra` | `latence-linkpred-ultra` | Inductive ULTRA (`ultra_3g`) zero-shot scorer + PyKEEN fallback | MIT | either |
 | `label_inducer.llm` | `latence-schema-inducer` | Any small OpenAI-compatible LLM induces each chunk's label schema (hosted, OpenRouter, or a LOCAL vLLM/Ollama box — `base_url` only) | Apache-2.0 (client) | either (endpoint) |
-| `label_inducer.lexicon` | `latence-schema-inducer` | Deterministic zero-network tagger over an operator-declared candidate type space — the non-frontier per-chunk option (no model, no calls) | PolyForm-Noncommercial-1.0.0 | cpu |
+| `label_inducer.lexicon` | `latence-schema-inducer` | Deterministic zero-network tagger over an operator-declared candidate type space — the non-frontier per-chunk option (no model, no calls) | Apache-2.0 | cpu |
 
 ## Embedders
 

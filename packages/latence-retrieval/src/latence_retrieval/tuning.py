@@ -1,15 +1,5 @@
 # Copyright (c) latence-framework contributors.
 # SPDX-License-Identifier: Apache-2.0
-#
-# DELIBERATE, BOUNDED EXCEPTION -- not a header nobody updated at the relicence. This
-# repository's outbound licence is PolyForm-Noncommercial-1.0.0 (root LICENSE); this module is
-# one of seven the copyright holder keeps under Apache-2.0 ON PURPOSE, so the query-time
-# retrieval primitives stay permissively reusable -- commercially included -- by anyone who
-# wants only them. The grant is his to make and safe to make: sole copyright holder, no
-# third-party and no copyleft code in this file. The exact set is authoritative in LICENSE,
-# section "SCOPE: THE RETAINED APACHE-2.0 MODULES", and pinned by
-# packages/latence-core/tests/test_publish_readiness.py, which fails the build if an eighth
-# file acquires the grant or one of the seven loses it.
 """Offline fusion tuning: evaluate a :class:`~latence_retrieval.fuser.Fuser`, sweep its weights.
 
 **Why this module exists (T-FUSE-1).** The audit found that

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Stage ``s3-pipeline`` — full-feature pipeline data generation on the pod, per dataset.
 
 The stage runs CLIENT-side (the ocr_stage pattern: the pod is a file server plus one

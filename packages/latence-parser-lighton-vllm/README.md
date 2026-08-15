@@ -93,7 +93,7 @@ real throughput needs a live rig (#64) — flagged, never fabricated.
 
 Recorded evidence-bearingly (H-B1), weights and code **separately**:
 
-* **code** — this framework code: **PolyForm Noncommercial 1.0.0** (the repository-wide licence); the `openai` client: **Apache-2.0**.
+* **code** — this framework code: **Apache-2.0** (the repository-wide licence); the `openai` client: **Apache-2.0**.
 * **weights** — `lightonai/LightOnOCR-2-1B`: **Apache-2.0**
   ([model card](https://huggingface.co/lightonai/LightOnOCR-2-1B)).
 

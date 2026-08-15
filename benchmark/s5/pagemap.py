@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Recover per-page character spans for the OCR'd datasets — the page gold mapping's foundation.
 
 **The problem.** ViDoSeek and OHR-Bench identify gold evidence by *page*, but the S3 export's

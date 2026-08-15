@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The harness's API: ``run(plan)``, the plan's layout, the probes' cell list, the refusals.
 
 Wave 5-K promoted ``run(plan) -> MatrixOutcome`` to THE entry and demoted argparse to an

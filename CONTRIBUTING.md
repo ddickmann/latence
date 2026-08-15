@@ -16,28 +16,52 @@ change can turn the suite red.
 **Every contribution requires a signed Contributor Licence Agreement (CLA) before it can be
 merged.** No exceptions, including for one-line fixes and documentation.
 
-**Why:** the project's licence reserves commercial rights to the owner, and the owner can
-only grant a commercial licence over code they hold sufficient rights in — so an inbound
-contribution has to arrive with an explicit grant, or it quietly makes those rights
-unenforceable for everyone.
+**Why:** the CLA was written for the licence the project carried between 2026-07-29 and
+2026-08-15 — PolyForm Noncommercial, where commercial rights were reserved to the owner and
+an inbound contribution had to arrive with an explicit grant or those rights became
+unenforceable. The project is now **Apache-2.0** (ADR-0063), whose §5 places every
+contribution under the same licence as the work, so a DCO would be sufficient and the CLA's
+original reason is gone.
 
-That is the whole reason. It is not a claim on your other work, it does not stop you using
-your own contribution however you like, and it is not a judgement about you. It is the
-mechanical consequence of the licence in [`LICENSE`](LICENSE).
+**Whether to replace it with a DCO is an open decision for the maintainer, recorded in
+ADR-0063.** Until he takes it, this requirement stands as written — a stated precondition
+that is quietly not enforced is worse than either alternative. What the CLA still buys is a
+recorded, explicit grant and the ability to relicense later without tracing contributors.
+
+It is not a claim on your other work, it does not stop you using your own contribution
+however you like, and it is not a judgement about you.
 
 Practically:
 
-- Open the pull request as normal. The CLA is handled as part of review; you do not need to
-  do anything up front beyond being able to sign it.
+- **The agreement is [`CLA.md`](CLA.md), at the repository root.** It is an Apache ICLA
+  derivative — about two pages, and its provenance section lists exactly what was changed
+  and why. This page states the *requirement*; `CLA.md` is the agreement and is the only
+  part of the two that grants anything.
+- **Sign it once, not per pull request.** Sign electronically, or fill in the block at the
+  end and email it to **ddickmann81@gmail.com** with the subject
+  `CLA: latence-framework`. The maintainer keeps a private record of who has signed.
+- **Open the pull request as normal.** You do not have to sign before you start work — but
+  no PR is merged until the signature is recorded, so send it early rather than at the end
+  of review.
 - You must have the right to grant what the CLA grants. If you wrote the change on an
   employer's time or equipment, your employer may own it — get that cleared first. Say so
-  in the PR if you are unsure; it is far cheaper to resolve before review than after.
+  in the PR if you are unsure; it is far cheaper to resolve before review than after. In
+  that case a **corporate** agreement, not this one, is usually what is needed, and there
+  is not one drafted yet — so raise it before you write the code, not after.
 - Contributions that cannot be covered by a CLA cannot be merged. They can still be
   valuable as a **bug report with a reproduction**, and that route is genuinely welcome —
   see the issue templates in [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/).
 
-> The CLA text is a legal document maintained separately from this page. This section states
-> the *requirement*; it is not itself the agreement and grants nothing.
+> `CLA.md` is a **draft that has not yet been reviewed by a lawyer**, and it says so at the
+> top. The review is already an open item on `RELEASE-GATES.md` Gate 3. Read the document
+> before you sign it; if something in it looks wrong to you, open an issue and say so —
+> that is a genuinely useful contribution.
+
+Administration is manual — one maintainer, an email, a written record. That is proportionate
+to the number of contributors this project has today. Moving to
+[cla-assistant](https://github.com/cla-assistant/cla-assistant) (a GitHub App: you comment to
+sign, the bot records it and sets a status check) is the intended next step once a second
+contributor makes the automation worth its own maintenance, not a promise with a date on it.
 
 If the CLA is a blocker for you and the change matters, open an issue and say so. Some
 changes can be re-implemented independently, which is a legitimate outcome.

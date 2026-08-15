@@ -43,11 +43,11 @@ _DEFAULT_FDE_BUCKETS = 8
 
 
 def _reference_profile(memory_mb: int) -> ProviderProfile:
-    """The shared descriptor for a pure-code, CPU, deterministic, PolyForm-Noncommercial-1.0.0
+    """The shared descriptor for a pure-code, CPU, deterministic, Apache-2.0
     reference generator.
 
     Every reference signal generator is a pure-Python part of ``latence-core``
-    (PolyForm-Noncommercial-1.0.0, verified per ADR-0012 — the package's own code, weights-and-code
+    (Apache-2.0, verified per ADR-0012 — the package's own code, weights-and-code
     trivially the same): it ships no model weights (``model_id=None``), is deterministic, CPU-only,
     does not batch, and has no per-call cost, so a bake-off / conformance run reads honest,
     non-fabricated columns off it (ADR-0036 §2).

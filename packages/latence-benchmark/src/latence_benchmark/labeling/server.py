@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Local labeling server — stdlib ``http.server`` on ``127.0.0.1``, JSON API + one page.
 
 No framework, no external assets, no new dependency: the whole interface is

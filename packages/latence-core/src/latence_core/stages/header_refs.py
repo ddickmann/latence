@@ -134,10 +134,10 @@ class HeaderReferenceExtractor:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         A regex header-reference extractor ships no model weights (``model_id=None``) and is a
-        pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified). Deterministic
+        pure-Python part of ``latence-core`` (Apache-2.0, verified). Deterministic
         (mentions/ relations emitted in chunk + header-line order), CPU-only, no batching, no per-
         call cost.
         """

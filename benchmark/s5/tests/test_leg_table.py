@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The LegSpec table: pinned against the dispatch logic it replaced, byte-order included.
 
 ``missing_inputs`` order is load-bearing — the cumulative, deduplicated file list appears

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Calibration mode: Hyperedge γ judgments for the isotonic-calibration sample (ticket 09).
 
 The ``latence calibrate`` harness (a post-M5 ticket) fits isotonic regression from ~200

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """``run_matrix.py`` — the S5 feature matrix: (dataset × leg) → one comparable table.
 
 **The API is :func:`run`, not the CLI.** ``run(plan) -> MatrixOutcome`` is the whole harness:

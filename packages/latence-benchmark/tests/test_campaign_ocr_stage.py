@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The s2-ocr stage, fully offline: fin cap, zip extraction, the transport seam.
 
 No ssh, no rsync, no GPU: the pod lives behind a scripted :class:`FakePod` transport and

@@ -95,11 +95,11 @@ class MuveraFdeConverter:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): a pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0 FDE.
+        Apache-2.0 FDE.
 
         MUVERA FDE is **data-oblivious and training-free** — it ships no model weights
         (``model_id=None``, ``license_weights=None``), so its license is trivially the package's own
-        verified PolyForm-Noncommercial-1.0.0 (this repo's ``LICENSE``); there is no separate
+        verified Apache-2.0 (this repo's ``LICENSE``); there is no separate
         weights license to defer (unlike ``sparse.splade`` / the ColBERT multi-vector encoder).
         Deterministic (seeded hyperplanes, rounded sums) and CPU-only; it does not batch and has no
         per-call vendor cost — so a bake-off / conformance run reads honest, non-fabricated columns

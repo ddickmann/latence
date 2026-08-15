@@ -145,7 +145,7 @@ dependency would make unverifiable.
 
 ## Licensing
 
-Framework code, **PolyForm Noncommercial 1.0.0** (the repository-wide licence). Ships **no weights and no model**, so there is no weights licence to
+Framework code, **Apache-2.0** (the repository-wide licence). Ships **no weights and no model**, so there is no weights licence to
 verify (ADR-0012 requires weights and code to be checked separately; here the weights side is empty).
 
 The reference *implementations* of the methods above were checked and **not adopted**: `kneed`

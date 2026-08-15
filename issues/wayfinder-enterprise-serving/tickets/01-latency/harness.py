@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Ticket-01 harness: per-lane latency profiling + byte-identical parity over real S5 exports.
 
 Read-only consumer of :mod:`benchmark.s5` (never modifies benchmark behavior): it loads the same

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Page-span reconstruction — byte-exact against the real S2 artifacts, or it does not ship."""
 
 from __future__ import annotations

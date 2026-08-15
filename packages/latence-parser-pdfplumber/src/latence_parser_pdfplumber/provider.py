@@ -126,7 +126,7 @@ class PdfPlumberParser(AdapterBase):
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, permissive (MIT).
 
         Ships no model weights (``model_id=None``): text-layer extraction is deterministic.
-        This Provider's own code is the repo's PolyForm-Noncommercial-1.0.0; its direct dep
+        This Provider's own code is the repo's Apache-2.0; its direct dep
         ``pdfplumber`` is **MIT** (``license_code="MIT"``), verified per ADR-0012 from the installed
         version's PyPI metadata (License classifier ``OSI Approved :: MIT License``) + the upstream
         GitHub LICENSE. **Honest dependency footprint (NOT pure-Python):** pdfplumber's install

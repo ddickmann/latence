@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The graph-as-rescue ARCHITECTURE **over this bench's engines**, pinned — not just its plumbing.
 
 The pipeline itself is the shipped :class:`latence_retrieval.rescue.GraphRescueRetrieval` and its

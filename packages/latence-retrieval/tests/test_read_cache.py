@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The file-identity-keyed read cache (the ADR-0056-amendment pattern, generalised).
 
 The lifetime policy is the point under test, because the pattern's first instance

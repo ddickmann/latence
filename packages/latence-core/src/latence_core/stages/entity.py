@@ -419,10 +419,10 @@ class GazetteerEntityExtractor:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         A gazetteer/regex extractor ships no model weights (``model_id=None``) and is a
-        pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified — the package's
+        pure-Python part of ``latence-core`` (Apache-2.0, verified — the package's
         own license, weights-and-code trivially the same code). Deterministic by construction
         (matches emitted in ``(char_start, label)`` order) and CPU-only; it does not batch (a per-
         chunk scan), and has no per-call cost.

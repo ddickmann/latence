@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """(Wave 1-A) Per-call latency of the SHIPPED parquet graph adapters, cached vs uncached.
 
 FINDINGS F1 measured: a production caller wiring ``GraphRetriever`` over the shipped

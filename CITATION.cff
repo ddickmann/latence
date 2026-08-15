@@ -11,11 +11,13 @@
 # same false claim CHANGELOG.md's 0.1.0 entry had to be corrected for. They go in when the
 # first tag is cut, per docs/RELEASING.md.
 #
-# NOTE ON `license`: the SPDX identifier is PolyForm-Noncommercial-1.0.0. It is expressed as
-# `license-url` rather than `license` because the CFF 1.2.0 schema validates `license`
-# against an SPDX enum frozen at schema-release time, and a value that enum does not carry
-# makes GitHub reject the whole file — which would lose the citation block over a spelling
-# technicality. The URL points at the authoritative text shipped in this repository.
+# NOTE ON `license`: the SPDX identifier is Apache-2.0 (ADR-0063, which supersedes the
+# PolyForm-Noncommercial-1.0.0 relicence of ADR-0055). It stays expressed as `license-url`
+# rather than `license`: the CFF 1.2.0 schema validates `license` against an SPDX enum frozen
+# at schema-release time, and the URL form points at the authoritative text shipped in this
+# repository, which is what a citing reader should resolve. `Apache-2.0` is in that enum, so
+# the `license` key would now validate — but the URL is the stronger claim (it cites the
+# file, not a label) and switching keys would gain nothing.
 cff-version: 1.2.0
 message: "If you use this framework, or the measurements and decisions published with it, please cite it as below."
 title: "Latence Framework: messy enterprise documents to AI-ready data"

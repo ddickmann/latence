@@ -45,7 +45,7 @@ fi
 
 case "$condition" in
   '${{ false'*)
-    echo "**PyPI publish gate: DISABLED at this ref.** \`pypi-publish\` is short-circuited by \`${condition}\` in the \`release.yml\` this run is executing, so it will be SKIPPED and nothing will reach PyPI — a green run here is NOT a publish. The enable must be merged to \`main\` BEFORE the tag is cut; committing it afterwards cannot affect an existing tag. See docs/GO-LIVE-RUNBOOK.md → Step 4."
+    echo "**PyPI publish gate: DISABLED at this ref.** \`pypi-publish\` is short-circuited by \`${condition}\` in the \`release.yml\` this run is executing, so it will be SKIPPED and nothing will reach PyPI — a green run here is NOT a publish. This is the DECIDED steady state, not a pending enable: ADR-0062 closed it (signed GitHub Releases only). If it is ever reversed, the enable must be merged to \`main\` BEFORE the tag is cut; committing it afterwards cannot affect an existing tag. See docs/GO-LIVE-RUNBOOK.md → Step 4."
     ;;
   *)
     echo "**PyPI publish gate: ENABLED at this ref.** \`pypi-publish\` is gated only by \`${condition}\`, so a non-dry run on this ref WILL upload to PyPI once the protected \`pypi\` environment is approved. PyPI uploads cannot be deleted, only yanked."

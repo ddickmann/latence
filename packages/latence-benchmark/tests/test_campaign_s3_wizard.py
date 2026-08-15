@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The s3 wizard block: defaults, contradictions, byte-determinism, backward compat."""
 
 from __future__ import annotations

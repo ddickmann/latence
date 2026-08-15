@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Stage ``s5-retrieval``: plan derivation, the probes, the gate, the no-fake-green floor.
 
 The harness itself is behind the :data:`~latence_benchmark.campaign.retrieval_stage.MatrixRunner`

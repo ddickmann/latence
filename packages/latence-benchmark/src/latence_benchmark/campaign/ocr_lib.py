@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Pure S2 OCR logic shared by the campaign stage and the pod-side worker.
 
 This module is **stdlib-only and flat-importable by design**: the s2-ocr stage pushes this

@@ -18,7 +18,7 @@
 #     -> Export (RAG corpus)   (export.jsonl_parquet: the redacted, chunked, embeddable corpus)
 #
 # This is what an adopter runs OUT OF THE BOX (ADR-0007 CPU-first): fully offline, licence-clean
-# (every Provider is this repo's own PolyForm-Noncommercial-1.0.0 code or MIT, verified), and
+# (every Provider is this repo's own Apache-2.0 code or MIT, verified), and
 # deterministic (a seeded run is byte-reproducible).
 # NO learned/endpoint Provider appears here — those live in stacks/gpu-sota.yaml.
 #

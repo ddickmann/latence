@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """``latence-label`` — the ticket-21 labeling harness CLI.
 
     latence-label gold      --export-dir <dir> --out gold.jsonl

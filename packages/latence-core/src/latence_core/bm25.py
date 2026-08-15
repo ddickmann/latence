@@ -70,11 +70,11 @@ _WORD = re.compile(r"[^\W_]+")
 
 
 def _reference_profile() -> ProviderProfile:
-    """The shared descriptor for a pure-code, CPU, deterministic, PolyForm-Noncommercial-1.0.0
+    """The shared descriptor for a pure-code, CPU, deterministic, Apache-2.0
     reference tokenizer.
 
     Each reference Tokenizer is a pure-Python part of ``latence-core``
-    (PolyForm-Noncommercial-1.0.0, verified per ADR-0012 — the package's own code, weights-and-code
+    (Apache-2.0, verified per ADR-0012 — the package's own code, weights-and-code
     trivially the same): no model weights (``model_id=None``), deterministic, CPU-only, no batching,
     no per-call cost — so a conformance / bake-off run reads honest, non-fabricated columns off it
     (ADR-0036 §2).

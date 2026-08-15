@@ -34,40 +34,37 @@ outside any employer.
 
 ## 2. What survives the maintainer: license & fork posture
 
-- **PolyForm Noncommercial License 1.0.0** (SPDX `PolyForm-Noncommercial-1.0.0`),
-  repository root `LICENSE`, with `NOTICE` and per-package
-  `license = "PolyForm-Noncommercial-1.0.0"` metadata on every publishable
-  distribution. Noncommercial use is free and needs nobody's permission: a
-  **noncommercial** fork does not need the maintainer's cooperation or continued
-  existence. **Commercial use requires a separate written agreement** with the
-  copyright holder ([`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md)) — and that agreement *does*
-  depend on the maintainer being reachable, which is the single largest continuity
-  risk on this page. Read §1 and §5 with that in mind.
-- **One deliberate permissive carve-out, and it is bounded.** Seven query-time retrieval
-  modules in `latence-retrieval` keep a file-level Apache-2.0 grant *on purpose*, so those
-  algorithms stay reusable — commercially included — by anyone, with no agreement and no
-  dependence on the maintainer being reachable. That is the one part of this repository the
-  continuity risk in the first bullet does not touch. The exact set is enumerated in
-  [`LICENSE`](../LICENSE), section *"SCOPE: THE RETAINED APACHE-2.0 MODULES"*, which is the
-  authoritative statement, and it is machine-pinned by
-  `packages/latence-core/tests/test_publish_readiness.py` so the boundary cannot widen or
-  narrow silently. It does **not** extend to the rest of the package those modules import
-  from. Recorded in [ADR-0055](adr/0055-relicence-to-polyform-noncommercial.md).
-- **Patent grant, and its limits.** PolyForm's *Patent License* section grants a
-  patent licence from **the licensor only** — not, as Apache-2.0 §3 would, from every
-  contributor — and only for the licence's *permitted purposes*, i.e. noncommercial
-  ones. A *Patent Defense* clause ends that licence immediately if you assert a patent
-  claim against the software. Procurement teams that require a broad, contributor-wide,
-  commercially-scoped patent grant will not find it here and should raise it as a term
-  of the commercial agreement.
-- **The grant is not irrevocable.** Unlike Apache-2.0, PolyForm's *Violations* section
-  ends all of your licences if a violation notified in writing is not cured within
-  32 days. A fork is durable only for as long as it stays inside the permitted purposes.
-- **A CLA is required, precisely because commercial rights are reserved.**
+- **Apache License 2.0** (SPDX `Apache-2.0`), repository root `LICENSE` — the canonical
+  text byte for byte — with `NOTICE` and per-package `license = "Apache-2.0"` metadata on
+  every publishable distribution. **Any** fork, commercial included, needs nobody's
+  permission and does not depend on the maintainer's cooperation or continued existence.
+  This is the single biggest change to this page's risk profile: the project carried
+  PolyForm Noncommercial from 2026-07-29 to 2026-08-15 (ADR-0055), under which the
+  commercial lane ran through one reachable person; [ADR-0063](adr/0063-relicence-to-apache-2-0.md)
+  relicensed back to Apache-2.0 and removed that dependency entirely. Read §1 and §5 with
+  that in mind — the bus factor still bites for *maintenance*, no longer for *rights*.
+- **No carve-outs, no exceptions.** Every file in the repository is Apache-2.0, and
+  `packages/latence-core/tests/test_publish_readiness.py` fails the build if any source
+  header, package manifest or licence document disagrees. (Under PolyForm, seven query-time
+  retrieval modules in `latence-retrieval` kept a file-level Apache-2.0 grant so those
+  algorithms stayed commercially reusable; that exception is dissolved, not withdrawn — what
+  it granted for seven files now holds for all of them.)
+- **The patent grant is broad and contributor-wide.** Apache-2.0 §3 grants a patent licence
+  from **every contributor**, for any purpose, terminating only if you initiate patent
+  litigation alleging the software infringes (§3's defensive-termination clause). This is
+  the clause enterprise legal reads after the identifier, and it is the reason ADR-0063
+  chose Apache-2.0 over MIT, which grants no patent licence at all.
+- **The grant is irrevocable.** Apache-2.0 §2 and §3 are perpetual and irrevocable, so a
+  fork is durable unconditionally. There is no cure-period clause that can end your rights,
+  and no field-of-use boundary anyone has to interpret.
+- **A CLA is currently required, though the reason it existed has gone.**
   `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement*
   requires a signed CLA on every contribution, including one-line and documentation
-  changes: the owner can only grant commercial licences over code they hold sufficient
-  rights in. This is a real concentration of rights in one person — it is the
+  changes. It was written for the PolyForm model, where the owner could only grant
+  commercial licences over code he held sufficient rights in; Apache-2.0 §5 makes every
+  contribution arrive on the Work's own terms, so a DCO would now suffice and whether to
+  switch is an open decision (ADR-0063). While it stands, it is a real concentration of
+  rights in one person — it is the
   deliberate trade for the commercial lane, not an oversight, and it is the opposite of
   the inbound-equals-outbound posture this section previously described.
 - **Permissive dependencies only.** `THIRD-PARTY-LICENSES.md` records every runtime
@@ -214,11 +211,17 @@ says so.
   `sha256sum -c SHA256SUMS`, then diff the asset directory against the manifest — because
   `sha256sum -c` checks only the files listed and would not notice an asset *added* to the
   published release.
-- **PyPI publication remains gated.** The `pypi-publish` job is written against **PyPI
-  Trusted Publishing (OIDC)** — no long-lived API token is ever stored — and is still
-  disabled behind a `false &&` short-circuit on its `if:` condition plus a protected `pypi`
-  GitHub Environment requiring a human
-  reviewer. Turning it on is a documented checklist in `docs/RELEASING.md`.
+- **PyPI publication is not enabled, and the decision is open.**
+  [ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)
+  closed it on the strength of the noncommercial licence — `pip install` is overwhelmingly a
+  corporate action and PolyForm did not licence commercial use. [ADR-0063](adr/0063-relicence-to-apache-2-0.md)
+  removed that licence, so the rationale is superseded and the decision is reopened pending the
+  maintainer's call. Today the signed GitHub Release remains the only channel.
+  The `pypi-publish` job is written against **PyPI Trusted Publishing (OIDC)** — no long-lived
+  API token is ever stored — and stays disabled behind a `false &&` short-circuit on its `if:`
+  condition plus a protected `pypi` GitHub Environment requiring a human reviewer, kept only so
+  a reversal (which would amend the ADR) stays cheap. What that means for you as an adopter:
+  the artifact you install comes from a Release URL or a clone, and it is signed.
 - **Verification by rebuild still works.** The lockfile is committed and the build is
   reproducible from source with `uv build --package <name>`; an adopter with a high
   assurance bar can still build from a tagged commit rather than trust any published
@@ -256,16 +259,16 @@ Regulation applies from 11 December 2027.
 
 **How this project sits relative to the CRA.**
 
-- **This classification changed on 2026-07-29 and is no longer a clean "outside a
-  commercial activity" case.** The previous text rested on the project being FOSS
-  released by an individual with "no monetisation attached to it". That premise ended
-  when the project relicensed to PolyForm Noncommercial and began offering commercial
-  licences ([`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md)). This is exactly the trigger the
-  bullet below reserves, and it is recorded here rather than left implicit.
-- **PolyForm Noncommercial is not an OSI-approved open-source licence** (it restricts
-  the field of use), so the CRA's FOSS-specific carve-outs cannot simply be assumed to
-  apply. Recital-level "free and open-source software" framing is not available to this
-  repository in the form it was before.
+- **This classification moved twice and is back where it started.** It rested on the
+  project being FOSS released by an individual with "no monetisation attached to it". That
+  premise ended on 2026-07-29 when the project relicensed to PolyForm Noncommercial and
+  began offering commercial licences, and was restored on 2026-08-15 by
+  [ADR-0063](adr/0063-relicence-to-apache-2-0.md): the licence is Apache-2.0, there is no
+  commercial licence to sell, and nothing is monetised. Recorded rather than left implicit,
+  because the intervening state is in the git history and a reader will find it.
+- **Apache-2.0 is an OSI-approved open-source licence**, so the CRA's FOSS-specific
+  carve-outs are available to this repository on the same footing as before the PolyForm
+  interlude. Under PolyForm they were not, because it restricts the field of use.
 - What has **not** changed, and still bears on the analysis: there is no legal person
   behind the project (§1), no hosted service, no phone-home, and no paid support
   contract or contractual response time (§4, §5.1). Charging for a commercial licence
@@ -298,7 +301,7 @@ you will be asked for:
 | Secure-by-default configuration | scheme allowlist denying `http`/`ftp`/`sftp` by default, two Screening checkpoints, universal redaction floor ([ADR-0044](adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)) |
 | Integrity & authenticity of the delivered artifact | keyless Sigstore signature over `SHA256SUMS` + the VERIFY.md instruction sheet, produced by `scripts/release-integrity.sh` (§5.4) |
 | Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `issues/gate/G1-RESULTS.md` |
-| Ability to remediate independently of the supplier | PolyForm Noncommercial's *Changes and New Works* licence + reproducible local gate (§2) — **for noncommercial use**; a commercial integrator needs the agreement in [`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md) to rely on this |
+| Ability to remediate independently of the supplier | Apache-2.0 §2's irrevocable right to prepare and distribute derivative works + reproducible local gate (§2) — for **any** use, commercial included, with no agreement and no dependence on the maintainer |
 
 **What it does not give you**, and you must cover yourself: automated dependency-CVE
 gating (§5.5), a supported-version lifetime with backports (§4), and any contractual
@@ -314,7 +317,7 @@ goes red — so this page cannot quietly become aspirational.
 
 | Claim | Artifact |
 | --- | --- |
-| PolyForm-Noncommercial-1.0.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md) |
+| Apache-2.0, personally owned | `LICENSE`, `NOTICE`, [`COMMERCIAL.md`](https://github.com/ddickmann/latence-framework/blob/main/COMMERCIAL.md), [ADR-0001](adr/0001-open-source-core-owned-personally.md), [ADR-0063](adr/0063-relicence-to-apache-2-0.md) |
 | Single maintainer, every path | `.github/CODEOWNERS` |
 | CLA required on every contribution | `CONTRIBUTING.md` → *Before you write code: the Contributor Licence Agreement* |
 | Docs-as-handover discipline | `CONTEXT.md`, [`docs/adr/`](adr/index.md), `CONTRIBUTING.md` → *ADR + CONTEXT discipline* |

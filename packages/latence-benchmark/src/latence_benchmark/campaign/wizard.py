@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The pure ``campaign.yaml`` generator behind ``latence-campaign init``.
 
 Mirrors the ``latence setup`` contract (W15/ADR-0041 house style): interactive prompts and

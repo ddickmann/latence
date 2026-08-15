@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The S5 result cell — ONE module owning every shape a ``<dataset>__<leg>.json`` file can take.
 
 Before this module, :mod:`benchmark.s5.run_matrix` wrote five undeclared payload shapes inline

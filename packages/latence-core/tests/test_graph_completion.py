@@ -366,7 +366,7 @@ def test_provider_predicted_edges_in_edge_id_order() -> None:
 
 
 def test_provider_profile_is_honest_cpu_deterministic() -> None:
-    """The declared ProviderProfile is pure-code, CPU, deterministic, PolyForm-Noncommercial-1.0.0, no model."""
+    """The declared ProviderProfile is pure-code, CPU, deterministic, Apache-2.0, no model."""
     profile = ReferenceGraphCompleter.profile()
     assert profile.compute == "cpu"
     assert profile.deterministic is True

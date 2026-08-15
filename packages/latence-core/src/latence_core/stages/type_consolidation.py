@@ -124,7 +124,7 @@ class CascadeTypeConsolidator:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         Ships no model weights (``model_id=None``) — the optional semantic rung *borrows* an
         Embedder Provider, which declares its own profile, so this Provider never claims a model
@@ -300,7 +300,7 @@ class ExactSurfaceTypeConsolidator(CascadeTypeConsolidator):
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, licensed
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
         """
         return ProviderProfile(
             compute="cpu",

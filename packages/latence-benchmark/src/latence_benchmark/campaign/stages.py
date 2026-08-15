@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The stage registry and the gated runner — supervise.sh's loop, importable and testable.
 
 Three supervise.sh rules survive the port unchanged:

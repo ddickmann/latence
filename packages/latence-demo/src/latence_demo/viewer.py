@@ -391,7 +391,7 @@ class DemoSiteExport:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The demo-site Export renders a standalone HTML KG viewer with a deterministic circular
         layout (dependency-free, no CDN/network). It ships no model weights (``model_id=None``),

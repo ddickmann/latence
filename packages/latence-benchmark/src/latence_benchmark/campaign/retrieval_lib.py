@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The wizard→component mapping for the ``retrieval:`` block: one home, one pinned claim.
 
 ``s3_lib.generate_pipeline_yaml`` is the model this follows: the wizard block is answers, and a

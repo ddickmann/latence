@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The denormalised KG-column read contract — one home (:class:`KgColumns`).
 
 The pipeline projects each chunk's 1-hop KG neighbourhood *onto the chunk itself* (ADR-0051):

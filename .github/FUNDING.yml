@@ -1,6 +1,7 @@
 # Funding / sponsorship links for the GitHub "Sponsor" button.
 #
-# This is a personally-owned, non-commercial OSS project (ADR-0001). No funding
+# This is a personally-owned OSS project (ADR-0001), not a commercial venture. It is
+# Apache-2.0 licensed (ADR-0063), so nothing here is sold. No funding
 # accounts are configured. Uncomment and fill in a platform below if that ever
 # changes — leave the rest commented.
 #

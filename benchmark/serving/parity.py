@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """``parity.py`` — Qdrant serving-path parity vs the brute-force bench reference (ticket 02).
 
 The question this answers, with live dependencies only: **"deployed with Qdrant, same recall?"**

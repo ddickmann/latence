@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M5 (ticket 16): chain assembly + structured emission (spec 3.4) and selection traces (3.5).
 
 The spec-M5 acceptance criteria: connected components over shared entities are the chains

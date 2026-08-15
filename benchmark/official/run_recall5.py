@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Ticket 08's remaining deliverable: paragraph-level recall@5 (HippoRAG-2 comparability).
 
 Left as an open note by ticket 17; the close-out audit flagged the demotion, so it is

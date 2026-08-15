@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Stateless query-time retrieval-quality tooling for the Latence framework: the Candidate contract, the RetrievalBackend seam, and the latence.retrieval component registry (candidate processors). Holds no index and runs no first-stage search (ADR-0048)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "PolyForm-Noncommercial-1.0.0"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "rag", "retrieval", "rerank", "fusion", "context-packing", "model-agnostic", "stateless"]
@@ -65,7 +65,7 @@ backend-qdrant = [
     "qdrant-client>=1.10",
 ]
 # sparse (#170): query-side sparse generation reusing the ADR-0053 index-time SPLADE composition.
-# `latence-splade` is the (PolyForm-Noncommercial-1.0.0) package that owns the composition — depending on it here (not
+# `latence-splade` is the (Apache-2.0) package that owns the composition — depending on it here (not
 # re-implementing it) keeps the query vector byte-identical to the emitted corpus signal. It pulls
 # `latence-core`, and only when a REAL model is wired the `transformers` stack; NO checkpoint is
 # pinned — a multilingual SPLADE model is config-selected and its weights+code license verified

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Chain-of-evidence selection (M4: spec 3.1–3.3 over M3's signals, ADR-0058 verified budget).
 
 The selection half of chain-of-evidence retrieval: given the

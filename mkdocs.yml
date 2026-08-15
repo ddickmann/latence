@@ -9,8 +9,8 @@ repo_name: ddickmann/latence-framework
 repo_url: https://github.com/ddickmann/latence-framework
 edit_uri: edit/main/docs/
 copyright: >-
-  PolyForm Noncommercial 1.0.0 licensed; commercial terms by agreement
-  (COMMERCIAL.md). Reference Providers ship permissive weights only
+  Apache-2.0 licensed; commercial use granted by the licence, no agreement
+  needed (COMMERCIAL.md). Reference Providers ship permissive weights only
   (ADR-0012); restricted-license models are opt-in.
 
 docs_dir: docs
@@ -239,7 +239,9 @@ nav:
           - 0002 — Clean-history monorepo: adr/0002-clean-monorepo-mined-from-private-repos.md
           - 0005 — v1 scope, the AI-ready-data spine: adr/0005-v1-scope-the-ai-ready-data-spine.md
           - 0015 — Python core, declarative YAML, Rust hot paths: adr/0015-python-core-declarative-yaml-rust-for-hot-paths.md
-          - 0055 — Relicence to PolyForm Noncommercial: adr/0055-relicence-to-polyform-noncommercial.md
+          - 0055 — Relicence to PolyForm Noncommercial (superseded by 0063): adr/0055-relicence-to-polyform-noncommercial.md
+          - "0062 — Distribution: signed GitHub Releases only, no PyPI (reopened by 0063)": adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md
+          - 0063 — Relicence to Apache-2.0: adr/0063-relicence-to-apache-2-0.md
       - The core seams:
           - 0003 — Stage library + pluggable Runners: adr/0003-stage-library-with-pluggable-runners.md
           - 0004 — Capability protocols + provider plugins: adr/0004-capability-protocols-with-provider-plugins.md
@@ -325,6 +327,7 @@ nav:
       # have to guess that the contribution rules, the changelog or the disclosure policy exist.
       - On GitHub:
           - How to contribute (+ the CLA requirement): https://github.com/ddickmann/latence-framework/blob/main/CONTRIBUTING.md
+          - Contributor Licence Agreement: https://github.com/ddickmann/latence-framework/blob/main/CLA.md
           - Changelog: https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md
           - Security & coordinated disclosure: https://github.com/ddickmann/latence-framework/blob/main/SECURITY.md
           - Getting help: https://github.com/ddickmann/latence-framework/blob/main/SUPPORT.md

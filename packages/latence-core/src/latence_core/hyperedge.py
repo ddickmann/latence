@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Hyperedge building: the m-ary retrieval unit emitted by Graph Assembly (ADR-0057).
 
 The pure engine behind the ``HYPEREDGE`` :class:`~latence_core.contracts.GraphScope`. It

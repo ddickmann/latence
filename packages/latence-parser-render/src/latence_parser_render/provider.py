@@ -195,7 +195,7 @@ class UniversalRenderParser(AdapterBase):
         dependencies are ALL permissive — pypdfium2 (Apache-2.0/BSD-3), Pillow (HPND), python-docx /
         openpyxl / python-pptx (MIT); LibreOffice, when used, is an EXTERNAL MPL-2.0 subprocess tool
         (not linked/vendored). NO AGPL anywhere (``fitz``/PyMuPDF is never imported — a test
-        enforces it). The headline/code license is this repo's PolyForm-Noncommercial-1.0.0 (the
+        enforces it). The headline/code license is this repo's Apache-2.0 (the
         Provider is code).
 
         ``deterministic=False``: page OCR is delegated to a VLM OCR Provider whose float decoding is

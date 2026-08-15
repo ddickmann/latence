@@ -5,17 +5,30 @@ Required Notice: Copyright 2026 Dennis Dickmann
 (https://github.com/ddickmann/latence-framework)
 
 This product includes software developed by Dennis Dickmann (latence.ai).
-Licensed under the PolyForm Noncommercial License 1.0.0 — SPDX identifier
-PolyForm-Noncommercial-1.0.0, reproduced verbatim in the LICENSE file.
-Noncommercial use is free under those terms. COMMERCIAL USE REQUIRES A SEPARATE
-WRITTEN AGREEMENT with the copyright holder; see COMMERCIAL.md.
+Licensed under the Apache License, Version 2.0 — SPDX identifier Apache-2.0,
+reproduced verbatim in the LICENSE file. Commercial use is granted by that
+licence; no separate agreement is required.
 
 PROVENANCE (not part of the licence terms): this repository carried an
-Apache-2.0 LICENSE internally from its first commit until 2026-07-29. It was
-never published — the GitHub repository has been private since creation, no
-distribution was ever published to PyPI, no release was ever cut, and every
-commit is authored by the sole copyright holder. The full verified record is at
-the top of the LICENSE file.
+Apache-2.0 LICENSE from its first commit until 2026-07-29, was relicensed to
+PolyForm Noncommercial 1.0.0 on that date (ADR-0055), and was relicensed back to
+Apache-2.0 on 2026-08-15 (ADR-0063, which supersedes ADR-0055). Neither change
+reached anyone, because the software was never published under either: the
+GitHub repository has been private since creation, no
+distribution was ever published to PyPI, no release was ever cut, no version tag
+exists, every commit is authored by the sole copyright holder, and no contributor
+licence agreement has ever been signed. So no one holds a grant under either
+superseded state, and Apache-2.0 is the only licence this software has ever been
+distributed under. The reasoning is in
+docs/adr/0063-relicence-to-apache-2-0.md; the LICENSE file itself is the
+canonical Apache-2.0 text and nothing else, so that scanners match it byte for
+byte.
+
+Under Apache-2.0 this project's inbound and outbound terms are the same, and
+commercial use — including use inside a for-profit company, in a product, or as
+a hosted service — needs no permission and no agreement from the copyright
+holder. COMMERCIAL.md exists only to say so to readers arriving from the
+superseded PolyForm-era pages.
 
 That licence covers the Latence Framework's own code and nothing else. The
 third-party software, model weights and datasets listed below and in

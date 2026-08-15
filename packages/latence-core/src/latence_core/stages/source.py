@@ -75,10 +75,10 @@ class LocalFolderSource:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The local-folder Source is a pure-Python part of ``latence-core``
-        (PolyForm-Noncommercial-1.0.0, verified — the package's own code, weights-and-code trivially
+        (Apache-2.0, verified — the package's own code, weights-and-code trivially
         the same), ships no model weights (``model_id=None``), is deterministic (files are read in
         sorted order with content-addressed ids), CPU-only, does not batch, and has no per-call
         cost.

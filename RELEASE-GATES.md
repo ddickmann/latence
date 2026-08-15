@@ -60,33 +60,36 @@ stated method is worse than a missing one, because it looks checked.
 ## Gate 3 — Licence coherence
 
 - [ ] `LICENSE` is the intended licence, reproduced verbatim from its canonical source
-- [ ] `COMMERCIAL.md` states how commercial terms are obtained
+- [ ] `COMMERCIAL.md` states the licence's commercial position accurately (post-ADR-0063: granted
+      outright, no agreement) and leaves no dangling inbound link
 - [x] **All 33 `packages/*/pyproject.toml`** declare the same SPDX identifier. Met, and it stays met
       without anyone re-reading this line: `test_public_release_gate.py`'s
       `test_release_the_licence_is_declared_consistently_across_every_package` fails the release
       check on any divergent package, and it has a negative control proving the check still fires.
       Verified by hand at the time of ticking —
       `grep -h "^license = " packages/*/pyproject.toml | sort | uniq -c` → `33
-      license = "PolyForm-Noncommercial-1.0.0"`
+      license = "Apache-2.0"` (re-verified after the ADR-0063 relicence back to Apache-2.0)
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
 - [ ] `CONTRIBUTING.md` states the CLA requirement
-- [ ] **The benchmark corpus's own licence flags are coherent.**
-      `latence_benchmark/redaction_suite.py` declares the synthetic PII corpus
-      `dataset_license="Apache-2.0", code_license="Apache-2.0", commercial_use=True`, and those
-      values render into `docs/BENCHMARKS.md`. Deferred deliberately, because it is not a mechanical
-      swap: setting PolyForm while leaving `commercial_use=True` states two contradictory things,
-      and setting `commercial_use=False` gates the project's OWN corpus behind
-      `--accept-non-commercial` in `licensing.require_usable`. **Owner decision, not a docstring.**
-- [ ] **`latence-splade`'s `license_code` resolved.** Its prose says "the package code and the
-      `transformers` library are Apache-2.0". The `transformers` half is true; the package-code half
-      is not, post-relicence. `ProviderProfile.license_code` is single-valued, so which claim it
-      carries is a semantics decision. Pinned by `test_splade_embedder.py:309`.
-- [ ] **Legal review completed** — the licence choice, the LGPL interaction, any prior PyPI
-      publication, the CLA text, and the **deliberately retained Apache-2.0 subset** in
-      `latence-retrieval` (7 modules keep an outbound Apache grant by decision, not oversight; a
-      scanner will flag the mismatch against the PolyForm package metadata, so the exception must be
-      one the reviewer has actually seen). This gate is not satisfiable by an automated check.
+- [x] **The benchmark corpus's own licence flags are coherent.** Met by ADR-0063, which dissolved
+      the contradiction rather than resolving it: `latence_benchmark/redaction_suite.py` declares the
+      synthetic PII corpus `dataset_license="Apache-2.0", code_license="Apache-2.0",
+      commercial_use=True`, and with the repository back on Apache-2.0 all three are true together.
+      Under PolyForm this was deferred because no combination was honest — PolyForm with
+      `commercial_use=True` stated two contradictory things, and `commercial_use=False` would have
+      gated the project's OWN corpus behind `--accept-non-commercial`.
+- [x] **`latence-splade`'s `license_code` resolved.** Same dissolution: its prose says "the package
+      code and the `transformers` library are Apache-2.0", and post-ADR-0063 both halves are true, so
+      the single-valued `ProviderProfile.license_code` has one correct value. Pinned by
+      `test_splade_embedder.py:309`. (Its *weights* — `naver/splade-v3`, CC-BY-NC-SA-4.0 — are
+      unaffected and stay behind `--accept-noncommercial-license`.)
+- [ ] **Legal review completed** — the LGPL interaction, any prior PyPI publication, and the
+      contributor position (whether to keep `CLA.md` or move to a DCO, now that Apache-2.0's
+      inbound=outbound removes the reason the CLA was written — ADR-0063). The licence *choice* no
+      longer needs review in itself: Apache-2.0 is reproduced verbatim and digest-pinned, and the
+      retained-Apache-subset exception a reviewer would have had to see is gone with the
+      noncommercial model that needed it. This gate is not satisfiable by an automated check.
 
 ## Gate 4 — Documentation truthfulness
 

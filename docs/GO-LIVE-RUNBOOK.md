@@ -72,11 +72,14 @@ Those tests are the reason this runbook can be short.
       squashed history. Do the same audit for any other maintainer-local note.
       *Back the file up outside the repo before merging #189 — the commit deletes it from
       your working tree.*
-- [ ] **The `latence-*` names must be available on PyPI.** All 32 distributions are named
-      `latence-core`, `latence-parser-*`, … If any name is taken, the publish 403s
-      mid-way and you end up with a partially released set. Check every name first:
+- [x] **PyPI is not part of go-live.** [ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)
+      closed it under the PolyForm licence; [ADR-0063](adr/0063-relicence-to-apache-2-0.md)
+      superseded that rationale and reopened the decision, but nothing is enabled and the
+      `pypi-publish` job stays short-circuited — so distribution at go-live is still the signed
+      GitHub Release and only that, no `latence-*` name has to be available, and nothing here
+      blocks step 1. If the decision is ever taken the other way (new ADR first), the name check is
       `for p in packages/*/; do n=$(basename "$p"); curl -s -o /dev/null -w "%{http_code} $n\n" "https://pypi.org/pypi/$n/json"; done`
-      — a `404` means available. See `RELEASING.md` → *Open decisions*.
+      — a `404` means available — and the rest of the mechanics are in step 4.
 - [ ] **Intra-package dependencies are unpinned.** Each provider package depends on a bare
       `latence-core` with no version floor. That is correct inside the uv workspace but
       means a published `latence-ner-gliner` will accept *any* `latence-core`. Decide
@@ -96,6 +99,12 @@ Those tests are the reason this runbook can be short.
      do this step *before* the release).
    - **Settings → Security → Private vulnerability reporting**: enable it — `SECURITY.md`
      directs reporters to GitHub Security Advisories, so that path must exist.
+   - **Settings → General → Features → Discussions**: enable it. This is not optional
+     housekeeping — Discussions is the decided front door for questions, so
+     `.github/ISSUE_TEMPLATE/config.yml` lists it as contact link #1 and `SUPPORT.md` routes
+     every question to it. Leaving the setting off ships two files pointing at a `/discussions`
+     tab that 404s — the exact defect those files were fixed for once already. No test can
+     catch this; it is a repository setting, and only the owner can flip it.
    - Confirm the OpenSSF Scorecard workflow (`.github/workflows/scorecard.yml`) and CodeQL
      both run; they are no-ops or restricted on private repos.
 
@@ -112,7 +121,7 @@ to `main`. It has never deployed while the repo was private.
 3. **Check:** the site is live and its navigation reaches the pages an evaluator needs —
    [Continuity & security process](CONTINUITY.md), [Throughput envelopes
    (measured)](perf-results.md), [Public benchmark results](BENCHMARKS.md), the
-   [Decision Log](adr/index.md) (all 60 ADRs), [Deploy](deployment.md),
+   [Decision Log](adr/index.md) (all 62 ADRs), [Deploy](deployment.md),
    [Observability](observability.md) and [Secrets](secrets.md).
 4. If a custom domain is used, set it in **Settings → Pages** and add the `CNAME`; then
    re-run the workflow so the deployed artifact carries it.
@@ -121,11 +130,15 @@ to `main`. It has never deployed while the repo was private.
 
 This is the flow from #178. It is already automated on a tag — you only push the tag.
 
-!!! warning "Decide about PyPI before you push the tag"
-    The tag you push freezes the workflow definition that every run for that tag will use.
-    If v0.1.0 is meant to reach PyPI, do [step 4](#step-4--publish-to-pypi) items 1–4 —
-    including the `pypi-publish` enable — **first**. Enabling afterwards cannot publish this
-    tag, and the only way back is re-cutting it, which invalidates the signed assets below.
+!!! note "PyPI is not enabled (and the decision is open)"
+    [ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)
+    closed this under the noncommercial licence; that rationale is superseded by
+    [ADR-0063](adr/0063-relicence-to-apache-2-0.md) and the decision is reopened. Either way
+    the signed GitHub Release is the distribution channel today, `pypi-publish` stays
+    short-circuited, and the tag flow below is unaffected. The ordering trap is only live if
+    the decision is ever taken the other way: the tag you push freezes the workflow definition
+    every run for that tag will use, so the enable would have to be merged **before** the tag —
+    see [step 4](#step-4--publish-to-pypi-closed-not-part-of-go-live).
 
 ```bash
 # 1. Rehearse LOCALLY — build + SBOM + SHA256SUMS + VERIFY.md, everything except the
@@ -158,7 +171,16 @@ bundle is missing.
 contains nothing but the downloads. If `sigstore verify` fails, the release is not
 trustworthy — delete it and investigate before going further.
 
-## Step 4 — publish to PyPI
+## Step 4 — publish to PyPI (CLOSED, not part of go-live)
+
+!!! danger "Do not do this step"
+    [ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md)
+    closed it, on the ground that `pip install` is overwhelmingly a corporate action and
+    PolyForm Noncommercial did not licence commercial use. That ground is gone —
+    [ADR-0063](adr/0063-relicence-to-apache-2-0.md) relicensed the project to Apache-2.0 — so
+    the decision is **reopened, not reversed**: it has not been retaken, the job is still
+    disabled, and go-live runs step 1 → 2 → 3 → 5 and skips this one. Everything below is kept
+    as the **enable procedure** — record the decision in a new ADR first, then follow it.
 
 The distributions you publish must be **the ones the release signed**, not a fresh local
 build.
@@ -232,8 +254,8 @@ resolves.
 
 - Repository **About**: description, the docs-site URL as Website, and topics
   (`ai-ready-data`, `knowledge-graph`, `rag`, `nlp`, `data-pipeline`, `model-agnostic`).
-- Pin the release. Enable Discussions if you want a support channel that is not the issue
-  tracker.
+- Pin the release. Confirm the Discussions tab enabled in step 1 is actually there before the
+  announcement sends readers at `SUPPORT.md`'s first row.
 - Announcement copy must survive a hostile reader. Say what is measured, not what is
   hoped: the framework is **built and G1-passed, not 1.0**; performance-at-scale and
   deeper structural file validation are open Phase-2 items; two Runners ship (local +

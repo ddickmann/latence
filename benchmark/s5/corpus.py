@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The loaded S3 export: chunk rows, the dense matrix, the KG indices — and the gold ChunkIndex.
 
 One :class:`Export` per dataset, built once per run and shared by every leg, because the legs

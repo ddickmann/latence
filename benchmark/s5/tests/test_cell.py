@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The result-cell schema module: every shape's bytes pinned against the pre-module literals.
 
 The cells are the campaign's oracle surface, so these tests assert *serialised bytes*, not just

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The Hyperedge sidecar's point-lookup KV: derived, rebuildable, read per call (ADR-0056).
 
 ADR-0056 measured the online read path: point lookups are flat in corpus size (~0.5 ms for a

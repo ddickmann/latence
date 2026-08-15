@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Stage ``s5-retrieval`` — the retrieval feature matrix, as a campaign stage.
 
 The S5 harness (``benchmark/s5/``) already honoured every rule this campaign is built on:

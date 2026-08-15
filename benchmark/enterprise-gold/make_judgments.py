@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Emit the Hyperedge γ-calibration judgment set for the enterprise-gold run (ticket 09/21).
 
 Reads the exported Hyperedge + node sidecars, joins ``entity_node_ids`` to canonical

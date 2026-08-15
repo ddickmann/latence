@@ -219,20 +219,40 @@ jobs:
           files: release-assets/*
 
   # ----------------------------------------------------------------------------------
-  # PyPI Trusted Publishing (OIDC) — SCAFFOLDED, DISABLED.
+  # PyPI Trusted Publishing (OIDC) — SCAFFOLDED, DISABLED. THE DECISION IS *OPEN*: NOTHING IS
+  # PUBLISHED TO PyPI TODAY, AND NOBODY HAS DECIDED THAT IT SHOULD BE.
+  # See docs/adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md
+  # and docs/adr/0063-relicence-to-apache-2-0.md.
   #
   # This job is intentionally NOT active: the leading `false &&` in its `if:` short-circuits
-  # it on every run so a tag push can never auto-publish to PyPI. It respects the
-  # maintainer-manual-publish policy: releasing to PyPI stays a deliberate, human-gated act.
+  # it on every run so a tag push can never auto-publish to PyPI. The distribution channel is
+  # the signed GitHub Release above (wheels + sdists + SBOM + SHA256SUMS + Sigstore bundle).
   #
-  # ENABLE CHECKLIST (do all four; step 4 is the only edit that changes behaviour):
+  # HISTORY, because the reason changed and the state did not. ADR-0062 CLOSED this: `pip
+  # install` is overwhelmingly a corporate action, PolyForm-Noncommercial did not licence
+  # commercial use, and corporate SCA scanners hard-block the `PolyForm-Noncommercial-1.0.0`
+  # SPDX identifier — so publishing would have put the artifact in a channel whose majority
+  # consumer was, by the licence's own terms, unlicensed. ADR-0063 then relicensed the project
+  # to Apache-2.0, which makes every one of those premises false (licensed consumers, no
+  # scanner block, no retained-subset invisibility) and meets ADR-0062's own revisit condition.
+  #
+  # So ADR-0062's RATIONALE IS SUPERSEDED AND ITS DECISION IS REOPENED — but it has NOT been
+  # reversed, and this job must NOT be enabled as a side effect of the relicence. Whether to
+  # publish is a distribution question (name claims, cadence, support expectations, an
+  # irreversible first upload) that ADR-0063 deliberately did not answer. It waits for the
+  # maintainer, and for a new ADR.
+  #
+  # The scaffolding below is KEPT ON PURPOSE so that enabling stays cheap. Do not delete it.
+  #
+  # IF THE DECISION IS TAKEN THE OTHER WAY (record it in a new ADR first; step 4 is the only
+  # edit that changes behaviour):
   #   1. On PyPI, create each distribution project (latence-core, latence-parser-*, …) and
   #      add a Trusted Publisher: owner=ddickmann, repo=latence-framework,
   #      workflow=release.yml, environment=pypi. (No API token is ever stored — OIDC only.)
   #   2. In repo Settings → Environments, create a `pypi` environment and add the
   #      maintainers as Required reviewers so each publish waits for a manual approval.
-  #   3. Decide the brand/namespace first (see docs/RELEASING.md → "Open decisions"): the
-  #      `latence-*` names must be available/owned on PyPI, or the publish 403s.
+  #   3. Claim the namespace: the `latence-*` names must be available/owned on PyPI, or the
+  #      publish 403s (see docs/RELEASING.md → "Publishing to PyPI").
   #   4. Remove the `false &&` from the `if:` on `pypi-publish` below (keep the `dry_run`
   #      clause), and MERGE THAT TO `main` BEFORE THE TAG IS CUT. The `id-token: write`
   #      permission + the pinned pypa/gh-action-pypi-publish action then do a tokenless OIDC
@@ -248,9 +268,10 @@ jobs:
   #      Already tagged? See docs/GO-LIVE-RUNBOOK.md → Step 4 for the two recovery options.
   # ----------------------------------------------------------------------------------
   pypi-publish:
-    name: Publish to PyPI (Trusted Publishing — DISABLED)
-    # <<< remove the `false &&` to enable; see the ENABLE CHECKLIST above. The dry_run clause
-    # stays either way, so a rehearsal can never reach PyPI.
+    name: Publish to PyPI (Trusted Publishing — DISABLED by ADR-0062)
+    # <<< the `false &&` stays: ADR-0062 closed this — no PyPI. Removing it requires amending
+    # that ADR first; see the reversal checklist above. The dry_run clause stays either way,
+    # so a rehearsal can never reach PyPI.
     if: ${{ false && github.event.inputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     # Gated on release-integrity, not build: nothing leaves this workflow before the SBOM is

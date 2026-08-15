@@ -45,7 +45,7 @@ so it never aborts the other documents' work); a well-formed non-JSON body still
 yields no relations for that document, exactly as before. ``max_concurrency=1`` is
 byte-identical to the pre-W6 sequential behaviour.
 
-Licensing: this Provider is framework code (PolyForm-Noncommercial-1.0.0) and calls a user-supplied
+Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied
 endpoint; it bundles no model weights. The ``openai`` client is Apache-2.0 (code).
 No key or endpoint is embedded — both come from config/environment.
 
@@ -163,7 +163,7 @@ class LLMRelationExtractor:
         needs a live rig (#64); conformance verifies it against a stub. ``model_id=None``:
         ships no weights — the served model id is config-supplied (default ``gpt-4o-mini`` is a
         served-model id, not a bundled checkpoint). License is framework code
-        (PolyForm-Noncommercial-1.0.0, verified; the ``openai`` client is Apache-2.0).
+        (Apache-2.0, verified; the ``openai`` client is Apache-2.0).
         ``deterministic=False`` (a served LLM is not byte-identical). ``cost_per_1k=None``: an LLM's
         per-call cost is vendor- and model-specific and changes over time, so a number is left
         undeclared rather than fabricated — the bake-off reads the honest gap, not a stale price.

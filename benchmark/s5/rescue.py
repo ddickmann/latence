@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The S5b graph-rescue family, as this bench wires the SHIPPED component to its own engines.
 
 The architecture — base ``dense+bm25`` RRF (those two only, max-normalised), an ``Expander``

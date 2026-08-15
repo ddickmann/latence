@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Gold→chunk resolution: the single biggest correctness risk in the S5 harness, isolated.
 
 Every dataset in the S5 matrix names its gold evidence differently — 2Wiki by

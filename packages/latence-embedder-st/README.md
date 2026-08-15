@@ -78,7 +78,7 @@ fabricated number).
 
 ## Licensing
 
-Framework code is **PolyForm Noncommercial 1.0.0** (the repository-wide licence); the `sentence-transformers` / `transformers` library is **Apache-2.0** (code,
+Framework code is **Apache-2.0** (the repository-wide licence); the `sentence-transformers` / `transformers` library is **Apache-2.0** (code,
 verified). Both Granite r2 checkpoints are **Apache-2.0** (weights; card tag `license: apache-2.0`,
 verified 2026-07-14), as is the ModernBERT backbone. Both permissive; nothing downloads unless a
 Pipeline configures this Provider (ADR-0012/0045).

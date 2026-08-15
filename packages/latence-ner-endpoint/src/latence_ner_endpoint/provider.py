@@ -29,7 +29,7 @@ fails fast). Retries absorbed land on ``endpoint_retries`` for the Quality Repor
 span (out of range, or text that does not match the chunk) is dropped, so a bad model reply never
 yields an un-resolvable record.
 
-Licensing: framework code (PolyForm-Noncommercial-1.0.0); bundles no weights (calls a user-supplied
+Licensing: framework code (Apache-2.0); bundles no weights (calls a user-supplied
 endpoint). The ``openai`` client is Apache-2.0 (code). The client import is deferred to first use.
 """
 
@@ -96,7 +96,7 @@ class EndpointEntityExtractor:
         required); the served NER model lives behind the endpoint, so the device seam does not
         skip it on a CPU-only host. Real quality/throughput needs a live rig (#64); conformance
         verifies it against a stub. ``model_id=None``: ships no weights (the served model id is
-        config-supplied). License is framework code (PolyForm-Noncommercial-1.0.0, verified; the
+        config-supplied). License is framework code (Apache-2.0, verified; the
         ``openai`` client is Apache-2.0). ``deterministic=False`` (a served model is not byte-
         identical); ``cost_per_1k=None`` (deployment/vendor-specific, not fabricated).
         """

@@ -13,7 +13,7 @@ fails fast). Retries absorbed land on ``endpoint_retries`` for the Quality Repor
 embedded in input order (the Embedder contract) with a configurable batch size so a long corpus is
 sent in bounded requests.
 
-Licensing: framework code (PolyForm-Noncommercial-1.0.0); bundles no weights (calls a user-supplied
+Licensing: framework code (Apache-2.0); bundles no weights (calls a user-supplied
 endpoint). The ``openai`` client is Apache-2.0 (code). The client import is deferred to first use.
 """
 
@@ -64,7 +64,7 @@ class EndpointEmbedder:
         not skip it on a CPU-only host. Real quality/throughput needs a live rig (#64);
         conformance verifies it against a stub. ``model_id=None``: this package ships no weights
         (the served model id, default ``multilingual-e5-large`` — MIT — is config-supplied, not a
-        bundled checkpoint). License is framework code (PolyForm-Noncommercial-1.0.0, verified; the
+        bundled checkpoint). License is framework code (Apache-2.0, verified; the
         ``openai`` ``openai`` client is Apache-2.0). ``deterministic=False`` (a served model is not
         guaranteed byte-identical); ``cost_per_1k=None`` (deployment/vendor-specific, not
         fabricated).

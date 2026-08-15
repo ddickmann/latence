@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Learned graph-completion Provider (graph_completion.ultra) — inductive ULTRA zero-shot scorer + PyKEEN fallback on the GraphCompleter seam for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "PolyForm-Noncommercial-1.0.0"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "link-prediction", "graph-completion", "ultra", "pykeen", "inductive", "zero-shot", "data-pipeline", "model-agnostic"]
@@ -27,7 +27,7 @@ classifiers = [
 # Heavy deps stay OUT of latence-core (ADR-0016). The learned link-prediction stack (torch +
 # torch-geometric + torch-scatter for the vendored MIT ULTRA inference subset; easydict for its
 # EasyDict config; pykeen for the graceful fallback scorer) ships with THIS Provider package, not
-# the thin core. The framework code (this package + latence-core) is PolyForm-Noncommercial-1.0.0; the vendored
+# the thin core. The framework code (this package + latence-core) is Apache-2.0; the vendored
 # ULTRA inference subset is MIT (MilaGraph, cited in NOTICE / THIRD-PARTY-LICENSES) and PyKEEN is
 # MIT — weights AND code verified permissive (ADR-0012, 2026-07-09). No model WEIGHTS are vendored:
 # the ULTRA checkpoint is a config path (default ``ultra_3g``), documented, downloaded only when a

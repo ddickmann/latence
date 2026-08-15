@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """``build_vectors`` — schema match against a real S3 export, resumability, idempotence.
 
 The heavy part (a 1.2 GB Granite checkpoint) is injected as an ``embedder_factory``, so these tests

@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Run the enterprise-gold pipeline through the real ``LocalRunner`` (ticket 21, part D).
 
     PYTHONHASHSEED=0 uv run python benchmark/enterprise-gold/run_pipeline.py

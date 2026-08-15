@@ -33,6 +33,6 @@ graceful-degradation contract as the CPU reference, so output is identical modul
 
 ## Licensing
 
-Framework code, PolyForm Noncommercial 1.0.0 (the repository-wide licence). Bundles **no** model weights — it calls a user-supplied endpoint. The
+Framework code, Apache-2.0 (the repository-wide licence). Bundles **no** model weights — it calls a user-supplied endpoint. The
 `openai` client is Apache-2.0 (code). Nothing is downloaded or called unless a Pipeline configures
 this Provider.

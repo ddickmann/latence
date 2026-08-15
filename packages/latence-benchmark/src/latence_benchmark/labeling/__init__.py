@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """The ticket-21 labeling harness — manual gold set + Hyperedge γ calibration labels.
 
 One labeling workflow, two artifacts (tickets 08/09/21):

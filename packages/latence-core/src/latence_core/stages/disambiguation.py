@@ -106,10 +106,10 @@ class CascadeDisambiguator:
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The cascade Disambiguator is the ported 5-strategy resolver + Union-Find merge.
-        A pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified per ADR-0012
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012
         — the package's own code, weights-and-code trivially the same), it ships no model weights
         (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call cost,
         so a bake-off/conformance run reads honest, non-fabricated columns off it.
@@ -405,10 +405,10 @@ class ExactSurfaceDisambiguator(CascadeDisambiguator):
     @classmethod
     def profile(cls) -> ProviderProfile:
         """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic,
-        PolyForm-Noncommercial-1.0.0.
+        Apache-2.0.
 
         The exact-surface Disambiguator blocks on normalized surface (no fuzzy cascade).
-        A pure-Python part of ``latence-core`` (PolyForm-Noncommercial-1.0.0, verified per ADR-0012
+        A pure-Python part of ``latence-core`` (Apache-2.0, verified per ADR-0012
         — the package's own code, weights-and-code trivially the same), it ships no model weights
         (``model_id=None``), is deterministic, CPU-only, does not batch, and has no per-call cost,
         so a bake-off/conformance run reads honest, non-fabricated columns off it.

@@ -1,6 +1,20 @@
 # Relicence to PolyForm Noncommercial — free for research, commercial by agreement
 
-**Status: accepted (2026-07-29).** The project's outbound licence is
+!!! warning "Superseded by [ADR-0063](0063-relicence-to-apache-2-0.md) (2026-08-15)"
+    **This decision is no longer in force.** The project's outbound licence is
+    **Apache-2.0**, not PolyForm Noncommercial 1.0.0. Nothing on this page describes the
+    current state of the repository: there is no commercial agreement to obtain, no
+    retained-Apache-2.0 subset (the whole tree is Apache-2.0), and no noncommercial
+    boundary to interpret.
+
+    The record is kept verbatim because it is a dated record of a decision that was
+    really made, and because ADR-0063 argues against the reasoning below — which a reader
+    can only weigh if the reasoning is still here. The relicence to PolyForm was never
+    published: no release, no tag, nothing on PyPI, so no one ever held a grant under it.
+    See `NOTICE` § *PROVENANCE*.
+
+**Status: superseded (2026-08-15) by [ADR-0063](0063-relicence-to-apache-2-0.md); accepted
+2026-07-29.** The project's outbound licence was
 **PolyForm Noncommercial License 1.0.0** (SPDX `PolyForm-Noncommercial-1.0.0`), replacing
 Apache-2.0. **Supersedes** the publication licence recorded in
 [ADR-0001](0001-open-source-core-owned-personally.md), and **amends** the two later ADRs that

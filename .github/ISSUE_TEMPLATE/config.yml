@@ -1,14 +1,25 @@
 blank_issues_enabled: false
 contact_links:
-  # No GitHub Discussions link here, deliberately: Discussions is NOT enabled on this
-  # repository, so a /discussions URL in the issue chooser is a dead end that looks like a
-  # supported channel. SUPPORT.md is the live routing table and says the same thing in prose.
-  # If Discussions is ever turned on, this entry becomes the Discussions link again and the
-  # matching row in SUPPORT.md changes with it — the two must never disagree.
+  # Discussions is contact link #1 by decision: blank issues are off, so questions go to the
+  # forum and the issue tracker keeps only structured bug / feature / Provider reports.
+  #
+  # LOAD-BEARING PREREQUISITE — this file describes a REPOSITORY SETTING. The URL below only
+  # resolves once Discussions is enabled in Settings → General → Features → Discussions. It is
+  # NOT enabled by anything in this tree, and no test can turn it on. If the link 404s, the
+  # defect is the setting, not this file — enable it, do not delete the link. The matching row
+  # in SUPPORT.md says the same thing in prose; the two must never disagree, and neither may
+  # disagree with the actual setting. That is exactly what broke before.
+  - name: Ask a question / discuss an idea (GitHub Discussions)
+    url: https://github.com/ddickmann/latence-framework/discussions
+    about: >
+      The front door for usage questions, design sanity-checks and "is this the right shape"
+      conversations. Blank issues are disabled on purpose: start here, and a discussion that
+      turns out to be a real bug or a concrete proposal gets moved into the right issue
+      template. Read SUPPORT.md first for what makes a question answerable.
   - name: Getting help — where to ask what
     url: https://github.com/ddickmann/latence-framework/blob/main/SUPPORT.md
     about: >
-      Usage questions and design sanity-checks: what channel exists for what, what makes a
+      The routing table behind the choice above: which channel takes what, what makes a
       question answerable, and what this project explicitly does not offer (no SLA, no paid
       support). Read this before filing a bug for a how-do-I question.
   - name: Report a security vulnerability (private)

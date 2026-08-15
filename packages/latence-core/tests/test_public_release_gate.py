@@ -63,7 +63,8 @@ def _placeholders(text: str) -> list[str]:
 #
 # Parsed with ``tomllib``, not pattern-matched. The regexes this replaced read each declaration
 # TWICE with two different patterns and unioned the results; the first was non-greedy and stopped
-# at ``-\d\.\d``, so a three-part version truncated. On ``PolyForm-Noncommercial-1.0.0`` the union
+# at ``-\d\.\d``, so a three-part version truncated. On ``PolyForm-Noncommercial-1.0.0`` (the licence
+# the repository carried between 2026-07-29 and 2026-08-15) the union
 # always held both ``…-1.0`` and ``…-1.0.0``, and the gate failed on a perfectly coherent tree. It
 # had only ever passed because ``Apache-2.0`` is a two-part version both patterns spelled the same
 # way — the gate broke at the exact moment the relicense it exists to protect actually happened.
@@ -279,7 +280,8 @@ def test_the_licence_coherence_check_fails_on_a_divergent_package(tmp_path: Path
     tree on every ordinary test run, and calls the same ``_licence_incoherence`` the gate calls.
 
     The divergent value is the licence this repo actually came from, so this asserts the precise
-    scenario the gate exists for: a partial revert leaving one package behind on Apache-2.0.
+    scenario the gate exists for: a partial revert leaving one package behind on the superseded
+    ``PolyForm-Noncommercial-1.0.0`` (ADR-0063 relicensed back to ``Apache-2.0``).
     """
 
     def _package(name: str, licence: str) -> None:
@@ -290,22 +292,22 @@ def test_the_licence_coherence_check_fails_on_a_divergent_package(tmp_path: Path
             encoding="utf-8",
         )
 
-    _package("agreeing-a", "PolyForm-Noncommercial-1.0.0")
-    _package("agreeing-b", "PolyForm-Noncommercial-1.0.0")
+    _package("agreeing-a", "Apache-2.0")
+    _package("agreeing-b", "Apache-2.0")
     assert _licence_incoherence(tmp_path) is None, (
         "the coherence check reports a problem on a tree where every package agrees — the false "
         "positive this replaced (a truncating regex splitting `1.0.0` into two identifiers) has "
         "come back, and the gate is again failing on a correct tree."
     )
 
-    _package("stray", "Apache-2.0")
+    _package("stray", "PolyForm-Noncommercial-1.0.0")
     incoherence = _licence_incoherence(tmp_path)
     assert incoherence is not None, (
-        "the coherence check passed a tree where `stray` declares Apache-2.0 while every other "
-        "package declares PolyForm-Noncommercial-1.0.0. The gate is inert: it would let a partial "
+        "the coherence check passed a tree where `stray` declares PolyForm-Noncommercial-1.0.0 "
+        "while every other package declares Apache-2.0. The gate is inert: it would let a partial "
         "revert publish wheels that declare a licence the repository no longer grants."
     )
-    assert "stray" in incoherence and "Apache-2.0" in incoherence, (
+    assert "stray" in incoherence and "PolyForm-Noncommercial-1.0.0" in incoherence, (
         f"the failure must name the offending package and its licence; got:\n{incoherence}"
     )
 
@@ -318,7 +320,7 @@ def test_the_licence_coherence_check_fails_on_a_package_declaring_nothing(tmp_pa
     tree that would publish an unlicensed wheel.
     """
     for name, body in (
-        ("declares", '[project]\nname = "declares"\nlicense = "PolyForm-Noncommercial-1.0.0"\n'),
+        ("declares", '[project]\nname = "declares"\nlicense = "Apache-2.0"\n'),
         ("silent", '[project]\nname = "silent"\nversion = "0.1.0"\n'),
     ):
         pkg = tmp_path / name

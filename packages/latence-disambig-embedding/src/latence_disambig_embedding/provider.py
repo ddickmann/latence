@@ -175,7 +175,7 @@ class EmbeddingDisambiguator(CascadeDisambiguator, AdapterBase):
         ``compute="either"``: the Provider itself is pure-Python (union-find + cosine); the compute
         it needs follows its resolved Embedder — the default ``embedding.hashing`` is CPU, a learned
         embedder opt-in accelerates on GPU (the device seam routes it). License is the *code*
-        license of this pure-Python package (PolyForm-Noncommercial-1.0.0, verified per ADR-0012 —
+        license of this pure-Python package (Apache-2.0, verified per ADR-0012 —
         this package's own code); a learned embedder opt-in carries its OWN verified weights license
         in ITS profile (H-B1 — this Provider never claims the embedder's license as its own).
 

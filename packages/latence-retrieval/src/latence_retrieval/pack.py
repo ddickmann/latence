@@ -4,14 +4,10 @@
 # This file carries TWO licence claims. They are independent and must not be collapsed: one is
 # about where the code came FROM, the other about what you may do WITH it.
 #
-# OUTBOUND GRANT (what you may do with it) -- DELIBERATE, BOUNDED EXCEPTION, not a header nobody
-# updated at the relicence. This repository's outbound licence is PolyForm-Noncommercial-1.0.0
-# (root LICENSE); this module is one of seven the copyright holder keeps under Apache-2.0 ON
-# PURPOSE, so the query-time retrieval primitives stay permissively reusable -- commercially
-# included -- by anyone who wants only them. The exact set is authoritative in LICENSE, section
-# "SCOPE: THE RETAINED APACHE-2.0 MODULES", and pinned by
-# packages/latence-core/tests/test_publish_readiness.py, which fails the build if an eighth file
-# acquires the grant or one of the seven loses it.
+# OUTBOUND GRANT (what you may do with it) -- Apache-2.0, the repository's licence for every
+# file in it (root LICENSE, ADR-0063). There is no exception and no carve-out here: the SPDX line
+# above is the same one every source file in the tree carries, and
+# packages/latence-core/tests/test_publish_readiness.py fails the build if any file disagrees.
 #
 # INBOUND PROVENANCE (where it came from) -- the record that the port was clean to take, which is
 # true regardless of what this file is licensed OUT under. The Knapsack QKP context-packer ported

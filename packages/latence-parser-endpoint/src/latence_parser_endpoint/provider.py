@@ -15,7 +15,7 @@ AC: endpoint failures retried/surfaced). An unrecoverable failure yields a ``PAR
 (carrying Provenance + the reason) rather than aborting the run — identical graceful-degradation
 contract to the CPU reference, so the output is identical modulo the model.
 
-Licensing: this Provider is framework code (PolyForm-Noncommercial-1.0.0) and calls a user-supplied
+Licensing: this Provider is framework code (Apache-2.0) and calls a user-supplied
 endpoint; it bundles no model weights. The ``openai`` client is Apache-2.0 (code). No key or
 endpoint is embedded — both come from config/environment. The client import is deferred to first use
 so importing this module (for Provider discovery) never needs the client installed.
@@ -100,7 +100,7 @@ class EndpointDocumentParser:
 
         ``model_id=None``: this package ships **no** model weights — the served model id is
         config-supplied (``config['model']``, default ``paddleocr-vl`` is a served-model id, not
-        a bundled checkpoint). License is framework code (PolyForm-Noncommercial-1.0.0, verified per
+        a bundled checkpoint). License is framework code (Apache-2.0, verified per
         ADR-0012; the ``openai`` client is Apache-2.0). ``deterministic=False``: a served LLM/VLM is
         not guaranteed byte-identical (temperature/model/version), so it does not overclaim.
         ``cost_per_1k=None``: the per-call cost is deployment/vendor-specific (a self-hosted vLLM

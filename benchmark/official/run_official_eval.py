@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M6 OFFICIAL scoring driver: two full corpora, per-tier dev curves, four A/Bs, gates.
 
 Discipline (ticket 08): every axis — entry tier, CoE budget share, weak on/off, exact vs

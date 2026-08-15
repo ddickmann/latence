@@ -50,9 +50,12 @@ REPO_LICENSE_SOURCE = "LICENSE"
 # keeps the machine-readable surface (bake-off matrices, the provider catalog, ProviderProfile
 # JSON) from drifting away from the file it cites. It drifted once: the repo relicensed from
 # Apache-2.0 to PolyForm-Noncommercial-1.0.0 on 2026-07-29 and 41 hardcoded "Apache-2.0"
-# literals kept telling evaluators the code was permissive. Third-party library and weights
-# licences are NOT this constant — they cite their own upstream source.
-REPO_LICENSE_CODE = "PolyForm-Noncommercial-1.0.0"
+# literals kept telling evaluators the code was permissive. It has since relicensed BACK to
+# Apache-2.0 (2026-08-15, ADR-0063) — which is exactly why this stays a single constant: the
+# value has now moved twice, and a hardcoded literal would have been wrong after each move.
+# Third-party library and weights licences are NOT this constant — they cite their own
+# upstream source.
+REPO_LICENSE_CODE = "Apache-2.0"
 
 # The compute a provider requires: it runs on CPU only, needs a GPU, or runs on
 # either (following the requested device / availability). Drives device routing and
@@ -83,7 +86,7 @@ class ProviderProfile(BaseModel):
       no evidence is un-constructable). The :data:`UNVERIFIED_LICENSE` invariant forbids
       a verified unknown.
     * ``license_code`` — SPDX of the **code/library** (a provider's own package code is
-      the repo's ``"PolyForm-Noncommercial-1.0.0"``). ADR-0012 records code separately from weights.
+      the repo's ``"Apache-2.0"``). ADR-0012 records code separately from weights.
     * ``license_weights`` — SPDX of the **weights**, or ``None`` for a pure-code provider
       that ships no model (``model_id is None``). ADR-0012 records these **separately**.
     * ``license_source`` — a citation for the verification: the HF model-card URL, the

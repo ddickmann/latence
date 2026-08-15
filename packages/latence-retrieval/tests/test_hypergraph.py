@@ -1,5 +1,5 @@
 # Copyright (c) latence-framework contributors.
-# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """M3 (ticket 14): entry + propagation over the sidecar KV, paper-faithful order.
 
 The spec-M3 acceptance criteria: the transition operator is column-stochastic; propagation

@@ -8,11 +8,11 @@ version = "0.1.0"
 description = "GPU GLM-OCR Parser Provider (image/scanned-PDF -> markdown + page map) over AdapterBase, for the Latence framework."
 readme = "README.md"
 requires-python = ">=3.11"
-# The PACKAGE CODE license is PolyForm-Noncommercial-1.0.0 — the repo's own code license (ADR-0001), like every
+# The PACKAGE CODE license is Apache-2.0 — the repo's own code license (ADR-0001), like every
 # framework package. The GLM-OCR *model* (weights + upstream code) is MIT — that is recorded,
 # evidence-bearingly, in the ProviderProfile (license_weights/license_code = MIT), NOT here: this
 # field describes the license of the code shipped in THIS package, which is framework code.
-license = "PolyForm-Noncommercial-1.0.0"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "parser", "ocr", "glm", "vision-language", "adapter", "gpu"]

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Schema-induction (LabelInducer) Providers for the Latence framework: a small OpenAI-compatible LLM induces each chunk's own entity/relation/PII label schema, plus a deterministic zero-network tagger over an operator-declared candidate type space."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "PolyForm-Noncommercial-1.0.0"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
 keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "schema-induction", "zero-shot", "llm", "openai"]
