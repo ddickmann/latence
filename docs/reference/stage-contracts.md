@@ -1631,7 +1631,7 @@ the run.
 | `page_map` | `PageMap \| None` | no |  |
 | `disposition` | `Disposition` | no |  |
 | `error` | `str \| None` | no | Human-readable failure reason when disposition is PARSE_ERROR. |
-| `induced_labels` | `ForwardRef('InducedLabels \| None')` | no | Per-document induced label schema (schema_induction Stage), so the per-document Redaction Stage UNIONs the induced pii_types onto its config labels. None (default) ⇒ the document is unchanged and Redaction uses its config labels exactly as before. |
+| `induced_labels` | `InducedLabels \| None` | no | Per-document induced label schema (schema_induction Stage), so the per-document Redaction Stage UNIONs the induced pii_types onto its config labels. None (default) ⇒ the document is unchanged and Redaction uses its config labels exactly as before. |
 
 ### `ChunkRecord`
 

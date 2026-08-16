@@ -221,7 +221,18 @@ def _protocol_entry(protocol: type) -> dict[str, Any]:
 
 
 def _carrier_entry(model: type[BaseModel]) -> dict[str, Any]:
-    """One record carrier as data: its docstring plus every field with type + description."""
+    """One record carrier as data: its docstring plus every field with type + description.
+
+    ``model_rebuild()`` first, always. A carrier may reference a type defined later in its own
+    module (``DocumentRecord.induced_labels`` names ``InducedLabels``, defined 120 lines below
+    it), and Pydantic leaves such an annotation as a ``ForwardRef`` until something happens to
+    trigger resolution. Without the explicit rebuild the render depends on which modules the
+    process imported first — the committed artifact once carried
+    ``ForwardRef('InducedLabels | None')`` and went stale the moment an unrelated test warmed
+    the process. The byte-identity gate exists to catch exactly that; this line is what makes
+    the render a function of the source instead of of import order.
+    """
+    model.model_rebuild()
     field_entries: list[dict[str, Any]] = []
     for field_name, info in model.model_fields.items():
         field_entries.append(

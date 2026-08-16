@@ -1436,7 +1436,7 @@
         },
         {
           "name": "induced_labels",
-          "type": "ForwardRef('InducedLabels | None')",
+          "type": "InducedLabels | None",
           "required": false,
           "description": "Per-document induced label schema (schema_induction Stage), so the per-document Redaction Stage UNIONs the induced pii_types onto its config labels. None (default) ⇒ the document is unchanged and Redaction uses its config labels exactly as before."
         }
