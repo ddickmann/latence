@@ -221,6 +221,7 @@ nav:
 
   - API Reference:
       - reference/index.md
+      - Stage contracts (generated): reference/stage-contracts.md
       - Data contracts: reference/contracts.md
       - Capability protocols: reference/capability.md
       - Pipeline: reference/pipeline.md

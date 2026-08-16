@@ -1,0 +1,2002 @@
+{
+  "schema": 1,
+  "generated_by": "latence_core.contract_reference",
+  "regenerate": "PYTHONHASHSEED=0 .venv/bin/latence contracts --write --repo-root .",
+  "entry_point_group": "latence.providers",
+  "conformance_command": "LATENCE_CUDA=0 PYTHONHASHSEED=0 uv run pytest packages/latence-core/tests/test_conformance.py packages/latence-core/tests/test_e2e_conformance.py",
+  "legend": {
+    "capability_descriptor": "Everything the framework must know about one Capability, declared once.\n\nAdding a Capability = adding one of these. The exhaustiveness check in\n`index_descriptors` makes that mandatory rather than customary.\n\nFields, and who consumes each:\n\n`kind`\n    The `CapabilityKind` this describes.\n`protocol`\n    The Capability Protocol a Provider bound to this kind must satisfy — the same check the\n    Runner's dispatch enforces at run time and `stacks.capability_guard` enforces statically\n    on a CPU host (ADR-0036).\n`carrier`\n    The record type a Stage of this kind checkpoints and threads downstream. `Record` means a\n    MIXED carrier (a fused extractor emits entity *and* relation mentions; Type Consolidation\n    re-emits both, relabelled) read back polymorphically. `None` means the kind has no carrier\n    of its own: `EXPORT` is a pass-through sink whose carrier is its nearest producing\n    ancestor's (see `export_carrier_of`), and `EMBEDDING` is not a DAG node at all.\n`level`\n    `CapabilityLevel` — corpus-level vs document-level *by kind*. Consumed by the\n    PHASE-BOUNDARY invariant and by delta reuse.\n`input_plan`\n    `StageInputPlan` — what a Stage of this kind RECEIVES: the shape the executor\n    delivers its input in, and the wiring rules its input must satisfy (with the exact typed\n    message each raises). Consumed by the Runner's input resolution\n    (`StageInputs`) and by the offline stack check.\n`accumulates`\n    Corpus-level AND its own output is bounded by the knowledge graph rather than by the corpus,\n    so the executor materializes its whole input and holds the result (ADR-0033). This is a\n    strictly narrower fact than `level is CORPUS`: an `EXPORT` is a sink (nothing downstream\n    holds its output) and `CONTEXT_ENRICHMENT` re-emits the entire chunk stream (its output is\n    corpus-sized, so treating it as an accumulator would defeat the streaming release).\n`entry_point_prefixes`\n    The `latence.providers` entry-point name prefixes that name this Capability\n    (`entity.gliner` → `entity`). A dotted prefix discriminates on the second segment:\n    `screening.intake` vs `screening.content` share a first segment.\n`conformance_case`\n    The value of the conformance suite's `Capability` member this kind is checked under.\n    Several kinds share one case (a fused extractor is driven through the RELATION case).\n`quality_section`\n    The `QualityReport` field this Capability fills, or `None`\n    when it contributes only per-Stage metrics. `GRAPH_COMPLETION` shares `graph` — its\n    predicted edges are counted separately *inside* `GraphQuality` and never merged into the\n    asserted-edge statistics (ADR-0037).\n`dag_node`\n    False for `EMBEDDING`, the one Capability that is not a top-level Stage: it is a nested\n    Export sub-config (`config['embedder']`, ADR-0017). A caller that mis-treats it as a Stage\n    must fail loudly rather than silently skip a check, so `dag_protocol_for` raises.\n`corpus_when_config`\n    The `(key, value)` in a Stage's config that promotes it to corpus level regardless of\n    kind. Only `SCHEMA_INDUCTION` declares one (`granularity: corpus` merges every\n    document's labels into one salience-capped schema and stamps it onto every chunk — an\n    aggregation wherever it sits in the DAG).\n`materializes_for_export`\n    Whether an Export wired (transitively) to a Stage of this kind re-emits THIS kind's carrier.\n    False for the kinds that carry records an Export never re-emits: `SOURCE` and\n    `INTAKE_SCREENING` thread raw `ParserInput`\\ s, so an\n    Export above them re-emits what the Parse they must feed produces, and an `EXPORT` above\n    an `EXPORT` resolves through to the real producer.",
+    "capability_level": "Does a Stage of this Capability see one unit at a time, or the whole corpus?\n\n`DOCUMENT` — the front half. It sees one chunk or one document and never aggregates, so it\ncan run per-document, be resumed per-document, and its output can be REUSED across a delta for\nan unchanged document (W17/ADR-0043).\n\n`CORPUS` — the back half. It consumes the whole corpus (or an artifact built from it) to\nproduce its output, so it cannot run before the front half has finished, its checkpoint spans\ndocuments that were never re-extracted, and the PHASE-BOUNDARY invariant forbids a chunk-level\nStage from depending on it.\n\nOne Capability's level depends on its *config* rather than its kind — `SCHEMA_INDUCTION` at\n`granularity: corpus` — which is why callers ask `CapabilityDescriptor.level_of` with\nthe Stage rather than reading `CapabilityDescriptor.level` directly.",
+    "stage_input_shape": "HOW the Runner delivers a Stage's input — the executor's four-way input decision, declared.\n\nThe Runner used to decide this in a four-way `if` chain over two hand-maintained frozensets,\nand the dispatch then re-decided it a second time to know whether `incoming` was safe to\nmaterialize. It is a fact about the Capability, so it is declared here with its siblings:\n\n`GATHERED`\n    The parents' records are concatenated into ONE list (`depends_on` order). The Capabilities\n    whose Provider materializes the input anyway — the screening outcomes, Relation Extraction's\n    two-carrier partition, Export's file write — so a lazy stream would move no memory and only\n    cost a second pass (ADR-0033's *Honest memory boundary*).\n`STREAMED`\n    The Protocol is `Iterable`-in and the Provider consumes it exactly ONCE, so the parents'\n    checkpoints are read record-by-record into the Provider: the input transient is O(1)\n    records rather than O(corpus-slice) (audit R2).\n`PER_CARRIER`\n    The Stage reads MORE than one carrier out of one `depends_on` set (Context Enrichment:\n    chunks + graph), and its Provider consumes each exactly once in its own order — so one\n    `incoming` stream cannot serve it and partitioning one would buffer a side whole-corpus.\n    It receives one INDEPENDENT lazy stream per carrier instead (dogfood-3).\n`ACCUMULATOR`\n    A corpus-level accumulator (ADR-0033) whose input IS the whole doc-level output: it streams\n    each carrier from the parents' checkpoints, so nothing corpus-sized is ever a list. Exactly\n    the kinds that declare `CapabilityDescriptor.accumulates` — a mismatch between the two\n    is refused at import (`index_descriptors`)."
+  },
+  "capabilities": [
+    {
+      "kind": "source",
+      "protocol": {
+        "name": "Source",
+        "doc": "Lists and fetches documents from where they live, stamping Provenance.",
+        "members": [
+          {
+            "name": "produce",
+            "kind": "method",
+            "signature": "produce(self, storage: Storage) -> Iterator[ParserInput]",
+            "doc": "Yield one raw document per source document, with initial Provenance.\n\nThe yielded `ParserInput` carries the\nundecoded source `content` (bytes) — decoding and the turn into\nmarkdown belong to the Parser (ADR-0019), not the Source."
+          }
+        ]
+      },
+      "optional_refinements": [
+        {
+          "name": "DocumentEnumerator",
+          "doc": "OPTIONAL Source refinement: enumerate document ids WITHOUT fetching content.\n\nA delta run has to know which documents the source currently holds *before* it can decide\nwhich of them are unchanged and can therefore be skipped (ADR-0018/0043). Deriving that set\nfrom `Source.produce` is correct but pays the full fetch cost for every document — for\na remote Source (a SharePoint library, an object store) that means the whole corpus crosses\nthe network on every delta, which is precisely the cost the delta exists to avoid, and it\nhappens *before* the exclusions are known, so no `exclude_document_ids` can prevent it.\n\nA Source that can name its documents more cheaply than it can fetch them implements this:\nSharePoint reads the content hash Graph reports in the *listing*, so a delta run over an\nunchanged library transfers zero bytes. The ids MUST be the same content-addressed ids\n`Source.produce` stamps on `Provenance.document_id` — an id that disagreed would\nsilently mis-classify documents as new. A Source that cannot do better simply does not\nimplement it, and the runner falls back to `produce` (correct, just not free).\n\nThe enumeration MAY be **partial**, and a Source that can only name *some* of its documents\ncheaply MUST leave the rest out rather than fetch them: an omitted id cannot intersect the\nparent Version, so its document is treated as new and fetched exactly once by `produce`,\nwhereas fetching it here transfers it unconditionally *in addition to* that — which is how a\nno-op delta ends up costing twice a full run (audit R3-connectors_ingestion-8). Omitting can\nonly lose a reuse; it can never invent one, and it never changes a document's records.",
+          "members": [
+            {
+              "name": "document_ids",
+              "kind": "method",
+              "signature": "document_ids(self, storage: Storage) -> Iterator[str]",
+              "doc": "Yield the `Provenance.document_id` of every document currently in the source."
+            }
+          ]
+        }
+      ],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "source"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "gathered",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "ParserInput",
+      "mixed_carrier": false,
+      "export_carrier": null,
+      "quality_section": null,
+      "conformance_case": "source",
+      "providers": [
+        {
+          "name": "source.local_folder",
+          "package": "latence-core"
+        },
+        {
+          "name": "source.sharepoint",
+          "package": "latence-source-sharepoint"
+        }
+      ]
+    },
+    {
+      "kind": "intake_screening",
+      "protocol": {
+        "name": "IntakeScreener",
+        "doc": "Screens raw documents BEFORE Parse (CONTEXT `Screening` — intake checkpoint).\n\nCatches malware, zip bombs, file-type spoofing, oversized/corrupt files. A\ndangerous document is Quarantined (removed from every downstream Stage); a\nclean one passes through untouched.",
+        "members": [
+          {
+            "name": "screen_intake",
+            "kind": "method",
+            "signature": "screen_intake(self, inputs: Iterable[ParserInput]) -> ScreeningOutcome[ParserInput]",
+            "doc": "Partition raw inputs into passed vs quarantined, with findings."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "screening.intake"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "gathered",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "ParserInput",
+      "mixed_carrier": false,
+      "export_carrier": null,
+      "quality_section": "screening",
+      "conformance_case": "intake_screening",
+      "providers": [
+        {
+          "name": "screening.intake_signature",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "parse",
+      "protocol": {
+        "name": "Parser",
+        "doc": "Turns raw source documents into parsed markdown records.",
+        "members": [
+          {
+            "name": "parse",
+            "kind": "method",
+            "signature": "parse(self, inputs: Iterable[ParserInput]) -> Iterator[DocumentRecord]",
+            "doc": "Consume raw `ParserInput`s and yield parsed markdown records."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "parse",
+          "parser"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "streamed",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "DocumentRecord",
+      "mixed_carrier": false,
+      "export_carrier": "DocumentRecord",
+      "quality_section": "parse",
+      "conformance_case": "parse",
+      "providers": [
+        {
+          "name": "parser.document",
+          "package": "latence-parser-document"
+        },
+        {
+          "name": "parser.endpoint",
+          "package": "latence-parser-endpoint"
+        },
+        {
+          "name": "parser.glm",
+          "package": "latence-parser-glm"
+        },
+        {
+          "name": "parser.lighton",
+          "package": "latence-parser-lighton"
+        },
+        {
+          "name": "parser.lighton_vllm",
+          "package": "latence-parser-lighton-vllm"
+        },
+        {
+          "name": "parser.pdfplumber",
+          "package": "latence-parser-pdfplumber"
+        },
+        {
+          "name": "parser.plaintext",
+          "package": "latence-parser-plaintext"
+        },
+        {
+          "name": "parser.render",
+          "package": "latence-parser-render"
+        }
+      ]
+    },
+    {
+      "kind": "chunk",
+      "protocol": {
+        "name": "Chunker",
+        "doc": "Splits parsed documents into retrieval-sized ChunkRecords (CONTEXT `Chunk`).\n\nPreserves offsets, page alignment, Provenance and Classification on every\nemitted chunk. A `PARSE_ERROR` DocumentRecord (no usable content) yields no\nchunks.",
+        "members": [
+          {
+            "name": "chunk",
+            "kind": "method",
+            "signature": "chunk(self, documents: Iterable[DocumentRecord]) -> Iterator[ChunkRecord]",
+            "doc": "Consume parsed `DocumentRecord`s and yield `ChunkRecord`s."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "chunk"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "streamed",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "ChunkRecord",
+      "mixed_carrier": false,
+      "export_carrier": "ChunkRecord",
+      "quality_section": "chunk",
+      "conformance_case": "chunk",
+      "providers": [
+        {
+          "name": "chunk.markdown",
+          "package": "latence-core"
+        },
+        {
+          "name": "chunk.sentence_window",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "content_screening",
+      "protocol": {
+        "name": "ContentScreener",
+        "doc": "Screens chunked content AFTER Chunk (CONTEXT `Screening` — content checkpoint).\n\nCatches prompt injection, harmful content, sensitivity escalation. A flagged\nchunk keeps flowing but carries a `RiskMarker`\nthat survives into the corpus; a chunk deemed dangerous is Quarantined.",
+        "members": [
+          {
+            "name": "screen_content",
+            "kind": "method",
+            "signature": "screen_content(self, chunks: Iterable[ChunkRecord]) -> ScreeningOutcome[ChunkRecord]",
+            "doc": "Return chunks (some marked) plus any quarantined chunks and findings."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "screening.content"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "gathered",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "ChunkRecord",
+      "mixed_carrier": false,
+      "export_carrier": "ChunkRecord",
+      "quality_section": "screening",
+      "conformance_case": "content_screening",
+      "providers": [
+        {
+          "name": "screening.content_fuzzy",
+          "package": "latence-core"
+        },
+        {
+          "name": "screening.content_keyword",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "schema_induction",
+      "protocol": {
+        "name": "LabelInducer",
+        "doc": "Induces a document's own label schema and annotates its chunks (CONTEXT `Classification`).\n\nThe W4 **schema-induction** Capability (ADR-0038): an OPTIONAL Stage inserted right after\nContent Screening and before the extraction Stages. It restores the \"point it at a folder and\nit discovers its own schema\" property — a small OpenAI-compatible LLM with structured JSON\noutput reads the document text and induces the entity / relation / PII **types** actually\nevidenced in it, then broadcasts that `InducedLabels` schema\nonto every `ChunkRecord` of the document. The extraction Stages\nthen UNION the induced types onto their config labels (the `latence_core.induced` seam), so a\nStage with no config labels becomes fully unsupervised and one with config labels is\nsupervised-plus-augmented — without any extractor rewrite.\n\nIt is a **chunk→chunk transform** (the Content-Screening shape): it consumes the run's chunks\nand yields the SAME chunks with `induced_labels` populated (a doc-level Provider groups chunks\nby `document_record_id` and makes one LLM call per document by default, broadcasting the doc's\ninduced labels to all its chunks). The Capability names no LLM and no label set — the Provider\nsupplies both. It is **fail-open (G1 posture)**: any inducer failure (network, malformed output,\ntruncation, schema-invalid, empty) leaves a chunk's `induced_labels` `None` so the extractor\nfalls back to its config labels and the run never crashes — the untrusted-LLM discipline lives\nentirely in the Provider. A chunk it could not annotate simply flows through unchanged.",
+        "members": [
+          {
+            "name": "induce",
+            "kind": "method",
+            "signature": "induce(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]",
+            "doc": "Consume the run's chunks; yield the same chunks with `induced_labels` set.\n\nThe stream is threaded through 1:1 (never dropped or reordered): a chunk the Provider could\ninduce labels for carries a populated `InducedLabels`; a\nchunk whose induction failed (fail-open) flows through with `induced_labels` still\n`None`. Deterministic + seeded (temperature 0, stable label order) so a run is\nbyte-reproducible (Baseline bar)."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "label_inducer"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": [
+        "granularity",
+        "corpus"
+      ],
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "streamed",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "ChunkRecord",
+      "mixed_carrier": false,
+      "export_carrier": "ChunkRecord",
+      "quality_section": null,
+      "conformance_case": "schema_induction",
+      "providers": [
+        {
+          "name": "label_inducer.lexicon",
+          "package": "latence-schema-inducer"
+        },
+        {
+          "name": "label_inducer.llm",
+          "package": "latence-schema-inducer"
+        }
+      ]
+    },
+    {
+      "kind": "entity_extraction",
+      "protocol": {
+        "name": "EntityExtractor",
+        "doc": "Finds typed entity mentions in chunked text (CONTEXT `Entity Extraction`).\n\nZero-shot NER: the label set is configured per Pipeline (Stage `config`), not\nhardcoded — the Capability names no types. Each emitted\n`EntityMention` carries its label, confidence,\nand the char span it occupies **in the parent document's assembled markdown**,\nso a mention resolves back through the parent's page map to its source page(s).\nAn empty or near-empty chunk yields no mentions (never an error).",
+        "members": [
+          {
+            "name": "extract",
+            "kind": "method",
+            "signature": "extract(self, chunks: Iterable[ChunkRecord]) -> Iterator[EntityMention]",
+            "doc": "Consume `ChunkRecord`s and yield typed `EntityMention`s."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "entity"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "streamed",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "EntityMention",
+      "mixed_carrier": false,
+      "export_carrier": "EntityMention",
+      "quality_section": "entities",
+      "conformance_case": "entity",
+      "providers": [
+        {
+          "name": "entity.endpoint",
+          "package": "latence-ner-endpoint"
+        },
+        {
+          "name": "entity.gazetteer",
+          "package": "latence-core"
+        },
+        {
+          "name": "entity.gliner",
+          "package": "latence-ner-gliner"
+        }
+      ]
+    },
+    {
+      "kind": "relation_extraction",
+      "protocol": {
+        "name": "RelationExtractor",
+        "doc": "Finds typed relations between entity mentions (CONTEXT `Relation Extraction`).\n\nRelation Extraction relates *mentions within a document* (ADR-0022): given the\ndocument's `EntityMention`s plus the chunk text\nthat supplies the surrounding context, it yields directed, typed\n`RelationMention`s (head → tail). The relation\nlabel set is configured per Pipeline (Stage `config`), not hardcoded — the\nCapability names no relation types (zero-shot / prompt-driven), mirroring\nEntity Extraction. Each emitted relation carries the head/tail mention refs, its\nlabel, confidence, and a Provenance span covering both endpoints, so it resolves\nback through the parent's page map to its source page(s). A document with fewer\nthan two mentions, or no relatable pair, yields no relations (never an error).",
+        "members": [
+          {
+            "name": "relate",
+            "kind": "method",
+            "signature": "relate(self, chunks: Iterable[ChunkRecord], mentions: Iterable[EntityMention]) -> Iterator[RelationMention]",
+            "doc": "Consume a run's chunks + mentions and yield typed `RelationMention`s.\n\nBoth carriers are supplied: `mentions` are what a relation connects, and\n`chunks` carry the text (and the parent page map) a text-based Provider\nneeds for context and offset→page resolution. The Provider groups both by\n`document_record_id` internally — a relation only ever links two mentions\nof the *same* document."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "relation"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "gathered",
+        "requires": [
+          {
+            "carrier": "EntityMention",
+            "subclass_ok": true,
+            "error": "Stage {stage} (relation_extraction) received no EntityMentions. A Relation-Extraction Stage must depend on an Entity-Extraction Stage (the mentions it relates). Check the Pipeline's depends_on wiring."
+          },
+          {
+            "carrier": "ChunkRecord",
+            "subclass_ok": true,
+            "error": "Stage {stage} (relation_extraction) received no ChunkRecords. A Relation-Extraction Stage must also depend on the Chunk (or Content-Screening) Stage for the text + page map. Check depends_on."
+          }
+        ],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "RelationMention",
+      "mixed_carrier": false,
+      "export_carrier": "RelationMention",
+      "quality_section": "relations",
+      "conformance_case": "relation",
+      "providers": [
+        {
+          "name": "relation.gliner_relex",
+          "package": "latence-relation-gliner"
+        },
+        {
+          "name": "relation.llm",
+          "package": "latence-relation-llm"
+        },
+        {
+          "name": "relation.pattern",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "fused_entity_relation",
+      "protocol": {
+        "name": "FusedEntityRelationExtractor",
+        "doc": "One Provider that fulfils BOTH Entity + Relation Extraction in one pass (ADR-0013).\n\nThe Pipeline does not force one Provider per Stage: a fused model (gliner-relex,\nthe custom span-predictor) does joint NER + RE, so a single fused Stage produces\nboth the `EntityMention`s and the\n`RelationMention`s. The Runner routes a fused\nStage's `FusedExtraction` to both downstream consumers without running a\nseparate Entity-Extraction Stage — the S5 seam requirement.",
+        "members": [
+          {
+            "name": "extract_fused",
+            "kind": "method",
+            "signature": "extract_fused(self, chunks: Iterable[ChunkRecord]) -> FusedExtraction",
+            "doc": "Consume `ChunkRecord`s and return mentions + relations together."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "fused_entity_relation"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "streamed",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "Record",
+      "mixed_carrier": true,
+      "export_carrier": "Record",
+      "quality_section": "relations",
+      "conformance_case": "relation",
+      "providers": [
+        {
+          "name": "fused_entity_relation.gliner2",
+          "package": "latence-extract-gliner2"
+        },
+        {
+          "name": "fused_entity_relation.header_refs",
+          "package": "latence-core"
+        },
+        {
+          "name": "fused_entity_relation.inline_refs",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "redaction",
+      "protocol": {
+        "name": "PIIDetector",
+        "doc": "Detects PII per chunk and produces a masked variant (CONTEXT `Redaction`; W16, ADR-0042).\n\nThe S6 Redaction Capability, made **chunk-level** in W16 to fix the document-level truncation\nleak. Before W16 a Provider scanned the WHOLE parsed\n`DocumentRecord`, feeding it into a fixed PII model window (768\ntokens for the gliner-family) — so any PII past that window was SILENTLY truncated and leaked\nunmasked into the corpus. Redaction is now a **chunk→chunk transform** (the Content-Screening /\nContext-Enrichment shape): a Provider consumes the run's\n`ChunkRecord`s and yields the SAME chunks with\n`masked_content` +\n`pii_spans` populated. Each chunk's text (≤ the model\nwindow) is PII-scanned + masked in full — nothing is truncated, so PII past the old 768-token\ndocument-truncation point is now caught (the ADR-0042 fix).\n\nThe chunk's `content` stays UNMASKED (so a later re-read / audit sees the full entities); the\nadditive `masked_content` is the PII-safe variant the Export materializes for the RAG corpus,\nand `pii_spans` are the chunk-local, counts-only detected spans (offsets into the chunk\n`content`, source pages resolved through the chunk's offset_map+page_slice — never the raw\nvalue, S6 AC). Redaction is metadata-aware: the Provider keys its policy off each chunk's\n`Classification.sensitivity` (S6 AC). The PII type set is Provider/config-supplied — the\nCapability names no PII types. A chunk with no detected PII yields a chunk whose\n`masked_content` equals its `content` and whose `pii_spans` is empty (never an error).\n\nThe shared policy/masking/no-op-floor/page-resolution machinery lives in\n`latence_core.redaction_policy` (`plan_chunk_redaction` + `finalize_redacted_chunk`),\nso a Provider owns ONLY detection. Because Redaction reads the chunk's markup-stripped\n`content`, a span's chunk-local offset resolves to its ORIGINAL source page through the\nchunk's offset_map + the\n`PageIndexResolver` — the coordinate-correctness ADR-0031/0042\nguarantee. The resolver reads the chunk's OWN `page_slice` (v19), so resolution is exact in\nany order and with any sibling chunk missing. A Provider builds ONE resolver per `redact`\ncall and hands it to every `plan_chunk_redaction` (it is a required argument, so the page\nseam cannot be forgotten). Redaction therefore depends on the Chunk Stage (not Parse).\n\nThe document-level `redact` shape (`Iterable[DocumentRecord] ->\nIterator[RedactionRecord]`) is DEPRECATED; a Provider MAY retain it as a secondary\n`redact_documents` method for the superseded path, but the blessed Capability is the chunk\nseam below.",
+        "members": [
+          {
+            "name": "redact",
+            "kind": "method",
+            "signature": "redact(self, chunks: Iterable[ChunkRecord]) -> Iterator[ChunkRecord]",
+            "doc": "Consume the run's `ChunkRecord`s; yield the SAME chunks with PII masked.\n\nThe chunk stream is threaded 1:1 and order-stable (never dropped or reordered): each yielded\nchunk carries `masked_content` (its text with every non-`TAG` PII span replaced) +\n`pii_spans` (the chunk-local detected spans) + `redaction_disabled_for_sensitive` (the\nH-C1 §4 no-op floor). `content` is byte-UNCHANGED. Chunks are emitted in first-seen order\nfor determinism; a seeded run is byte-reproducible (Baseline bar)."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "redaction"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "streamed",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "ChunkRecord",
+      "mixed_carrier": false,
+      "export_carrier": "ChunkRecord",
+      "quality_section": "redaction",
+      "conformance_case": "redaction",
+      "providers": [
+        {
+          "name": "redaction.gliner2",
+          "package": "latence-pii-gliner2"
+        },
+        {
+          "name": "redaction.gliner_pii",
+          "package": "latence-pii-gliner"
+        },
+        {
+          "name": "redaction.hybrid_rule",
+          "package": "latence-core"
+        },
+        {
+          "name": "redaction.presidio",
+          "package": "latence-pii-presidio"
+        }
+      ]
+    },
+    {
+      "kind": "profiling",
+      "protocol": {
+        "name": "Profiler",
+        "doc": "Computes corpus-level statistical + quality features (CONTEXT `Profiling`).\n\nThe S7 Profiling Capability. Profiling is a **corpus-level** Stage: it consumes the\nwhole run's parsed `DocumentRecord`s (and, when an\nEntity-Extraction Stage is upstream, the run's\n`EntityMention`s) and emits\n`FeatureRecord`s — one `DOCUMENT`-scope record per\nparsed document carrying its per-document features (density, readability, Zipf α,\ncompression ratio, structure) and exactly one `CORPUS`-scope record carrying the\ncross-document aggregate features (entity frequency, co-occurrence, type consensus,\nsource coverage).\n\nBoth carriers are supplied so a fused corpus profile can relate document text to the\nentities extracted from it; a Provider that only wants document text ignores the\nmentions. The feature pass must be **streaming / spill-to-disk friendly** — it must\nnot assume the whole corpus fits in RAM (S7 AC) — so a Provider folds documents in\none at a time rather than materialising the corpus. A `PARSE_ERROR` document (no\nusable content) is skipped, mirroring the Chunk Stage. Records are emitted\ndeterministically (document-scope in first-seen order, then the single corpus-scope\nrecord last), so a seeded run is byte-identical.",
+        "members": [
+          {
+            "name": "profile",
+            "kind": "method",
+            "signature": "profile(self, documents: Iterable[DocumentRecord], mentions: Iterable[EntityMention]) -> Iterator[FeatureRecord]",
+            "doc": "Consume the run's documents + mentions; yield per-document + corpus FeatureRecords."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "profiling"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": true,
+      "input_plan": {
+        "shape": "accumulator",
+        "requires": [
+          {
+            "carrier": "DocumentRecord",
+            "subclass_ok": false,
+            "error": "Stage {stage} (profiling) received no DocumentRecords (got: {got}). A Profiling Stage must depend on the Parse Stage (the documents it profiles). Check the Pipeline's depends_on wiring."
+          }
+        ],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "FeatureRecord",
+      "mixed_carrier": false,
+      "export_carrier": "FeatureRecord",
+      "quality_section": "profiling",
+      "conformance_case": "profiling",
+      "providers": [
+        {
+          "name": "profiling.lightweight",
+          "package": "latence-core"
+        },
+        {
+          "name": "profiling.statistical",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "type_consolidation",
+      "protocol": {
+        "name": "TypeConsolidator",
+        "doc": "Canonicalizes the corpus's TYPE vocabulary (CONTEXT `Resolution`; T3).\n\nThe counterpart to `Disambiguator` in the resolution phase: where a Disambiguator\nresolves entity **mentions** to canonical entities, a TypeConsolidator resolves the\n**type vocabulary** those mentions are labelled with. Both are corpus-level, and both exist\nbecause the front half of the pipeline now runs per chunk: each chunk induces its own\nlabels, which is what gives it a small, relevant, uncapped label set — and what makes chunk\nA say `org` where chunk B says `organization`. Consistency is earned HERE, downstream,\ninstead of being imposed upstream by freezing and salience-capping one corpus schema before\nextraction (which silently dropped rare-but-critical labels).\n\nIt is a **corpus-level mention→mention transform**: it consumes the whole run's\n`EntityMention`s (required — the labels it canonicalizes) and,\noptionally, its `RelationMention`s, and returns the SAME\nrecords with each `label` rewritten to its canonical form and the raw induced label kept on\n`raw_label` for audit — plus the `TypeVocabulary` it built.\n\nIt runs BEFORE Disambiguation, not after: the entity resolver votes a cluster's type from its\nmembers' labels and gates its low-precision rungs on type compatibility, so feeding it a\ndrifted vocabulary would both split clusters that belong together and mistype the ones that\nsurvive. Canonical types in, consistent entities and consistent graph out.\n\nDeterminism is part of the contract: identical inputs must yield an identical vocabulary and\nidentical records (stable clustering, stable canonical election), so a seeded run is\nbyte-identical (Baseline bar).",
+        "members": [
+          {
+            "name": "consolidate",
+            "kind": "method",
+            "signature": "consolidate(self, mentions: Iterable[EntityMention], relations: Iterable[RelationMention] = ()) -> TypeConsolidation",
+            "doc": "Consume the run's mentions (+ optional relations); return them remapped + the vocab."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "type_consolidation"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": true,
+      "input_plan": {
+        "shape": "accumulator",
+        "requires": [
+          {
+            "carrier": "EntityMention",
+            "subclass_ok": false,
+            "error": "Stage {stage} (type_consolidation) received no EntityMentions (got: {got}). A Type-Consolidation Stage must depend on an Entity-Extraction (or fused) Stage (the mentions whose types it canonicalizes). Check the Pipeline's depends_on wiring."
+          }
+        ],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "Record",
+      "mixed_carrier": true,
+      "export_carrier": "Record",
+      "quality_section": "type_consolidation",
+      "conformance_case": "type_consolidation",
+      "providers": [
+        {
+          "name": "type_consolidation.cascade",
+          "package": "latence-core"
+        },
+        {
+          "name": "type_consolidation.exact_surface",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "disambiguation",
+      "protocol": {
+        "name": "Disambiguator",
+        "doc": "Links mentions to canonical entities + merges duplicates (CONTEXT `Disambiguation`).\n\nThe S8 Disambiguation Capability — the algorithmic crown. Disambiguation is a\n**corpus-level** Stage: it consumes the whole run's\n`EntityMention`s (required — the mentions it resolves and\nlinks) and, OPTIONALLY, the run's `RelationMention`s (to\nnormalise onto the canonical entities), and emits\n`DisambiguationRecord`s at two scopes:\n\n* one `ENTITY`-scope record per resolved\n  `CanonicalEntity` — a cross-document merged cluster with\n  its member mentions, an audited, confidence-weighted merge log (**no silent\n  over-merge** — a below-policy merge is logged not applied), an optional external-KB\n  link (with a **graceful fallback** for unlinked mentions), and page-accurate\n  Provenance + `Evidence` back to the source mentions;\n* one `RELATION`-scope record per `NormalizedRelation` —\n  a relation whose endpoints are remapped to canonical entities and whose label is L2\n  normalised (fuzzy/alias, type-filtered, inverse-detected + direction-swapped).\n\nBoth carriers are supplied so relations can be normalised onto the entities resolved in\nthe same pass; a Provider that only disambiguates entities ignores the relations. The\nmention side is REQUIRED (unlike Profiling's optional mentions) — Disambiguation with no\nmentions has nothing to resolve. Records are emitted deterministically (all ENTITY\nrecords in canonical-text order, then RELATION records), so a seeded run is\nbyte-identical (Baseline bar). The CPU reference path must work with no embedder/KB; a\nFAISS/GPU blocking Provider is a pluggable option, not required (S8 AC).\n\n`chunks` is a **third, additive, defaulted** carrier: the run's\n`ChunkRecord`s, so a Provider that resolves mentions by\ntheir *surrounding context* (the learned `disambiguation.embedding` Provider — the pod\nproved a bare-surface embedding over-merges distinct short surfaces like `IBM` and\n`Apple`, but surface+context separates them cleanly) can locate a mention's parent chunk\n(by `EntityMention.chunk_record_id`) and read a bounded window of its `content` around\nthe mention's offset. It defaults to an empty tuple so the signature is backward-compatible:\nthe algorithmic cascade ignores it (its behaviour is unchanged), a mentions-only run passes\nno chunks, and any existing Provider that only accepts `(mentions, relations)` still\nsatisfies the Protocol — the Runner threads chunks only when the parameter exists (W1\nrework, #94).",
+        "members": [
+          {
+            "name": "disambiguate",
+            "kind": "method",
+            "signature": "disambiguate(self, mentions: Iterable[EntityMention], relations: Iterable[RelationMention], chunks: Iterable[ChunkRecord] = ()) -> Iterator[DisambiguationRecord]",
+            "doc": "Consume the run's mentions (+ optional relations + optional chunks); yield records."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "disambiguation"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": true,
+      "input_plan": {
+        "shape": "accumulator",
+        "requires": [
+          {
+            "carrier": "EntityMention",
+            "subclass_ok": false,
+            "error": "Stage {stage} (disambiguation) received no EntityMentions (got: {got}). A Disambiguation Stage must depend on an Entity-Extraction (or fused) Stage (the mentions it resolves). Check the Pipeline's depends_on wiring."
+          }
+        ],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "DisambiguationRecord",
+      "mixed_carrier": false,
+      "export_carrier": "DisambiguationRecord",
+      "quality_section": "disambiguation",
+      "conformance_case": "disambiguation",
+      "providers": [
+        {
+          "name": "disambiguation.cascade",
+          "package": "latence-core"
+        },
+        {
+          "name": "disambiguation.embedding",
+          "package": "latence-disambig-embedding"
+        },
+        {
+          "name": "disambiguation.exact_surface",
+          "package": "latence-core"
+        },
+        {
+          "name": "disambiguation.glinker",
+          "package": "latence-disambig-glinker"
+        }
+      ]
+    },
+    {
+      "kind": "graph_assembly",
+      "protocol": {
+        "name": "GraphAssembler",
+        "doc": "Builds the canonical knowledge graph from disambiguated records (CONTEXT `Graph Assembly`).\n\nThe S9 Graph Assembly Capability. Graph Assembly is a **corpus-level** Stage: it consumes\nthe whole run's `DisambiguationRecord`s (the canonical\nentities and normalized relations the S8 Disambiguation Stage produced) and emits\n`GraphRecord`s at two scopes:\n\n* one `NODE`-scope record per `CanonicalEntity` — a graph\n  node with a **deterministic** content-addressed id, its member mentions, source-document\n  reach, an optional external-KB link, and `Evidence` back\n  to the source mentions;\n* one `EDGE`-scope record per `NormalizedRelation` — a\n  graph edge with a deterministic id, its head/tail node ids, the normalized label, and\n  **per-edge Evidence** back to the source relation's mentions/documents (every edge\n  carries Evidence, the S9 acceptance criterion).\n\nAn edge is emitted only when *both* its endpoints resolved to a node (endpoint validation\n— no dangling edges). Records are emitted deterministically (all NODE records in node-id\norder, then EDGE records in edge-id order), so a seeded run is byte-identical (Baseline\nbar) and two runs over the same corpus produce the same graph. The reference Provider is\npure-Python, no embedder/KB required; a graph-DB-writer or embedding-augmented Provider is\na pluggable option behind this same seam (ADR-0017: Export writes files, never a live DB).",
+        "members": [
+          {
+            "name": "assemble",
+            "kind": "method",
+            "signature": "assemble(self, records: Iterable[DisambiguationRecord]) -> Iterator[GraphRecord]",
+            "doc": "Consume the run's DisambiguationRecords; yield GraphRecords (nodes then edges)."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "graph"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": true,
+      "input_plan": {
+        "shape": "accumulator",
+        "requires": [],
+        "exclusive": {
+          "carrier": "DisambiguationRecord",
+          "error": "Stage {stage} ({capability}) requires DisambiguationRecord inputs but received: {wrong}. Check the Pipeline's depends_on wiring."
+        },
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "GraphRecord",
+      "mixed_carrier": false,
+      "export_carrier": "GraphRecord",
+      "quality_section": "graph",
+      "conformance_case": "graph",
+      "providers": [
+        {
+          "name": "graph.canonical",
+          "package": "latence-core"
+        },
+        {
+          "name": "graph.weighted",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "graph_completion",
+      "protocol": {
+        "name": "GraphCompleter",
+        "doc": "Predicts missing KG edges over the assembled graph (CONTEXT `Graph Assembly`; W2-linkpred).\n\nThe **post-Assembly link-prediction** Capability (ADR-0037): an OPTIONAL corpus-level Stage\nthat consumes the whole run's assembled `GraphRecord`s (NODE +\nEDGE) and yields ADDITIONAL EDGE-scope `GraphRecord`s for\n**predicted** edges — the `§19` predicted-vs-extracted split GraphAssembler carried as\n`is_predicted` (ADR-0027) turned into its own Stage. It never re-emits the input nodes/edges\nand never mutates an asserted edge; it only appends new predicted edges.\n\nA predicted edge is a `GraphEdge` at `scope=EDGE`,\nUNMISTAKABLY marked `properties[\"inferred\"] = True` (plus `scorer`/`score`/`rank`/\n`calibrated`) so it is never silently merged into the asserted stream — the enterprise-honesty\ncrux (ADR-0037). Its Evidence is honest and model-derived, NOT fabricated mention offsets:\n`mention_ids = []` (there is no textual mention to cite), `document_ids` = the union of the\nhead + tail nodes' `source_document_ids`, `snippet` a human justification naming the\nscorer + score, and `confidence` the calibrated score. A predicted edge that COLLIDES\n(same endpoints +\nlabel) with an asserted edge is DROPPED — it is already asserted — logged, not emitted.\n\nMirroring `GraphAssembler`: corpus-level, `Iterable` in / `Iterator` out,\ndeterministic + seeded → byte-identical (predicted edges yielded in edge-id order), the CPU\nreference (`graph_completion.reference`) pure-Python, no torch. A learned ULTRA/PyKEEN scorer\nis a pluggable Provider behind this same seam (Slice 2). The Stage is genuinely OPTIONAL: a\nstack with no `graph_completion` Stage behaves exactly as today.",
+        "members": [
+          {
+            "name": "complete",
+            "kind": "method",
+            "signature": "complete(self, records: Iterable[GraphRecord]) -> Iterator[GraphRecord]",
+            "doc": "Consume the assembled graph (NODE + EDGE); yield ADDITIONAL predicted EDGE records.\n\nNever re-emits the input, never mutates asserted edges — only appends predicted\nEDGE-scope `GraphRecord`s, each marked\n`properties[\"inferred\"] = True` with honest model-derived Evidence, in edge-id order\n(deterministic). A predicted edge colliding with an asserted edge (same endpoints +\nlabel) is dropped, not emitted."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "graph_completion"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": true,
+      "input_plan": {
+        "shape": "accumulator",
+        "requires": [],
+        "exclusive": {
+          "carrier": "GraphRecord",
+          "error": "Stage {stage} (graph_completion) requires GraphRecord inputs but received: {wrong}. A Graph Completion Stage must depend on the Graph Assembly Stage (the assembled nodes + edges it completes). Check the Pipeline's depends_on wiring."
+        },
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": "GraphRecord",
+      "mixed_carrier": false,
+      "export_carrier": "GraphRecord",
+      "quality_section": "graph",
+      "conformance_case": "graph_completion",
+      "providers": [
+        {
+          "name": "graph_completion.reference",
+          "package": "latence-core"
+        },
+        {
+          "name": "graph_completion.ultra",
+          "package": "latence-linkpred-ultra"
+        }
+      ]
+    },
+    {
+      "kind": "context_enrichment",
+      "protocol": {
+        "name": "ContextEnricher",
+        "doc": "Projects the assembled KG back onto each chunk as a compact header (W13 context enrichment).\n\nThe W13 **context-enrichment** Capability (ADR-0039): an OPTIONAL Stage placed AFTER Graph\nAssembly that stamps each `ChunkRecord` with a compact\n`ContextHeader` — its canonical entities + top-k KG-neighbor\ntriples — which the Export prepends to the EMBEDDING input ONLY. The connections a chunk needs\nfor retrieval relevance are ALREADY computed as the KG; this surfaces them into the vector + a\nmetadata column, without inflating the stored chunk text (the LLM window stays the clean chunk).\n\nShaped like `LabelInducer` (a chunk→chunk transform that yields the SAME chunks with an\nadditive field populated via `chunk.model_copy(update=...)`) but corpus-level and multi-input,\nlike `Disambiguator`: it consumes the run's `ChunkRecord`s\n(what it enriches + passes through), `EntityMention`s (a chunk's\ncanonical entities, via `EntityMention.chunk_record_id`) AND the assembled\n`GraphRecord`s (NODE + EDGE — the entities' KG neighbors). It\nyields the SAME chunks, 1:1 and order-stable, with `context_header` populated (or left\n`None`\nfor a chunk with no gated canonical entity — nothing to add). Genuinely optional +\ncontract-preserving: offsets/provenance/content are untouched, so a stack without the Stage is\nbyte-identical (the field stays `None` and the Export prepends nothing).\n\nDeterministic + seeded (the CPU reference `context.kg_header` is pure-Python, no model, no\nkey)\n→ byte-identical: every collection in the header is sorted, and the neighbor triples are\nconfidence-sorted then CAPPED (`max_neighbors_per_entity` top-k per entity + an overall\n`max_triples`) so a corpus-wide hub entity contributes only its TOP relations — the mandatory\nanti-bloat + hub-entity guard (ADR-0039). The optional LLM situating-sentence mode is a\ndocumented follow-on (deterministic=False), not the default.",
+        "members": [
+          {
+            "name": "enrich",
+            "kind": "method",
+            "signature": "enrich(self, chunks: Iterable[ChunkRecord], mentions: Iterable[EntityMention], graph_records: Iterable[GraphRecord]) -> Iterator[ChunkRecord]",
+            "doc": "Consume the run's chunks + mentions + assembled graph; yield the SAME chunks enriched.\n\nThe chunk stream is threaded 1:1 and order-stable (never dropped or reordered): a chunk with\nat least one confidence-gated canonical entity carries a populated\n`ContextHeader`; a chunk with none flows through with\n`context_header` still `None` (byte-identical to no-stage for that chunk). Deterministic\n+\nseeded → byte-reproducible (sorted + capped + content-addressed, the Baseline bar)."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "context"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "per_carrier",
+        "requires": [
+          {
+            "carrier": "ChunkRecord",
+            "subclass_ok": true,
+            "error": "Stage {stage} (context_enrichment) received no ChunkRecords (got: {got}). A Context-Enrichment Stage must depend on the Chunk (or Content-Screening / Schema-Induction) Stage — the chunks it enriches. Check the Pipeline's depends_on wiring."
+          },
+          {
+            "carrier": "GraphRecord",
+            "subclass_ok": true,
+            "error": "Stage {stage} (context_enrichment) received no GraphRecords (got: {got}). A Context-Enrichment Stage must also depend on the Graph Assembly Stage — the assembled KG it projects onto each chunk. Check the Pipeline's depends_on wiring."
+          }
+        ],
+        "exclusive": null,
+        "scan_short_circuit": true
+      },
+      "checkpoint_carrier": "ChunkRecord",
+      "mixed_carrier": false,
+      "export_carrier": "ChunkRecord",
+      "quality_section": "context_enrichment",
+      "conformance_case": "context_enrichment",
+      "providers": [
+        {
+          "name": "context.kg_header",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "kind": "embedding",
+      "protocol": {
+        "name": "Embedder",
+        "doc": "Optionally embeds RAG-corpus text into vectors (CONTEXT — an opt-in Export augmentation).\n\nThe S9 **opt-in** Embedder Capability (ADR-0017: \"embeddings are optional (an opt-in\nEmbedder Provider) so any vector DB can ingest it\"). It is **not required for Export** —\nthe RAG-ready corpus exports its cleaned/chunked/PII-handled text with full\nProvenance/Classification whether or not an embedder is wired. When a Pipeline opts in, an\nEmbedder maps each text to a fixed-width vector so the exported corpus carries embeddings a\nvector DB can ingest directly.\n\nThe reference embedder in core is a deterministic, dependency-free hashing embedder (no\nmodel, no weights, no license to verify — ADR-0012/0016), so the seam is exercised end to\nend offline; the default learned Embedder (IBM Granite Embedding r2, Apache-2.0; ADR-0045)\nis a pluggable Provider package, not a core dependency. The Capability names no model — only\nthe seam.",
+        "members": [
+          {
+            "name": "dimension",
+            "kind": "property",
+            "signature": "dimension: int",
+            "doc": "The fixed embedding width every returned vector has."
+          },
+          {
+            "name": "embed",
+            "kind": "method",
+            "signature": "embed(self, texts: Iterable[str]) -> Iterator[list[float]]",
+            "doc": "Map each input text to a `dimension`-wide vector, in input order."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "embedding"
+        ]
+      },
+      "level": "document",
+      "corpus_when_config": null,
+      "dag_node": false,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "gathered",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": null,
+      "mixed_carrier": false,
+      "export_carrier": null,
+      "quality_section": null,
+      "conformance_case": "embedding",
+      "providers": [
+        {
+          "name": "embedding.endpoint",
+          "package": "latence-embedder-endpoint"
+        },
+        {
+          "name": "embedding.hashing",
+          "package": "latence-core"
+        },
+        {
+          "name": "embedding.sentence_transformers",
+          "package": "latence-embedder-st"
+        }
+      ]
+    },
+    {
+      "kind": "export",
+      "protocol": {
+        "name": "Export",
+        "doc": "Materializes AI-ready outputs (JSONL + Parquet in S1).\n\nA corpus Export Provider may **optionally** attach embeddings (ADR-0017: an opt-in\nEmbedder augmentation). It opts in by naming an `Embedder` Provider in its own\nStage `config['embedder']` (a `{\"provider\": ..., \"config\": {...}}` block); the Provider\nresolves that Embedder and threads each exported record's text through it, adding a vector\nper row. A Provider that names no embedder exports its text unchanged — embeddings are never\nrequired for Export. The seam is one signature so a non-embedding Export (the KG / demo-site\nProviders) satisfies it identically.",
+        "members": [
+          {
+            "name": "export",
+            "kind": "method",
+            "signature": "export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]",
+            "doc": "Write records to `out_dir` on `storage`; return the output URIs."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "export"
+        ]
+      },
+      "level": "corpus",
+      "corpus_when_config": null,
+      "dag_node": true,
+      "accumulates": false,
+      "input_plan": {
+        "shape": "gathered",
+        "requires": [],
+        "exclusive": null,
+        "scan_short_circuit": false
+      },
+      "checkpoint_carrier": null,
+      "mixed_carrier": false,
+      "export_carrier": null,
+      "quality_section": null,
+      "conformance_case": "export",
+      "providers": [
+        {
+          "name": "export.demo_site",
+          "package": "latence-demo"
+        },
+        {
+          "name": "export.jsonl_parquet",
+          "package": "latence-core"
+        },
+        {
+          "name": "export.knowledge_graph",
+          "package": "latence-core"
+        }
+      ]
+    }
+  ],
+  "signal_seams": [
+    {
+      "prefix": "sparse",
+      "protocol": {
+        "name": "SparseEmbedder",
+        "doc": "Encodes corpus text into a sparse term-weight vector (a `Signal generator`; ADR-0053).\n\nThe index-time SPLADE-family sibling of `Embedder` for the shape a dense vector cannot\nexpress: a variable-support term-weight map over a fixed vocabulary, emitted at Export as the\nparallel `sparse_indices` / `sparse_values` columns a store's sparse index ingests directly\n(ADR-0050). Like every signal generator it is a **pure transform** that holds nothing (ADR-0048)\nand names no model — the framework names the seam.\n\nThe blessed real Provider (ADR-0053) composes a multilingual SPLADE model's term-weights with\nthe pipeline's confidence-gated NER entity terms + selected metadata, over the *redacted* corpus\ntext by default; that composition + its license-verified model ship as a pluggable package\n(`latence-splade`), NOT in core. The in-core `sparse.hashing` reference is a deterministic,\ndependency-free hashing sparse encoder that exercises the seam + emission path offline (no\nmodel, no weights, no license to verify — ADR-0012/0016), exactly as `embedding.hashing` does\nfor the dense seam. It is a reference, not SPLADE.",
+        "members": [
+          {
+            "name": "encode_sparse",
+            "kind": "method",
+            "signature": "encode_sparse(self, texts: Iterable[str]) -> Iterator[SparseVector]",
+            "doc": "Map each text to a `SparseVector` (canonical ascending indices), in input order.\n\nOne vector per input text, in order (like `Embedder.embed`). Empty/degenerate text\nyields the empty `SparseVector()` (never a crash). A deterministic Provider is\nbyte-reproducible (the Baseline bar)."
+          },
+          {
+            "name": "vocab_size",
+            "kind": "property",
+            "signature": "vocab_size: int",
+            "doc": "The size of the term-index space: every emitted index lies in `[0, vocab_size)`."
+          }
+        ]
+      },
+      "optional_refinements": [
+        {
+          "name": "ComposingSparseEmbedder",
+          "doc": "A `SparseEmbedder` that also composes structured per-record signals (ADR-0053).\n\nThe index-time seam for the ADR-0053 **structured composition**. A plain `SparseEmbedder`\nexposes only the text-only `encode_sparse` (the model leg); a *composing*\nembedder additionally accepts, per record, the `SparseSignals` (confidence-bearing entity\nsurfaces + selected metadata) and folds them into the emitted vector — so the corpus's sparse\nspace carries the SAME boosted entity/metadata terms the query-side encoder injects (the\none-composition-two-clocks guarantee). Export detects this Capability and passes each row's\nsignals; an embedder that does NOT implement it (e.g. the deterministic `sparse.hashing`\nreference) is driven text-only, byte-identically to today.\n\nAn implementer is also a `SparseEmbedder` (it keeps the text-only `encode_sparse` for\nthe no-signal path); this Protocol declares only the additional composing method so an\n`isinstance` check cleanly discriminates the two.",
+          "members": [
+            {
+              "name": "encode_sparse_composed",
+              "kind": "method",
+              "signature": "encode_sparse_composed(self, texts: Iterable[str], signals: Sequence[SparseSignals]) -> Iterator[SparseVector]",
+              "doc": "Map each `(text, signals)` pair to its composed `SparseVector`, in input order.\n\n`signals` is **parallel** to `texts` (one `SparseSignals` per text, same length +\norder). One vector per input, in order; a record whose signals are\n`EMPTY_SPARSE_SIGNALS` composes to exactly the model leg (identical to\n`SparseEmbedder.encode_sparse` on that text — the additive guarantee)."
+            }
+          ]
+        }
+      ],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "sparse"
+        ]
+      },
+      "conformance_case": "sparse",
+      "providers": [
+        {
+          "name": "sparse.hashing",
+          "package": "latence-core"
+        },
+        {
+          "name": "sparse.splade",
+          "package": "latence-splade"
+        }
+      ]
+    },
+    {
+      "prefix": "multivector",
+      "protocol": {
+        "name": "MultiVectorEmbedder",
+        "doc": "Encodes text into a variable-length multi-vector — one vector per token (ADR-0050).\n\nThe index-time generator for the ColBERT-style late-interaction shape: a text becomes a\n*sequence* of fixed-width token vectors (not one pooled vector). Raw multi-vectors are heavy and\nhave a different access pattern, so Export writes them to a **sidecar** `multivectors.parquet`\n(`list<list<double>>` keyed by `record_id`), never into `records.parquet` (ADR-0050). They\nalso feed an `FdeConverter` to produce the dense `fde_embedding` column.\n\nExperimental and off by default (ADR-0050). The in-core `multivector.hashing` reference is a\ndeterministic, dependency-free per-token hashing encoder that exercises the seam offline; a real\nColBERT-family encoder is a pluggable package.",
+        "members": [
+          {
+            "name": "dimension",
+            "kind": "property",
+            "signature": "dimension: int",
+            "doc": "The fixed width of every token vector in every returned multi-vector."
+          },
+          {
+            "name": "encode_multivector",
+            "kind": "method",
+            "signature": "encode_multivector(self, texts: Iterable[str]) -> Iterator[list[list[float]]]",
+            "doc": "Map each text to a list of `dimension`-wide token vectors, in input order.\n\nOne multi-vector per input text, in order. Empty/degenerate text yields an empty list (no\ntokens, never a crash). Every token vector has width `dimension`. A deterministic\nProvider is byte-reproducible."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "multivector"
+        ]
+      },
+      "conformance_case": "multivector",
+      "providers": [
+        {
+          "name": "multivector.hashing",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "prefix": "fde",
+      "protocol": {
+        "name": "FdeConverter",
+        "doc": "Converts a multi-vector into one fixed-width dense vector (MUVERA FDE; ADR-0050).\n\nA **data-oblivious, training-free** reduction that maps a variable-length multi-vector to a\nsingle `dimension`-wide dense vector, so late-interaction quality can be approximated inside a\ncustomer's ordinary **dense** index with no special store — emitted at Export as the\n`fde_embedding` column (ADR-0050). Pure transform, holds nothing, names no model.\n\nExperimental and off by default (ADR-0050): the *production* converter decision (canonical\nMUVERA vs a regularizer-refined variant) is deferred, and the quality-blessed canonical MUVERA\nreference is a pluggable Provider (`fde.muvera`). The in-core `fde.reference` is a\ndeterministic, dependency-free SimHash space-partition-and-sum converter that exercises the seam\n+ emission path offline — a genuine data-oblivious FDE (NOT a passthrough that lies, the\nanti-false-green bar), without claiming a MaxSim-approximation quality guarantee on any corpus.",
+        "members": [
+          {
+            "name": "convert",
+            "kind": "method",
+            "signature": "convert(self, multivectors: Iterable[list[list[float]]]) -> Iterator[list[float]]",
+            "doc": "Map each multi-vector to one `dimension`-wide dense vector, in input order.\n\nOne dense vector per input multi-vector, in order. An empty multi-vector yields the\nzero vector of width `dimension`. A token vector whose width does not match the\nconverter's declared input width is rejected with a typed error (the faithful contract a\nreal converter enforces — anti-false-green). A deterministic Provider is byte-reproducible."
+          },
+          {
+            "name": "dimension",
+            "kind": "property",
+            "signature": "dimension: int",
+            "doc": "The fixed width of the produced dense vector, independent of the multi-vector length."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "fde"
+        ]
+      },
+      "conformance_case": "fde",
+      "providers": [
+        {
+          "name": "fde.muvera",
+          "package": "latence-muvera"
+        },
+        {
+          "name": "fde.reference",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "prefix": "tokenizer",
+      "protocol": {
+        "name": "Tokenizer",
+        "doc": "Splits text into lexical terms — the varying seam of the BM25 term-stats export (ADR-0048).\n\nBM25 is a *lexical* signal, so its corpus statistics (document frequency, term frequency,\ndocument length, average document length) are a pure function of one thing that genuinely\n**varies**: how text is split into terms. This Capability is that seam. Everything else in the\n`Bm25Accumulator` — the df/tf fold, the Robertson idf, the ascending\ncanonical order — is fixed math; the tokenisation is the knob a corpus tunes. Like every\nretrieval-tooling piece it is a **pure transform that holds nothing** (ADR-0048) and names no\nmodel — the framework names the seam.\n\nTwo in-core reference adapters ship behind it (`latence_core.bm25`), and they are\ngenuinely different tokenisations (not a clone + a rename — the anti-false-green bar for a real\nseam): `tokenizer.regex` folds to lowercase *Unicode* alphanumeric runs (punctuation and the\nunderscore are boundaries and are dropped, matching the dense/sparse hashing references — so\n`Müller` and `Таможенный` are whole terms, though an unspaced script like Chinese yields one\nterm per whitespace run: the reference is Unicode-aware, not a word segmenter, and a corpus that\nneeds segmentation plugs it in HERE), while `tokenizer.whitespace` splits\nonly on whitespace and keeps punctuation attached to the token (so `\"foo,\"` and `\"foo\"` are\ndistinct terms). A corpus that wants a store's exact analyzer plugs its own Tokenizer in behind\nthis same seam. Both references are deterministic, so the emitted BM25 artifact is\nbyte-reproducible (the Baseline bar).",
+        "members": [
+          {
+            "name": "tokenize",
+            "kind": "method",
+            "signature": "tokenize(self, texts: Iterable[str]) -> Iterator[list[str]]",
+            "doc": "Map each text to its list of terms, in input order (one token list per input text).\n\nOne token list per input text, in order (like `Embedder.embed`). The terms appear in\ntheir order of occurrence in the text (a BM25 term frequency counts occurrences, so order is\nimmaterial to the statistic but the contract is occurrence-order, not sorted). Empty or\nterm-free text yields the empty list `[]` (never a crash). A deterministic Tokenizer is\nbyte-reproducible (the Baseline bar)."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "tokenizer"
+        ]
+      },
+      "conformance_case": "tokenizer",
+      "providers": [
+        {
+          "name": "tokenizer.regex",
+          "package": "latence-core"
+        },
+        {
+          "name": "tokenizer.whitespace",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "prefix": "graph_features",
+      "protocol": {
+        "name": "GraphFeatureComputer",
+        "doc": "Computes centrality + community per node over the assembled KG (CONTEXT `Graph Assembly`).\n\nThe index-time **graph-feature enrichment** Capability (ADR-0051): a pure transform that, given\nthe assembled graph's `GraphNode`s and\n`GraphEdge`s, returns one `GraphFeatures` — a\n**centrality** measure (degree / PageRank) and a **community** id per node. It holds no index,\nruns no search (ADR-0048), names no model. The Graph-Assembly Stage OPTIONALLY resolves a\ncomputer from its `config['graph_features']` (the same `{\"provider\", \"config\"}` composition\nExport uses for its Embedder) and stamps the returned features onto each node's `properties`\nbag, so they flow into `graph-nodes.parquet` columns and — via Context Enrichment — onto each\nchunk's `ContextHeader` (the two consumers ADR-0051 names:\ngraph-augmented retrieval and the Knapsack packer's `centrality` / `cluster_ids` inputs).\nGenuinely optional: a Stage that names no computer emits the graph byte-identically to today.\n\nBehaviour VARIES behind the seam, so it ships **two** in-core reference adapters\n(`latence_core.stages.graph_features`): `graph_features.degree` (degree centrality +\nconnected-components community) and `graph_features.pagerank` (PageRank centrality +\nlabel-propagation community). Both are pure-Python, zero-dependency and DETERMINISTIC (fixed\niteration order, rounded scores, content-addressed community ids), so a seeded run is\nbyte-reproducible. They are *references*, not the blessed Louvain/Leiden community detection\n(ADR-0051), which — like SPLADE/MUVERA — ships as a pluggable, license-verified package.",
+        "members": [
+          {
+            "name": "compute_features",
+            "kind": "method",
+            "signature": "compute_features(self, nodes: Iterable[GraphNode], edges: Iterable[GraphEdge]) -> GraphFeatures",
+            "doc": "Compute one `GraphFeatures` (centrality + community per node) over the KG.\n\nConsumes the whole assembled graph (all nodes + all edges); returns a\n`GraphFeatures` covering **every** input node (never a partial map). An edge whose\nendpoint is not among `nodes` is ignored (belt-and-braces — the assembler validates\nendpoints). An empty graph yields the empty `GraphFeatures`. Deterministic → a seeded\nrun is byte-reproducible (the Baseline bar)."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "graph_features"
+        ]
+      },
+      "conformance_case": "graph_features",
+      "providers": [
+        {
+          "name": "graph_features.degree",
+          "package": "latence-core"
+        },
+        {
+          "name": "graph_features.pagerank",
+          "package": "latence-core"
+        }
+      ]
+    },
+    {
+      "prefix": "delta",
+      "protocol": {
+        "name": "DeltaProcessor",
+        "doc": "Applies a Delta to the parent corpus with affected-set recompute (CONTEXT `Delta`).\n\nThe S11 Delta Capability (ADR-0018). A DeltaProcessor is model-agnostic and pure over\nrecords: given the parent Corpus Version's corpus-level derived records\n(`DisambiguationRecord`s +\n`GraphRecord`s), the current run's freshly-extracted\ncorpus-level records, and the classified `Delta`, it returns\na `DeltaOutcome`: the new live derived set for Version N+1 (parent records the delta\ndid not touch, spliced with the affected-set recompute), the retracted set, and the\nentity/edge churn counts.\n\nThe DeltaProcessor owns the **corpus-level** recompute of the *committed* record set — the\nblocking-neighborhood affected set for Disambiguation and the graph patch by\n`source_document_ids` (ports `graph/patcher`). (Doc-level Stages, Parse … Redaction, run\nonly on the NEW/CHANGED documents since W17/ADR-0043 — an unchanged document's records are\nreused across runs and the processor consumes the union of reused + freshly-extracted\ncorpus-level records exactly as before, so the seam here is unchanged.) When the Delta signals\na full Reconciliation (drift crossed the threshold), the processor re-resolves ALL blocks\nrather than only the affected set; the seam is identical, only the affected set differs. The\nreference Provider is pure-Python, deterministic and CPU-viable (the blocking-neighborhood\n`compute_affected_set` closure + GraphPatcher); a\ndistributed blocking Provider is a pluggable upgrade behind this same seam.",
+        "members": [
+          {
+            "name": "apply_delta",
+            "kind": "method",
+            "signature": "apply_delta(self, parent_records: Iterable[Record], current_records: Iterable[Record], delta: Delta) -> DeltaOutcome",
+            "doc": "Apply `delta` to the parent corpus; return the patched live set + churn."
+          }
+        ]
+      },
+      "optional_refinements": [],
+      "entry_point": {
+        "group": "latence.providers",
+        "prefixes": [
+          "delta"
+        ]
+      },
+      "conformance_case": "delta",
+      "providers": [
+        {
+          "name": "delta.affected_set",
+          "package": "latence-core"
+        }
+      ]
+    }
+  ],
+  "carriers": [
+    {
+      "name": "Record",
+      "doc": "Base inter-Stage record: always carries Provenance and Classification.\n\nBoth are required with no default, so constructing a record without them\nraises `pydantic.ValidationError` — the enforced Stage-boundary check.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "Provenance",
+      "doc": "The immutable chain from a record back to its source.\n\nRequired fields identify the source document unambiguously; the optional\noffset fields locate a derived record within it (populated by Parse/Chunk).",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "source_uri",
+          "type": "str",
+          "required": true,
+          "description": "Storage URI read from."
+        },
+        {
+          "name": "file_name",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "file_type",
+          "type": "str",
+          "required": true,
+          "description": "Lowercased extension, no dot."
+        },
+        {
+          "name": "file_size",
+          "type": "int",
+          "required": true,
+          "description": "Source size in bytes."
+        },
+        {
+          "name": "document_id",
+          "type": "str",
+          "required": true,
+          "description": "Content-addressed source doc id."
+        },
+        {
+          "name": "source_system",
+          "type": "str | None",
+          "required": false,
+          "description": "Originating system."
+        },
+        {
+          "name": "page_start",
+          "type": "int | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "page_end",
+          "type": "int | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "char_start",
+          "type": "int | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "char_end",
+          "type": "int | None",
+          "required": false,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "Classification",
+      "doc": "Descriptive attributes of a document's content.\n\nAttached at ingest / after Parse and inherited by every downstream record.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "language",
+          "type": "str",
+          "required": true,
+          "description": "BCP-47-ish tag; 'und' if unknown."
+        },
+        {
+          "name": "category",
+          "type": "str | None",
+          "required": false,
+          "description": "Content category, e.g. 'contract'."
+        },
+        {
+          "name": "sensitivity",
+          "type": "str",
+          "required": false,
+          "description": "'public'/'internal'/'confidential'."
+        }
+      ]
+    },
+    {
+      "name": "ParserInput",
+      "doc": "A raw document handed to a Parser: source lineage plus undecoded content.\n\nThis is the input side of the Parse seam (ADR-0019). Source produces a\n`ParserInput` per source document — Provenance and Classification stamped,\nbut `content` still the raw bytes (or already-decoded text) exactly as read\nfrom Storage, NOT yet turned into markdown. The Parser owns decoding and the\nturn into a `DocumentRecord`, so the seam fits real parsers (which\nconsume PDF/image/office BYTES), not just the S1 plain-text passthrough.\n\n`config` carries per-input Parser hints (e.g. a forced encoding or an OCR\nlanguage) so a Source or the Runner can steer a Parser without a new contract.\n\n`content` bytes are serialized to JSON as **base64** (`ser_json_bytes` /\n`val_json_bytes`), not as a UTF-8 string. This is a serialization-durability\ninvariant, not a field change: a raw source document can be *arbitrary binary*\n(a PDF, an office file, a ZIP archive with a deflate stream), and Pydantic's\ndefault bytes-as-UTF-8 JSON encoding raises on any byte sequence that is not\nvalid UTF-8 — which would tear the Runner's checkpoint the moment a genuinely\nbinary file (e.g. a Screened ZIP) is threaded through the Source/Intake seam.\nbase64 round-trips *any* bytes losslessly (`model_validate_json` yields the\nidentical bytes), so checkpoint/resume survives the messy, dangerous corpus the\ndemo is built to ingest. The model fields are unchanged, so the inter-Stage\ncontract (and its `schema_version`) is unchanged — only the on-disk JSON\nencoding of already-binary content is made lossless.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "content",
+          "type": "bytes | str",
+          "required": true,
+          "description": "Raw, undecoded source content — bytes for binary formats, str if text."
+        },
+        {
+          "name": "config",
+          "type": "dict[str, Any]",
+          "required": false,
+          "description": "Per-input Parser hints (encoding, OCR lang, …)."
+        },
+        {
+          "name": "page_map_sidecar",
+          "type": "bytes | None",
+          "required": false,
+          "description": "Raw bytes of the document's PAGE_MAP_SIDECAR_SUFFIX file, if the Source found one beside it. Undecoded and uninterpreted, exactly like 'content' — the Source knows Storage and can find the file; the Parser owns turning it into a PageMap (ADR-0019/0060). None means no sidecar was present, which is not an error here: what a Parser does about it is the Parser's disposition to record."
+        }
+      ]
+    },
+    {
+      "name": "DocumentRecord",
+      "doc": "A whole-document record: the parsed Parse output.\n\n`content` is the assembled markdown text; `media_type` records how to\ninterpret it. `page_map` (present when `disposition == PARSED`) records\nthe source page boundaries so any downstream offset resolves back to its\noriginal page. `disposition`/`error` capture a graceful parse failure — a\ncorrupt file yields a `PARSE_ERROR` record, never an exception that aborts\nthe run.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "content",
+          "type": "str",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "media_type",
+          "type": "str",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "page_map",
+          "type": "PageMap | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "disposition",
+          "type": "Disposition",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "error",
+          "type": "str | None",
+          "required": false,
+          "description": "Human-readable failure reason when disposition is PARSE_ERROR."
+        },
+        {
+          "name": "induced_labels",
+          "type": "ForwardRef('InducedLabels | None')",
+          "required": false,
+          "description": "Per-document induced label schema (schema_induction Stage), so the per-document Redaction Stage UNIONs the induced pii_types onto its config labels. None (default) ⇒ the document is unchanged and Redaction uses its config labels exactly as before."
+        }
+      ]
+    },
+    {
+      "name": "ChunkRecord",
+      "doc": "One retrieval-sized piece of a parsed document (CONTEXT `Chunk`).\n\nChunk splits a `DocumentRecord`'s markdown into retrieval-sized pieces\nwhile preserving offsets, page alignment, Provenance and Classification\nlosslessly. Every chunk carries:\n\n* `char_start`/`char_end` on its **Provenance** — the half-open span the\n  chunk occupies in the parent document's assembled markdown, so any chunk\n  resolves back to its exact source offsets (round-trip: chunk → offset →\n  original page via `PageOffsetIndex`);\n* `page_start`/`page_end` on its **Provenance** — the source page(s) the\n  chunk spans, resolved from the parent's page map;\n* the parent's **Classification**, inherited unchanged;\n* `risk_markers` — any `RiskMarker` Content Screening attached, which\n  survive into the corpus so RAG consumers can exclude the chunk.\n\n`document_record_id` links the chunk back to its parent document; `index`\nis the chunk's ordinal within that document (0-based, contiguous).\n\n`page_slice` carries **this chunk's own** page spans so a *downstream* Stage\nthat finds a sub-chunk offset (an entity mention) can resolve **that offset's\nown** source page — not merely inherit the chunk's whole\n`[page_start, page_end]` range. Without it, a mention on a later page of a\nmulti-page chunk would cite the chunk's first page.\n\nSince v19 the chunk is SELF-DESCRIBING (`PageSlice`): it holds exactly\nthe document page spans overlapping its own `[char_start, char_end)` — one\nfor a chunk inside a page, two for a chunk straddling a page break — in the\ndocument's original coordinates. v18 instead carried the whole document map on\nthe document's FIRST chunk and had every Stage adopt it from the stream, which\nmade resolution depend on that one record being seen first and surviving every\nfiltering Stage; when it was not, resolution silently degraded to the chunk's\ninherited page range — a plausible-looking WRONG page. A slice cannot express\nthat failure: there is no shared state and no ordering to depend on.\n\nResolve through `PageIndexResolver` rather than\nreading the field: the resolver owns the half-open end-of-span clamp and the\ndrift diagnostics. A `None` here means the producing Chunker supplied no page\nspans at all — resolution raises\n`PageSliceMissingError` rather than guessing\n(ADR-0034).\n\n`offset_map` carries the stripped-`content`→original-markdown offset map\n(`OffsetMap`) so a downstream Stage can recover a sub-chunk offset's TRUE\noriginal position. `content` is markup-stripped, so `char_start + local` is\nonly a lower bound on a mention's real offset once markup was stripped before it;\nthe map corrects that (ADR-0031). Optional and additive — absent (pre-v11 chunk,\nor no map), downstream degrades to the `char_start + local` shift.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "document_record_id",
+          "type": "str",
+          "required": true,
+          "description": "Parent DocumentRecord id."
+        },
+        {
+          "name": "index",
+          "type": "int",
+          "required": true,
+          "description": "0-based chunk ordinal within the document."
+        },
+        {
+          "name": "content",
+          "type": "str",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "media_type",
+          "type": "str",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "token_count",
+          "type": "int",
+          "required": true,
+          "description": "Budgeted token count for the chunk text."
+        },
+        {
+          "name": "page_slice",
+          "type": "PageSlice | None",
+          "required": false,
+          "description": "THIS chunk's own page spans — exactly the document page spans overlapping [char_start, char_end), in document coordinates (v19). Self-describing: it resolves a sub-chunk offset in any order, with any other chunk missing. Read it through latence_core.page_index.PageIndexResolver, never directly."
+        },
+        {
+          "name": "offset_map",
+          "type": "OffsetMap | None",
+          "required": false,
+          "description": "Stripped-content→original-markdown offset map, so a sub-chunk offset (an entity mention) resolves to its TRUE original offset, not the lower bound char_start+local."
+        },
+        {
+          "name": "risk_markers",
+          "type": "list[RiskMarker]",
+          "required": false,
+          "description": "Content-Screening flags that propagate into the corpus."
+        },
+        {
+          "name": "induced_labels",
+          "type": "InducedLabels | None",
+          "required": false,
+          "description": "Per-document induced label schema the OPTIONAL schema_induction Stage attached, so a downstream extractor UNIONs these types onto its config labels (like risk_markers). None (default) ⇒ the chunk is unchanged and every extractor uses its config labels."
+        },
+        {
+          "name": "context_header",
+          "type": "ContextHeader | None",
+          "required": false,
+          "description": "The KG projected back onto this chunk (canonical entities + top-k neighbor triples) the OPTIONAL context_enrichment Stage attached, which the Export prepends to the EMBEDDING input ONLY — the stored content is byte-unchanged (W13, ADR-0039). None (default) ⇒ the chunk is unchanged and the Export prepends nothing (byte-identical to a run without the Stage), mirroring the risk_markers/induced_labels precedent."
+        },
+        {
+          "name": "masked_content",
+          "type": "str | None",
+          "required": false,
+          "description": "The PII-handled variant of this chunk's text the OPTIONAL Redaction Stage produced (W16, ADR-0042): the chunk text with every non-TAG PII span replaced by its placeholder. The clean ``content`` stays UNMASKED (so extraction still sees full entities); the Export materializes ``masked_content`` for the PII-safe RAG corpus. None (default) ⇒ no Redaction Stage ran, and the Export falls back to ``content`` (byte-identical to a run without the Stage), mirroring the context_header precedent. Redaction runs per CHUNK (each ≤ the model window) so no PII is truncated — the fix for the document-level 768-token truncation leak (ADR-0042)."
+        },
+        {
+          "name": "pii_spans",
+          "type": "list[PIISpan]",
+          "required": false,
+          "description": "The chunk-local PII spans the Redaction Stage detected (W16, ADR-0042): each span's ``char_start``/``char_end`` are offsets into THIS chunk's ``content`` (the coordinate system ``masked_content`` is masked in), while ``page_start``/``page_end`` resolve to the original source page through the chunk's offset_map+page_slice. Counts-only: a span never stores the raw PII value (S6 AC). Empty (default) ⇒ no Redaction Stage ran, or a clean chunk."
+        },
+        {
+          "name": "redaction_disabled_for_sensitive",
+          "type": "bool",
+          "required": false,
+          "description": "True when this chunk's Classification.sensitivity is in the Redactor's sensitive set (confidential/restricted/…) yet the applied policy ran NO detectors (skip / empty types / empty detector set) — so an empty ``pii_spans`` here means 'the control was OFF', NOT 'no PII found' (the H-C1 §4 no-op floor carried per chunk, W16/ADR-0042)."
+        }
+      ]
+    },
+    {
+      "name": "EntityMention",
+      "doc": "One typed entity mention found in a chunk's text (CONTEXT `Entity Extraction`).\n\nEntity Extraction finds typed entity mentions in chunked text (zero-shot NER):\nevery mention is an inter-Stage `Record` — it carries Provenance and\nClassification like any other — so it can be threaded through the DAG and\nexported. A mention records:\n\n* `label` — the entity type it was tagged as. The label set is supplied per\n  Pipeline (zero-shot); no label set is hardcoded in core.\n* `text` — the exact surface string of the mention as it appears in the\n  parent document's assembled markdown.\n* `confidence` — the extractor's 0..1 score for the mention.\n* `char_start`/`char_end` on its **Provenance** — the half-open span the\n  mention occupies **in the parent document's assembled markdown** (not in the\n  chunk-local text), so a mention resolves back to its exact source offsets and,\n  through the parent's page map, to its original source page(s) (the S4\n  round-trip: mention → offset → original page, via\n  `PageOffsetIndex`).\n* `page_start`/`page_end` on its **Provenance** — the source page(s) the\n  mention span falls on, resolved from the parent's page map.\n* the parent chunk's **Classification**, inherited unchanged.\n\n`chunk_record_id`/`document_record_id` link the mention back to the chunk it\nwas found in and to the document that chunk came from; `index` is the\nmention's ordinal within its chunk (0-based).",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "document_record_id",
+          "type": "str",
+          "required": true,
+          "description": "Parent DocumentRecord id."
+        },
+        {
+          "name": "chunk_record_id",
+          "type": "str",
+          "required": true,
+          "description": "Parent ChunkRecord id."
+        },
+        {
+          "name": "index",
+          "type": "int",
+          "required": true,
+          "description": "0-based mention ordinal within the chunk."
+        },
+        {
+          "name": "label",
+          "type": "str",
+          "required": true,
+          "description": "Zero-shot entity type (per-Pipeline label)."
+        },
+        {
+          "name": "text",
+          "type": "str",
+          "required": true,
+          "description": "The mention's exact surface string."
+        },
+        {
+          "name": "confidence",
+          "type": "float",
+          "required": true,
+          "description": "Extractor confidence 0..1."
+        },
+        {
+          "name": "raw_label",
+          "type": "str | None",
+          "required": false,
+          "description": "The pre-canonicalization induced type, when a Type-Consolidation Stage ran."
+        }
+      ]
+    },
+    {
+      "name": "RelationMention",
+      "doc": "One typed relation between two entity mentions (CONTEXT `Relation Extraction`).\n\nRelation Extraction finds typed relations between entity mentions *within a\ndocument*. A relation is an inter-Stage `Record` — it carries Provenance\nand Classification like `EntityMention` — so it threads through the DAG,\nis checkpointed/resumed uniformly, and is exported to the corpus directly. A\nrelation records:\n\n* `label` — the relation type (e.g. `works_for`, `located_in`). The\n  relation label set is supplied per Pipeline (zero-shot / prompt-driven); no\n  label set is hardcoded in core, mirroring Entity Extraction.\n* `head_mention_id`/`tail_mention_id` — the `record_id` of the head (subject)\n  and tail (object) `EntityMention` the relation connects. The relation is\n  directed head → tail.\n* `head_text`/`tail_text` — the head/tail surface strings, carried denormalised\n  so a consumer (and Graph Assembly's Evidence) reads the relation without\n  re-joining to the mention set.\n* `confidence` — the extractor's 0..1 score for the relation.\n* `char_start`/`char_end` on its **Provenance** — the half-open span in the\n  parent document's assembled markdown that *covers both* endpoints (from the\n  earlier mention's start to the later mention's end), so the relation resolves\n  back to source offsets and, through the parent's page map, to its source\n  page(s). The page span is resolved the same way (mention → offset → page).\n* the parent document's **Classification**, inherited unchanged.\n\n`document_record_id` links the relation back to the document its two mentions\nbelong to; `index` is the relation's ordinal within that document (0-based).\n\nThe head and tail must be distinct mentions (no self-relation), and the char\nspan must be present and well-ordered — a relation with no span or an inverted\nspan fails validation, so a Provider that forgets to resolve the endpoint offsets\ncannot silently emit an un-resolvable relation.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "document_record_id",
+          "type": "str",
+          "required": true,
+          "description": "Parent DocumentRecord id."
+        },
+        {
+          "name": "index",
+          "type": "int",
+          "required": true,
+          "description": "0-based relation ordinal within the document."
+        },
+        {
+          "name": "label",
+          "type": "str",
+          "required": true,
+          "description": "Zero-shot relation type (per-Pipeline label)."
+        },
+        {
+          "name": "head_mention_id",
+          "type": "str",
+          "required": true,
+          "description": "record_id of the head mention."
+        },
+        {
+          "name": "tail_mention_id",
+          "type": "str",
+          "required": true,
+          "description": "record_id of the tail mention."
+        },
+        {
+          "name": "head_text",
+          "type": "str",
+          "required": true,
+          "description": "Head mention surface string."
+        },
+        {
+          "name": "tail_text",
+          "type": "str",
+          "required": true,
+          "description": "Tail mention surface string."
+        },
+        {
+          "name": "confidence",
+          "type": "float",
+          "required": true,
+          "description": "Extractor confidence 0..1."
+        },
+        {
+          "name": "raw_label",
+          "type": "str | None",
+          "required": false,
+          "description": "The pre-canonicalization induced type, when a Type-Consolidation Stage ran."
+        }
+      ]
+    },
+    {
+      "name": "FeatureRecord",
+      "doc": "A corpus-level Profiling result: a typed FeatureSet at one scope (CONTEXT `Profiling`).\n\nProfiling computes statistical and quality features over the corpus. A FeatureRecord\nis an inter-Stage `Record` — it carries Provenance and Classification like\nevery other carrier — so it threads through the DAG, is checkpointed/resumed\nuniformly, and exports directly. Exactly one of `document`/`corpus` is populated,\nselected by `scope`:\n\n* `scope == DOCUMENT`: `document` holds the per-document `DocumentFeatures`\n  and `document_record_id` links back to the profiled DocumentRecord; its Provenance\n  is that document's lineage, its Classification inherited unchanged. `corpus` is\n  `None`.\n* `scope == CORPUS`: `corpus` holds the cross-document `CorpusFeatures`;\n  `document_record_id` is `None` and its Provenance is the synthetic corpus-scope\n  lineage (the whole run is its source). `document` is `None`.\n\nThe scope/payload consistency is contract-enforced, so a Provider cannot emit a\ndocument-scope record with corpus features (or vice-versa) or leave both empty.",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "scope",
+          "type": "FeatureScope",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "document_record_id",
+          "type": "str | None",
+          "required": false,
+          "description": "Parent DocumentRecord id (DOCUMENT scope only)."
+        },
+        {
+          "name": "document",
+          "type": "DocumentFeatures | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "corpus",
+          "type": "CorpusFeatures | None",
+          "required": false,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "DisambiguationRecord",
+      "doc": "A corpus-level Disambiguation result: one canonical entity OR one normalized relation.\n\nThe scoped inter-Stage carrier for the Disambiguation Stage, mirroring\n`FeatureRecord`'s scope split (ADR-0025/0026). Exactly one of\n`entity`/`relation` is populated, selected by `scope`:\n\n* `scope == ENTITY`: `entity` holds the `CanonicalEntity`; `relation` is\n  `None`. Its Provenance is the canonical mention's page-accurate lineage and its\n  Classification is inherited from that mention.\n* `scope == RELATION`: `relation` holds the `NormalizedRelation`;\n  `entity` is `None`. Its Provenance/Classification are the source relation's.\n\nThe scope/payload consistency is contract-enforced, so a Provider cannot emit an\nentity-scope record with a relation payload (or leave both empty). Records are emitted\ndeterministically (all ENTITY records in canonical-text order, then all RELATION records)\nso a seeded run is byte-identical (Baseline bar).",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "scope",
+          "type": "DisambiguationScope",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "entity",
+          "type": "CanonicalEntity | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "relation",
+          "type": "NormalizedRelation | None",
+          "required": false,
+          "description": null
+        }
+      ]
+    },
+    {
+      "name": "GraphRecord",
+      "doc": "A corpus-level Graph-Assembly result: one graph node OR one graph edge.\n\nThe scoped inter-Stage carrier for the Graph Assembly Stage, mirroring\n`DisambiguationRecord`'s scope split (ADR-0026). Exactly one of `node`/`edge`\nis populated, selected by `scope`:\n\n* `scope == NODE`: `node` holds the `GraphNode`; `edge`/`hyperedge` are\n  `None`. Its Provenance/Classification are the source canonical entity's (page-accurate).\n* `scope == EDGE`: `edge` holds the `GraphEdge`; `node`/`hyperedge` are\n  `None`. Its Provenance/Classification are the source normalized relation's.\n* `scope == HYPEREDGE`: `hyperedge` holds the `GraphHyperedge` (ADR-0057);\n  `node`/`edge` are `None`. Its Provenance is the primary span's, in original\n  coordinates.\n\nThe scope/payload consistency is contract-enforced, so a Provider cannot emit a node-scope\nrecord with an edge payload (or leave both empty). Records are emitted deterministically\n(all NODE records in node-id order, then all EDGE records in edge-id order, then any\nHYPEREDGE records in hyperedge-id order), so a seeded run is byte-identical (Baseline bar).",
+      "fields": [
+        {
+          "name": "schema_version",
+          "type": "int",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "record_id",
+          "type": "str",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "provenance",
+          "type": "Provenance",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "classification",
+          "type": "Classification",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "scope",
+          "type": "GraphScope",
+          "required": true,
+          "description": null
+        },
+        {
+          "name": "node",
+          "type": "GraphNode | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "edge",
+          "type": "GraphEdge | None",
+          "required": false,
+          "description": null
+        },
+        {
+          "name": "hyperedge",
+          "type": "GraphHyperedge | None",
+          "required": false,
+          "description": null
+        }
+      ]
+    }
+  ],
+  "result_types": [
+    {
+      "name": "ScreeningOutcome",
+      "doc": "The result of a Screening checkpoint: what passed, what was Quarantined.\n\n`passed` are the records that proceed downstream — for Content Screening\nthese may carry newly-attached risk markers. `quarantined` are the\n`QuarantineRecord`s removed from the pipeline\n(retained for audit, never exported to the corpus). `findings` is the full\nper-record decision log Screening emits into the Quality Report — every\nQuarantine reason and every flag, so the disposition is auditable (S3 AC).",
+      "fields": [
+        {
+          "name": "passed",
+          "type": "list[_Screened]"
+        },
+        {
+          "name": "quarantined",
+          "type": "list[QuarantineRecord]"
+        },
+        {
+          "name": "findings",
+          "type": "list[ScreeningFinding]"
+        }
+      ]
+    },
+    {
+      "name": "FusedExtraction",
+      "doc": "The joint output of a `FusedEntityRelationExtractor` — one pass, both Stages.\n\nA Fused Provider (ADR-0013: gliner-relex, the custom span-predictor) fulfils\nEntity Extraction AND Relation Extraction in a single pass over the chunks, so\nit returns both carriers together: the `mentions` it found and the\n`relations` between them. The Runner threads both downstream from the one\nfused Stage — S4's mentions and S5's relations — without invoking a separate\nEntity-Extraction Stage (no double-extraction).",
+      "fields": [
+        {
+          "name": "mentions",
+          "type": "list[EntityMention]"
+        },
+        {
+          "name": "relations",
+          "type": "list[RelationMention]"
+        }
+      ]
+    },
+    {
+      "name": "TypeConsolidation",
+      "doc": "The output of a `TypeConsolidator` — remapped records + the vocabulary that did it.\n\nThree things travel together because they are one decision: the `mentions` and\n`relations` with their `label` rewritten to canonical form (and their raw induced label\npreserved on `raw_label`), and the `TypeVocabulary` that\ndefines the mapping. The Runner threads the records downstream and persists the vocabulary\nbeside the Stage's checkpoint — so the consolidation is inspectable as data, and an\nincremental run can merge into it (ADR-0017: files are the source of truth).",
+      "fields": [
+        {
+          "name": "mentions",
+          "type": "list[EntityMention]"
+        },
+        {
+          "name": "relations",
+          "type": "list[RelationMention]"
+        },
+        {
+          "name": "vocabulary",
+          "type": "TypeVocabulary | None"
+        }
+      ]
+    },
+    {
+      "name": "DeltaOutcome",
+      "doc": "The result of applying a `Delta` to the parent corpus (S11 affected-set recompute).\n\nA `DeltaProcessor` takes the last committed Corpus Version's corpus-level derived\nrecords, the current run's freshly-extracted corpus-level records, and the classified\n`Delta`, and returns:\n\n* `records` — the new **live** derived set for Version N+1: the parent records the delta did\n  not touch, spliced with the affected-set recompute's freshly-resolved records (the\n  merge-on-add / split-on-delete result). This is what the Corpus Version commits.\n* `retracted` — the derived records tombstoned by this delta (soft-retained on a\n  Retraction, discarded on a Purge), so the audit knows exactly what left the live set.\n* `entities_created` / `entities_merged` / `entities_split` — the affected-set\n  recompute's effect on canonical entities vs the parent (a bridging doc that MERGED two\n  clusters, a deleted doc that SPLIT one) — the S11 churn the Quality Report reports.\n* `edges_added` / `edges_retracted` — the graph patch counts.\n* `affected_set_size` / `corpus_record_count` — the perf-baseline witness: how many\n  corpus-level records the affected-set recompute actually re-resolved\n  (`affected_set_size`) out of the whole current corpus-level set\n  (`corpus_record_count`). On an incremental (non-reconciliation) delta\n  `affected_set_size` is the blocking-neighborhood closure the recompute touched, which is\n  `<= corpus_record_count` — the measurable \"recompute only the affected set\" bound\n  (ADR-0018). On a full Reconciliation the two are equal (the whole corpus is the affected\n  region).",
+      "fields": [
+        {
+          "name": "records",
+          "type": "list[Record]"
+        },
+        {
+          "name": "retracted",
+          "type": "list[Record]"
+        },
+        {
+          "name": "entities_created",
+          "type": "int"
+        },
+        {
+          "name": "entities_merged",
+          "type": "int"
+        },
+        {
+          "name": "entities_split",
+          "type": "int"
+        },
+        {
+          "name": "edges_added",
+          "type": "int"
+        },
+        {
+          "name": "edges_retracted",
+          "type": "int"
+        },
+        {
+          "name": "affected_set_size",
+          "type": "int"
+        },
+        {
+          "name": "corpus_record_count",
+          "type": "int"
+        }
+      ]
+    },
+    {
+      "name": "GraphFeatures",
+      "doc": "Per-node structural features over the assembled KG: centrality + community (ADR-0051).\n\nThe result a `GraphFeatureComputer` returns: for **every** node in the assembled graph,\na `centrality` score and a `community` id. It is a *value* the Graph-Assembly Stage stamps\nonto each `GraphNode`'s `properties` bag (`centrality` /\n`community`) — the computer holds nothing and mutates nothing (ADR-0048). Invariants (enforced\nat construction so a Provider cannot emit a half-populated result, so the downstream stamp is\ntotal):\n\n* `centrality` and `community` cover the **same** node-id set — every node gets both a\n  centrality and a community, never one without the other (the anti-false-green contract: a\n  computer that skips nodes fails here, not silently downstream);\n* each `centrality` value is a finite float (the normalisation is the Provider's business —\n  degree-centrality lands in `[0, 1]`, PageRank sums to ~1 — but every value is a real number,\n  never NaN/inf);\n* each `community` id is a non-empty string — the deterministic, content-addressed id of the\n  node's community (the reference Providers use the community's lexicographically-smallest\n  `node_id`), so two runs over the same corpus agree byte-for-byte (the Baseline bar).\n\nAn empty graph yields the empty `GraphFeatures` (both maps empty), never an error.",
+      "fields": [
+        {
+          "name": "centrality",
+          "type": "dict[str, float]"
+        },
+        {
+          "name": "community",
+          "type": "dict[str, str]"
+        }
+      ]
+    },
+    {
+      "name": "SparseVector",
+      "doc": "A sparse term-weight vector — the index-time SPLADE-family signal (ADR-0050/0053).\n\nThe shape every vector DB's sparse index expects: two parallel columns, `indices` (the\nterm ids that have non-zero weight) and `values` (their weights), materialised at Export as\n`sparse_indices: list<int>` + `sparse_values: list<float>` (ADR-0050). Invariants (enforced\nat construction so a Provider cannot emit a malformed vector, and so the emission is\nbyte-deterministic regardless of a Provider's internal dict ordering):\n\n* `indices` and `values` are the same length;\n* `indices` are **strictly ascending** (hence unique) and non-negative — the canonical order\n  a sparse index ingests, and the order two runs must agree on for a byte-identical export;\n* a zero vector (empty text, no surviving terms) is the empty `SparseVector()` — never a\n  dense run of zeros.\n\nA `SparseEmbedder` Provider builds one via `from_terms` from its natural\n`{term_id: weight}` map, which sorts and validates in one place.",
+      "fields": [
+        {
+          "name": "indices",
+          "type": "list[int]"
+        },
+        {
+          "name": "values",
+          "type": "list[float]"
+        }
+      ]
+    },
+    {
+      "name": "SparseSignals",
+      "doc": "The per-record structured signals a composing `SparseEmbedder` injects at index time.\n\nADR-0053's sparse vector is not plain `SPLADE(text)` but the structured composition\n`SPLADE(text) ⊕ boost·entity_terms ⊕ boost·metadata_terms`. The text-only\n`SparseEmbedder.encode_sparse` seam can only build the model leg — no structured signal\ncrosses it — so a `ComposingSparseEmbedder` receives this parallel per-record carrier and\nfolds the chunk's own structured signals into the emitted vector. That is what makes the\nindex-time and query-time sparse spaces **match** (the ADR-0053 one-composition-two-clocks\nguarantee): without it the query encoder injects boosted entity/metadata terms the corpus never\ncarried, and a hybrid search on an injected term matches zero documents. A record with no\nstructured signals is `EMPTY_SPARSE_SIGNALS` and composes to exactly the model leg —\nidentical to the text-only path (so the additive/byte-identical guarantee is untouched when no\nsignals exist).\n\n* `entities` — the chunk's `(surface, confidence)` entity mentions offered to the\n  composition. The composition confidence-gates them; the embedder's redaction gate additionally\n  drops any surface that no longer occurs in the (redacted) corpus text, so a masked PII surface\n  is never re-injected as a term (ADR-0053, REDACTION-BY-DEFAULT).\n* `metadata` — the chunk's `{field: value}` map from which the embedder's operator-selected\n  `metadata_fields` are injected (e.g. its classification category).",
+      "fields": [
+        {
+          "name": "entities",
+          "type": "tuple[tuple[str, float], ...]"
+        },
+        {
+          "name": "metadata",
+          "type": "Mapping[str, str]"
+        }
+      ]
+    }
+  ]
+}

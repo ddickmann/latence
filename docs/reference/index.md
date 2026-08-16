@@ -7,6 +7,7 @@ is the stable surface a Provider author and an embedding integrator program agai
 
 | Module | What it defines |
 | --- | --- |
+| [Stage contracts (generated)](stage-contracts.md) | The generated per-Capability replacement contract — what every Stage receives and must emit, plus the exact steps to swap any Provider without breaking the flow. Machine-readable twin: [stage-contracts.json](stage-contracts.json). |
 | [Data contracts](contracts.md) | The Pydantic record schema shared by every Stage — Provenance, Classification, the per-Stage Record types. |
 | [Capability protocols](capability.md) | The typed `Protocol`s a Provider implements, plus the `ProviderRegistry`. |
 | [Pipeline](pipeline.md) | The declarative DAG of Stages. |

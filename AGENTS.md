@@ -271,6 +271,12 @@ the embedder is a **config key**, not a refactor, and a new model is a **new pac
 to `latence-core` (ADR-0004/0016). An agent that "adds support for model X" by editing core has
 written a fork; an agent that adds a package has written a plugin.
 
+The full per-Capability replacement contract — what every Stage receives, what it must emit, the
+wiring rules with their exact typed errors, and the swap walkthrough — is the **generated**
+[`docs/reference/stage-contracts.md`](./docs/reference/stage-contracts.md) (machine-readable twin
+`stage-contracts.json`, drift-gated against the descriptor table). Read that first when replacing a
+component.
+
 1. **Create `packages/latence-<capability>-<name>/`** with its own `pyproject.toml`, `LICENSE`,
    `README.md`, `src/latence_<capability>_<name>/` and `tests/`. Its heavy dependencies belong to it
    and stay out of core.

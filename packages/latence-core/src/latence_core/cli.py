@@ -1471,6 +1471,84 @@ def purge(
     _emit_delta_report(pipeline, rid, report)
 
 
+@app.command()
+def contracts(
+    capability: Annotated[
+        str | None,
+        typer.Option(
+            "--capability",
+            help="Print only this Capability's entry — a Stage kind (e.g. 'parse', "
+            "'entity_extraction') or a signal-seam prefix (e.g. 'tokenizer').",
+        ),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option(
+            "--write",
+            help="Write docs/reference/stage-contracts.{json,md} under the repo root instead of "
+            "printing (the regeneration path the drift gate names).",
+        ),
+    ] = False,
+    repo_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--repo-root",
+            help="Workspace root holding packages/*/pyproject.toml. When set (or when ./packages "
+            "exists) the Provider listings come from the workspace declarations; otherwise from "
+            "the installed distributions.",
+        ),
+    ] = None,
+) -> None:
+    """Print the generated Stage-contract reference (the agent-facing replacement contract).
+
+    One authoritative JSON document generated from the CapabilityDescriptor table, the Capability
+    Protocols and the record carriers: per Capability, what a Stage receives, what it must emit,
+    how a Provider registers, and the conformance case that gates a replacement. The committed
+    twin lives at ``docs/reference/stage-contracts.{json,md}``; ``--write`` regenerates it.
+    """
+    import json as _json
+
+    from latence_core.contract_reference import (
+        build_reference,
+        installed_provider_packages,
+        render_reference_files,
+        workspace_provider_packages,
+    )
+
+    root = repo_root or Path.cwd()
+    try:
+        if write:
+            for path, text in render_reference_files(root).items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            typer.echo(f"rendered docs/reference/stage-contracts.json + .md under {root}")
+            return
+        if (root / "packages").is_dir():
+            packages = workspace_provider_packages(root)
+        else:
+            packages = installed_provider_packages()
+        reference = build_reference(packages)
+    except (LatenceError, OSError) as exc:
+        typer.echo(f"contracts failed [{error_category(exc)}]: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if capability is not None:
+        wanted = capability.strip().lower()
+        entries: list[dict[str, object]] = [
+            *(e for e in reference["capabilities"] if e["kind"] == wanted),
+            *(e for e in reference["signal_seams"] if e["prefix"] == wanted),
+        ]
+        if not entries:
+            known = ", ".join(
+                [e["kind"] for e in reference["capabilities"]]
+                + [e["prefix"] for e in reference["signal_seams"]]
+            )
+            typer.echo(f"unknown capability {capability!r}; one of: {known}", err=True)
+            raise typer.Exit(code=2)
+        typer.echo(_json.dumps(entries[0], indent=2, ensure_ascii=False))
+        return
+    typer.echo(_json.dumps(reference, indent=2, ensure_ascii=False))
+
+
 def _repo_root_for(spec_path: Path) -> Path:
     """The repo root a ``deploy/env/<name>/environment.yaml`` belongs to (three parents up)."""
     from latence_core.envspec import repo_root_for  # noqa: PLC0415 - keeps the CLI import lazy

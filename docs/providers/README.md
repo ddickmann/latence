@@ -10,7 +10,9 @@ one method, declare a profile, register an entry point, and pass conformance.
 This guide is the end-to-end path. The mechanical checklist is
 [Passing Provider Conformance](../CONFORMANCE.md); the ergonomic helpers are in
 [Writing an adapter with `AdapterBase`](../writing-an-adapter.md); the real template is the
-[`parser.pdfplumber`](../reference/example-provider.md) package.
+[`parser.pdfplumber`](../reference/example-provider.md) package. The per-Capability
+**replacement contract** — what each Stage receives, what it must emit, and the five-step swap
+walkthrough — is the generated [Stage contracts](../reference/stage-contracts.md) reference.
 
 ## 1. Implement the Capability
 
