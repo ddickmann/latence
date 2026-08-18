@@ -39,6 +39,30 @@ for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence
 done
 ok "workspace synced + heavy sources installed --no-deps"
 
+# Editable installs must resolve into THIS checkout. The venv is shared, and a session that
+# ran the install loop from a git worktree left three latence_* packages resolving into
+# .claude/worktrees/<name>/ — so tests here imported (and mypy checked) a DIFFERENT tree than
+# the one under test, silently. The loop above repairs the paths as a side effect of running
+# from this root; this step is what proves the repair instead of trusting it, and catches any
+# latence_* module the loop does not cover.
+step "editable installs resolve into this checkout"
+uv run python - <<'PYEOF'
+import importlib.util, pathlib, sys
+root = pathlib.Path.cwd().resolve()
+stray = {}
+for finder in list(pathlib.Path(p) for p in sys.path if "site-packages" in p):
+    for pth in finder.glob("_editable_impl_latence_*.pth"):
+        name = pth.stem.removeprefix("_editable_impl_")
+        spec = importlib.util.find_spec(name)
+        if spec and spec.origin and not pathlib.Path(spec.origin).resolve().is_relative_to(root):
+            stray[name] = spec.origin
+if stray:
+    lines = "\n".join(f"  {k} -> {v}" for k, v in sorted(stray.items()))
+    sys.exit(f"editable installs resolve OUTSIDE this checkout — tests would validate the "
+             f"wrong tree:\n{lines}\nfix: uv pip install --no-deps -e packages/<name>")
+PYEOF
+ok "all latence_* editables resolve under $(pwd)"
+
 # The lint scope is CI's, verbatim. This script's whole promise is "what CI will say, before
 # you push", and a narrower scope here breaks that promise silently: the campaign scripts and
 # scripts/ were unlinted locally while CI checked them. test_verify_local_mirrors_ci_lint_scope
