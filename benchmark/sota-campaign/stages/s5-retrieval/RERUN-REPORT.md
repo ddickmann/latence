@@ -64,6 +64,47 @@ Document-level recall tells the same story — `doc_recall@10` for graph_rescue:
 ohr_bench 0.9738, uda 0.4466, multihop_rag 0.8551, wiki2multihop 0.7198, musique 0.6068,
 hotpotqa 0.8119 — dense-or-better everywhere.
 
+### Read against the right baseline, though
+
+Dense is not the strongest rung in the matrix; `bm25` is, and `graph_rescue`'s own first stage
+already contains it. Compared against **`bm25`** rather than against dense, the same cells say
+something much weaker:
+
+| dataset | bm25 | graph_rescue | Δ recall@10 | Δ nDCG@10 |
+|---|---|---|---|---|
+| vidoseek | 0.9705 | 0.9726 | +0.0021 | **−0.0412** |
+| ohr_bench | 0.6609 | 0.6589 | **−0.0020** | **−0.0288** |
+| uda | 0.1261 | 0.1276 | +0.0015 | +0.0006 |
+| multihop_rag | 0.3772 | 0.3759 | **−0.0013** | −0.0050 |
+| wiki2multihop | 0.7018 | 0.7096 | +0.0078 | −0.0166 |
+| musique | 0.3404 | 0.3404 | 0.0000 | 0.0000 |
+| hotpotqa | 0.5786 | 0.5786 | 0.0000 | 0.0000 |
+
+So the "+0.07 on uda" headline is what **adding BM25 to dense** buys, not what the graph buys. The
+graph lanes' own contribution at k=10 is within ±0.008 on recall and *negative* on nDCG for four of
+seven datasets.
+
+**There is a structural reason, and it is not a tuning accident.** The harness runs `POOL_K = 100`
+(`benchmark/s5/legs.py:286`) and the pipeline's `select_pool_k` is also 100. `_append_and_dedupe`
+(`packages/latence-retrieval/src/latence_retrieval/rescue.py:1071`) places the *entire* fused base
+ahead of every rescued candidate by construction, and the base is already 100–200 candidates —
+so the first item stamped `rescued` sits at rank ≥ 100, and `select()` then truncates the union to
+`union[:100]` (`rescue.py:878`). **No rescued candidate can reach a top-10 cut, or the selector's
+pool, at this configuration.**
+
+The cells confirm the prediction rather than merely permitting it: `graph_rescue_coe` is bitwise
+identical to `graph_rescue` on **7 of 7** datasets, and `graph_rescue_packed` on 4 of 7 (differing
+only where the token budget truncates, always downward). A selector fed an all-base pool ordered by
+a strictly decreasing score can only drop items, never reorder them.
+
+**What this section's numbers therefore measure** is the base stage — dense+BM25 RRF, max-normalised,
+with the Expander rescore — not graph traversal. `graph_rescue` − `bm25` is, to within the rounding
+floor, exactly the Expander's contribution. The traversal and hypergraph lanes are architecturally
+live, correct, and **measurably inert at k=10 on this matrix**: they cost latency and buy nothing the
+metric can see. Demonstrating them requires `select_pool_k > |base|`, a larger k, or a smaller
+`pool_k` — and that experiment has not been run. Until it is, no claim should be made that graph
+traversal improves retrieval quality here.
+
 ---
 
 ## 3. Does the packer do its job?

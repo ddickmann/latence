@@ -179,6 +179,16 @@ nav:
       - Domain language: concepts/domain-language.md
       - Pipeline Stages: pipeline/index.md
       - "Deep dive: messy data → knowledge-graph retrieval": DEEP-DIVE.md
+      # The anatomy guide: the same territory as the deep dive, but exhaustive and grounded in
+      # the pipeline that actually produced the benchmark results. The index is readable alone;
+      # the five chapters are the zoom-in, in DAG order.
+      - Pipeline anatomy:
+          - anatomy/index.md
+          - "1 · Ingest & document understanding": anatomy/01-ingest-and-document-understanding.md
+          - "2 · Extraction & privacy": anatomy/02-extraction-and-privacy.md
+          - "3 · Corpus → knowledge graph": anatomy/03-corpus-to-knowledge-graph.md
+          - "4 · Enrichment & export": anatomy/04-enrichment-and-export.md
+          - "5 · Retrieval": anatomy/05-retrieval.md
 
   # --- The Provider author's entry point -----------------------------------------------------
   - Providers:
