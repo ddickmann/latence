@@ -1,0 +1,17 @@
+{
+  "dataset": "multihop_rag",
+  "queries_total": 2556,
+  "queries_usable": 2255,
+  "queries_excluded": 0,
+  "refs_total": 5908,
+  "refs_resolved": 5908,
+  "refs_excluded": 0,
+  "resolution_rate": 1.0,
+  "granularity": {
+    "page": 0,
+    "document": 5908
+  },
+  "page_share_of_resolved": 0.0,
+  "exclusions": {},
+  "trustworthy": true
+}

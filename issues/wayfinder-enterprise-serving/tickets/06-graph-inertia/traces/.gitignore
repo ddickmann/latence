@@ -1,0 +1,4 @@
+# Captured retrieval traces: ~50 KB/query, regenerate with `probe.py` (deterministic).
+*.jsonl
+*.partial
+*.log
