@@ -29,6 +29,12 @@ replacing it.
 The rest of this document walks that end to end, in five acts, naming the real models and mechanisms,
 and closes on a measured result that isolates exactly what the knowledge graph buys you.
 
+> **This page is the reasoning; [Pipeline anatomy](anatomy/index.md) is the mechanics.** Where this
+> deep dive argues *why* the design is shaped this way, the anatomy walks the stack **as actually
+> configured today** — every stage of the benchmarked pipelines, with its Provider, its model, its
+> exact config values, and its I/O contract — and its chapters go all the way down per stage. Read
+> this one for the argument, that one for the specification.
+
 ---
 
 ## Act I — The spine: messy files → AI-ready data
@@ -57,13 +63,20 @@ serve); anything with scans, PDFs, office docs, or images goes to the **served O
   endpoint*, not in-process, because a VLM is heavy and benefits from vLLM's batching — and because
   isolating it behind an endpoint keeps its dependency stack from colliding with the learned models
   downstream.
+- **Two LightOn packages, two checkpoints — don't conflate them.** `latence-parser-lighton-vllm`
+  (`parser.lighton_vllm`) is the served path above and pins `lightonai/LightOnOCR-2-1B`;
+  `latence-parser-lighton` (`parser.lighton`) is the in-process `transformers` path for a single
+  box and pins `lightonai/LightOnOCR-1B-1025`. Both are Apache-2.0 weights **and** code, verified
+  independently (2026-07-09 and 2026-07-08 respectively) and declared in each Provider's own
+  `ProviderProfile`.
 - Output: a `DocumentRecord` — clean markdown plus a page map that preserves where every span came
   from. Provenance is never lost; it is threaded through every subsequent stage.
 
-**4 · Chunk** — `chunk.markdown`. Splits the markdown into retrieval-sized pieces
-(`max_tokens: 768` by default, `--chunk-max-tokens` to change it, with 80-token overlap), preserving
+**4 · Chunk** — `chunk.markdown`. Splits the markdown into retrieval-sized pieces, preserving
 character offsets and page alignment so any later result can be traced back to its exact source
-location. Deterministic. The downstream encoder's window is *derived* from this budget rather than
+location. Deterministic. The engine's `ChunkBudget` defaults to `max_tokens: 512`,
+`overlap_tokens: 64`, `min_tokens: 16`; `--chunk-max-tokens` changes the ceiling, and the
+benchmark campaign's pipelines run `640 / 80 / 8`. The downstream encoder's window is *derived* from this budget rather than
 fixed: the chunker counts ~1.2× fewer tokens than mdeberta-v3, so `extract`/`redact` bound
 `max_len` above the budget and a raised budget cannot silently truncate.
 

@@ -43,11 +43,17 @@ The framework never bundles model weights. It names Capabilities and lets
 Providers fulfil them; a Provider downloads its checkpoint only when a Pipeline
 configures it. The models below are the permissively-licensed DEFAULTS the
 reference Providers point at. Weights AND code licenses were verified separately
-on 2026-07-06 (see docs/adr/0012-permissive-only-reference-providers-gemma-opt-in.md).
+per model, from 2026-07-06 onward; each Provider's own ProviderProfile records the
+citation and the verification date, and THIRD-PARTY-LICENSES.md carries the
+full table (see
+docs/adr/0012-permissive-only-reference-providers-gemma-opt-in.md).
 All are Apache-2.0 or MIT:
 
-  - lightonai/LightOnOCR-1B-1025 (Parse/OCR)     — Apache-2.0
-  - knowledgator/gliner-linker-large (Disambig)  — Apache-2.0
+  - lightonai/LightOnOCR-1B-1025 (Parse/OCR, `parser.lighton`)      — Apache-2.0
+  - lightonai/LightOnOCR-2-1B (Parse/OCR, `parser.lighton_vllm`)    — Apache-2.0
+  - fastino/gliner2-multi-v1 (Fused Entity+Relation)                — Apache-2.0
+  - fastino/GLiNER2-Guardrails-PII-Multi (Redaction)                — Apache-2.0
+  - knowledgator/gliner-linker-large-v1.0 (Disambig) — Apache-2.0
   - knowledgator/gliner-relex-multi-v1.0 (Rel)   — Apache-2.0
   - urchade/gliner_multi-v2.1 (Entity)           — Apache-2.0
   - urchade/gliner_multi_pii-v1 (Redaction)      — Apache-2.0
