@@ -101,9 +101,39 @@ a strictly decreasing score can only drop items, never reorder them.
 with the Expander rescore — not graph traversal. `graph_rescue` − `bm25` is, to within the rounding
 floor, exactly the Expander's contribution. The traversal and hypergraph lanes are architecturally
 live, correct, and **measurably inert at k=10 on this matrix**: they cost latency and buy nothing the
-metric can see. Demonstrating them requires `select_pool_k > |base|`, a larger k, or a smaller
-`pool_k` — and that experiment has not been run. Until it is, no claim should be made that graph
-traversal improves retrieval quality here.
+metric can see.
+
+### That experiment has now been run, and the lanes lost
+
+Ticket 06 (`issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/`) ran all three
+configurations named above plus the interleave family, over three datasets. Its `base` arm
+reproduces this matrix's `graph_rescue` cells to four decimals on full populations, so it is
+comparable to the table above rather than a re-measurement of it.
+
+The finding is not that a knob was set wrong — it is that **there is almost nothing behind the
+knob**. An oracle that promotes every rescued gold chunk to the front of the list (no policy can
+beat it) is worth **+0.0056** recall@10 on multihop_rag, **+0.0077** on wiki2multihop, and
+**exactly 0.0000** on vidoseek, where the graph lanes reach *not one* gold chunk the base missed
+across 1,142 queries. Each option in turn:
+
+- **`select_pool_k > |base|`** — works and saturates (0 rescued candidates selected at 100, 59 at
+  250, no change at 1000), and costs the packer −0.0032 recall over its own selected context.
+- **larger `k`** — `append` is bitwise identical to `base` at *every* cut including k=100, on all
+  three datasets. The inertia is not a k=10 artifact.
+- **smaller `pool_k`** — a rescued candidate reaches the top ten only when `|base| < k`, i.e. at
+  `pool_k=8`; it buys +0.0003 against a base that shrinking already cost 0.0127 (net −0.0124).
+- **interleave / fuse instead of append** — monotonically worse in the fusion weight, down to
+  −0.1121 at `w=1.00`. **The append-not-fuse design choice is confirmed by measurement.**
+
+And the counterfactual, on the same queries in the same units: a perfect reranker over the base's
+own top-100 is worth **+0.3724** recall@10 (multihop_rag) and **+0.0905** (wiki2multihop) — 66×
+and 12× the graph's entire ceiling. The base already *retrieves* 87% of multihop_rag's gold in its
+top 100 and only *ranks* 38% of it into the top 10: a ranking problem, not a reach problem.
+
+**The claim these cells support** is that graph-as-rescue never *lowers* recall — a real property
+of the append design, and one fusing demonstrably lacks — not that graph traversal improves
+retrieval quality here. It does not, at any configuration tested. See
+[`REPORT.md`](../../../../issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/REPORT.md).
 
 ---
 

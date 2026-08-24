@@ -12,12 +12,25 @@ deciding whether the graph lane is worth paying for at all. There are **zero LLM
 the online path**: every signal is a precomputed export column, a graph traversal, or a
 deterministic solver — recall-per-token at zero marginal LLM cost is the positioning.
 
+> **Before you enable this: what it measurably buys.** On the three datasets of the ticket-06
+> experiment, the traversal and hypergraph lanes contribute **nothing a top-10 or top-100 metric
+> can see** — an oracle that promotes every rescued gold chunk to the front is worth +0.0056
+> (multihop_rag), +0.0077 (wiki2multihop) and **0.0000** (vidoseek), against 221–538 ms/query.
+> The base stage (dense+BM25 RRF) is doing the work, and the next unit of quality is a rescore
+> over *its* top-100, worth up to +0.37. Enable the graph lanes for the property below — that
+> they cannot make retrieval worse — not for a recall gain. See
+> `issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/REPORT.md`.
+
 ## Why this shape (and not fusion)
 
 The obvious wiring — run a graph traversal as one more retrieval leg and RRF-fuse it with dense
 and BM25 — was **measured to regress recall on every dataset** of the S5 benchmark matrix
-(R@1 falling monotonically as graph legs were added, e.g. ohr_bench 0.228 → 0.122). The components
-were fine; the application was wrong, four ways:
+(R@1 falling monotonically as graph legs were added, e.g. ohr_bench 0.228 → 0.122). Ticket 06
+reproduced this independently as a continuous weight sweep — RRF weight on the graph lane is
+monotonically harmful, −0.0187 recall@10 at `w=0.25` and −0.1121 at `w=1.00` on multihop_rag, with
+no weight small enough to help without being small enough to do nothing — so **the design choice
+below is confirmed by measurement, not merely by the original observation.** The components were
+fine; the application was wrong, four ways:
 
 1. **Graph lists are not peers of dense/BM25.** A weak alias-seeded traversal hit competed at
    equal RRF weight with a strong dense hit and dragged it down. Dense and BM25 *are* peers (both

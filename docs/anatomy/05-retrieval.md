@@ -613,15 +613,50 @@ relative order and can never promote. Where they differ (vidoseek, ohr_bench, ud
 binds, which §5.10 measures directly.
 
 So the traversal and hypergraph lanes are **architecturally live and measurably inert at
-k = 10 on this matrix**. What they cost is latency. What they would buy needs
-`select_pool_k > |base|`, or a `k` beyond the base's length, or a narrower `pool_k` — a
-configuration this matrix did not run. The right claim from these numbers is:
+k = 10 on this matrix**. What they cost is latency.
 
-> *Applied as rescue, the graph never lowers recall — which fusing it demonstrably did — and
-> the denormalised 1-hop projection is worth up to +0.008 recall@10 on top of a strong hybrid
-> baseline. The traversal and hypergraph lanes are the mechanism by which a candidate the base
-> missed can enter the result at all; on this matrix, at these pool sizes, they did not enter
-> the top ten.*
+### And what they would buy, now measured: almost nothing
+
+The configurations that would un-inert them — `select_pool_k > |base|`, a `k` beyond the
+base's length, a narrower `pool_k`, or interleaving instead of appending — were run in ticket
+06 over three datasets, against a `base` arm that reproduces this matrix's `graph_rescue`
+cells to four decimals. **All four are refuted, and none of them was the binding constraint.**
+
+The bound that settles it is an oracle: promote every rescued gold chunk to the front of the
+list, which no shippable policy can beat.
+
+| dataset | rescue-only gold per query | queries with any | **ceiling Δ recall@10** | perfect rerank of the base |
+|---|---|---|---|---|
+| multihop_rag (2,255) | 0.142 | 9.8% | **+0.0056** | **+0.3724** |
+| wiki2multihop (2,500) | 0.021 | 2.0% | **+0.0077** | **+0.0905** |
+| vidoseek (1,142) | **0.000** | **0%** | **+0.0000** | +0.0244 |
+
+On vidoseek the graph lanes reach **not one** gold chunk the base missed. And the same oracle
+pointed at the base alone — a perfect rescore of candidates dense+BM25 *already* retrieved — is
+worth 66× and 12× the graph's entire ceiling on the two multi-hop corpora. The base retrieves
+87% of multihop_rag's gold into its top 100 and ranks 38% into its top 10: **a ranking problem
+wearing a reach problem's clothes.**
+
+Two results worth keeping out of that:
+
+* **§5.4's append-not-fuse choice is confirmed, not merely defended.** Run as a continuum, RRF
+  weight on the graph lane is monotonically harmful — −0.0187 at `w=0.25`, −0.1121 at `w=1.00`
+  on multihop_rag — and no weight is small enough to help without being small enough to do
+  nothing. Fusing destroys the ranking; appending contains it. That containment is real.
+* **The Expander should not inherit the win.** `graph_rescue` − `bm25` is exactly the Expander
+  (above), and it is recall-neutral and **nDCG-negative on four of the five datasets where it
+  acts**. It trades head precision for a third-decimal recall gain.
+
+The right claim from these numbers is therefore:
+
+> *Applied as rescue, the graph never lowers recall — which fusing it demonstrably does, by up
+> to −0.11. But the traversal and hypergraph lanes reach almost nothing the base missed, and no
+> configuration of `select_pool_k`, `k`, `pool_k` or fusion weight converts that into a
+> measurable win. At 221–538 ms/query against BM25's 1.1–8.3 ms, they do not earn their
+> latency. The next unit of retrieval quality is a rescore over the base's own top-100.*
+
+Full design, arms and stop rule:
+`issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/REPORT.md`.
 
 ### Latency
 

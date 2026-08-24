@@ -219,21 +219,37 @@ production composition is four steps:
 4. **SELECT** — a token budget is spent over the deduped union by the knapsack packer or the
    chain-of-evidence selector.
 
-Measured on the full campaign matrix, `recall@10`, every query, no limit:
+Measured on the full campaign matrix, `recall@10`, every query, no limit — and read against
+**both** baselines, because only one of them is honest:
 
-| dataset | dense (baseline) | graph_rescue | Δ |
-|---|---|---|---|
-| vidoseek | 0.9466 | **0.9726** | +0.026 |
-| ohr_bench | 0.5890 | **0.6589** | +0.070 |
-| uda | 0.0594 | **0.1276** | **+0.068 (2.1×)** |
-| multihop_rag | 0.3328 | **0.3759** | +0.043 |
-| wiki2multihop | 0.6753 | **0.7096** | +0.034 |
-| musique | 0.3353 | **0.3404** | +0.005 |
-| hotpotqa | 0.5576 | **0.5786** | +0.021 |
+| dataset | dense | **bm25 (the strong baseline)** | graph_rescue | Δ vs dense | **Δ vs bm25** |
+|---|---|---|---|---|---|
+| vidoseek | 0.9466 | 0.9705 | 0.9726 | +0.026 | +0.0021 |
+| ohr_bench | 0.5890 | 0.6609 | 0.6589 | +0.070 | **−0.0020** |
+| uda | 0.0594 | 0.1261 | 0.1276 | +0.068 | +0.0015 |
+| multihop_rag | 0.3328 | 0.3772 | 0.3759 | +0.043 | **−0.0013** |
+| wiki2multihop | 0.6753 | 0.7018 | 0.7096 | +0.034 | +0.0078 |
+| musique | 0.3353 | 0.3404 | 0.3404 | +0.005 | 0.0000 |
+| hotpotqa | 0.5576 | 0.5786 | 0.5786 | +0.021 | 0.0000 |
 
-Graph rescue beats the dense baseline on **all seven** datasets. The chapter on retrieval
-carries the budget curves, the latency story (median 9.8× faster after the optimisation pass;
-`uda` graph_rescue 6,648 → 646 ms) and the honest accounting of the seven cells that moved.
+Graph rescue beats the *dense* baseline on all seven datasets — but dense is not the strongest
+rung, and `graph_rescue`'s own first stage already contains BM25. **Against `bm25`, the graph
+lanes' contribution is within ±0.008 and negative on two.** The "+0.068 on uda" is what adding
+BM25 to dense buys, not what the graph buys.
+
+A dedicated experiment (ticket 06) settled why, and the answer is structural: with a 100–200
+candidate base and rescue candidates appended below it, **no rescued candidate reaches a top-10
+cut at all.** An oracle that promotes every rescued gold chunk to the front — which no shippable
+policy can beat — is worth +0.0056 (multihop_rag), +0.0077 (wiki2multihop) and **exactly zero**
+(vidoseek, where the graph lanes reach not one gold chunk the base missed in 1,142 queries). No
+setting of `select_pool_k`, `k`, `pool_k` or fusion weight converts that into a win.
+
+**What these numbers support** is the asymmetry itself: applied as rescue, the graph never
+*lowers* recall, and fusing it demonstrably does — up to −0.11 at co-equal weight. That
+containment is real and is why point 3 above is written the way it is. What they do not support
+is a claim that graph traversal improves retrieval quality here. The chapter on retrieval carries
+the ceiling tables, the budget curves and the latency story (median 9.8× faster after the
+optimisation pass; `uda` graph_rescue 6,648 → 646 ms).
 
 ---
 

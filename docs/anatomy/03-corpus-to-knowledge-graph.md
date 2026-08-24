@@ -390,9 +390,10 @@ list is empty, no pair is ever compared, and:
 > **In the campaign configuration, a canonical entity is exactly the set of mentions whose surface
 > strings NFKC-normalise, casefold and whitespace-collapse to the same string.** Nothing else.
 
-Everything the graph achieves downstream — every multi-hop join, every hyperedge, the entire
-`graph_rescue` recall lift — is built on that austere a notion of identity. Which is either
+Everything the graph achieves downstream — every multi-hop join, every hyperedge, everything the
+`graph_rescue` lanes reach — is built on that austere a notion of identity. Which is either
 reassuring or alarming, depending on your priors, and is exactly why the alternatives below matter.
+(How much they reach, measured: very little. See `05-retrieval.md` §5.4.)
 
 ### What a resolved cluster becomes
 
