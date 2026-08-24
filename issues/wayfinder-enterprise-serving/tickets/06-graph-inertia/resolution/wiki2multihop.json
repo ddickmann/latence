@@ -1,0 +1,17 @@
+{
+  "dataset": "wiki2multihop",
+  "queries_total": 2500,
+  "queries_usable": 2500,
+  "queries_excluded": 0,
+  "refs_total": 6050,
+  "refs_resolved": 6050,
+  "refs_excluded": 0,
+  "resolution_rate": 1.0,
+  "granularity": {
+    "page": 0,
+    "document": 6050
+  },
+  "page_share_of_resolved": 0.0,
+  "exclusions": {},
+  "trustworthy": true
+}

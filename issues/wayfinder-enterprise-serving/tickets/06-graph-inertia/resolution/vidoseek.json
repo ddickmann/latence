@@ -1,0 +1,17 @@
+{
+  "dataset": "vidoseek",
+  "queries_total": 1142,
+  "queries_usable": 1142,
+  "queries_excluded": 0,
+  "refs_total": 1142,
+  "refs_resolved": 1142,
+  "refs_excluded": 0,
+  "resolution_rate": 1.0,
+  "granularity": {
+    "page": 1142,
+    "document": 0
+  },
+  "page_share_of_resolved": 1.0,
+  "exclusions": {},
+  "trustworthy": true
+}
