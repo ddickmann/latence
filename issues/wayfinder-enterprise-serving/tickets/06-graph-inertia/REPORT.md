@@ -20,13 +20,14 @@ the interleave family the brief raised as a fourth.
 
 | | question | answer |
 |---|---|---|
-| **Q1** | Do the graph lanes reach gold the base does not already hold? | **Barely.** Oracle ceiling **+0.0056** recall@10 (multihop_rag), **+0.0000** (vidoseek). |
+| **Q1** | Do the graph lanes reach gold the base does not already hold? | **Barely.** Oracle ceiling **+0.0056** recall@10 (multihop_rag), **+0.0077** (wiki2multihop — the best case), **+0.0000** (vidoseek). |
 | **Q2** | Does any promotion policy realise it? | No policy beats `base` with a CI excluding zero. The best is indistinguishable from base; the rest are worse. |
-| **Q3** | What else could that retrieval budget buy? | A perfect reranker over the base alone: **+0.3724** recall@10 — **66×** the graph's entire ceiling, same queries, same units. |
+| **Q3** | What else could that retrieval budget buy? | A perfect reranker over the base alone: **+0.3724** recall@10 on multihop_rag, **+0.0905** on wiki2multihop — **66×** and **12×** the graph's entire ceiling, same queries, same units. |
 
-The graph lanes cost **484–538 ms/query** median against the `bm25` rung's **1.3 ms**
-(committed cells; the trace's own timings were taken under concurrent load and are not a latency
-measurement). They buy, at the ceiling, +0.0056. **They do not earn their latency.**
+The graph lanes cost **221–538 ms/query** median against the `bm25` rung's **1.1–8.3 ms** on the
+same three datasets (committed cells; the traces' own timings were taken under concurrent load and
+are not a latency measurement). For that, at the ceiling, they buy **+0.0000 to +0.0077** recall@10.
+**They do not earn their latency.**
 
 ### Validity check, before any of the numbers are quoted
 
@@ -51,6 +52,7 @@ reads the labels — and that is the point: **no promotion policy can beat it.**
 | dataset | queries | gold/query | in base | **rescue-only** | queries with any rescued gold | ceiling Δr@10 |
 |---|---|---|---|---|---|---|
 | multihop_rag | 2,255 | 13.86 | 12.02 | **0.142** | 221 (9.8%) | **+0.0056** [+0.0047, +0.0065] |
+| wiki2multihop | 2,500 | 2.52 | 1.93 | **0.021** | 50 (2.0%) | **+0.0077** [+0.0055, +0.0100] |
 | vidoseek | 1,142 | 1.54 | 1.52 | **0.000** | **0 (0.0%)** | **+0.0000** [+0.0000, +0.0000] |
 
 On vidoseek the traversal and hypergraph lanes reach **not one gold chunk** the base missed,
@@ -158,6 +160,7 @@ The same oracle machinery, pointed at the base:
 | dataset | `base` r@10 | `base` r@100 | perfect rerank of the base, r@10 | Δ |
 |---|---|---|---|---|
 | multihop_rag | 0.3759 | 0.8737 | **0.7483** | **+0.3724** [+0.3630, +0.3812] |
+| wiki2multihop | 0.7091 | 0.7894 | **0.7996** | **+0.0905** [+0.0833, +0.0976] |
 | vidoseek | 0.9726 | 0.9960 | 0.9969 | +0.0244 [+0.0173, +0.0319] |
 
 On the multi-hop dataset the base already **retrieves** 87% of gold in its top 100 and **ranks**
@@ -212,10 +215,47 @@ trades head precision for a third-decimal recall gain. It is not the thing to bu
   escalation. It fired. Separately, **`musique` and `hotpotqa` cannot be re-run in this checkout
   at all** — their exports carry no `bm25-stats.json` / `bm25-postings.parquet`, so the committed
   cells for them describe artifacts no longer on disk.
-* **`wiki2multihop`** — running as a robustness check rather than under the stop rule, because it
-  is the dataset where `graph_rescue` looked *best* in the committed matrix (+0.0078 vs `bm25`,
-  the only clearly positive cell) and therefore the strongest remaining case for the graph. §7
-  records it.
+* **`wiki2multihop`** — run as a robustness check rather than under the stop rule, because it is
+  the dataset where `graph_rescue` looked *best* in the committed matrix (+0.0078 vs `bm25`, the
+  only clearly positive cell) and therefore the strongest remaining case for the graph. §7 records
+  it, and it agrees.
 * **A tuning sweep over the expander/gate/seed knobs** — deliberately not run. A sweep can only
   find which knob converts a gain into a visible gain; it cannot manufacture a gain. With the
   ceiling at +0.0056 it would be arithmetic on zero.
+
+---
+
+## 7. The strongest remaining case, checked
+
+`wiki2multihop` is the one cell in the committed matrix where `graph_rescue` clearly beat `bm25`
+(+0.0078 recall@10, and `full_chain_hit@10` 0.4222 against 0.4076). If the graph lanes were going
+to earn anything anywhere, it would be here. A 2,500-query fixed-seed sample (the committed cell
+is the full 12,576, which is why `base` reads 0.7091 against the cell's 0.7096 — sampling, not
+disagreement):
+
+| arm | r@1 | r@10 | r@100 | nDCG@10 | Δr@10 (95% CI) |
+|---|---|---|---|---|---|
+| `base` | 0.3585 | 0.7091 | 0.7894 | 0.7000 | — |
+| `append` (shipped) | 0.3585 | 0.7091 | 0.7894 | 0.7000 | +0.0000 [+0.0000, +0.0000] |
+| `fuse w=0.05` | 0.3350 | 0.7100 | 0.7895 | 0.6863 | +0.0009 [−0.0005, +0.0024] |
+| `fuse w=0.10` | 0.3068 | 0.7104 | 0.7896 | 0.6642 | +0.0013 [−0.0007, +0.0034] |
+| `fuse w=1.00` | 0.2216 | 0.6568 | 0.7815 | 0.5535 | −0.0523 [−0.0594, −0.0451] |
+| **ORACLE graph (cap 50)** | 0.3602 | 0.7168 | 0.7971 | 0.7068 | **+0.0077** [+0.0055, +0.0100] |
+| ORACLE graph (uncapped) | 0.3618 | 0.7266 | 0.8070 | 0.7153 | +0.0175 [+0.0142, +0.0208] |
+| **ORACLE rerank base only** | 0.4365 | **0.7996** | 0.7996 | 0.8498 | **+0.0905** [+0.0833, +0.0976] |
+
+The same three facts, on the friendliest dataset available:
+
+* **The ceiling is +0.0077** — still inside the stop rule's ≤ +0.01, with the CI's upper bound
+  landing exactly on it. The graph lanes reach 0.021 rescue-only gold chunks per query (36 of the
+  50 from the hypergraph lane, 5 from traversal).
+* **`append` is identical to `base` at every cut**, k=100 included, for the third dataset running.
+* **The reranker ceiling is 12× the graph's** (+0.0905 vs +0.0077) even here, where the base has
+  much less headroom than on multihop_rag (r@10 0.7091 against r@100 0.7894).
+
+The two `fuse` arms with positive point estimates (`w=0.05`, `w=0.10`) are the closest anything
+comes to a win in this study — and both have CIs containing zero, both cost nDCG@10 (0.7000 →
+0.6863 → 0.6642), and both collapse `recall@1` (0.3585 → 0.3350 → 0.3068). Buying a third-decimal
+recall@10 that may be zero, by measurably wrecking the head of the ranking, is not a trade to ship.
+
+**Three datasets, one answer.** The negative result stands on the dataset chosen to break it.
