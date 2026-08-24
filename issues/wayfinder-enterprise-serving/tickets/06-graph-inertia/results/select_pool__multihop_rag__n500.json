@@ -1,0 +1,49 @@
+{
+  "cells": {
+    "coe@pool100": {
+      "ndcg@10": 0.5307,
+      "queries_with_rescued_selected": 0,
+      "recall@10": 0.3769,
+      "rescued_selected_total": 0,
+      "selected_mean": 34.74
+    },
+    "coe@pool1000": {
+      "ndcg@10": 0.5307,
+      "queries_with_rescued_selected": 23,
+      "recall@10": 0.3769,
+      "rescued_selected_total": 23,
+      "selected_mean": 34.94
+    },
+    "coe@pool250": {
+      "ndcg@10": 0.5307,
+      "queries_with_rescued_selected": 23,
+      "recall@10": 0.3769,
+      "rescued_selected_total": 23,
+      "selected_mean": 34.94
+    },
+    "packed@pool100": {
+      "ndcg@10": 0.5307,
+      "queries_with_rescued_selected": 0,
+      "recall@10": 0.3769,
+      "rescued_selected_total": 0,
+      "selected_mean": 23.26
+    },
+    "packed@pool1000": {
+      "ndcg@10": 0.5307,
+      "queries_with_rescued_selected": 54,
+      "recall@10": 0.3769,
+      "rescued_selected_total": 59,
+      "selected_mean": 23.82
+    },
+    "packed@pool250": {
+      "ndcg@10": 0.5307,
+      "queries_with_rescued_selected": 54,
+      "recall@10": 0.3769,
+      "rescued_selected_total": 59,
+      "selected_mean": 23.82
+    }
+  },
+  "dataset": "multihop_rag",
+  "limit": 500,
+  "queries": 446
+}
