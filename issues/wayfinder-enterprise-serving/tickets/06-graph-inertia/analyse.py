@@ -111,7 +111,9 @@ def arm_protect(row: dict, keep: int, cap: int = RESCUE_CAP) -> list[str]:
     tail = [c for c in row["rescue"] if not (c in seen or seen.add(c))][:cap]
     head, rest = base[:keep], base[keep:]
     woven: list[str] = []
-    for left, right in zip(rest, tail):
+    # NOT strict: the two are different lengths by construction (base tail vs a 50-capped
+    # appendix) and the leftovers are appended below.
+    for left, right in zip(rest, tail, strict=False):
         woven += [left, right]
     woven += rest[len(tail) :] + tail[len(rest) :]
     return head + woven
@@ -215,9 +217,7 @@ def reachability(rows: list[dict]) -> dict[str, float]:
         "gold_in_base_mean": round(stats.fmean(gold_in_base), 2),
         "gold_rescued_only_mean": round(stats.fmean(gold_new), 4),
         "queries_with_rescued_gold": sum(1 for g in gold_new if g),
-        "queries_with_rescued_gold_pct": round(
-            100 * sum(1 for g in gold_new if g) / n, 2
-        ),
+        "queries_with_rescued_gold_pct": round(100 * sum(1 for g in gold_new if g) / n, 2),
         "rescued_gold_only_traversal": sum(only_trav),
         "rescued_gold_only_hypergraph": sum(only_hyper),
         "retrieve_ms_median": round(stats.median(r["retrieve_ms"] for r in rows), 1),
@@ -234,13 +234,17 @@ def report(path: Path) -> str:
     lines = [f"### `{path.name}`", "", "**Reachability**", "", "```json"]
     lines.append(json.dumps(reach, indent=2))
     lines += ["```", ""]
-    header = "| arm | " + " | ".join(f"r@{k}" for k in CUTS) + " | nDCG@10 | nDCG@50 | Δr@10 (95% CI) |"
+    header = (
+        "| arm | " + " | ".join(f"r@{k}" for k in CUTS) + " | nDCG@10 | nDCG@50 | Δr@10 (95% CI) |"
+    )
     lines += [header, "|" + "---|" * (len(CUTS) + 4)]
     for name, metrics in scored.items():
         cells = [f"{stats.fmean(metrics[f'recall@{k}']):.4f}" for k in CUTS]
         cells.append(f"{stats.fmean(metrics['ndcg@10']):.4f}")
         cells.append(f"{stats.fmean(metrics['ndcg@50']):.4f}")
-        deltas = [a - b for a, b in zip(metrics["recall@10"], control["recall@10"])]
+        # strict: the arms are scored over the same rows in the same order, and a delta between
+        # unequal-length vectors would silently truncate rather than fail.
+        deltas = [a - b for a, b in zip(metrics["recall@10"], control["recall@10"], strict=True)]
         mean = stats.fmean(deltas)
         lo, hi = bootstrap_ci(deltas)
         cells.append("—" if name == "base" else f"{mean:+.4f} [{lo:+.4f}, {hi:+.4f}]")
@@ -255,9 +259,7 @@ def main(argv=None) -> int:  # noqa: ANN001
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
     paths = (
-        [Path(p) for p in args.traces]
-        if args.traces
-        else sorted((HERE / "traces").glob("*.jsonl"))
+        [Path(p) for p in args.traces] if args.traces else sorted((HERE / "traces").glob("*.jsonl"))
     )
     body = "\n".join(report(p) for p in paths)
     print(body)

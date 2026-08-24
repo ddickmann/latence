@@ -38,8 +38,11 @@ from benchmark.s5.datasets import DATASETS  # noqa: E402
 from benchmark.s5.embed import GraniteQueryEmbedder  # noqa: E402
 from benchmark.s5.legs import build_runner  # noqa: E402
 from benchmark.s5.rescue import ExportDecorator, HyperedgeChunks, bundle_for  # noqa: E402
-from benchmark.s5.run_matrix import Plan, measure_resolution  # noqa: E402
-from benchmark.s5.run_matrix import require_deterministic  # noqa: E402
+from benchmark.s5.run_matrix import (  # noqa: E402
+    Plan,
+    measure_resolution,
+    require_deterministic,  # noqa: E402
+)
 from latence_retrieval.rescue import GraphRescueRetrieval  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -149,9 +152,7 @@ def run(dataset: str, *, pool_k: int, limit: int | None, force: bool) -> Path:
                         "rescue": [c.id for c in pipeline.last_rescue],
                         "traversal": [c.id for c in pipeline.last_traversal],
                         "hyper": [c.id for c in pipeline.last_hyper],
-                        "appendix": [
-                            c.id for c in retrieval.union if c.metadata.get("rescued")
-                        ],
+                        "appendix": [c.id for c in retrieval.union if c.metadata.get("rescued")],
                         "gate_fired": retrieval.gate.fired,
                         "retrieve_ms": round(elapsed, 3),
                     },
