@@ -264,6 +264,16 @@ Where it is not, `label_inducer.llm` derives each chunk's own small label set. T
 interface is identical either way, because induced labels arrive on the chunk record rather
 than in the extractor's config.
 
+**And the split follows the OCR boundary, not anyone's taste.** The three datasets that run
+induction are exactly the three that came through OCR. The campaign generator declares them as
+a named group — `INDUCED_DATASETS = ("ohr_bench", "vidoseek", "uda")` against
+`TEXT_DATASETS = ("multihop_rag", "wiki2multihop")` — beside a comment that states the reason:
+the OCR'd group induces under a budget cap, the text-native preps use hand-authored labels. The
+OCR stage names the identical three (`OCR_DATASETS`) for the same reason from the other side.
+So the rule is: *a corpus you had to read off a page is a corpus whose schema you do not
+already know.* Both facts are declarations in code, which is why the five YAMLs are generated
+rather than hand-tuned — and why the header of each one says so.
+
 The scale range is the point worth dwelling on for anyone sizing this: 292 documents to
 56,687; 2,434 chunks to 220,129; 809 relations to 90,076. The document-phase cost is a
 function of worker count, not corpus size; the corpus phase runs once, on already-extracted
