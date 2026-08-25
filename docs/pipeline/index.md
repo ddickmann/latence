@@ -42,7 +42,9 @@ technique, not the Stage. **Providers:** `parser.plaintext`, `parser.document`,
 Splits parsed documents into retrieval-sized pieces while preserving offsets, page
 alignment, Provenance, and Classification
 ([ADR-0021](../adr/0021-chunk-offsets-and-screening-two-checkpoints.md)). **Providers:**
-`chunk.markdown`, `chunk.sentence_window`.
+`chunk.markdown`, `chunk.sentence_window`, `chunk.page` (one chunk per source page when the
+document carries a measured page map, else a 1024-token window —
+[ADR-0064](../adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary.md)).
 
 ### Screening
 Catches dangerous data early at **two checkpoints**: *Intake Screening* before Parse
@@ -60,7 +62,7 @@ packages ([ADR-0022](../adr/0022-entity-mention-record-and-zero-shot-provider-sp
 Entity Extraction emits **true original offsets** by carrying the chunk's strip offset map
 forward ([ADR-0031](../adr/0031-entity-extraction-emits-true-original-offsets-via-carried-strip-offset-map.md)).
 **Providers:** `entity.gazetteer`, `entity.gliner`, `entity.endpoint`, and the fused
-`fused_entity_relation.gliner2`.
+`fused_entity_relation.gliner2` / `fused_entity_relation.gliner25`.
 
 ### Relation Extraction
 Finds typed relations between entity mentions within a document. A **Fused Provider** may
@@ -68,7 +70,8 @@ emit both entity and relation carriers in one pass, threaded by a mixed-carrier 
 ([ADR-0023](../adr/0023-relation-mention-record-and-fused-stage-routing.md)). The Provider
 is chosen empirically
 ([ADR-0013](../adr/0013-relation-extraction-provider-chosen-empirically-fused-capability-allowed.md)).
-**Providers:** `relation.pattern`, `relation.gliner_relex`, `relation.llm`.
+**Providers:** `relation.pattern`, `relation.gliner_relex`, `relation.llm`, and the fused
+`fused_entity_relation.gliner2` / `fused_entity_relation.gliner25`.
 
 ### Redaction
 Detects PII and produces masked/replaced variants of the text — one RedactionRecord per
@@ -79,7 +82,9 @@ chunk→chunk transform, closing the document-level truncation PII leak
 a universal financial-PII floor with an optional mask-before-extract mode
 ([ADR-0044](../adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)).
 **Providers:** `redaction.hybrid_rule`, `redaction.gliner_pii`, `redaction.gliner2`,
-`redaction.presidio`.
+`redaction.presidio`, and `redaction.gliner25` — whose PII detection is **zero-shot** on a general
+GLiNER 2.5 checkpoint and **unmeasured**, because no GLiNER 2.5 PII checkpoint exists
+([ADR-0064](../adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary.md)).
 
 ## Corpus-level Stages
 

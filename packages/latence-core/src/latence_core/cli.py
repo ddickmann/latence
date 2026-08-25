@@ -596,6 +596,28 @@ def setup(
             "Granite + ULTRA). See stacks/gpu-sota-glinker.yaml.",
         ),
     ] = None,
+    engine: Annotated[
+        str | None,
+        typer.Option(
+            "--engine",
+            help="Extraction/PII ENGINE: 'gliner2' (default — the validated fastino GLiNER2 1.x "
+            "family: fused NER+RE plus a guardrails+PII redaction checkpoint) or 'gliner25' (the "
+            "GLiNER 2.5 family over gliner2 2.x: a 4096-token window and page-preferred chunking; "
+            "its PII detection is ZERO-SHOT and UNMEASURED — there is no GLiNER 2.5 PII "
+            "checkpoint). ONE answer picks BOTH the extractor and the redactor: their packages pin "
+            "mutually exclusive gliner2 majors, so a mixed pair cannot be installed.",
+        ),
+    ] = None,
+    chunk_strategy: Annotated[
+        str | None,
+        typer.Option(
+            "--chunk-strategy",
+            help="'auto' (default — the engine's own chunker: chunk.markdown for gliner2, "
+            "chunk.page for gliner25), 'window' (chunk.markdown) or 'page' (chunk.page — one chunk "
+            "per source page when the document carries a measured page map, else the windowed "
+            "budget).",
+        ),
+    ] = None,
     parser: Annotated[
         str | None,
         typer.Option(
@@ -788,11 +810,20 @@ def setup(
         scan_source,
         validate_config_text,
     )
+    from latence_core.setup.recipe import (
+        _KNOWN_CHUNK_STRATEGIES,
+        _KNOWN_ENGINES,
+        CHUNK_STRATEGY_AUTO,
+        ENGINE_GLINER2,
+        ENGINE_GLINER25,
+        ENGINES,
+        chunker_for,
+        engine_for,
+    )
     from latence_core.setup.wizard import (
         _KNOWN_PARSERS,
         _KNOWN_PROFILES,
         _KNOWN_SOTA_PARSERS,
-        CHUNK_MAX_TOKENS,
         CHUNK_MIN_TOKENS,
         CHUNK_OVERLAP_TOKENS,
         DEFAULT_LLM_BASE_URL,
@@ -862,6 +893,46 @@ def setup(
         )
         raise typer.Exit(code=2)
     is_sota = chosen_profile == PROFILE_SOTA
+
+    # b2. The extraction/PII ENGINE (ADR-0064). Prompted, because it changes what the stack can
+    # claim about PII — not a tuning knob. ONE answer picks BOTH the fused extractor and the
+    # redactor; there is no combination of flags that emits a mixed pair, because the two
+    # Providers' packages pin mutually exclusive gliner2 majors and such a stack could not be
+    # installed at all.
+    chosen_engine = ask_text(
+        engine,
+        f"Extraction engine ({ENGINE_GLINER2} | {ENGINE_GLINER25})",
+        f"{ENGINE_GLINER2} = {ENGINES[ENGINE_GLINER2].summary} "
+        f"{ENGINE_GLINER25} = {ENGINES[ENGINE_GLINER25].summary}",
+        ENGINE_GLINER2,
+    )
+    if chosen_engine not in _KNOWN_ENGINES:
+        typer.echo(
+            f"Unknown engine {chosen_engine!r}; expected one of {sorted(_KNOWN_ENGINES)}.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    engine_row = engine_for(chosen_engine)
+    chosen_chunk_strategy = chunk_strategy if chunk_strategy is not None else CHUNK_STRATEGY_AUTO
+    if chosen_chunk_strategy not in _KNOWN_CHUNK_STRATEGIES:
+        typer.echo(
+            f"Unknown --chunk-strategy {chosen_chunk_strategy!r}; expected one of "
+            f"{sorted(_KNOWN_CHUNK_STRATEGIES)}.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if chosen_engine == ENGINE_GLINER25:
+        # Said once, loudly, at the moment the choice is made — not only in the generated file's
+        # header, which an operator may never read.
+        typer.echo(
+            "NOTE: the gliner25 engine's PII detection is ZERO-SHOT. There is no GLiNER 2.5 PII "
+            "checkpoint, so `redaction.gliner25` asks the GENERAL 2.5 checkpoint for PII labels; "
+            "no parity with the task-trained `redaction.gliner2` checkpoint is claimed and its "
+            "recall is UNMEASURED. Learned guardrail screening is unavailable on this engine (the "
+            "deterministic content_screen Stage still runs), and the ADR-0044 financial-PII floor "
+            "applies regardless of backend.",
+            err=True,
+        )
 
     # c. Output / storage URI.
     store = ask_text(
@@ -1106,7 +1177,12 @@ def setup(
     # so a guided run must not make the operator answer five questions to reach the blessed stack.
     # Validated HERE and loudly: an out-of-range budget would otherwise surface as a ValueError
     # from ChunkBudget at run time, hours later, with a stack config already saved.
-    chunk_max = chunk_max_tokens if chunk_max_tokens is not None else CHUNK_MAX_TOKENS
+    # ADR-0064: an UNSET budget takes the ENGINE's own default (768 for gliner2, 1024 for
+    # gliner25's page-preferred chunking), so `--engine gliner25` alone lands the coherent
+    # page/1024 pairing. An explicit --chunk-max-tokens always wins, and a budget too large for
+    # the chosen engine's checkpoint window is refused by SetupAnswers rather than truncating
+    # silently at run time.
+    chunk_max = chunk_max_tokens if chunk_max_tokens is not None else engine_row.chunk_max_tokens
     chunk_overlap = (
         chunk_overlap_tokens if chunk_overlap_tokens is not None else CHUNK_OVERLAP_TOKENS
     )
@@ -1150,6 +1226,8 @@ def setup(
         llm_base_url=base_url,
         llm_model=model,
         profile=chosen_profile,
+        engine=chosen_engine,
+        chunk_strategy=chosen_chunk_strategy,
         ocr_base_url=ocr_base,
         ocr_model=ocr_mdl,
         pii=pii_on,
@@ -1204,6 +1282,10 @@ def setup(
     stage_flow = " -> ".join(s.name for s in pipeline.stages)
     typer.echo(f"  stages ({len(pipeline.stages)}): {stage_flow}")
     typer.echo(f"  parser: {chosen_parser}   device: {dev}")
+    typer.echo(
+        f"  engine: {chosen_engine}   extract: {engine_row.extract_provider}   "
+        f"chunk: {chunker_for(engine_row, chosen_chunk_strategy)} @ {chunk_max} tokens"
+    )
     if is_sota:
         typer.echo(f"  OCR endpoint: {ocr_mdl} @ {ocr_base}")
     # The intake oversize cap: say what it is AND where the number came from, because a cap below

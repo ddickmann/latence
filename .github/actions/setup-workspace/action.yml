@@ -37,6 +37,7 @@ runs:
       run: |
         for p in latence-ner-gliner latence-relation-gliner latence-relation-llm \
                  latence-pii-gliner latence-pii-gliner2 latence-extract-gliner2 \
+                 latence-gliner25 \
                  latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
                  latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
                  latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \

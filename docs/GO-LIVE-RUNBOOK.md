@@ -32,7 +32,7 @@ uv run mkdocs build --strict --site-dir site
 
 # 3. Build every distribution and validate its PyPI metadata.
 rm -rf dist
-for pkg in packages/*/; do uv build --package "$(basename "$pkg")" --out-dir dist; done
+for pkg in packages/*/; do uv build "$pkg" --out-dir dist; done
 uvx twine check dist/*
 
 # 4. Rehearse the published install in a CLEAN environment — local wheels for the
@@ -121,7 +121,7 @@ to `main`. It has never deployed while the repo was private.
 3. **Check:** the site is live and its navigation reaches the pages an evaluator needs —
    [Continuity & security process](CONTINUITY.md), [Throughput envelopes
    (measured)](perf-results.md), [Public benchmark results](BENCHMARKS.md), the
-   [Decision Log](adr/index.md) (all 62 ADRs), [Deploy](deployment.md),
+   [Decision Log](adr/index.md) (all 63 ADRs), [Deploy](deployment.md),
    [Observability](observability.md) and [Secrets](secrets.md).
 4. If a custom domain is used, set it in **Settings → Pages** and add the `CNAME`; then
    re-run the workflow so the deployed artifact carries it.
@@ -146,7 +146,7 @@ This is the flow from #178. It is already automated on a tag — you only push t
 #    signature is minted from the workflow run's OIDC identity, a workflow_dispatch checks
 #    out its `tag` input, and that tag must exist on origin — so nothing can sign v0.1.0
 #    until v0.1.0 is pushed, and pushing it is the real release (step 2).
-for pkg in packages/*/; do uv build --package "$(basename "$pkg")" --out-dir dist; done
+for pkg in packages/*/; do uv build "$pkg" --out-dir dist; done
 bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets --no-sign
 (cd release-assets && shasum -a 256 -c SHA256SUMS)   # then read release-assets/VERIFY.md
 

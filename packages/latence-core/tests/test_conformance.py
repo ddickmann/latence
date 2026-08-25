@@ -239,8 +239,13 @@ def test_full_report_all_pass_and_flags_stub_scoped() -> None:
         "relation.llm",
         "relation.gliner_relex",
         "fused_entity_relation.gliner2",
+        # The GLiNER 2.5 twins (ADR-0064): a different gliner2 major, the same "needs a rig" honesty
+        # — and, for redaction.gliner25 specifically, no quality claim at all, because it drives a
+        # GENERAL checkpoint zero-shot (there is no 2.5 PII checkpoint) and nothing is measured yet.
+        "fused_entity_relation.gliner25",
         "redaction.gliner_pii",
         "redaction.gliner2",
+        "redaction.gliner25",
         "redaction.presidio",
         "embedding.endpoint",
         "embedding.sentence_transformers",

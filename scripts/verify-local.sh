@@ -28,8 +28,16 @@ step "sync workspace (dev env)"
 uv sync
 # Heavy/endpoint provider SOURCES only (no heavy deps) — their tests monkeypatch the heavy
 # dep; keeps the CPU-first offline env intact (ADR-0007/0016). Mirrors the CI step exactly.
+#
+# `--no-deps` is also what lets BOTH gliner2 majors' tests run in ONE venv (ADR-0064):
+# latence-extract-gliner2 / latence-pii-gliner2 pin gliner2>=1.3,<2 and latence-gliner25 pins
+# >=2.0,<3, which no resolver can satisfy together — and neither is resolved here, because neither
+# library is installed at all. Each package's tests inject their own faithful fake. That is also
+# why latence-gliner25 is excluded from the uv workspace (see the root pyproject.toml): `uv lock`
+# DOES resolve the members together, and correctly refuses the pair.
 for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence-pii-gliner \
-         latence-pii-gliner2 latence-extract-gliner2 latence-pii-presidio latence-parser-endpoint \
+         latence-pii-gliner2 latence-extract-gliner2 latence-gliner25 latence-pii-presidio \
+         latence-parser-endpoint \
          latence-ner-endpoint \
          latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
          latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \

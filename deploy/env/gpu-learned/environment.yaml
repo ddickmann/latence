@@ -60,6 +60,20 @@ extra_requirements: []
 # Each one is (a) emitted into constraints.txt and passed to the installer as `-c`, and
 # (b) asserted against requirements.lock by `latence env verify`.
 constraints:
+  - requirement: "gliner2>=1.3,<2"
+    reason: >-
+      THE gliner2 MAJOR BOUNDARY (ADR-0064). gliner2 2.0.0 was released 2026-08-24, and it is a
+      genuine major: the GLiNER 2.5 checkpoints are the new `boundary` architecture head, every
+      1.x checkpoint is `span`, and AutoExtractor.from_pretrained refuses to convert between them
+      ("Span and boundary heads are not checkpoint-compatible"). This environment installs the 1.x
+      Providers (latence-extract-gliner2 / latence-pii-gliner2, which declare
+      gliner2[local]>=1.3,<2), so an unconstrained resolve is free to take a 2.x that their
+      checkpoints cannot load. The cap ALSO makes the reverse impossible: latence-gliner25 declares
+      gliner2[local]>=2.0,<3, which is disjoint from this window, so adding it to
+      workspace_packages fails `latence env verify` with E-CONSTRAINT-CONFLICT — offline, on every
+      commit, at dependency-resolution time rather than at model load on a pod. One resolved
+      environment holds ONE gliner2 major; the 2.5 Providers belong to an environment that resolves
+      the 2.x line.
   - requirement: "transformers>=4.51.3,<5"
     reason: >-
       THE transformers split, resolved. Floor: gliner 0.2.27 (the learned PII Provider's engine)

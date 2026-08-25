@@ -166,6 +166,79 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Added
 
+- **GLiNER 2.5 as a new Provider package, behind an enforced `gliner2` major boundary
+  ([ADR-0064](docs/adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary.md)).**
+  `packages/latence-gliner25` registers **two** entry points — `fused_entity_relation.gliner25`
+  (fused zero-shot NER+RE) and `redaction.gliner25` (PII) — over `gliner2[local]>=2.0,<3` and the
+  `fastino/gliner2.5-multi-v1` checkpoint (287M, mDeBERTa-v3-base, multilingual, Apache-2.0, a
+  4096-token window). One package because 2.5 is one checkpoint family serving both Capabilities
+  over one pin, one compat gate and one loader seam.
+
+  The pin is **disjoint** from the `>=1.3,<2` the existing gliner2 Providers declare, deliberately:
+  gliner2 2.0 is a major whose 2.5 checkpoints are the new `boundary` architecture head, and
+  `AutoExtractor.from_pretrained` refuses to bridge span and boundary checkpoints. That refusal is
+  enforced three times before anything is fetched — the package pins, an
+  `E-CONSTRAINT-CONFLICT` boundary on `deploy/env/cpu-text` + `gpu-learned` (offline, on every
+  commit), and `latence_gliner25._compat`, which turns an unsupported version / a missing
+  `AutoExtractor` / a 1.x `span` checkpoint into a typed `ProviderError` naming the Provider that
+  *does* load it. The batched API itself did **not** change across the major (both architectures mix
+  in the same runtime), so no parsing changed.
+
+  **The PII claim is zero-shot and says so.** There is no GLiNER 2.5 PII or guardrails checkpoint,
+  so `redaction.gliner25` asks the *general* checkpoint for PII labels zero-shot: no parity with
+  `redaction.gliner2` is claimed, no recall has been measured (`docs/BENCHMARKS.md` records where
+  the number will go), and `guardrails: true` is **refused** on the default checkpoint rather than
+  run unbacked. The ADR-0044 deterministic financial-PII floor applies underneath either backend.
+
+  **The advertised 4096-token window is NOT a window of reliable extraction** — measured on a pod
+  GPU (RTX 2000 Ada 16 GB, torch 2.4.1+cu124, transformers 4.57.6, gliner2 2.0.0, 2026-08-25). A
+  7,562-token document holding 90 SSNs returned 32 spans covering the first 35% of the text, with
+  no error and a well-formed result; 12,612 tokens with one label returned zero spans silently; and
+  longer inputs OOM'd a 16 GB card inside DeBERTa's quadratic attention. The degradation is
+  **non-monotonic** (2,438 tokens scored worse than 3,026), which is worse than a hard truncation
+  because no threshold test catches it. The filler was synthetic, so the percentages are
+  directional — the failure MODE is not. So: **1024 tokens is the decided chunk budget**, the
+  Providers' `max_len` is DERIVED from it rather than typed, raising it past the safe window is
+  warned about on extraction and **REFUSED** on redaction (there it is fail-open — "redacted"
+  chunks that still contain PII, silently), and a chunk too long for the window is refused with a
+  typed error naming the budget knob rather than truncated. `chunk.page`'s split of an over-budget
+  page is now a measured requirement, not a safety argument.
+
+  Two things a real load needed that nothing declared, both found by running it: the 2.5
+  checkpoints store `extra_special_tokens` as a **list**, which transformers >= 4.57 rejects at
+  load — so the guarded shim that already fixed this for a 1.x checkpoint is **promoted into
+  `latence_core.providers.perf`** and called by both packages (the old claim that only one
+  checkpoint was affected is corrected in the same change) — and `protobuf` + `sentencepiece` are
+  declared, since `gliner2[local]` declares neither and the DeBERTa-v2 tokenizer path needs both.
+
+  Consequences worth knowing: the package is outside the uv workspace (a workspace is one resolved
+  environment, and `uv lock` correctly refuses the pair), so it carries its own committed `uv.lock`,
+  the release builds by path rather than `uv build --package`, and `scripts/generate-sbom.sh` unions
+  the two locks so a shipped distribution is never absent from the SBOM. All three are gated.
+
+- **`chunk.page` — a third reference Chunker: page-preferred, 1024 otherwise
+  ([ADR-0064](docs/adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary.md)).**
+  One chunk per source page when the document carries a **measured** page map, so a retrieval hit is
+  citable as a page with no further resolution; the windowed budget at **1024** tokens when it does
+  not. Per [ADR-0060](docs/adr/0060-page-boundaries-cross-the-ocr-handoff-in-a-sidecar-and-an-absent-page-map-is-a-value-not-a-page-1.md)
+  an `assumed_single_page` map counts as "no page structure", not as page 1 — the Provider reads the
+  map's origin, not merely its presence. A page over the budget still **splits**: a page-sized chunk
+  past the model window is a silent truncation and a split is not. Same offset-preserving engine as
+  the other two, so the chunk → offset → original page round-trip and the v19 `page_slice` stay
+  exact. **The existing `chunk.markdown` / `chunk.sentence_window` 512-token defaults are
+  unchanged** — they are baked into committed benchmark baselines, and 1024 is the default of the
+  new strategy only.
+
+- **`latence setup` selects an extraction ENGINE, not a Provider.** One `--engine`
+  (`gliner2`, the unchanged default, or `gliner25`) drives BOTH the fused extractor and the
+  redactor, plus its coherent chunking (`chunk.page` at 1024 for `gliner25`). Because both Stages
+  read the same `ExtractionEngine` row, a stack pairing one family's extractor with the other's
+  redactor — which validates and then cannot be installed — is **unrepresentable** rather than
+  discouraged. `--chunk-strategy auto|window|page` is the escape hatch. A chunk budget whose derived
+  model window exceeds the chosen engine's documented checkpoint window is refused at answer
+  construction rather than silently truncating at run time.
+
+
 - **The KG Export's redaction asymmetry is now loud, and settled as intended behaviour.**
   `GraphHyperedge.tau_text` is redacted at its writer
   ([ADR-0057](docs/adr/0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md)); `GraphNode.canonical_name`

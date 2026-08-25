@@ -141,6 +141,21 @@ cells:
       Held below 1.x, which transformers 4.x cannot use. Blackwell-specific operational note from
       the pod walkthrough: the hub's XET transfer backend has hung on fresh Blackwell pods —
       HF_HUB_DISABLE_XET=1 is the documented workaround (docs/TUTORIAL-fresh-pod-walkthrough.md).
+  - component: gliner2
+    kind: distribution
+    environment: cpu-text
+    version: "1.3.2"
+    resolution: *res_cpu_text
+    runtime: *rt_cpu_text
+    notes: >-
+      THE gliner2 MAJOR BOUNDARY (ADR-0064). gliner2 2.0.0 shipped 2026-08-24 and is a genuine
+      major: the GLiNER 2.5 checkpoints are the new `boundary` architecture head, every 1.x
+      checkpoint is `span`, and AutoExtractor.from_pretrained refuses to convert between them. This
+      environment installs the 1.x extraction Provider, so the enforced `gliner2>=1.3,<2` boundary
+      keeps a 2.x out — AND keeps latence-gliner25 (which declares gliner2[local]>=2.0,<3) out,
+      since a disjoint declared window is E-CONSTRAINT-CONFLICT at `latence env verify`. One
+      resolved environment holds ONE gliner2 major. Nothing about the 2.x line is measured here;
+      no environment in this repository resolves it yet.
   # The model-loading Providers this environment installs. They are here because coverage is
   # DERIVED from the workspace metadata behind the spec (a Provider whose package depends on a
   # model runtime), not from an optional `learned_providers:` field — cpu-text declares none, and
@@ -335,6 +350,20 @@ cells:
     notes: >-
       Below 1.x. On a fresh Blackwell pod set HF_HUB_DISABLE_XET=1 before the first weight
       download (docs/TUTORIAL-fresh-pod-walkthrough.md §1.3).
+  - component: gliner2
+    kind: distribution
+    environment: gpu-learned
+    version: "1.3.2"
+    resolution: *res_gpu_learned
+    runtime: *rt_gpu_learned
+    notes: >-
+      The same ADR-0064 major boundary as the cpu-text cell, on the GPU side — and it binds harder
+      here, because this environment installs BOTH 1.x Providers (fused extraction AND redaction).
+      A 2.x resolve would break both at model load; the enforced `gliner2>=1.3,<2` window makes
+      that a resolution-time refusal instead. The GLiNER 2.5 Providers are deliberately absent:
+      they need an environment that resolves gliner2 2.x, which does not exist in this repository
+      yet, so their runtime on sm_120 is UNVERIFIED in the strongest sense — nothing has been
+      installed here, let alone run.
   - component: fused_entity_relation.gliner2
     kind: learned_provider
     environment: gpu-learned

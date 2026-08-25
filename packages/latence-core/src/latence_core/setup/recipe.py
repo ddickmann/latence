@@ -84,6 +84,12 @@ STACK_NAME = "latence-setup-stack"
 # Since C7 the header comment reads the redactor NAME off the emitted `redact` block rather than off
 # this constant, so the class of drift ADR-0041 §7a recorded cannot recur even for a Stage whose
 # contribution stops using the constant.
+#
+# ADR-0064: this is now the `gliner2` ENGINE's redactor rather than a free-standing choice. The
+# extraction engine and the redactor are ONE answer (see `ExtractionEngine` below), because the two
+# Providers pull mutually exclusive `gliner2` majors into one environment — so a stack naming
+# `fused_entity_relation.gliner25` beside `redaction.gliner2` is not merely discouraged, it is
+# unrepresentable in the answer struct.
 BLESSED_REDACT_PROVIDER = "redaction.gliner2"
 
 # The financial-PII label FLOOR the blessed redactor (`BLESSED_REDACT_PROVIDER`) runs when PII
@@ -294,6 +300,172 @@ class RecipeWiringError(SetupConfigError):
     surface far downstream as a confusing DAG error (or, worse, as a silently mis-wired stack).
     ADR-0034: failures are typed and loud.
     """
+
+
+# --------------------------------------------------------------------------------------------
+# The extraction ENGINE — one answer, because the alternative is an unresolvable environment
+# --------------------------------------------------------------------------------------------
+#
+# ADR-0064. `fused_entity_relation.gliner2` + `redaction.gliner2` pin `gliner2>=1.3,<2`;
+# `fused_entity_relation.gliner25` + `redaction.gliner25` pin `gliner2>=2.0,<3`. Those windows are
+# DISJOINT — gliner2 2.0 is a major release whose 2.5 checkpoints are a different architecture head
+# — so a stack naming one package's extractor beside the other package's redactor cannot be
+# installed at all. It would validate (both Providers are real, both fulfil their Capability) and
+# then fail at `pip install`, which is the worst place to learn it.
+#
+# The fix is structural, not advisory: the wizard has ONE `engine` answer, and both Stages read
+# their Provider off the SAME row of this table. There is no combination of answers that emits a
+# mixed pair, so no comment has to ask anyone not to.
+
+#: The gliner2 1.x engine — the blessed default, unchanged (ADR-0036 W9, #197).
+ENGINE_GLINER2 = "gliner2"
+
+#: The GLiNER 2.5 engine (ADR-0064): the gliner2 2.x boundary architecture over a 4096-token
+#: checkpoint window, with page-preferred chunking as its coherent default.
+ENGINE_GLINER25 = "gliner25"
+
+
+@dataclass(frozen=True)
+class ExtractionEngine:
+    """One coherent (extractor, redactor, chunker, budget) row — the unit the wizard selects.
+
+    Everything here moves together for a reason:
+
+    * ``extract_provider`` / ``redact_provider`` come from ONE distribution family and therefore
+      ONE ``gliner2`` major. Reading both off one row is what makes a mixed pair inexpressible.
+    * ``chunker`` / ``chunk_max_tokens`` are the segmentation the engine's model window is sized
+      for. A 4096-token checkpoint asked to read 512-token chunks wastes its window; a 768-token
+      checkpoint handed 1024-token chunks truncates silently.
+    * ``max_window`` is the checkpoint family's DOCUMENTED token window, and where there is one it
+      is a REFUSAL: a chunk budget whose derived ``max_len`` exceeds it is rejected at
+      answer-construction rather than emitted as a config that silently truncates. ``None`` means
+      the family publishes no such ceiling — which is the honest state of the gliner2 1.x line
+      (mdeberta-v3 attends by relative position and ``max_len`` is a per-call bound, so no number
+      was ever verified for it) and NOT a licence to invent one. Only the GLiNER 2.5 card states a
+      window, so only that engine carries the refusal here; the Provider itself enforces the same
+      ceiling independently.
+    * ``guardrails`` records whether the engine's redactor has a guardrail-trained checkpoint. Only
+      the gliner2 1.x family does; asking the general GLiNER 2.5 checkpoint for guardrail categories
+      zero-shot would be a security control that reports nothing while looking enabled, and
+      ``redaction.gliner25`` refuses the switch outright.
+    """
+
+    name: str
+    extract_provider: str
+    redact_provider: str
+    chunker: str
+    chunk_max_tokens: int
+    max_window: int | None
+    guardrails: bool
+    summary: str
+
+
+#: The ``chunk.page`` budget, MIRRORED from ``latence_core.stages.chunk.PAGE_CHUNK_MAX_TOKENS``
+#: rather than imported, exactly as :data:`DEFAULT_MODEL_WINDOW` mirrors the Provider-side default
+#: — the setup module stays a leaf, and ``test_setup_wizard_knobs.py`` holds the two in sync,
+#: because an unchecked mirror is the drift class ADR-0041 §7a recorded.
+CHUNK_MAX_TOKENS_PAGE = 1024
+
+#: The GLiNER 2.5 checkpoint window, per the ``fastino/gliner2.5-multi-v1`` model card. Mirrored
+#: rather than imported (``latence-core`` must not depend on a Provider package, ADR-0016); the
+#: mirror is held in sync with ``latence_gliner25._backbone.MAX_SUPPORTED_MAX_LEN`` by a test.
+GLINER25_MAX_WINDOW = 4096
+
+ENGINES: Mapping[str, ExtractionEngine] = MappingProxyType(
+    {
+        ENGINE_GLINER2: ExtractionEngine(
+            name=ENGINE_GLINER2,
+            extract_provider="fused_entity_relation.gliner2",
+            redact_provider=BLESSED_REDACT_PROVIDER,
+            chunker="chunk.markdown",
+            chunk_max_tokens=CHUNK_MAX_TOKENS,
+            # No ceiling is claimed: nothing in this repository ever verified one for the 1.x
+            # checkpoints, and asserting a number here would refuse budgets that work today.
+            max_window=None,
+            guardrails=True,
+            summary=(
+                "fastino GLiNER2 1.x (mdeberta-v3 span head): fused NER+RE, a guardrails+PII "
+                "redaction checkpoint, a 768-token window. The validated default."
+            ),
+        ),
+        ENGINE_GLINER25: ExtractionEngine(
+            name=ENGINE_GLINER25,
+            extract_provider="fused_entity_relation.gliner25",
+            redact_provider="redaction.gliner25",
+            chunker="chunk.page",
+            chunk_max_tokens=CHUNK_MAX_TOKENS_PAGE,
+            max_window=GLINER25_MAX_WINDOW,
+            guardrails=False,
+            summary=(
+                "fastino GLiNER 2.5 (gliner2 2.x boundary head): fused NER+RE over a 4096-token "
+                "window, page-preferred chunking. PII is ZERO-SHOT — there is no GLiNER 2.5 PII "
+                "checkpoint — and its recall is UNMEASURED."
+            ),
+        ),
+    }
+)
+
+_KNOWN_ENGINES = frozenset(ENGINES)
+
+
+def engine_for(name: str) -> ExtractionEngine:
+    """The :class:`ExtractionEngine` row for ``name``, or a :class:`SetupConfigError`.
+
+    Unlike ``recipe_for``, an unknown engine does NOT fall back: a profile falls back to ``lite``
+    because every profile emits a valid stack, whereas guessing an engine would silently pair one
+    family's extractor with the operator's expectations of the other. The CLI validates the flag,
+    and :meth:`SetupAnswers.__post_init__` validates the struct, so this is the third gate.
+    """
+    try:
+        return ENGINES[name]
+    except KeyError as exc:
+        msg = f"Unknown extraction engine {name!r}; expected one of {sorted(_KNOWN_ENGINES)}."
+        raise SetupConfigError(msg) from exc
+
+
+#: The ``chunk_max_tokens`` "not answered" sentinel. A budget must be ``>= 1``, so ``0`` is a value
+#: no operator can mean, which is what makes it usable as one: it lets
+#: :class:`~latence_core.setup.wizard.SetupAnswers` resolve the budget from the chosen ENGINE
+#: without turning the field ``int | None`` and pushing a narrowing cast into every read site.
+#:
+#: Why the resolution must live on the STRUCT rather than only in the CLI: ``build_stack_config``
+#: is a public entry point, and a caller doing ``SetupAnswers(engine=ENGINE_GLINER25)`` must get
+#: the engine's own coherent budget rather than the other engine's. A first draft resolved it in
+#: the CLI alone and produced exactly the mismatch ADR-0041 §7a is about — the generator disagreeing
+#: with its own design, visible only in the emitted YAML.
+CHUNK_BUDGET_FROM_ENGINE = 0
+
+#: ``chunk_strategy``: take the engine's own chunker (the coherent default), or override it.
+CHUNK_STRATEGY_AUTO = "auto"
+CHUNK_STRATEGY_WINDOW = "window"
+CHUNK_STRATEGY_PAGE = "page"
+_CHUNK_STRATEGY_PROVIDERS: Mapping[str, str] = MappingProxyType(
+    {CHUNK_STRATEGY_WINDOW: "chunk.markdown", CHUNK_STRATEGY_PAGE: "chunk.page"}
+)
+_KNOWN_CHUNK_STRATEGIES = frozenset({CHUNK_STRATEGY_AUTO, *_CHUNK_STRATEGY_PROVIDERS})
+
+
+def chunker_for(engine: ExtractionEngine, strategy: str) -> str:
+    """The ``chunk`` Provider name for an engine + strategy pair.
+
+    ``auto`` (the default) takes the engine's own chunker, which is the whole point of the engine
+    being one row: the segmentation and the model window are chosen together. The two explicit
+    values are the escape hatch for an operator who wants page-preferred chunking with the 1.x
+    engine, or the window strategy with 2.5. ``chunk.sentence_window`` is deliberately NOT offered
+    here — the wizard has never emitted it, and adding a third strategy to the guided path is its
+    own decision, not a side effect of this one.
+    """
+    if strategy == CHUNK_STRATEGY_AUTO:
+        return engine.chunker
+    try:
+        return _CHUNK_STRATEGY_PROVIDERS[strategy]
+    except KeyError as exc:
+        msg = (
+            f"Unknown chunk strategy {strategy!r}; expected one of "
+            f"{sorted(_KNOWN_CHUNK_STRATEGIES)}."
+        )
+        raise SetupConfigError(msg) from exc
+
 
 
 # -- the intake oversize guard, sized from the SCANNED corpus ------------------------------------
@@ -883,7 +1055,11 @@ class ChunkContribution(StageContribution):
         return {
             "name": self.name,
             "capability": "chunk",
-            "provider": "chunk.markdown",
+            # ADR-0064: the chunker comes from the ENGINE row (or the operator's explicit
+            # override), because the segmentation and the model window are one decision — a
+            # 4096-token checkpoint reading 512-token chunks wastes its window, and a 768-token
+            # checkpoint handed 1024-token chunks truncates silently.
+            "provider": chunker_for(engine_for(answers.engine), answers.chunk_strategy),
             "depends_on": ["parse"],
             "config": {
                 "max_tokens": answers.chunk_max_tokens,
@@ -898,17 +1074,31 @@ class ChunkContribution(StageContribution):
         config = block.get("config")
         assert isinstance(config, dict)  # noqa: S101 - the block this contribution just emitted
         budget = int(config["max_tokens"])
-        return (
+        # Read off the emitted block, never off the answers: the prose may only describe the
+        # segmentation this walk actually wired (the ADR-0041 §7a discipline).
+        provider = str(block.get("provider", ""))
+        lines = [
             "#",
             f"# Chunk budget: {budget} chunker tokens / {config['overlap_tokens']} overlap"
             " (`--chunk-max-tokens`).",
             f"#   `extract`/`redact` bound the model window at {model_window_for(budget)} to match."
             " The chunker",
             "#   counts in its OWN tokenizer, ~1.2x FEWER tokens than the mdeberta-v3 encoder",
-            "#   GLiNER2 runs (pod-measured: a 768-chunker-token cap hit mdeberta median 666 /",
-            "#   MAX 921) and the encoder SILENTLY truncates past its window — so raising the",
-            "#   budget raises the window with it.",
-        )
+            "#   the GLiNER family runs (pod-measured: a 768-chunker-token cap hit mdeberta",
+            "#   median 666 / MAX 921) and the encoder SILENTLY truncates past its window — so",
+            "#   raising the budget raises the window with it.",
+        ]
+        if provider == "chunk.page":
+            lines += [
+                "#",
+                "#   Chunker: `chunk.page` (ADR-0064) — ONE chunk per source page when the",
+                "#   document carries a MEASURED page map, so a retrieval hit is citable as a",
+                "#   page without any further resolution. A document with NO page structure (an",
+                "#   `assumed_single_page` map, ADR-0060) falls back to the windowed budget above,",
+                "#   and a page OVER that budget still splits — a page-sized chunk past the model",
+                "#   window would be a silent truncation, and a split is not.",
+            ]
+        return tuple(lines)
 
 
 @dataclass(frozen=True)
@@ -1132,7 +1322,9 @@ class ExtractContribution(StageContribution):
         return {
             "name": self.name,
             "capability": "fused_entity_relation",
-            "provider": "fused_entity_relation.gliner2",
+            # ADR-0064: read off the ENGINE row, which is the same row `redact` reads — so the two
+            # Stages cannot name Providers from packages that pin disjoint `gliner2` majors.
+            "provider": engine_for(answers.engine).extract_provider,
             "depends_on": [upstream],
             "config": config,
         }
@@ -1220,20 +1412,29 @@ class RedactContribution(StageContribution):
         # truncated the tail of a longer chunk — i.e. left PII in the exported corpus UNMASKED,
         # which is a correctness failure, not a throughput one.
         window = model_window_for(answers.chunk_max_tokens)
+        engine = engine_for(answers.engine)
         config: StageBlock = {
             "device": self.device or answers.device,
             # T1: the ADR-0044 financial floor, plus any operator-fixed pii_types
             # (predefined-only fixes the RELEVANCE schema, never the SAFETY schema).
             "pii_labels": _pii_labels(answers),
-            "guardrails": True,
             "max_len": window,
             "threshold": 0.5,
         }
+        # ADR-0064: the guardrail screen is emitted only when the engine's redactor HAS a
+        # guardrail-trained checkpoint. The GLiNER 2.5 family has none — asking a general
+        # checkpoint for `prompt injection` zero-shot and recording the answer as a security
+        # finding is a control that reports nothing while looking enabled — and
+        # `redaction.gliner25` refuses the key outright, so emitting it would produce a config
+        # that does not load. The deterministic `content_screen` Stage is unaffected and still
+        # rides `answers.pii` on both engines.
+        if engine.guardrails:
+            config["guardrails"] = True
         _add_gliner2_perf_knobs(config, answers, window=window)
         return {
             "name": self.name,
             "capability": "redaction",
-            "provider": BLESSED_REDACT_PROVIDER,
+            "provider": engine.redact_provider,
             "depends_on": [ctx.anchor(ANCHOR_LABELS)],
             "config": config,
         }
@@ -1244,8 +1445,23 @@ class RedactContribution(StageContribution):
         # The redactor NAME is read off the block this very walk emitted — the ADR-0041 §7a drift
         # (header naming gliner2 while the generator emitted gliner_pii) is unrepresentable here.
         provider = block.get("provider")
+        caveat: tuple[str, ...] = ()
+        if provider == "redaction.gliner25":
+            # ADR-0064. The prose must not describe this as the guardrails+PII redactor, because
+            # it is not one: there is NO GLiNER 2.5 PII checkpoint, so it drives the GENERAL 2.5
+            # checkpoint zero-shot. Saying so in the emitted file is the difference between an
+            # operator who knows what their privacy posture rests on and one who does not.
+            caveat = (
+                "#   NOTE (ADR-0064): there is NO GLiNER 2.5 PII checkpoint, so this Redactor",
+                "#   asks the GENERAL 2.5 checkpoint for PII labels ZERO-SHOT. No parity with",
+                "#   `redaction.gliner2`'s task-trained checkpoint is claimed and its recall is",
+                "#   UNMEASURED. Learned guardrail screening is NOT available on this engine",
+                "#   (the deterministic `content_screen` Stage still runs); the ADR-0044",
+                "#   financial floor below is model-independent and applies unchanged.",
+            )
         return (
-            f"#   Redactor: `{provider}` (#197, ADR-0036 W9) — the SAME GLiNER2",
+            *caveat,
+            f"#   Redactor: `{provider}` (#197, ADR-0036 W9, ADR-0064) — the SAME GLiNER",
             "#   engine `extract` runs, so PII detection adds no second model library. Its",
             "#   `pii_labels` are the ADR-0044 financial floor — UNIVERSAL, applied to EVERY",
             "#   chunk and never subsetted (T2); the per-chunk induced pii_types UNION on top",

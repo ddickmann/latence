@@ -925,6 +925,31 @@ def _package_dirs() -> list[Path]:
     return sorted(p.parent for p in (_REPO_ROOT / "packages").glob("*/pyproject.toml"))
 
 
+def _workspace_excluded() -> set[str]:
+    """Package directory names the root pyproject excludes from the uv WORKSPACE (ADR-0064).
+
+    Read, never hard-coded, because the two counts this distinguishes are genuinely different
+    facts and both are load-bearing:
+
+    * the release BUILDS ``for pkg in packages/*/`` — an excluded package still ships;
+    * the SBOM is generated from ``uv export --all-packages``, which resolves the WORKSPACE — an
+      excluded package is absent from THAT export, and ``scripts/generate-sbom.sh`` folds in its
+      own committed ``uv.lock`` instead so the union still covers everything shipped.
+
+    ``latence-gliner25`` is excluded because it pins a ``gliner2`` major disjoint from the one the
+    other Provider packages pin; a uv workspace is one resolved environment, so ``uv lock``
+    correctly refuses to hold both. The consequence — a shipped distribution outside the SBOM — is
+    a real gap, disclosed in ``docs/RELEASING.md`` and printed by ``scripts/generate-sbom.sh``
+    rather than absorbed here.
+    """
+    import tomllib
+
+    with (_REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        workspace = tomllib.load(handle).get("tool", {}).get("uv", {}).get("workspace", {})
+    return {Path(entry).name for entry in workspace.get("exclude", [])}
+
+
+
 def _documented_dry_run_counts() -> dict[str, int]:
     """The derivation table in the evidence block, as {label: value}."""
     rows = re.findall(
@@ -1009,6 +1034,24 @@ def test_releasing_sbom_component_arithmetic_is_consistent() -> None:
         f"tree has {len(_package_dirs())} packages — the SBOM does not cover every "
         "distribution the release ships (a missing `uv export --all-packages`?)"
     )
+    # A package the workspace EXCLUDES is covered by a different mechanism (its own uv.lock,
+    # folded in by generate-sbom.sh), and a mechanism nobody documented is one the next person
+    # deletes. So the document must name each exclusion — the count above proves coverage, this
+    # proves the reader can find out how it was achieved.
+    doc_text = _RELEASING.read_text()
+    for name in sorted(_workspace_excluded() & {p.name for p in _package_dirs()}):
+        assert name in doc_text, (
+            f"{name} is excluded from the uv workspace, so `uv export --all-packages` does not "
+            "resolve it and its SBOM coverage comes from its own uv.lock — docs/RELEASING.md "
+            "must say so by name rather than leave the mechanism undocumented"
+        )
+    for pkg in _package_dirs():
+        if pkg.name in _workspace_excluded():
+            assert (pkg / "uv.lock").is_file(), (
+                f"{pkg.name} is excluded from the uv workspace but carries no uv.lock of its "
+                "own, so generate-sbom.sh cannot export its dependencies and the release would "
+                "ship a distribution this SBOM does not describe"
+            )
 
 
 # --------------------------------------------------------------------------------------

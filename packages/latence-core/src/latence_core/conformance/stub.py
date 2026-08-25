@@ -267,6 +267,14 @@ class _StubGLiNER2:
     #: ``{"relation_extraction": {rel: [{"head": {...}, "tail": {...}}]}}`` dict by
     #: :meth:`extract_relations` — the W9 fused-extraction gliner2 path.
     relations: list[dict[str, Any]] = []
+    #: The architecture marker the real classes carry (``gliner2/inference/engine.py``). ``GLiNER2``
+    #: is the SPAN head; the GLiNER 2.5 checkpoints are ``boundary`` (see
+    #: :class:`_StubBoundaryExtractor`). The gliner25 Providers read it to refuse a checkpoint from
+    #: the other major, so a stub that omitted it would let that refusal go unexercised.
+    architecture: str = "span"
+    #: ``BoundaryExtractorModel.enable_relations`` — a checkpoint whose relation head is inactive
+    #: returns an EMPTY relation result with no error, which is what the fused Provider warns about.
+    enable_relations: bool = True
 
     @classmethod
     def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubGLiNER2:  # noqa: ARG003 - id/quantize/compile unused offline
@@ -398,6 +406,65 @@ def install_gliner2(
     _StubGLiNER2.entities = entities or []
     _StubGLiNER2.relations = relations or []
     module = types.ModuleType("gliner2")
+    module.GLiNER2 = _StubGLiNER2  # type: ignore[attr-defined]
+    saved = sys.modules.get("gliner2")
+    sys.modules["gliner2"] = module
+    try:
+        yield
+    finally:
+        if saved is not None:
+            sys.modules["gliner2"] = saved
+        else:
+            sys.modules.pop("gliner2", None)
+
+
+class _StubBoundaryExtractor(_StubGLiNER2):
+    """``gliner2.models.boundary.engine.BoundaryExtractor`` — what a GLiNER 2.5 checkpoint is.
+
+    The batched surface is IDENTICAL to the span class's: both public model classes mix in
+    ``gliner2.inference.runtime.ExtractorRuntimeMixin``, which is precisely the finding that let
+    the 2.5 Providers reuse the 1.x parse unchanged. Only the architecture marker differs, and that
+    marker is what the Providers gate on.
+    """
+
+    architecture = "boundary"
+
+
+class _StubAutoExtractor:
+    """``gliner2.auto.AutoExtractor`` — the architecture-dispatching loader used by gliner2 2.x.
+
+    The real one resolves the checkpoint's SAVED architecture from its config and raises
+    ``ArchitectureMismatchError`` rather than converting between heads. The conformance case only
+    ever loads the 2.5 default checkpoint, so this returns the boundary class; the per-checkpoint
+    dispatch (and the span-checkpoint refusal) is exercised in ``packages/latence-gliner25/tests``,
+    against a fake that models the whole registry.
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_id: str, **_kwargs: Any) -> _StubBoundaryExtractor:  # noqa: ARG003 - id/quantize/compile unused offline
+        return _StubBoundaryExtractor()
+
+
+@contextlib.contextmanager
+def install_gliner25(
+    *,
+    entities: list[dict[str, Any]] | None = None,
+    relations: list[dict[str, Any]] | None = None,
+) -> Iterator[None]:
+    """Install a fake ``gliner2`` **2.x** module for the GLiNER 2.5 Providers.
+
+    The same canned rows and the same nested output shapes as :func:`install_gliner2` — that
+    sameness is the verified finding, not a shortcut: the batched entity/relation envelopes did not
+    change across the 1.x → 2.x major. What differs is the LOADER (``AutoExtractor`` rather than
+    ``GLiNER2``) and the architecture marker the loaded object carries, which is what the
+    ``*.gliner25`` Providers check at load.
+    """
+    _StubGLiNER2.entities = entities or []
+    _StubGLiNER2.relations = relations or []
+    module = types.ModuleType("gliner2")
+    module.__version__ = "2.0.0"  # type: ignore[attr-defined]
+    module.AutoExtractor = _StubAutoExtractor  # type: ignore[attr-defined]
+    module.BoundaryExtractor = _StubBoundaryExtractor  # type: ignore[attr-defined]
     module.GLiNER2 = _StubGLiNER2  # type: ignore[attr-defined]
     saved = sys.modules.get("gliner2")
     sys.modules["gliner2"] = module

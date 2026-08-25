@@ -43,6 +43,7 @@ from latence_core.contracts import (
     Disposition,
     OffsetMap,
     OffsetSegment,
+    PageMapOrigin,
     PageSlice,
 )
 from latence_core.pagemap import PageOffsetIndex
@@ -180,6 +181,134 @@ class SentenceWindowChunker:
             yield from _emit_chunk_records(
                 doc, chunk_document_by_sentence(doc.content, self._budget)
             )
+
+
+#: The ``chunk.page`` windowed-fallback default (ADR-0064). Deliberately NOT the 512 that
+#: :class:`MarkdownChunker` / :class:`SentenceWindowChunker` default to, and deliberately not a
+#: change to theirs: those defaults are baked into committed benchmark baselines and parity
+#: oracles, so moving them would silently invalidate every published number. 1024 is the default
+#: **of this strategy**, chosen to pair with the longer model window a GLiNER 2.5-class extractor
+#: attends to (1024 chunker tokens ≈ 1229 mdeberta tokens at the pod-measured 1.2x expansion,
+#: which ``latence_core.setup.recipe.model_window_for`` rounds to a 1280-token window).
+PAGE_CHUNK_MAX_TOKENS = 1024
+
+
+class PageChunker:
+    """Third reference Chunker Provider: **one chunk per source page**, windowed otherwise.
+
+    Behind the same :class:`~latence_core.capability.Chunker` seam and the same offset-preserving
+    engine as :class:`MarkdownChunker` / :class:`SentenceWindowChunker`, so the S3 round-trip
+    (chunk → offset → original page) holds identically and each chunk's ``page_slice`` (v19) stays
+    exact. Pure Python, zero extra deps, deterministic.
+
+    **The strategy, and the two cases it is.**
+
+    *A document that carries a real page map* is cut on its own page boundaries: one chunk per
+    page. That is the segmentation an operator already has when the source is paginated — a page is
+    an author-chosen unit of meaning, and a retrieval hit on it is citable as "page 7" without any
+    further resolution. The window strategies cut wherever the token budget runs out, which is a
+    boundary nothing in the document agrees with.
+
+    *A document that carries none* falls back to the windowed budget at
+    :data:`PAGE_CHUNK_MAX_TOKENS` (1024) — exactly :func:`~latence_core.chunking.chunk_document`,
+    the reference strategy, at a larger budget. Per ADR-0060 an **absent** page map is a value, not
+    a ``page 1``: a :class:`~latence_core.contracts.PageMapOrigin.ASSUMED_SINGLE_PAGE` map is the
+    Parser saying "this document had no page structure", so treating its single span as a page
+    would produce one enormous chunk for a whole ``.txt`` file while *claiming* it was a page. This
+    Provider therefore reads the map's ORIGIN, not merely its presence, and only ``PARSER`` /
+    ``SIDECAR`` maps — the measured ones — drive the per-page cut.
+
+    **A page that exceeds the budget still splits.** A page-sized chunk that blows past the model
+    window is a *silent truncation* at extraction time (tail entities lost, offsets past the window
+    unreliable), which is strictly worse than a split: a split is visible in the record count and
+    every piece stays groundable. So each page is run through the same budget engine, and a page
+    within budget yields exactly one chunk while an over-budget page yields as many as it needs,
+    with the configured overlap between them. ``min_tokens`` folds a short tail back — WITHIN a
+    page, never across one, because merging across a page boundary is the thing this strategy
+    exists not to do.
+
+    Config:
+        max_tokens: int  — the per-chunk token ceiling (default 1024). It bounds an over-budget
+            page's split AND is the whole budget in the no-page-map fallback.
+        overlap_tokens: int  — tokens repeated at the start of the next chunk when a page splits
+            (default 64). Never applied across a page boundary.
+        min_tokens: int  — a trailing remnant below this merges into the previous chunk of the SAME
+            page (default 16).
+    """
+
+    @classmethod
+    def profile(cls) -> ProviderProfile:
+        """The declared descriptor (ADR-0036 §2): pure-code, CPU, deterministic, Apache-2.0.
+
+        Ships no weights (``model_id=None``), is deterministic (a pure function of the document
+        text, its page map and the budget), CPU-only, and has no per-call cost. ``batch=True``: it
+        accepts an iterable of documents and folds chunks per document.
+        """
+        return ProviderProfile(
+            compute="cpu",
+            memory_mb=16,
+            model_id=None,
+            license=REPO_LICENSE_CODE,
+            license_verified=True,
+            license_code=REPO_LICENSE_CODE,
+            license_source=REPO_LICENSE_SOURCE,
+            license_verified_on="2026-08-25",
+            deterministic=True,
+            batch=True,
+            cost_per_1k=None,
+        )
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        config = config or {}
+        self._budget = ChunkBudget(
+            max_tokens=int(config.get("max_tokens", PAGE_CHUNK_MAX_TOKENS)),
+            overlap_tokens=int(config.get("overlap_tokens", 64)),
+            min_tokens=int(config.get("min_tokens", 16)),
+        )
+
+    def chunk(self, documents: Iterable[DocumentRecord]) -> Iterator[ChunkRecord]:
+        for doc in documents:
+            if doc.disposition is Disposition.PARSE_ERROR or not doc.content:
+                continue
+            yield from _emit_chunk_records(doc, self._chunk_one(doc))
+
+    def _chunk_one(self, doc: DocumentRecord) -> list[Chunk]:
+        """This document's chunks: per page when the map is measured, else one windowed pass."""
+        page_map = doc.page_map
+        if page_map is None or page_map.origin is PageMapOrigin.ASSUMED_SINGLE_PAGE:
+            return chunk_document(doc.content, self._budget)
+        chunks: list[Chunk] = []
+        for span in page_map.pages:
+            # The page's slice of the ORIGINAL markdown. Running the engine on it (rather than on
+            # the whole document, then cutting) is what makes "one chunk per page" a property of
+            # the segmentation instead of a post-hoc filter — and it is exact, because stripping
+            # only ever DELETES characters, so a piece's offsets within the slice shift by the
+            # slice's own start and by nothing else.
+            page_text = doc.content[span.char_start : span.char_end]
+            chunks.extend(
+                _shifted(piece, span.char_start)
+                for piece in chunk_document(page_text, self._budget)
+            )
+        return chunks
+
+
+def _shifted(piece: Chunk, offset: int) -> Chunk:
+    """Rebase a page-local :class:`~latence_core.chunking.Chunk` onto document coordinates.
+
+    Every original-text coordinate a ``Chunk`` carries — its span AND every ``doc_start`` in its
+    run-length offset map — is relative to the text the engine was handed. Adding the page's own
+    ``char_start`` to all of them is the whole rebase; the ``local_start`` half of each segment is
+    an offset into the chunk's own stripped ``text`` and is untouched by construction.
+    """
+    if offset == 0:
+        return piece
+    return Chunk(
+        text=piece.text,
+        char_start=piece.char_start + offset,
+        char_end=piece.char_end + offset,
+        token_count=piece.token_count,
+        offset_map=tuple((local, doc + offset) for local, doc in piece.offset_map),
+    )
 
 
 def _emit_chunk_records(doc: DocumentRecord, chunks: list[Chunk]) -> Iterator[ChunkRecord]:

@@ -1,5 +1,35 @@
 [tool.uv.workspace]
 members = ["packages/*"]
+# The ONE package that cannot be a workspace member, and the reason is the point (ADR-0064).
+#
+# A uv workspace is ONE resolved environment: `uv lock` solves every member's dependencies
+# together. `latence-gliner25` pins `gliner2[local]>=2.0,<3` while `latence-extract-gliner2` and
+# `latence-pii-gliner2` pin `gliner2[local]>=1.3,<2`, and those windows are DISJOINT — gliner2 2.0
+# is a major release whose 2.5 checkpoints are a different architecture head (`boundary` vs
+# `span`), not a drop-in. Listing all three as members makes `uv lock` unsatisfiable, verbatim:
+#
+#   Because latence-extract-gliner2 depends on gliner2[local]>=1.3,<2 and latence-gliner25
+#   depends on gliner2[local]>=2.0,<3, we can conclude that latence-extract-gliner2 and
+#   latence-gliner25 are incompatible.
+#
+# That refusal is CORRECT and is the same fact `deploy/env/*/environment.yaml` enforces per
+# environment (E-CONSTRAINT-CONFLICT). Excluding the package is not a workaround for it: it is
+# the statement that the dev workspace resolves the gliner2 1.x line, and that the 2.5 Providers
+# belong to an environment that resolves the 2.x line instead.
+#
+# The package is still a first-class distribution, and everything that could quietly have dropped
+# it was checked and wired:
+#   * `packages/*/pyproject.toml` globs (the contract reference, the environment specs, the
+#     publish-readiness and release gates), ruff, `scripts/typecheck.sh` and pytest all cover it
+#     BY DIRECTORY, so exclusion changes nothing for them;
+#   * `scripts/verify-local.sh` installs its SOURCE with `--no-deps`, exactly as for every other
+#     heavy Provider — which is what lets both gliner2 majors' offline tests run in one venv;
+#   * the release builds it by PATH (`uv build "$pkg"`, not `--package <name>`, which resolves
+#     through the workspace and cannot see it);
+#   * it carries its OWN committed `uv.lock`, and `scripts/generate-sbom.sh` folds that lock's
+#     export into the SBOM so a shipped distribution is never absent from the release's component
+#     inventory. Both of those are gated (`test_release_integrity.py`).
+exclude = ["packages/latence-gliner25"]
 
 [tool.uv.sources]
 latence-core = { workspace = true }

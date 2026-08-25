@@ -46,10 +46,14 @@ import yaml
 
 from latence_core.setup.recipe import (
     _DEFAULT_EXTENSIONS,
+    _KNOWN_CHUNK_STRATEGIES,
+    _KNOWN_ENGINES,
     BLESSED_REDACT_PROVIDER,
+    CHUNK_BUDGET_FROM_ENGINE,
     CHUNK_MAX_TOKENS,
     CHUNK_MIN_TOKENS,
     CHUNK_OVERLAP_TOKENS,
+    CHUNK_STRATEGY_AUTO,
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL,
     DEFAULT_OCR_BASE_URL,
@@ -57,6 +61,7 @@ from latence_core.setup.recipe import (
     DEFAULT_RASTER_DPI,
     DEFAULT_RASTER_MAX_LONGEST_DIM,
     DOMAIN_HINT_MAX_CHARS,
+    ENGINE_GLINER2,
     FINANCIAL_PII_LABELS,
     INTAKE_HEADROOM,
     INTAKE_MAX_BYTES_CEILING,
@@ -80,8 +85,10 @@ from latence_core.setup.recipe import (
     StackRecipe,
     StageBlock,
     StageContribution,
+    engine_for,
     intake_max_bytes,
     llm_key_env_var,
+    model_window_for,
     normalize_domain_hint,
     recipe_for,
 )
@@ -390,6 +397,18 @@ class SetupAnswers:
     # pod-validated composed stack). The generator picks the profile's RECIPE from this; other
     # fields are shared.
     profile: str = PROFILE_LITE
+    # ADR-0064 — the extraction ENGINE. ONE answer drives BOTH the fused extractor and the
+    # redactor, because their Provider packages pin mutually exclusive `gliner2` majors: a stack
+    # naming `fused_entity_relation.gliner25` beside `redaction.gliner2` would validate and then
+    # fail at `pip install`. Reading both Stages off one `ExtractionEngine` row makes that pair
+    # unrepresentable rather than merely discouraged. `gliner2` (the default) is unchanged
+    # behaviour; `gliner25` selects the GLiNER 2.5 family and, with `chunk_strategy: auto`, its
+    # coherent page-preferred chunking.
+    engine: str = ENGINE_GLINER2
+    # `auto` (default) takes the engine's own chunker; `window` / `page` override it. The
+    # override exists because page-preferred chunking is useful with the 1.x engine too, and
+    # because an operator whose corpus is unpaginated may prefer the window strategy explicitly.
+    chunk_strategy: str = CHUNK_STRATEGY_AUTO
     # Enterprise-SOTA served-OCR endpoint (only consumed by the SOTA profile's
     # `parser.lighton_vllm` parse Stage; ignored by the lite profile).
     ocr_base_url: str = DEFAULT_OCR_BASE_URL
@@ -462,7 +481,11 @@ class SetupAnswers:
     # gliner-family Stages derive their `max_len` from THIS value (`recipe.model_window_for`),
     # because the chunker counts ~1.2x FEWER tokens than the mdeberta encoder and a budget raised
     # without the window silently truncates (pod-measured: 768 chunker -> max 921 mdeberta).
-    chunk_max_tokens: int = CHUNK_MAX_TOKENS
+    # ADR-0064: ``0`` (:data:`CHUNK_BUDGET_FROM_ENGINE`, the default) means "not answered — take
+    # the ENGINE's own budget", resolved in ``__post_init__`` so every caller of the public
+    # ``build_stack_config`` gets the pairing the engine was designed around: 768 for `gliner2`
+    # (unchanged), 1024 for `gliner25`'s page-preferred chunking. An explicit value always wins.
+    chunk_max_tokens: int = CHUNK_BUDGET_FROM_ENGINE
     chunk_overlap_tokens: int = CHUNK_OVERLAP_TOKENS
     chunk_min_tokens: int = CHUNK_MIN_TOKENS
     # T-OCR-3 — the rasterisation policy, LightOn's published 200 DPI / 1540 px longest side. These
@@ -500,6 +523,41 @@ class SetupAnswers:
             raise SetupConfigError(msg)
         if self.label_min_hits < 1:
             msg = f"label candidates 'min_hits' must be >= 1, got {self.label_min_hits}."
+            raise SetupConfigError(msg)
+        if self.engine not in _KNOWN_ENGINES:
+            msg = (
+                f"Unknown extraction engine {self.engine!r}; expected one of "
+                f"{sorted(_KNOWN_ENGINES)}."
+            )
+            raise SetupConfigError(msg)
+        if self.chunk_strategy not in _KNOWN_CHUNK_STRATEGIES:
+            msg = (
+                f"Unknown chunk strategy {self.chunk_strategy!r}; expected one of "
+                f"{sorted(_KNOWN_CHUNK_STRATEGIES)}."
+            )
+            raise SetupConfigError(msg)
+        # ADR-0064 — the budget must FIT the engine's checkpoint window, checked here rather than
+        # discovered at run time. The gliner-family encoders truncate SILENTLY past their window:
+        # for `extract` that loses tail entities and relations, and for `redact` it leaves PII in
+        # the exported corpus UNMASKED, which is a correctness failure rather than a throughput
+        # one. `build_stack_config(answers)` is a public entry point, so the refusal lives on the
+        # struct where every caller passes through, not only on the CLI flag.
+        engine = engine_for(self.engine)
+        if self.chunk_max_tokens == CHUNK_BUDGET_FROM_ENGINE:
+            # ``frozen=True`` is about an operator not mutating an answer set after the fact, not
+            # about the struct being unable to finish constructing itself; this is the ordinary
+            # dataclass idiom for a derived default and it runs before any reader sees the field.
+            object.__setattr__(self, "chunk_max_tokens", engine.chunk_max_tokens)
+        window = model_window_for(self.chunk_max_tokens)
+        if engine.max_window is not None and window > engine.max_window:
+            msg = (
+                f"a {self.chunk_max_tokens}-token chunk budget needs a {window}-token model "
+                f"window, but the {self.engine!r} engine's checkpoint window is "
+                f"{engine.max_window}. The chunker counts ~1.2x FEWER tokens than the mdeberta "
+                "encoder, so the window is derived from the budget and the encoder truncates "
+                "silently past it. Lower the chunk budget, or choose an engine with a wider "
+                "window."
+            )
             raise SetupConfigError(msg)
 
 

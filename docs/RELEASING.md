@@ -139,7 +139,7 @@ This is the rehearsal available *before* the tag exists — everything except th
 offline:
 
 ```bash
-for pkg in packages/*/; do uv build --package "$(basename "$pkg")" --out-dir dist; done
+for pkg in packages/*/; do uv build "$pkg" --out-dir dist; done   # by PATH — see the note below
 bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets --no-sign
 (cd release-assets && shasum -a 256 -c SHA256SUMS)
 ```
@@ -151,20 +151,28 @@ claimed 25 packages / 56 distributions / 58 assets against a tree that had none 
 
 | measured | value | derivation |
 | --- | --- | --- |
-| packages built | 33 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
-| distributions | 66 | one sdist + one wheel per package (every package builds with `hatchling`) |
-| assets checksummed | 68 | the 66 distributions + `sbom.cdx.json` + `VERIFY.md` |
+| packages built | 34 | one per `packages/*/pyproject.toml` — the `for pkg in packages/*/` loop the workflow also uses |
+| distributions | 68 | one sdist + one wheel per package (every package builds with `hatchling`) |
+| assets checksummed | 70 | the 68 distributions + `sbom.cdx.json` + `VERIFY.md` |
 
-`shasum -a 256 -c SHA256SUMS` verified all 68. The CycloneDX 1.6 SBOM was generated from
-`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 180 components — 147 pinned
-third-party requirements plus 33 workspace path entries (see below). Running
+`shasum -a 256 -c SHA256SUMS` verified all 70. The CycloneDX 1.6 SBOM was generated from
+`uv.lock`, stamped as `latence-framework 0.1.0`, and carried 207 components — 173 pinned
+third-party requirements plus 34 workspace path entries (see below). Running
 `scripts/generate-sbom.sh` twice produced a byte-identical `sbom.cdx.json`
 (`--output-reproducible`), so the release is reproducible from the same lockfile.
 
-> Those 33 components are emitted as `unknown`: they are the `./packages/...` path
+> **Re-measured 2026-08-25** on the commit that added `packages/latence-gliner25` (ADR-0064).
+> The previous block recorded 33 / 66 / 68 assets and 180 components (147 + 33) against a
+> 33-package tree; the numbers above are a fresh local rehearsal of the three commands under
+> [Rehearsing locally](#rehearsing-locally), not an extrapolation. Re-measured again after
+> `latence-gliner25` gained H-G1 caps on `protobuf` / `sentencepiece`: the component counts
+> moved (205→207, 171→173 pinned, 24→26 folded-in pins) because those two became DECLARED
+> requirements of the excluded package's own lock. The three table rows did not move.
+>
+> Those 34 components are emitted as `unknown`: they are the `./packages/...` path
 > requirements that `uv export --no-emit-project` does not strip and that `cyclonedx-py`
 > cannot resolve to a name or version. They are inert for CVE matching — the third-party
-> surface an adopter scans is the 147 pinned components — but they do pad the component
+> surface an adopter scans is the 173 pinned components — but they do pad the component
 > count. Recorded during the pre-release documentation-truth audit.
 >
 > There is one such entry per package built, and that is the point: `generate-sbom.sh`
@@ -175,6 +183,19 @@ third-party requirements plus 33 workspace path entries (see below). Running
 > omitted `torch`, `transformers`, `gliner`, `openai`, `presidio-analyzer`,
 > `sentence-transformers` and the rest, while still being stamped, checksummed and
 > Sigstore-signed as evidence. Recorded during the pre-release supply-chain audit.
+>
+> **One of the 34 is not a workspace member** (ADR-0064). `latence-gliner25` pins
+> `gliner2[local]>=2.0,<3` while `latence-extract-gliner2` / `latence-pii-gliner2` pin
+> `gliner2[local]>=1.3,<2`; a uv workspace is ONE resolved environment, so `uv lock`
+> refuses the set — correctly — and the root `pyproject.toml` excludes it under
+> `[tool.uv.workspace] exclude`. It is still built and published, so it carries its **own
+> committed `uv.lock`** and `generate-sbom.sh` folds that lock's export into the
+> requirements union (26 pins the workspace lock does not already carry, deduplicated by
+> name+version) before the coverage check runs. Leaving it out would have been the exact
+> silent false negative that check exists to prevent, and `generate-sbom.sh` fails closed
+> if an excluded package has no lock of its own. The release builds by PATH
+> (`uv build "$pkg"`) rather than by `--package <name>` for the same reason: the name form
+> resolves through the workspace and cannot see an excluded package at all.
 
 > The SBOM generator is version-pinned (`cyclonedx-bom>=7,<8`) on purpose. It had silently
 > stopped working: `cyclonedx-py` 7 removed the `--outfile` flag the script passed, so the

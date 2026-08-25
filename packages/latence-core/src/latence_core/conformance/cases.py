@@ -1100,7 +1100,23 @@ def _relation_case(*, stub_scoped: bool, gliner: bool, backend: str = "gliner") 
         one = c.mentions[:1]
         return _capture_raise(lambda: list(provider.relate(c.chunks, one)))
 
-    if stub_scoped and gliner and backend == "gliner2":
+    if stub_scoped and gliner and backend == "gliner25":
+        # fused_entity_relation.gliner25 (ADR-0064) is the SAME fused contract over the gliner2 2.x
+        # boundary architecture: the batched envelopes are unchanged across the major, so the SAME
+        # canned rows drive it — what differs is the AutoExtractor loader and the architecture
+        # marker the Provider gates on, which `install_gliner25` supplies.
+        def invoke(provider: Any) -> Sequence[Record]:
+            with stubs.install_gliner25(
+                entities=stubs.gliner2_entities(), relations=stubs.gliner2_relations()
+            ):
+                return _run_valid_fused(provider)
+
+        def adversarial(provider: Any) -> AdversarialOutcome:
+            with stubs.install_gliner25(entities=[], relations=[]):
+                return _run_adversarial(provider, fused=True)
+
+        config: dict[str, Any] = {"labels": entity_labels, "relation_labels": labels}
+    elif stub_scoped and gliner and backend == "gliner2":
         # fused_entity_relation.gliner2 is a FUSED provider (extract_fused) over the fastino GLiNER2
         # framework: extract_entities + extract_relations, the REAL nested per-label/per-relation
         # dict shapes (NOT the relex tuple) — the W9 unified default. Same extract_fused contract.
@@ -1114,7 +1130,7 @@ def _relation_case(*, stub_scoped: bool, gliner: bool, backend: str = "gliner") 
             with stubs.install_gliner2(entities=[], relations=[]):
                 return _run_adversarial(provider, fused=True)
 
-        config: dict[str, Any] = {"labels": entity_labels, "relation_labels": labels}
+        config = {"labels": entity_labels, "relation_labels": labels}
     elif stub_scoped and gliner:
         # gliner-relex is a FUSED provider (extract_fused).
         def invoke(provider: Any) -> Sequence[Record]:
@@ -1303,6 +1319,13 @@ def _redaction_case(*, stub_scoped: bool, backend: str = "gliner") -> Conformanc
             if backend == "presidio":
                 spans = [] if empty else stubs.presidio_pii_spans()
                 with stubs.install_presidio(spans=spans):
+                    yield
+            elif backend == "gliner25":
+                # redaction.gliner25 (ADR-0064) — the same per-label-dict parse over the gliner2
+                # 2.x boundary loader. The stub says nothing about zero-shot PII QUALITY, which is
+                # unmeasured and deliberately not claimed anywhere.
+                rows = [] if empty else stubs.gliner2_pii_entities()
+                with stubs.install_gliner25(entities=rows):
                     yield
             elif backend == "gliner2":
                 rows = [] if empty else stubs.gliner2_pii_entities()
@@ -2040,6 +2063,9 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "fused_entity_relation.gliner2": _relation_case(
         stub_scoped=True, gliner=True, backend="gliner2"
     ),
+    "fused_entity_relation.gliner25": _relation_case(
+        stub_scoped=True, gliner=True, backend="gliner25"
+    ),
     # The in-core deterministic header-reference extractor (dogfood-3-inspect): pure-code, so it
     # runs for REAL over the canonical corpus (not stub-scoped) — the fused extract_fused contract.
     "fused_entity_relation.header_refs": _header_refs_case(),
@@ -2048,6 +2074,7 @@ _PROVIDER_CASE_OVERRIDES: dict[str, ConformanceCase] = {
     "fused_entity_relation.inline_refs": _inline_refs_case(),
     "redaction.gliner_pii": _redaction_case(stub_scoped=True, backend="gliner"),
     "redaction.gliner2": _redaction_case(stub_scoped=True, backend="gliner2"),
+    "redaction.gliner25": _redaction_case(stub_scoped=True, backend="gliner25"),
     "redaction.presidio": _redaction_case(stub_scoped=True, backend="presidio"),
     "embedding.endpoint": _embedding_case(stub_scoped=True),
     "embedding.sentence_transformers": _embedding_case(

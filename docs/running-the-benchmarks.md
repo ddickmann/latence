@@ -106,6 +106,60 @@ uv run latence-benchmark run --suite all \
 The section below says what those numbers will look like and why — read it *before* you read the
 numbers, not after.
 
+### GLiNER 2.5 has no numbers at all (ADR-0064)
+
+`fused_entity_relation.gliner25` and `redaction.gliner25` shipped **unmeasured**, and the silence is
+deliberate rather than an omission: the checkpoint has never been loaded in this repository. Their
+whole test suite runs against a faithful offline fake of `gliner2` 2.0.0 which reproduces the real
+API *and its real degradations* — that proves the Providers parse, ground and batch it correctly and
+proves **nothing** about extraction or redaction quality.
+
+Two measurements are outstanding, and this is where each lands:
+
+| What | Where the number goes | What produces it |
+| --- | --- | --- |
+| PII recall/precision for `redaction.gliner25` | a Redaction slice on [the results page](BENCHMARKS.md), with its own stack pin and measured-on date | `latence-benchmark run --suite redaction --provider redaction.gliner25` — the existing suite, parameterised by Provider |
+| Fused NER+RE quality for `fused_entity_relation.gliner25` | the RED^FM extraction sections above, once run with that Provider pinned | `latence-benchmark run --suite entity_extraction --provider fused_entity_relation.gliner25` (and `relation_extraction`), which needs the RED^FM download |
+| Throughput | nowhere on this page | a GPU pod run. It is never estimated offline; see `PERF-RESULTS.md` for how the gliner2 1.x numbers were produced. |
+
+#### What IS measured about GLiNER 2.5, and why it is not on the results page
+
+One thing about the 2.5 checkpoint *has* been measured, and it is a property of the model rather
+than a score, so it belongs here rather than on [the results page](BENCHMARKS.md). On a pod GPU
+(RTX 2000 Ada 16 GB, driver 580.159.04, torch 2.4.1+cu124, transformers 4.57.6, gliner2 2.0.0,
+`fastino/gliner2.5-multi-v1`, 2026-08-25), one call at the card's advertised `max_len=4096` over a
+document seeded with a repeated PII sentence:
+
+| tokens | pii_spans returned | how far into the document the spans reach |
+| ---: | ---: | ---: |
+| 674 | 24 | 100% |
+| 1262 | 30 | 99% |
+| 1850 | 27 | 90% |
+| 2438 | 13 | 34% |
+| 3026 | 25 | 72% |
+| 4874 | 32 | 55% |
+| 7562 | 32 | 35% |
+
+At 7,562 tokens the document holds 90 SSNs and the model returns 32 spans covering the first 35% of
+the text — no error, no warning, a well-formed result. At 12,612 tokens with a single label it
+returned zero spans, silently; longer inputs OOM'd the card inside DeBERTa's quadratic attention.
+
+The filler is synthetic repetitive prose, so **the percentages are directional, not a benchmark** —
+which is exactly why they are not published as one. The failure MODE is what matters and is not in
+doubt: overflow is silent, partial and non-monotonic (2,438 scored worse than 3,026), so no
+threshold test catches it reliably, and useful recall ends far below 4096.
+
+The framework's response is in ADR-0064: 1024 tokens is the decided chunk budget, the Providers'
+`max_len` is derived from it, raising it past the safe window is warned about on extraction and
+**refused** on redaction, and a chunk too long for the window is refused rather than silently
+truncated. If you raise any of those knobs, this table is what you are trading against.
+
+The redaction measurement is the one that matters, because **there is no GLiNER 2.5 PII
+checkpoint**: `redaction.gliner25` asks the *general* 2.5 checkpoint for PII labels zero-shot. Until
+that number exists, no parity with the task-trained `redaction.gliner2` checkpoint is claimed
+anywhere — the Provider's own `ProviderProfile.perf_note` says so and a test asserts it does — and
+the ADR-0044 deterministic financial-PII floor is what holds underneath either backend regardless.
+
 ## Reading the extraction and disambiguation results honestly
 
 All three RED^FM suites pin the framework's **dependency-free CPU built-ins**, for the same

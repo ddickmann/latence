@@ -31,8 +31,17 @@ Evidence, Quarantine) and avoid the synonyms it bans.
 ## Repository shape
 
 A [uv](https://docs.astral.sh/uv/) workspace. `[tool.uv.workspace] members = ["packages/*"]` in the
-root `pyproject.toml`; **33 packages** under `packages/`, each an independently publishable
+root `pyproject.toml`; **34 packages** under `packages/`, each an independently publishable
 distribution.
+
+**One of them is deliberately NOT a workspace member.** `packages/latence-gliner25` pins a
+`gliner2` major disjoint from the one the other Provider packages pin, and a uv workspace is ONE
+resolved environment — `uv lock` refuses the set, correctly — so it is listed under
+`[tool.uv.workspace] exclude` (ADR-0064). Everything that works by directory (ruff,
+`scripts/typecheck.sh`, pytest, the contract reference, the environment specs) covers it unchanged;
+three things had to be taught about it, and all three are gated: the release builds by **path**
+(`uv build "$pkg"`, not `--package <name>`), the package carries its **own committed `uv.lock`**,
+and `scripts/generate-sbom.sh` folds that lock into the SBOM union.
 
 ```
 packages/latence-<family>-<name>/     33 of these

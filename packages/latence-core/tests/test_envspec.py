@@ -624,6 +624,64 @@ def test_a_satisfiable_window_is_not_reported_as_a_conflict(sandbox: Path) -> No
     assert "E-CONSTRAINT-CONFLICT" not in _codes(sandbox, _GPU_ENV)
 
 
+# --------------------------------------------------------------------------------------------
+# The gliner2 MAJOR boundary (ADR-0064) — the second enforced conflict, and the one it exists for
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("env_name", ["cpu-text", _GPU_ENV])
+def test_every_gliner2_environment_enforces_the_major_boundary(
+    sandbox: Path, env_name: str
+) -> None:
+    """An environment that installs a 1.x gliner2 Provider must pin the major, not hope.
+
+    Parametrised over both, because the failure this prevents is asymmetric: it is the environment
+    that FORGOT the boundary that silently resolves a 2.x.
+    """
+    spec = load_environment(_spec_in(sandbox, env_name))
+    windows = [c.requirement for c in spec.constraints if c.requirement.startswith("gliner2")]
+    assert windows == ["gliner2>=1.3,<2"]
+
+
+@pytest.mark.parametrize("env_name", ["cpu-text", _GPU_ENV])
+def test_the_gliner_2_5_package_cannot_resolve_into_a_gliner2_1x_environment(
+    sandbox: Path, env_name: str
+) -> None:
+    """THE architectural crux of ADR-0064, as a machine-checked refusal rather than a warning.
+
+    ``latence-gliner25`` declares ``gliner2[local]>=2.0,<3``; these environments enforce
+    ``gliner2>=1.3,<2``. The windows are DISJOINT, so adding the package is refused here — offline,
+    import-free, lock-independent, before anything installs — instead of resolving to something and
+    exploding at ``AutoExtractor.from_pretrained`` on a pod.
+
+    The finding is asserted by CODE and the offending requirement by NAME, so a future edit that
+    widened either pin would turn this red rather than quietly making the two co-installable.
+    """
+    spec_path = _spec_in(sandbox, env_name)
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8").replace(
+            "  - packages/latence-extract-gliner2\n",
+            "  - packages/latence-extract-gliner2\n  - packages/latence-gliner25\n",
+        ),
+        encoding="utf-8",
+    )
+    report = verify_environment(load_environment(spec_path), sandbox)
+    conflicts = [f for f in report.findings if f.code == "E-CONSTRAINT-CONFLICT"]
+    assert conflicts, {f.code for f in report.findings}
+    assert any("gliner2[local]>=2.0,<3" in f.message for f in conflicts)
+    assert any("latence-gliner25" in f.message for f in conflicts)
+
+
+def test_the_1x_packages_are_not_reported_as_conflicting_with_their_own_boundary(
+    sandbox: Path,
+) -> None:
+    """The negative control: the boundary must refuse the 2.x package and NOTHING else.
+
+    A boundary that also flags the packages it was written for is a boundary somebody deletes.
+    """
+    assert "E-CONSTRAINT-CONFLICT" not in _codes(sandbox, _GPU_ENV)
+
+
 def test_the_in_process_ocr_vlm_is_refused_by_name(sandbox: Path) -> None:
     """The half of the split version metadata cannot express.
 

@@ -86,6 +86,11 @@ latence = "latence_core.cli:app"
 # Second reference Chunker (#77 'providers' hardening bar): whole-sentence packing,
 # sentence-aligned boundaries, no overlap — a distinct CPU strategy behind the same seam.
 "chunk.sentence_window" = "latence_core.stages.chunk:SentenceWindowChunker"
+# Third reference Chunker (ADR-0064): PAGE-PREFERRED — one chunk per source page when the
+# document carries a MEASURED page map, else the windowed budget at 1024 tokens. Same engine,
+# same offset map, same page_slice exactness; a page over budget still splits, because a
+# page-sized chunk past the model window is a silent truncation and a split is not.
+"chunk.page" = "latence_core.stages.chunk:PageChunker"
 "screening.intake_signature" = "latence_core.stages.screening:SignatureSizeIntakeScreener"
 "screening.content_keyword" = "latence_core.stages.screening:KeywordContentScreener"
 # Second reference Content Screener (#77): a bounded fuzzy/scoring injection detector

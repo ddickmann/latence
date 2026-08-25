@@ -27,7 +27,7 @@ CPU reference Provider so the seam is exercised by real alternatives
 | Capability | Provider | Technique | Compute |
 | --- | --- | --- | --- |
 | Source | `source.local_folder` | Filesystem / object-store listing + fetch | cpu |
-| Chunk | `chunk.markdown`, `chunk.sentence_window` | Offset-preserving markdown / sentence-window packing | cpu |
+| Chunk | `chunk.markdown`, `chunk.sentence_window`, `chunk.page` | Offset-preserving markdown / sentence-window packing / page-preferred (one chunk per source page, 1024-token window otherwise) | cpu |
 | Screening (intake) | `screening.intake_signature` | Signature + size intake screen | cpu |
 | Screening (content) | `screening.content_keyword`, `screening.content_fuzzy` | Keyword / fuzzy injection detection | cpu |
 | Entity Extraction | `entity.gazetteer` | Zero-shot gazetteer / regex | cpu |
@@ -74,6 +74,7 @@ connector a plugin rather than a fork.
 | `relation.gliner_relex` | `latence-relation-gliner` | `knowledgator/gliner-relex-multi-v1.0` (fused NER+RE) | Apache-2.0 | either |
 | `relation.llm` | `latence-relation-llm` | Any OpenAI-compatible LLM (incl. local Ollama) | Apache-2.0 (client) | either (endpoint) |
 | `fused_entity_relation.gliner2` | `latence-extract-gliner2` | `fastino/gliner2-multi-v1` (mdeberta-v3, fused) | Apache-2.0 | either |
+| `fused_entity_relation.gliner25` | `latence-gliner25` | `fastino/gliner2.5-multi-v1` (mDeBERTa-v3 **boundary** head, fused, 4096-token window) | Apache-2.0 | either |
 
 ## Redaction (PII)
 
@@ -81,6 +82,7 @@ connector a plugin rather than a fork.
 | --- | --- | --- | --- | --- |
 | `redaction.gliner_pii` | `latence-pii-gliner` | `urchade/gliner_multi_pii-v1` (zero-shot PII) | Apache-2.0 | either |
 | `redaction.gliner2` | `latence-pii-gliner2` | `fastino/GLiNER2-Guardrails-PII-Multi` | Apache-2.0 | either |
+| `redaction.gliner25` | `latence-gliner25` | `fastino/gliner2.5-multi-v1` — **zero-shot** PII on the GENERAL checkpoint (there is no GLiNER 2.5 PII checkpoint); recall UNMEASURED | Apache-2.0 | either |
 | `redaction.presidio` | `latence-pii-presidio` | Microsoft Presidio + spaCy `en_core_web_sm` | MIT | either |
 
 ## Disambiguation

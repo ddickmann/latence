@@ -66,6 +66,7 @@ from latence_core.induced import (
 from latence_core.page_index import PageIndexResolver
 from latence_core.providers.adapter import AdapterBase
 from latence_core.providers.perf import (
+    coerce_list_extra_special_tokens,
     empty_cuda_cache,
     inference_context,
     is_compile_backend_failure,
@@ -93,7 +94,6 @@ from latence_pii_gliner2._compat import (
     require_batched_entity_api,
     require_supported_gliner2,
 )
-from latence_pii_gliner2._tokenizer_compat import coerce_list_extra_special_tokens
 
 _log = logging.getLogger("latence.provider.gliner2_pii")
 
@@ -528,6 +528,10 @@ class Gliner2PIIRedactor(AdapterBase):
         # before any run dir is written. Coerce it to the dict shape 4.57 requires BEFORE the load
         # (guarded, best-effort, byte-identical tokenization). Mirrors the glinker backend's
         # _patch_tokenizer_config precedent; a dict-shaped checkpoint is an idempotent no-op.
+        # PROMOTED to latence_core.providers.perf on 2026-08-25 (ADR-0064): the shim used to live
+        # in this package because this checkpoint was believed to be the only affected one. The
+        # GLiNER 2.5 line reverts to the list shape, so it is now needed by three Providers across
+        # two packages, and a shared seam is where it belongs. Behaviour here is unchanged.
         coerce_list_extra_special_tokens(self._model_id, provider_name=self.provider_name)
         self._model = load_gliner2_model(
             self._gliner2_cls,

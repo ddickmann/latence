@@ -227,6 +227,10 @@
           "package": "latence-core"
         },
         {
+          "name": "chunk.page",
+          "package": "latence-core"
+        },
+        {
           "name": "chunk.sentence_window",
           "package": "latence-core"
         }
@@ -484,6 +488,10 @@
           "package": "latence-extract-gliner2"
         },
         {
+          "name": "fused_entity_relation.gliner25",
+          "package": "latence-gliner25"
+        },
+        {
           "name": "fused_entity_relation.header_refs",
           "package": "latence-core"
         },
@@ -533,6 +541,10 @@
         {
           "name": "redaction.gliner2",
           "package": "latence-pii-gliner2"
+        },
+        {
+          "name": "redaction.gliner25",
+          "package": "latence-gliner25"
         },
         {
           "name": "redaction.gliner_pii",

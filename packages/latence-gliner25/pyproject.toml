@@ -1,0 +1,125 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latence-gliner25"
+version = "0.1.0"
+description = "GLiNER 2.5 Providers (fused zero-shot Entity+Relation extraction AND PII redaction) over the fastino gliner2 2.x boundary architecture, for the Latence framework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "ddickmann", email = "ddickmann81@gmail.com" }]
+keywords = ["ai-ready-data", "knowledge-graph", "rag", "nlp", "data-pipeline", "model-agnostic", "entity-extraction", "relation-extraction", "pii", "redaction", "gliner", "gliner2", "gliner25", "fused", "zero-shot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+# Heavy/optional deps stay OUT of latence-core (ADR-0016): the GLiNER 2.5 model stack
+# (gliner2 2.x -> torch/transformers, mdeberta-v3 boundary encoder) ships with THIS Provider
+# package, not the thin core.
+#
+# THE PIN IS THE POINT (ADR-0064). `gliner2[local]>=2.0,<3` is DISJOINT from the
+# `gliner2[local]>=1.3,<2` that latence-extract-gliner2 and latence-pii-gliner2 declare, and that
+# disjointness is deliberate and enforced, not incidental:
+#   * gliner2 2.0.0 (PyPI, 2026-08-24) is a MAJOR release. The 2.5 checkpoints are the new
+#     `boundary` architecture (gliner2.models.boundary.engine.BoundaryExtractor); the 1.x
+#     checkpoints are `span` (GLiNER2(SpanExtractor)). `AutoExtractor.from_pretrained` dispatches
+#     on the checkpoint's saved `architecture` and raises ArchitectureMismatchError rather than
+#     converting — "Span and boundary heads are not checkpoint-compatible" (verified in the 2.0.0
+#     wheel, gliner2/auto.py).
+#   * One resolved environment therefore holds ONE gliner2 major. `deploy/env/*/environment.yaml`
+#     enforces that as a conflict boundary (`gliner2>=1.3,<2` on the environments that install the
+#     1.x Providers), so mixing this package into one of them fails at `latence env verify` —
+#     offline, in scripts/verify-local.sh — with E-CONSTRAINT-CONFLICT, never at model load on a pod.
+#
+# The [local] extra is REQUIRED (the base dist ships no torch/transformers; local inference needs
+# them). VERIFIED against the 2.0.0 wheel's own METADATA (2026-08-25):
+#   Requires-Dist: numpy<3,>=1.24; extra == "local"
+#   Requires-Dist: peft<1,>=0.10;  extra == "local"      <-- see below
+#   Requires-Dist: safetensors<1,>=0.4; extra == "local"
+#   Requires-Dist: torch<3,>=2.1;  extra == "local"
+#   Requires-Dist: transformers<5,>=4.38; extra == "local"
+# so the explicit `peft>=0.10` that latence-extract-gliner2 / latence-pii-gliner2 carry (a
+# pod-found 1.x gap: gliner2 1.3.2's `[local]` extra did NOT declare peft, and the relation engine
+# imports it) is REDUNDANT here and is deliberately NOT carried forward. Checked, not assumed.
+#
+# TWO UNDECLARED TRANSITIVE NEEDS, both MEASURED on a real load (2026-08-25) and both required
+# here because nothing else in this package's closure pulls them. Same class of gap as the `peft`
+# dep the 1.x packages record — a library's declared extras not matching what its code imports:
+#
+#   * `protobuf>=7.36,<8` — a real `AutoExtractor.from_pretrained("fastino/gliner2.5-multi-v1")` on
+#     a clean environment fails with transformers' `PROTOBUF_IMPORT_ERROR` ("requires the protobuf
+#     library"). Licence VERIFIED from the installed distribution's own metadata on 2026-08-25:
+#     protobuf 7.36.0 declares `License: 3-Clause BSD License` (BSD-3-Clause) — permissive.
+#   * `sentencepiece>=0.2.2,<0.3` — the same DeBERTa-v2 tokenizer path needs it. Read out of the
+#     transformers 4.57.6 source rather than assumed:
+#     `models/deberta_v2/tokenization_deberta_v2.py` carries a top-level
+#     `import sentencepiece as sp` and `@requires(backends=("sentencepiece",))`, and its
+#     `SENTENCEPIECE_IMPORT_ERROR` sits beside the protobuf one in `utils/import_utils.py` — the
+#     two are the same slow-tokenizer/convert path, and protobuf simply raises first. Licence
+#     VERIFIED the same way on 2026-08-25: sentencepiece 0.2.2 declares
+#     `License-Expression: Apache-2.0` — permissive.
+#
+# BOTH CARRY THE H-G1 MAJOR-BOUNDARY CAP, same as every other pin in this workspace. Neither is an
+# exception and neither is uncapped on purpose:
+#   * the FLOOR is the version actually verified on 2026-08-25, not a guess at the oldest release
+#     that might work — nothing below it was tested, and declaring compatibility this repository
+#     has not exercised is the claim it refuses to make;
+#   * the CAP is the boundary past which the API may break. `protobuf` is on its 7.x line and that
+#     project has broken generated-code compatibility across majors before, and it arrives here
+#     through a tokenizer path this package does not control — precisely the "downstream install
+#     silently pulls an API-breaking major" case H-G1 exists to prevent. `sentencepiece` is a 0.x
+#     line, so its MINOR is the effective major boundary (`<0.3`), matching how
+#     latence-pii-gliner pins `gliner>=0.2.5,<0.3` and latence-disambig-glinker pins
+#     `flashdeberta>=0.0.5,<0.1`.
+#
+# Both were present incidentally in the committed 1.x environments and therefore invisible there:
+# `deploy/env/cpu-text/requirements.lock` records `protobuf # via onnxruntime` and
+# `sentencepiece # via gliner`. Neither of those distributions is in this package's closure, which
+# is exactly why the gap only shows up here.
+dependencies = [
+    "latence-core",
+    "gliner2[local]>=2.0,<3",
+    "protobuf>=7.36,<8",
+    "sentencepiece>=0.2.2,<0.3",
+]
+
+# This package is NOT a uv workspace member (see the root pyproject's
+# `[tool.uv.workspace] exclude` and ADR-0064): its `gliner2` major is disjoint from the one the
+# other Provider packages pin, and a workspace is ONE resolved environment. It therefore carries
+# its OWN `uv.lock`, and needs its own source for the sibling it depends on. `[tool.uv.sources]`
+# is uv-only metadata — it is not written into the built sdist/wheel's core metadata, so a
+# `pip install latence-gliner25` from an index still resolves `latence-core` from the index.
+[tool.uv.sources]
+latence-core = { path = "../latence-core" }
+
+[project.urls]
+Homepage = "https://github.com/ddickmann/latence-framework"
+Repository = "https://github.com/ddickmann/latence-framework"
+Documentation = "https://ddickmann.github.io/latence-framework/"
+Issues = "https://github.com/ddickmann/latence-framework/issues"
+Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
+
+# TWO entry points, ONE package (ADR-0064). GLiNER 2.5 is a single checkpoint family serving both
+# Capabilities over one dependency pin, one compat gate and one loader seam; splitting it into two
+# distributions would duplicate the pin, the gate and the loader while making it possible to
+# install half a family. Installing this package makes both Providers available to any Pipeline
+# with no core change (ADR-0004).
+[project.entry-points."latence.providers"]
+"fused_entity_relation.gliner25" = "latence_gliner25.extract:Gliner25FusedExtractor"
+"redaction.gliner25" = "latence_gliner25.redact:Gliner25PIIRedactor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latence_gliner25"]

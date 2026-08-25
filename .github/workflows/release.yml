@@ -70,10 +70,15 @@ jobs:
       # release rather than silently left out of a hand-maintained list.
       - name: Build all packages
         run: |
+          # `uv build <path>` rather than `uv build --package <name>`: the name form resolves
+          # through the uv WORKSPACE and fails outright ("Package ... not found in workspace") for
+          # a package the root pyproject excludes from it. `latence-gliner25` is one such package
+          # (ADR-0064: it pins a gliner2 major disjoint from the other Providers', and a workspace
+          # is one resolved environment), and it still ships — so the loop must build by PATH,
+          # which works identically for members and non-members alike.
           for pkg in packages/*/; do
-            name="$(basename "$pkg")"
-            echo "::group::uv build --package ${name}"
-            uv build --package "${name}" --out-dir dist
+            echo "::group::uv build ${pkg}"
+            uv build "${pkg}" --out-dir dist
             echo "::endgroup::"
           done
           echo "## Distributions in this release" >> "$GITHUB_STEP_SUMMARY"

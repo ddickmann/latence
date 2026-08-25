@@ -318,6 +318,7 @@ Consume parsed `DocumentRecord`s and yield `ChunkRecord`s.
 | Provider | Package |
 | --- | --- |
 | `chunk.markdown` | `latence-core` |
+| `chunk.page` | `latence-core` |
 | `chunk.sentence_window` | `latence-core` |
 
 ### `content_screening` — ContentScreener
@@ -523,6 +524,7 @@ Consume `ChunkRecord`s and return mentions + relations together.
 | Provider | Package |
 | --- | --- |
 | `fused_entity_relation.gliner2` | `latence-extract-gliner2` |
+| `fused_entity_relation.gliner25` | `latence-gliner25` |
 | `fused_entity_relation.header_refs` | `latence-core` |
 | `fused_entity_relation.inline_refs` | `latence-core` |
 
@@ -594,6 +596,7 @@ for determinism; a seeded run is byte-reproducible (Baseline bar).
 | Provider | Package |
 | --- | --- |
 | `redaction.gliner2` | `latence-pii-gliner2` |
+| `redaction.gliner25` | `latence-gliner25` |
 | `redaction.gliner_pii` | `latence-pii-gliner` |
 | `redaction.hybrid_rule` | `latence-core` |
 | `redaction.presidio` | `latence-pii-presidio` |

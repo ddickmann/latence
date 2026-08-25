@@ -1856,6 +1856,139 @@ def load_gliner_model(
     return maybe_compile(model, config, provider_name=provider_name)
 
 
+# ---------------------------------------------------------------------------
+# Tokenizer-config shape shim (dogfood-2b-process; PROMOTED to core 2026-08-25, ADR-0064)
+# ---------------------------------------------------------------------------
+#
+# It lives here rather than in one Provider package because it is now needed by THREE Providers
+# across TWO packages, and the pin that would have kept it private turned out to be wrong.
+#
+# The field failure: ``latence process`` died entering the mandatory redact stage with
+#
+#     ProviderError: redaction.gliner2: provider failure in 'load_model' (native AttributeError)
+#     root: AttributeError: 'list' object has no attribute 'keys'
+#
+# raised inside ``transformers`` (>= 4.57) while the loader builds a DeBERTa-v2 tokenizer whose
+# ``tokenizer_config.json`` stores ``extra_special_tokens`` as a LIST of the 10 GLiNER2 structural
+# tokens — the shape an older ``transformers`` accepted. 4.57 refactored that field to a dict
+# ``{name: token}`` and its loader calls ``.keys()`` / ``.items()`` on the value.
+#
+# The claim that has now been CORRECTED: the shim's original docstring said only
+# ``fastino/GLiNER2-Guardrails-PII-Multi`` was affected, "which is exactly why only this PII
+# checkpoint is affected", because the sibling ``fastino/gliner2-multi-v1`` stores ``{}``. That was
+# true when written and is false now — the GLiNER 2.5 line REVERTS to the list shape, verified on
+# 2026-08-25 in the downloaded
+# ``models--fastino--gliner2.5-multi-v1/snapshots/*/tokenizer_config.json`` (a 10-element list), and
+# it therefore hits BOTH GLiNER 2.5 Providers. A per-checkpoint claim about a shape a third party
+# controls is not a thing to pin a module's location on.
+
+#: The tokenizer-config file whose ``extra_special_tokens`` shape transformers >= 4.57 rejects as a
+#: list.
+TOKENIZER_CONFIG_FILE = "tokenizer_config.json"
+
+
+def coerce_list_extra_special_tokens(model_id: str, *, provider_name: str) -> bool:
+    """Coerce a list-valued ``extra_special_tokens`` to a dict in the checkpoint's cached config.
+
+    Returns ``True`` iff the cached ``tokenizer_config.json`` for ``model_id`` was rewritten (its
+    ``extra_special_tokens`` was a list and is now the ``{token: token}`` dict shape that
+    ``transformers`` >= 4.57 requires). Returns ``False`` — never raises — when there is nothing to
+    do (already a dict / absent) or the shim cannot run (no ``huggingface_hub``, offline,
+    unreadable, or a read-only cache), so the caller's load proceeds unchanged.
+
+    **Byte-identical output.** All the tokens are ALREADY registered as ``special`` added tokens in
+    the checkpoint's ``tokenizer.json`` (the fast tokenizer's source of truth), so tokenization does
+    not change; the shim only fixes the *shape* of a redundant config field so the loader stops
+    crashing and the tokens remain model-specific special tokens. It mirrors the established
+    precedent ``latence_disambig_glinker...GLinkerBackend._patch_tokenizer_config``.
+
+    **Guarded, best-effort, never fatal** (ADR-0034 posture — no *new* silent error, only the
+    removal of a crash): every failure path logs at ``debug`` and returns ``False``, and the load
+    then fails, if it fails, with exactly the typed ``ProviderError`` the operator already saw.
+    **Idempotent**: it rewrites only when the value is actually a list, so an already-dict config —
+    or a re-run after the first patch — is a no-op.
+
+    Dep-light (ADR-0016): ``huggingface_hub`` is imported INSIDE, on use, so importing this module
+    for Provider discovery never requires it.
+    """
+    try:
+        import json  # noqa: PLC0415 - stdlib, imported on use
+        import os  # noqa: PLC0415
+        import shutil  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
+        from huggingface_hub import hf_hub_download  # noqa: PLC0415 - heavy dep, resolved on use
+    except ImportError:
+        # ``huggingface_hub`` is not installed (it ships transitively with ``gliner2[local]``); with
+        # no gliner2 stack there is no load to protect. The load path surfaces the missing dep.
+        _log.debug(
+            "%s: huggingface_hub unavailable; skipping the extra_special_tokens shape shim",
+            provider_name,
+        )
+        return False
+
+    try:
+        config_path = hf_hub_download(model_id, TOKENIZER_CONFIG_FILE)
+    except Exception as exc:  # noqa: BLE001 - offline / private / unresolved: best-effort, never fatal
+        _log.debug(
+            "%s: could not resolve %s for %s; skipping the shape shim (%s)",
+            provider_name,
+            TOKENIZER_CONFIG_FILE,
+            model_id,
+            exc,
+        )
+        return False
+
+    try:
+        with open(config_path, encoding="utf-8") as handle:  # noqa: PTH123 - plain path from the hub
+            config: dict[str, Any] = json.load(handle)
+    except (OSError, ValueError) as exc:
+        _log.debug(
+            "%s: could not read %s; skipping the shape shim (%s)", provider_name, config_path, exc
+        )
+        return False
+
+    extra = config.get("extra_special_tokens")
+    if not isinstance(extra, list):
+        # Already a dict, or absent: nothing to fix. Idempotent no-op.
+        return False
+
+    # Preserve every string token as a model-specific special token keyed by itself — the exact dict
+    # shape transformers 4.57 iterates. Non-str entries (there are none in the real checkpoints) are
+    # dropped rather than smuggled through the isinstance(value, (str, AddedToken)) check the loader
+    # would reject.
+    coerced = {token: token for token in extra if isinstance(token, str)}
+    config["extra_special_tokens"] = coerced
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", dir=os.path.dirname(config_path))  # noqa: PTH120
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, indent=2)
+        # Atomic same-filesystem rename over the cached file (replacing the snapshot symlink with a
+        # real, patched file); readers see either the old or the new config, never a torn one.
+        shutil.move(tmp_path, config_path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)  # noqa: PTH108
+        _log.debug(
+            "%s: could not write the patched %s (read-only cache?); skipping the shape shim (%s)",
+            provider_name,
+            TOKENIZER_CONFIG_FILE,
+            exc,
+        )
+        return False
+
+    _log.info(
+        "%s: coerced list-valued extra_special_tokens (%d tokens) to the dict shape transformers "
+        ">= 4.57 requires in %s's cached %s — byte-identical tokenization, load no longer crashes",
+        provider_name,
+        len(coerced),
+        model_id,
+        TOKENIZER_CONFIG_FILE,
+    )
+    return True
+
+
 def load_gliner2_model(
     import_model_cls: Callable[[], Any],
     model_id: str,

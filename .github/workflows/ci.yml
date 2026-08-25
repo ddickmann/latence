@@ -238,10 +238,13 @@ jobs:
       # silently left unbuilt/unpublished.
       - name: Build all packages
         run: |
+          # By PATH, not `--package <name>`: the name form resolves through the uv WORKSPACE
+          # and fails for a package the root pyproject excludes from it (ADR-0064 —
+          # latence-gliner25 pins a disjoint gliner2 major). The path form builds members and
+          # non-members identically, so "iterate the dir" keeps meaning what it says.
           for pkg in packages/*/; do
-            name="$(basename "$pkg")"
-            echo "::group::uv build --package ${name}"
-            uv build --package "${name}" --out-dir dist
+            echo "::group::uv build ${pkg}"
+            uv build "${pkg}" --out-dir dist
             echo "::endgroup::"
           done
           echo "## Built distributions" >> "$GITHUB_STEP_SUMMARY"
