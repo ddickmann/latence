@@ -194,6 +194,7 @@ nav:
   - Providers:
       - providers/README.md
       - Provider catalog: providers/catalog.md
+      - Extending the pipeline: extending.md
       - Writing an adapter (AdapterBase): writing-an-adapter.md
       - ProviderProfile & device handling: provider-profile.md
       - Conformance checklist: CONFORMANCE.md

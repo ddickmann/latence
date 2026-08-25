@@ -205,6 +205,52 @@ The reasoning behind each of those choices is written down: **62 architecture de
 
 ---
 
+## Extending it — and one place to configure it
+
+**Swapping a component is a class and an entry point.** Capabilities are `typing.Protocol`s, so a
+Provider satisfies one *structurally* — your class subclasses nothing from this framework, takes a
+`dict` in its constructor, implements the one method the Capability declares, and registers itself
+from your own package:
+
+```toml
+[project.entry-points."latence.providers"]
+"parse.acme_ocr" = "acme_ocr.provider:AcmeParser"
+```
+
+Nothing in the framework is edited to accept it. Replace the OCR model with docling or your own,
+GLiNER2 with a different extractor, the embedder, the graph store, or a query-time reranker — each is
+a Provider under an existing Capability.
+
+**The contract an AI coding agent needs is generated from the code, not written about it:**
+
+```bash
+latence contracts --capability parse    # typed signatures, carrier schemas, wiring, conformance cases
+```
+
+`docs/reference/stage-contracts.json` carries every Capability's Protocol signature, what the executor
+delivers, the record schemas field by field, and the Providers that already fulfil it — and a drift
+gate fails CI if it disagrees with the code, so it is safe to hand to a machine that will act on it.
+The [conformance suite](./docs/CONFORMANCE.md) then decides admission: it guarantees a replacement
+cannot break the end-to-end flow. It says nothing about whether yours is *better* — that is yours to
+measure, with the [benchmark harness](./docs/running-the-benchmarks.md).
+
+**One file configures the whole pipeline, and you do not write it:**
+
+```bash
+latence setup      # inspects the corpus, emits a validated latence.stack.yaml
+latence process    # runs it
+```
+
+`setup` validates before writing — DAG structure, phase-boundary invariants, Capability satisfaction,
+unknown config keys, sub-Provider slots — and reports a mistyped Provider as a typo with the nearest
+real name rather than as an absent package. An installed third-party Provider appears as a choice in
+the wizard; it never becomes a YAML edit.
+
+→ **[`docs/extending.md`](./docs/extending.md)** — the full picture, including where a core edit *is*
+required (a genuinely new Capability, by design) and why.
+
+---
+
 ## What makes it different
 
 Five claims, each with the thing that makes it checkable.
