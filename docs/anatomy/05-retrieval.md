@@ -658,6 +658,38 @@ The right claim from these numbers is therefore:
 Full design, arms and stop rule:
 `issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/REPORT.md`.
 
+### Where the architecture does pay — the budget, not the cut
+
+The verdict above is about the graph *payload*: what traversal adds to a ranking. It says nothing
+about the *discipline* — appending rather than fusing — and that is a separate, measurable thing.
+
+Compare the two selection legs at an **equal 4,000-token budget**. `packer` packs a graph-**fused**
+ranking; `graph_rescue_packed` packs the append-not-fuse union. Same knapsack, same spend, only the
+candidate list differs:
+
+| dataset | chain_coverage@10 | Δ | full_chain_hit@10 | Δ |
+|---|---|---|---|---|
+| musique | 0.4575 → 0.5905 | **+0.1330** | 0.1092 → 0.2266 | **+0.1174** |
+| hotpotqa | 0.6181 → 0.7960 | **+0.1779** | 0.3508 → 0.6130 | **+0.2622** |
+| multihop_rag | 0.6206 → 0.7506 | **+0.1300** | 0.3282 → 0.4736 | **+0.1454** |
+| wiki2multihop | 0.5547 → 0.7199 | **+0.1652** | 0.2417 → 0.4216 | **+0.1799** |
+
+Thirteen to twenty-six points of full-chain completion, at identical token spend, on the four
+corpora that publish a real chain.
+
+This does **not** contradict the inertia finding — it is its mirror image. Because the rescued
+payload reaches almost no gold the base missed, the gain here cannot be the graph *adding*
+evidence; it is graph-fusion damage being *removed*. The oracle study measured the same effect
+from the other direction, as a monotonic decline in the fusion weight down to −0.1121 at `w=1.00`.
+
+So the honest summary of the graph in this system: **its value is negative-avoidance, and it is
+largest exactly where a budget binds and a chain must complete.** Keeping graph scores out of the
+ranking is worth a great deal; putting them in costs a great deal; and traversing further buys
+nothing measurable at these pool sizes.
+
+One anomaly, unexplained and not investigated: `multihop_rag` chain coverage **peaks at 4,000
+tokens** (0.7506) and falls at 8,000 and beyond (0.7136, then 0.7112). More budget makes it worse.
+
 ### Latency
 
 64 cells carry a comparable pre/post latency pair (median of per-query wall clock).
