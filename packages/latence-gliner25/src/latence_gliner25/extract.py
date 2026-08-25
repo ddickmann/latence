@@ -31,13 +31,23 @@ Providers drive SURVIVED the major bump unchanged in shape:
     # -> [{"relation_extraction": {rel_type: [{"head": {"text","confidence","start","end"},
     #                                          "tail": {...}}, ...], ...}}, ...]
 
-Both shapes are **identical to the 1.3.2 ones**, and that was verified twice over because the two
-architectures build them in different code: the span path through
+Both shapes are **identical to the 1.3.2 ones — MEASURED, not inferred.** The two architectures
+build them in DIFFERENT code (the span path through
 ``ExtractorRuntimeMixin._extract_entities`` / ``._extract_relations``, the boundary path through
-``BoundaryExtractor._decode_entities`` / ``._decode_relations`` — and the shared
-``ExtractorRuntimeMixin.format_results`` is what folds either one into the same
-``{"entities": {...}}`` / ``{"relation_extraction": {...}}`` envelope. **So this Provider's parsing
-did not have to adapt at all.** Three genuine 2.0.0 deltas, none of which change the contract:
+``BoundaryExtractor._decode_entities`` / ``._decode_relations``, with the shared
+``ExtractorRuntimeMixin.format_results`` folding either into one envelope), and reading two
+implementations cannot establish that they agree — so both were RUN. A cross-major A/B on the pod
+(RTX 2000 Ada 16 GB, driver 580.159.04, 2026-08-25) drove gliner2 1.3.2 + ``gliner2-multi-v1``
+(span) and gliner2 2.0.0 + ``gliner2.5-multi-v1`` (boundary) in two venvs on the same text with the
+same labels under identical transformers 4.57.6 / torch 2.4.1+cu124, and diffed the structural
+signature: every field SAME — envelopes, entity row keys, relation row keys, endpoint keys, int
+offsets — with only ``head_class`` and ``gliner2_version`` differing. The key sets are pinned in
+:mod:`latence_core.conformance.stub` and every fake in the workspace is asserted against them
+(ADR-0064). Key ORDER is NOT part of the contract: the diff sorted the keys, so it establishes the
+SET only, and nothing here reads these dicts positionally.
+
+**So this Provider's parsing did not have to adapt at all.** Three genuine 2.0.0 deltas, none of
+which change the contract:
 
 * ``batch_size`` is the THIRD POSITIONAL parameter of both batched methods (it was in 1.3.2 too);
   every argument here is passed by keyword, so the position is irrelevant and cannot silently

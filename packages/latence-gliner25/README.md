@@ -52,9 +52,39 @@ packages for a historical reason (they were built a release apart, against two d
 checkpoints); that is not a precedent to copy. Recorded in
 [ADR-0064](https://ddickmann.github.io/latence-framework/adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary/).
 
+## Same record contract, different engine — measured
+
+The two families produce the **identical** record shape. That was not read off a docstring; both
+were run. Cross-major A/B on a pod (RTX 2000 Ada 16 GB, driver 580.159.04, **2026-08-25**): gliner2
+**1.3.2** + `fastino/gliner2-multi-v1` (span head) and gliner2 **2.0.0** +
+`fastino/gliner2.5-multi-v1` (boundary head), in two venvs, on the same text with the same labels,
+under identical transformers 4.57.6 / torch 2.4.1+cu124 — diffing key sets, types and nesting:
+
+| field | verdict |
+| --- | --- |
+| `entities_signature` · `relations_signature` | **SAME** |
+| `entity_row_keys` `["confidence","end","start","text"]` | **SAME** |
+| `relation_row_keys` `["head","tail"]` | **SAME** |
+| `relation_endpoint_keys` `["confidence","end","start","text"]` | **SAME** |
+| top-level envelopes `["entities"]` · `["relation_extraction"]` | **SAME** |
+| `offsets_are_ints` | **SAME** |
+| `head_class` | **DIFF** — `GLiNER2` → `BoundaryExtractor` |
+| `gliner2_version` | **DIFF** — `1.3.2` → `2.0.0` |
+
+Every structural field is identical; the only two that differ name which model is which. So
+swapping `fused_entity_relation.gliner2` → `fused_entity_relation.gliner25` in a stack changes the
+engine and **nothing** about the records that come out — same mentions, relations, evidence,
+provenance and offsets. The key sets are pinned in `latence_core.conformance.stub` and every offline
+fake in the workspace is asserted against them, so a future gliner2 release that moves one turns
+tests red rather than drifting quietly.
+
+What is **not** interchangeable is the loader and the checkpoints — which is the next section, and
+the reason this is a new package rather than a version bump.
+
 ## It cannot be installed beside `latence-extract-gliner2` / `latence-pii-gliner2`
 
-That is deliberate and it is **enforced**, not documented. `gliner2` 2.0 is a major release:
+That is deliberate and it is **enforced**, not documented. The inference contract carries across the
+major (above); the *engine* does not. `gliner2` 2.0 is a major release:
 
 - the 2.5 checkpoints are the new **`boundary`** architecture
   (`gliner2.models.boundary.engine.BoundaryExtractor`); every 1.x checkpoint is **`span`**;

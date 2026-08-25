@@ -400,11 +400,12 @@ def _nest_relations(
 def _format_pair(row: dict[str, Any], *, include_spans: bool, include_confidence: bool) -> Any:
     """``_extract_relations`` / ``_decode_relations`` — a ``(head, tail)`` TUPLE with no flags.
 
-    The full form's key ORDER is ``text, start, end, confidence``, which is what a REAL 2.0.0
-    forward returns (measured 2026-08-25 on ``fastino/gliner2.5-multi-v1``) — the boundary decoder
-    builds the span dict first and attaches the pair score after. Order carries no contract weight
-    (the Provider reads by key), but a fake that mirrors the real key SET and order is one less
-    thing a reader has to re-derive from the wheel.
+    The full form's key SET is ``{text, start, end, confidence}`` — pinned in
+    :mod:`latence_core.conformance.stub` from the cross-major pod A/B and asserted by
+    ``test_this_packages_fake_matches_the_pod_measured_record_shape``. The ORDER used here follows
+    the boundary decoder's source (it builds the span dict first and attaches the pair score after)
+    and is deliberately NOT claimed as measured: the A/B sorted the keys, so it establishes the set
+    and nothing about order — and no consumer in this framework reads these dicts positionally.
     """
     head, tail = row["head"], row["tail"]
     if include_spans and include_confidence:

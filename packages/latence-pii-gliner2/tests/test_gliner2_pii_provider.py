@@ -1900,3 +1900,35 @@ def test_process_survives_list_valued_extra_special_tokens(
     # iterates, keyed token->token (every struct token preserved as a model-specific special token).
     patched = json.loads(list_valued_pii_checkpoint.read_text(encoding="utf-8"))
     assert patched["extra_special_tokens"] == {token: token for token in _STRUCT_TOKENS}
+
+
+def test_this_packages_fake_matches_the_pod_measured_record_shape() -> None:
+    """This fake must mirror the REAL gliner2 record shape, or the tests above decorate.
+
+    Checked against the ONE pinned definition in ``latence_core.conformance.stub`` — the same
+    contract the three other fakes in this workspace are checked against — rather than a key list
+    copied here. That contract is a pod A/B (gliner2 1.3.2/span vs 2.0.0/boundary, same text, same
+    labels, identical transformers 4.57.6 / torch 2.4.1+cu124, RTX 2000 Ada, 2026-08-25): every
+    structural field came back SAME.
+
+    A Redactor asks no relation question, so only the ENTITY half of the signature is produced —
+    and the checker is written to check what it is given rather than fail for a half this fake
+    never claimed to have.
+    """
+    from latence_core.conformance.stub import (
+        assert_matches_gliner2_shape_contract,
+        gliner2_shape_signature,
+    )
+
+    _FakeGLiNER2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.95}]
+    _FakeGLiNER2.per_text = None
+    entities = _FakeGLiNER2().batch_extract_entities(
+        ["Alice works at Acme."], ["person"], include_spans=True, include_confidence=True
+    )
+    signature = gliner2_shape_signature(entities)
+    assert set(signature) == {
+        "top_level_keys_entities",
+        "entity_row_keys",
+        "entity_offsets_are_ints",
+    }
+    assert_matches_gliner2_shape_contract(signature)

@@ -477,6 +477,132 @@ def install_gliner25(
             sys.modules.pop("gliner2", None)
 
 
+# ---------------------------------------------------------------------------
+# The gliner2 RECORD-SHAPE CONTRACT — pinned once, checked against every fake
+# ---------------------------------------------------------------------------
+#
+# MEASURED A/B on the pod (RTX 2000 Ada 16 GB, driver 580.159.04, 2026-08-25). gliner2 **1.3.2** +
+# ``fastino/gliner2-multi-v1`` (span head) and gliner2 **2.0.0** + ``fastino/gliner2.5-multi-v1``
+# (boundary head) were run in TWO SEPARATE VENVS — the disjoint pin of ADR-0064 made real — on the
+# SAME text with the SAME labels under IDENTICAL transformers 4.57.6 / torch 2.4.1+cu124, and the
+# STRUCTURAL signature of the output (key sets, types, nesting — never values) was diffed:
+#
+#     entities_signature         SAME   [{"entities": {<label>: [{confidence,end,start,text}]}}]
+#     relations_signature        SAME   [{"relation_extraction": {<label>: [{head,tail}]}}]
+#     entity_row_keys            SAME   ["confidence","end","start","text"]
+#     relation_row_keys          SAME   ["head","tail"]
+#     relation_endpoint_keys     SAME   ["confidence","end","start","text"]
+#     top_level_keys_entities    SAME   ["entities"]
+#     top_level_keys_relations   SAME   ["relation_extraction"]
+#     offsets_are_ints           SAME   true
+#     n_entity_labels_returned   SAME   3
+#     n_relation_types_returned  SAME   3
+#     head_class                 DIFF   GLiNER2  ->  BoundaryExtractor
+#     gliner2_version            DIFF   1.3.2    ->  2.0.0
+#
+# Every structural field is identical; the only two that differ name which model is which. That is
+# the evidence for ADR-0064's central asymmetry — the INFERENCE contract carries across the major,
+# the LOADER and the CHECKPOINTS do not — and it is why this repository can hold two Provider
+# families behind one record contract while refusing to let them share an environment.
+#
+# The key lists below are SORTED SETS, which is what the diff established. Key ORDER is deliberately
+# NOT pinned: the measurement sorted the keys, so it says nothing about order, and no consumer in
+# this framework reads these dicts positionally.
+#
+# Four fakes claim to mirror this shape — the two stubs in this module plus the test-local fakes in
+# ``latence-extract-gliner2``, ``latence-pii-gliner2`` and ``latence-gliner25``. They are checked
+# against THIS definition rather than against each other, so a future gliner2 release that moves a
+# key is one edit here and four red tests, never a fake that quietly drifts away from the real API.
+
+#: The top-level key wrapping each per-text entity result.
+GLINER2_ENTITIES_ENVELOPE = "entities"
+
+#: The top-level key wrapping each per-text relation result.
+GLINER2_RELATIONS_ENVELOPE = "relation_extraction"
+
+#: One entity row, with ``include_spans=True, include_confidence=True``.
+GLINER2_ENTITY_ROW_KEYS: tuple[str, ...] = ("confidence", "end", "start", "text")
+
+#: One relation row: the two endpoints and nothing else — no relation-level score (which is why
+#: both Providers derive one from the endpoints, weakest-link).
+GLINER2_RELATION_ROW_KEYS: tuple[str, ...] = ("head", "tail")
+
+#: A relation endpoint carries the same key set as an entity row.
+GLINER2_RELATION_ENDPOINT_KEYS: tuple[str, ...] = ("confidence", "end", "start", "text")
+
+
+def gliner2_shape_signature(
+    entity_results: list[Any] | None = None,
+    relation_results: list[Any] | None = None,
+) -> dict[str, Any]:
+    """The structural signature of a gliner2 batched result — the same one the pod A/B diffed.
+
+    Key sets, types and nesting; never values. Pass whichever halves a fake produces (the PII
+    fakes drive entities only), and compare the result with :data:`GLINER2_SHAPE_CONTRACT` — or
+    with another fake's signature, which is what makes "the span fake and the boundary fake agree"
+    a single assertion rather than two copies of a key list.
+
+    Keys are SORTED, deliberately: the measurement sorted them, so order is not something this
+    signature is entitled to claim.
+    """
+    signature: dict[str, Any] = {}
+    if entity_results is not None:
+        first = entity_results[0]
+        rows = [row for by_label in first[GLINER2_ENTITIES_ENVELOPE].values() for row in by_label]
+        signature["top_level_keys_entities"] = sorted(first)
+        signature["entity_row_keys"] = sorted(rows[0])
+        signature["entity_offsets_are_ints"] = all(
+            isinstance(row["start"], int) and isinstance(row["end"], int) for row in rows
+        )
+    if relation_results is not None:
+        first = relation_results[0]
+        rows = [
+            row
+            for by_type in first[GLINER2_RELATIONS_ENVELOPE].values()
+            for row in by_type
+        ]
+        signature["top_level_keys_relations"] = sorted(first)
+        signature["relation_row_keys"] = sorted(rows[0])
+        signature["relation_endpoint_keys"] = sorted(rows[0]["head"])
+        signature["relation_offsets_are_ints"] = all(
+            isinstance(row[role]["start"], int) and isinstance(row[role]["end"], int)
+            for row in rows
+            for role in GLINER2_RELATION_ROW_KEYS
+        )
+    return signature
+
+
+#: The measured contract, in the shape :func:`gliner2_shape_signature` returns. A fake's signature
+#: must be a subset-by-key match against this (a PII fake contributes only the entity half).
+GLINER2_SHAPE_CONTRACT: dict[str, Any] = {
+    "top_level_keys_entities": [GLINER2_ENTITIES_ENVELOPE],
+    "entity_row_keys": sorted(GLINER2_ENTITY_ROW_KEYS),
+    "entity_offsets_are_ints": True,
+    "top_level_keys_relations": [GLINER2_RELATIONS_ENVELOPE],
+    "relation_row_keys": sorted(GLINER2_RELATION_ROW_KEYS),
+    "relation_endpoint_keys": sorted(GLINER2_RELATION_ENDPOINT_KEYS),
+    "relation_offsets_are_ints": True,
+}
+
+
+def assert_matches_gliner2_shape_contract(signature: dict[str, Any]) -> None:
+    """Assert a fake's :func:`gliner2_shape_signature` agrees with the measured contract.
+
+    Compares only the fields the signature carries, so an entities-only fake is checked on the
+    entity half rather than failing for a relation half it never claimed to have.
+    """
+    for field, measured in signature.items():
+        expected = GLINER2_SHAPE_CONTRACT[field]
+        if measured != expected:
+            msg = (
+                f"gliner2 record-shape contract violated on {field!r}: the fake produced "
+                f"{measured!r}, the pod-measured real API produced {expected!r} (A/B on gliner2 "
+                "1.3.2/span and 2.0.0/boundary, 2026-08-25). A fake that has drifted from the real "
+                "shape turns every test built on it into a decoration."
+            )
+            raise AssertionError(msg)
+
+
 def gliner2_pii_entities() -> list[dict[str, Any]]:
     """Canned document-offset PII rows the GLiNER2 stub returns for the canonical fixture.
 

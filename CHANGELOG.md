@@ -174,7 +174,20 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   4096-token window). One package because 2.5 is one checkpoint family serving both Capabilities
   over one pin, one compat gate and one loader seam.
 
-  The pin is **disjoint** from the `>=1.3,<2` the existing gliner2 Providers declare, deliberately:
+  **The record contract is identical across the major — measured, not inferred.** A cross-major A/B
+  on a pod (RTX 2000 Ada 16 GB, 2026-08-25) ran gliner2 1.3.2 + `gliner2-multi-v1` (span head) and
+  gliner2 2.0.0 + `gliner2.5-multi-v1` (boundary head) in two venvs, on the same text with the same
+  labels under identical transformers 4.57.6 / torch 2.4.1+cu124, and diffed the structural
+  signature: envelopes, entity row keys, relation row keys, endpoint keys and int offsets all came
+  back **SAME** — only `head_class` (`GLiNER2` → `BoundaryExtractor`) and `gliner2_version`
+  differed. So swapping the extractor changes the engine and nothing about the emitted records. The
+  key sets are now pinned in `latence_core.conformance.stub` and **all four** offline fakes in the
+  workspace are asserted against that one definition, so a future gliner2 release that moves a key
+  turns tests red instead of letting a fake drift away from the API it stands in for.
+
+  That asymmetry — the inference contract carries, the loader and checkpoints do not — is the whole
+  justification for a new package rather than a version bump. The pin is **disjoint** from the
+  `>=1.3,<2` the existing gliner2 Providers declare, deliberately:
   gliner2 2.0 is a major whose 2.5 checkpoints are the new `boundary` architecture head, and
   `AutoExtractor.from_pretrained` refuses to bridge span and boundary checkpoints. That refusal is
   enforced three times before anything is fetched — the package pins, an

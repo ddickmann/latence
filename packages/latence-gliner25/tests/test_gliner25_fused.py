@@ -481,3 +481,28 @@ def test_the_window_is_DERIVED_from_the_decided_1024_budget_not_typed() -> None:
     assert SAFE_CHUNK_BUDGET == 1024 == PAGE_CHUNK_MAX_TOKENS
     assert model_window_for(SAFE_CHUNK_BUDGET) == SAFE_MAX_LEN
     assert CHUNKER_TOKEN_EXPANSION == MDEBERTA_TOKEN_EXPANSION
+
+
+def test_this_packages_fake_matches_the_pod_measured_record_shape() -> None:
+    """The offline fake must mirror the REAL gliner2 record shape, or every test above decorates.
+
+    Checked against ``latence_core.conformance.stub``'s pinned contract — the one definition all
+    four fakes in this workspace are measured against — rather than against a key list copied into
+    this file. The contract itself is a pod A/B (gliner2 1.3.2/span vs 2.0.0/boundary, same text,
+    same labels, identical transformers/torch, 2026-08-25): every structural field came back SAME,
+    which is the evidence ADR-0064 rests on.
+    """
+    from latence_core.conformance.stub import (
+        assert_matches_gliner2_shape_contract,
+        gliner2_shape_signature,
+    )
+
+    with install_gliner2(entities=_ENTITY_ROWS, relations=_RELATION_ROWS) as fake:
+        model = fake()
+        entities = model.batch_extract_entities(
+            [TEXT], ["person", "organization"], include_spans=True, include_confidence=True
+        )
+        relations = model.batch_extract_relations(
+            [TEXT], ["works for"], include_spans=True, include_confidence=True
+        )
+    assert_matches_gliner2_shape_contract(gliner2_shape_signature(entities, relations))

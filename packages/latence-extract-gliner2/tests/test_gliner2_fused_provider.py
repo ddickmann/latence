@@ -1616,3 +1616,37 @@ def test_package_pins_the_batched_capable_gliner2_range() -> None:
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     deps = [d for d in data["project"]["dependencies"] if d.startswith("gliner2")]
     assert deps == ["gliner2[local]>=1.3,<2"]
+
+
+def test_this_packages_fake_matches_the_pod_measured_record_shape() -> None:
+    """This fake must mirror the REAL gliner2 1.3.2 record shape, or the tests above decorate.
+
+    Checked against the ONE pinned definition in ``latence_core.conformance.stub`` — the same
+    contract the gliner2 2.x fake is checked against — rather than a key list copied here. That
+    contract is a pod A/B (gliner2 1.3.2/span vs 2.0.0/boundary, same text, same labels, identical
+    transformers 4.57.6 / torch 2.4.1+cu124, RTX 2000 Ada, 2026-08-25): every structural field came
+    back SAME, only ``head_class`` and ``gliner2_version`` differed. So a drift in EITHER fake is a
+    drift from a measured shape, not from the other fake's opinion.
+    """
+    from latence_core.conformance.stub import (
+        assert_matches_gliner2_shape_contract,
+        gliner2_shape_signature,
+    )
+
+    model = _FakeGLiNER2()
+    _FakeGLiNER2.entities = [{"start": 0, "end": 5, "label": "person", "confidence": 0.9}]
+    _FakeGLiNER2.relations = [
+        {
+            "head": {"start": 0, "end": 5, "text": "Alice", "confidence": 0.9},
+            "tail": {"start": 16, "end": 25, "text": "Acme Corp", "confidence": 0.8},
+            "relation": "works_for",
+        }
+    ]
+    text = "Alice works for Acme Corp in Berlin."
+    entities = model.batch_extract_entities(
+        [text], ["person"], include_spans=True, include_confidence=True
+    )
+    relations = model.batch_extract_relations(
+        [text], ["works_for"], include_spans=True, include_confidence=True
+    )
+    assert_matches_gliner2_shape_contract(gliner2_shape_signature(entities, relations))

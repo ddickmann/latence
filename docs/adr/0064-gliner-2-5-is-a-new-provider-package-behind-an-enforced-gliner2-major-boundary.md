@@ -39,16 +39,66 @@ already drive:
 # -> [{"relation_extraction": {rel_type: [{"head": {...}, "tail": {...}}, ...]}}, ...]
 ```
 
-That third fact was verified twice over, because the two architectures build those shapes in
-different code — the span path through `ExtractorRuntimeMixin._extract_entities` /
-`._extract_relations`, the boundary path through `BoundaryExtractor._decode_entities` /
-`._decode_relations` — and the shared `format_results` is what folds either into one envelope. **No
-Provider-side parsing change was needed.** Three real 2.0.0 deltas exist and none of them changes
-the contract: `batch_size` is the third positional parameter (it was in 1.3.2 too, and every
+That third fact is the load-bearing one, and it is **MEASURED, not read**. Reading the wheel is
+what suggested it — the two architectures build those shapes in *different* code, the span path
+through `ExtractorRuntimeMixin._extract_entities` / `._extract_relations` and the boundary path
+through `BoundaryExtractor._decode_entities` / `._decode_relations`, with the shared
+`format_results` folding either into one envelope — but source reading cannot establish that two
+implementations agree. So both were run. See [the A/B](#the-evidence-a-cross-major-ab-on-the-pod)
+below: it is the evidence for this whole decision, not background. **No Provider-side parsing change
+was needed.** Three real 2.0.0 deltas exist and none of them changes the contract: `batch_size` is the third positional parameter (it was in 1.3.2 too, and every
 argument is passed by keyword here so it cannot silently become the threshold); a new
 `overlap_policy` kwarg, not passed; and new `*_long` variants taking `chunk_size`/`chunk_overlap`,
 deliberately unused — the Chunk Stage owns segmentation, and a second model-internal chunker would
 produce offsets nothing downstream can ground (ADR-0021/0031).
+
+### The evidence: a cross-major A/B on the pod
+
+Two venvs — the disjoint pin of this ADR made real — on **RTX 2000 Ada 16 GB**, driver 580.159.04,
+**2026-08-25**. gliner2 **1.3.2** + `fastino/gliner2-multi-v1` (span head) and gliner2 **2.0.0** +
+`fastino/gliner2.5-multi-v1` (boundary head), driven on the **same text** with the **same labels**
+under **identical** transformers 4.57.6 / torch 2.4.1+cu124, diffing the *structural* signature of
+the output — key sets, types, nesting; never values:
+
+| field | verdict | |
+| --- | --- | --- |
+| `entities_signature` | **SAME** | `[{"entities": {<label>: [{confidence,end,start,text}]}}]` |
+| `relations_signature` | **SAME** | `[{"relation_extraction": {<label>: [{head,tail}]}}]` |
+| `entity_row_keys` | **SAME** | `["confidence","end","start","text"]` |
+| `relation_row_keys` | **SAME** | `["head","tail"]` |
+| `relation_endpoint_keys` | **SAME** | `["confidence","end","start","text"]` |
+| `top_level_keys_entities` | **SAME** | `["entities"]` |
+| `top_level_keys_relations` | **SAME** | `["relation_extraction"]` |
+| `offsets_are_ints` | **SAME** | `true` |
+| `n_entity_labels_returned` | **SAME** | 3 |
+| `n_relation_types_returned` | **SAME** | 3 |
+| `head_class` | **DIFF** | `GLiNER2` → `BoundaryExtractor` |
+| `gliner2_version` | **DIFF** | `1.3.2` → `2.0.0` |
+
+Every structural field is identical. The only two that differ name *which model is which*.
+
+**That asymmetry is the whole decision.** The **inference contract** carries across the major
+unchanged — which is why one record contract, one set of Capability seams and one conformance case
+shape serve both families, and why no parsing was written twice. The **loader and the checkpoints
+do not** — `AutoExtractor.from_pretrained` raises `ArchitectureMismatchError` ("Span and boundary
+heads are not checkpoint-compatible, and automatic architecture conversion is not supported"), and
+the pins are disjoint. A version bump can only express the first half; it would silently redefine
+what `latence-extract-gliner2` *is*. A new package behind an enforced boundary expresses both: the
+same contract, a different, non-interchangeable engine.
+
+The key lists above are **sorted sets** — that is what the diff established. Key ORDER is
+deliberately not claimed anywhere, and no consumer in this framework reads these dicts
+positionally.
+
+It is pinned so it cannot rot: `latence_core.conformance.stub` holds the contract as constants plus
+a `gliner2_shape_signature()` that reproduces the pod's methodology, and **all four** fakes in this
+workspace — the two stubs in core and the test-local fakes in `latence-extract-gliner2`,
+`latence-pii-gliner2` and `latence-gliner25` — are asserted against that one definition rather than
+against each other. `test_gliner2_shape_contract.py` additionally drives the span and boundary stubs
+side by side and asserts their signatures are equal, which is the pod diff as a unit test, and
+proves the checker rejects a renamed key, an added relation-level score and string offsets. A future
+gliner2 release that moves any of these is one edit and several red tests, never a fake that quietly
+drifts away from the API it stands in for.
 
 **4. There is no GLiNER 2.5 PII or guardrails checkpoint.** As of 2026-08-25 the fastino PII models
 (`GLiNER2-Guardrails-PII-Multi`, `gliner2-privacy-filter-PII-multi`) are still the 2.x-era **span**
