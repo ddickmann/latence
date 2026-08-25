@@ -494,6 +494,7 @@ Copyright 2026 Dennis Dickmann (latence.ai). See [`NOTICE`](./NOTICE).
 | | |
 |---|---|
 | **Understand the whole thing** | [`docs/DEEP-DIVE.md`](./docs/DEEP-DIVE.md) — messy files → knowledge graph → multi-hop retrieval, with the reasoning |
+| **Every stage, every model, in depth** | [`docs/anatomy/`](./docs/anatomy/index.md) — the 15-stage pipeline that produced the benchmark results, chapter by chapter: [ingest](./docs/anatomy/01-ingest-and-document-understanding.md) · [extraction & privacy](./docs/anatomy/02-extraction-and-privacy.md) · [knowledge graph](./docs/anatomy/03-corpus-to-knowledge-graph.md) · [enrichment & export](./docs/anatomy/04-enrichment-and-export.md) · [retrieval](./docs/anatomy/05-retrieval.md) |
 | **Run it on your corpus** | [`docs/getting-started/index.md`](./docs/getting-started/index.md), then [`docs/TUTORIAL-fresh-pod-walkthrough.md`](./docs/TUTORIAL-fresh-pod-walkthrough.md) |
 | **Read the results** | [`docs/getting-started/run-console.md`](./docs/getting-started/run-console.md) — the offline, read-only run console |
 | **Keep a corpus current** | [`docs/guides/incremental-ingest.md`](./docs/guides/incremental-ingest.md) — churn without rebuild, equivalence proven byte-identical; hands-on: [add / update / retract / GDPR purge](./docs/TUTORIAL-fresh-pod-walkthrough.md#8-incremental-updates-add--update--retract--purge) |
