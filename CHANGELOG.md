@@ -166,6 +166,29 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Added
 
+- **The KG Export's redaction asymmetry is now loud, and settled as intended behaviour.**
+  `GraphHyperedge.tau_text` is redacted at its writer
+  ([ADR-0057](docs/adr/0057-hyperedge-is-a-third-graphscope-emitted-by-graph-assembly-and-tau-text-follows-corpus-redaction.md)); `GraphNode.canonical_name`
+  never was, and `graph_export.py` holds no redaction gate — so under the default
+  `extract_on: unmasked` the real entity names ship in `graph-nodes.parquet`
+  (`canonical_name`, the `evidence` snippet, and the `description` in `properties`), in the TTL
+  `rdfs:label`, in the GraphML `label`, and in the hyperedge KV's `a|` alias keys. Reviewed and
+  kept: a graph of `[PERSON]` nodes is a graph about nobody, and masking the label would collapse
+  every person onto the single `a|person` alias key — a gate preserving node distinctness would
+  have to *pseudonymise*, which is a different feature. A span-symmetric gate could not live in
+  the export either: it receives only `GraphRecord`s, so it holds none of the `pii_spans` evidence
+  the `tau_text` gate acts on. What is new is the signal: the Runner now logs one WARNING per KG
+  export (`runner.KG_ENTITY_NAMES_WARNING`) in the genuinely surprising configuration — a
+  redaction Stage wired while `extract_on` is `unmasked`, i.e. the corpus masked and the graph
+  not — naming every surface and the `extract_on: masked` lever. Neither half of the condition
+  warns alone. It is keyed off the new `KnowledgeGraphExport.exports_entity_names` marker (the
+  same additive duck-typed seam as `wants_document_streams`), because the Provider itself sees
+  neither the extraction posture nor whether anything upstream was redacted. The posture is now
+  stated at the Provider, in `examples/graph-slice.yaml` (which hits the condition), and in
+  `docs/anatomy/04-enrichment-and-export.md` §4.5; `test_kg_export_name_posture.py` pins the
+  banner, the cleartext surfaces, and that `extract_on: masked` puts no PII span text in any
+  node label.
+
 - **`.pre-commit-config.yaml`** — a commit-time mirror of the two fastest CI gates (the ruff lint
   scope and the `detect-secrets` audited-baseline gate). Every hook is `local` /
   `language: system` and runs the *identical* command from `ci.yml`: pulling hook code from a

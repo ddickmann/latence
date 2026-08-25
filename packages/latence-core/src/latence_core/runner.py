@@ -17,6 +17,7 @@ spine (Source→Parse→Export) the order is linear, but the DAG machinery is re
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -235,6 +236,27 @@ _KEY_PART_SPLIT = re.compile(r"[^a-z0-9]+")
 
 _REDACTED = "***REDACTED***"
 
+_LOG = logging.getLogger(__name__)
+
+# The one-per-KG-export WARNING for the redaction asymmetry the KG Export cannot warn about
+# itself (it sees only GraphRecords — neither the extraction posture nor whether anything
+# upstream was redacted). Emitted ONLY in the genuinely surprising configuration: a redaction
+# Stage IS wired — so the operator has asked for masking and the corpus ships masked — while
+# ``extract_on`` is ``unmasked``, so extraction read the RAW chunks and the graph carries the
+# real entity names. With no redaction Stage at all nothing is masked anywhere, so there is no
+# asymmetry to warn about and the banner stays silent; under ``extract_on: masked`` PII never
+# reached extraction, so it stays silent there too. Kept as a constant so the operator banner,
+# the Provider docstrings and the regression test all read the same words — the same discipline
+# as the corpus Export's ``unsafe_unmasked_corpus`` banner.
+KG_ENTITY_NAMES_WARNING = (
+    "A redaction Stage is wired but extract_on is 'unmasked': the exported corpus is masked "
+    "while the knowledge graph is NOT. Extracted entity names ship in cleartext as "
+    "GraphNode.canonical_name — the nodes parquet canonical_name/evidence/properties columns, "
+    "the TTL rdfs:label, the GraphML label, and the hyperedge KV 'a|' alias keys. "
+    "GraphHyperedge.tau_text follows the corpus redaction (ADR-0057); node labels deliberately "
+    "do not. Set extract_on: masked to keep PII out of extraction and out of the graph."
+)
+
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
@@ -265,6 +287,21 @@ def scrub_sensitive(value: object) -> object:
     if isinstance(value, list):
         return [scrub_sensitive(item) for item in value]
     return value
+
+
+def _kg_names_unredacted(pipeline: Pipeline) -> bool:
+    """True when this Pipeline masks its corpus but ships the graph's entity names in cleartext.
+
+    The exact condition :data:`KG_ENTITY_NAMES_WARNING` describes: a redaction Stage is wired
+    (so masking was asked for and the corpus ships masked) AND ``extract_on`` is ``unmasked``
+    (so the extraction Stages read the RAW chunks and every ``canonical_name`` in the graph is
+    the real surface). Neither half alone is surprising — no redaction Stage means nothing is
+    masked anywhere, and ``extract_on: masked`` means PII never reached extraction — so both are
+    required before the operator is told anything.
+    """
+    if pipeline.extract_on is not ExtractOn.UNMASKED:
+        return False
+    return any(s.capability is CapabilityKind.REDACTION for s in pipeline.stages)
 
 
 def topological_order(stages: list[Stage]) -> list[Stage]:
@@ -1581,6 +1618,15 @@ CapabilityDescriptor` (L2/C2) rather than re-decided by a fifty-line if-chain he
 
         if stage.capability is CapabilityKind.EXPORT:
             exporter = self._capability_provider(stage, provider, Export)
+            # The KG Export's redaction asymmetry, named before it writes a byte (the same
+            # timing rule as the corpus Export's own banner: it warns about what THIS export is
+            # about to write, never at import or wiring time). The Provider opts in with
+            # ``exports_entity_names``; the Runner supplies the two facts the Provider cannot
+            # see — the extraction posture and whether a redaction Stage is wired.
+            if getattr(exporter, "exports_entity_names", False) and _kg_names_unredacted(
+                pipeline
+            ):
+                _LOG.warning(KG_ENTITY_NAMES_WARNING)
             inputs.validate()
             # Export materializes any inter-Stage Record: DocumentRecords (S1/S2
             # spine) or ChunkRecords (S3, when a Chunk Stage sits upstream). Only a

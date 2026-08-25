@@ -28,6 +28,32 @@ half-published set — a crash mid-export leaves the previous complete set, neve
 and never a new ``graph.ttl`` beside a stale ``graph-hyperedges.kv``. The Provider is a
 pass-through sink: it returns its input records unchanged so the Runner can checkpoint them,
 exactly like the S1 exporter.
+
+**Redaction posture — this export applies no redaction gate, deliberately.** It is the one
+KG surface that carries readable entity names, and the asymmetry against
+:attr:`~latence_core.contracts.GraphHyperedge.tau_text` (redacted at its writer per ADR-0057)
+is intended, not an omission:
+
+* a graph whose nodes are all ``[PERSON]`` is a graph about nobody — resolution,
+  disambiguation and graph-RAG expansion all degrade in proportion to what was masked; and
+* masking the label would COLLIDE the graph: every person node would normalise to the single
+  alias key ``a|person`` in the ADR-0056 KV, so the alias keyspace would stop being a lookup,
+  and ``canonical_name`` (``min_length=1``) cannot simply be emptied.
+
+The lever is UPSTREAM and structural, not a knob here: ``extract_on: masked`` (W18, ADR-0044)
+redirects the extraction Stages to read ``masked_content``, so PII never reaches extraction and
+therefore never reaches the graph at all — and the Pipeline validator refuses the mode unless
+the extraction Stages transitively depend on a redaction Stage, so it cannot be set without the
+ordering that makes it true. A span-symmetric gate could not live here in any case: this Stage
+receives only :class:`~latence_core.contracts.GraphRecord`s — no chunk text, no ``pii_spans``,
+no ``masked_content`` — so it holds none of the evidence the ``tau_text`` gate acts on.
+
+Under the default ``extract_on: unmasked`` posture the exact surfaces that carry the real
+surface string are listed on :class:`KnowledgeGraphExport`. When a redaction Stage IS wired
+under that posture — the corpus is masked but the graph is not — the Runner logs one WARNING
+naming them, so the trade is never discovered after the graph ships
+(:data:`~latence_core.runner.KG_ENTITY_NAMES_WARNING`, keyed off
+:attr:`KnowledgeGraphExport.exports_entity_names`).
 """
 
 from __future__ import annotations
@@ -96,6 +122,26 @@ class KnowledgeGraphExport:
     Only :class:`~latence_core.contracts.GraphRecord`s are materialized; any other record kind
     in the input is ignored (an Export wired downstream of Graph Assembly sees only graph
     records). An empty graph writes valid empty files (headers only), never an error.
+
+    **What this export does and does not redact** (the module docstring records the decision;
+    this is the surface list it turns on). ``GraphHyperedge.tau_text`` — in
+    ``graph-hyperedges.parquet`` and the KV's ``t|`` keyspace — IS the corpus redaction variant,
+    enforced upstream at its writer (ADR-0057). ``GraphNode.canonical_name`` is NOT, so under the
+    default ``extract_on: unmasked`` posture the REAL surface string is written to all six of:
+
+    * ``<stem>-nodes.parquet`` → the ``canonical_name`` column;
+    * ``<stem>-nodes.parquet`` → the ``evidence`` column, whose ``snippet`` Graph Assembly
+      renders as ``node '<canonical_name>' (<label>) from N mention(s)``;
+    * ``<stem>.ttl`` → each node's ``rdfs:label`` literal;
+    * ``<stem>.graphml`` → each node's ``<data key="label">``;
+    * ``<stem>-hyperedges.kv`` → the ``a|`` alias keyspace, normalised
+      (:func:`~latence_core.hyperedge_store.normalize_alias`);
+    * ``<stem>-nodes.parquet`` → the ``properties`` column's ``description``, on the
+      hyperedge-configured path: it opens ``<canonical_name> — <label>`` and its relation
+      contexts name the NEIGHBOUR nodes' canonical names too (``_stamp_hyperedge_descriptions``).
+
+    Choose the posture deliberately with ``extract_on``; there is no knob on this Stage that
+    changes the above.
     """
 
     @classmethod
@@ -129,6 +175,24 @@ class KnowledgeGraphExport:
         # ADR-0056: within the (already opt-in) hyperedge path, the KV ships by default —
         # the strong configuration is the default, the cheap mode is the documented opt-out.
         self._hyperedge_kv = bool(config.get("hyperedge_kv", True))
+
+    @property
+    def exports_entity_names(self) -> bool:
+        """True: this Export writes readable entity names, so the Runner may warn about them.
+
+        The Runner checks this attribute (absent/False on every other Provider — the same
+        additive duck-typed seam as
+        :attr:`~latence_core.stages.graph_assembly.CanonicalGraphAssembler.wants_document_streams`,
+        no Capability-protocol change) and, when a redaction Stage is wired under the default
+        ``extract_on: unmasked`` posture, logs :data:`~latence_core.runner.KG_ENTITY_NAMES_WARNING`
+        once — the "your corpus is masked but your graph is not" case. The Provider cannot raise
+        that warning itself: it sees only GraphRecords, so it knows neither the extraction posture
+        nor whether anything upstream was redacted.
+
+        A third-party KG Export that also materializes ``canonical_name`` should declare this too;
+        one that pseudonymises or drops names should not.
+        """
+        return True
 
     def export(self, records: Iterable[Record], storage: Storage, out_dir: str) -> list[str]:
         # ONE pass, wrappers dropped as we go (production S3, UDA, 2026-08-06): the previous

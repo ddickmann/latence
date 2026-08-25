@@ -763,12 +763,54 @@ Say it plainly, because it is the asymmetry a reviewer will find:
   so the span text in `graph-hyperedges.parquet` and the KV's `t|` keyspace is the corpus
   redaction variant;
 - `GraphNode.canonical_name` **is not**. Under `extract_on: unmasked`, the KG's entity names are
-  the real surfaces, and `graph_export.py` applies no redaction gate at all. They appear in
-  `graph-nodes.parquet.canonical_name`, in `graph.ttl` as `rdfs:label`, in `graph.graphml` as
-  `<data key="label">`, and — normalised — as the KV's `a|` alias keys.
+  the real surfaces, and `graph_export.py` applies no redaction gate at all. Six surfaces carry
+  them, and the fifth and sixth are the ones a reader counting columns misses:
 
-That is not a bug; it is the documented consequence of the extraction posture, and the framework
-gives you the lever. `extract_on: masked` redirects the extraction stages to read
+  | Surface | Where |
+  |---|---|
+  | `canonical_name` column | `graph-nodes.parquet` |
+  | `evidence` column → `snippet` | `graph-nodes.parquet` — Graph Assembly renders it as `node '<name>' (<label>) from N mention(s)` (`graph_assembly.py:405-410`) |
+  | `properties` column → `description` | `graph-nodes.parquet`, hyperedge path only — opens `<name> — <label>`, and its relation contexts name the **neighbour** nodes too (`graph_assembly.py:225-228`) |
+  | `rdfs:label` | `graph.ttl` |
+  | `<data key="label">` | `graph.graphml` |
+  | `a\|` alias keys | `graph-hyperedges.kv`, normalised (`hyperedge_store.py:114-117`) |
+
+**Why it stays that way** — reviewed 2026-08-25, decided WONTFIX-with-documentation. Two
+reasons, and the second is the one that settles it:
+
+1. a graph whose nodes are all `[PERSON]` is a graph about nobody — chapter 2 already states the
+   trade in the `extract_on` table (`PII reaches the KG? yes | no`), and resolution,
+   disambiguation and the graph-rescue retrieval of chapter 5 all degrade with it;
+2. masking the label would **collide the graph**. Every person node normalises to the single
+   `a|person` alias key, so the KV's alias keyspace stops being a lookup, and `canonical_name`
+   (`min_length=1`) cannot be emptied — a gate that preserved node distinctness would have to
+   *pseudonymise*, which is a different feature, not a symmetric one.
+
+And a gate symmetric with the `tau_text` one could not live in `graph_export.py` in any case.
+The `tau_text` gate works because it sits at the **writer** (`hyperedge._redacted_text`), which
+holds the chunk and its `pii_spans`; the export Stage receives only `GraphRecord`s — no chunk
+text, no spans, no `masked_content` — so it holds none of the evidence the gate acts on. Moving
+it upstream would mean streaming chunks into the node path of Graph Assembly, which today pulls
+them only when hyperedges are configured (`wants_document_streams`).
+
+### The KG export *does* warn
+
+Since the review, the genuinely surprising configuration is loud. When a redaction stage **is**
+wired while `extract_on` is `unmasked` — your corpus is masked and your graph is not — the
+runner logs one `WARNING` per KG export, before the first byte
+(`runner.KG_ENTITY_NAMES_WARNING`), naming every surface in the table above and the lever. It is
+keyed off `KnowledgeGraphExport.exports_entity_names`, the same additive duck-typed marker
+`wants_document_streams` uses; the provider cannot raise it itself, because it sees neither the
+extraction posture nor whether anything upstream was redacted.
+
+Both halves of the condition are required, and neither alone warns: with **no** redaction stage
+nothing is masked anywhere, so there is no asymmetry to report; under `extract_on: masked` the
+PII never reached extraction. The campaign pipelines and `examples/graph-slice.yaml` both hit
+the warning condition — deliberately, and now visibly.
+
+### The lever
+
+`extract_on: masked` redirects the extraction stages to read
 `masked_content` instead, so PII never reaches extraction or the KG at all — and the pipeline
 validator enforces that the extraction stages transitively depend on a redaction stage, so the
 mode cannot be set without the ordering that makes it true
