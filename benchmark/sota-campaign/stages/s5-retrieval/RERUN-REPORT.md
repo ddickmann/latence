@@ -141,6 +141,33 @@ retrieval quality here. It does not, at any configuration tested. See
 
 Yes, and the one place it looks like it does not is the budget, not the packer.
 
+### What the append discipline is worth under a budget, in chain terms
+
+Ticket 06 measured the graph payload in recall and found it empty. The complementary question —
+what the *discipline* is worth once a token budget binds — is answered by the selection legs at an
+**equal 4,000-token budget**. `packer` packs a graph-**fused** ranking; `graph_rescue_packed` packs
+the append-not-fuse union. Same knapsack, same spend, different candidate list:
+
+| dataset | chain_coverage@10 | Δ | full_chain_hit@10 | Δ |
+|---|---|---|---|---|
+| musique | 0.4575 → 0.5905 | **+0.1330** | 0.1092 → 0.2266 | **+0.1174** |
+| hotpotqa | 0.6181 → 0.7960 | **+0.1779** | 0.3508 → 0.6130 | **+0.2622** |
+| multihop_rag | 0.6206 → 0.7506 | **+0.1300** | 0.3282 → 0.4736 | **+0.1454** |
+| wiki2multihop | 0.5547 → 0.7199 | **+0.1652** | 0.2417 → 0.4216 | **+0.1799** |
+
+Thirteen to twenty-six points of full-chain completion at identical token spend, on the four
+genuinely multi-hop corpora.
+
+**Read this with ticket 06, not against it.** Since the rescued payload reaches almost no gold the
+base missed, this gain cannot be the graph *adding* evidence — it is the cost of graph-fusion being
+*removed*. Ticket 06 measured the same effect from the other side, as a monotonic decline in the
+fusion weight down to −0.1121 at `w=1.00`. Both arms agree: fusing graph scores into the ranking
+actively damages retrieval, and the damage is largest exactly where chains must be completed under
+a budget. The graph's contribution in this system is negative-avoidance, and it is worth a lot.
+
+**One anomaly, unexplained:** `multihop_rag` chain coverage peaks at 4,000 tokens (0.7506) and
+falls at 8,000 and beyond (0.7136, 0.7112). More budget makes it worse. Not investigated.
+
 `graph_rescue_packed` matches `graph_rescue` exactly on five of seven datasets. It loses recall on
 vidoseek (0.8424 vs 0.9726) and slightly on ohr_bench (0.6352 vs 0.6589). The vidoseek budget
 curve says why:
