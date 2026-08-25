@@ -65,7 +65,7 @@ RUN uv pip install --no-sources \
     && uv pip install --no-sources --no-deps \
         "./packages/latence-parser-lighton" \
         "./packages/latence-parser-lighton-vllm" \
-    && uv pip install "openai>=1.0,<3" "pypdfium2>=4.0" "pillow>=10.0"
+    && uv pip install "openai>=1.0,<3" "pypdfium2>=4.0,<6" "pillow>=10.0,<13"
 
 # ---- Stage 2: runtime — minimal, non-root, just the venv + the CLI ------------------------
 FROM python:3.12-slim AS runtime

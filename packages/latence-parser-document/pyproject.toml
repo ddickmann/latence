@@ -29,9 +29,11 @@ classifiers = [
 # Heavy/optional deps stay OUT of latence-core (ADR-0016): the PDF reader ships
 # with this Provider package, not the thin core. pypdf is pure-Python, CPU-only,
 # and BSD-3-Clause (permissive per ADR-0012, weights/code verified 2026-07-06).
+# H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py):
+# 'pypdf' carries a major-boundary '<7' so a downstream install can't pull an API-breaking 7.x.
 dependencies = [
     "latence-core",
-    "pypdf>=6.0",
+    "pypdf>=6.0,<7",
 ]
 
 # Registers this Provider under the framework's discovery group. Installing this

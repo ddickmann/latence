@@ -59,7 +59,11 @@ dependencies = [
 # faiss-gpu`); the PyPI `faiss-gpu` wheel is a third-party-maintained build (declared MIT). Prefer
 # conda for GPU provenance; `faiss-cpu` (MIT, the actively-maintained PyPI wheel) also satisfies the
 # optional import + pulls numpy. The resolver falls back to brute-force when faiss/numpy is absent.
-faiss = ["faiss-cpu>=1.7", "numpy>=1.24"]
+# H-G1 dep caps (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py): the
+# extra's pins are capped too — an extra is a downstream install path with the same exposure. numpy
+# is the live case: '>=1.24' had already resolved to a 2.x, the exact silent major crossing the
+# cap exists to stop.
+faiss = ["faiss-cpu>=1.7,<2", "numpy>=1.24,<3"]
 
 [project.urls]
 Homepage = "https://github.com/ddickmann/latence-framework"

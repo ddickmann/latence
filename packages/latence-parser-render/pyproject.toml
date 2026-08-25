@@ -44,13 +44,16 @@ classifiers = [
 # heavy Provider packages (ADR-0016) — this package is installed --no-deps into the CPU-first
 # dev/CI env; its tests use a faithful in-memory fake renderer + a stub OCR, and the real
 # soffice/PDF/office run is validated on the pod (scripts/validate-universal-parser-on-gpu.md).
+# H-G1 dep caps (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py): every
+# pin here carries a major boundary. pypdfium2's old '>=4.0' had already resolved to a 5.x and
+# python-pptx's '>=0.6.23' to a 1.x, so both crossings had happened silently before the cap landed.
 dependencies = [
     "latence-core",
-    "pypdfium2>=4.0",
-    "pillow>=10.0",
-    "python-docx>=1.1",
-    "openpyxl>=3.1",
-    "python-pptx>=0.6.23",
+    "pypdfium2>=4.0,<6",
+    "pillow>=10.0,<13",
+    "python-docx>=1.1,<2",
+    "openpyxl>=3.1,<4",
+    "python-pptx>=0.6.23,<2",
 ]
 
 [project.urls]

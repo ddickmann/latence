@@ -13,19 +13,19 @@ fsspec>=2024.2
     # via latence-core
 openai>=1.0,<3
     # via latence-parser-lighton-vllm
-pillow>=10.0
+pillow>=10.0,<13
     # via latence-parser-lighton, latence-parser-lighton-vllm
 pyarrow>=15.0
     # via latence-core
-pydantic>=2.5
+pydantic>=2.5,<3
     # via latence-core
-pypdfium2>=4.0
+pypdfium2>=4.0,<6
     # via latence-parser-lighton, latence-parser-lighton-vllm
-pyyaml>=6.0
+pyyaml>=6.0,<7
     # via latence-core
-torch>=2.1
+torch>=2.1,<3
     # via latence-parser-lighton
 transformers>=4.45
     # via latence-parser-lighton
-typer>=0.12
+typer>=0.12,<1
     # via latence-core

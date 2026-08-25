@@ -32,8 +32,13 @@ classifiers = [
 # installs this without pulling the whole pipeline (pyarrow/typer/fsspec). Heavy query-time deps
 # (cross-encoders, the Rust knapsack, DuckDB, the MCP stack, per-backend clients) land behind
 # extras on this package in later tickets, mirroring the thin-core / per-provider discipline.
+# H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py):
+# 'pydantic>=2.5,<3' here for the same reason as in latence-core — the signal contracts this
+# library returns are pydantic 2.x models. Every extra below is capped too: an extra is a
+# downstream install path ('pip install latence-retrieval[graph-neo4j]') with exactly the same
+# exposure to an API-breaking major, so the rule does not stop at [project].dependencies.
 dependencies = [
-    "pydantic>=2.5",
+    "pydantic>=2.5,<3",
 ]
 
 # Heavy query-time deps behind extras (ADR-0016/0049 discipline), so an adopter installs only what
@@ -44,7 +49,7 @@ dependencies = [
 # its weights+code license verified separately before wiring (ADR-0012). Offline tests use the
 # shipped faithful `FakeCrossEncoder` and never need this extra.
 rerank = [
-    "sentence-transformers>=2.2",
+    "sentence-transformers>=2.2,<6",
 ]
 # pack (#167): the real, exact token counter for the Knapsack QKP context-packer. `tiktoken` is
 # MIT (code: https://github.com/openai/tiktoken/blob/main/LICENSE) and ships its encoding data — it
@@ -52,7 +57,7 @@ rerank = [
 # wiring (ADR-0012). The packer runs day one on the pure-Python `HeuristicTokenCounter` with NO
 # extra; offline tests drive the heuristic + a fake `tiktoken` module and never need this extra.
 pack = [
-    "tiktoken>=0.5",
+    "tiktoken>=0.5,<1",
 ]
 # backend-qdrant (#173): the reference production RetrievalBackend adapter over Qdrant. `qdrant-client`
 # is Apache-2.0 (code: https://github.com/qdrant/qdrant-client/blob/master/LICENSE) and the Qdrant
@@ -62,7 +67,7 @@ pack = [
 # the rerank/pack fake-module boundary), so protocol conformance is covered without the heavy client;
 # live-store validation against a running Qdrant is done out of band.
 backend-qdrant = [
-    "qdrant-client>=1.10",
+    "qdrant-client>=1.10,<2",
 ]
 # sparse (#170): query-side sparse generation reusing the ADR-0053 index-time SPLADE composition.
 # `latence-splade` is the (Apache-2.0) package that owns the composition — depending on it here (not
@@ -95,7 +100,7 @@ multivector = [
 # equivalence test gated on this dep (skipped when absent); the `duckdb` import is lazy so the
 # pure-Python core and registry discovery never require it.
 graph-duckdb = [
-    "duckdb>=0.10",
+    "duckdb>=0.10,<2",
 ]
 # graph-networkx (#169): the pure-Python multi-hop REFERENCE for small graphs (ADR-0051) — loads the
 # same `graph-edges.parquet` into an undirected graph and reads bounded shortest-path hop distances.
@@ -104,7 +109,7 @@ graph-duckdb = [
 # with `pyarrow` (the pipeline's existing parquet spine). Offline tests drive `FakeGraphSource` and a
 # real-networkx equivalence test gated on this dep; the imports are lazy so the core never needs it.
 graph-networkx = [
-    "networkx>=3.0",
+    "networkx>=3.0,<4",
 ]
 # graph-neo4j (#169): the OPTIONAL enterprise multi-hop backend for shops that ALREADY run Neo4j
 # (ADR-0051) — a variable-length Cypher path query against a live deployment (never a server the
@@ -115,7 +120,7 @@ graph-networkx = [
 # rerank/pack/qdrant tests use); a live-Neo4j smoke is gated on the dep + a URL env var (skipped
 # offline). The `neo4j` import is lazy so the core and registry discovery never require it.
 graph-neo4j = [
-    "neo4j>=5.0",
+    "neo4j>=5.0,<7",
 ]
 # mcp (#174): the optional MCP-protocol face over the hardened, stateless server core. The `mcp`
 # Python SDK (modelcontextprotocol/python-sdk) is MIT (code:
@@ -128,7 +133,7 @@ graph-neo4j = [
 # the qdrant/neo4j adapters use), so the surface is covered without the SDK; live-client validation
 # is out of band.
 mcp = [
-    "mcp>=1.0",
+    "mcp>=1.0,<2",
 ]
 
 [project.urls]

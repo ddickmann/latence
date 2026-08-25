@@ -139,7 +139,7 @@ def test_a_new_dependency_on_a_provider_package_is_caught(sandbox: Path) -> None
     pyproject = sandbox / "packages" / "latence-extract-gliner2" / "pyproject.toml"
     pyproject.write_text(
         pyproject.read_text(encoding="utf-8").replace(
-            '"peft>=0.10",', '"peft>=0.10",\n    "torchcodec>=0.2",'
+            '"peft>=0.10,<1",', '"peft>=0.10",\n    "torchcodec>=0.2",'
         ),
         encoding="utf-8",
     )
@@ -381,7 +381,7 @@ def test_an_exclusion_contradicted_by_a_package_dependency_is_caught(sandbox: Pa
     """
     pyproject = sandbox / "packages" / "latence-parser-lighton" / "pyproject.toml"
     pyproject.write_text(
-        pyproject.read_text(encoding="utf-8").replace('"torch>=2.1",', '"torch>=2.1",\n    "flash-attn>=2.8",'),
+        pyproject.read_text(encoding="utf-8").replace('"torch>=2.1,<3",', '"torch>=2.1,<3",\n    "flash-attn>=2.8",'),
         encoding="utf-8",
     )
     assert "E-EXCLUSION-CONTRADICTED" in _codes(sandbox, "served-ocr-client")
@@ -601,7 +601,7 @@ def test_a_transformers_five_package_cannot_resolve_into_the_gpu_environment(san
     pyproject = sandbox / "packages" / "latence-extract-gliner2" / "pyproject.toml"
     pyproject.write_text(
         pyproject.read_text(encoding="utf-8").replace(
-            '"peft>=0.10",', '"peft>=0.10",\n    "transformers>=5.0",'
+            '"peft>=0.10,<1",', '"peft>=0.10",\n    "transformers>=5.0",'
         ),
         encoding="utf-8",
     )
@@ -617,7 +617,7 @@ def test_a_satisfiable_window_is_not_reported_as_a_conflict(sandbox: Path) -> No
     pyproject = sandbox / "packages" / "latence-extract-gliner2" / "pyproject.toml"
     pyproject.write_text(
         pyproject.read_text(encoding="utf-8").replace(
-            '"peft>=0.10",', '"peft>=0.10",\n    "transformers>=4.52,<4.99",'
+            '"peft>=0.10,<1",', '"peft>=0.10",\n    "transformers>=4.52,<4.99",'
         ),
         encoding="utf-8",
     )

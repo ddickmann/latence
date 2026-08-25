@@ -199,7 +199,7 @@ the whole spine on a laptop with checkpoint/resume, and a shipped Airflow adapte
 (`latence-runner-airflow`) runs the identical Stages as a DAG. **Storage** is one fsspec seam. Every
 record carries Provenance and Classification, validated at every Stage boundary.
 
-The reasoning behind each of those choices is written down: **63 architecture decisions** in
+The reasoning behind each of those choices is written down: **64 architecture decisions** in
 [`docs/adr/`](./docs/adr/), and the glossary that fixes the vocabulary in
 [`CONTEXT.md`](./CONTEXT.md).
 

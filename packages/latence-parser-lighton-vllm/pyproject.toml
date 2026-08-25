@@ -36,12 +36,15 @@ classifiers = [
 # (:class:`openai.AsyncOpenAI`). The real OCR run needs a live vLLM server (infra-gated, ADR-0007):
 # its tests use a faithful async mock of the vLLM chat-completions response; the real run is
 # pod-validated (scripts/validate-lighton-vllm-on-gpu.md).
+# H-G1 dep caps (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py):
+# pypdfium2 and pillow carry major-boundary caps. pypdfium2's old lower-bound-only '>=4.0' had
+# already resolved to a 5.x — the silent major crossing the convention exists to stop.
 dependencies = [
     "latence-core",
     "latence-parser-lighton",
     "openai>=1.0,<3",
-    "pypdfium2>=4.0",
-    "pillow>=10.0",
+    "pypdfium2>=4.0,<6",
+    "pillow>=10.0,<13",
 ]
 
 [project.urls]

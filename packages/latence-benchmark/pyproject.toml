@@ -39,8 +39,11 @@ dependencies = [
 # ships NO model weights; the DATASET it downloads carries its own, separately verified license
 # (ADR-0012) recorded on every DatasetSpec and enforced by the license gate before a byte is
 # fetched. Offline runs use `LocalDatasetSource` and never need this extra.
+# H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py):
+# 'huggingface-hub' carries the same '<1' boundary latence-disambig-glinker pins — the hub's 1.x
+# line is a real break (transformers 4.x itself declares huggingface-hub<1.0).
 hub = [
-    "huggingface-hub>=0.23",
+    "huggingface-hub>=0.23,<1",
 ]
 
 [project.scripts]

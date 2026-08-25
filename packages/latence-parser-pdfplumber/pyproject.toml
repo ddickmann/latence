@@ -35,9 +35,13 @@ classifiers = [
 # closure pulls native code via wheels — pillow (C-ext) and pypdfium2 (bundled PDFium),
 # plus cryptography under pdfminer.six — all permissive, all latent (the used path is
 # pdfminer.six-only). See the provider profile() license note for the full closure.
+# H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py):
+# 'pdfplumber' is a 0.x library, so its signalled break is 1.0 and the cap sits there. It is NOT
+# capped at the next minor: nothing in this repository has observed pdfplumber break across 0.x
+# minors, and H-G1 refuses a boundary invented rather than evidenced.
 dependencies = [
     "latence-core",
-    "pdfplumber>=0.11",
+    "pdfplumber>=0.11,<1",
 ]
 
 [project.urls]

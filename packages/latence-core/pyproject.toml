@@ -27,12 +27,24 @@ classifiers = [
     "Typing :: Typed",
 ]
 # Near-zero deps (ADR-0016): only the contract/serialization/IO/CLI spine.
+# H-G1 dep caps (ADR-0065 — the workspace-wide default, ENFORCED by
+# packages/latence-core/tests/test_dependency_caps.py). pydantic/pyyaml/typer carry a
+# major-boundary upper cap so a downstream install can't silently pull an API-breaking release.
+# pydantic earns it most:
+# the entire contract spine (contracts.py, SCHEMA_VERSION, the Stage-boundary validation) is
+# written against the 2.x model API, and 2 -> 3 is a signalled break.
+# fsspec and pyarrow are the two RECORDED exemptions, and they are recorded in that gate rather
+# than here so they cannot rot into a stale comment: fsspec is CalVer (its leading component is a
+# year, so '<N' would encode a date), and pyarrow rides a time-based release train this package's
+# >=15.0 floor has already spanned 15 -> 25 with no source change — capping it in the near-zero-dep
+# base (ADR-0016) every adopter installs beside their own Arrow stack would buy an unobserved
+# boundary and cost a real resolution conflict. The gate fails if either is ever capped OR removed.
 dependencies = [
-    "pydantic>=2.5",
+    "pydantic>=2.5,<3",
     "fsspec>=2024.2",
     "pyarrow>=15.0",
-    "pyyaml>=6.0",
-    "typer>=0.12",
+    "pyyaml>=6.0,<7",
+    "typer>=0.12,<1",
 ]
 
 # Optional metrics/tracing EXPORT backends (ADR-0047). NOT a runtime dependency: the core
@@ -48,13 +60,18 @@ dependencies = [
 # than silently degrading. Same discipline as the observability extra below: opt-in, edge-side,
 # never a core dep. ``packaging`` is pure-Python, dependency-free and PSF-2.0/Apache-2.0
 # dual-licensed (verified 2026-07-18).
+# H-G1 (ADR-0065): 'packaging' is the third RECORDED cap exemption in
+# packages/latence-core/tests/test_dependency_caps.py — a cap on the ecosystem's most ubiquitous
+# build-time dependency conflicts with pip/build/setuptools in an adopter's environment rather
+# than protecting anything, and the >=23.0 floor has spanned 23 -> 26 through one lazy import of
+# Requirement/Version/SpecifierSet. Every other extra on this package IS capped.
 envspec = [
     "packaging>=23.0",
 ]
 observability = [
-    "prometheus-client>=0.19",
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
+    "prometheus-client>=0.19,<1",
+    "opentelemetry-api>=1.20,<2",
+    "opentelemetry-sdk>=1.20,<2",
 ]
 # OPTIONAL Iceberg-table Export output (#184, ADR-0017). NOT a runtime dependency: the Export is
 # Parquet-first and the Iceberg block is OFF by default, so ``pyiceberg`` is never imported unless
@@ -62,7 +79,7 @@ observability = [
 # pyiceberg is Apache-2.0 (Apache Software Foundation; code and distribution alike — it ships no
 # model weights, so ADR-0012's weights-vs-code split is trivially the same license).
 iceberg = [
-    "pyiceberg>=0.9",
+    "pyiceberg>=0.9,<1",
 ]
 
 [project.urls]

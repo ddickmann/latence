@@ -48,10 +48,14 @@ classifiers = [
 # (gliner2.inference.engine -> gliner2.training.trainer) imports peft, which the 'gliner2[local]'
 # extra does NOT declare — real extract_relations fails with ModuleNotFoundError: No module named
 # 'peft' without it. peft is Apache-2.0 (github.com/huggingface/peft, verified 2026-07-10).
+# H-G1 (ADR-0065): 'peft' now carries the '<1' cap the paragraph below always implied — it is a
+# REQUIRED runtime import on the relation path, so an unbounded resolve could hand this Provider a
+# peft major its call sites are not written against. Enforced by
+# packages/latence-core/tests/test_dependency_caps.py.
 dependencies = [
     "latence-core",
     "gliner2[local]>=1.3,<2",
-    "peft>=0.10",
+    "peft>=0.10,<1",
 ]
 
 [project.urls]

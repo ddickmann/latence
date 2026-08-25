@@ -33,6 +33,8 @@ classifiers = [
 # is pure-Python, so this package installs into the CPU-first, offline dev env and its tests
 # run against the shipped faithful `FakeQdrantClient` with no heavy dep. latence-core takes
 # NO new dependency from this package (the arrow only points one way).
+# H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py):
+# 'qdrant-client' carries a '<2' major boundary; latence-retrieval[backend-qdrant] pins the same.
 dependencies = [
     "latence-core",
 ]
@@ -46,7 +48,7 @@ dependencies = [
 # verified 2026-07-16 for `latence-retrieval[backend-qdrant]`, same dependency). Pinned
 # `>=1.10` for `collection_exists` + the modern `upsert`/`set_payload`/`delete` signatures.
 client = [
-    "qdrant-client>=1.10",
+    "qdrant-client>=1.10,<2",
 ]
 
 [project.urls]

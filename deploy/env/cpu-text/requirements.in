@@ -21,15 +21,15 @@ glinker>=0.1,<0.2
     # via latence-disambig-glinker
 huggingface-hub>=0.23,<1
     # via latence-disambig-glinker
-pdfplumber>=0.11
+pdfplumber>=0.11,<1
     # via latence-parser-pdfplumber
-peft>=0.10
+peft>=0.10,<1
     # via latence-extract-gliner2
 pyarrow>=15.0
     # via latence-core
-pydantic>=2.5
+pydantic>=2.5,<3
     # via latence-core
-pyyaml>=6.0
+pyyaml>=6.0,<7
     # via latence-core
 sentence-transformers>=3.0,<6
     # via latence-embedder-st
@@ -39,5 +39,5 @@ transformers>=4.40,<5
     # via latence-disambig-glinker
 transformers>=4.40,<6
     # via latence-splade
-typer>=0.12
+typer>=0.12,<1
     # via latence-core

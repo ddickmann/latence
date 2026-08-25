@@ -39,12 +39,19 @@ classifiers = [
 # validated on a CUDA pod (scripts/validate-glm-on-gpu.md). GLM-OCR support currently requires a
 # recent transformers (install-from-source per the model card until it lands in a release), so
 # transformers is pinned loosely and the real run is pod-gated.
+# H-G1 (ADR-0065): torch/pillow/pypdfium2 carry major-boundary caps. 'transformers' deliberately
+# does NOT, and it is a RECORDED exemption in
+# packages/latence-core/tests/test_dependency_caps.py — this is H-G1's own "if a cap would be
+# guesswork, note it and skip" clause. The compatible major is not
+# settled (the model card's install-from-source note above is exactly that unsettledness), and
+# deploy/env/gpu-learned/environment.yaml already names THIS uncapped pin as the reason it refuses
+# the package by name rather than by version math. Capping it would falsify that recorded reason.
 dependencies = [
     "latence-core",
     "transformers>=4.45",
-    "torch>=2.1",
-    "pillow>=10.0",
-    "pypdfium2>=4.0",
+    "torch>=2.1,<3",
+    "pillow>=10.0,<13",
+    "pypdfium2>=4.0,<6",
 ]
 
 [project.urls]

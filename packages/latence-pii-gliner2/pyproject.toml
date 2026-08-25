@@ -58,10 +58,12 @@ classifiers = [
 # (gliner2.inference.engine -> gliner2.training.trainer) imports peft, which the 'gliner2[local]'
 # extra does NOT declare — the load path fails with ModuleNotFoundError: No module named 'peft'
 # without it. peft is Apache-2.0 (github.com/huggingface/peft, verified 2026-07-10).
+# H-G1 (ADR-0065): 'peft' carries a '<1' major-boundary cap, same as latence-extract-gliner2.
+# Enforced by packages/latence-core/tests/test_dependency_caps.py.
 dependencies = [
     "latence-core",
     "gliner2[local]>=1.3,<2",
-    "peft>=0.10",
+    "peft>=0.10,<1",
 ]
 
 [project.urls]

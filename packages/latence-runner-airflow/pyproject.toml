@@ -42,7 +42,10 @@ Issues = "https://github.com/ddickmann/latence-framework/issues"
 Changelog = "https://github.com/ddickmann/latence-framework/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-airflow = ["apache-airflow>=2.7"]
+# H-G1 dep cap (ADR-0065, enforced by packages/latence-core/tests/test_dependency_caps.py): the
+# '>=2.7' floor had already resolved to Airflow 3.x — a major with a genuinely different DAG API —
+# so the '<4' boundary records the line this adapter is actually written and locked against.
+airflow = ["apache-airflow>=2.7,<4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latence_runner_airflow"]

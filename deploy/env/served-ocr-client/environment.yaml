@@ -75,11 +75,14 @@ constraints:
       The async HTTP client parser.lighton_vllm POSTs page images with (openai.AsyncOpenAI, code
       Apache-2.0). The library breaks its API across majors; the current major is 2.x, so <3 is the
       real current-major boundary — pinning <2 would exclude the shipping line.
-  - requirement: "pillow>=10.0"
+  - requirement: "pillow>=10.0,<13"
     reason: >-
       The rasteriser's LANCZOS downscale and PNG encode, and the floor the shipped smoke fixture is
-      rendered with. Pillow's decoder CVEs are patched forward, so a floor is the security-relevant
-      boundary here; there is no upper cap because the rasteriser uses only the stable Image API.
+      rendered with. Pillow's decoder CVEs are patched forward, so the floor is the
+      security-relevant end. The cap is the H-G1 major boundary latence-parser-lighton and
+      latence-parser-lighton-vllm now declare (ADR-0065) — restated here so this environment
+      enforces the same window its packages do rather than a wider one. It is NOT a claim that the
+      rasteriser's Image API usage breaks at 13; it is a refusal to assume it does not.
 
 # --- EXCLUDED distributions -------------------------------------------------------------------
 # The same two wheels the serving environment excludes, for the same reason and with the same
