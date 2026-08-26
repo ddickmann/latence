@@ -121,7 +121,7 @@ validated at every Stage boundary.
 Each Stage ships a deterministic, dependency-light **CPU-first reference Provider**, so the whole
 pipeline runs offline before you choose a single model. The
 [Provider catalog](./docs/providers/catalog.md) lists every one with its verified weights-and-code
-licence. The reasoning behind each choice is written down: **64 architecture decisions** in
+licence. The reasoning behind each choice is written down: **65 architecture decisions** in
 [`docs/adr/`](./docs/adr/), and the glossary that fixes the vocabulary in
 [`CONTEXT.md`](./CONTEXT.md).
 

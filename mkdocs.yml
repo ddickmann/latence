@@ -265,6 +265,7 @@ nav:
           - "0062 — Distribution: signed GitHub Releases only, no PyPI (reopened by 0063)": adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md
           - 0063 — Relicence to Apache-2.0: adr/0063-relicence-to-apache-2-0.md
           - "0064 — GLiNER 2.5 as a new package behind an enforced gliner2 major boundary": adr/0064-gliner-2-5-is-a-new-provider-package-behind-an-enforced-gliner2-major-boundary.md
+          - "0066 — Publication and release are separate gates": adr/0066-publication-and-release-are-separate-gates.md
       - The core seams:
           - 0003 — Stage library + pluggable Runners: adr/0003-stage-library-with-pluggable-runners.md
           - 0004 — Capability protocols + provider plugins: adr/0004-capability-protocols-with-provider-plugins.md

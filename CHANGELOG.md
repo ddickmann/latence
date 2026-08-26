@@ -17,6 +17,26 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Changed
 
+- **Publication and release are separate gates
+  ([ADR-0066](docs/adr/0066-publication-and-release-are-separate-gates.md), amending
+  `RELEASE-GATES.md`).** That page previously opened "This repository is **private**. It is not
+  published publicly until every gate below is green," and Gate 1 — the end-to-end benchmark
+  protocol on named hardware — is genuinely unmet, with 52 `PENDING:` tokens on
+  `docs/BENCHMARKS-E2E.md`. Publishing under that sentence would have falsified the page on its
+  own first line, in a repository whose distinguishing discipline is that documentation making a
+  claim about the code is machine-checked. The gate's purpose is preventing *overclaim*, and that
+  survives the split: **publication** of the source requires only that every claim is
+  substantiated or explicitly labelled as unsubstantiated, which is met and enforced; **a `v*`
+  release** still requires every gate, Gate 1 included, and the `pypi-publish` job stays disabled.
+  Holding the source private was never going to make an unmeasured number measured — the two facts
+  are independent, and coupling them cost the only thing publication buys a bus-factor-1 project.
+- **The strict release check now runs on the path it gates.** `LATENCE_RELEASE_CHECK` was
+  documented as the enforcement mechanism — `README.md` claimed publishing with an unfilled table
+  "is not possible" — while appearing in **no workflow, no script and not the Makefile**. It failed
+  only if a human remembered the flag. It now runs in `release.yml` before anything is built, so a
+  red gate stops a tag rather than decorating a job summary after the artifacts already exist.
+  Three gate items that were verifiably true but never ticked are ticked; Gate 1 is left unticked,
+  because it is not met.
 - **The repository is prepared for public launch: internal material out, an agent-facing entry
   point in.** Five maintainer-internal documents left the shipping tree — `docs/GO-LIVE-RUNBOOK.md`
   (which named the scrubbed competitor review *and* the commit it remains reachable at, and

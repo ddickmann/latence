@@ -65,6 +65,21 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
+      # ADR-0066: publication and release are separate gates. Publishing the SOURCE requires only
+      # that every claim is substantiated or labelled; cutting a RELEASE requires every gate in
+      # RELEASE-GATES.md, Gate 1 included. LATENCE_RELEASE_CHECK is what makes that check strict,
+      # and it was documented as the enforcement mechanism while appearing in no workflow, no
+      # script and not the Makefile — so it only ever failed if a human remembered the flag. It
+      # runs here, on the one path it gates, BEFORE anything is built: a red gate must stop a tag,
+      # not decorate a summary after the artifacts already exist.
+      - name: Release gate (strict — fails while any gate in RELEASE-GATES.md is unmet)
+        env:
+          LATENCE_RELEASE_CHECK: "1"
+          PYTHONHASHSEED: "0"
+        run: |
+          uv sync
+          uv run pytest packages/latence-core/tests/test_public_release_gate.py -o addopts=""
+
       # Build EVERY package under packages/ (dir name == distribution name) into one dist/.
       # Iterating the directory means a newly added package is automatically included in the
       # release rather than silently left out of a hand-maintained list.

@@ -7,7 +7,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 
 !!! note
     ADRs are numbered by decision order. Number 0040 was never issued (no gap in reasoning —
-    the sequence simply skipped it), so the log holds 64 records numbered 0001–0065.
+    the sequence simply skipped it), so the log holds 65 records numbered 0001–0066.
 
 ## Foundations & scope
 
@@ -48,6 +48,7 @@ are the authoritative source; the [Concepts](../concepts/index.md) and
 | [0030](0030-performance-path-endpoint-providers-and-second-runner-adapter.md) | Performance path is endpoint Providers; the second Runner reuses the Stage engine |
 | [0045](0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md) | IBM Granite Embedding r2 is the default learned Embedder |
 | [0065](0065-the-h-g1-dependency-cap-is-a-workspace-wide-default-with-recorded-exemptions.md) | The H-G1 dependency cap is a workspace-wide default over every third-party pin (extras included), with machine-read, reason-bearing exemptions |
+| [0066](0066-publication-and-release-are-separate-gates.md) | Publication and release are separate gates — the source is published as a pre-1.0 preview while Gate 1 (measured end-to-end numbers) stays open; a `v*` tag still requires every gate (amends `RELEASE-GATES.md`) |
 
 ## The Stages (contracts per Stage)
 

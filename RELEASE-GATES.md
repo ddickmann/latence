@@ -1,11 +1,17 @@
-# Public-release gates
+# Release gates
 
-This repository is **private**. It is not published publicly until every gate below is green.
+**Publication and release are two different gates** ([ADR-0066](docs/adr/0066-publication-and-release-are-separate-gates.md)).
 
-The gates exist because the failure mode they prevent is specific and expensive: publishing a
+* **The source is public**, as a pre-1.0 preview. That bar is: every claim this repository makes is
+  either substantiated or explicitly labelled as unsubstantiated. It is met.
+* **A `v*` release — a tag, signed artifacts, an SBOM, something people install — requires every
+  gate below**, Gate 1 included. Gate 1 is **not** met, and nothing below pretends otherwise.
+
+The gates exist because the failure mode they prevent is specific and expensive: shipping a
 framework whose headline claims a sophisticated evaluator can falsify in an afternoon. A capability
 that is *designed* is not a capability that *works*, and the distance between them is exactly what
-an evaluator is looking for.
+an evaluator is looking for. That failure is **overclaim**, which is why the honest-labelling
+discipline is what gates publication, and measurement is what gates a release.
 
 **These are machine-checked.** `packages/latence-core/tests/test_public_release_gate.py` runs on
 every build. Ordinarily it verifies the gate documents are well-formed and inventories what is
@@ -48,8 +54,8 @@ stated method is worse than a missing one, because it looks checked.
 
 - [ ] `bash scripts/verify-local.sh` exits **0** — captured by **redirect**, never by piping to
       `tail` (a pipeline returns the last command's status and will report green on a red tree)
-- [ ] `mypy --strict` passes on src **and** tests for every package
-- [ ] The full suite passes with `PYTHONHASHSEED=0`
+- [x] `mypy --strict` passes on src **and** tests for every package
+- [x] The full suite passes with `PYTHONHASHSEED=0`
 - [ ] **The environment-gated lanes actually ran** — live Qdrant search, GPU providers, s3. These
       skip locally. If they still skip on the pod, the environment is wrong; a skip is not a pass.
 - [ ] SPLADE proven as a **live retrieval signal** against a real Qdrant — a sparse-only query
@@ -71,7 +77,7 @@ stated method is worse than a missing one, because it looks checked.
       license = "Apache-2.0"` (re-verified after the ADR-0063 relicence back to Apache-2.0)
 - [ ] `THIRD-PARTY-LICENSES.md` is re-verified under the new posture, including the **LGPL-3.0
       `easydict`** obligation on the opt-in `latence-linkpred-ultra[ultra]` path
-- [ ] `CONTRIBUTING.md` states the CLA requirement
+- [x] `CONTRIBUTING.md` states the CLA requirement
 - [x] **The benchmark corpus's own licence flags are coherent.** Met by ADR-0063, which dissolved
       the contradiction rather than resolving it: `latence_benchmark/redaction_suite.py` declares the
       synthetic PII corpus `dataset_license="Apache-2.0", code_license="Apache-2.0",
