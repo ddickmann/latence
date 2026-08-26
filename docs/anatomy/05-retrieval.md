@@ -656,7 +656,7 @@ The right claim from these numbers is therefore:
 > latency. The next unit of retrieval quality is a rescore over the base's own top-100.*
 
 Full design, arms and stop rule:
-`issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/REPORT.md`.
+`evidence/graph-inertia.md`.
 
 ### Where the architecture does pay — the budget, not the cut
 

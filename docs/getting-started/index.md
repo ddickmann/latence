@@ -10,14 +10,26 @@ Everything ships CPU-first and offline by default ([ADR-0007](../adr/0007-cpu-fi
 so you can run a full pipeline on a laptop with no GPU and no network:
 
 ```bash
-pip install latence-core
+# Install from a clone — nothing is published to PyPI (see the note below).
+git clone https://github.com/ddickmann/latence-framework
+cd latence-framework
+uv sync
 
 # 1. A guided wizard emits ONE opinionated, quality-baked stack config (ADR-0041).
-latence setup
+uv run latence setup
 
 # 2. Run that config end-to-end over your documents.
-latence process --config stack.yaml --input ./my-documents --out ./corpus
+uv run latence process --config stack.yaml --input ./my-documents --out ./corpus
 ```
+
+!!! note "Why a clone, and not `pip install`"
+    Nothing is published to PyPI: the distribution channel is the signed GitHub Release
+    ([ADR-0062](../adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md),
+    whose rationale is superseded and whose decision is reopened — not reversed — by
+    [ADR-0063](../adr/0063-relicence-to-apache-2-0.md)). A `pip install latence-core` today
+    fails with `ERROR: No matching distribution found`. `uv sync` installs the whole
+    CPU-first workspace from the clone, which is what every command on this page assumes;
+    the [quickstart](../quickstart.md) walks the same install step by step.
 
 `latence process` runs the wizard-produced stack and writes the RAG corpus + knowledge
 graph, plus a first-class [Quality Report](../adr/0008-quality-report-as-first-class-artifact.md)
@@ -25,8 +37,8 @@ substantiating the "AI-ready" claim.
 
 ```bash
 # 3. Read the results — a read-only, offline, localhost console over what the run wrote.
-pip install latence-console
-latence-console ./corpus
+#    `latence-console` is already in the environment `uv sync` built.
+uv run latence-console ./corpus
 ```
 
 `latence-console` serves the run list and each run's Quality Report as **headline quality

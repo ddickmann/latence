@@ -553,11 +553,13 @@ class LightOnOcrParser(AdapterBase):
 def size_after_parse(record: DocumentRecord) -> int:
     """Assembled-markdown size in bytes — the Provenance 'size-after-parse' (S2 observability).
 
-    The per-record view the Runner sums across parsed records into the Quality Report's
-    ``ParseQuality.bytes_after_parse``. Mirrors the in-core / pdfplumber Parser helper so a Pipeline
-    that swaps this Provider in gets the same observability signal.
+    A one-line delegation to :attr:`~latence_core.contracts.DocumentRecord.size_after_parse`,
+    which is where the rule lives: the size is a property of the record, not of the Parser that
+    produced it. Kept as a module-level function because this package publishes the name in its
+    ``__all__``; every Parser package delegates to the same implementation, so the signal the
+    Runner sums into ``ParseQuality.bytes_after_parse`` cannot drift between Providers.
     """
-    return len(record.content.encode("utf-8"))
+    return record.size_after_parse
 
 
 # The recoverable rasterisation failure now lives in the shared rasteriser (:class:`RasterFailure`).

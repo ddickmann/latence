@@ -34,7 +34,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import re
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -60,6 +59,7 @@ from latence_core.providers.profile import (
     REPO_LICENSE_SOURCE,
     ProviderProfile,
 )
+from latence_core.redaction_survival import occurs_as_phrase, word_tokens
 from latence_core.subprovider import (
     build_sub_provider,
     owner_label,
@@ -186,10 +186,10 @@ def _corpus_text(row: dict[str, Any], *, unmasked: bool = False) -> str:
 # The redaction-survival token space (ADR-0053): lower-cased ``\w+`` runs. An entity surface is
 # tested as a whole word/phrase against the redacted corpus text, NEVER as a bare substring — so a
 # masked name whose letters happen to sit inside a surviving word (``"ann"`` inside ``"annual"``) is
-# NOT counted as surviving. The same gate the SPLADE composition Provider applies to its injected
-# entity terms (``latence_splade``): one REDACTION-BY-DEFAULT rule, expressed the same way on both
-# inspectable sinks.
-_WORD = re.compile(r"\w+", re.UNICODE)
+# NOT counted as surviving. The rule itself lives ONCE, in
+# :mod:`latence_core.redaction_survival`, and the SPLADE composition Provider imports the same two
+# functions for its injected entity terms — so the two inspectable sinks apply one
+# REDACTION-BY-DEFAULT rule rather than two copies of it.
 
 # The Context Enricher renders every neighbor triple as ``{src} —{label}→ {tgt}`` (the
 # ``context_enrichment`` arrow constants). These markers recover the two ENDPOINT canonical names —
@@ -197,26 +197,6 @@ _WORD = re.compile(r"\w+", re.UNICODE)
 # surface) as a name.
 _TRIPLE_ARROW_L = " —"
 _TRIPLE_ARROW_R = "→ "
-
-
-def _word_tokens(text: str) -> list[str]:
-    """Lower-cased word tokens of ``text`` (the redaction-survival token space, ADR-0053)."""
-    return _WORD.findall(text.casefold())
-
-
-def _occurs_as_phrase(needle: list[str], haystack: list[str]) -> bool:
-    """True iff ``needle`` occurs as a contiguous run of word tokens in ``haystack``.
-
-    Word-boundary survival, not substring: a single-token surface must match a whole surviving
-    token (``["ann"]`` does NOT survive inside ``["annual"]``), and a multi-word surface must
-    survive as an adjacent run. An empty ``needle`` (a punctuation-only surface) never survives; the
-    check mirrors the SPLADE provider's redaction gate so the two inspectable sinks apply the
-    identical REDACTION-BY-DEFAULT rule.
-    """
-    n = len(needle)
-    if n == 0:
-        return False
-    return any(haystack[start : start + n] == needle for start in range(len(haystack) - n + 1))
 
 
 def _triple_endpoint_surfaces(triple: str) -> list[str]:
@@ -266,7 +246,7 @@ def _redacted_context_header(header: dict[str, Any], redacted_text: str) -> dict
     actually redacted (``masked_content`` present); an un-redacted corpus removed nothing to
     re-leak, so its header is exported byte-identical (:func:`_redact_exported_headers`).
     """
-    haystack = _word_tokens(redacted_text)
+    haystack = word_tokens(redacted_text)
 
     entities = header.get("entities") or []
     entity_types = header.get("entity_types") or []
@@ -285,7 +265,7 @@ def _redacted_context_header(header: dict[str, Any], redacted_text: str) -> dict
     kept_centrality: list[Any] = []
     kept_community: list[Any] = []
     for idx, name in enumerate(entities):
-        if not _occurs_as_phrase(_word_tokens(str(name)), haystack):
+        if not occurs_as_phrase(word_tokens(str(name)), haystack):
             continue
         kept_entities.append(name)
         if idx < len(entity_types):
@@ -304,7 +284,7 @@ def _redacted_context_header(header: dict[str, Any], redacted_text: str) -> dict
         triple
         for triple in triples
         if all(
-            _occurs_as_phrase(_word_tokens(surface), haystack)
+            occurs_as_phrase(word_tokens(surface), haystack)
             for surface in _triple_endpoint_surfaces(str(triple))
         )
     ]

@@ -38,6 +38,15 @@ secrets.*
 # Maintainer-local competitive review (issue #189): candid competitor/gap notes that
 # were never intended to ship on a public repo or docs site. Kept on disk, out of git.
 docs/COMPETITIVE-GAP-ANALYSIS.md
+# Maintainer-internal operating material dropped from the shipping tree for the same reason:
+# a go-live checklist, the provenance memos naming the private predecessor repos and costing
+# their reinvention, deck speaker notes, and a per-PR review whose asks have all shipped.
+# Restore a local copy with `git show <ref>:<path>` if you need one; it stays out of git.
+docs/GO-LIVE-RUNBOOK.md
+docs/PORTING-MAP.md
+docs/ASSET-INVENTORY.md
+docs/PITCH-SLIDES.md
+docs/audits/
 benchmark/enterprise-gold/store/
 # official eval data: dataset-derived artifacts stay local (HotpotQA CC BY-SA share-alike,
 # ticket 02); judgments/maps/results are committed, corpora+exports+gold regenerate via
@@ -100,6 +109,12 @@ issues/GITHUB-MAP.md
 issues/RELEASE-FLEET.md
 # This scrub's own audit: it necessarily quotes the identifiers it removed.
 issues/wayfinder-enterprise-serving/tickets/05-part-b-inventory.md
+# Part A of the same pass: an editorial rating of five named third-party projects that
+# also tabulates two external maintainers' email addresses. Same grounds as Part B.
+issues/wayfinder-enterprise-serving/tickets/05-part-a-comparison.md
+# Local experiment traces from the same tree (their own .gitignore went with the
+# roadmap condensation, so the rule has to live here to keep them unpublishable).
+issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/traces/
 # Maintainer-local assistant tooling.
 .claude/
 # Build-harness scripts: they drive a maintainer-local agent harness, hardcode a
@@ -110,3 +125,9 @@ orchestration/
 # STATE.json is rewritten on every stage transition. No test reads either.
 benchmark/sota-campaign/campaign.yaml
 benchmark/sota-campaign/STATE.json
+# Decision memo addressed to the maintainer in second person (names a personal account and
+# PyPI identity). Kept on disk; never published. ADR-0062 is the public decision record.
+issues/05-decisions.local.md
+# Internal session status report (names the maintainer, another session's in-flight files, and
+# gitignored FINDINGS). Kept on disk; the measured evidence it summarises is published separately.
+issues/04-enterprise-readiness.local.md

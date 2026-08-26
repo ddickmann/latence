@@ -1,6 +1,6 @@
 """Disambiguation engine — the ported entity-resolution / linking / normalisation assets (S8).
 
-Ported faithfully (PORT-AS-IS, ASSET-INVENTORY.md) from three private
+Ported faithfully — as-is — from three private
 ``latenceai-dataset-intelligence`` assets, re-homed here as one pure, contract-free,
 CPU-viable, deterministic engine behind the single Disambiguation seam:
 

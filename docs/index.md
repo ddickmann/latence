@@ -127,13 +127,11 @@ and you should not need to hunt for anything else.
 
     1. **[Decision Log (ADRs)](adr/index.md)** — the authoritative source. Every seam has
        a record with the context, the choice, and the alternatives rejected.
-    2. **[Architecture audit (S1)](audits/S1-architecture-audit.md)** — the adversarial
-       four-lens review of the walking skeleton, kept as the worked example of the bar.
-    3. **[Releasing](RELEASING.md)** — one version across every publishable distribution,
+    2. **[Releasing](RELEASING.md)** — one version across every publishable distribution,
        and the gate that must be green before a tag.
-    4. **[Continuity & security process](CONTINUITY.md)** — how vulnerabilities are
+    3. **[Continuity & security process](CONTINUITY.md)** — how vulnerabilities are
        handled, and what happens if the maintainer stops.
-    5. `CONTRIBUTING.md` in the repository root — the local dev loop, the merge gate, and
+    4. `CONTRIBUTING.md` in the repository root — the local dev loop, the merge gate, and
        the doc-truth tests that fail the build when a page drifts from the code.
 
 ## Browse by section
@@ -171,18 +169,27 @@ and you should not need to hunt for anything else.
 
 ## Install
 
-```bash
-# The dependency-light core: contracts, Capability protocols, Pipeline, local Runner, Storage.
-pip install latence-core
+Nothing is published to PyPI — the distribution channel is the signed GitHub Release
+([ADR-0062](adr/0062-distribution-is-signed-github-releases-only-no-pypi-under-polyform-noncommercial.md),
+whose rationale is superseded and whose decision is reopened, not reversed, by
+[ADR-0063](adr/0063-relicence-to-apache-2-0.md)). You install from a clone:
 
-# Providers are separate packages — install only what a stack needs, e.g.:
-pip install latence-parser-pdfplumber   # CPU PDF parser
-pip install latence-ner-gliner          # learned zero-shot NER
+```bash
+git clone https://github.com/ddickmann/latence-framework
+cd latence-framework
+uv sync
+
+# Providers are separate packages — add only what a stack needs, by path, e.g.:
+uv pip install -e packages/latence-parser-pdfplumber   # CPU PDF parser
+uv pip install -e packages/latence-ner-gliner          # learned zero-shot NER
 ```
 
-The core has near-zero dependencies ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)):
+`uv sync` installs the dependency-light core — contracts, Capability protocols, Pipeline,
+local Runner, Storage and the `latence` CLI — plus the CPU-first, offline default set. The
+core has near-zero dependencies ([ADR-0016](adr/0016-thin-core-per-provider-packages.md)):
 `pydantic`, `fsspec`, `pyarrow`, `pyyaml`, `typer`. Heavy model stacks live in their own
-Provider packages, so `pip install latence-core` stays lean.
+Provider packages, so the core stays lean. Step-by-step: the
+[quickstart](quickstart.md).
 
 !!! note "Project status"
     Latence is a personally-owned, open-source framework licensed under the

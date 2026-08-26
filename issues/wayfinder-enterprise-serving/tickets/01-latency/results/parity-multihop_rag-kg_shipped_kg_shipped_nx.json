@@ -1,8 +1,0 @@
-{
-  "dataset": "multihop_rag",
-  "diffs": 0,
-  "skipped_resume_offset": 0,
-  "queries": 2556,
-  "kg_shipped": 2556,
-  "kg_shipped_nx": 2556
-}

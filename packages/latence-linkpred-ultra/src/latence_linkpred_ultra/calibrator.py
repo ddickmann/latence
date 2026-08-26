@@ -3,9 +3,9 @@
 The calibrator the learned :mod:`~latence_linkpred_ultra.provider` runs over raw scorer outputs so
 what it emits as an edge's ``confidence`` is a **calibrated probability**, never a raw model score,
 and so it only emits an edge whose calibrated probability clears a configurable **target
-precision**. This is the ASSET-INVENTORY *calibrator* discipline (the Link-prediction stack, 5/5,
-PORT-AS-IS): temperature scaling (Guo et al. 2017) + precision-targeted thresholds. It is pure
-math (no torch), so it is unit-testable offline.
+precision**. This is the predecessor stack's *calibrator* discipline, ported as-is from its
+link-prediction stack: temperature scaling (Guo et al. 2017) + precision-targeted
+thresholds. It is pure math (no torch), so it is unit-testable offline.
 
 Enterprise honesty (why this exists): a raw ULTRA/PyKEEN score is an *unbounded logit-like* number
 whose scale is arbitrary; presenting it as a 0..1 confidence would be a fabricated calibration. The

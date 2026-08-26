@@ -105,9 +105,8 @@ A rehearsal with a **real** signature needs an **existing** tag: the run is disp
 that tag as its input and every job checks it out, and the signature itself is minted from
 the run's OIDC identity. So this rehearses a tag that is already on origin (a previous
 release, or the one you just pushed) without creating or touching a release. *Before* a tag
-exists, rehearse [locally](#rehearsing-locally) instead (the go-live runbook's
-[Step 3](GO-LIVE-RUNBOOK.md#step-3--cut-the-first-release-signed--sbom) does exactly that) —
-it covers everything except the signature.
+exists, rehearse [locally](#rehearsing-locally) instead — that is the first command of
+[Cutting the tag](#cutting-the-tag), and it covers everything except the signature.
 
 ```
 Actions → Release → Run workflow
@@ -223,6 +222,42 @@ The heavy lanes not covered by `verify-local.sh` (MinIO `s3://` e2e, the real-Ai
 tests) run in `ci-heavy.yml` on the PR and on push to `main`; confirm those are green on
 the commit you are about to tag.
 
+## Cutting the tag
+
+The tag push **is** the release: everything before it is rehearsal and everything after it
+is automated. Run these three in order.
+
+```bash
+# 1. Rehearse LOCALLY — build + SBOM + SHA256SUMS + VERIFY.md, everything except the
+#    signature. This is the only pre-flight that exists before the tag does: a Sigstore
+#    signature is minted from the workflow run's OIDC identity, a workflow_dispatch checks
+#    out its `tag` input, and that tag must exist on origin — so nothing can sign v0.1.0
+#    until v0.1.0 is pushed, and pushing it is the real release (step 2).
+for pkg in packages/*/; do uv build "$pkg" --out-dir dist; done
+bash scripts/release-integrity.sh --tag v0.1.0 --dist dist --out release-assets --no-sign
+(cd release-assets && shasum -a 256 -c SHA256SUMS)   # then read release-assets/VERIFY.md
+
+# 2. Then, for real. The tag push runs on refs/tags/v0.1.0, which is the identity the
+#    published VERIFY.md pins.
+git tag -a v0.1.0 -m "latence-framework 0.1.0"
+git push origin v0.1.0
+
+# 3. Optional, AFTER the tag exists: re-run the signed flow artifact-only. `--ref` is what
+#    Sigstore certifies — omit it and the run dispatches on the default branch and signs
+#    under `…/release.yml@refs/heads/main`, an identity no release ever pins.
+gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0 -f dry_run=true
+gh run watch          # download the `release-assets` artifact and read VERIFY.md
+```
+
+The tag push runs `build` → `release-integrity` (CycloneDX SBOM + `SHA256SUMS` + a keyless
+Sigstore bundle) → `github-release`. The release job refuses to publish if the Sigstore
+bundle is missing.
+
+**Check:** run the [adopter-side verification](#how-an-adopter-verifies-a-release) against
+the published assets, from a directory that contains nothing but the downloads. If
+`sigstore verify` fails, the release is not trustworthy — delete it and investigate before
+going further.
+
 ## Versioning
 
 - Scheme: [SemVer](https://semver.org/). `0.x` — minor bumps may still break APIs.
@@ -298,8 +333,19 @@ in its `if:` condition and gated behind a protected `pypi` GitHub Environment. T
     and re-running the workflow for that tag re-reads the same disabled definition.
     Dispatching from a branch instead is refused by the non-tag signing-identity guard. Every
     run states its own gate status in the job summary (**PyPI publish gate: DISABLED /
-    ENABLED at this ref**); the recovery options for an already-cut tag are in
-    [`GO-LIVE-RUNBOOK.md`](GO-LIVE-RUNBOOK.md) → Step 4.
+    ENABLED at this ref**) — read that line before concluding a publish happened.
+
+    **If you already cut and signed the tag without the enable**, do not re-run the workflow
+    and expect an upload. Choose one:
+
+    - **Preferred — ship it in the next tag.** Merge the enable to `main` and cut `v0.1.1`.
+      The signed `v0.1.0` release stays valid and untouched, and nothing an adopter may have
+      already downloaded or pinned is invalidated.
+    - **Re-cut `v0.1.0`.** Delete the GitHub Release *and* the tag, re-tag the post-enable
+      commit, and redo [Cutting the tag](#cutting-the-tag) in full. This **destroys the
+      already-published `v0.1.0` assets**: their Sigstore bundle and `SHA256SUMS` certify the
+      old commit, so any copy an adopter already holds stops matching what the name now
+      resolves to. Only do this if you are certain nothing has been downloaded.
 
 Optional dry run: point the publish step at TestPyPI first by setting
 `repository-url: https://test.pypi.org/legacy/` (a commented hint is in the workflow).

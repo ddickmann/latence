@@ -31,7 +31,7 @@ this: "Graph Assembly (S9) reuses [Evidence] verbatim for per-edge justification
 ## Deterministic, content-addressed IDs (the ported builder asset)
 
 The named asset for this slice is the **Graph builder + EvidenceRecord provenance**
-(`dataset-intelligence/graph/builder.py`, ASSET-INVENTORY.md, 5/5, **PORT-AS-IS**), re-homed
+(`dataset-intelligence/graph/builder.py`, rated 5/5 in the asset review and taken **as-is**), re-homed
 in the pure `latence_core.graph` engine. Its algorithmic value is preserved verbatim:
 
 - **`make_graph_id`** — the ported `_make_id`: a node/edge id is a sha256 over a stable key

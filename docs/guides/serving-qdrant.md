@@ -1,6 +1,10 @@
 # Serving with Qdrant — the benched stack on a real ANN engine
 
-> **Status: measured, live.** Every number on this page comes from a live Qdrant v1.19.0
+> **Status: measured, live.** The full result, with method and per-dataset cells, is
+> [Served on Qdrant: recall parity](../evidence/enterprise-serving-02-qdrant-serving-parity.md);
+> the graph-latency result behind it is
+> [Graph latency at scale](../evidence/enterprise-serving-01-latency.md).
+> Every number on this page comes from a live Qdrant v1.19.0
 > (Docker, single node) serving real pipeline Exports, scored over the **full** gold query sets
 > of the e2e benchmark campaign — no mocks anywhere in the measured path
 > (ticket `wayfinder-enterprise-serving/02`; raw results in `benchmark/serving/results/`).

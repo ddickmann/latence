@@ -1,9 +1,9 @@
 """Endpoint lifecycle + ref-counted lease + retry-with-jitter (PORTED, S12).
 
 Ported and generalized from the private ``pipeline-worker/endpoint_lifecycle.py`` and
-``pipeline-worker/retry_utils.py`` assets (ASSET-INVENTORY: "Endpoint lifecycle / ref-counted
-lease → PORT-WITH-HARDENING, generalized off RunPod"; "Retry w/ jitter + error classing →
-EXTRACT-ALGORITHM-ONLY"). The private originals hard-wired RunPod serverless endpoint IDs, a
+``pipeline-worker/retry_utils.py`` assets: the endpoint lifecycle / ref-counted lease was
+ported WITH HARDENING and generalized off RunPod, and the retry-with-jitter + error classing
+was taken as an ALGORITHM ONLY. The private originals hard-wired RunPod serverless endpoint IDs, a
 Supabase job table, and B2 for weights; this port keeps *only the algorithm* — reference-counted
 lease so N concurrent Stages sharing one heavy inference endpoint spin it up once and tear it down
 once, plus the exponential-backoff-with-jitter retry that classes 5xx/429 as retryable and 4xx as
@@ -74,6 +74,45 @@ class EndpointError(ProviderError):
         if self.status is None:
             return True
         return is_retryable_status(self.status)
+
+
+def classify_exception(exc: Exception) -> EndpointError:
+    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry.
+
+    An exception exposing an HTTP ``status_code`` (the OpenAI client's ``APIStatusError`` shape) is
+    classed by that status (429/5xx retryable, other 4xx terminal); anything else — a timeout, a
+    dropped connection, a client-library error with no status — is a transport error, and an
+    :class:`EndpointError` with ``status is None`` is retryable by construction.
+
+    This is the ADR-0034 native-error → typed-error boundary that EVERY OpenAI-client Provider sits
+    behind (``embedder``/``ner``/``parser`` endpoints, ``parser.lighton-vllm``, ``relation.llm``,
+    ``schema-inducer``). It was six byte-identical copies, one per package, differing only in how
+    much of the rule each docstring restated — six independently-editable answers to the one
+    question "is this failure worth retrying?". It belongs next to :class:`EndpointError`,
+    :class:`RetryPolicy`, :func:`call_with_retry` and :func:`is_retryable_status`, which are what
+    it feeds and which those packages already import from here.
+
+    Deliberately duck-typed on ``status_code`` rather than on ``openai.APIStatusError``: this
+    module imports no network client (ADR-0016), and the same attribute is exposed by httpx-based
+    and vendor clients alike, so a Provider on a different client gets the same classing free.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return EndpointError(str(exc), status=status)
+    return EndpointError(str(exc))
+
+
+async def async_noop_sleep(_delay: float) -> None:
+    """The async backoff sleep the endpoint Providers inject: a no-op, awaited.
+
+    :func:`async_call_with_retry` requires an awaitable ``sleep``; the endpoint Providers pass this
+    one, the async twin of the sync path's ``lambda _delay: None``. In their batch context the
+    ported retry's value is the CLASSING plus the ``endpoint_retries`` tally, not wall-time
+    backoff, and an instant sleep keeps a seeded test instant and byte-stable. A deployment that
+    wants real pacing injects ``asyncio.sleep`` instead — the seam is the injection point, and
+    nothing here forecloses it.
+    """
+    return None
 
 
 @dataclass(frozen=True)

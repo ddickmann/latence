@@ -96,7 +96,7 @@ stages:
 
   - name: disambiguate
     capability: disambiguation
-    provider: disambiguation.cascade   # ported EntityResolver cascade (ASSET-INVENTORY, S8)
+    provider: disambiguation.cascade   # ported EntityResolver cascade (S8)
     depends_on: [entities, relations]
     config:
       kb:

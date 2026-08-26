@@ -199,7 +199,7 @@ This is the **G1-passed** posture: a documented threat model (malicious files, p
 injection, PII leakage, secret handling, SSRF via Source URIs) with the controls above
 implemented and adversarially tested against pathological inputs — zip bombs, type-spoofed
 PDFs, cross-chunk injection, oversized files, secret-laden config. See
-`issues/gate/G1-RESULTS.md`; known residuals are enumerated there rather than papered over.
+`docs/evidence/G1-RESULTS.md`; known residuals are enumerated there rather than papered over.
 
 This is **not yet a 1.0 release.** Performance at scale, deeper structural file validation,
 and dependency-CVE gating are tracked as Phase-2 hardening.

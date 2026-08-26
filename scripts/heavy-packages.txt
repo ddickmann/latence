@@ -1,0 +1,40 @@
+# The heavy/endpoint Provider packages: workspace members that are deliberately NOT dependencies
+# of the dev environment. torch/transformers, apache-airflow, the openai client, the Presidio/spaCy
+# stack and the GLinker/ULTRA stacks would each break the CPU-first, offline, deterministic test
+# environment (ADR-0007/0016), so only their SOURCE is installed, with --no-deps. Their tests
+# inject a faithful fake for the heavy dependency, or take an Airflow-free in-process path.
+#
+# --no-deps is also what lets BOTH gliner2 majors' tests run in ONE venv (ADR-0064):
+# latence-extract-gliner2 / latence-pii-gliner2 pin gliner2>=1.3,<2 while latence-gliner25 pins
+# >=2.0,<3. No resolver can satisfy that pair — and none has to, because neither library is
+# installed at all. It is also why latence-gliner25 is excluded from the uv workspace: `uv lock`
+# DOES resolve the members together, and correctly refuses the pair.
+#
+# THIS FILE IS THE SINGLE SOURCE. It is read by `make sync`, scripts/verify-local.sh and
+# .github/actions/setup-workspace/action.yml, and gated by
+# packages/latence-core/tests/test_heavy_package_list.py. It previously existed as three
+# hand-synchronised copies; the Makefile's drifted to 9 of 21 entries, so a contributor who
+# followed AGENTS.md and ran `make sync && make test` got a red suite for environment reasons.
+# Blank lines and #-comments are ignored; one package name per line.
+
+latence-ner-gliner
+latence-relation-gliner
+latence-relation-llm
+latence-pii-gliner
+latence-pii-gliner2
+latence-extract-gliner2
+latence-gliner25
+latence-pii-presidio
+latence-parser-endpoint
+latence-ner-endpoint
+latence-embedder-endpoint
+latence-embedder-st
+latence-runner-airflow
+latence-parser-lighton
+latence-parser-lighton-vllm
+latence-parser-glm
+latence-linkpred-ultra
+latence-schema-inducer
+latence-parser-render
+latence-disambig-glinker
+latence-splade

@@ -1,8 +1,8 @@
 """Affected-set incremental disambiguation — the recast IncrementalLinker (S11, ADR-0018).
 
-The private stack's ``incremental_linker`` (ASSET-INVENTORY.md, RECAST) linked a delta's new
-mentions against the *existing* KB — good for attach-to-known, but it structurally could not
-catch two cases ADR-0018 calls out:
+The private stack's ``incremental_linker`` — recast here rather than re-homed as-is —
+linked a delta's new mentions against the *existing* KB — good for attach-to-known, but it
+structurally could not catch two cases ADR-0018 calls out:
 
 * **merge-on-add** — two pre-existing entity clusters that should MERGE when a *bridging*
   document arrives (a doc whose mentions connect surfaces that were previously in separate

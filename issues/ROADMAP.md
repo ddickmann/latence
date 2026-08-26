@@ -36,7 +36,7 @@ Hardening order is by risk/impact, not strict linear; each Hn is blocked only by
 
 ## Post-v1 (preserved backlog, unblocked by v1 completion)
 
-P1 retrieval-serving · P2 compression · P3 link-prediction (ULTRA) · P4 formal-ontology · P5 source-connectors · P6 trace-scoring. Each ports catalogued IP (`../docs/ASSET-INVENTORY.md`).
+P1 retrieval-serving · P2 compression · P3 link-prediction (ULTRA) · P4 formal-ontology · P5 source-connectors · P6 trace-scoring. Each ports catalogued IP mined from the maintainer's earlier private implementations (ADR-0002).
 
 ## Critical path to first end-to-end KG
 

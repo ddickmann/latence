@@ -3,8 +3,8 @@
 The candidate generator the learned :mod:`~latence_linkpred_ultra.provider` scores. Given the
 observed KG — node types (from the node labels) and observed ``(head, label, tail)`` edges — it
 proposes the ``(head, relation, tail)`` triples worth scoring, so the learned scorer never has to
-rank the full ``N x R x N`` product. It is the ASSET-INVENTORY *candidate_generator* discipline
-(the Link-prediction stack, 5/5, PORT-AS-IS): **type-aware** + **tiered 2-hop** + **bounded** with a
+rank the full ``N x R x N`` product. It is the predecessor stack's *candidate_generator* discipline,
+ported as-is from its link-prediction stack: **type-aware** + **tiered 2-hop** + **bounded** with a
 **rare-relation recall guarantee**, and every cap that drops a candidate is logged (no silent
 truncation).
 

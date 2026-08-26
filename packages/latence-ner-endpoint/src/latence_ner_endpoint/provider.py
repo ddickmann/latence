@@ -41,7 +41,12 @@ import random
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import EntityMention
-from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
+from latence_core.endpoint import (
+    EndpointPool,
+    RetryPolicy,
+    call_with_retry,
+    classify_exception,
+)
 from latence_core.offsetmap import OffsetIndex
 from latence_core.page_index import PageIndexResolver
 from latence_core.providers.profile import (
@@ -284,7 +289,7 @@ class EndpointEntityExtractor:
                 ],
             )
         except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError below
-            raise _classify_exception(exc) from exc
+            raise classify_exception(exc) from exc
         content = response.choices[0].message.content or "{}"
         try:
             parsed = json.loads(content)
@@ -315,9 +320,3 @@ class EndpointEntityExtractor:
         return chunk_prov.model_copy(update=update)
 
 
-def _classify_exception(exc: Exception) -> EndpointError:
-    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry."""
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return EndpointError(str(exc), status=status)
-    return EndpointError(str(exc))

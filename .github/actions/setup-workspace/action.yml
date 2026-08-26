@@ -30,18 +30,12 @@ runs:
     # the GLinker/ULTRA stacks would all break the CPU-first, offline, deterministic test
     # env — ADR-0007/0016). Install ONLY their source (no deps) so their src is
     # type-checked and their offline tests (which monkeypatch the heavy/endpoint dep with a
-    # fake, or use the Airflow-free in-process path) collect and run. This list is kept
-    # byte-identical to the one in scripts/verify-local.sh.
+    # fake, or use the Airflow-free in-process path) collect and run. The list is read from
+    # scripts/heavy-packages.txt, the single source shared with the Makefile and
+    # scripts/verify-local.sh; it used to be a hand-synchronised copy.
     - name: Install heavy/endpoint Provider sources (no heavy deps)
       shell: bash
       run: |
-        for p in latence-ner-gliner latence-relation-gliner latence-relation-llm \
-                 latence-pii-gliner latence-pii-gliner2 latence-extract-gliner2 \
-                 latence-gliner25 \
-                 latence-pii-presidio latence-parser-endpoint latence-ner-endpoint \
-                 latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
-                 latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \
-                 latence-linkpred-ultra latence-schema-inducer latence-parser-render \
-                 latence-disambig-glinker latence-splade; do
+        while read -r p; do
           uv pip install --no-deps -e "packages/$p"
-        done
+        done < <(grep -vE '^[[:space:]]*(#|$)' scripts/heavy-packages.txt)

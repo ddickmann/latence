@@ -170,8 +170,7 @@ MRR and degrades retrieval is a failure.
 
 ## 4. Reproduction
 
-Reproduced by
-[`issues/e2e-extended/RUNBOOK.md`](https://github.com/ddickmann/latence-framework/blob/main/issues/e2e-extended/RUNBOOK.md). Corpus
-acquisition: `bash benchmark/corpus/fetch_corpus.sh`.
+Reproduced by running the enterprise profile end to end on the stated hardware; corpus
+acquisition is `bash benchmark/corpus/fetch_corpus.sh`.
 
 **Corpus:** `PENDING:repro-corpus` · **Date:** `PENDING:repro-date`

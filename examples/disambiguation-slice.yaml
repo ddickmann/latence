@@ -18,7 +18,7 @@
 # Relation Extraction (the relations it normalises). Drop the `relations` edge for an
 # entity-only disambiguation.
 #
-# PORTED ALGORITHMIC ASSETS (all PORT-AS-IS, ASSET-INVENTORY.md), re-homed in the pure
+# PORTED ALGORITHMIC ASSETS (all taken as-is), re-homed in the pure
 # `latence_core.disambiguation` engine: the EntityResolver 5-strategy cascade (exact ->
 # alias -> acronym -> substring -> embedding) + Union-Find + audited merge log; the GLinker
 # L2->L3->L4->L0 linking cascade with KB-text fallback; the RelationNormalizer (alias/fuzzy

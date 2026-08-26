@@ -64,7 +64,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import RelationMention
-from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
+from latence_core.endpoint import (
+    RetryPolicy,
+    async_noop_sleep,
+    call_with_retry_async,
+    classify_exception,
+)
 from latence_core.induced import LabelSlot, effective_labels
 from latence_core.page_index import pages_for_covering_span
 from latence_core.providers.profile import (
@@ -95,16 +100,6 @@ _SYSTEM_PROMPT = (
     '{"relations": [{"head": <int>, "tail": <int>, "label": "<relation>", '
     '"confidence": <0..1>}]}. Emit no relation you cannot support from the text.'
 )
-
-
-async def _async_noop_sleep(_delay: float) -> None:
-    """The injected async backoff sleep — a no-op, mirroring the sync path's ``lambda _d: None``.
-
-    The endpoint Providers pass an instant sleep to the ported retry (the retry's value is the
-    classing + the ``endpoint_retries`` tally, not wall-time backoff in this batch context); keeping
-    it a no-op makes a seeded test instant and byte-stable and preserves the pre-W6 behaviour.
-    """
-    return None
 
 
 @dataclass(frozen=True)
@@ -402,14 +397,14 @@ class LLMRelationExtractor:
                     ],
                 )
             except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError
-                raise _classify_exception(exc) from exc
+                raise classify_exception(exc) from exc
             return response.choices[0].message.content or "{}"
 
         result = await call_with_retry_async(
             do_call,
             self._policy,
             rng=self._rng.random,
-            sleep=_async_noop_sleep,
+            sleep=async_noop_sleep,
             on_retry=self._count_retry,
         )
         return str(result)
@@ -453,19 +448,6 @@ class LLMRelationExtractor:
                 confidence = self._default_confidence
             confidence = min(max(confidence, 0.0), 1.0)
             yield head, tail, label, confidence
-
-
-def _classify_exception(exc: Exception) -> EndpointError:
-    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry.
-
-    An exception exposing an HTTP ``status_code`` (the OpenAI client's ``APIStatusError`` shape) is
-    classed by that status (429/5xx retryable, other 4xx terminal); anything else is a transport
-    error → retryable. Mirrors the NER/Parse endpoint Providers exactly.
-    """
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return EndpointError(str(exc), status=status)
-    return EndpointError(str(exc))
 
 
 # -- shared text/page-map/provenance helpers (mirror the core provider) ------

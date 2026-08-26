@@ -28,7 +28,7 @@
 #      export.knowledge_graph, off Graph Assembly), loadable into Neo4j, a triple store, or a
 #      graph-RAG engine.
 #
-# PORTED ALGORITHMIC ASSET (PORT-AS-IS, ASSET-INVENTORY.md): the Graph builder + EvidenceRecord
+# PORTED ALGORITHMIC ASSET (taken as-is): the Graph builder + EvidenceRecord
 # provenance (dataset-intelligence/graph/builder.py), re-homed in the pure latence_core.graph
 # engine — content-addressed sha256 ids, endpoint validation (no dangling edges), and Evidence
 # links.

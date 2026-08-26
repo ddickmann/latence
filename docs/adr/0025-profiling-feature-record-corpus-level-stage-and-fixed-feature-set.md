@@ -46,10 +46,10 @@ errors only if a non-empty input carries no `DocumentRecord` (a mis-wired Parse 
 
 ## One fixed, closed feature set — the 9-enricher registry is recast away
 
-The private `dataset-intelligence` stack computed features through a dynamic **registry**
-of nine enrichers (PORTING-MAP.md: "9 enrichers as a registry → consolidate; the registry
-is heavier than a fixed set needs"; ASSET-INVENTORY.md S7: "consolidate into one
-`document_features` + `corpus_features` module … RECAST (simplify registry)"). We port the
+The predecessor stack computed features through a dynamic **registry**
+of nine enrichers. That port was scoped as a **recast**, not a faithful re-home: the registry
+is heavier than a fixed set needs, so the nine enrichers consolidate into one
+`document_features` + `corpus_features` module. We port the
 *algorithms* faithfully — density, a dependency-free Flesch-style readability normalised to
 `[0, 1]`, a least-squares Zipfian-α fit, a zlib compression ratio as a redundancy proxy,
 plus the cross-document entity frequency / co-occurrence / type-consensus / source-coverage
@@ -64,8 +64,8 @@ contract, the same "framework owns the seam" stance as the rest of the spine.
 ## The feature pass is streaming with bounded aggregate state, never whole-corpus-in-RAM
 
 The S7 acceptance criterion requires the feature pass to make no whole-corpus-in-RAM
-assumption (PORTING-MAP.md keeps the private stack's "feature disk-spilling under memory
-pressure" motivation for this Stage). So the engine's cross-document aggregation is a
+assumption — the predecessor stack had to spill features to disk under memory pressure,
+and that motivation carries over to this Stage. So the engine's cross-document aggregation is a
 streaming `CorpusAggregator`: documents are folded in one at a time and the corpus *text*
 is never held whole — the reference Provider drives it from a generator over the document
 stream, so text is processed and released document by document.

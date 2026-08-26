@@ -112,10 +112,11 @@ discipline*):
   the framework without reverse-engineering it.
 - **The work itself is version-controlled**, not in a private tracker: `issues/`
   carries the issue records, the definition-of-done tiers, and the roadmaps.
-- **Provenance of the code is recorded**: [`docs/PORTING-MAP.md`](PORTING-MAP.md),
-  [`docs/ASSET-INVENTORY.md`](ASSET-INVENTORY.md), and
-  [ADR-0002](adr/0002-clean-monorepo-mined-from-private-repos.md) document where
-  each ported asset came from and that the history is clean.
+- **Provenance of the code is recorded**:
+  [ADR-0002](adr/0002-clean-monorepo-mined-from-private-repos.md) records that this
+  monorepo was mined from the maintainer's own earlier implementations into a clean,
+  single-author history, and every ported asset names its origin and the terms of its
+  port in its own module docstring and in the ADR that adopted it.
 
 This is the real continuity mitigation. A successor maintainer inherits the
 decisions and the vocabulary, not just the source.
@@ -300,7 +301,7 @@ you will be asked for:
 | Documented security risk assessment | [`docs/THREAT-MODEL.md`](THREAT-MODEL.md) — trust boundaries, mitigations, residual risks |
 | Secure-by-default configuration | scheme allowlist denying `http`/`ftp`/`sftp` by default, two Screening checkpoints, universal redaction floor ([ADR-0044](adr/0044-universal-redaction-floor-and-optional-mask-before-extract.md)) |
 | Integrity & authenticity of the delivered artifact | keyless Sigstore signature over `SHA256SUMS` + the VERIFY.md instruction sheet, produced by `scripts/release-integrity.sh` (§5.4) |
-| Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `issues/gate/G1-RESULTS.md` |
+| Evidence that fixes are tested | `scripts/verify-local.sh`; the profound-testing gate record in `docs/evidence/G1-RESULTS.md` |
 | Ability to remediate independently of the supplier | Apache-2.0 §2's irrevocable right to prepare and distribute derivative works + reproducible local gate (§2) — for **any** use, commercial included, with no agreement and no dependence on the maintainer |
 
 **What it does not give you**, and you must cover yourself: automated dependency-CVE
@@ -331,7 +332,7 @@ goes red — so this page cannot quietly become aspirational.
 | SBOM on demand, release-time | `scripts/generate-sbom.sh`, [`docs/SBOM.md`](SBOM.md) |
 | Supply-chain controls | `.github/dependabot.yml`, `.github/workflows/codeql.yml`, `.github/workflows/scorecard.yml`, `scripts/secret_scan_gate.py`, `.secrets.baseline` |
 | Reproducible merge gate without CI | `scripts/verify-local.sh` |
-| Testing gate record | `issues/gate/G1-RESULTS.md` |
+| Testing gate record | `docs/evidence/G1-RESULTS.md` |
 
 **Sources for the CRA dates:**
 [EC — CRA policy page](https://digital-strategy.ec.europa.eu/en/policies/cyber-resilience-act),

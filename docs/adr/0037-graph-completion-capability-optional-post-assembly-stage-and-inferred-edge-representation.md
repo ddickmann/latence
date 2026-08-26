@@ -12,8 +12,9 @@ Runner), ADR-0036 (Provider ecosystem: profile, conformance, bake-off).
 ## Context
 
 ADR-0005 deferred **link prediction** from v1 (sequencing + dependency surface, not asset quality);
-the ASSET-INVENTORY records the preserved **Link prediction stack**
-(`link_prediction/{scorer,ultra_scorer,candidate_generator,calibrator}.py`, 5/5, PORT-AS-IS):
+the preserved **Link prediction stack**
+(`link_prediction/{scorer,ultra_scorer,candidate_generator,calibrator}.py`, rated 5/5 in the
+asset review and taken as-is) is:
 **ULTRA** (ICLR'24, inductive/zero-shot) + PyKEEN behind one scorer abstraction, type-aware tiered
 2-hop candidate generation with a recall guarantee, temperature scaling + precision-targeted
 thresholds. ADR-0027 already anticipated the split: every S9 edge carries `is_predicted=False`, "so
@@ -103,7 +104,7 @@ order).
 
 ### 7. Slice 2 (NOT this slice): the learned ULTRA/PyKEEN scorer behind the same seam
 
-Slice 2 (`latence-linkpred-ultra`, an isolated package per ADR-0016) ports the ASSET-INVENTORY link
+Slice 2 (`latence-linkpred-ultra`, an isolated package per ADR-0016) ports that preserved link
 prediction stack behind this same `GraphCompleter` seam: **ULTRA** (inductive/zero-shot) + PyKEEN
 scorer, the type-aware tiered 2-hop candidate generator (recall guarantee), the temperature-scaling
 calibrator (`calibrated=True`), and MRR/Hits@k evaluation surfaced in the bake-off. **Licenses,

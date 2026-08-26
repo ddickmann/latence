@@ -285,7 +285,7 @@ def test_docs_do_not_cite_a_gate_literal_that_release_yml_lacks() -> None:
     """
     workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
     executable = str(yaml.safe_load(workflow)["jobs"]["pypi-publish"]["if"])
-    for relpath in ("docs/CONTINUITY.md", "docs/GO-LIVE-RUNBOOK.md", "docs/RELEASING.md"):
+    for relpath in ("docs/CONTINUITY.md", "docs/RELEASING.md"):
         text = (_REPO_ROOT / relpath).read_text()
         for cited in re.findall(r"`(if: [^`\n]+)`", text):
             assert cited in workflow or cited.rstrip(" …") in executable, (

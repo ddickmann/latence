@@ -703,6 +703,24 @@ class DocumentRecord(Record):
         ),
     )
 
+    @property
+    def size_after_parse(self) -> int:
+        """Assembled-markdown size in bytes — the Provenance 'size-after-parse' (S2).
+
+        A property of the RECORD, not of any Parser: it reads ``content`` and nothing else, so
+        every Parser that produced one of these answers it identically. It used to be six
+        byte-identical ``size_after_parse(record)`` helpers, one per Parser package, each
+        docstring claiming to "mirror" the others — six copies of the same one-liner is six
+        chances for the signal the Runner sums into ``ParseQuality.bytes_after_parse`` to stop
+        meaning the same thing across Providers. Those helpers survive as one-line delegations to
+        this property, because each package publishes its own in ``__all__``.
+
+        UTF-8 because that is the encoding the Parse seam assembles markdown in; the count is of
+        ENCODED BYTES, not characters, so a document of accented or CJK text reports the size a
+        sink actually stores.
+        """
+        return len(self.content.encode("utf-8"))
+
     @model_validator(mode="after")
     def _disposition_consistent(self) -> DocumentRecord:
         if self.disposition is Disposition.PARSE_ERROR:
@@ -2014,10 +2032,9 @@ class Evidence(BaseModel):
 class MergeStrategy(StrEnum):
     """Which resolver strategy justified a merge/link decision (ported EntityResolver cascade).
 
-    The ported ``resolution/entity_resolver.py`` asset (ASSET-INVENTORY.md, 5/5,
-    PORT-AS-IS) resolves entity mentions with a **5-strategy cascade**, tried in order of
-    descending precision so the strongest available signal wins and the reason is
-    auditable:
+    The ported ``resolution/entity_resolver.py`` asset — taken as-is — resolves entity
+    mentions with a **5-strategy cascade**, tried in order of descending precision so the
+    strongest available signal wins and the reason is auditable:
 
     * ``EXACT`` — identical normalised surface strings (case/whitespace-folded).
     * ``ALIAS`` — a configured alias/synonym maps one surface to another's canonical.
@@ -2154,7 +2171,7 @@ class CanonicalEntity(Record):
 class NormalizedRelation(Record):
     """A relation remapped onto canonical entities, label normalised (ported RelationNormalizer).
 
-    The ported ``relations/normalizer.py`` asset (ASSET-INVENTORY.md, 4.5/5, PORT-AS-IS):
+    The ported ``relations/normalizer.py`` asset, taken as-is:
     GLinker-style relation L2 resolution — fuzzy + alias label normalisation, type
     filtering, and **inverse detection + direction swap** (an ``employed_by`` relation
     whose configured inverse is ``employs`` is rewritten to the canonical direction). A

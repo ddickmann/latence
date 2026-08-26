@@ -55,7 +55,7 @@ and errors only if a non-empty input carries no `EntityMention` (a mis-wired Ent
 
 ## The ported algorithmic assets — PORT-AS-IS behind the Disambiguator seam
 
-The three strongest v1 assets (ASSET-INVENTORY.md, all PORT-AS-IS) are re-homed faithfully
+The three strongest v1 assets — all taken as-is from the predecessor implementation — are re-homed faithfully
 in the pure `latence_core.disambiguation` engine, keeping the *algorithmic value* verbatim
 while dropping vendor coupling:
 

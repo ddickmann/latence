@@ -1,7 +1,0 @@
-{
-  "dataset": "wiki2multihop",
-  "diffs": 0,
-  "skipped_resume_offset": 0,
-  "queries": 12576,
-  "kg_shipped": 12576
-}

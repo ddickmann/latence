@@ -64,8 +64,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from latence_core.errors import ProviderError
+from latence_core.providers import load_sentence_transformer as _load_sentence_transformer
 from latence_core.providers.adapter import AdapterBase
-from latence_core.providers.perf import load_sentence_transformer as _load_sentence_transformer
 from latence_core.providers.profile import ProviderProfile
 
 if TYPE_CHECKING:

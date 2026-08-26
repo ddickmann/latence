@@ -35,16 +35,9 @@ uv sync
 # library is installed at all. Each package's tests inject their own faithful fake. That is also
 # why latence-gliner25 is excluded from the uv workspace (see the root pyproject.toml): `uv lock`
 # DOES resolve the members together, and correctly refuses the pair.
-for p in latence-ner-gliner latence-relation-gliner latence-relation-llm latence-pii-gliner \
-         latence-pii-gliner2 latence-extract-gliner2 latence-gliner25 latence-pii-presidio \
-         latence-parser-endpoint \
-         latence-ner-endpoint \
-         latence-embedder-endpoint latence-embedder-st latence-runner-airflow \
-         latence-parser-lighton latence-parser-lighton-vllm latence-parser-glm \
-         latence-linkpred-ultra latence-schema-inducer latence-parser-render \
-         latence-disambig-glinker latence-splade; do
+while read -r p; do
   [ -d "packages/$p" ] && uv pip install --no-deps -e "packages/$p" >/dev/null 2>&1 || true
-done
+done < <(grep -vE '^[[:space:]]*(#|$)' scripts/heavy-packages.txt)
 ok "workspace synced + heavy sources installed --no-deps"
 
 # Editable installs must resolve into THIS checkout. The venv is shared, and a session that

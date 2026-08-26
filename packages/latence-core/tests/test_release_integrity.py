@@ -604,8 +604,8 @@ def test_a_real_release_refuses_a_non_tag_signing_identity() -> None:
 # --------------------------------------------------------------------------------------
 # The PyPI enable is only reachable from the ref that is allowed to publish
 #
-# A run executes the workflow DEFINITION from the ref it is on. The go-live runbook used to
-# say: remove the `false &&`, "Commit that change on `main`", then "Re-run the release
+# A run executes the workflow DEFINITION from the ref it is on. The PyPI enable procedure used
+# to say: remove the `false &&`, "Commit that change on `main`", then "Re-run the release
 # workflow for the tag" — which cannot publish anything, ever. The run on refs/tags/v0.1.0
 # re-reads release.yml AS IT EXISTS AT THAT TAG, still short-circuited, so `pypi-publish` is
 # skipped: exit 0, green run, nothing on PyPI, no annotation, no summary line. And the escape
@@ -617,53 +617,57 @@ def test_a_real_release_refuses_a_non_tag_signing_identity() -> None:
 # --------------------------------------------------------------------------------------
 
 _GATE_STATUS = _REPO_ROOT / "scripts" / "pypi-gate-status.sh"
-_RUNBOOK = _REPO_ROOT / "docs" / "GO-LIVE-RUNBOOK.md"
+_RELEASING = _REPO_ROOT / "docs" / "RELEASING.md"
 
 
-def _runbook_step_4() -> str:
-    """The PyPI section of the go-live runbook, up to the next top-level step."""
-    text = _RUNBOOK.read_text()
-    start = text.index("## Step 4 — publish to PyPI")
+def _pypi_enable_procedure() -> str:
+    """The PyPI enable procedure in docs/RELEASING.md, up to the next top-level section."""
+    text = _RELEASING.read_text()
+    start = text.index("### If the decision is taken the other way")
     return text[start : text.index("\n## ", start + 1)]
 
 
-def test_go_live_runbook_does_not_prescribe_an_unreachable_pypi_enable() -> None:
-    """Step 4 must not tell the maintainer to enable on `main` and re-run an existing tag.
+def test_pypi_enable_procedure_is_not_an_unreachable_ordering() -> None:
+    """It must not tell the maintainer to enable on `main` and re-run an existing tag.
 
     That sequence is a deadlock, not a slow path: the workflow definition comes from the tag
     ref, so the enable can never be in force for a tag that predates it.
     """
-    step4 = _runbook_step_4()
+    step4 = _pypi_enable_procedure()
 
     assert "Commit that change on `main`." not in step4, (
-        "Step 4 still tells the maintainer to commit the PyPI enable on `main` after the tag "
+        "The enable procedure still tells the maintainer to commit the PyPI enable on `main` "
+        "after the tag "
         "was cut — a run on the tag executes the definition AT THE TAG, which is still "
         "short-circuited, so `pypi-publish` is skipped and nothing is ever published"
     )
     assert not re.search(r"Re-run the release workflow for the tag", step4), (
-        "Step 4 still prescribes re-running the workflow for the existing tag as the way to "
+        "The enable procedure still prescribes re-running the workflow for the existing tag "
+        "as the way to "
         "publish; re-running re-reads the same disabled definition from that same tag ref"
     )
 
     # The reachable ordering must be stated, not merely implied by the absence of the bad one.
     assert re.search(r"before\b[^.]*\btag\b", step4, re.IGNORECASE), (
-        "Step 4 must say the enable has to land BEFORE the tag is cut"
+        "The enable procedure must say the enable has to land BEFORE the tag is cut"
     )
     # ...and the already-tagged case must be answered honestly, including its real cost.
     assert "already cut" in step4, (
-        "Step 4 must cover the case where the tag was already cut without the enable — "
+        "The enable procedure must cover the case where the tag was already cut without the "
+        "enable — "
         "otherwise the maintainer who followed the old order has no documented way out"
     )
     assert re.search(r"destroys|invalidat", step4, re.IGNORECASE), (
-        "Step 4 must state that re-cutting the tag destroys the already-published signed "
+        "The enable procedure must state that re-cutting the tag destroys the already-published "
+        "signed "
         "assets; offering that recovery without its cost trades one silent failure for a worse one"
     )
 
 
 # --------------------------------------------------------------------------------------
-# The go-live rehearsal has to be a command that can actually run
+# The documented rehearsal has to be a command that can actually run
 #
-# Step 3 used to dispatch `release.yml -f tag=v0.1.0 -f dry_run=true` BEFORE creating the
+# The tag-cutting section used to dispatch `release.yml -f tag=v0.1.0 -f dry_run=true` BEFORE creating the
 # tag. Every workflow_dispatch supplies `tag` (it is required), and both jobs check out
 # `${{ github.event.inputs.tag || github.ref }}` — so that run dies at the first step of the
 # first job with `couldn't find remote ref v0.1.0`. And `gh workflow run` without `--ref`
@@ -672,10 +676,10 @@ def test_go_live_runbook_does_not_prescribe_an_unreachable_pypi_enable() -> None
 # --------------------------------------------------------------------------------------
 
 
-def _runbook_step_3() -> str:
-    """The release section of the go-live runbook, up to the next top-level step."""
-    text = _RUNBOOK.read_text()
-    start = text.index("## Step 3 — cut the first release")
+def _cutting_the_tag() -> str:
+    """The tag-cutting section of docs/RELEASING.md, up to the next top-level section."""
+    text = _RELEASING.read_text()
+    start = text.index("## Cutting the tag")
     return text[start : text.index("\n## ", start + 1)]
 
 
@@ -685,7 +689,7 @@ def _shell_blocks(section: str) -> list[str]:
 
 def test_go_live_rehearsal_never_dispatches_a_tag_that_does_not_exist_yet() -> None:
     """A dispatch checks out the `tag` input, so the tag must already be on origin."""
-    for block in _shell_blocks(_runbook_step_3()):
+    for block in _shell_blocks(_cutting_the_tag()):
         pushed_at: dict[str, int] = {}
         for lineno, line in enumerate(block.splitlines()):
             pushed = re.search(r"git push \S+ (v[0-9][^\s]*)", line)
@@ -695,7 +699,7 @@ def test_go_live_rehearsal_never_dispatches_a_tag_that_does_not_exist_yet() -> N
             if dispatched:
                 tag = dispatched.group(1)
                 assert tag in pushed_at and pushed_at[tag] < lineno, (
-                    f"the runbook dispatches release.yml with tag={tag} before `git push` "
+                    f"docs/RELEASING.md dispatches release.yml with tag={tag} before `git push` "
                     f"puts {tag} on origin. Both jobs check out `github.event.inputs.tag`, so "
                     f"this run fails at the very first step with `couldn't find remote ref "
                     f"{tag}` — the maintainer's first contact with the release flow is a hard "
@@ -729,19 +733,21 @@ def test_documented_workflow_dispatches_pin_the_tag_as_the_run_ref() -> None:
         )
 
 
-def test_go_live_still_offers_a_pre_tag_rehearsal_and_says_why_it_is_unsigned() -> None:
+def test_release_docs_still_offer_a_pre_tag_rehearsal_and_say_why_it_is_unsigned() -> None:
     """Removing the impossible dispatch must not remove the pre-flight it stood for."""
-    step3 = _runbook_step_3()
+    step3 = _cutting_the_tag()
 
     assert "--no-sign" in step3, (
-        "Step 3 no longer offers any rehearsal before the tag is cut. The local unsigned run "
+        "docs/RELEASING.md no longer offers any rehearsal before the tag is cut. The local "
+        "unsigned run "
         "of release-integrity.sh is the only pre-flight that is possible pre-tag — dropping it "
         "leaves the first exposure of the release machinery to be the real release"
     )
     assert re.search(r"sign", step3, re.IGNORECASE) and re.search(
         r"OIDC|identity|tag (must )?exist", step3, re.IGNORECASE
     ), (
-        "Step 3 must state WHY the local rehearsal is unsigned — a Sigstore signature needs "
+        "The tag-cutting section must state WHY the local rehearsal is unsigned — a Sigstore "
+        "signature needs "
         "the workflow's OIDC identity, which needs the tag to already be on origin"
     )
 

@@ -1,7 +1,7 @@
 """Write-Ahead Log — the ported crash-safe atomic-commit engine (PORT-AS-IS, S11).
 
-Ported faithfully from ``latenceai-dataset-intelligence/state/write_ahead_log.py``
-(ASSET-INVENTORY.md, 5/5, PORT-AS-IS), re-homed on the framework's
+Ported faithfully — as-is — from
+``latenceai-dataset-intelligence/state/write_ahead_log.py``, re-homed on the framework's
 :class:`~latence_core.storage.Storage` seam (ADR-0009) rather than raw ``os`` calls, so it
 works over local disk, S3, GCS, or Azure with no change. The algorithmic value is preserved
 verbatim: **temp-write → manifest-write → atomic rename**, with crash recovery driven by a

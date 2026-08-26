@@ -110,8 +110,10 @@ from latence_core.endpoint import (
     EndpointLease,
     EndpointPool,
     RetryPolicy,
+    async_noop_sleep,
     call_with_retry,
     call_with_retry_async,
+    classify_exception,
     is_retryable_status,
 )
 from latence_core.errors import (
@@ -425,8 +427,10 @@ __all__ = [
     "score_relations",
     "select_device",
     "strip_markup",
+    "async_noop_sleep",
     "call_with_retry",
     "call_with_retry_async",
+    "classify_exception",
     "is_retryable_status",
     "topological_order",
 ]

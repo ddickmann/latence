@@ -229,6 +229,6 @@ Restated from `SECURITY.md` so this document is self-contained:
 This is the **G1-passed, pre-1.0** posture: a documented threat model with the
 controls above implemented and adversarially tested (zip bombs, type-spoofed PDFs,
 cross-chunk injection, oversized files, secret-laden config) — see
-`issues/gate/G1-RESULTS.md`. Performance-at-scale, deeper structural file validation,
+`docs/evidence/G1-RESULTS.md`. Performance-at-scale, deeper structural file validation,
 and dependency-CVE gating are the tracked Phase-2 hardening items, enumerated rather
 than papered over.

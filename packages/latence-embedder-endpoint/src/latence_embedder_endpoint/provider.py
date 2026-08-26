@@ -23,7 +23,13 @@ import os
 import random
 from typing import TYPE_CHECKING, Any
 
-from latence_core.endpoint import EndpointError, EndpointPool, RetryPolicy, call_with_retry
+from latence_core.endpoint import (
+    EndpointError,
+    EndpointPool,
+    RetryPolicy,
+    call_with_retry,
+    classify_exception,
+)
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
@@ -185,15 +191,9 @@ class EndpointEmbedder:
         try:
             response = client.embeddings.create(model=self._model, input=batch)
         except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError below
-            raise _classify_exception(exc) from exc
+            raise classify_exception(exc) from exc
         # OpenAI-compatible shape: response.data[i].embedding, ordered by input index.
         ordered = sorted(response.data, key=lambda d: d.index)
         return [[float(x) for x in d.embedding] for d in ordered]
 
 
-def _classify_exception(exc: Exception) -> EndpointError:
-    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry."""
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return EndpointError(str(exc), status=status)
-    return EndpointError(str(exc))

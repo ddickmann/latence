@@ -20,11 +20,12 @@ contract every Wave-1 provider adapter is written against — dependency-light, 
   and Provenance/offset carry over the existing OffsetIndex/PageOffsetIndex seam
   (ADR-0031). Convenience, never a required layer — a Provider still satisfies a
   Capability structurally without it.
-* :mod:`~latence_core.providers.perf` — the **load choreography**: three deep entry
+* :mod:`~latence_core.providers.perf` — the **load choreography**: four deep entry
   points (:func:`~latence_core.providers.perf.load_gliner_model`,
   :func:`~latence_core.providers.perf.load_gliner2_model`,
-  :func:`~latence_core.providers.perf.load_transformers_model`), one per native-library
-  family, each of which takes a backbone-import factory + a
+  :func:`~latence_core.providers.perf.load_transformers_model`,
+  :func:`~latence_core.providers.perf.load_sentence_transformer`), one per
+  native-library family, each of which takes a backbone-import factory + a
   :class:`~latence_core.providers.device.DeviceDecision` and returns a model that is
   ready to run. The ordering the three field bugs (#190/#191/the bare ``.to``) came out
   of lives inside them. Re-exported here because this index is where a Provider author
@@ -44,6 +45,7 @@ from latence_core.providers.device import (
 from latence_core.providers.perf import (
     load_gliner2_model,
     load_gliner_model,
+    load_sentence_transformer,
     load_transformers_model,
 )
 from latence_core.providers.profile import (
@@ -68,6 +70,7 @@ __all__ = [
     "cuda_available",
     "load_gliner2_model",
     "load_gliner_model",
+    "load_sentence_transformer",
     "load_transformers_model",
     "profile_of",
     "select_device",

@@ -1,9 +1,10 @@
 """Corpus profiling engine — the consolidated, ported enricher set (S7).
 
-Ported by RECAST from the ``latenceai-dataset-intelligence`` enrichment stack
-(ASSET-INVENTORY.md / PORTING-MAP.md: "9 enrichers as a registry → consolidate; the
-registry is heavier than a fixed set needs" and "Feature disk-spilling under memory
-pressure → KEEP, Profiling Stage"). The private stack's nine enrichers — density,
+Ported by RECAST from the ``latenceai-dataset-intelligence`` enrichment stack. Two
+scoping notes carried over from that port: its nine enrichers were a dynamic registry,
+heavier than a fixed feature set needs (so the port consolidates them), and its
+feature disk-spilling under memory pressure is a motivation this Stage keeps. The
+predecessor stack's nine enrichers — density,
 readability, Zipf, compression, structure, entity frequency, co-occurrence, type
 consensus, source coverage — are re-homed here as **one fixed feature set** behind
 two pure functions, dropping the dynamic registry indirection. What is preserved

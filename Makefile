@@ -9,11 +9,13 @@ export PYTHONHASHSEED := 0
 # deps (torch/transformers, apache-airflow, the openai client would break the
 # CPU-first, offline test env — ADR-0007/0016). Install ONLY their source, so
 # their offline tests (which monkeypatch the heavy dep, or use the Airflow-free
-# in-process path) collect and run. Mirrors .github/workflows/ci.yml.
-HEAVY_PKGS := \
-	latence-ner-gliner latence-relation-gliner latence-relation-llm \
-	latence-pii-gliner latence-parser-endpoint latence-ner-endpoint \
-	latence-embedder-endpoint latence-runner-airflow latence-disambig-glinker
+# in-process path) collect and run.
+#
+# The list is read from scripts/heavy-packages.txt, which is the SINGLE SOURCE
+# shared with scripts/verify-local.sh and .github/actions/setup-workspace. It used
+# to be duplicated here by hand and had drifted to 9 of 21 entries, so `make sync`
+# left 12 Providers unregistered and `make test` went red for environment reasons.
+HEAVY_PKGS := $(shell grep -vE '^[[:space:]]*(\#|$$)' scripts/heavy-packages.txt)
 
 # Every package with a typed source tree (mirrors CI's mypy target list).
 ALL_PKGS := \

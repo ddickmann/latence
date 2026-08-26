@@ -270,7 +270,8 @@ jobs:
   #      "Refuse to publish under a non-tag signing identity" step above rejects any non-dry run
   #      whose signing identity is not `…@refs/tags/<tag>`. The tag is the only ref allowed to
   #      publish, so the tag must be the ref that carries the enable.
-  #      Already tagged? See docs/GO-LIVE-RUNBOOK.md → Step 4 for the two recovery options.
+  #      Already tagged? See docs/RELEASING.md → "If the decision is taken the other way"
+  #      for the two recovery options.
   # ----------------------------------------------------------------------------------
   pypi-publish:
     name: Publish to PyPI (Trusted Publishing — DISABLED by ADR-0062)

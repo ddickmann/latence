@@ -19,7 +19,7 @@ deterministic solver — recall-per-token at zero marginal LLM cost is the posit
 > The base stage (dense+BM25 RRF) is doing the work, and the next unit of quality is a rescore
 > over *its* top-100, worth up to +0.37. Enable the graph lanes for the property below — that
 > they cannot make retrieval worse — not for a recall gain. See
-> `issues/wayfinder-enterprise-serving/tickets/06-graph-inertia/REPORT.md`.
+> `../evidence/graph-inertia.md`.
 
 ## Why this shape (and not fusion)
 

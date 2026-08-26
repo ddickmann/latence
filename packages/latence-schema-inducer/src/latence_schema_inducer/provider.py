@@ -106,7 +106,13 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
 from latence_core.contracts import InducedLabels
-from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry_async
+from latence_core.endpoint import (
+    EndpointError,
+    RetryPolicy,
+    async_noop_sleep,
+    call_with_retry_async,
+    classify_exception,
+)
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
     REPO_LICENSE_SOURCE,
@@ -167,16 +173,6 @@ _EMPTY_AFTER_SANITIZATION = "empty-after-sanitization"
 
 class _Truncated(Exception):
     """Internal signal: the reply's ``finish_reason`` was ``length`` (truncated, safety net #2)."""
-
-
-async def _async_noop_sleep(_delay: float) -> None:
-    """The injected async backoff sleep — a no-op, mirroring the sync path's ``lambda _d: None``.
-
-    The endpoint Providers pass an instant sleep to the ported retry (the retry's value is the
-    classing + the ``endpoint_retries`` tally, not wall-time backoff in this batch context); keeping
-    it a no-op makes a seeded test instant and byte-stable and preserves the pre-W6 behaviour.
-    """
-    return None
 
 
 class LLMLabelInducer:
@@ -928,7 +924,7 @@ class LLMLabelInducer:
             try:
                 response = await client.chat.completions.create(**request)
             except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError
-                raise _classify_exception(exc) from exc
+                raise classify_exception(exc) from exc
             self._count_usage(response)
             choice = response.choices[0]
             content = choice.message.content or ""
@@ -939,7 +935,7 @@ class LLMLabelInducer:
             do_call,
             self._policy,
             rng=self._rng.random,
-            sleep=_async_noop_sleep,
+            sleep=async_noop_sleep,
             on_retry=self._count_retry,
         )
         content, finish_reason = cast("tuple[str, str | None]", result)
@@ -1112,15 +1108,3 @@ def _validate_schema(obj: dict[str, Any]) -> dict[str, list[str]] | None:
     return out
 
 
-def _classify_exception(exc: Exception) -> EndpointError:
-    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry.
-
-    An exception exposing an HTTP ``status_code`` (the OpenAI client's ``APIStatusError`` shape) is
-    classed by that status (429/5xx retryable, other 4xx terminal); anything else is a transport
-    error → retryable. Mirrors the other endpoint Providers exactly. A terminal / exhausted failure
-    re-raises up to the Provider's fail-open guard (which returns config labels, never crashes).
-    """
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return EndpointError(str(exc), status=status)
-    return EndpointError(str(exc))

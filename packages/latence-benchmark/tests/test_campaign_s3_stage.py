@@ -255,9 +255,26 @@ class TestPreps:
 
 class TestPollLoop:
     def test_returns_on_done(self) -> None:
+        """It returns on ``done`` — having POLLED THROUGH the two ``running`` states first.
+
+        Asserting only that the call returns proves nothing: a loop that returned on the very
+        first ``running`` reading would pass that too. The scripted sequence is the assertion —
+        three state reads (one per scripted state, the third being ``done``) and exactly two
+        sleeps, one after each non-terminal reading.
+        """
         pod = FakePod(states={"uda": [("running", 1), ("running", 2), ("done", 9)]})
         clock = FakeClock()
+
         poll_pipeline_run(pod, "uda", clock=clock, sleep=clock.sleep)
+
+        reads = [cmd for cmd in pod.commands if f"du -sk {REMOTE_ROOT}/uda" in cmd]
+        assert len(reads) == 3, (
+            f"the poll consumed {len(reads)} state readings, not the whole scripted sequence — "
+            f"it did not run to `done`"
+        )
+        assert clock.now == 2 * pipeline_stage.POLL_INTERVAL_S, (
+            f"expected one sleep per non-terminal reading; the clock advanced to {clock.now}"
+        )
 
     def test_stalled_bytes_block_after_the_budget(self) -> None:
         pod = FakePod(states={"uda": [("running", 5)]})  # bytes never grow

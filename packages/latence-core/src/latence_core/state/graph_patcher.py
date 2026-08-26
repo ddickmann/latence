@@ -1,7 +1,7 @@
 """Graph patcher — the ported Evidence-provenance record retract/add engine (PORT-AS-IS, S11).
 
-Ported faithfully from ``latenceai-dataset-intelligence/graph/patcher.py``
-(ASSET-INVENTORY.md, 5/5, PORT-AS-IS). The algorithmic value is preserved verbatim:
+Ported faithfully — as-is — from ``latenceai-dataset-intelligence/graph/patcher.py``.
+The algorithmic value is preserved verbatim:
 **retract records by their source-document provenance**, so a deletion is surgical (touching
 only the records a document actually contributed to) rather than a full-corpus rebuild. The
 private stack retracted graph *edges* by ``source_document_ids``; here the same technique is

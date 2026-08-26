@@ -23,13 +23,13 @@ faithful fake — so the deep composition/gating behaviour is exercised offline 
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from latence_core.capability import SparseVector
 from latence_core.errors import ConfigError
 from latence_core.providers.device import select_device
 from latence_core.providers.profile import UNVERIFIED_LICENSE, ProviderProfile
+from latence_core.redaction_survival import occurs_as_phrase, word_tokens
 
 from latence_splade.composition import EntityTerm, SpladeInput, compose
 from latence_splade.model import SpladeModel, TransformersSpladeModel
@@ -46,32 +46,11 @@ _DEFAULT_METADATA_BOOST = 1.0
 _DEFAULT_MODEL_WEIGHT = 1.0
 _MODES = ("inject", "weighted")
 
-# Word tokens for the redaction survival check: lower-cased ``\w+`` runs, mirroring the model's
-# lower-cased subword vocabulary. Used to test whether a masked surface still occurs as a whole
-# token/phrase in the redacted text — NOT as a bare substring (which would re-leak a masked name
-# whose letters happen to sit inside a surviving word, e.g. "ann" inside "annual").
-_WORD = re.compile(r"\w+", re.UNICODE)
-
-
-def _word_tokens(text: str) -> list[str]:
-    """Lower-cased word tokens of ``text`` (the redaction-gate token space)."""
-    return _WORD.findall(text.casefold())
-
-
-def _occurs_as_phrase(needle: list[str], haystack: list[str]) -> bool:
-    """True iff the token list ``needle`` occurs as a contiguous sub-sequence of ``haystack``.
-
-    Word-boundary survival: a single-token surface must match a whole surviving token (``ann`` does
-    NOT survive inside ``annual``), and a multi-word surface (``["john", "smith"]``) must survive as
-    an adjacent run. An empty ``needle`` (a punctuation-only surface with no word tokens) never
-    survives — there is nothing that could have been redacted, and it injects no ids regardless.
-    """
-    n = len(needle)
-    if n == 0:
-        return False
-    return any(
-        haystack[start : start + n] == needle for start in range(len(haystack) - n + 1)
-    )
+# The redaction survival check is the SHARED ADR-0053 rule (:mod:`latence_core.redaction_survival`),
+# not a local copy: a masked surface survives only as a whole token/phrase in the redacted text,
+# never as a bare substring (which would re-leak a masked name whose letters happen to sit inside a
+# surviving word, e.g. "ann" inside "annual"). The Export Stage's header/triple gate imports the
+# same two functions, so both inspectable sinks apply one rule.
 
 
 class SpladeCompositionEmbedder:
@@ -305,11 +284,11 @@ class SpladeCompositionEmbedder:
         a masked ``"ann"`` does NOT survive inside the surviving word ``"annual"`` (a bare ``in``
         substring test would re-leak it), and a multi-word surface must survive as an adjacent run.
         """
-        haystack = _word_tokens(item.text)
+        haystack = word_tokens(item.text)
         legs: list[tuple[list[int], float]] = []
         for entity in item.entities:
             surface = entity.surface
-            if self._redact and not _occurs_as_phrase(_word_tokens(surface), haystack):
+            if self._redact and not occurs_as_phrase(word_tokens(surface), haystack):
                 continue
             ids = model.term_ids(surface)
             if ids:

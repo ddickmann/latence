@@ -151,7 +151,7 @@ The equivalence property is verified two ways, permanently:
   batch, compared against a full rebuild of the same final corpus: exported row sets, graph
   topology (nodes/edges/hyperedges), BM25 statistics, and retrieval rankings on the real query
   set; embeddings bitwise where the device's determinism permits, else a measured, documented
-  tolerance. Results live in `issues/wayfinder-enterprise-serving/tickets/03-report.md`; every
+  tolerance. Results live in `docs/evidence/enterprise-serving-03-incremental-ingest.md`; every
   deliberate divergence is measured there — none is silent.
 
 ## Consequences

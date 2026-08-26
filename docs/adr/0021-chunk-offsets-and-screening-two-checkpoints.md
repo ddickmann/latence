@@ -7,9 +7,9 @@ answers, recorded here.
 
 ## The chunking asset is a core engine; the Chunker is a thin Provider over it
 
-The ported orchestrator asset (ASSET-INVENTORY.md: pipeline-worker
-`orchestrator.py` — "18-pattern markup stripping + token budgeting", PORT-AS-IS,
-"strip RunPod/B2", lands in S3 Chunk) is offset-preserving text processing. A chunk
+The ported orchestrator asset — the predecessor implementation's 18-pattern markup
+stripping + token budgeting, taken as-is with its vendor coupling stripped out, landing in
+S3 Chunk — is offset-preserving text processing. A chunk
 boundary is an offset, and that offset must resolve back to a source **page** via
 `PageOffsetIndex` — a core Provenance concern (ADR-0020) every downstream Stage
 (Entity Extraction spans, Disambiguation Evidence offsets) also needs.

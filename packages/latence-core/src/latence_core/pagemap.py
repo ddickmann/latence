@@ -1,7 +1,7 @@
 """PageOffsetIndex — offset→page resolution over a parsed document (ADR asset port).
 
-Ported faithfully from the dataset-intelligence ``page_mapper.py`` asset
-(ASSET-INVENTORY.md: PORT-AS-IS, "Provenance integrity", lands in S2/S8). The
+Ported faithfully — as-is — from the dataset-intelligence ``page_mapper.py`` asset,
+landing in S2/S8. The
 job is Provenance integrity: after Parse concatenates a document's pages into one
 markdown string, *any* downstream character offset (a chunk boundary, an entity
 mention span) must resolve back to the original source page it came from — so a

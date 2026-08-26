@@ -21,8 +21,8 @@
 project's published artifacts are, for now, distributed **only** as
 signed GitHub Releases (wheels + sdists + CycloneDX SBOM + `SHA256SUMS` + its Sigstore bundle).
 Nothing is uploaded to PyPI. Follows from [ADR-0055](0055-relicence-to-polyform-noncommercial.md)
-(the relicence to PolyForm Noncommercial 1.0.0) and settles decision **D1** of
-`issues/wayfinder-enterprise-serving/tickets/05-decisions.md`. No contract, schema or API change.
+(the relicence to PolyForm Noncommercial 1.0.0) and settles the distribution question this ADR
+is named for. No contract, schema or API change.
 
 ## Context
 
@@ -46,9 +46,8 @@ royalty-free and on the SPDX License List (PEP 639 metadata accepts
 prohibition — that distinction matters, because a future maintainer who finds this decision needs
 to know that reversing it is a policy call and not a licensing fight.
 
-None of the five reference repositories surveyed in
-`issues/wayfinder-enterprise-serving/tickets/05-part-a-comparison.md` is a clean precedent (all
-five are permissively licensed), but the *shape* is established at the top of the field: qdrant
+None of the five comparable open-source repositories surveyed at the time is a clean precedent
+(all five are permissively licensed), but the *shape* is established at the top of the field: qdrant
 ships binaries and signed images with no PyPI; `NousResearch/hermes-agent` has no PyPI workflow at
 all — a curl installer plus Docker — at 230k stars. "Signed GitHub Releases, no PyPI" is a normal
 distribution posture, not a consolation prize.

@@ -17,6 +17,52 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
 
 ### Changed
 
+- **The repository is prepared for public launch: internal material out, an agent-facing entry
+  point in.** Five maintainer-internal documents left the shipping tree — `docs/GO-LIVE-RUNBOOK.md`
+  (which named the scrubbed competitor review *and* the commit it remains reachable at, and
+  disclosed an open supply-chain gap), `docs/PORTING-MAP.md` and `docs/ASSET-INVENTORY.md` (which
+  named four private predecessor repositories, a hosted product and a vendor bill-optimisation
+  hack, and costed the reinvention of that IP), `docs/PITCH-SLIDES.md` (sales speaker notes,
+  already out of the nav but still published on GitHub) and `docs/audits/S1-architecture-audit.md`
+  (whose asks had all shipped — its `ParserInput` recommendation is ADR-0019 — so it read as a
+  stalled to-do list). **Nothing was merely de-linked:** the release-process content the runbook
+  carried moved into `docs/RELEASING.md` under a new *Cutting the tag* section, the three
+  `test_release_integrity.py` guards that policed that prose were re-anchored to it with every
+  assertion intact, and ADR and source-comment references were rewritten to stand alone — the
+  borrowed fact inlined, the pointer dropped — because an ADR records why a decision was made and
+  is not revised by a scrub. The signed G1 evidence was promoted out of `issues/` into
+  `docs/evidence/`, where a reader can actually reach it.
+- **The README is a front door again — 554 lines to 230** — and it opens with a pointer for coding
+  agents, which is how most readers now arrive. Two new files serve them: `llms.txt` (the
+  `llmstxt.org`-format index) and `docs/agent-briefing.md`, which is written for an LLM agent
+  rather than adapted from human docs — the mental model, every Provider available at each Stage
+  with the CPU-first default marked, the pipeline YAML contract, the CLI, the output schema, the
+  retrieval wiring and the traps. `AGENTS.md` now routes between the two audiences; it previously
+  had no use-the-framework path at all, and its one gesture at one pointed to a page whose first
+  command was a broken `pip install`.
+- **110 MB of unread derived data left the tracked tree.** `benchmark/musique-subset/export/` held
+  eight files; `run_eval_final.py` opens exactly two of them. The other six had no reader anywhere
+  in the repository and no committed configuration that reproduces them, so they were a snapshot of
+  one historical run rather than a fixture. The two that are read stay tracked, so the harness still
+  runs from a clean clone, and `SOURCE.md` now states which is which. Removing them made a security
+  gate's own justification stale — `scripts/secret_scan_gate.py` excludes `*.graphml` and cited a
+  file that no longer exists — so that reasoning was rewritten rather than left asserting something
+  false about the tree.
+
+### Fixed
+
+- **`make sync` produced a broken environment, and had for some time.** The heavy/endpoint Provider
+  list existed as three hand-synchronised copies — `Makefile`, `scripts/verify-local.sh` and
+  `.github/actions/setup-workspace/action.yml`, the last carrying a comment promising it was "kept
+  byte-identical" with nothing enforcing it. The Makefile copy had drifted to **9 of 21** entries,
+  so a contributor who followed `AGENTS.md` (`make sync`, then `make test`) got a red suite for
+  environment reasons: twelve Providers never registered their entry points, which surfaces as
+  *registry* failures rather than as an import error and so does not read as a setup problem. The
+  list is now single-sourced in `scripts/heavy-packages.txt`, read by all three, and gated by
+  `packages/latence-core/tests/test_heavy_package_list.py` — which asserts the stronger invariant
+  the copies violated: that **every** workspace package is reachable by one of the documented
+  install paths, or carries a reasoned exemption whose stated mechanism is verified to still exist.
+
 - **The outbound licence is Apache-2.0 again
   ([ADR-0063](docs/adr/0063-relicence-to-apache-2-0.md), superseding
   [ADR-0055](docs/adr/0055-relicence-to-polyform-noncommercial.md)).** The workspace relicensed
@@ -66,6 +112,49 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   noncommercial repository licence. Both are now true as written and are ticked.
 
 ### Fixed
+
+- **PII inside a markdown table was not masked, because the chunker welded the cells together.**
+  `chunking.py`'s pattern 13 matched `[ \t]*\|[ \t]*` with a literal `" "` replacement, and a
+  replacement carrying no backreference is a *deletion* (`_apply_match`, deliberately — an
+  injected literal has no original offset to map). The pipe **and the whitespace on both sides of
+  it** were therefore removed and adjacent cell texts abutted: `| Ada Lovelace | 123 45 6789 |
+  DE89370400440532013000 |` reached the Redactor as
+  `Ada Lovelace123 45 6789DE89370400440532013000`. Welded to the name, the digits were refused by
+  `ssn_nodash`'s letter-glue guard and the IBAN's leading `\b` could not fire between `e` and `D`,
+  so the chunk came out with an **empty `pii_spans` and `masked_content == content`** — the same
+  values that were masked in a sentence were left in the clear in a table, on every one of the 11
+  shipped stacks (all of them wire `chunk.markdown`) and through the non-bypassable floor as well.
+  The pattern now takes its separator from the text itself: a pipe with whitespace in front of it
+  (or one that opens a line) is dropped along with the padding that follows it and the preceding
+  space survives as the separator; a row-closing pipe goes with its trailing padding; a pipe with
+  no whitespace on its left — the compact `|a|b|` form, where there is no space to promote — is
+  kept, because the grid character is then the only thing that can hold the cells apart. Pinned by
+  `test_strip_keeps_table_cell_texts_separated` (unit) and
+  `test_table_row_pii_is_masked_identically_to_prose` (chunk → redact, end to end). The
+  `ssn_nodash` letter-glue guard was re-measured against the fix rather than deleted with the weld
+  that motivated it: it now costs no recall and still rejects letter-glued part and lot codes
+  (`Lot 410455470A`, `Menü410455470`), so it stays.
+  **This changes chunk text, and therefore embeddings and every benchmark number measured from a
+  table-bearing corpus** (13 of the 40 enterprise-gold documents carry a markdown table; the OCR'd
+  campaign corpora are table-heavy by construction). Nothing has been regenerated: every committed
+  result is *pre-fix* and must be re-run before it is compared with anything measured after this
+  change.
+- **The table-pipe pattern was quadratic on a long whitespace run.** It began with a
+  variable-length `[ \t]*`, so the engine rescanned the whole run from every start position inside
+  it — 200k spaces cost ~55s in this one pattern. Every branch of the replacement now starts *at*
+  the pipe (the lookbehind is fixed-width), which makes it linear: ~7ms for the same input,
+  guarded by `test_table_pipe_pattern_stays_linear_on_a_long_whitespace_run`. `strip_markup` as a
+  whole is still **not** linear on that input — pattern 12 (the table *separator* row) overlaps
+  `^\s*` with a later `[ \t]*` over the same run and costs ~3s on 20k spaces. That is a separate,
+  pre-existing defect; the new test is deliberately scoped to the pattern it guards so it neither
+  hides nor claims to have fixed it.
+- **The pattern list claimed an order dependence it does not have.** "Order matters: fenced/inline
+  code first (their contents must not be re-interpreted as markup)" was false in both halves. The
+  keep mask is a union of deletions marked against the *original* text, so the order is inert —
+  shuffling the list 200 times produces byte-identical output and offset maps
+  (`test_strip_pattern_order_does_not_change_the_result`) — and a fence's contents *are*
+  re-interpreted: `x = a | b ***c***` inside a fence strips to `x = a b *c*`. The comment now says
+  what the code does, and the anatomy chapter says it too.
 
 - **CI never left Linux while all 33 packages claimed `Operating System :: OS Independent`.**
   Every `runs-on:` in every workflow was `ubuntu-latest`. The `test` job now matrixes over
@@ -475,6 +564,9 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   distribution that is not in `packages/`. The PyPI publish was rehearsed end to end: all
   32 distributions build, `twine check` passes on all 64 artifacts, and `pip install
   latence-demo` into a clean venv runs the full demo to a green Quality Report.
+  **`docs/GO-LIVE-RUNBOOK.md` has since been removed from the shipping tree** as one of five
+  maintainer-internal documents. This entry is left standing as the record of what shipped and
+  is not a live pointer: the path named here no longer resolves in the tree.
 
 - **Benchmark suites for Entity/Relation Extraction, Disambiguation and Redaction (#187).** The
   public benchmark harness (#181) now measures four more Stages through the same
@@ -660,7 +752,9 @@ report, and claiming one would be the kind of thing `RELEASE-GATES.md` exists to
   every question there while the three issue templates keep only structured reports. Both files
   describe a **repository setting**; enabling it is now a numbered step in
   `docs/GO-LIVE-RUNBOOK.md` step 1, because no test in this tree can turn a GitHub setting on and
-  the last defect here was exactly a docs-vs-settings disagreement.
+  the last defect here was exactly a docs-vs-settings disagreement. (That runbook has since been
+  removed from the shipping tree as maintainer-internal; the path above no longer resolves. The
+  repository setting it enumerated is unaffected.)
 - **A chunk describes its OWN pages — `ChunkRecord.page_map` becomes `ChunkRecord.page_slice`
   and `PageIndexResolver` becomes STATELESS (`SCHEMA_VERSION` 18 → 19, BREAKING).** v18 kept the
   payload win (below) but bought it with a SHAPE defect: the whole document's `PageMap` rode ONE

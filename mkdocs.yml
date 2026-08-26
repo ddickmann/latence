@@ -216,7 +216,7 @@ nav:
           - Serving LightOn-OCR with vLLM: serving-lighton-vllm.md
           - Blackwell / CUDA-13 compatibility matrix: compatibility-matrix.md
       - Feed a retrieval engine:
-          - Retrieval-quality tooling (design): retrieval-tooling.md
+          - Retrieval-quality tooling — scope & boundary: retrieval-tooling.md
           - Graph-rescue retrieval: guides/graph-rescue-retrieval.md
           - "Serving with Qdrant: measured parity": guides/serving-qdrant.md
           - Retrieval-engine input spec: RETRIEVAL-ENGINE-INPUT-SPEC.md
@@ -229,6 +229,16 @@ nav:
           # should be able to find. It was published but unreachable from the nav.
           - "End-to-end protocol (still unmeasured)": BENCHMARKS-E2E.md
           - The e2e campaign wizard: guides/benchmark-campaign.md
+      # Measured evidence promoted out of the internal planning tree, because published pages
+      # cite these results and a citation a reader cannot follow is not a citation.
+      - Measured evidence:
+          - "G1 profound-testing gate — signed results": evidence/G1-RESULTS.md
+          - The G1 gate specification: evidence/G1-profound-testing-gate.md
+          - GPU SOTA sweep results: evidence/GPU-SOTA-SWEEP-RESULTS.md
+          - "Graph latency at scale (hypergraph index)": evidence/enterprise-serving-01-latency.md
+          - "Served on Qdrant: recall parity": evidence/enterprise-serving-02-qdrant-serving-parity.md
+          - "Incremental ingest: byte-identical, O(changed)": evidence/enterprise-serving-03-incremental-ingest.md
+          - "Graph inertia: the rescue-lane study": evidence/graph-inertia.md
 
   - API Reference:
       - reference/index.md
@@ -274,6 +284,7 @@ nav:
           - 0036 — Provider ecosystem + bake-off: adr/0036-provider-ecosystem-and-bakeoff.md
           - 0030 — Performance path + second Runner adapter: adr/0030-performance-path-endpoint-providers-and-second-runner-adapter.md
           - 0045 — Granite r2 default Embedder: adr/0045-granite-r2-default-embedder-gpu-311m-fa2-bf16-cpu-97m.md
+          - 0065 — H-G1 dependency cap is a workspace-wide default: adr/0065-the-h-g1-dependency-cap-is-a-workspace-wide-default-with-recorded-exemptions.md
       - The Stages (contracts per Stage):
           - 0014 — Source seam, thin connectors: adr/0014-source-seam-thin-connectors.md
           - 0019 — Parser input contract: adr/0019-parser-input-contract.md
@@ -326,13 +337,8 @@ nav:
           - Threat model: THREAT-MODEL.md
           - SBOM & supply chain: SBOM.md
           - Dependency audit: DEPENDENCY-AUDIT.md
-      - Release & review:
+      - Release:
           - Releasing: RELEASING.md
-          - Go-live runbook (flip public): GO-LIVE-RUNBOOK.md
-          - Architecture audit (S1): audits/S1-architecture-audit.md
-      - Provenance of the code:
-          - Algorithmic asset inventory: ASSET-INVENTORY.md
-          - Porting map: PORTING-MAP.md
       # CONTRIBUTING / CHANGELOG / SECURITY / SUPPORT live at the repository root, outside
       # docs_dir, so they cannot be nav'd as pages — mkdocs would need a copy, and a copy drifts.
       # They are nav'd as absolute links to the canonical file on GitHub instead, which is what
@@ -345,10 +351,6 @@ nav:
           - Security & coordinated disclosure: https://github.com/ddickmann/latence-framework/blob/main/SECURITY.md
           - Getting help: https://github.com/ddickmann/latence-framework/blob/main/SUPPORT.md
 
-# Pages that are published but deliberately NOT in the nav. Listing them here is how the
-# omission is *declared* rather than merely tolerated: mkdocs otherwise logs an INFO for every
-# unreferenced page, and a real omission hides in that noise.
-#   PITCH-SLIDES.md — speaker notes for a deck, not documentation. It ships in the repo so the
-#   deck and the code stay in one place; it is not a page a reader of this site should land on.
-not_in_nav: |
-  PITCH-SLIDES.md
+# Every page under `docs/` is reachable from the nav above. If a page is ever published but
+# deliberately left out of the nav, declare it in a `not_in_nav` block here rather than
+# leaving it to hide in mkdocs' INFO output for unreferenced pages.

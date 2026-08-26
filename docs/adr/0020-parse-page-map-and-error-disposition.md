@@ -7,8 +7,8 @@ questions had non-obvious answers, recorded here.
 
 ## PageMap is a `latence-core` contract; PageOffsetIndex is a core resolver — not a Provider concern
 
-The ported `PageOffsetIndex` asset (ASSET-INVENTORY.md, "Provenance integrity",
-lands in **S2/S8**) is offset→page resolution: it is used at Parse to build the
+The ported `PageOffsetIndex` asset — the predecessor implementation's
+*provenance-integrity* piece, landing here in **S2/S8** — is offset→page resolution: it is used at Parse to build the
 map, and again downstream at Chunk (offset-preserving splits), Entity Extraction
 (mention spans), and Disambiguation (Evidence offsets → source page). If the
 `PageMap` contract and the resolver lived in the `latence-parser-document`

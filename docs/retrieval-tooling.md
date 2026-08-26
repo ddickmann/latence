@@ -1,8 +1,13 @@
-# Retrieval-quality tooling (design scope)
+# Retrieval-quality tooling — scope and boundary
 
-> **Status: design, aligned, not yet built.** This page is the agreed scope from the design grill. The
-> decisions are recorded as ADRs [0048](adr/0048-retrieval-tooling-is-strictly-stateless.md)–[0053](adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md);
-> this page is the navigational summary and the explicit v1 boundary.
+> **Status: built and measured. This page is the scope boundary, not a build plan.** The
+> query-time library (`latence-retrieval`), the index-time signals and the MCP server ship;
+> [Anatomy 5 · Retrieval](anatomy/05-retrieval.md) documents what they do against the code,
+> and [Graph-rescue retrieval](guides/graph-rescue-retrieval.md) documents a production lane
+> over them. What this page is for is the **line**: which half of retrieval this project
+> takes on and which half stays the customer's engine, and what was deliberately left out of
+> v1. The decisions behind it are ADRs
+> [0048](adr/0048-retrieval-tooling-is-strictly-stateless.md)–[0053](adr/0053-splade-sparse-signal-is-a-structured-composition-of-model-ner-and-metadata.md).
 
 ## What this is (and is not)
 

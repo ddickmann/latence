@@ -1,11 +1,12 @@
 """Delta Detector — the ported content-hash manifest diff (PORT-AS-IS, S11).
 
-Ported faithfully from ``latenceai-dataset-intelligence/state/delta_detector.py``
-(ASSET-INVENTORY.md, 5/5, PORT-AS-IS). The algorithmic value is preserved verbatim: a
-**deterministic SHA-256** over ``(doc_id, markdown, sorted entity texts, sorted relation
-labels)`` produces one content hash per document, and a **manifest diff** against the last
-committed manifest classifies every document as *added* / *updated* (same identity, new
-hash) / *deleted* / *unchanged* — the four :class:`~latence_core.contracts.DeltaKind`s.
+Ported faithfully — as-is — from
+``latenceai-dataset-intelligence/state/delta_detector.py``. The algorithmic value is
+preserved verbatim: a **deterministic SHA-256** over ``(doc_id, markdown, sorted entity
+texts, sorted relation labels)`` produces one content hash per document, and a **manifest
+diff** against the last committed manifest classifies every document as *added* / *updated*
+(same identity, new hash) / *deleted* / *unchanged* — the four
+:class:`~latence_core.contracts.DeltaKind`s.
 
 This is a pure engine over contract-free views (:class:`ManifestEntry`), mirroring the
 :mod:`latence_core.disambiguation` engine's IO-independence: the delta orchestration builds

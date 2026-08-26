@@ -49,10 +49,12 @@ _BASELINE = Path(".secrets.baseline")
 # state in the clear one line below, and it authenticates nothing. There is also no
 # credential-shaped field for one to hide in: ``stages/graph_export.py::_render_graphml``
 # emits exactly id, label, type, kb_id, confidence and evidence_count — never environment
-# or connection material. Auditing them one by one would mean writing ~83k hashes of
-# public benchmark text into the baseline (``benchmark/musique-subset/export/graph.graphml``
-# alone), bloating the anchor without adding a single bit of review — and a bloated anchor
-# is how a real finding gets lost. Kept as one regex for ``--exclude-files``.
+# or connection material. Auditing them one by one would mean writing tens of thousands of
+# hashes of ordinary corpus text into the baseline, bloating the anchor without adding a
+# single bit of review — and a bloated anchor is how a real finding gets lost. No GraphML
+# export is tracked today (the benchmark export that motivated this rule is derived output
+# and is now gitignored); the rule is kept because the next one to land would flood the
+# baseline for the same structural reason. Kept as one regex for ``--exclude-files``.
 _EXCLUDE_FILES = (
     r"(^|/)\.secrets\.baseline$|uv\.lock|\.venv/|dist/|node_modules/|\.graphml$"
 )

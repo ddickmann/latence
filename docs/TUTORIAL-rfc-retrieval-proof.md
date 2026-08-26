@@ -366,7 +366,7 @@ class of queries single retrievers structurally cannot answer"* — **not** an i
 The Qdrant sink (`packages/latence-sink-qdrant/src/latence_sink_qdrant/sink.py`) currently carries the
 Export's `sparse_indices`/`sparse_values` **as payload**, and deliberately declares named sparse
 vectors out of scope. Step 4.3 needs them as **queryable Qdrant named sparse vectors**. This is real
-feature work, not a bug — scoped as its own ticket (`issues/dogfood/qdrant-native-sparse.md`): add a
+feature work, not a bug — scoped as its own change: a
 `--vector sparse` load path that writes `models.SparseVector` under a named sparse vector, with a
 regression test proving a sparse query returns SPLADE-ranked candidates (and dense stays byte-identical
 when sparse is absent). Either pre-built before the loop or fixed on first encounter at 4.3.

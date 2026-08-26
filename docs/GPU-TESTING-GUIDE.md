@@ -2,7 +2,7 @@
 
 This is the turnkey guide to exercise the full **learned/GPU** stack end-to-end on a CUDA pod, plus the
 CPU path that needs no GPU. Every step here was run on an RTX 2000 Ada (16 GB) on 2026-07-09 and passed
-(see `issues/gate/GPU-SOTA-SWEEP-RESULTS.md`).
+(see `docs/evidence/GPU-SOTA-SWEEP-RESULTS.md`).
 
 ## 0. CPU path (no GPU needed — sanity first)
 ```bash

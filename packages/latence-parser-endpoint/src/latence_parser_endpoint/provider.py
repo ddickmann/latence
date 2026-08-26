@@ -29,7 +29,7 @@ import random
 from typing import TYPE_CHECKING, Any
 
 from latence_core.contracts import Disposition, DocumentRecord, PageMap
-from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry
+from latence_core.endpoint import EndpointError, RetryPolicy, call_with_retry, classify_exception
 from latence_core.language import detect_language
 from latence_core.providers.profile import (
     REPO_LICENSE_CODE,
@@ -309,7 +309,7 @@ class EndpointDocumentParser:
                 ],
             )
         except Exception as exc:  # noqa: BLE001 - normalized into a classed EndpointError below
-            raise _classify_exception(exc) from exc
+            raise classify_exception(exc) from exc
         return response.choices[0].message.content or ""
 
 
@@ -332,14 +332,3 @@ def _no_sleep(_delay: float) -> None:
     return None
 
 
-def _classify_exception(exc: Exception) -> EndpointError:
-    """Normalize any client exception into a classed :class:`EndpointError` for the ported retry.
-
-    An exception exposing an HTTP ``status_code`` (the OpenAI client's ``APIStatusError`` shape) is
-    classed by that status (429/5xx retryable, other 4xx terminal); anything else is a transport
-    error → retryable.
-    """
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return EndpointError(str(exc), status=status)
-    return EndpointError(str(exc))

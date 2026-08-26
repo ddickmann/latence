@@ -6,6 +6,12 @@ covers the CLA, the review process and the AI-disclosure policy, and it is the a
 three. This page is the operational half: the repository's shape, the gates, and the specific
 things that are easy to get wrong here and expensive to get wrong.
 
+> **Are you here to *use* the framework rather than change this repository?** You want
+> [`docs/agent-briefing.md`](./docs/agent-briefing.md) instead — the mental model, every Provider
+> available at each Stage, the Pipeline YAML contract, the CLI, the output schema and the retrieval
+> wiring. [`llms.txt`](./llms.txt) indexes the rest. This page is for agents **editing this
+> codebase**: the gates, the contracts, and the traps.
+
 Two ground rules before anything else:
 
 1. **The tree is the authority.** Every claim below was read out of a file at the path named. If a
@@ -94,7 +100,11 @@ uv pip install --no-deps -e packages/latence-ner-gliner
 ```
 
 `make sync` and `scripts/verify-local.sh` do this for the whole heavy set; the authoritative list is
-the loop at the top of `scripts/verify-local.sh`.
+[`scripts/heavy-packages.txt`](./scripts/heavy-packages.txt), which the Makefile, the verify script
+and the CI setup action all read. It is gated by
+`packages/latence-core/tests/test_heavy_package_list.py`, which also asserts that every workspace
+package is reachable by one of the documented install paths — the three copies of this list had
+drifted, and `make sync` was installing 9 of 21.
 
 ---
 

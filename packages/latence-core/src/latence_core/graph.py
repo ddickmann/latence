@@ -5,9 +5,8 @@ disambiguated canonical entities and normalized relations and produces the canon
 knowledge graph — nodes (one per entity), edges (one per relation), and per-edge/-node
 :class:`~latence_core.contracts.Evidence` back to the source mentions/documents.
 
-Ported from ``dataset-intelligence/graph/builder.py`` (ASSET-INVENTORY.md, 5/5,
-PORT-AS-IS), re-homed behind the framework's contracts. The algorithmic value is preserved
-verbatim:
+Ported as-is from ``dataset-intelligence/graph/builder.py``, re-homed behind the
+framework's contracts. The algorithmic value is preserved verbatim:
 
 * **Deterministic, content-addressed IDs** — a node/edge id is a sha256 over a stable key
   (the corpus id + the entity/relation id), truncated to 16 hex chars, so the same entity
@@ -22,7 +21,7 @@ verbatim:
 
 The private stack's ``§19`` predicted-vs-extracted split is preserved as an
 ``is_predicted`` edge property: v1 has no link-prediction Stage (that is the post-v1 P3
-plugin, ASSET-INVENTORY.md), so every v1 edge is extracted (``is_predicted=False``); the
+plugin), so every v1 edge is extracted (``is_predicted=False``); the
 attribute is carried so a future predicted edge is never silently mixed with an extracted
 one.
 """

@@ -179,7 +179,7 @@ two scopes:
   are remapped to canonical entities and whose label is normalised (fuzzy/alias,
   type-filtered, inverse-detected + direction-swapped).
 
-The ported algorithmic assets (all PORT-AS-IS, ASSET-INVENTORY.md) are re-homed in the
+The ported algorithmic assets (all taken as-is) are re-homed in the
 pure `latence_core.disambiguation` engine:
 
 - the **EntityResolver** 5-strategy cascade — exact → alias → acronym → substring →
