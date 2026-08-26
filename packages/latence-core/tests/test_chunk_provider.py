@@ -8,6 +8,7 @@ Provenance and Classification on every chunk — verified by a round-trip test
 from __future__ import annotations
 
 from latence_core.contracts import (
+    ChunkRecord,
     Classification,
     Disposition,
     DocumentRecord,
@@ -17,6 +18,7 @@ from latence_core.contracts import (
 from latence_core.offsetmap import OffsetIndex
 from latence_core.pagemap import PageOffsetIndex
 from latence_core.stages.chunk import MarkdownChunker
+from latence_core.stages.redaction import HybridPIIRedactor
 
 
 def _doc(pages: list[str], *, sensitivity: str = "confidential") -> DocumentRecord:
@@ -157,3 +159,55 @@ def test_chunker_is_deterministic() -> None:
 def test_chunker_empty_content_document_yields_no_chunks() -> None:
     doc = _doc([""])
     assert list(MarkdownChunker().chunk([doc])) == []
+
+
+# -- a table row is not a hiding place for PII -------------------------------
+
+_SSN = "123 45 6789"
+_IBAN = "DE89370400440532013000"
+_PROSE = f"Ada Lovelace, SSN {_SSN}, IBAN {_IBAN}."
+_TABLE = (
+    "| Name | SSN | IBAN |\n"
+    "|---|---|---|\n"
+    f"| Ada Lovelace | {_SSN} | {_IBAN} |"
+)
+
+
+def _chunk_then_redact(text: str) -> ChunkRecord:
+    """One document all the way through ``chunk.markdown`` -> ``redaction.hybrid_rule``."""
+    chunks = list(MarkdownChunker().chunk([_doc([text])]))
+    assert len(chunks) == 1, f"fixture should be a single chunk, got {len(chunks)}"
+    return list(HybridPIIRedactor().redact(chunks))[0]
+
+
+def test_table_row_pii_is_masked_identically_to_prose() -> None:
+    """The same SSN and IBAN must be masked in a table row as in a sentence.
+
+    They were not. The chunker's table-pipe pattern deleted each pipe together with the
+    whitespace around it, so the row reached the Redactor as
+    ``Ada Lovelace123 45 6789DE89370400440532013000``. Welded to the name, the digits were
+    refused by ``ssn_nodash``'s letter-glue guard and the IBAN's leading ``\b`` could not
+    fire between ``e`` and ``D`` — the chunk came back with an EMPTY ``pii_spans`` and
+    ``masked_content == content``. Prose said ``[SSN]``/``[IBAN]``; the table said nothing,
+    for the same data in the same document. This is the end-to-end half of
+    ``test_chunking.test_strip_keeps_table_cell_texts_separated``.
+    """
+    prose = _chunk_then_redact(_PROSE)
+    table = _chunk_then_redact(_TABLE)
+
+    assert {span.pii_type for span in prose.pii_spans} == {"ssn", "iban"}
+    assert {span.pii_type for span in table.pii_spans} == {
+        "ssn",
+        "iban",
+    }, f"table row PII went undetected: {table.pii_spans}"
+
+    # The values themselves are gone from what a corpus consumer reads.
+    for record in (prose, table):
+        assert record.masked_content is not None
+        assert _SSN not in record.masked_content
+        assert _IBAN not in record.masked_content
+        assert "[SSN]" in record.masked_content
+        assert "[IBAN]" in record.masked_content
+        # The clean text is left untouched — masking is additive (W16/ADR-0042).
+        assert _SSN in record.content
+

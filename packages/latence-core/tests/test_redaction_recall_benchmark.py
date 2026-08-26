@@ -150,9 +150,11 @@ _CLEAN_CONTROLS: tuple[str, ...] = (
     "The quarterly report summarises revenue growth across three regions.",
     "Version 1.4 shipped on schedule with no regressions in the suite.",
     "Meeting notes: agenda, action items, and the follow-up date next week.",
-    # Stripped markdown table rows (enterprise-gold T21 finding 2): the chunker fuses
-    # ``| Industrial drives | 410 | 455 | 470 |`` into a label-glued digit run. An
-    # innocent numeric row must not be masked as an SSN (or anything else).
+    # A label-glued digit run (enterprise-gold T21 finding 2). The chunker no longer
+    # produces this shape — it used to fuse ``| Industrial drives | 410 | 455 | 470 |``
+    # into it, and pattern 13 now separates the cells — but part and lot codes reach the
+    # detector glued to a label on their own, and an innocent numeric run must not be
+    # masked as an SSN (or anything else).
     "Industrial drives410455470 headcount by division, rounded.",
     # A German cell label ending in a NON-ASCII letter: the glue guard is unicode-aware
     # (``[^\W\d_]``), so ``ü``-glued digits are rejected exactly like ``s``-glued ones.
@@ -611,15 +613,20 @@ def test_ssn_nodash_plausible_guard_rejects_invalid_ranges() -> None:
 
 
 def test_ssn_nodash_letter_glue_guard_spares_stripped_table_rows() -> None:
-    """Precision: a digit run fused to a letter is a stripped table cell, not an SSN.
+    """Precision: a digit run fused to a letter is a part or lot code, not an SSN.
 
-    Enterprise-gold T21 finding 2: the markdown chunker strips table pipes, so
-    ``| Industrial drives | 410 | 455 | 470 |`` reaches the detector as
-    ``Industrial drives410455470`` and was masked as ``[SSN]`` — destroying innocent
-    numeric cells in every table-bearing chunk. The letter-glue guard rejects a run
-    glued to a unicode letter on EITHER side; the sole letter-glued form that is a
-    genuine presentation — the literal ``SSN`` label fused to the digits — survives
-    via the guard's fixed-width exception (covered by the gold-set case).
+    Enterprise-gold T21 finding 2: the markdown chunker used to strip table pipes
+    *together with the whitespace around them*, so ``| Industrial drives | 410 | 455 |
+    470 |`` reached the detector as ``Industrial drives410455470`` and was masked as
+    ``[SSN]`` — destroying innocent numeric cells in every table-bearing chunk. That weld
+    is gone (``chunking`` pattern 13 keeps a separator, and
+    ``test_chunk_provider.test_table_row_pii_is_masked_identically_to_prose`` pins the PII
+    half of the same bug), so the guard no longer costs recall on tables. It is kept for
+    what it independently buys: the glued shapes below arise without any table at all.
+    The guard rejects a run glued to a unicode letter on EITHER side; the sole
+    letter-glued form that is a genuine presentation — the literal ``SSN`` label fused to
+    the digits — survives via the guard's fixed-width exception (covered by the gold-set
+    case).
     """
     glued = (
         "Industrial drives410455470 headcount by division.",  # the T21 chunk, verbatim shape

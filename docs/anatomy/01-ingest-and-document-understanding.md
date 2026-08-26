@@ -425,43 +425,60 @@ recorded span points into the **original** markdown.
 ### Step 1 — 18-pattern markup stripping, with an offset map
 
 You cannot map offsets through `re.sub`: it rewrites the string opaquely. So `strip_markup`
-(`chunking.py:139`) builds a per-original-character **keep mask**. Every pattern marks the
+(`chunking.py:164`) builds a per-original-character **keep mask**. Every pattern marks the
 positions it deletes; a replacement that backreferences a capture group keeps that group's
 characters (their offsets survive), and a replacement that is a literal deletes the whole match.
 The surviving characters, in order, are the stripped text, and each one remembers its original
 offset in a `mapping` array with `len(stripped) + 1` entries — the sentinel so an exclusive end
 offset maps cleanly.
 
-The 18 patterns run in a deliberate order: fenced and inline code first (so their contents are
-not re-interpreted as markup), then block constructs, then inline emphasis, then residual HTML.
-Two of them have consequences you should know about before you look at a chunk and wonder what
-happened.
+**The order of the 18 patterns is inert.** They are listed in a reading order — code, then block
+constructs, then inline emphasis, then residual HTML — but every pattern is matched against the
+*original* text and contributes only deletions to that one shared mask, so the output is the
+union of those deletions however the list is sorted. Shuffling it 200 times yields byte-identical
+stripped text and offset maps (`test_strip_pattern_order_does_not_change_the_result`). Running
+code first therefore also buys no protection for code: a fence's contents are re-interpreted like
+any prose, so a fence holding `x = a | b ***c***` strips to `x = a b *c*`. The source comment
+claimed both the opposite things until 2026-08-25, when they were checked.
 
-**Table cells are concatenated, not separated.** Pattern 13 reads:
+**Table cells are separated by a real character, never welded.** Pattern 13 reads:
 
 ```python
-# 13. Table cell pipes -> a single space (keep cell text, drop the grid).
-(re.compile(r"[ \t]*\|[ \t]*"), " "),
+(re.compile(r"\|[ \t]*$|(?:(?<=[ \t])|^)\|[ \t]*|(\|)", re.MULTILINE), r"\1"),
 ```
-`chunking.py:106`
+`chunking.py:132`
 
-The comment says "a single space". The behaviour is not that. `_apply_match` (`chunking.py:167`)
-treats a literal replacement as a **deletion** — deliberately, and documented in its own
-docstring, because an injected literal has no original offset to map. The match is
-`[ \t]*\|[ \t]*`, so the pipe *and the whitespace on both sides of it* are deleted together, and
-the two cell texts abut with nothing between them:
+The constraint that shapes it is `_apply_match` (`chunking.py:192`): a replacement holding no
+backreference is a **deletion** — deliberately, and documented in its own docstring, because an
+injected literal has no original offset to map. So the separator between two cells has to be a
+character that already exists in the source. A pipe with whitespace in front of it (or one that
+opens a line) is dropped together with the padding that *follows* it, and the space in front
+survives as the separator; a row-closing pipe goes with its trailing padding; a pipe with no
+whitespace on its left — the compact form, where there is no space to promote — is kept, because
+the grid character is then the only thing that can hold the two cell texts apart:
 
 ```
-"| Revenue | 1,200 | 3,400 |"   →   "Revenue1,2003,400"
+"| Revenue | 1,200 | 3,400 |"   →   "Revenue 1,200 3,400"
+"|Revenue|1,200|3,400|"         →   "Revenue|1,200|3,400"
 ```
 
-This is verifiable in the shipped exports: the first line of every OCR'd document's chunk 0 in
-`corpus.jsonl` reads `<!-- latence-campaign s2-ocrdoc_id=...dataset=vidoseekpages=15...`, where
-the provenance header's ` | ` separators have vanished and the fields are glued. For
-table-heavy corpora — which `uda` and `ohr_bench` emphatically are — this changes what the
-embedder and the extractor see. It is a real trade: the offset map stays exact (no invented
-characters), and the cost is that tabular structure degrades to a run-on token. If your corpus
-is mostly tables, this is the first thing to measure.
+Until 2026-08-25 the pattern was `[ \t]*\|[ \t]*` with a literal `" "` replacement, which — by
+the deletion rule above — removed the pipe *and the whitespace on both sides of it*, so the cell
+texts abutted and `"| Revenue | 1,200 |"` became `"Revenue1,200"`. That was not only a cosmetic
+degradation of tabular structure. A welded row **hid PII from the Redactor**: `| Ada Lovelace |
+123 45 6789 | DE89370400440532013000 |` arrived as `Ada Lovelace123 45 6789DE89370400440532013000`,
+where the no-dash SSN recogniser's letter-glue guard refused the digits and the IBAN pattern's
+leading `\b` could not fire between `e` and `D`. The chunk came back with an empty `pii_spans`
+and `masked_content == content` — the same values that were masked in a sentence were left in the
+clear in a table (chapter 2, §4.4; pinned by
+`test_chunk_provider.test_table_row_pii_is_masked_identically_to_prose`).
+
+**Every measurement taken before that date saw the welded text.** Chunk text is what the embedder
+and the extractor consume, so any number produced from a table-bearing corpus was measured on a
+different corpus than this code now produces — 13 of the 40 enterprise-gold documents carry a
+markdown table, and the OCR'd campaign corpora are table-heavy by construction. Those baselines
+are *pre-fix* until they are re-run, and nothing in this repository was regenerated by the fix:
+numbers must not be compared across it.
 
 **HTML comments survive.** Pattern 18 strips `</?[a-zA-Z][^>]*>`. `<!--` does not start with a
 letter, so comments are not matched — which is why the campaign's OCR provenance header is

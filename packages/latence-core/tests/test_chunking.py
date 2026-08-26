@@ -7,10 +7,12 @@ retrieval-sized pieces, and the offset map back into the ORIGINAL text.
 
 from __future__ import annotations
 
+import random
 import time
 
 import pytest
 from latence_core.chunking import (
+    _MARKUP_PATTERNS,
     _WORD_RE,
     ChunkBudget,
     _overlap_start,
@@ -75,6 +77,111 @@ def test_strip_all_eighteen_pattern_kinds_run() -> None:
         assert gone not in result.stripped
     for kept in ("bold", "italic", "strike", "code", "quote", "numbered", "html"):
         assert kept in result.stripped
+
+
+# -- markup stripping never welds two table cells together -------------------
+
+_TABLE = "| Name | Role |\n|---|---|\n| Ada | Engineer |"
+
+
+def test_strip_keeps_table_cell_texts_separated() -> None:
+    """A table's cell texts survive the strip SEPARATED — never fused into one token.
+
+    Pattern 13 used to be ``[ \\t]*\\|[ \\t]*`` -> " ", and a replacement holding no
+    backref is a DELETION (``_apply_match``): the pipe *and the padding on both sides*
+    went, so ``| Ada | Engineer |`` stripped to ``AdaEngineer``. Two cells fused into one
+    token is wrong on its own terms, and downstream it hid PII from every recogniser that
+    anchors on a word boundary — the end-to-end half of that failure is pinned by
+    ``test_chunk_provider.test_table_row_pii_is_masked_identically_to_prose``.
+    """
+    stripped = strip_markup(_TABLE).stripped
+    assert "AdaEngineer" not in stripped
+    assert "NameRole" not in stripped
+    # Every cell text survives, and consecutive cells stay apart.
+    assert "Name Role" in stripped
+    assert "Ada Engineer" in stripped
+    # The grid itself is still gone: no pipes, and the separator row deleted whole.
+    assert "|" not in stripped
+    assert "---" not in stripped
+
+
+def test_strip_separates_cells_that_have_no_padding_around_the_pipes() -> None:
+    """The compact ``|a|b|`` form has no whitespace to promote, so the pipe separates.
+
+    The separator can only ever be a character that already exists in the source (an
+    injected literal has no original offset to map), so when a row carries no padding
+    there is nothing to keep but the grid character. What this pins is not "the pipe
+    survives" — it is that the cell texts never abut.
+    """
+    stripped = strip_markup("|Ada|Engineer|").stripped
+    assert "AdaEngineer" not in stripped
+    assert "Ada" in stripped
+    assert "Engineer" in stripped
+
+
+def test_strip_table_offsets_still_map_to_original_characters() -> None:
+    """The separator is a real source character, so the offset map stays exact."""
+    result = strip_markup(_TABLE)
+    for i, ch in enumerate(result.stripped):
+        assert _TABLE[result.mapping[i]] == ch, f"offset {i} maps wrong"
+    assert result.mapping[len(result.stripped)] == len(_TABLE)
+
+
+def test_strip_pattern_order_does_not_change_the_result() -> None:
+    """The pattern list is a set of deletions over the ORIGINAL text, so order is inert.
+
+    The list's comment used to claim the opposite ("Order matters: fenced/inline code
+    first, their contents must not be re-interpreted as markup"). Both halves were false:
+    every pattern runs against the original text and only ever marks characters deleted,
+    so the keep mask is a union and the order cannot matter — and a fence's contents ARE
+    re-interpreted, whatever the order. This test is the check that keeps the corrected
+    comment honest.
+    """
+    md = (
+        "# Heading **bold**\n\n"
+        "> quote with `inline | code` and [link](http://x/y)\n\n"
+        "```py\na = b | c  # ***stars*** and | pipes\n```\n\n"
+        "| Col A | Col B |\n|---|---|\n| *x* | ~~y~~ |\n"
+    )
+    canonical = strip_markup(md)
+    original = list(_MARKUP_PATTERNS)
+    rng = random.Random(0)
+    try:
+        for _ in range(50):
+            shuffled = original[:]
+            rng.shuffle(shuffled)
+            _MARKUP_PATTERNS[:] = shuffled
+            result = strip_markup(md)
+            assert result.stripped == canonical.stripped
+            assert result.mapping == canonical.mapping
+    finally:
+        _MARKUP_PATTERNS[:] = original
+    # …and the second half of the old claim: fenced code is stripped like any prose.
+    assert strip_markup("```\nx = a | b ***c***\n```").stripped == "x = a b *c*\n"
+
+
+def test_table_pipe_pattern_stays_linear_on_a_long_whitespace_run() -> None:
+    """Pattern 13 must not rescan a whitespace run once per start position inside it.
+
+    The old ``[ \\t]*\\|[ \\t]*`` opened with a variable-length whitespace run, so the
+    engine retried the whole run from every position inside it: this one pattern spent
+    ~55s on 200k spaces. Every branch of the replacement starts AT the pipe (the
+    lookbehind is fixed-width), which is what makes it linear — ~7ms for the same input.
+    The bound below is three orders of magnitude off the old cost, so it cannot flake on a
+    noisy host, but a revert to a leading ``[ \\t]*`` fails it decisively.
+
+    The pattern is exercised on its own, not through ``strip_markup``, because
+    ``strip_markup`` as a whole is NOT linear on this input: pattern 12's ``^\\s*`` and its
+    later ``[ \\t]*`` overlap the same run and cost ~3s on 20k spaces. That is a separate,
+    pre-existing defect, and scoping this test to the pattern it guards keeps it visible
+    rather than folding it into a bound that would quietly hide either one.
+    """
+    pattern, replacement = _MARKUP_PATTERNS[12]
+    assert replacement == r"\1", "pattern 13 moved — this test guards the table-pipe one"
+    start = time.perf_counter()
+    assert not list(pattern.finditer(" " * 200_000))
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0, f"table-pipe pattern went quadratic ({elapsed:.1f}s)"
 
 
 # -- token estimation --------------------------------------------------------

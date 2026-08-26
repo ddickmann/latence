@@ -520,12 +520,22 @@ built-ins (a drift-guard test pins them equal), so a `hybrid_rule` stack is byte
 every floor span coincides with a Provider span and the Provider wins the tie, keeping its
 richer provenance.
 
-The `ssn_nodash` letter-glue guard is a good example of what a live corpus teaches. The markdown
-chunker strips table pipes, so `| Industrial drives | 410 | 455 | 470 |` reaches the detector as
-`Industrial drives410455470` — an innocent numeric row, not an SSN. A fixed-width negative
-lookbehind rejects a digit run fused to a Unicode letter, with an explicit exception for the one
-letter-glued form that *is* a real presentation: `SSN123456789`
+The `ssn_nodash` letter-glue guard is a good example of what a live corpus teaches — and of what
+that lesson is worth once the thing it taught turns out to have been a bug. The markdown chunker
+used to weld table cells together, so `| Industrial drives | 410 | 455 | 470 |` reached the
+detector as `Industrial drives410455470` — an innocent numeric row masked as an SSN. A fixed-width
+negative lookbehind rejects a digit run fused to a Unicode letter, with an explicit exception for
+the one letter-glued form that *is* a real presentation: `SSN123456789`
 (`redaction_policy.py:346`).
+
+The weld is gone (chapter 1, pattern 13). The same fix showed that the guard had been doing more
+than sparing innocent rows: on a welded `Ada Lovelace123 45 6789` it refused a *genuine* SSN, so
+tabular PII went unmasked while the identical value in a sentence was masked. The guard was
+re-measured against the fix rather than deleted along with its original motivation, and it stays,
+on two grounds that were checked: it costs no recall now that cells arrive separated (a table
+cell's SSN is masked exactly as the same value in prose), and it still buys precision on
+letter-glued digit runs that have nothing to do with tables — part and lot codes like
+`Lot 410455470A`, a label ending in a non-ASCII letter like `Menü410455470`.
 
 ### 4.5 How masking is represented
 

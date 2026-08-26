@@ -1,11 +1,10 @@
 """Offset-preserving chunking engine (ported orchestrator asset).
 
-Ported faithfully from the pipeline-worker ``orchestrator.py`` asset
-(ASSET-INVENTORY.md: "Streaming orchestrator … LLM chunk budgeting, … 18-pattern
-markup stripping", PORT-AS-IS, "strip RunPod/B2", lands in **S3 Chunk**). The
-RunPod/B2/streaming-IO machinery is dropped (that was vendor scheduling, mined out
-per PORTING-MAP.md); what is kept verbatim is the three algorithmic parts that
-carry the enterprise value:
+Ported faithfully — as-is — from the pipeline-worker ``orchestrator.py`` asset, landing
+in **S3 Chunk**. The RunPod/B2/streaming-IO machinery is dropped — that was vendor
+scheduling, not enterprise value — while the three algorithmic parts that carry that value
+are kept verbatim: the 18-pattern markup stripper, the LLM chunk budgeting and the offset
+preservation.
 
 1. **18-pattern markup stripping.** Parsed markdown is de-marked-up into clean,
    embeddable text *while tracking every deleted span*, so a stripped chunk's
@@ -70,9 +69,17 @@ class Chunk:
 # -- 18-pattern markup stripping ---------------------------------------------
 
 # Each entry is (compiled_pattern, replacement). The replacement keeps the human
-# text and drops the markup, so offsets can be re-mapped span by span. Order
-# matters: fenced/inline code first (their contents must not be re-interpreted as
-# markup), then block constructs, then inline emphasis, then residual HTML.
+# text and drops the markup, so offsets can be re-mapped span by span. Order does
+# NOT matter and the listing order buys no protection: every pattern is matched
+# against the ORIGINAL text and contributes only DELETIONS to one shared keep mask
+# (see :func:`strip_markup`), so the result is the union of those deletions however
+# the list is ordered — shuffling it 200 times yields byte-identical stripped text
+# and offset maps. A fenced block's contents are therefore re-interpreted by the
+# later patterns exactly like prose: a fence holding ``x = a | b ***c***`` strips to
+# ``x = a b *c*``, not to the verbatim code line. Running code first would not change
+# that either — nothing here consumes text so that a later pattern cannot see it. The
+# order below is a reading order: code, then block constructs, then inline emphasis,
+# then residual HTML.
 _MARKUP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # 1. Fenced code blocks ```lang\n…\n``` -> the code body, fences removed.
     (re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL), r"\1"),
@@ -103,8 +110,28 @@ _MARKUP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "",
     ),
-    # 13. Table cell pipes -> a single space (keep cell text, drop the grid).
-    (re.compile(r"[ \t]*\|[ \t]*"), " "),
+    # 13. Table cell pipes -> dropped, without ever welding two cells together.
+    # The replacement can only be an ORIGINAL character: an injected literal has no
+    # source offset, so ``_apply_match`` treats a replacement carrying no ``\N``
+    # backref as a deletion of the whole match. That is what the previous
+    # ``[ \t]*\|[ \t]*`` -> " " really did — it deleted the pipe AND the padding on
+    # both sides, fusing ``| Ada | 123 45 6789 |`` into ``Ada123 45 6789`` and hiding
+    # tabular PII from every recogniser that anchors on a word boundary.
+    # So the separator is taken from the text itself. A pipe that already has
+    # whitespace in front of it (or opens a line) is dropped together with the padding
+    # that FOLLOWS it, leaving that preceding space — a real character with a real
+    # offset — as the separator; a row-closing pipe is dropped with its trailing
+    # padding. A pipe with no whitespace on its left (the compact ``|Ada|Engineer|``
+    # form) has no space to promote, so it is KEPT as group 1: the grid character
+    # itself is then the only thing that can keep the two cell texts apart.
+    # Linear-time, and that is a property of this shape rather than a happy accident:
+    # every branch starts AT the pipe (the lookbehind is fixed-width), so a long run of
+    # whitespace is scanned once instead of once per start position the way the old
+    # leading ``[ \t]*`` forced — 200k spaces went from 55s to 7ms in this pattern. That
+    # is a claim about pattern 13 only: pattern 12 overlaps ``^\s*`` with a later
+    # ``[ \t]*`` over the same run and is still quadratic (~3s on 20k spaces), which is a
+    # separate defect and not one this pattern's shape can fix.
+    (re.compile(r"\|[ \t]*$|(?:(?<=[ \t])|^)\|[ \t]*|(\|)", re.MULTILINE), r"\1"),
     # 14. Bold **x** / __x__ -> x
     (re.compile(r"(\*\*|__)(.+?)\1", re.DOTALL), r"\2"),
     # 15. Italic *x* -> x. Only the asterisk form is stripped: underscore italics
@@ -168,10 +195,12 @@ def _apply_match(match: re.Match[str], replacement: str, keep: list[bool]) -> No
     """Mark deleted positions for one regex match, keeping captured-group spans.
 
     A replacement like ``r"\1"`` keeps group 1's characters and deletes everything
-    else in the match; ``""`` deletes the whole match; a literal replacement (e.g.
-    " " for table pipes) deletes the whole match (the injected literal has no
-    original offset, so it is treated as a deletion — the surrounding real text is
-    what carries meaning and offsets).
+    else in the match; ``""`` deletes the whole match; and so does ANY literal
+    replacement, because the injected literal has no original offset — the surrounding
+    real text is what carries meaning and offsets. A literal is therefore never a way to
+    *insert* a separator, only a way to delete: pattern 13's history is what that costs
+    when it is forgotten (it read ``[ \t]*\|[ \t]*`` -> " " and silently welded adjacent
+    table cells together for as long as the comment said otherwise).
     """
     kept_spans = _kept_group_spans(match, replacement)
     for pos in range(match.start(), match.end()):

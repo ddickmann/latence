@@ -131,10 +131,19 @@ _BUILTIN_PATTERNS: dict[str, str] = {
     # negative lookahead rejects the SSA-invalid area/group/serial ranges (area
     # ``000``/``666``/``9xx``, group ``00``, serial ``0000``) to cut the false positives
     # a bare 9-digit run would otherwise cause. A **letter-glue guard** rejects a run
-    # fused to a letter on either side (enterprise-gold T21 finding 2: the markdown
-    # chunker strips table pipes, so ``| Industrial drives | 410 | 455 | 470 |`` reaches
-    # the detector as ``Industrial drives410455470`` — an innocent numeric row, not an
-    # SSN). ``[^\W\d_]`` is "any unicode letter" (word char minus digit minus ``_``), so
+    # fused to a letter on either side. It came from enterprise-gold T21 finding 2,
+    # where the chunker welded ``| Industrial drives | 410 | 455 | 470 |`` into
+    # ``Industrial drives410455470`` and this recogniser masked the innocent numeric row
+    # as an SSN. **That weld is gone** — ``chunking._MARKUP_PATTERNS`` pattern 13 now
+    # leaves a separator between cells, so the row arrives as
+    # ``Industrial drives 410 455 470`` — and the guard was re-measured against the fix
+    # rather than deleted along with its original motivation. It stays, on two measured
+    # grounds: it costs no recall now that cells are separated (a table cell's SSN is
+    # masked exactly as the same value in prose — pinned end-to-end by
+    # ``test_table_row_pii_is_masked_identically_to_prose``), and it still buys precision
+    # on letter-glued digit runs that have nothing to do with tables — part and lot codes
+    # (``Lot 410455470A``), a label ending in a non-ASCII letter (``Menü410455470``).
+    # ``[^\W\d_]`` is "any unicode letter" (word char minus digit minus ``_``), so
     # a German cell label ending in ``ä``/``ü`` is rejected too; the one letter-glued
     # form that IS a real SSN presentation — the literal label fused to the digits,
     # ``SSN123456789`` — is kept by the fixed-width ``(?<=[sS][sS][nN])`` exception

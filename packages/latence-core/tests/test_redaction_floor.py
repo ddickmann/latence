@@ -301,11 +301,12 @@ def test_floor_candidates_empty_on_clean_text() -> None:
 def test_floor_ssn_spares_letter_glued_table_digits_but_keeps_real_ssns() -> None:
     """The floor's ``ssn_nodash`` carries the same letter-glue guard as the built-in.
 
-    Enterprise-gold T21 finding 2: stripped markdown table rows reach detection as
-    letter-glued digit runs (``Industrial drives410455470``) and the floor — which runs
-    on EVERY Provider's chunks, not just hybrid_rule's — masked them as ``[SSN]``. The
-    guard must spare those without weakening the ADR-0044 guarantee: unglued no-dash
-    SSNs and the label-glued ``SSN123456789`` form still floor.
+    Enterprise-gold T21 finding 2: stripped markdown table rows used to reach detection as
+    letter-glued digit runs (``Industrial drives410455470``) and the floor — which runs on
+    EVERY Provider's chunks, not just hybrid_rule's — masked them as ``[SSN]``. The
+    chunker no longer welds cells, but part and lot codes still arrive glued to a label,
+    and the guard must spare those without weakening the ADR-0044 guarantee: unglued
+    no-dash SSNs and the label-glued ``SSN123456789`` form still floor.
     """
     for glued in (
         "Industrial drives410455470 headcount by division.",

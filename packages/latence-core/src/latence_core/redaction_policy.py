@@ -339,10 +339,11 @@ FINANCIAL_FLOOR_PATTERNS: dict[str, tuple[str, str]] = {
     # detector_name: (reported pii_type, regex) — byte-identical to the hybrid_rule built-ins.
     "ssn": ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
     # The no-dash form carries the plausible-SSN guard (SSA-invalid ranges) AND the
-    # letter-glue guard (a run fused to a unicode letter on either side is a stripped
-    # table cell, not an SSN — enterprise-gold T21 finding 2), with the literal
+    # letter-glue guard (a run fused to a unicode letter on either side is a part or lot
+    # code, not an SSN — enterprise-gold T21 finding 2), with the literal
     # ``SSN123456789`` label-glued presentation kept via the ``(?<=[sS][sS][nN])``
-    # exception. Rationale lives on the hybrid_rule built-in this must stay equal to.
+    # exception. Rationale — including why the guard outlived the chunker weld that first
+    # motivated it — lives on the hybrid_rule built-in this must stay equal to.
     "ssn_nodash": (
         "ssn",
         r"(?:(?<=[sS][sS][nN])|(?<![^\W\d_]))(?<!\d)"
