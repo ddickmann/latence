@@ -1,7 +1,7 @@
 # Publication and release are separate gates
 
 **Status: accepted (2026-08-26).** The repository is published publicly as a pre-1.0 preview
-**before** Gate 1 of [`RELEASE-GATES.md`](../../RELEASE-GATES.md) is met. Publication of the
+**before** Gate 1 of [`RELEASE-GATES.md`](https://github.com/ddickmann/latence/blob/main/RELEASE-GATES.md) is met. Publication of the
 source and cutting a versioned release become two different gates with two different bars.
 **Amends** `RELEASE-GATES.md`, which previously conflated them. No API, contract, schema
 version, default or artifact changes.

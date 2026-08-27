@@ -18,7 +18,7 @@ Two ground rules, both load-bearing:
    guarantee. Read the error; it names the fix.
 
 > **Changing this repository** rather than using the framework? Stop here and read
-> [`AGENTS.md`](../AGENTS.md) instead — the gates, the conformance rules, and the specific things
+> [`AGENTS.md`](https://github.com/ddickmann/latence/blob/main/AGENTS.md) instead — the gates, the conformance rules, and the specific things
 > that are expensive to get wrong when editing this codebase.
 
 ---
@@ -91,7 +91,7 @@ to emit no induction Stage at all. The two flags are mutually exclusive and reje
 
 ## 3 · The mental model
 
-Five nouns. Use them exactly; [`CONTEXT.md`](../CONTEXT.md) is the canonical glossary and lists the
+Five nouns. Use them exactly; [`CONTEXT.md`](https://github.com/ddickmann/latence/blob/main/CONTEXT.md) is the canonical glossary and lists the
 synonyms this project bans.
 
 | Noun | What it is |
@@ -413,10 +413,10 @@ Cheapest first, so a lint break costs seconds rather than ten minutes. The full 
 
 | You want | Read |
 |---|---|
-| The vocabulary, exactly | [`CONTEXT.md`](../CONTEXT.md) |
+| The vocabulary, exactly | [`CONTEXT.md`](https://github.com/ddickmann/latence/blob/main/CONTEXT.md) |
 | Why any of it is the way it is | [the decision log](adr/index.md) — every architectural decision, with its rejected alternatives |
 | The generated contracts | [`reference/stage-contracts.md`](reference/stage-contracts.md), or `latence contracts` |
 | A worked path end to end | [Quickstart](quickstart.md), then the [tutorials](tutorials/index.md) |
 | The mechanics, Stage by Stage | [Pipeline anatomy](anatomy/index.md) |
 | What is measured, and what is not | [Benchmarks](BENCHMARKS.md) and [`PERF-RESULTS.md`](perf-results.md) |
-| To change this repository | [`AGENTS.md`](../AGENTS.md) |
+| To change this repository | [`AGENTS.md`](https://github.com/ddickmann/latence/blob/main/AGENTS.md) |
