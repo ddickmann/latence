@@ -39,7 +39,7 @@ Practically:
   part of the two that grants anything.
 - **Sign it once, not per pull request.** Sign electronically, or fill in the block at the
   end and email it to **ddickmann81@gmail.com** with the subject
-  `CLA: latence-framework`. The maintainer keeps a private record of who has signed.
+  `CLA: latence`. The maintainer keeps a private record of who has signed.
 - **Open the pull request as normal.** You do not have to sign before you start work — but
   no PR is merged until the signature is recorded, so send it early rather than at the end
   of review.
@@ -95,8 +95,13 @@ dependency with a faithful fake. To work on one, install its source without its 
 uv pip install --no-deps -e packages/latence-ner-gliner
 ```
 
-`scripts/verify-local.sh` does this for the whole heavy set automatically; read its opening
-section for the exact list.
+`make sync` and `scripts/verify-local.sh` do this for the whole heavy set automatically. The
+authoritative list is [`scripts/heavy-packages.txt`](scripts/heavy-packages.txt), which those two
+and the CI setup action all read; `packages/latence-core/tests/test_heavy_package_list.py` asserts
+that every workspace package is reachable by one of the documented install paths. That gate exists
+because the list used to be three hand-synchronised copies, one of which had drifted to 9 of 21 —
+so `make sync` produced an environment where twelve Providers never registered, which surfaces as
+*registry* failures rather than import errors and reads like a code bug rather than a setup one.
 
 **Optional but recommended — the commit hooks.** `.pre-commit-config.yaml` runs the two fastest
 CI gates at commit time: the ruff lint (identical scope to CI) and the `detect-secrets`
@@ -373,10 +378,16 @@ which you could not.
 Using an AI assistant to write code for this project is **allowed and expected**. Three rules,
 and they are about *disclosure and ownership*, not about restriction.
 
-**1. Disclose it.** Say so in the PR description — which parts, and which tool. One line is
-enough ("the Provider adapter and its tests were drafted with Claude; the offset-mapping fix is
-hand-written"). This is not a confession; it tells the reviewer where to concentrate. Undisclosed
-AI output that then turns out to be AI output is the thing that costs trust, not the tool.
+**1. Say which parts — for the reviewer, not for the record.** One line in the PR description is
+enough ("the Provider adapter and its tests were drafted with an assistant; the offset-mapping fix
+is hand-written"). This is not a confession and it is not provenance accounting. **Much of this
+codebase was itself written with an assistant, and the git history deliberately carries no
+per-commit AI attribution** — so nothing here treats "AI-assisted" as a mark against a change, and
+you are not being asked to declare something the maintainer does not. The reason to say it is
+narrower and entirely practical: it tells a reviewer where to concentrate. Assistants fail in a
+recognisable shape — plausible prose over an unchecked claim, a test that asserts the mock rather
+than the behaviour, a docstring describing what the code was *meant* to do. Pointing at the
+generated part aims the review at where that shape is likeliest.
 
 **2. You own it.** Submitting a change asserts that you understand it, that you can explain why
 it is correct, and — under the CLA above — that you have the rights to contribute it. "The model

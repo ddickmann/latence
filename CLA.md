@@ -60,7 +60,7 @@ submitted to this project.
 
 The procedure is in [`CONTRIBUTING.md`](./CONTRIBUTING.md) — in short: sign this document
 electronically, or complete the block at the end and email it to `ddickmann81@gmail.com` with
-the subject `CLA: latence-framework`. The Maintainer records the signature; a pull request is
+the subject `CLA: latence`. The Maintainer records the signature; a pull request is
 not merged until that record exists. Administration is manual and deliberately so at this
 size; automation is a later step.
 
